@@ -60,11 +60,13 @@ public:
                 return;
             }
             xml_io_callback->setExceptionContext(xsink);
+            //printd(5, "XmlIoInputCallbackHelper::XmlIoInputCallbackHelper() set xml_io_vallback: %p\n", xml_io_callback);
         }
     }
 
     DLLLOCAL ~XmlIoInputCallbackHelper() {
         if (xml_io_callback) {
+            //printd(5, "XmlIoInputCallbackHelper::~XmlIoInputCallbackHelper() clearing xml_io_vallback: %p\n", xml_io_callback);
             xml_io_callback->clearExceptionContext();
             xml_io_callback->deref(xsink);
             xml_io_callback = nullptr;

@@ -80,12 +80,14 @@ public:
         ReferenceHolder<QoreListNode> args(new QoreListNode(autoTypeInfo), xsink);
         args->push(len, xsink);
         ValueHolder bufHolder(input_stream->evalMethod("read", *args, xsink), xsink);
-        //printd(5, "AbstractXmlIoInputCallback::read() %d: %d\n", len, (bool)bufHolder);
-        if (!bufHolder)
-            return -1;
+        if (!bufHolder) {
+            printd(5, "AbstractXmlIoInputCallback::read() %d failed (err: %d)\n", len, *xsink ? 1 : 0);
+            return *xsink ? -1 : 0;
+        }
         const BinaryNode* b = bufHolder->get<const BinaryNode>();
         assert(b->size() <= (size_t)len);
         memcpy(buffer, b->getPtr(), b->size());
+        printd(5, "AbstractXmlIoInputCallback::read() %d succeeded: %d\n", len, (int)b->size());
         return (int)b->size();
     }
 

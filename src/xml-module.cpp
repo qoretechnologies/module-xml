@@ -85,6 +85,8 @@ static void* qoreXmlInputOpenCallback(const char* filename) {
 
 // libxml2 I/O callback: read the requested resource; returns the number of bytes read or -1 in case of error
 static int qoreXmlInputReadCallback(void* context, char* buffer, int len) {
+    //printd(5, "qoreXmlInputReadCallback() context: %p buffer: %p len: %d xml_io_callback: %p\n", context, buffer, len,
+    //    xml_io_callback);
     return xml_io_callback ? xml_io_callback->read(context, buffer, len) : -1;
 }
 
