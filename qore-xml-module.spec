@@ -1,4 +1,4 @@
-%global mod_ver 1.8.1
+%global mod_ver 1.8.2
 
 %{?_datarootdir: %global mydatarootdir %_datarootdir}
 %{!?_datarootdir: %global mydatarootdir /usr/share}
@@ -130,6 +130,9 @@ qore -l ./xml-api-%{module_api}.qmod test/webdav_FsWebDavHandler.qtest -v
 qore -l ./xml-api-%{module_api}.qmod test/xml.qtest -v
 
 %changelog
+* Tue Apr 9 2024 David Nichols <david@qore.org> - 1.8.2
+- updated to version 1.8.2
+
 * Thu Jun 15 2023 David Nichols <david@qore.org> - 1.8.1
 - allow wsdl to be chosen as a file in the SoapClient connection
 
