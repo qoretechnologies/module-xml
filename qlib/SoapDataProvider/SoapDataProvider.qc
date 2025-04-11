@@ -59,16 +59,26 @@ public class SoapDataProvider inherits AbstractDataProvider {
         const ConstructorOptions = {
             "schema": <DataProviderOptionInfo>{
                 "display_name": "WSDL",
-                "short_desc": "The location to the WSDL or the WSDL object itself",
+                "short_desc": "The WSDL object or source data",
                 "type": (
                     AbstractDataProviderType::get(StringType, NOTHING, {
                         DTT_FromFile: True,
-                        DTT_FromLocation: True,
                     }),
                     AbstractDataProviderType::get(new Type("WebService")),
                 ),
-                "desc": "The SOAP schema object (WebService) or source URL for the WSDL",
-                "required": True,
+                "desc": "The WSDL object or source data",
+                "required_groups": ("schema",),
+            },
+            "schema_location": <DataProviderOptionInfo>{
+                "display_name": "WSDL Location",
+                "short_desc": "The WSDL source URL",
+                "type": (
+                    AbstractDataProviderType::get(StringType, NOTHING, {
+                        DTT_FromLocation: True,
+                    }),
+                ),
+                "desc": "The Swagger schema source URL",
+                "required_groups": ("schema",),
             },
             "soapclient": <DataProviderOptionInfo>{
                 "display_name": "SOAP Client",
@@ -115,13 +125,22 @@ public class SoapDataProvider inherits AbstractDataProvider {
     #! Creates the object from constructor options
     constructor(*hash<auto> options) {
         *hash<auto> copts = checkOptions("CONSTRUCTOR-ERROR", ConstructorOptions, options);
-        switch (copts.schema.typeCode()) {
-            case NT_STRING:
-                webservice = WSDLLib::getWebServiceFromUrl(copts.schema);
-                break;
-            case NT_OBJECT:
-                webservice = copts.schema;
-                break;
+        if (!copts.schema.val() && !copts.schema_location.val()) {
+            throw "CONSTRUCTOR-ERROR", "No 'schema' or 'schema_location' option given";
+        }
+        if (copts.schema.val()) {
+            switch (copts.schema.typeCode()) {
+                case NT_STRING:
+                    webservice = WSDLLib::getWebServiceFromUrl(copts.schema);
+                    break;
+                case NT_OBJECT:
+                    webservice = copts.schema;
+                    break;
+                default:
+                    throw "CONSTRUCTOR-ERROR", sprintf("Unsupported schema type: %y", copts.schema.type());
+            }
+        } else {
+            webservice = WSDLLib::getWebServiceFromUrl(copts.schema_location);
         }
 
         if (copts.soapclient) {
