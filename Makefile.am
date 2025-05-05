@@ -18,7 +18,8 @@ noinst_HEADERS = src/QC_XmlDoc.h \
 	src/MakeXmlOpts.h \
     src/QC_AbstractXmlIoInputCallback.h
 
-USER_MODULES = qlib/XmlRpcHandler.qm qlib/WSDL.qm qlib/SoapClient.qm qlib/SoapHandler.qm qlib/XmlRpcConnection.qm qlib/SalesforceSoapClient.qm
+USER_MODULES = qlib/XmlRpcHandler.qm qlib/WSDL.qm qlib/SoapClient.qm qlib/SoapHandler.qm qlib/XmlRpcConnection.qm \
+    qlib/SalesforceSoapClient.qm
 
 USER_SPLIT_MODULES = qlib/SaxDataProvider qlib/SoapDataProvider qlib/WebDavHandler
 
@@ -33,6 +34,7 @@ dist_WebDavHandler_mod_DATA = $(wildcard qlib/WebDavHandler/*.q[cm])
 
 EXTRA_DIST = COPYING.LGPL COPYING.MIT AUTHORS README \
 	RELEASE-NOTES \
+    CMakeLists.txt \
 	src/QC_XmlDoc.qpp \
 	src/QC_XmlNode.qpp \
 	src/QC_XmlReader.qpp \
@@ -44,12 +46,12 @@ EXTRA_DIST = COPYING.LGPL COPYING.MIT AUTHORS README \
 	src/qc_option.qpp \
 	src/MakeXmlOpts.qpp \
     src/QC_AbstractXmlIoInputCallback.qpp \
-	test/xml.qtest \
-	test/soap.qtest \
-	test/test.wsdl \
-	examples/xml-rpc-client.q \
-	examples/XmlRpcServerValidation.q \
+	test/ \
+	examples/ \
+    docs/mainpage.doxygen.tmpl \
+    docs/footer_template.html \
 	$(USER_MODULES) \
+    ${USER_SPLIT_MODULES} \
 	qore-xml-module.spec
 
 ACLOCAL_AMFLAGS=-I m4
