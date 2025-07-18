@@ -1,4 +1,4 @@
-%global mod_ver 2.0.0
+%global mod_ver 2.0.1
 
 %{?_datarootdir: %global mydatarootdir %_datarootdir}
 %{!?_datarootdir: %global mydatarootdir /usr/share}
@@ -130,6 +130,9 @@ qore -l ./xml-api-%{module_api}.qmod test/webdav_FsWebDavHandler.qtest -v
 qore -l ./xml-api-%{module_api}.qmod test/xml.qtest -v
 
 %changelog
+* Fri Jul 18 2025 David Nichols <david@qore.org> - 2.0.1
+- fixed a memory error handling XML-RPC I/O; updated to v2.0.1
+
 * Sun Oct 1 2023 David Nichols <david@qore.org> - 2.0.0
 - added support for the DataProvider app/action catalog
 
