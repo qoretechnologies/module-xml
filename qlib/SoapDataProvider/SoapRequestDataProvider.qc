@@ -103,13 +103,18 @@ public class SoapRequestDataProvider inherits SoapDataProviderBase {
     }
 
     #! Returns an iterator for zero or more records matching the search options
-    /** @param where_cond the search criteria
+    /** @param req the request to serialize and make according to the request type
+        @param where_cond the search criteria
         @param search_options the search options after processing by validateSearchOptions()
 
         This will execute the request and perform a default search on any record(s) returned
+
+        @throw SWAGGER-SEARCH-ERROR the response type exists but is not list or hash and therefore does not support
+        searching
     */
-    private AbstractDataProviderRecordIterator searchRecordsImpl(*hash<auto> where_cond, *hash<auto> search_options) {
-        auto resp = doRequestIntern(search_options);
+    private AbstractDataProviderRecordIterator requestSearchRecordsImpl(auto req, *hash<auto> where_cond,
+            *hash<auto> search_options) {
+        auto resp = doRequestIntern(req);
         if (resp.response) {
             resp = resp.response;
         }
@@ -117,6 +122,7 @@ public class SoapRequestDataProvider inherits SoapDataProviderBase {
         AbstractIterator i;
         switch (resp.typeCode()) {
             case NT_HASH:
+            case NT_NOTHING:
                 i = new SingleValueIterator(resp);
                 break;
             case NT_LIST:
@@ -127,7 +133,17 @@ public class SoapRequestDataProvider inherits SoapDataProviderBase {
                     resp.type());
                 break;
         }
-        return new DefaultRecordIterator(i, where_cond);
+        return new DefaultRecordIterator(i, where_cond, search_options);
+    }
+
+    #! Returns an iterator for zero or more records matching the search options
+    /** @param where_cond the search criteria
+        @param search_options the search options after processing by validateSearchOptions()
+
+        This will execute the request and perform a default search on any record(s) returned
+    */
+    private AbstractDataProviderRecordIterator searchRecordsImpl(*hash<auto> where_cond, *hash<auto> search_options) {
+        return requestSearchRecordsImpl(search_options.request, where_cond, search_options - "request");
     }
 
     #! Makes a REST request and returns the response
@@ -154,6 +170,14 @@ public class SoapRequestDataProvider inherits SoapDataProviderBase {
             "supports_read": exists record_type,
             "supports_request": True,
             "has_record": exists record_type,
+            "search_options": GenericRecordSearchOptions{"requires_result", "max_records"} + {
+                "request": <DataProviderOptionInfo>{
+                    "display_name": "Request",
+                    "short_desc": "The arguments to the SOAP request",
+                    "type": AbstractDataProviderTypeMap."any",
+                    "desc": "The arguments to the SOAP request",
+                },
+            },
         };
         rv.request_options = rv.search_options = getApiOptions();
         return rv;
