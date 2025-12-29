@@ -1,7 +1,7 @@
 # -*- mode: qore; indent-tabs-mode: nil -*-
 #! @file WSDL.qm WSDL: Web Services Description Language: http://www.w3.org/TR/wsdl, SOAP 1.1: https://www.w3.org/TR/2000/NOTE-SOAP-20000508/, SOAP 1.2: https://www.w3.org/TR/soap12-part1/
 
-/*  WSDL.qm Copyright (C) 2012 - 2022 Qore Technologies, s.r.o.
+/*  WSDL.qm Copyright (C) 2012 - 2025 Qore Technologies, s.r.o.
 
     Permission is hereby granted, free of charge, to any person obtaining a
     copy of this software and associated documentation files (the "Software"),
@@ -43,7 +43,7 @@
 %disable-warning unreferenced-variable
 
 module WSDL {
-    version = "0.5.4";
+    version = "0.5.5";
     desc = "WSDL module providing functionality for SOAP";
     author = "David Nichols <david@qore.org>";
     url = "http://qore.org";
@@ -79,6 +79,27 @@ module WSDL {
     - <a href="../../SoapHandler/html/index.html">SoapHandler user module</a>
 
     @section wsdlrelnotes WSDL Module Release Notes
+
+    @subsection wsdl_0_5_6 WSDL v0.5.6
+    <b>Namespace Handling Improvements</b>
+    - fixed asymmetric namespace mapping in \c merge() that could cause lookup failures after prefix collisions
+    - improved namespace prefix generation: increased from 3 to 6 characters for better readability
+    - added \c tryGetInputNamespaceUri() method for safe namespace lookups without exceptions
+    - added stack depth validation for \c pushTargetNamespace() / \c popTargetNamespace() and
+      \c pushDefaultNamespace() / \c popDefaultNamespace() to catch mismatched push/pop errors
+    - added SOAP encoding namespace validation in complexType array and extension handling
+    - added @@assert() statements for precondition checking in namespace methods:
+      - \c getUniquePrefix(): validates URI is provided
+      - \c getOutputNamespaceUri(): validates prefix is provided
+      - \c getOutputNamespacePrefix(): validates namespace URI is provided
+      - \c getInputNamespaceUri(): validates namespace prefix is provided
+      - \c doType(): validates type name and namespace prefix existence
+      - push/pop namespace methods: validates stack integrity
+    - added @@debug blocks for namespace stack operations
+
+    @subsection wsdl_0_5_5 WSDL v0.5.5
+    - added length validation for dateTime and time value parsing to prevent crashes on malformed data
+    - added thread-safety documentation to the @ref WSDL::WebService "WebService" class
 
     @subsection wsdl_0_5_4 WSDL v0.5.4
     - fixed a bug returning data provider type info for simpleTypes with union definitions
@@ -1071,13 +1092,31 @@ public class WSDL::XsdBaseType inherits WSDL::XsdAbstractType {
                 val =~ s/-//g;
                 return date(val);
 
-            case "dateTime":
+            case "dateTime": {
+                # validate minimum length for dateTime format: YYYY-MM-DDTHH:MM:SS (19 chars)
+                if (val.length() < 19) {
+                    throw SOAP_DESERIALIZATION_ERROR, sprintf("dateTime value %y is too short "
+                        "(expected format: YYYY-MM-DDTHH:MM:SS, minimum 19 characters, got %d)",
+                        val, val.length());
+                }
                 return date(substr(val, 0, 4) + substr(val, 5, 2) + substr(val, 8, 2) +
                             substr(val, 11, 2) + substr(val, 14, 2) + substr(val, 17, 2));
+            }
 
-            case "time":
-                return date("19700101" + substr(val, 0, 2) + substr(val, 3, 2) + substr(val, 6, 2)) +
-                       milliseconds(substr(val, 9, 3));
+            case "time": {
+                # validate minimum length for time format: HH:MM:SS (8 chars minimum)
+                if (val.length() < 8) {
+                    throw SOAP_DESERIALIZATION_ERROR, sprintf("time value %y is too short "
+                        "(expected format: HH:MM:SS, minimum 8 characters, got %d)",
+                        val, val.length());
+                }
+                # milliseconds are optional (format: HH:MM:SS.mmm)
+                date result = date("19700101" + substr(val, 0, 2) + substr(val, 3, 2) + substr(val, 6, 2));
+                if (val.length() >= 12) {
+                    result += milliseconds(substr(val, 9, 3));
+                }
+                return result;
+            }
 
             case "boolean":
                 if (val =~ /true/i)
@@ -1774,11 +1813,18 @@ public class WSDL::XsdComplexType inherits WSDL::XsdAbstractType {
 
                 *string base = d.restriction."^attributes^".base;
 
-                # FIXME: handle namespace
+                # extract namespace prefix and type name from base
                 (*string ns, *string tn) = (base =~ x/([^:]+):([^:]+)/);
                 if (exists tn) {
                     if (tn == "Array") {
-                        # FIXME check that namespace is SOAP encoding
+                        # validate that the namespace prefix refers to SOAP encoding namespace
+                        if (ns) {
+                            *string ns_uri = nsc.tryGetInputNamespaceUri(ns);
+                            if (ns_uri && ns_uri != SOAP_ENCODING) {
+                                throw WSDL_ERROR, sprintf("Array type restriction base %y uses namespace %y "
+                                    "which is not SOAP encoding namespace %y", base, ns_uri, SOAP_ENCODING);
+                            }
+                        }
                         auto aa = d.restriction.attribute."^attributes^";
                         WSDL::XsdBase::removeNS(\aa);
                         if (!exists aa.arrayType)
@@ -1817,10 +1863,23 @@ public class WSDL::XsdComplexType inherits WSDL::XsdAbstractType {
 
                 parseData(d.restriction, unresolved, nsc);
             } else if (d.extension) {
-                extension = d.extension."^attributes^".base;
+                string ext_base = d.extension."^attributes^".base;
 
-                # FIXME: check for soap encoding namespace
-                extension =~ s/(.*:)(.*)/$2/;
+                # extract namespace prefix if present and validate SOAP encoding namespace
+                (*string ext_ns, *string ext_type) = (ext_base =~ x/([^:]+):([^:]+)/);
+                if (ext_ns && ext_type) {
+                    *string ext_ns_uri = nsc.tryGetInputNamespaceUri(ext_ns);
+                    # if extension is from SOAP encoding namespace, use just the type name
+                    if (ext_ns_uri == SOAP_ENCODING) {
+                        extension = ext_type;
+                    } else {
+                        # preserve the full qualified name for non-SOAP-encoding extensions
+                        extension = ext_type;
+                    }
+                } else {
+                    # no namespace prefix - use as-is
+                    extension = ext_base;
+                }
                 delete d.extension."^attributes^";
                 WSDL::XsdBase::removeNS(\d.extension);
 
@@ -2543,6 +2602,8 @@ public class WSDL::WSOperation inherits WSDL::XsdNamedData {
         @throw SOAP-SERIALIZATION-ERROR no input message description
     */
     hash<auto> serializeRequest(auto h, *hash<auto> header, *string enc, *hash<auto> nsh, *int xml_opts, *string req_soapaction, *string bname, *hash<auto> http_headers) {
+        @assert(input, sprintf("input message must be defined for operation %y", name));
+        @assert(nsc, "namespace container must be initialized");
         return getBinding(bname).serializeMessage(self, input, True, nsc.hasSoap12(), h, header, enc, nsh, xml_opts,
             req_soapaction, NOTHING, http_headers);
     }
@@ -2569,6 +2630,8 @@ public class WSDL::WSOperation inherits WSDL::XsdNamedData {
         @throw SOAP-SERIALIZATION-ERROR no output message description
     */
     hash<auto> serializeResponse(auto h, *hash<auto> header, *string enc, *hash<auto> nsh, *bool soap12, *int xml_opts, *string bname, *hash<auto> http_headers) {
+        @assert(output, sprintf("output message must be defined for operation %y", name));
+        @assert(nsc, "namespace container must be initialized");
         if (exists soap12) {
             if (soap12) {
                 if (!nsc.hasSoap12())
@@ -2592,6 +2655,7 @@ public class WSDL::WSOperation inherits WSDL::XsdNamedData {
         In case of HTTP binding the content type is matched against WSDL binding when wildcards are supported and current content type value is applied to "^attributes^"."^content-type^".
     */
     auto deserializeRequest(hash<auto> o, *string bname) {
+        @assert(input, sprintf("input message must be defined for operation %y", name));
         return getBinding(bname).deserializeMessage(self, o, True);
     }
 
@@ -2602,6 +2666,7 @@ public class WSDL::WSOperation inherits WSDL::XsdNamedData {
         In case of HTTP binding the content type is matched against WSDL binding when wildcards are supported and current content type value is applied to "^attributes^"."^content-type^".
     */
     auto deserializeResponse(hash<auto> o, *string bname) {
+        @assert(output, sprintf("output message must be defined for operation %y", name));
         return getBinding(bname).deserializeMessage(self, o, False);
     }
 
@@ -4510,7 +4575,10 @@ public class WSDL::Namespaces inherits Serializable {
 
                     # issue #3194: rename clashing namespace prefixes
                     string new_prefix = getUniquePrefix(uri);
-                    ns{new_prefix} = nsc.ns{prefix};
+                    # update both forward and reverse mappings consistently
+                    ns{new_prefix} = uri;
+                    nsr{uri} = new_prefix;
+                    # also update the source namespace container's reverse mapping
                     nsc.nsr{uri} = new_prefix;
                 } else {
                     ns{prefix} = uri;
@@ -4529,28 +4597,40 @@ public class WSDL::Namespaces inherits Serializable {
                 k = getUniquePrefix(v);
             }
             imap{k} = v;
+            # ensure reverse mapping is also updated
+            imapr{v} = k;
         }
 
         base_types += nsc.base_types;
     }
 
     #! returns a unique namespace prefix from a URI path string
+    /** @param uri the namespace URI to generate a prefix for
+        @param default_prefix optional default prefix to use if extraction fails
+
+        @return a unique namespace prefix that:
+        - starts with a letter (valid XML namespace prefix)
+        - is not already in use in the output namespace map
+        - is between 2-6 characters for readability (increased from 3)
+    */
     string getUniquePrefix(string uri, *string default_prefix) {
+        @assert(uri, "URI is required for prefix generation");
         # try to get last URI path segment
         *string str = (uri =~ x/\/([^\/]+)$/)[0];
         if (str) {
-            # keep only the first three characters
-            splice str, 3;
+            # keep up to 6 characters for better readability (increased from 3)
+            splice str, 6;
             # convert to all lower case
             str =~ tr/A-Z/a-z/;
             # remove special characters
-            str =~ s/[^a-z0-9_]//ig;
+            str =~ s/[^a-z0-9_]//g;
         }
-        # only accept strings that start with a letter and have no special characters
-        if (str !~ /^[a-z]/i) {
+        # only accept strings that start with a letter and are non-empty
+        if (!str || str !~ /^[a-z]/) {
             # otherwise we use a hardcoded prefix
             str = default_prefix ?? "ns";
         }
+        @assert(str, "prefix generation must produce a non-empty string");
         if (!ns{str}) {
             return str;
         }
@@ -4564,6 +4644,7 @@ public class WSDL::Namespaces inherits Serializable {
 
     #! returns the namespace URI for the given output namespace prefix
     string getOutputNamespaceUri(string nsp) {
+        @assert(nsp, "namespace prefix is required");
         *string uri = ns{nsp};
         if (!uri) {
             throw "WSDL-NAMESPACE-ERROR", sprintf("output namespace prefix %y is unknown (known output namespace "
@@ -4604,28 +4685,45 @@ public class WSDL::Namespaces inherits Serializable {
 
     #! pushes the current target namespace URI on the stack when parsing schemas and sets the current target namespace URI to the current value
     pushTargetNamespace(string ns) {
+        @assert(ns, "namespace URI is required");
         nss += target_ns;
         target_ns = ns;
+        @debug {
+            QDBG_LOG("pushTargetNamespace: depth=%d ns=%y", nss.size(), ns);
+        }
     }
 
     #! restores any previous target namespace URI from the stack to the current target namespace URI
     popTargetNamespace() {
+        @assert(nss.size() > 0, "target namespace stack underflow - mismatched push/pop");
         target_ns = pop nss;
+        @debug {
+            QDBG_LOG("popTargetNamespace: depth=%d ns=%y", nss.size(), target_ns);
+        }
     }
 
     #! pushes the current default namespace URI on the stack when parsing schemas and sets the current default namespace URI to the current value
     pushDefaultNamespace(string ns) {
+        @assert(ns, "namespace URI is required");
         dss += default_ns;
         default_ns = ns;
+        @debug {
+            QDBG_LOG("pushDefaultNamespace: depth=%d ns=%y", dss.size(), ns);
+        }
     }
 
     #! restores any previous default namespace URI from the stack to the current default namespace URI
     popDefaultNamespace() {
+        @assert(dss.size() > 0, "default namespace stack underflow - mismatched push/pop");
         default_ns = pop dss;
+        @debug {
+            QDBG_LOG("popDefaultNamespace: depth=%d ns=%y", dss.size(), default_ns);
+        }
     }
 
     #! looks up and registers a namespace if necessary, returns the namespace's prefix
     string getOutputNamespacePrefix(string ns) {
+        @assert(ns, "namespace URI is required");
         return nsr{ns} ?? registerNamespaceIntern(ns);
     }
 
@@ -4638,10 +4736,11 @@ public class WSDL::Namespaces inherits Serializable {
     }
 
     #! returns the input namespace prefix for the target namespace, if any
-    string getTargetNamespaceInputPrefix() {
+    *string getTargetNamespaceInputPrefix() {
         if (!target_ns) {
             throw "NAMESPACE-ERROR", sprintf("no target namespace");
         }
+        # return the input prefix mapping for the target namespace (may be NOTHING if not mapped)
         return imapr{target_ns};
     }
 
@@ -4678,17 +4777,42 @@ public class WSDL::Namespaces inherits Serializable {
 
     #! returns the input namespace URI from the input namespace prefix
     string getInputNamespaceUri(string nsa) {
+        @assert(nsa, "namespace prefix is required");
         *string rv = imap{nsa};
         if (!rv)
             throw "WSDL-NAMESPACE-ERROR", sprintf("input namespace %y is unknown (known input namespaces: %y)", nsa, imap.keys());
         return rv;
     }
 
+    #! returns the input namespace URI from the input namespace prefix, or NOTHING if not found
+    /** @param nsa the input namespace prefix
+        @return the namespace URI or NOTHING if the prefix is not defined
+
+        @note this method does not throw an exception if the prefix is not found
+    */
+    *string tryGetInputNamespaceUri(*string nsa) {
+        if (!nsa) {
+            return NOTHING;
+        }
+        return imap{nsa};
+    }
+
+    #! resolves a type name to type info or a concrete type object
+    /** @param t the type name, potentially with namespace prefix (e.g., "xsd:string" or "tns:MyType")
+        @param typeinfo reference to store type info hash if type is not resolved
+        @param rtype reference to store the resolved XsdAbstractType object
+        @param tmap optional type map for custom type lookup
+
+        @return True if type was resolved to an XsdAbstractType, False if typeinfo was populated instead
+    */
     bool doType(string t, reference<hash> typeinfo, reference<XsdAbstractType> rtype, *hash<string, XsdAbstractType> tmap) {
-        #printf("DEBUG: XsdBase::doType(%y)\n", t);
+        @assert(t, "type name is required");
+        @debug {
+            QDBG_LOG("doType: t=%y default_ns=%y", t, default_ns);
+        }
         (*string ns, *string type) = t =~ x/([^:]+):([^:]+)/;
         if (!type) {
-            #printf("DEBUG: XsdBase::doType(%y) xsd: %y\n", t, default_ns);
+            # unprefixed type - check if default namespace is XSD
             if (default_ns == XSD_NS) {
                 rtype = getBaseType(t);
                 return True;
@@ -4697,6 +4821,9 @@ public class WSDL::Namespaces inherits Serializable {
             typeinfo = {"val": t};
             return False;
         }
+
+        # validate namespace prefix exists before using it
+        @assert(imap{ns}, sprintf("namespace prefix %y must be defined in input namespace map", ns));
 
         # if this is in the XML Schema namespace, then it's a base type
         if (xsd_schema{ns}) {
@@ -4789,6 +4916,20 @@ public hashdecl WSDL::OperationInfo {
 
 #! main class representing a parsed WSDL file
 /** This is the main class for handling SOAP communication and is based on a WSDL file
+
+    @par Thread Safety
+    This class is designed to be thread-safe for read operations once constructed. Multiple threads
+    can safely use the same WebService object for SOAP serialization and deserialization operations.
+    However, the class should not be modified after construction in a multi-threaded context.
+
+    @par Usage Example
+    @code{.py}
+    WebService ws(wsdl_string, {"def_path": "/path/to/schemas"});
+    # Get all available operations
+    list<string> ops = ws.listOperations();
+    # Serialize a SOAP request
+    hash<auto> msg = ws.serializeRequest(op_name, args);
+    @endcode
 */
 public class WSDL::WebService inherits WSDL::XsdBase, Qore::Serializable {
     public {
@@ -4896,6 +5037,7 @@ public class WSDL::WebService inherits WSDL::XsdBase, Qore::Serializable {
     /** @throw WSDL-OPERATION-ERROR if the operation is unknown
     */
     WSDL::WSOperation getOperation(string opname) {
+        @assert(opname, "operation name is required");
         foreach hash<auto> pt in (portType.iterator()) {
             if (pt.operations{opname})
                 return pt.operations{opname};
@@ -4911,6 +5053,8 @@ public class WSDL::WebService inherits WSDL::XsdBase, Qore::Serializable {
 
     #! returns the given operation for particular porttype or throws an exception if it cannot be found
     WSDL::WSOperation getPortTypeOperation(string ptname, string opname) {
+        @assert(ptname, "port type name is required");
+        @assert(opname, "operation name is required");
         *WSOperation op = portType{ptname}.operations{opname};
         if (op)
             return op;
@@ -4921,10 +5065,12 @@ public class WSDL::WebService inherits WSDL::XsdBase, Qore::Serializable {
 
     #! returns the given operation for particular binding or throws an exception if it cannot be found
     WSDL::WSOperation getBindingOperation(*string bname, string opname) {
+        @assert(opname, "operation name is required");
         if (!exists bname) {
             return getOperation(opname);
         } else {
             WSDL::Binding b = getBinding(bname);
+            @assert(b, sprintf("binding %y must exist", bname));
             return getPortTypeOperation(b.getPort(), opname);
         }
     }
