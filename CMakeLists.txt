@@ -1,10 +1,10 @@
-cmake_minimum_required(VERSION 2.8.3)
+cmake_minimum_required(VERSION 3.5)
 
 project(qore-xml-module)
 
 set (VERSION_MAJOR 2)
-set (VERSION_MINOR 0)
-set (VERSION_PATCH 1)
+set (VERSION_MINOR 1)
+set (VERSION_PATCH 0)
 
 find_package(Qore 1.0 REQUIRED)
 
