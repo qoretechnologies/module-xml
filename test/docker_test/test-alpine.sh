@@ -48,7 +48,8 @@ chown -R qore:qore ${MODULE_SRC_DIR}
 export QORE_MODULE_DIR=${MODULE_SRC_DIR}/qlib:${QORE_MODULE_DIR}
 cd ${MODULE_SRC_DIR}
 for test in test/*.qtest; do
-    gosu qore:qore qore $test -vv
+    # run with debugging enabled to catch @debug block parse errors
+    gosu qore:qore qore -p enable-debug $test -vv
     RESULTS="$RESULTS $?"
 done
 
