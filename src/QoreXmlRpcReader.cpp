@@ -359,7 +359,7 @@ int QoreXmlRpcReader::getInt(Qore::Xml::intern::XmlRpcValue *v, ExceptionSink* x
    if (nt == XML_READER_TYPE_TEXT) {
       const char* str = constValue();
       if (str) {
-         printd(0, "** getInt() str='%s' len=%d\n", str, (int)strlen(str));
+         printd(5, "** getInt() str='%s' len=%d\n", str, (int)strlen(str));
          // note that we can parse 64-bit integers here, which is not conformant to the standard
          char* endptr = nullptr;
          errno = 0;

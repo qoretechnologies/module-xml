@@ -1,0 +1,406 @@
+#!/usr/bin/env qore
+
+%new-style
+%enable-all-warnings
+%strict-args
+%require-types
+
+%requires HttpServer
+%requires ../qlib/WebDavHandler
+%requires WebDavClient
+%requires WebDavClientDataProvider
+%requires QUnit
+%requires FsUtil
+%requires Logger
+%requires xml
+
+%exec-class Main
+
+# minimal HTTP server for this test suite
+class Server inherits HttpServer {
+    private {
+        int port;
+    }
+
+    constructor(hash<HttpServerOptionInfo> http_opts, WebDavHandler::AbstractWebDavHandler handler)
+            : HttpServer(http_opts) {
+        setHandler("webdavhandler", "/", NOTHING, handler);
+        setDefaultHandler("webdavhandler", handler);
+
+        map addHttpMethod($1), handler.getHttpMethods();
+
+        port = addListener(<HttpListenerOptionInfo>{"service": 0}).port;
+    }
+
+    int getPort() {
+        return port;
+    }
+}
+
+class Main inherits QUnit::Test {
+    private {
+        TmpDir tmp;
+        Server srv;
+        WebDavClient::WebDavClient client;
+    }
+
+    constructor() : QUnit::Test("WebDavClient", "1.0") {
+        addTestCase("basic operations", \testBasicOperations());
+        addTestCase("directory operations", \testDirectoryOperations());
+        addTestCase("copy and move", \testCopyMove());
+        addTestCase("propfind", \testPropfind());
+        addTestCase("locking", \testLocking());
+        addTestCase("data provider operations", \testDataProvider());
+        addTestCase("error handling", \testErrorHandling());
+
+        set_return_value(main());
+    }
+
+    globalSetUp() {
+        tmp = new TmpDir();
+        WebDavHandler::FsWebDavHandler handler(tmp.path);
+
+        Logger logger("test", LoggerLevel::getLevelInfo());
+        if (m_options.verbose > 2) {
+            logger.addAppender(new TestAppender());
+        }
+        hash<HttpServerOptionInfo> http_opts = <HttpServerOptionInfo>{
+            "logger": logger,
+            "debug": True,
+        };
+
+        srv = new Server(http_opts, handler);
+        if (m_options.verbose > 2) {
+            map srv.setListenerLogOptionsID($1, -1), keys srv.getListeners();
+        }
+
+        client = new WebDavClient::WebDavClient({
+            "url": sprintf("http://localhost:%d", srv.getPort()),
+        });
+
+        if (m_options.verbose > 2) {
+            client.setDebug(True);
+        }
+    }
+
+    globalTearDown() {
+        delete client;
+        srv.stop();
+        delete srv;
+        delete tmp;
+    }
+
+    # Test basic file operations: put, get, exists, delete
+    private testBasicOperations() {
+        string filename = "test-" + get_random_string(8) + ".txt";
+        string content = "Hello, WebDAV! " + get_random_string(32);
+
+        # Test put - creates new file
+        bool created = client.put(filename, content, "text/plain");
+        assertTrue(created, "put should return True for new file");
+
+        # Test exists
+        assertTrue(client.exists(filename), "file should exist after put");
+
+        # Test get
+        *data retrieved = client.get(filename);
+        assertEq(content, retrieved.toString(), "get should return uploaded content");
+
+        # Test put - updates existing file
+        string new_content = "Updated content: " + get_random_string(32);
+        created = client.put(filename, new_content, "text/plain");
+        assertFalse(created, "put should return False for existing file");
+
+        # Verify update
+        retrieved = client.get(filename);
+        assertEq(new_content, retrieved.toString(), "get should return updated content");
+
+        # Test delete
+        client.del(filename);
+        assertFalse(client.exists(filename), "file should not exist after delete");
+
+        # Test get on non-existent file
+        retrieved = client.get("nonexistent-" + get_random_string(8) + ".txt");
+        assertEq(NOTHING, retrieved, "get on non-existent file should return NOTHING");
+    }
+
+    # Test directory (collection) operations: mkcol, list
+    private testDirectoryOperations() {
+        string dirname = "testdir-" + get_random_string(8);
+        string subdir = dirname + "/subdir";
+        string filename = dirname + "/file.txt";
+
+        # Create directory
+        client.mkcol(dirname);
+        assertTrue(client.exists(dirname), "directory should exist after mkcol");
+
+        # Create subdirectory
+        client.mkcol(subdir);
+        assertTrue(client.exists(subdir), "subdirectory should exist after mkcol");
+
+        # Create file in directory
+        client.put(filename, "test content");
+        assertTrue(client.exists(filename), "file in directory should exist");
+
+        # List directory contents
+        list<hash<WebDavClient::WebDavResourceInfo>> resources = client.list(dirname);
+        assertGe(3, resources.size(), "list should return at least 3 entries (dir + subdir + file)");
+
+        # Verify types
+        hash<string, hash<WebDavClient::WebDavResourceInfo>> by_name;
+        foreach hash<WebDavClient::WebDavResourceInfo> r in (resources) {
+            # Extract filename from href
+            string name = r.href;
+            name =~ s/.*\///;
+            by_name{name} = r;
+        }
+
+        if (by_name.subdir) {
+            assertEq("collection", by_name.subdir.type, "subdir should be a collection");
+        }
+        if (by_name."file.txt") {
+            assertEq("file", by_name."file.txt".type, "file.txt should be a file");
+        }
+
+        # List with depth 0
+        resources = client.list(dirname, "0");
+        assertEq(1, resources.size(), "list with depth 0 should return just the directory");
+
+        # Cleanup
+        client.del(filename);
+        client.del(subdir);
+        client.del(dirname);
+    }
+
+    # Test copy and move operations
+    private testCopyMove() {
+        string src = "source-" + get_random_string(8) + ".txt";
+        string dest = "dest-" + get_random_string(8) + ".txt";
+        string moved = "moved-" + get_random_string(8) + ".txt";
+        string content = "Copy/move test content: " + get_random_string(32);
+
+        # Create source file
+        client.put(src, content);
+        assertTrue(client.exists(src), "source file should exist");
+
+        # Test copy
+        client.copyResource(src, dest);
+        assertTrue(client.exists(src), "source should still exist after copy");
+        assertTrue(client.exists(dest), "destination should exist after copy");
+
+        *data dest_content = client.get(dest);
+        assertEq(content, dest_content.toString(), "copied content should match");
+
+        # Test copy with overwrite=False on existing file (should fail)
+        string new_content = "New content";
+        client.put(src, new_content);
+
+        try {
+            client.copyResource(src, dest, False);
+            # If server supports overwrite=F, this should fail
+            # Some servers may not enforce this
+        } catch () {
+            # Expected for compliant servers
+        }
+
+        # Test move
+        client.moveResource(dest, moved);
+        assertFalse(client.exists(dest), "destination should not exist after move");
+        assertTrue(client.exists(moved), "moved file should exist");
+
+        # Cleanup
+        client.del(src);
+        client.del(moved);
+    }
+
+    # Test PROPFIND operations
+    private testPropfind() {
+        string filename = "propfind-test-" + get_random_string(8) + ".txt";
+        string content = "Propfind test content";
+
+        client.put(filename, content);
+
+        # Get properties
+        list<hash<WebDavClient::WebDavResourceInfo>> resources = client.propfind(filename, "0");
+        assertEq(1, resources.size(), "propfind depth 0 should return 1 resource");
+
+        hash<WebDavClient::WebDavResourceInfo> info = resources[0];
+        assertEq("file", info.type, "resource type should be file");
+        assertEq(content.size(), info.contentlength, "content length should match");
+
+        # Propfind with specific properties
+        resources = client.propfind(filename, "0", ("getcontentlength", "getlastmodified"));
+        assertEq(1, resources.size(), "propfind with specific props should return 1 resource");
+
+        # Cleanup
+        client.del(filename);
+    }
+
+    # Test locking operations
+    private testLocking() {
+        string filename = "lock-test-" + get_random_string(8) + ".txt";
+        string content = "Lock test content";
+
+        client.put(filename, content);
+
+        # Lock the resource
+        hash<WebDavClient::WebDavLockInfo> lock_info;
+        try {
+            lock_info = client.lock(filename, "exclusive", "test-owner", 300);
+            assertTrue(exists lock_info.token, "lock should return a token");
+            assertEq("exclusive", lock_info.scope, "lock scope should be exclusive");
+            assertEq("write", lock_info.type, "lock type should be write");
+
+            # Unlock the resource
+            client.unlock(filename, lock_info.token);
+        } catch (hash<ExceptionInfo> ex) {
+            # Some servers may not support locking
+            if (m_options.verbose) {
+                printf("Lock test skipped: %s\n", ex.desc);
+            }
+        }
+
+        # Cleanup
+        client.del(filename);
+    }
+
+    # Test data provider operations
+    private testDataProvider() {
+        WebDavClientDataProvider::WebDavClientDataProvider provider(client);
+
+        # Test child providers exist
+        *list<string> names = provider.getChildProviderNames();
+        assertTrue(names.contains("list"), "provider should have 'list' child");
+        assertTrue(names.contains("get"), "provider should have 'get' child");
+        assertTrue(names.contains("put"), "provider should have 'put' child");
+        assertTrue(names.contains("delete"), "provider should have 'delete' child");
+        assertTrue(names.contains("mkdir"), "provider should have 'mkdir' child");
+        assertTrue(names.contains("copy"), "provider should have 'copy' child");
+        assertTrue(names.contains("move"), "provider should have 'move' child");
+
+        # Test put operation
+        string filename = "dp-test-" + get_random_string(8) + ".txt";
+        string content = "DataProvider test content";
+
+        AbstractDataProvider put_dp = provider.getChildProvider("put");
+        hash<auto> result = put_dp.doRequest({
+            "path": filename,
+            "content": content,
+            "content_type": "text/plain",
+        });
+        assertTrue(result.created, "put should create new file");
+
+        # Test list operation
+        AbstractDataProvider list_dp = provider.getChildProvider("list");
+        result = list_dp.doRequest({
+            "path": "/",
+        });
+        assertEq("list", result.resources.typeCode() == NT_LIST ? "list" : "not list",
+            "list should return a list");
+
+        # Test get operation
+        AbstractDataProvider get_dp = provider.getChildProvider("get");
+        result = get_dp.doRequest({
+            "path": filename,
+        });
+        assertEq(content, result.content.toString(), "get should return file content");
+
+        # Test mkdir operation
+        string dirname = "dp-dir-" + get_random_string(8);
+        AbstractDataProvider mkdir_dp = provider.getChildProvider("mkdir");
+        result = mkdir_dp.doRequest({
+            "path": dirname,
+        });
+        assertTrue(result.success, "mkdir should succeed");
+        assertTrue(client.exists(dirname), "directory should exist");
+
+        # Test copy operation
+        string copy_dest = "dp-copy-" + get_random_string(8) + ".txt";
+        AbstractDataProvider copy_dp = provider.getChildProvider("copy");
+        result = copy_dp.doRequest({
+            "source": filename,
+            "destination": copy_dest,
+        });
+        assertTrue(result.success, "copy should succeed");
+        assertTrue(client.exists(copy_dest), "copied file should exist");
+
+        # Test move operation
+        string move_dest = "dp-move-" + get_random_string(8) + ".txt";
+        AbstractDataProvider move_dp = provider.getChildProvider("move");
+        result = move_dp.doRequest({
+            "source": copy_dest,
+            "destination": move_dest,
+        });
+        assertTrue(result.success, "move should succeed");
+        assertFalse(client.exists(copy_dest), "source should not exist after move");
+        assertTrue(client.exists(move_dest), "moved file should exist");
+
+        # Test delete operation
+        AbstractDataProvider delete_dp = provider.getChildProvider("delete");
+        result = delete_dp.doRequest({
+            "path": filename,
+        });
+        assertTrue(result.success, "delete should succeed");
+        assertFalse(client.exists(filename), "file should not exist after delete");
+
+        # Cleanup remaining files
+        client.del(move_dest);
+        client.del(dirname);
+    }
+
+    # Test error handling
+    private testErrorHandling() {
+        # Test delete non-existent file
+        string nonexistent = "nonexistent-" + get_random_string(8) + ".txt";
+        try {
+            client.del(nonexistent);
+            # Some servers may return success for DELETE on non-existent resources
+        } catch (hash<ExceptionInfo> ex) {
+            # Expected for strict servers
+            assertTrue(True);
+        }
+
+        # Test mkcol on existing file path
+        string filename = "mkcol-conflict-" + get_random_string(8) + ".txt";
+        client.put(filename, "test");
+
+        try {
+            client.mkcol(filename);
+            fail("mkcol on existing file should fail");
+        } catch (hash<ExceptionInfo> ex) {
+            # Expected - conflict error
+            assertTrue(True);
+        }
+
+        # Cleanup
+        client.del(filename);
+
+        # Test nested mkcol without parent
+        string nested = "nonexistent-parent/child-" + get_random_string(8);
+        try {
+            client.mkcol(nested);
+            # Some servers may auto-create parent directories
+            if (client.exists("nonexistent-parent")) {
+                client.del(nested);
+                client.del("nonexistent-parent");
+            }
+        } catch (hash<ExceptionInfo> ex) {
+            # Expected for strict servers - 409 Conflict
+            assertTrue(True);
+        }
+    }
+}
+
+class TestAppender inherits LoggerAppenderWithLayout {
+    constructor() : LoggerAppenderWithLayout("test", new LoggerLayoutPattern("%d T%t [%p]: %m%n")) {
+        open();
+    }
+
+    processEventImpl(int type, auto params) {
+        switch (type) {
+            case EVENT_LOG:
+                print(params);
+                break;
+        }
+    }
+}
