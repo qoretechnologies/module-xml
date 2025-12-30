@@ -1,6 +1,6 @@
 # -*- mode: qore; indent-tabs-mode: nil -*-
 
-/*  WebDavHandler module Copyright 2019 - 2022 Qore Technologies, s.r.o.
+/*  WebDavHandler module Copyright 2019 - 2025 Qore Technologies, s.r.o.
 
     Permission is hereby granted, free of charge, to any person obtaining a
     copy of this software and associated documentation files (the "Software"),
@@ -35,6 +35,28 @@ hashdecl PropPatchActionInfo {
     string prop;
     #! Value
     auto val;
+}
+
+#! WebDAV lock information structure
+hashdecl WebDavLockInfo {
+    #! Unique lock token URI (e.g., "urn:uuid:...")
+    string token;
+    #! Resource path being locked
+    string resource;
+    #! Lock scope: "exclusive" or "shared"
+    string scope;
+    #! Lock type: currently only "write" per RFC 4918
+    string type;
+    #! Lock depth: "0" or "infinity"
+    string depth;
+    #! Lock owner information (from request)
+    auto owner;
+    #! Timeout value in seconds (0 = infinite)
+    int timeout;
+    #! Expiration timestamp
+    date expires;
+    #! User who created the lock (from auth context)
+    *string user;
 }
 
 #! Abstract WebDavHandler interface class
@@ -144,11 +166,12 @@ public class AbstractWebDavHandler inherits public HttpServer::AbstractHttpReque
             *data body) {
         if (*string method = RequestMethods{hdr.method}) {
             # parse destination path if needed
-            if (DestMethods{method}) {
+            if (DestMethods{hdr.method}) {
                 if (!exists hdr.destination) {
-                    return response(400, "WebDAV request missing 'Destination' header for method %y", method);
+                    return response(400, "WebDAV request missing 'Destination' header for method %y", hdr.method);
                 }
-                cx.webdav_dest_path = getRealPath(parseURL(hdr.destination) ?? hdr.destination);
+                *hash<UrlInfo> dest_url = parseURL(hdr.destination);
+                cx.webdav_dest_path = getRealPath(dest_url.path ?? hdr.destination);
             }
             # parse source path
             cx.webdav_path = getRealPath(cx.raw_path);

@@ -1,6 +1,6 @@
 # -*- mode: qore; indent-tabs-mode: nil -*-
 
-/*  WebDavHandler module Copyright 2019 - 2022 Qore Technologies, s.r.o.
+/*  WebDavHandler module Copyright 2019 - 2025 Qore Technologies, s.r.o.
 
     Permission is hereby granted, free of charge, to any person obtaining a
     copy of this software and associated documentation files (the "Software"),
@@ -39,11 +39,17 @@ public class FsWebDavHandler inherits AbstractWebDavHandler {
         string basePath;
         bool debug;
 
+        #! Lock handler for DAV Class 2 locking support
+        AbstractWebDavLockHandler lock_handler;
+
         #! Default block size for chunked sends (32KiB)
         const BlockSize = 32 * 1024;
 
         #! Default I/O timeout
         const IoTimeout = 30s;
+
+        #! Default lock timeout in seconds (10 minutes)
+        const DefaultLockTimeout = 600;
     }
 
     #! Creates the object with an empty logger and an in-memory property handler
@@ -99,6 +105,7 @@ public class FsWebDavHandler inherits AbstractWebDavHandler {
         if (!is_dir(basePath)) {
             throw "WEBDAV-BASE-PATH-ERROR", sprintf("path %y is not a directory", path);
         }
+        lock_handler = new InMemoryWebDavLockHandler();
     }
 
     #! Converts a request path to a normalized real path on the filesystem in the root WebDavHandler directory
@@ -161,7 +168,13 @@ public class FsWebDavHandler inherits AbstractWebDavHandler {
                     continue;
                 }
                 if (depth == "infinity" && info.type == "DIRECTORY") {
-                    res += preparePropFindResponse(cx, depth, h, all_props, additional_props);
+                    # Create updated context for subdirectory recursion
+                    string child_raw_path = raw_path =~ /\/$/ ? raw_path + name : raw_path + "/" + name;
+                    hash<auto> child_cx = cx + {
+                        "webdav_path": local_name,
+                        "raw_path": child_raw_path,
+                    };
+                    res += preparePropFindResponse(child_cx, depth, info, all_props, additional_props);
                 } else {
                     raw_path =~ s/\/$//;
                     res += preparePropFindXmlResponse(local_name, raw_path + "/" + name, info.type == "DIRECTORY",
@@ -449,7 +462,54 @@ public class FsWebDavHandler inherits AbstractWebDavHandler {
         @return the response to the HTTP request
     */
     private hash<HttpResponseInfo> handlePutImpl(Socket s, hash<auto> cx, hash<auto> hdr, *data body) {
-        return handlePost(s, cx, hdr, body);
+        string path = cx.webdav_path;
+
+        # PUT cannot target a collection (path ending with /)
+        if (path =~ /\/$/) {
+            return response(405, "Cannot PUT to a collection");
+        }
+
+        # Check if parent directory exists
+        string dirPath = dirname(path);
+        if (!is_dir(dirPath)) {
+            return response(409, "Parent collection does not exist");
+        }
+
+        *hash<StatInfo> h = hstat(path);
+        bool is_new = !h;
+
+        # Cannot PUT over a directory
+        if (h && h.type == "DIRECTORY") {
+            return response(405, "Cannot PUT over a collection");
+        }
+
+        # Save data
+        try {
+            if (!exists body && (hdr."transfer-encoding" == "chunked")) {
+                FileOutputStream os(path);
+                s.readHTTPChunkedBodyToOutputStream(os, IoTimeout);
+            } else {
+                if (!body) {
+                    body = getMessageBody(s, hdr);
+                }
+                File f();
+                if (f.open(path, O_CREAT | O_TRUNC | O_WRONLY, 0644)) {
+                    return response(500, "Could not create/update file: %s", strerror());
+                }
+                if (exists body) {
+                    f.write(body);
+                }
+            }
+        } catch (hash<ExceptionInfo> ex) {
+            return response(500, "Error writing file: %s", ex.desc);
+        }
+
+        hash<auto> hdr_resp = {
+            "ETag": getETag(path),
+        };
+
+        # RFC 4918: 201 Created for new resources, 204 No Content for updates
+        return response(is_new ? 201 : 204, hdr_resp);
     }
 
     #! Handles HTTP DELETE requests for WebDavHandler resources
@@ -622,19 +682,22 @@ public class FsWebDavHandler inherits AbstractWebDavHandler {
         @return the response to the WebDavHandler request
     */
     private hash<HttpResponseInfo> handleLockImpl(Socket s, hash<auto> cx, hash<auto> hdr, *data body) {
+        string path = cx.webdav_path;
+
         if (!body) {
             body = getMessageBody(s, cx.hdr);
         }
 
+        # Check for lock refresh (If header with lock token, no body)
+        if (!body && hdr."if") {
+            return handleLockRefresh(path, hdr);
+        }
+
         if (!body) {
-            # RFC #4918: https://tools.ietf.org/html/rfc4918#page-62
-            if (hdr."if") {
-                return response(501);
-            }
             return response(400, "missing message body in LOCK request");
         }
 
-        # parse the mandatory XML body
+        # Parse the mandatory XML body
         hash<auto> request_xml;
         try {
             request_xml = getXml(body);
@@ -642,15 +705,189 @@ public class FsWebDavHandler inherits AbstractWebDavHandler {
             return response(400, sprintf("%s: %s", ex.err, ex.desc));
         }
 
-        if (exists hdr.depth && hdr.depth != "0" && hdr.depth != "infinity") {
-            string msg = sprintf("invalid Depth header value: %y for LOCK request; only Depth: \"0\" or "
-                "\"infinity\" accepted", hdr.depth);
-            return response(400, msg);
+        # Validate Depth header
+        string depth = hdr.depth ?? "infinity";
+        if (depth != "0" && depth != "infinity") {
+            return response(400, sprintf("invalid Depth header value: %y for LOCK request; "
+                "only Depth: \"0\" or \"infinity\" accepted", hdr.depth));
         }
 
-        #printf("hdr: %y body: %y\n", hdr, request_xml);
+        # Parse lockinfo from XML
+        if (!request_xml."DAV:lockinfo") {
+            return response(400, "XML body does not contain 'lockinfo' root tag");
+        }
 
-        return response(501);
+        hash<auto> lockinfo = request_xml."DAV:lockinfo";
+
+        # Extract lock scope (exclusive or shared)
+        string scope;
+        if (lockinfo."DAV:lockscope"."DAV:exclusive") {
+            scope = "exclusive";
+        } else if (lockinfo."DAV:lockscope"."DAV:shared") {
+            scope = "shared";
+        } else {
+            return response(400, "lockscope must be 'exclusive' or 'shared'");
+        }
+
+        # Extract lock type (must be "write" per RFC 4918)
+        if (!lockinfo."DAV:locktype"."DAV:write") {
+            return response(400, "locktype must be 'write'");
+        }
+
+        # Extract owner info (optional)
+        auto owner = lockinfo."DAV:owner";
+
+        # Parse timeout header
+        int timeout = parseTimeout(hdr.timeout);
+
+        # Check if the resource exists (can lock non-existent resources in some cases)
+        *hash<StatInfo> h = hstat(path);
+
+        # Generate lock token
+        string token = lock_handler.generateLockToken();
+
+        # Create lock info
+        hash<WebDavLockInfo> lock_info = <WebDavLockInfo>{
+            "token": token,
+            "resource": path,
+            "scope": scope,
+            "type": "write",
+            "depth": depth,
+            "owner": owner,
+            "timeout": timeout,
+            "expires": timeout == 0 ? 9999-12-31 : now() + seconds(timeout),
+            "user": cx.user,
+        };
+
+        # Try to acquire the lock
+        try {
+            lock_handler.lock(path, lock_info);
+        } catch (hash<ExceptionInfo> ex) {
+            if (ex.err == "LOCK-CONFLICT") {
+                return response(423, ex.desc);
+            }
+            rethrow;
+        }
+
+        # Build lock discovery response
+        hash<auto> resp = buildLockDiscoveryResponse(lock_info);
+
+        return <HttpResponseInfo>{
+            "code": h ? 200 : 201,
+            "hdr": {
+                "Lock-Token": sprintf("<%s>", token),
+                "Content-Type": MimeTypeXml,
+            },
+            "body": make_xml(resp),
+        };
+    }
+
+    #! Handles lock refresh requests
+    private hash<HttpResponseInfo> handleLockRefresh(string path, hash<auto> hdr) {
+        # Extract lock token from If header
+        # Format: (<urn:uuid:...>) or (Not <urn:uuid:...>)
+        *string if_header = hdr."if";
+        if (!if_header) {
+            return response(400, "Lock refresh requires If header with lock token");
+        }
+
+        # Parse token from If header - format: (<token>)
+        *list<*string> matches = (if_header =~ x/<([^>]+)>/g);
+        if (!matches || !matches[0]) {
+            return response(400, "Could not parse lock token from If header");
+        }
+        string token = matches[0];
+
+        # Get the lock
+        *hash<WebDavLockInfo> lock_info = lock_handler.getLock(token);
+        if (!lock_info) {
+            return response(412, "Lock token not found");
+        }
+
+        # Verify the lock is for this resource
+        if (lock_info.resource != path) {
+            return response(412, "Lock token does not match resource");
+        }
+
+        # Parse new timeout
+        int timeout = parseTimeout(hdr.timeout);
+
+        # Refresh the lock
+        if (!lock_handler.refresh(token, timeout)) {
+            return response(412, "Failed to refresh lock");
+        }
+
+        # Update lock_info with new timeout for response
+        lock_info.timeout = timeout;
+        lock_info.expires = timeout == 0 ? 9999-12-31 : now() + seconds(timeout);
+
+        # Build response
+        hash<auto> resp = buildLockDiscoveryResponse(lock_info);
+
+        return <HttpResponseInfo>{
+            "code": 200,
+            "hdr": {
+                "Lock-Token": sprintf("<%s>", token),
+                "Content-Type": MimeTypeXml,
+            },
+            "body": make_xml(resp),
+        };
+    }
+
+    #! Parses the Timeout header value
+    /** @param timeout_header the Timeout header value (e.g., "Second-3600", "Infinite")
+        @return timeout in seconds, or 0 for infinite
+    */
+    private int parseTimeout(*string timeout_header) {
+        if (!timeout_header) {
+            return DefaultLockTimeout;
+        }
+
+        # Handle multiple timeout values (comma-separated), use first valid one
+        list<string> timeouts = timeout_header.split(",");
+        foreach string t in (timeouts) {
+            t = trim(t);
+            if (t == "Infinite") {
+                return 0;
+            }
+            if (t =~ /^Second-([0-9]+)$/) {
+                *list<*string> m = (t =~ x/^Second-([0-9]+)$/);
+                if (m && m[0]) {
+                    return m[0].toInt();
+                }
+            }
+        }
+
+        return DefaultLockTimeout;
+    }
+
+    #! Builds the lock discovery XML response
+    private hash<auto> buildLockDiscoveryResponse(hash<WebDavLockInfo> lock_info) {
+        string timeout_str = lock_info.timeout == 0 ? "Infinite" : sprintf("Second-%d", lock_info.timeout);
+
+        hash<auto> activelock = {
+            "DAV:locktype": {"DAV:write": NOTHING},
+            "DAV:lockscope": lock_info.scope == "exclusive"
+                ? {"DAV:exclusive": NOTHING}
+                : {"DAV:shared": NOTHING},
+            "DAV:depth": lock_info.depth,
+            "DAV:timeout": timeout_str,
+            "DAV:locktoken": {"DAV:href": lock_info.token},
+            "DAV:lockroot": {"DAV:href": lock_info.resource},
+        };
+
+        if (lock_info.owner) {
+            activelock."DAV:owner" = lock_info.owner;
+        }
+
+        return {
+            "DAV:prop": {
+                "^attributes^": {"xmlns:DAV": DavNs},
+                "DAV:lockdiscovery": {
+                    "DAV:activelock": activelock,
+                },
+            },
+        };
     }
 
     private string getLockToken() {
@@ -697,7 +934,39 @@ public class FsWebDavHandler inherits AbstractWebDavHandler {
         @return the response to the WebDavHandler request
     */
     private hash<HttpResponseInfo> handleUnlockImpl(Socket s, hash<auto> cx, hash<auto> hdr, *data body) {
-        return response(501);
+        string path = cx.webdav_path;
+
+        # Lock-Token header is required for UNLOCK
+        *string lock_token_header = hdr."lock-token";
+        if (!lock_token_header) {
+            return response(400, "UNLOCK requires Lock-Token header");
+        }
+
+        # Parse the token from the header - format: <token>
+        *list<*string> matches = (lock_token_header =~ x/<([^>]+)>/);
+        if (!matches || !matches[0]) {
+            return response(400, "Invalid Lock-Token header format");
+        }
+        string token = matches[0];
+
+        # Verify the lock exists
+        *hash<WebDavLockInfo> lock_info = lock_handler.getLock(token);
+        if (!lock_info) {
+            return response(409, "Lock token not found");
+        }
+
+        # Verify the lock is for this resource
+        if (lock_info.resource != path) {
+            return response(409, "Lock token does not match resource");
+        }
+
+        # Release the lock
+        if (!lock_handler.unlock(path, token)) {
+            return response(409, "Failed to release lock");
+        }
+
+        # RFC 4918: UNLOCK returns 204 No Content on success
+        return response(204);
     }
 
     #! Handles WebDavHandler MKCOL requests for WebDavHandler resources
@@ -968,7 +1237,7 @@ public class FsWebDavHandler inherits AbstractWebDavHandler {
             body = getMessageBody(s, cx.hdr);
         }
 
-        string dest_path = cx.webdav_rest_path;
+        string dest_path = cx.webdav_dest_path;
         string src_path = cx.webdav_path;
         # TODO/FIXME: it's same code as in MKCOL -> new method?
         if (dest_path =~ /\/$/) {
