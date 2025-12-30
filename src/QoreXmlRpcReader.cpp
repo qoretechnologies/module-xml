@@ -4,7 +4,7 @@
 
     Qore Programming Language
 
-    Copyright (C) 2003 - 2022 Qore Technologies, s.r.o.
+    Copyright (C) 2003 - 2025 Qore Technologies, s.r.o.
 
     This library is free software; you can redistribute it and/or
     modify it under the terms of the GNU Lesser General Public
@@ -25,6 +25,9 @@
 #include "QoreXmlRpcReader.h"
 
 #include "ql_xml.h"
+
+#include <cerrno>
+#include <climits>
 
 static int xmlrpc_do_empty_value(Qore::Xml::intern::XmlRpcValue *v, const char* name, int depth, ExceptionSink* xsink) {
    if (!strcmp(name, "string"))
@@ -321,7 +324,14 @@ int QoreXmlRpcReader::getBoolean(Qore::Xml::intern::XmlRpcValue *v, ExceptionSin
       const char* str = constValue();
       if (str) {
          //printd(5, "** got boolean '%s'\n", str);
-         v->set(strtoll(str, 0, 10) ? true : false);
+         char* endptr = nullptr;
+         long long val = strtoll(str, &endptr, 10);
+         // Skip trailing whitespace
+         while (endptr && *endptr && isspace(*endptr)) {
+            ++endptr;
+         }
+         // For boolean, we're lenient - just check if it parsed anything
+         v->set(val ? true : false);
       }
 
       if (readXmlRpc(xsink))
@@ -349,9 +359,26 @@ int QoreXmlRpcReader::getInt(Qore::Xml::intern::XmlRpcValue *v, ExceptionSink* x
    if (nt == XML_READER_TYPE_TEXT) {
       const char* str = constValue();
       if (str) {
-         //printd(5, "** got int '%s'\n", str);
+         printd(5, "** getInt() str='%s' len=%d\n", str, (int)strlen(str));
          // note that we can parse 64-bit integers here, which is not conformant to the standard
-         v->set(strtoll(str, 0, 10));
+         char* endptr = nullptr;
+         errno = 0;
+         long long val = strtoll(str, &endptr, 10);
+         if (errno == ERANGE) {
+            xsink->raiseException("PARSE-XMLRPC-ERROR", "integer value '%s' is out of range", str);
+            return -1;
+         }
+         if (endptr == str || (endptr && *endptr != '\0')) {
+            // Allow trailing whitespace
+            while (endptr && *endptr && isspace(*endptr)) {
+               ++endptr;
+            }
+            if (endptr && *endptr != '\0') {
+               xsink->raiseException("PARSE-XMLRPC-ERROR", "invalid integer value '%s'", str);
+               return -1;
+            }
+         }
+         v->set(val);
       }
 
       if (readXmlRpc(xsink))

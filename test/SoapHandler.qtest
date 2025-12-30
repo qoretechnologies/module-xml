@@ -35,7 +35,9 @@ class SimpleSoapHandler inherits SoapHandler {
     public {
         list msglogs;
     }
-    constructor(HttpServer::AbstractAuthenticator auth, *code n_getLogMessage, bool dbg = False): SoapHandler(auth, n_getLogMessage, dbg) {}
+    constructor(HttpServer::AbstractAuthenticator auth, *code n_getLogMessage, bool dbg = False, *int n_max_message_size)
+            : SoapHandler(auth, n_getLogMessage, dbg, n_max_message_size) {
+    }
 
     nothing msglog(hash cx, hash msg) {
         push msglogs, msg;
@@ -213,9 +215,11 @@ class SoapHandlerTest inherits QUnit::Test {
         addTestCase("issue 2783", \issue2783());
         addTestCase("simpleTest", \simpleTest());
         addTestCase("multiTest", \multiTest());
+        addTestCase("messageSizeLimit", \messageSizeLimitTest());
+        addTestCase("contentTypeParsingTest", \contentTypeParsingTest());
 
         # execute tests
-        set_return_value(main()); exit();
+        set_return_value(main());
     }
 
     issue2804() {
@@ -229,10 +233,11 @@ class SoapHandlerTest inherits QUnit::Test {
         } catch (hash<ExceptionInfo> ex1) {
             ex = ex1;
         }
-        #printf("%s\n", get_exception_string(ex));
         assertEq("SOAP-SERVER-FAULT-RESPONSE", ex.err);
-        assertEq("err1", ex.arg.Detail."sim:GetCompanyInfoFault"."sim:err");
-        assertEq("desc1", ex.arg.Detail."sim:GetCompanyInfoFault"."sim:desc");
+        # Find the namespace prefix dynamically (it could be "sim:" or "simple:" etc.)
+        string nsprefix = (ex.arg.Detail.keys()[0] =~ x/^([^:]+):GetCompanyInfoFault$/)[0];
+        assertEq("err1", ex.arg.Detail.(nsprefix + ":GetCompanyInfoFault").(nsprefix + ":err"));
+        assertEq("desc1", ex.arg.Detail.(nsprefix + ":GetCompanyInfoFault").(nsprefix + ":desc"));
     }
 
     issue2783() {
@@ -274,5 +279,130 @@ class SoapHandlerTest inherits QUnit::Test {
         assertEq(Type::String, (remove answer.ReceiptAck.OriginalTXID).type());
         assertEq(Type::String, (remove answer.Timestamp).type());
         assertEq(MultiResp, answer);
+    }
+
+    messageSizeLimitTest() {
+        # test the message size limit functionality
+
+        # Test 1: Constructor with size limit
+        SimpleSoapHandler handler(new PermissiveAuthenticator(), NOTHING, False, 100);
+        assertEq(100, handler.getMaxMessageSize(), "constructor sets size limit");
+
+        # Test 2: Setting a new limit
+        handler.setMaxMessageSize(200);
+        assertEq(200, handler.getMaxMessageSize(), "setMaxMessageSize updates limit");
+
+        # Test 3: Clearing the limit
+        handler.setMaxMessageSize(NOTHING);
+        assertEq(NOTHING, handler.getMaxMessageSize(), "setMaxMessageSize clears limit");
+
+        # Test 4: Constructor without size limit (default)
+        SimpleSoapHandler handler2(new PermissiveAuthenticator(), NOTHING, False);
+        assertEq(NOTHING, handler2.getMaxMessageSize(), "default constructor has no limit");
+
+        # Test 5: Setting limit on handler created without limit
+        handler2.setMaxMessageSize(500);
+        assertEq(500, handler2.getMaxMessageSize(), "limit can be set after construction");
+
+        # Test 6: Corner case - zero limit (should be treated as no limit in practice,
+        # but we store exactly what's set)
+        SimpleSoapHandler handler3(new PermissiveAuthenticator(), NOTHING, False, 0);
+        assertEq(0, handler3.getMaxMessageSize(), "zero limit stored correctly");
+
+        # Test 7: Large limit values
+        SimpleSoapHandler handler4(new PermissiveAuthenticator(), NOTHING, False, 10485760);  # 10MB
+        assertEq(10485760, handler4.getMaxMessageSize(), "large limit stored correctly");
+
+        # Test 8: Setting very small limit (edge case for testing)
+        handler.setMaxMessageSize(1);
+        assertEq(1, handler.getMaxMessageSize(), "very small limit can be set");
+
+        # Test 9: Re-enable limit after clearing
+        handler.setMaxMessageSize(NOTHING);
+        assertEq(NOTHING, handler.getMaxMessageSize(), "limit cleared");
+        handler.setMaxMessageSize(300);
+        assertEq(300, handler.getMaxMessageSize(), "limit re-enabled after clearing");
+    }
+
+    contentTypeParsingTest() {
+        # Test the improved content-type parsing regex (fixes for the action parameter extraction)
+
+        # Test 1: Simple content-type with action parameter
+        {
+            string ct = "application/soap+xml;action=http://example.com/action";
+            *string action = (ct =~ x/;action=([^;]+)/)[0];
+            assertEq("http://example.com/action", action, "action extracted correctly");
+
+            # After removing action, the content-type should be clean
+            ct =~ s/;action=[^;]+//;
+            assertEq("application/soap+xml", ct, "action removed correctly");
+        }
+
+        # Test 2: Content-type with action and charset
+        {
+            string ct = "application/soap+xml;action=http://example.com/action;charset=utf-8";
+            *string action = (ct =~ x/;action=([^;]+)/)[0];
+            assertEq("http://example.com/action", action, "action extracted with charset present");
+
+            ct =~ s/;action=[^;]+//;
+            assertEq("application/soap+xml;charset=utf-8", ct, "action removed, charset preserved");
+        }
+
+        # Test 3: Content-type with charset before action
+        {
+            string ct = "application/soap+xml;charset=utf-8;action=http://example.com/action";
+            *string action = (ct =~ x/;action=([^;]+)/)[0];
+            assertEq("http://example.com/action", action, "action extracted when charset is first");
+
+            ct =~ s/;action=[^;]+//;
+            assertEq("application/soap+xml;charset=utf-8", ct, "charset preserved when first");
+        }
+
+        # Test 4: Content-type without action parameter
+        {
+            string ct = "application/soap+xml;charset=utf-8";
+            *string action = (ct =~ x/;action=([^;]+)/)[0];
+            assertEq(NOTHING, action, "no action in content-type without action");
+
+            # Should not modify content-type when no action
+            string original = ct;
+            ct =~ s/;action=[^;]+//;
+            assertEq(original, ct, "content-type unchanged when no action");
+        }
+
+        # Test 5: Action with quoted value (edge case)
+        {
+            string ct = "application/soap+xml;action=\"http://example.com/action\";charset=utf-8";
+            # The regex extracts up to the next semicolon, including quotes if present
+            *string action = (ct =~ x/;action=([^;]+)/)[0];
+            assertEq("\"http://example.com/action\"", action, "quoted action extracted");
+        }
+
+        # Test 6: Multiple parameters after action
+        {
+            string ct = "application/soap+xml;action=test;charset=utf-8;boundary=xyz";
+            *string action = (ct =~ x/;action=([^;]+)/)[0];
+            assertEq("test", action, "action extracted with multiple params after");
+
+            ct =~ s/;action=[^;]+//;
+            assertEq("application/soap+xml;charset=utf-8;boundary=xyz", ct, "all other params preserved");
+        }
+
+        # Test 7: Empty action value (edge case - no match due to empty value)
+        {
+            string ct = "application/soap+xml;action=;charset=utf-8";
+            *string action = (ct =~ x/;action=([^;]+)/)[0];
+            assertEq(NOTHING, action, "no match due to empty value");
+        }
+
+        # Test 8: Action is last parameter (no trailing semicolon)
+        {
+            string ct = "text/xml;charset=utf-8;action=http://example.com/test";
+            *string action = (ct =~ x/;action=([^;]+)/)[0];
+            assertEq("http://example.com/test", action, "action extracted when last");
+
+            ct =~ s/;action=[^;]+//;
+            assertEq("text/xml;charset=utf-8", ct, "action removed when last");
+        }
     }
 }

@@ -1,0 +1,633 @@
+# -*- mode: qore; indent-tabs-mode: nil -*-
+#! @file WebDavClient.qm WebDAV Client module implementation
+
+/*  WebDavClient.qm Copyright (C) 2019 - 2025 Qore Technologies, s.r.o.
+
+    Permission is hereby granted, free of charge, to any person obtaining a
+    copy of this software and associated documentation files (the "Software"),
+    to deal in the Software without restriction, including without limitation
+    the rights to use, copy, modify, merge, publish, distribute, sublicense,
+    and/or sell copies of the Software, and to permit persons to whom the
+    Software is furnished to do so, subject to the following conditions:
+
+    The above copyright notice and this permission notice shall be included in
+    all copies or substantial portions of the Software.
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+    AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+    FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+    DEALINGS IN THE SOFTWARE.
+*/
+
+# make sure we have the required qore version
+%requires qore >= 2.0
+
+%requires(reexport) xml
+%requires(reexport) ConnectionProvider >= 1.4
+
+# do not use $ for vars
+%new-style
+
+# do not ignore argument errors
+%strict-args
+
+# require type declarations
+%require-types
+
+# enable all warnings
+%enable-all-warnings
+
+module WebDavClient {
+    version = "1.0";
+    desc = "WebDAV client module";
+    author = "David Nichols <david@qore.org>";
+    url = "http://qore.org";
+    license = "MIT";
+    init = sub () {
+        ConnectionSchemeCache::registerScheme("webdav", WebDavConnection::ConnectionScheme);
+        ConnectionSchemeCache::registerScheme("webdavs", WebDavConnection::ConnectionScheme);
+    };
+}
+
+/** @mainpage WebDavClient Module
+
+    @tableofcontents
+
+    @section webdavclientintro Introduction to the WebDavClient Module
+
+    The %WebDavClient module provides a client implementation for the WebDAV protocol (RFC 4918).
+
+    This module provides the following classes:
+    - @ref WebDavClient::WebDavClient "WebDavClient": The main client class
+    - @ref WebDavClient::WebDavConnection "WebDavConnection": ConnectionProvider integration
+
+    @section webdavclientexample Example
+
+    Here is an example of how to use this module:
+    @code{.py}
+%requires WebDavClient
+
+WebDavClient client({"url": "https://webdav.example.com/files"});
+
+# List directory contents
+list<hash<WebDavResourceInfo>> resources = client.list("/");
+
+# Upload a file
+client.put("/test.txt", "Hello, World!");
+
+# Download a file
+*binary content = client.get("/test.txt");
+
+# Create a directory
+client.mkcol("/newdir/");
+
+# Delete a resource
+client.del("/test.txt");
+    @endcode
+
+    @section webdavclientrelnotes Release Notes
+
+    @subsection webdavclient_v1_0 WebDavClient v1.0
+    - initial release
+*/
+
+#! Main public WebDavClient namespace
+public namespace WebDavClient {
+    #! DAV namespace constant
+    public const DavNs = "DAV:";
+
+    #! Resource information returned by PROPFIND
+    public hashdecl WebDavResourceInfo {
+        #! Resource path/href
+        string href;
+        #! Display name
+        *string displayname;
+        #! Resource type: "file" or "collection"
+        string type;
+        #! Content type (MIME type)
+        *string contenttype;
+        #! Content length in bytes
+        *int contentlength;
+        #! Last modified date
+        *date lastmodified;
+        #! Creation date
+        *date creationdate;
+        #! ETag
+        *string etag;
+    }
+
+    #! Lock information
+    public hashdecl WebDavLockInfo {
+        #! Lock token
+        string token;
+        #! Lock scope: "exclusive" or "shared"
+        string scope;
+        #! Lock type: "write"
+        string type;
+        #! Lock depth: "0" or "infinity"
+        string depth;
+        #! Lock owner
+        *string owner;
+        #! Lock timeout in seconds
+        *int timeout;
+    }
+
+    #! WebDAV client class
+    /** This class provides a WebDAV client implementation based on HTTPClient.
+    */
+    public class WebDavClient inherits Qore::HTTPClient {
+        public {
+            #! Default timeout for operations (30 seconds)
+            const DefaultTimeout = 30s;
+        }
+
+        private {
+            #! Base path for all operations
+            string base_path = "/";
+
+            #! Debug flag
+            bool debug = False;
+        }
+
+        #! Creates a WebDavClient object
+        /** @param opts a hash of options:
+            - \c url: (required) the WebDAV server URL
+            - \c timeout: (optional) connection/I/O timeout in milliseconds (default: 30000)
+            - \c connect_timeout: (optional) connection timeout in milliseconds
+            - \c proxy: (optional) proxy URL
+            - \c ssl_cert_path: (optional) path to SSL client certificate
+            - \c ssl_key_path: (optional) path to SSL client private key
+            - \c ssl_key_password: (optional) password for SSL private key
+            - \c ssl_verify_cert: (optional) verify server certificate (default: True)
+        */
+        constructor(hash<auto> opts) : HTTPClient(WebDavClient::getClientOpts(opts)) {
+            if (opts.url) {
+                *string path = parse_url(opts.url).path;
+                if (path) {
+                    base_path = path;
+                    if (base_path !~ /\/$/) {
+                        base_path += "/";
+                    }
+                }
+            }
+        }
+
+        #! Returns HTTPClient options from constructor options
+        private static hash<auto> getClientOpts(hash<auto> opts) {
+            return opts + {
+                "protocols": {
+                    "webdav": {
+                        "port": 80,
+                        "ssl": False,
+                    },
+                    "webdavs": {
+                        "port": 443,
+                        "ssl": True,
+                    },
+                    "http": {
+                        "port": 80,
+                        "ssl": False,
+                    },
+                    "https": {
+                        "port": 443,
+                        "ssl": True,
+                    },
+                },
+                # WebDAV-specific HTTP methods
+                "additional_methods": {
+                    "PROPFIND": True,
+                    "PROPPATCH": True,
+                    "MKCOL": True,
+                    "COPY": True,
+                    "MOVE": True,
+                    "LOCK": True,
+                    "UNLOCK": True,
+                },
+            };
+        }
+
+        #! Enables or disables debug output
+        setDebug(bool val = True) {
+            debug = val;
+        }
+
+        #! Gets the supported DAV capabilities
+        /** @return a list of DAV compliance classes (e.g., "1", "2", "3")
+        */
+        list<string> options(string path = "/") {
+            hash<auto> info;
+            send(NOTHING, "OPTIONS", resolvePath(path), NOTHING, False, \info);
+
+            *string dav_header = info."response-headers".dav ?? info."response-headers".DAV;
+            if (!dav_header) {
+                return ();
+            }
+
+            return map trim($1), dav_header.split(",");
+        }
+
+        #! Lists resources in a directory using PROPFIND
+        /** @param path the path to list
+            @param depth "0" for just the resource, "1" for immediate children, "infinity" for all descendants
+
+            @return a list of resource information
+        */
+        list<hash<WebDavResourceInfo>> list(string path = "/", string depth = "1") {
+            return propfind(path, depth);
+        }
+
+        #! Performs a PROPFIND request
+        /** @param path the resource path
+            @param depth "0", "1", or "infinity"
+            @param properties optional list of specific properties to request
+
+            @return a list of resource information
+        */
+        list<hash<WebDavResourceInfo>> propfind(string path = "/", string depth = "1",
+                *list<string> properties) {
+            # Build PROPFIND request body
+            hash<auto> body;
+            if (properties) {
+                hash<auto> props;
+                foreach string prop in (properties) {
+                    props{"DAV:" + prop} = NOTHING;
+                }
+                body = {
+                    "DAV:propfind": {
+                        "^attributes^": {"xmlns:DAV": DavNs},
+                        "DAV:prop": props,
+                    },
+                };
+            } else {
+                body = {
+                    "DAV:propfind": {
+                        "^attributes^": {"xmlns:DAV": DavNs},
+                        "DAV:allprop": NOTHING,
+                    },
+                };
+            }
+
+            string xml_body = make_xml(body);
+
+            hash<auto> hdrs = {
+                "Depth": depth,
+                "Content-Type": MimeTypeXml,
+            };
+
+            hash<auto> info;
+            on_error if (debug) printf("PROPFIND error: %s\n", $1.desc);
+
+            hash<auto> resp = send(xml_body, "PROPFIND", resolvePath(path), hdrs, True, \info);
+
+            if (resp.status_code != 207) {
+                throw "WEBDAV-ERROR", sprintf("PROPFIND failed with status %d: %s",
+                    resp.status_code, resp.body);
+            }
+
+            return parsePropfindResponse(resp.body);
+        }
+
+        #! Downloads a file
+        /** @param path the file path
+
+            @return the file contents as binary data, or NOTHING if not found
+        */
+        *data get(string path) {
+            hash<auto> info;
+            try {
+                hash<auto> resp = send(NOTHING, "GET", resolvePath(path), NOTHING, True, \info);
+                return resp.body;
+            } catch (hash<ExceptionInfo> ex) {
+                if (info."response-headers".status_code == 404) {
+                    return NOTHING;
+                }
+                rethrow;
+            }
+        }
+
+        #! Uploads a file
+        /** @param path the file path
+            @param content the file contents
+            @param content_type optional content type (default: application/octet-stream)
+
+            @return True if a new resource was created, False if an existing resource was updated
+        */
+        bool put(string path, data content, *string content_type) {
+            hash<auto> hdrs = {
+                "Content-Type": content_type ?? MimeTypeOctetStream,
+            };
+
+            hash<auto> info;
+            send(content, "PUT", resolvePath(path), hdrs, False, \info);
+
+            return info."response-headers".status_code == 201;
+        }
+
+        #! Deletes a resource
+        /** @param path the resource path
+        */
+        del(string path) {
+            hash<auto> info;
+            send(NOTHING, "DELETE", resolvePath(path), NOTHING, False, \info);
+        }
+
+        #! Creates a collection (directory)
+        /** @param path the collection path
+        */
+        mkcol(string path) {
+            hash<auto> info;
+            send(NOTHING, "MKCOL", resolvePath(path), NOTHING, False, \info);
+        }
+
+        #! Copies a resource
+        /** @param src source path
+            @param dest destination path
+            @param overwrite whether to overwrite existing resources (default: True)
+        */
+        copyResource(string src, string dest, bool overwrite = True) {
+            string abs_dest = getURL() + resolvePath(dest);
+            hash<auto> hdrs = {
+                "Destination": abs_dest,
+                "Overwrite": overwrite ? "T" : "F",
+            };
+
+            hash<auto> info;
+            send(NOTHING, "COPY", resolvePath(src), hdrs, False, \info);
+        }
+
+        #! Moves a resource
+        /** @param src source path
+            @param dest destination path
+            @param overwrite whether to overwrite existing resources (default: True)
+        */
+        moveResource(string src, string dest, bool overwrite = True) {
+            string abs_dest = getURL() + resolvePath(dest);
+            hash<auto> hdrs = {
+                "Destination": abs_dest,
+                "Overwrite": overwrite ? "T" : "F",
+            };
+
+            hash<auto> info;
+            send(NOTHING, "MOVE", resolvePath(src), hdrs, False, \info);
+        }
+
+        #! Locks a resource
+        /** @param path the resource path
+            @param scope "exclusive" or "shared"
+            @param owner optional owner information
+            @param timeout timeout in seconds (0 for infinite)
+            @param depth "0" or "infinity"
+
+            @return lock information including the lock token
+        */
+        hash<WebDavLockInfo> lock(string path, string scope = "exclusive", *string owner,
+                int timeout = 0, string depth = "infinity") {
+            hash<auto> body = {
+                "DAV:lockinfo": {
+                    "^attributes^": {"xmlns:DAV": DavNs},
+                    "DAV:lockscope": scope == "exclusive"
+                        ? {"DAV:exclusive": NOTHING}
+                        : {"DAV:shared": NOTHING},
+                    "DAV:locktype": {"DAV:write": NOTHING},
+                },
+            };
+
+            if (owner) {
+                body."DAV:lockinfo"."DAV:owner" = {"DAV:href": owner};
+            }
+
+            string xml_body = make_xml(body);
+
+            hash<auto> hdrs = {
+                "Depth": depth,
+                "Content-Type": MimeTypeXml,
+            };
+
+            if (timeout > 0) {
+                hdrs.Timeout = sprintf("Second-%d", timeout);
+            } else {
+                hdrs.Timeout = "Infinite";
+            }
+
+            hash<auto> info;
+            hash<auto> resp = send(xml_body, "LOCK", resolvePath(path), hdrs, True, \info);
+
+            if (resp.status_code != 200 && resp.status_code != 201) {
+                throw "WEBDAV-LOCK-ERROR", sprintf("LOCK failed with status %d", resp.status_code);
+            }
+
+            # Parse lock token from response
+            *string lock_token = info."response-headers"."lock-token";
+            if (lock_token) {
+                # Remove angle brackets
+                lock_token =~ s/^<//;
+                lock_token =~ s/>$//;
+            }
+
+            return <WebDavLockInfo>{
+                "token": lock_token,
+                "scope": scope,
+                "type": "write",
+                "depth": depth,
+                "owner": owner,
+                "timeout": timeout,
+            };
+        }
+
+        #! Unlocks a resource
+        /** @param path the resource path
+            @param token the lock token
+        */
+        unlock(string path, string token) {
+            hash<auto> hdrs = {
+                "Lock-Token": sprintf("<%s>", token),
+            };
+
+            hash<auto> info;
+            send(NOTHING, "UNLOCK", resolvePath(path), hdrs, False, \info);
+        }
+
+        #! Checks if a resource exists
+        /** @param path the resource path
+
+            @return True if the resource exists, False otherwise
+        */
+        bool exists(string path) {
+            hash<auto> info;
+            try {
+                send(NOTHING, "HEAD", resolvePath(path), NOTHING, False, \info);
+                return True;
+            } catch (hash<ExceptionInfo> ex) {
+                if (info."response-headers".status_code == 404) {
+                    return False;
+                }
+                rethrow;
+            }
+        }
+
+        #! Resolves a path relative to the base path
+        private string resolvePath(string path) {
+            if (path =~ /^\//) {
+                return path;
+            }
+            return base_path + path;
+        }
+
+        #! Parses a PROPFIND response
+        private list<hash<WebDavResourceInfo>> parsePropfindResponse(auto body) {
+            if (!body) {
+                return ();
+            }
+
+            hash<auto> xml;
+            if (body.typeCode() == NT_STRING || body.typeCode() == NT_BINARY) {
+                xml = parse_xml(body, XPF_PRESERVE_ORDER);
+            } else {
+                xml = body;
+            }
+
+            list<hash<WebDavResourceInfo>> result = ();
+
+            # Handle multistatus response
+            *auto responses = xml."DAV:multistatus"."DAV:response";
+            if (!responses) {
+                return result;
+            }
+
+            # Ensure we have a list
+            if (responses.typeCode() != NT_LIST) {
+                responses = (responses,);
+            }
+
+            foreach hash<auto> resp in (responses) {
+                hash<WebDavResourceInfo> info = parseResourceResponse(resp);
+                result += info;
+            }
+
+            return result;
+        }
+
+        #! Parses a single response element
+        private hash<WebDavResourceInfo> parseResourceResponse(hash<auto> resp) {
+            string href = resp."DAV:href" ?? "";
+
+            # Get properties from propstat with 200 status
+            hash<auto> props;
+            auto propstats = resp."DAV:propstat";
+            if (propstats.typeCode() != NT_LIST) {
+                propstats = (propstats,);
+            }
+
+            foreach auto propstat in (propstats) {
+                if (propstat.typeCode() != NT_HASH) {
+                    continue;
+                }
+                *string status = propstat."DAV:status";
+                if (status && status =~ /200/) {
+                    props = propstat."DAV:prop";
+                    break;
+                }
+            }
+
+            bool is_collection = props."DAV:resourcetype".hasKey("DAV:collection");
+
+            return <WebDavResourceInfo>{
+                "href": href,
+                "displayname": props."DAV:displayname",
+                "type": is_collection ? "collection" : "file",
+                "contenttype": props."DAV:getcontenttype",
+                "contentlength": props."DAV:getcontentlength".toInt(),
+                "lastmodified": parseDate(props."DAV:getlastmodified"),
+                "creationdate": parseDate(props."DAV:creationdate"),
+                "etag": props."DAV:getetag",
+            };
+        }
+
+        #! Parses a date string
+        private *date parseDate(*string str) {
+            if (!str) {
+                return NOTHING;
+            }
+            try {
+                return date(str);
+            } catch () {
+                return NOTHING;
+            }
+        }
+    }
+
+    #! WebDAV connection class for ConnectionProvider integration
+    public class WebDavConnection inherits ConnectionProvider::HttpBasedConnection {
+        public {
+            #! Connection scheme info
+            const ConnectionScheme = <ConnectionSchemeInfo>{
+                "display_name": "WebDAV",
+                "short_desc": "WebDAV server connection",
+                "desc": "WebDAV server connection supporting RFC 4918 operations",
+                "cls": Class::forName("WebDavClient::WebDavConnection"),
+                "schemes": {
+                    "webdav": True,
+                    "webdavs": True,
+                },
+                "options": HttpConnection::ConnectionScheme.options + {
+                    "root_path": <ConnectionOptionInfo>{
+                        "display_name": "Root Path",
+                        "short_desc": "Root path for WebDAV operations",
+                        "type": "string",
+                        "desc": "Root path that will be prepended to all WebDAV operations",
+                        "default_value": "/",
+                    },
+                },
+            };
+        }
+
+        #! Creates the connection object
+        constructor(string name, string description, string url, hash<auto> attributes = {},
+                hash<auto> options = {})
+                : HttpBasedConnection(name, description, url, attributes, options) {
+        }
+
+        #! Returns the connection scheme info
+        hash<ConnectionSchemeInfo> getConnectionSchemeInfo() {
+            return ConnectionScheme;
+        }
+
+        #! Returns "webdav"
+        string getType() {
+            return "webdav";
+        }
+
+        #! Returns the data provider for this connection
+        *DataProvider::AbstractDataProvider getDataProvider() {
+            # Return the DataProvider if available
+            return NOTHING;
+        }
+
+        #! Returns a WebDavClient object
+        private WebDavClient getImpl(bool connect = True, *hash<auto> rtopts) {
+            return new WebDavClient(getRealOpts() + rtopts);
+        }
+
+        #! Returns the real options for the connection
+        private hash<auto> getRealOpts() {
+            string real_url = url;
+            if (real_url =~ /^webdavs:/) {
+                real_url =~ s/^webdavs:/https:/;
+            } else if (real_url =~ /^webdav:/) {
+                real_url =~ s/^webdav:/http:/;
+            }
+
+            return {
+                "url": real_url,
+            } + opts;
+        }
+
+        #! Returns the ConnectionSchemeInfo hash
+        private hash<ConnectionSchemeInfo> getConnectionSchemeInfoImpl() {
+            return ConnectionScheme;
+        }
+    }
+}
