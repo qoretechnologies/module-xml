@@ -4,7 +4,7 @@
 
     Qore Programming Language
 
-    Copyright (C) 2003 - 2022 Qore Technologies, s.r.o.
+    Copyright (C) 2003 - 2025 Qore Technologies, s.r.o.
 
     This library is free software; you can redistribute it and/or
     modify it under the terms of the GNU Lesser General Public
@@ -41,19 +41,32 @@ public:
     }
 
     DLLLOCAL virtual ~AbstractXmlIoInputCallback() {
-        assert(!input_stream);
+        // input_stream should be nullptr on destruction; log if not
+        if (input_stream) {
+            printd(0, "AbstractXmlIoInputCallback::~AbstractXmlIoInputCallback() WARNING: input_stream not closed\n");
+        }
         // remove the weak reference
         self->tDeref();
     }
 
     // libxml2 I/O callback: can we provide the requested resource; 1 = true, 0 = false
     DLLLOCAL int match(const char* filename) {
-        assert(!input_stream);
-        assert(xsink);
+        // validate preconditions with proper error handling
+        if (input_stream) {
+            printd(0, "AbstractXmlIoInputCallback::match() ERROR: input_stream already set\n");
+            return 0;
+        }
+        if (!xsink) {
+            printd(0, "AbstractXmlIoInputCallback::match() ERROR: no exception context\n");
+            return 0;
+        }
 
         // unhandled exceptions will appear on stdout
         ReferenceHolder<QoreListNode> args(new QoreListNode(autoTypeInfo), xsink);
         args->push(new QoreStringNode(filename), xsink);
+        if (*xsink) {
+            return 0;
+        }
         ValueHolder bufHolder(self->evalMethod("open", *args, xsink), xsink);
         //printd(5, "AbstractXmlIoInputCallback::match() '%s': %d\n", filename, (int)(bool)bufHolder);
         if (!bufHolder)
@@ -64,28 +77,53 @@ public:
 
     // libxml2 I/O callback: open the requested resource; returns nullptr on error
     DLLLOCAL void* open(const char* filename) {
-        assert(input_stream);
+        if (!input_stream) {
+            printd(0, "AbstractXmlIoInputCallback::open() ERROR: input_stream not set\n");
+            return nullptr;
+        }
         return input_stream;
     }
 
     // libxml2 I/O callback: read the requested resource; returns the number of bytes read or -1 in case of error
     DLLLOCAL int read(void* context, char* buffer, int len) {
-        assert(input_stream);
-        assert(context == input_stream);
-        assert(len > 0);
-        assert(buffer);
-        assert(xsink);
+        // validate preconditions with proper error handling
+        if (!input_stream) {
+            printd(0, "AbstractXmlIoInputCallback::read() ERROR: input_stream not set\n");
+            return -1;
+        }
+        if (context != input_stream) {
+            printd(0, "AbstractXmlIoInputCallback::read() ERROR: context mismatch\n");
+            return -1;
+        }
+        if (len <= 0) {
+            printd(0, "AbstractXmlIoInputCallback::read() ERROR: invalid len %d\n", len);
+            return -1;
+        }
+        if (!buffer) {
+            printd(0, "AbstractXmlIoInputCallback::read() ERROR: null buffer\n");
+            return -1;
+        }
+        if (!xsink) {
+            printd(0, "AbstractXmlIoInputCallback::read() ERROR: no exception context\n");
+            return -1;
+        }
 
         // unhandled exceptions will appear on stdout
         ReferenceHolder<QoreListNode> args(new QoreListNode(autoTypeInfo), xsink);
         args->push(len, xsink);
+        if (*xsink) {
+            return -1;
+        }
         ValueHolder bufHolder(input_stream->evalMethod("read", *args, xsink), xsink);
         if (!bufHolder) {
             printd(5, "AbstractXmlIoInputCallback::read() %d failed (err: %d)\n", len, *xsink ? 1 : 0);
             return *xsink ? -1 : 0;
         }
         const BinaryNode* b = bufHolder->get<const BinaryNode>();
-        assert(b->size() <= (size_t)len);
+        if (b->size() > (size_t)len) {
+            printd(0, "AbstractXmlIoInputCallback::read() ERROR: read size %zu > requested %d\n", b->size(), len);
+            return -1;
+        }
         memcpy(buffer, b->getPtr(), b->size());
         printd(5, "AbstractXmlIoInputCallback::read() %d succeeded: %d\n", len, (int)b->size());
         return (int)b->size();
@@ -93,9 +131,20 @@ public:
 
     // libxml2 I/O callback: close the requested resource
     DLLLOCAL int close(void* context) {
-        assert(input_stream);
-        assert(context == input_stream);
-        assert(xsink);
+        if (!input_stream) {
+            printd(0, "AbstractXmlIoInputCallback::close() WARNING: input_stream already null\n");
+            return 0;
+        }
+        if (context != input_stream) {
+            printd(0, "AbstractXmlIoInputCallback::close() ERROR: context mismatch\n");
+            return -1;
+        }
+        if (!xsink) {
+            printd(0, "AbstractXmlIoInputCallback::close() ERROR: no exception context\n");
+            // Still try to clean up
+            input_stream = nullptr;
+            return -1;
+        }
 
         input_stream->deref(xsink);
         input_stream = nullptr;
@@ -104,13 +153,17 @@ public:
 
     // set exception context
     DLLLOCAL void setExceptionContext(ExceptionSink* xs) {
-        assert(!xsink);
+        if (xsink && xs != xsink) {
+            printd(0, "AbstractXmlIoInputCallback::setExceptionContext() WARNING: overwriting existing context\n");
+        }
         xsink = xs;
     }
 
     // clear exception context
     DLLLOCAL void clearExceptionContext() {
-        assert(xsink);
+        if (!xsink) {
+            printd(0, "AbstractXmlIoInputCallback::clearExceptionContext() WARNING: context already null\n");
+        }
         xsink = nullptr;
     }
 
