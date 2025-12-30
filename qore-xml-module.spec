@@ -1,4 +1,4 @@
-%global mod_ver 2.0.1
+%global mod_ver 2.1.0
 
 %{?_datarootdir: %global mydatarootdir %_datarootdir}
 %{!?_datarootdir: %global mydatarootdir /usr/share}
@@ -130,6 +130,20 @@ qore -l ./xml-api-%{module_api}.qmod test/webdav_FsWebDavHandler.qtest -v
 qore -l ./xml-api-%{module_api}.qmod test/xml.qtest -v
 
 %changelog
+* Mon Dec 30 2025 David Nichols <david@qore.org> - 2.1.0
+- xml module: replaced assertions with proper error handling in I/O callback class
+- xml module: added exception checking after container operations in XML parsing
+- xml module: added input validation for numeric conversions in XML-RPC parsing
+- WSDL: fixed namespace handling, improved prefix generation (6 chars)
+- WSDL: added tryGetInputNamespaceUri() for safe namespace lookups
+- WSDL: fixed WSOperation serialize/deserialize to support header-only operations
+- WSDL: added @debug blocks for namespace stack operations
+- SoapClient: improved SOAP fault detection regex, fixed documentation typos
+- SoapHandler: fixed version constant mismatch, fixed malformed error string,
+  added message size limits
+- tests: enabled debug mode in CI to catch @debug block parse errors
+- updated module copyrights to 2025
+
 * Fri Jul 18 2025 David Nichols <david@qore.org> - 2.0.1
 - fixed a memory error handling XML-RPC I/O; updated to v2.0.1
 
