@@ -19,15 +19,18 @@ noinst_HEADERS = src/QC_XmlDoc.h \
     src/QC_AbstractXmlIoInputCallback.h
 
 USER_MODULES = qlib/XmlRpcHandler.qm qlib/WSDL.qm qlib/SoapClient.qm qlib/SoapHandler.qm qlib/XmlRpcConnection.qm \
-    qlib/SalesforceSoapClient.qm
+    qlib/SalesforceSoapClient.qm qlib/WebDavClient.qm
 
-USER_SPLIT_MODULES = qlib/SaxDataProvider qlib/SoapDataProvider qlib/WebDavHandler
+USER_SPLIT_MODULES = qlib/SaxDataProvider qlib/SoapDataProvider qlib/WebDavClientDataProvider qlib/WebDavHandler
 
 SaxDataProvider_moddir= $(moddir)/SaxDataProvider
 dist_SaxDataProvider_mod_DATA = $(wildcard qlib/SaxDataProvider*.q[cm])
 
 SoapDataProvider_moddir= $(moddir)/SoapDataProvider
 dist_SoapDataProvider_mod_DATA = $(wildcard qlib/SoapDataProvider/*.q[cm])
+
+WebDavClientDataProvider_moddir= $(moddir)/WebDavClientDataProvider
+dist_WebDavClientDataProvider_mod_DATA = $(wildcard qlib/WebDavClientDataProvider/*.q[cm])
 
 WebDavHandler_moddir= $(moddir)/WebDavHandler
 dist_WebDavHandler_mod_DATA = $(wildcard qlib/WebDavHandler/*.q[cm])
@@ -70,6 +73,7 @@ TMP_MOD_TARG = docs/qlib/XmlRpcHandler.qm.dox.h docs/qlib/Doxyfile.XmlRpcHandler
 	docs/qlib/SoapHandler.qm.dox.h docs/qlib/Doxyfile.SoapHandler \
 	docs/qlib/WSDL.qm.dox.h docs/qlib/Doxyfile.WSDL \
 	docs/qlib/SalesforceSoapClient.qm.dox.h docs/qlib/Doxyfile.SalesforceSoapClient \
+	docs/qlib/WebDavClient.qm.dox.h docs/qlib/Doxyfile.WebDavClient \
 	docs/qlib/XmlRpcConnection.qm.dox.h
 QLIB_TMP_DOXYFILES = $(TMP_MOD_TARG) $(addsuffix .tag,$(USER_MODS) $(USER_SPLIT_MODS))
 QDX = qdx
@@ -152,6 +156,16 @@ docs/qlib/XmlRpcConnection.qm.dox.h: qlib/XmlRpcConnection.qm
 docs/XmlRpcConnection/html: docs/qlib/XmlRpcConnection.qm.dox.h docs/qlib/Doxyfile.XmlRpcConnection
 	cd docs; $(DOXYGEN_CMD) qlib/Doxyfile.XmlRpcConnection
 	$(QDX) --post docs/XmlRpcConnection/html docs/XmlRpcConnection/html/search
+
+docs/qlib/Doxyfile.WebDavClient: docs/qlib/Doxyfile.tmp
+	$(QDX) -M=qlib/WebDavClient.qm:qlib/WebDavClient.qm.dox.h -txml.tag=../../xml/html $< $@
+
+docs/qlib/WebDavClient.qm.dox.h: qlib/WebDavClient.qm
+	$(QDX) $< $@
+
+docs/WebDavClient/html: docs/qlib/WebDavClient.qm.dox.h docs/qlib/Doxyfile.WebDavClient
+	cd docs; $(DOXYGEN_CMD) qlib/Doxyfile.WebDavClient
+	$(QDX) --post docs/WebDavClient/html docs/WebDavClient/html/search
 
 docs/xml/html: $(DOXYFILES)
 	cd docs; $(DOXYGEN_CMD) doxyfile;
