@@ -415,7 +415,7 @@ public class AbstractWebDavHandler inherits public HttpServer::AbstractHttpReque
         @param hdr incoming header hash; all keys will be converted to lower-case, additionally the following keys will be present:
         - \c method: the HTTP method received (ie \c "GET", \c "POST", etc)
         - \c path: the HTTP path given in the request, after processing by @ref Qore::decode_uri_request()
-        - \c http_version: the HTTP version number in the request (either \c "1.0" or \c "1.1")
+        - \c http_version: the HTTP version number in the request (ex: \c "1.0", \c "1.1", or \c "2.0")
         @param body message body, if any
 
         @return a 200 response with headers indicating WebDavHandler support
@@ -456,7 +456,7 @@ public class AbstractWebDavHandler inherits public HttpServer::AbstractHttpReque
         @param hdr incoming header hash; all keys will be converted to lower-case, additionally the following keys will be present:
         - \c method: the HTTP method received (ie \c "GET", \c "POST", etc)
         - \c path: the HTTP path given in the request, after processing by @ref Qore::decode_uri_request()
-        - \c http_version: the HTTP version number in the request (either \c "1.0" or \c "1.1")
+        - \c http_version: the HTTP version number in the request (ex: \c "1.0", \c "1.1", or \c "2.0")
         @param body message body, if any
 
         @return the response to the HTTP request
@@ -497,7 +497,7 @@ public class AbstractWebDavHandler inherits public HttpServer::AbstractHttpReque
         @param hdr incoming header hash; all keys will be converted to lower-case, additionally the following keys will be present:
         - \c method: the HTTP method received (ie \c "GET", \c "POST", etc)
         - \c path: the HTTP path given in the request, after processing by @ref Qore::decode_uri_request()
-        - \c http_version: the HTTP version number in the request (either \c "1.0" or \c "1.1")
+        - \c http_version: the HTTP version number in the request (ex: \c "1.0", \c "1.1", or \c "2.0")
         @param body message body, if any
 
         @return the response to the HTTP request
@@ -538,7 +538,7 @@ public class AbstractWebDavHandler inherits public HttpServer::AbstractHttpReque
         @param hdr incoming header hash; all keys will be converted to lower-case, additionally the following keys will be present:
         - \c method: the HTTP method received (ie \c "GET", \c "POST", etc)
         - \c path: the HTTP path given in the request, after processing by @ref Qore::decode_uri_request()
-        - \c http_version: the HTTP version number in the request (either \c "1.0" or \c "1.1")
+        - \c http_version: the HTTP version number in the request (ex: \c "1.0", \c "1.1", or \c "2.0")
         @param body message body, if any
 
         @return the response to the HTTP request
@@ -579,7 +579,7 @@ public class AbstractWebDavHandler inherits public HttpServer::AbstractHttpReque
         @param hdr incoming header hash; all keys will be converted to lower-case, additionally the following keys will be present:
         - \c method: the HTTP method received (ie \c "GET", \c "POST", etc)
         - \c path: the HTTP path given in the request, after processing by @ref Qore::decode_uri_request()
-        - \c http_version: the HTTP version number in the request (either \c "1.0" or \c "1.1")
+        - \c http_version: the HTTP version number in the request (ex: \c "1.0", \c "1.1", or \c "2.0")
         @param body message body, if any
 
         @return the response to the HTTP request
@@ -620,7 +620,7 @@ public class AbstractWebDavHandler inherits public HttpServer::AbstractHttpReque
         @param hdr incoming header hash; all keys will be converted to lower-case, additionally the following keys will be present:
         - \c method: the HTTP method received (ie \c "GET", \c "POST", etc)
         - \c path: the HTTP path given in the request, after processing by @ref Qore::decode_uri_request()
-        - \c http_version: the HTTP version number in the request (either \c "1.0" or \c "1.1")
+        - \c http_version: the HTTP version number in the request (ex: \c "1.0", \c "1.1", or \c "2.0")
         @param body message body, if any
 
         @return the response to the HTTP request
@@ -661,7 +661,7 @@ public class AbstractWebDavHandler inherits public HttpServer::AbstractHttpReque
         @param hdr incoming header hash; all keys will be converted to lower-case, additionally the following keys will be present:
         - \c method: the HTTP method received (ie \c "GET", \c "POST", etc)
         - \c path: the HTTP path given in the request, after processing by @ref Qore::decode_uri_request()
-        - \c http_version: the HTTP version number in the request (either \c "1.0" or \c "1.1")
+        - \c http_version: the HTTP version number in the request (ex: \c "1.0", \c "1.1", or \c "2.0")
         @param body message body, if any
 
         @return the response to the WebDavHandler request
@@ -702,7 +702,7 @@ public class AbstractWebDavHandler inherits public HttpServer::AbstractHttpReque
         @param hdr incoming header hash; all keys will be converted to lower-case, additionally the following keys will be present:
         - \c method: the HTTP method received (ie \c "GET", \c "POST", etc)
         - \c path: the HTTP path given in the request, after processing by @ref Qore::decode_uri_request()
-        - \c http_version: the HTTP version number in the request (either \c "1.0" or \c "1.1")
+        - \c http_version: the HTTP version number in the request (ex: \c "1.0", \c "1.1", or \c "2.0")
         @param body message body, if any
 
         @return the response to the WebDavHandler request
@@ -743,7 +743,7 @@ public class AbstractWebDavHandler inherits public HttpServer::AbstractHttpReque
         @param hdr incoming header hash; all keys will be converted to lower-case, additionally the following keys will be present:
         - \c method: the HTTP method received (ie \c "GET", \c "POST", etc)
         - \c path: the HTTP path given in the request, after processing by @ref Qore::decode_uri_request()
-        - \c http_version: the HTTP version number in the request (either \c "1.0" or \c "1.1")
+        - \c http_version: the HTTP version number in the request (ex: \c "1.0", \c "1.1", or \c "2.0")
         @param body message body, if any
 
         @return the response to the WebDavHandler request
@@ -784,7 +784,7 @@ public class AbstractWebDavHandler inherits public HttpServer::AbstractHttpReque
         @param hdr incoming header hash; all keys will be converted to lower-case, additionally the following keys will be present:
         - \c method: the HTTP method received (ie \c "GET", \c "POST", etc)
         - \c path: the HTTP path given in the request, after processing by @ref Qore::decode_uri_request()
-        - \c http_version: the HTTP version number in the request (either \c "1.0" or \c "1.1")
+        - \c http_version: the HTTP version number in the request (ex: \c "1.0", \c "1.1", or \c "2.0")
         @param body message body, if any
 
         @return the response to the WebDavHandler request
@@ -825,7 +825,7 @@ public class AbstractWebDavHandler inherits public HttpServer::AbstractHttpReque
         @param hdr incoming header hash; all keys will be converted to lower-case, additionally the following keys will be present:
         - \c method: the HTTP method received (ie \c "GET", \c "POST", etc)
         - \c path: the HTTP path given in the request, after processing by @ref Qore::decode_uri_request()
-        - \c http_version: the HTTP version number in the request (either \c "1.0" or \c "1.1")
+        - \c http_version: the HTTP version number in the request (ex: \c "1.0", \c "1.1", or \c "2.0")
         @param body message body, if any
 
         @return the response to the WebDavHandler request
@@ -867,7 +867,7 @@ public class AbstractWebDavHandler inherits public HttpServer::AbstractHttpReque
         @param hdr incoming header hash; all keys will be converted to lower-case, additionally the following keys will be present:
         - \c method: the HTTP method received (ie \c "GET", \c "POST", etc)
         - \c path: the HTTP path given in the request, after processing by @ref Qore::decode_uri_request()
-        - \c http_version: the HTTP version number in the request (either \c "1.0" or \c "1.1")
+        - \c http_version: the HTTP version number in the request (ex: \c "1.0", \c "1.1", or \c "2.0")
         @param body message body, if any
 
         @return the response to the WebDavHandler request
@@ -909,7 +909,7 @@ public class AbstractWebDavHandler inherits public HttpServer::AbstractHttpReque
         @param hdr incoming header hash; all keys will be converted to lower-case, additionally the following keys will be present:
         - \c method: the HTTP method received (ie \c "GET", \c "POST", etc)
         - \c path: the HTTP path given in the request, after processing by @ref Qore::decode_uri_request()
-        - \c http_version: the HTTP version number in the request (either \c "1.0" or \c "1.1")
+        - \c http_version: the HTTP version number in the request (ex: \c "1.0", \c "1.1", or \c "2.0")
         @param body message body, if any
 
         @return the response to the WebDavHandler request
@@ -1090,7 +1090,7 @@ public class AbstractWebDavHandler inherits public HttpServer::AbstractHttpReque
         @param hdr incoming header hash; all keys will be converted to lower-case, additionally the following keys will be present:
         - \c method: the HTTP method received (ie \c "GET", \c "POST", etc)
         - \c path: the HTTP path given in the request, after processing by @ref Qore::decode_uri_request()
-        - \c http_version: the HTTP version number in the request (either \c "1.0" or \c "1.1")
+        - \c http_version: the HTTP version number in the request (ex: \c "1.0", \c "1.1", or \c "2.0")
         @param body message body, if any
 
         @return a 200 response with headers indicating WebDavHandler support
@@ -1136,7 +1136,7 @@ public class AbstractWebDavHandler inherits public HttpServer::AbstractHttpReque
         @param hdr incoming header hash; all keys will be converted to lower-case, additionally the following keys will be present:
         - \c method: the HTTP method received (ie \c "GET", \c "POST", etc)
         - \c path: the HTTP path given in the request, after processing by @ref Qore::decode_uri_request()
-        - \c http_version: the HTTP version number in the request (either \c "1.0" or \c "1.1")
+        - \c http_version: the HTTP version number in the request (ex: \c "1.0", \c "1.1", or \c "2.0")
         @param body message body, if any
 
         @return the response to the HTTP request
@@ -1173,7 +1173,7 @@ public class AbstractWebDavHandler inherits public HttpServer::AbstractHttpReque
         @param hdr incoming header hash; all keys will be converted to lower-case, additionally the following keys will be present:
         - \c method: the HTTP method received (ie \c "GET", \c "POST", etc)
         - \c path: the HTTP path given in the request, after processing by @ref Qore::decode_uri_request()
-        - \c http_version: the HTTP version number in the request (either \c "1.0" or \c "1.1")
+        - \c http_version: the HTTP version number in the request (ex: \c "1.0", \c "1.1", or \c "2.0")
         @param body message body, if any
 
         @return the response to the HTTP request
@@ -1210,7 +1210,7 @@ public class AbstractWebDavHandler inherits public HttpServer::AbstractHttpReque
         @param hdr incoming header hash; all keys will be converted to lower-case, additionally the following keys will be present:
         - \c method: the HTTP method received (ie \c "GET", \c "POST", etc)
         - \c path: the HTTP path given in the request, after processing by @ref Qore::decode_uri_request()
-        - \c http_version: the HTTP version number in the request (either \c "1.0" or \c "1.1")
+        - \c http_version: the HTTP version number in the request (ex: \c "1.0", \c "1.1", or \c "2.0")
         @param body message body, if any
 
         @return the response to the HTTP request
@@ -1247,7 +1247,7 @@ public class AbstractWebDavHandler inherits public HttpServer::AbstractHttpReque
         @param hdr incoming header hash; all keys will be converted to lower-case, additionally the following keys will be present:
         - \c method: the HTTP method received (ie \c "GET", \c "POST", etc)
         - \c path: the HTTP path given in the request, after processing by @ref Qore::decode_uri_request()
-        - \c http_version: the HTTP version number in the request (either \c "1.0" or \c "1.1")
+        - \c http_version: the HTTP version number in the request (ex: \c "1.0", \c "1.1", or \c "2.0")
         @param body message body, if any
 
         @return the response to the HTTP request
@@ -1284,7 +1284,7 @@ public class AbstractWebDavHandler inherits public HttpServer::AbstractHttpReque
         @param hdr incoming header hash; all keys will be converted to lower-case, additionally the following keys will be present:
         - \c method: the HTTP method received (ie \c "GET", \c "POST", etc)
         - \c path: the HTTP path given in the request, after processing by @ref Qore::decode_uri_request()
-        - \c http_version: the HTTP version number in the request (either \c "1.0" or \c "1.1")
+        - \c http_version: the HTTP version number in the request (ex: \c "1.0", \c "1.1", or \c "2.0")
         @param body message body, if any
 
         @return the response to the HTTP request
@@ -1321,7 +1321,7 @@ public class AbstractWebDavHandler inherits public HttpServer::AbstractHttpReque
         @param hdr incoming header hash; all keys will be converted to lower-case, additionally the following keys will be present:
         - \c method: the HTTP method received (ie \c "GET", \c "POST", etc)
         - \c path: the HTTP path given in the request, after processing by @ref Qore::decode_uri_request()
-        - \c http_version: the HTTP version number in the request (either \c "1.0" or \c "1.1")
+        - \c http_version: the HTTP version number in the request (ex: \c "1.0", \c "1.1", or \c "2.0")
         @param body message body, if any
 
         @return the response to the WebDavHandler request
@@ -1358,7 +1358,7 @@ public class AbstractWebDavHandler inherits public HttpServer::AbstractHttpReque
         @param hdr incoming header hash; all keys will be converted to lower-case, additionally the following keys will be present:
         - \c method: the HTTP method received (ie \c "GET", \c "POST", etc)
         - \c path: the HTTP path given in the request, after processing by @ref Qore::decode_uri_request()
-        - \c http_version: the HTTP version number in the request (either \c "1.0" or \c "1.1")
+        - \c http_version: the HTTP version number in the request (ex: \c "1.0", \c "1.1", or \c "2.0")
         @param body message body, if any
 
         @return the response to the WebDavHandler request
@@ -1395,7 +1395,7 @@ public class AbstractWebDavHandler inherits public HttpServer::AbstractHttpReque
         @param hdr incoming header hash; all keys will be converted to lower-case, additionally the following keys will be present:
         - \c method: the HTTP method received (ie \c "GET", \c "POST", etc)
         - \c path: the HTTP path given in the request, after processing by @ref Qore::decode_uri_request()
-        - \c http_version: the HTTP version number in the request (either \c "1.0" or \c "1.1")
+        - \c http_version: the HTTP version number in the request (ex: \c "1.0", \c "1.1", or \c "2.0")
         @param body message body, if any
 
         @return the response to the WebDavHandler request
@@ -1432,7 +1432,7 @@ public class AbstractWebDavHandler inherits public HttpServer::AbstractHttpReque
         @param hdr incoming header hash; all keys will be converted to lower-case, additionally the following keys will be present:
         - \c method: the HTTP method received (ie \c "GET", \c "POST", etc)
         - \c path: the HTTP path given in the request, after processing by @ref Qore::decode_uri_request()
-        - \c http_version: the HTTP version number in the request (either \c "1.0" or \c "1.1")
+        - \c http_version: the HTTP version number in the request (ex: \c "1.0", \c "1.1", or \c "2.0")
         @param body message body, if any
 
         @return the response to the WebDavHandler request
@@ -1469,7 +1469,7 @@ public class AbstractWebDavHandler inherits public HttpServer::AbstractHttpReque
         @param hdr incoming header hash; all keys will be converted to lower-case, additionally the following keys will be present:
         - \c method: the HTTP method received (ie \c "GET", \c "POST", etc)
         - \c path: the HTTP path given in the request, after processing by @ref Qore::decode_uri_request()
-        - \c http_version: the HTTP version number in the request (either \c "1.0" or \c "1.1")
+        - \c http_version: the HTTP version number in the request (ex: \c "1.0", \c "1.1", or \c "2.0")
         @param body message body, if any
 
         @return the response to the WebDavHandler request
@@ -1507,7 +1507,7 @@ public class AbstractWebDavHandler inherits public HttpServer::AbstractHttpReque
         @param hdr incoming header hash; all keys will be converted to lower-case, additionally the following keys will be present:
         - \c method: the HTTP method received (ie \c "GET", \c "POST", etc)
         - \c path: the HTTP path given in the request, after processing by @ref Qore::decode_uri_request()
-        - \c http_version: the HTTP version number in the request (either \c "1.0" or \c "1.1")
+        - \c http_version: the HTTP version number in the request (ex: \c "1.0", \c "1.1", or \c "2.0")
         @param body message body, if any
 
         @return the response to the WebDavHandler request
