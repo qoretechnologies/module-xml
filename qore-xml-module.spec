@@ -47,14 +47,15 @@ Source: http://prdownloads.sourceforge.net/qore/%{name}-%{version}.tar.bz2
 BuildRoot: %{_tmppath}/%{name}-%{version}-%{release}-root
 Requires: /usr/bin/env
 Requires: qore-module(abi)%{?_isa} = %{module_api}
+Requires: qore >= 2.3
 %if 0%{?el7}
 BuildRequires: devtoolset-7-gcc-c++
 %endif
 BuildRequires: cmake >= 3.5
 BuildRequires: gcc-c++
-BuildRequires: qore-devel >= 2.0
-BuildRequires: qore-stdlib >= 2.0
-BuildRequires: qore >= 2.0
+BuildRequires: qore-devel >= 2.3
+BuildRequires: qore-stdlib >= 2.3
+BuildRequires: qore >= 2.3
 BuildRequires: libxml2-devel
 BuildRequires: openssl-devel
 BuildRequires: fdupes
@@ -130,6 +131,9 @@ qore -l ./xml-api-%{module_api}.qmod test/webdav_FsWebDavHandler.qtest -v
 qore -l ./xml-api-%{module_api}.qmod test/xml.qtest -v
 
 %changelog
+* Tue Jan 20 2026 David Nichols <david@qore.org> - 2.1.0
+- updated qore version requirements to 2.3 for %modern tests
+
 * Mon Dec 30 2025 David Nichols <david@qore.org> - 2.1.0
 - xml module: replaced assertions with proper error handling in I/O callback class
 - xml module: added exception checking after container operations in XML parsing
