@@ -80,6 +80,9 @@ module WSDL {
 
     @section wsdlrelnotes WSDL Module Release Notes
 
+    @subsection wsdl_0_5_8 WSDL v0.5.8
+    - added support for async schema import caching for polling operations
+
     @subsection wsdl_0_5_7 WSDL v0.5.7
     - moved WSDL class declarations inside the WSDL namespace for compatibility with %strong-encapsulation
 
@@ -337,6 +340,27 @@ public class WSDLLib {
         }
 
         return rv;
+    }
+
+    #! normalizes a location to a scheme-prefixed string
+    /** @note Applies environment variable substitution and default path resolution for file locations
+
+        @since %WSDL 0.5.8
+    */
+    static string normalizeLocation(string url, string def_protocol = "file", *string def_path) {
+        if (url =~ /^\w+:\/\//) {
+            return url;
+        }
+        if (def_protocol != "file") {
+            return def_protocol + "://" + url;
+        }
+        string path = url;
+        # do environment variable substitution
+        map path = replace(path, "\$" + $1, ENV.$1), (path =~ x/\$(\w+)/g);
+        if (def_path && !absolute_path(path)) {
+            path = def_path + DirSep + path;
+        }
+        return "file://" + path;
     }
 
     #! retrieves a file from a URL with HTTP and returns the file's contents as a string
@@ -4921,6 +4945,227 @@ list<string> ops = ws.listOperations();
 hash<auto> msg = ws.serializeRequest(op_name, args);
 @endcode
 */
+#! Poll operation for async WSDL retrieval and schema imports
+/** Uses only non-blocking I/O for WSDL and XSD retrieval
+
+    @since %WSDL 0.5.8
+*/
+public class WsdlPollOperation inherits Qore::AbstractPollOperation {
+    public {
+        #! Get WSDL state
+        const SPS_GET_WSDL = "get-wsdl";
+
+        #! Get XSD import state
+        const SPS_GET_IMPORT = "get-import";
+
+        #! Build WebService state
+        const SPS_BUILD = "build-wsdl";
+
+        #! Complete state
+        const SPS_COMPLETE = "complete";
+    }
+
+    private {
+        string wsdl_url;
+        *string def_path;
+        *hash<auto> http_opts;
+        *hash<auto> http_headers;
+        *AbstractPollOperation poller;
+        string state;
+        bool goal_reached = False;
+        auto output;
+        string wsdl_text;
+        string current_location;
+        hash<string, string> xsd_cache();
+        *Logger::LoggerInterface logger;
+    }
+
+    constructor(string wsdl_url, *hash<auto> http_opts, *hash<auto> http_headers,
+            *Logger::LoggerInterface logger) {
+        self.wsdl_url = wsdl_url;
+        self.http_opts = http_opts;
+        self.http_headers = http_headers;
+        self.logger = logger;
+
+        if (wsdl_url =~ /^</) {
+            log("INFO", "WSDL async build start: inline data");
+            wsdl_text = wsdl_url;
+            state = SPS_BUILD;
+        } else {
+            state = SPS_GET_WSDL;
+            log("INFO", "WSDL async fetch start: %y", wsdl_url);
+            startFetch(normalizeWsdlLocation(wsdl_url));
+        }
+    }
+
+    string getGoal() {
+        return "wsdl";
+    }
+
+    string getState() {
+        return state + (poller ? ("-" + poller.getState()) : NOTHING);
+    }
+
+    bool goalReached() {
+        return goal_reached;
+    }
+
+    *hash<SocketPollInfo> continuePoll() {
+        while (True) {
+            if (poller) {
+                *hash<SocketPollInfo> info = poller.continuePoll();
+                if (info) {
+                    return info;
+                }
+                handlePollComplete();
+                continue;
+            }
+
+            if (state == SPS_BUILD) {
+                try {
+                    output = new WebService(wsdl_text, {
+                        "def_path": def_path,
+                        "http_headers": http_headers,
+                        "xsd_cache": xsd_cache,
+                        "async_only": True,
+                    });
+                    goal_reached = True;
+                    state = SPS_COMPLETE;
+                    log("INFO", "WSDL async build complete");
+                    return;
+                } catch (hash<ExceptionInfo> ex) {
+                    if (ex.err != "WSDL-ASYNC-IMPORT") {
+                        rethrow;
+                    }
+                    string loc = ex.arg;
+                    if (!loc) {
+                        throw "WSDL-ASYNC-IMPORT", "missing async import location in exception";
+                    }
+                    log("DEBUG", "WSDL async import required: %y", loc);
+                    current_location = loc;
+                    state = SPS_GET_IMPORT;
+                    startFetch(loc);
+                    continue;
+                }
+            }
+
+            return;
+        }
+    }
+
+    auto getOutput() {
+        return output;
+    }
+
+    abort() {
+        if (poller) {
+            poller.abort();
+        }
+    }
+
+    private handlePollComplete() {
+        if (state == SPS_GET_WSDL) {
+            wsdl_text = parseResponseToString(poller.getOutput());
+            state = SPS_BUILD;
+            log("INFO", "WSDL async fetch complete");
+            poller = NOTHING;
+            return;
+        }
+
+        if (state == SPS_GET_IMPORT) {
+            xsd_cache{current_location} = parseResponseToString(poller.getOutput());
+            state = SPS_BUILD;
+            log("INFO", "WSDL async import fetch complete: %y", current_location);
+            poller = NOTHING;
+            return;
+        }
+
+        poller = NOTHING;
+    }
+
+    private startFetch(string location) {
+        if (location =~ /^https?:/) {
+            HTTPClient hc((http_opts ?? {}) + {"url": location});
+            # HTTPClient does not support setLogger()
+            string path;
+            hash<UrlInfo> u = parse_url(location);
+            path = u.path ?? "/";
+            if (u.query) {
+                path += "?" + u.query;
+            }
+            poller = hc.startPollSendRecv("GET", path, NOTHING, http_headers);
+        } else {
+            poller = FileLocationHandler::getIoPollerForLocation(location);
+        }
+        log("DEBUG", "WSDL async fetch queued: %y", location);
+    }
+
+    private string normalizeWsdlLocation(string location) {
+        string normalized = WSDLLib::normalizeLocation(location, "file", NOTHING);
+        if (normalized =~ /^file:/) {
+            hash<UrlInfo> u = parse_url(normalized);
+            string path;
+            if (u.host) {
+                path = u.host;
+            }
+            if (u.path) {
+                if (path) {
+                    path += DirSep;
+                }
+                path += u.path;
+            }
+            def_path = dirname(path);
+        }
+        return normalized;
+    }
+
+    private string parseResponseToString(auto resp) {
+        if (resp.typeCode() == NT_HASH && exists resp.code) {
+            if ((resp.code / 100) != 2) {
+                log("ERROR", "WSDL async fetch failed: code=%d url=%y", resp.code, wsdl_url);
+                throw "WSDL-ASYNC-ERROR", sprintf("HTTP code %d returned for %y", resp.code, wsdl_url);
+            }
+            return resp."response-body" ? resp."response-body".toString(resp.info.charset ?? "ISO-8859-1") : "";
+        }
+        if (resp.typeCode() == NT_HASH && exists resp.data) {
+            auto data = resp.data;
+            if (data.typeCode() == NT_BINARY) {
+                return data.toString();
+            }
+            if (data.typeCode() == NT_STRING) {
+                return normalizeXmlString(data);
+            }
+            return data;
+        }
+        if (resp.typeCode() == NT_HASH && exists resp."response-body") {
+            return resp."response-body".toString(resp.info.charset ?? "ISO-8859-1");
+        }
+        if (resp.typeCode() == NT_STRING) {
+            return normalizeXmlString(resp);
+        }
+        if (resp.typeCode() == NT_BINARY) {
+            return resp.toString();
+        }
+        return resp;
+    }
+
+    private log(string level, string msg, ...) {
+        if (logger) {
+            logger.logArgs(level, msg, argv);
+        }
+    }
+
+    private string normalizeXmlString(string xml) {
+        string enc = "UTF-8";
+        if (xml =~ x/<\?xml[^>]*encoding=['"]([^'"]+)['"]/i) {
+            if ($1) {
+                enc = $1;
+            }
+        }
+        return xml.toString(enc);
+    }
+}
+
 public class WebService inherits WSDL::XsdBase, Qore::Serializable {
     public {
         #! the WSDL string
@@ -4995,6 +5240,9 @@ public class WebService inherits WSDL::XsdBase, Qore::Serializable {
         - \c "try_import": a call reference or closure to be passed a string name for XSD imports without any scheme to retrieve the data, must take a string argument (the resource name) and return a string (the resource data)
         - \c "http_client": a HTTPClient object for retrieving data from import commands
         - \c "http_headers": a hash of optional HTTP header info to use when retrieving data from import commands
+        - \c "xsd_cache": a hash mapping schema locations to cached schema data for async parsing
+        - \c "async_only": if @ref True then external imports must be satisfied by \c "xsd_cache" and no blocking
+          I/O is performed
 
         @since 0.3.7 added the \c "compat_empty_string_is_nothing" and \c "compat_allow_any_header" options for backwards compatibility
     */
@@ -5213,14 +5461,26 @@ public class WebService inherits WSDL::XsdBase, Qore::Serializable {
                 *hash<auto> a = import."^attributes^";
                 # import file
                 if (a.schemaLocation) {
+                    bool async_only = opts.async_only;
+                    *hash<auto> xsd_cache = opts.xsd_cache;
+                    string cache_key = a.schemaLocation;
+                    if (async_only) {
+                        cache_key = WSDLLib::normalizeLocation(a.schemaLocation, "file", def_path);
+                    }
                     # issue #4449: do not import the same schema more than once
-                    if (import_map{a.schemaLocation}) {
+                    if (import_map{cache_key}) {
                         continue;
                     }
-                    import_map{a.schemaLocation} = True;
+                    import_map{cache_key} = True;
                     hash<auto> h = parse_url(a.schemaLocation);
                     string xsd;
-                    if (!h.protocol && try_import) {
+                    if (async_only) {
+                        if (xsd_cache && exists xsd_cache{cache_key}) {
+                            xsd = xsd_cache{cache_key};
+                        } else {
+                            throw "WSDL-ASYNC-IMPORT", sprintf("missing async import %y", cache_key), cache_key;
+                        }
+                    } else if (!h.protocol && try_import) {
                         xsd = call_function(try_import, a.schemaLocation);
                     } else {
                         xsd = WSDLLib::getFileFromURL(a.schemaLocation, "file", http_client, http_headers, NOTHING,

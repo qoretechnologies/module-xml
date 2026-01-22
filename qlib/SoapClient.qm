@@ -1,7 +1,7 @@
 # -*- mode: qore; indent-tabs-mode: nil -*-
 #! @file SoapClient.qm SOAP Client module implementation based on the WSDL classes
 
-/*  SoapClient.qm Copyright (C) 2012 - 2025 Qore Technologies, s.r.o.
+/*  SoapClient.qm Copyright (C) 2012 - 2026 Qore Technologies, s.r.o.
 
     Permission is hereby granted, free of charge, to any person obtaining a
     copy of this software and associated documentation files (the "Software"),
@@ -28,7 +28,7 @@
 %requires(reexport) xml
 %requires(reexport) WSDL
 %requires(reexport) Mime >= 1.1
-%requires(reexport) ConnectionProvider >= 1.4
+%requires(reexport) ConnectionProvider >= 2.2
 
 # do not use $ for vars
 %new-style
@@ -119,6 +119,9 @@ auto result = sc.call("SubmitDocument", msg);
       namespace prefixes
     - fixed documentation typos ("pore" -> "port", "valus" -> "value")
 
+    @subsection soapclient_1_0_2 SoapClient v1.0.2
+    - added polling ping support to SOAP connections with async WSDL retrieval
+
     @subsection soapclient_1_0_1 SoapClient v1.0.1
     - allow connection options designating files to be selected as files
       (<a href="https://github.com/qorelanguage/qore/issues/4725">issue 4725</a>)
@@ -180,7 +183,7 @@ public namespace SoapClient {
 #! SOAP client class implementation, publically inherits qore's HTTPClient class
 public class SoapClient inherits HTTPClient {
     #! version of the implementation of this class
-    const Version = "1.0.1";
+    const Version = "1.0.2";
 
     #! default HTTP headers
     const Headers = {"User-Agent": ("Qore-Soap-Client/" + SoapClient::Version)};
@@ -790,6 +793,10 @@ log(sprintf("%s:\n%s\n", msg.reason, msg.body));
       @ref SoapClient::constructor(hash) "SoapClient::constructor()" argument)
     - \c "wsdl": overrides the WSDL URL provided by the connection URL; \c "wsdl" values with a \c "file://" scheme
       are subject to environment variable substitution
+    - \c "ping_method": HTTP method to use for polling pings (requires \c "ping_path")
+    - \c "ping_path": URI path to use for polling pings (requires \c "ping_method")
+    - \c "ping_headers": optional HTTP headers to send with polling pings
+    - \c "ping_body": optional body to send with polling pings (ignored for \c GET)
 
     @see @ref SoapClient::constructor(hash) for more information on the above options
 
@@ -841,6 +848,37 @@ public class SoapConnection inherits HttpBasedConnection {
                     "type": "file-as-string",
                     "desc": "Overrides the WSDL URL provided by the connection URL",
                     "freeform": True,
+                },
+                "ping_method": <ConnectionOptionInfo>{
+                    "display_name": "Ping Method",
+                    "short_desc": "The HTTP method to use for pings",
+                    "type": "string",
+                    "desc": "The HTTP method to use for an advanced ping; this and `ping_path` must be set to make "
+                        "an HTTP request as a part of the socket polling ping operation; must be a valid HTTP method "
+                        "name",
+                },
+                "ping_path": <ConnectionOptionInfo>{
+                    "display_name": "Ping Path",
+                    "short_desc": "The URI path to use for pings",
+                    "type": "string",
+                    "desc": "The URI path to use for an advanced ping; this and `ping_method` must be set to make "
+                        "an HTTP request as a part of the socket polling ping operation.  If the value for this "
+                        "option begins with a `/` character, then it replaces any connection path for the SOAP "
+                        "client, otherwise the value is appended to the connection path for the SOAP client.",
+                },
+                "ping_headers": <ConnectionOptionInfo>{
+                    "display_name": "Ping Headers",
+                    "short_desc": "Any HTTP headers to send with pings",
+                    "type": "hash",
+                    "desc": "Any HTTP headers to send when performing an advanced ping operation; ignored if either "
+                        "one of `ping_method` and `ping_path` are not set",
+                },
+                "ping_body": <ConnectionOptionInfo>{
+                    "display_name": "Ping Body",
+                    "short_desc": "The message body to send with pings",
+                    "type": "auto",
+                    "desc": "Any message body to send when performing an advanced ping operation; ignored if either "
+                        "one of `ping_method` and `ping_path` are not set or if `ping_method` is `GET`",
                 },
             },
         };
@@ -922,13 +960,30 @@ public class SoapConnection inherits HttpBasedConnection {
     }
 
     #! returns @ref False
-    /** This connection type has not yet been updated to support the %Qore @ref Qore::Socket "Socket-based" polling
-        API
-
-        @return @ref False
+    /** @return @ref True
     */
     bool supportsPollingApi() {
-        return False;
+        return True;
+    }
+
+    #! Called to start a non-blocking polling ping operation on the remote SOAP server
+    /** @param logger an optional logger for the polling operation
+
+        @return a socket poll operation object that will allow the connection goal to be reached with polling
+
+        @see supportsPollingApi()
+    */
+    Qore::AbstractPollOperation startPollConnect(*Logger::LoggerInterface logger) {
+        if (opts.ping_method && opts.ping_path) {
+            hash<auto> headers;
+            headers += real_opts.headers;
+            headers += real_opts.ping_headers;
+            return new ConnectionProvider::HttpPingPollOperation(getPingBaseUrl(), real_opts.ping_method,
+                real_opts.ping_path, getPingHttpOpts(), headers,
+                (real_opts.ping_method == "GET" ? NOTHING : real_opts.ping_body), logger, "SOAP-PING-ERROR",
+                "SoapConnection");
+        }
+        return getWsdlPollOperation(logger);
     }
 
     #! Common constructor initialization
@@ -970,5 +1025,60 @@ public class SoapConnection inherits HttpBasedConnection {
     private hash<ConnectionSchemeInfo> getConnectionSchemeInfoImpl() {
         return ConnectionScheme;
     }
+
+    #! Returns the base URL for ping operations
+    private string getPingBaseUrl() {
+        return real_opts.url ?? (real_opts.wsdl.typeCode() == NT_STRING ? real_opts.wsdl : real_url);
+    }
+
+    #! Returns HTTP options for ping operations
+    private hash<auto> getPingHttpOpts() {
+        return real_opts{SoapClient::HTTPOptions};
+    }
+
+    #! Returns a poll operation for WSDL retrieval
+    private Qore::AbstractPollOperation getWsdlPollOperation(*Logger::LoggerInterface logger) {
+        auto wsdl = real_opts.wsdl ?? real_url;
+        if (wsdl instanceof WebService) {
+            return new SoapImmediatePollOperation(wsdl);
+        }
+        return new WSDL::WsdlPollOperation(wsdl, getPingHttpOpts(), real_opts.headers, logger);
+    }
 }
+
+#! Simple poll operation that completes immediately
+class SoapImmediatePollOperation inherits Qore::AbstractPollOperation {
+    private {
+        auto output;
+        bool goal_reached = True;
+    }
+
+    constructor(auto output) {
+        self.output = output;
+    }
+
+    string getGoal() {
+        return "complete";
+    }
+
+    string getState() {
+        return "complete";
+    }
+
+    bool goalReached() {
+        return goal_reached;
+    }
+
+    *hash<SocketPollInfo> continuePoll() {
+        return;
+    }
+
+    auto getOutput() {
+        return output;
+    }
+
+    abort() {
+    }
+}
+
 }
