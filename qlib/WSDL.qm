@@ -1679,15 +1679,18 @@ public class XsdArrayType inherits WSDL::XsdAbstractType {
         return new ListDataType(elementType.getDataProviderType());
     }
 
-    finalize(hash<string, XsdAbstractType> tmap, Namespaces nsc) {
+    finalize(hash<string, XsdAbstractType> tmap, Namespaces nsc, *hash<string, XsdGroup> groupMap,
+            *hash<string, XsdAttributeGroup> attrGroupMap, *XsdLateResolverHelper unresolved) {
         if (finalized) {
             return;
         }
         finalized = True;
 
         XsdAbstractType t = tmap_get(tmap, typeinfo.val);
-        if (t.hasCallableMethod("finalize")) {
-            cast<object>(t).finalize(tmap, nsc);
+        if (t instanceof XsdComplexType) {
+            cast<XsdComplexType>(t).finalize(tmap, nsc, groupMap, attrGroupMap, unresolved);
+        } else if (t instanceof XsdArrayType) {
+            cast<XsdArrayType>(t).finalize(tmap, nsc, groupMap, attrGroupMap, unresolved);
         }
     }
 
@@ -2500,10 +2503,13 @@ public class XsdGroup inherits WSDL::XsdNamedData, Qore::Serializable {
         hash<string, XsdElement> groupElements();
         #! The group content model type: "sequence", "choice", or "all"
         *string contentModel;
+        #! Namespace URI where this group is defined
+        *string nsUri;
     }
 
     constructor(hash<auto> g, Namespaces nsc, XsdLateResolverHelper unresolved, bool usedocns) : XsdNamedData(\g) {
         name = g."^attributes^".name;
+        nsUri = nsc.getTargetNamespaceUri();
 
         WSDL::XsdBase::removeNS(\g);
 
@@ -2536,6 +2542,11 @@ public class XsdGroup inherits WSDL::XsdNamedData, Qore::Serializable {
     hash<string, XsdElement> getElements() {
         return groupElements;
     }
+
+    #! Returns the qualified name for map lookup: "{namespace_uri}local_name" or just "local_name" if no namespace
+    string getQualifiedName() {
+        return nsUri ? sprintf("{%s}%s", nsUri, name) : name;
+    }
 }
 
 #! XSD attribute group class for xs:attributeGroup definitions
@@ -2543,10 +2554,15 @@ public class XsdAttributeGroup inherits WSDL::XsdNamedData, Qore::Serializable {
     public {
         #! Attributes in this group
         hash<string, XsdAttribute> groupAttrs();
+        #! Nested attributeGroup references to resolve later
+        list<string> nestedAttrGroupRefs();
+        #! Namespace URI where this attribute group is defined
+        *string nsUri;
     }
 
     constructor(hash<auto> ag, Namespaces nsc, XsdLateResolverHelper unresolved) : XsdNamedData(\ag) {
         name = ag."^attributes^".name;
+        nsUri = nsc.getTargetNamespaceUri();
 
         WSDL::XsdBase::removeNS(\ag);
 
@@ -2557,11 +2573,47 @@ public class XsdAttributeGroup inherits WSDL::XsdNamedData, Qore::Serializable {
                 groupAttrs{attr.name} = attr;
             }
         }
+
+        # Parse nested attributeGroup references
+        foreach hash<auto> nested in (ag.attributeGroup) {
+            *string nestedRef = nested."^attributes^".ref;
+            if (nestedRef) {
+                nestedAttrGroupRefs += nestedRef;
+            }
+        }
     }
 
-    #! Returns the attributes in this group
+    #! Returns the attributes in this group (including resolved nested groups)
     hash<string, XsdAttribute> getAttributes() {
         return groupAttrs;
+    }
+
+    #! Resolve nested attributeGroup references and merge their attributes
+    resolveNestedGroups(hash<string, XsdAttributeGroup> attrGroupMap, Namespaces nsc) {
+        foreach string nestedRef in (nestedAttrGroupRefs) {
+            string qualifiedKey = resolveGroupRef(nestedRef, nsUri, nsc);
+            *XsdAttributeGroup nested = attrGroupMap{qualifiedKey};
+            if (!nested) {
+                # Try local name fallback for backwards compatibility
+                string localName = nestedRef;
+                if (nestedRef =~ /:/) {
+                    localName = (nestedRef =~ x/:(.+)$/)[0];
+                }
+                nested = attrGroupMap{localName};
+            }
+            if (nested) {
+                # Recursively resolve nested group's own nested refs first
+                nested.resolveNestedGroups(attrGroupMap, nsc);
+                groupAttrs += nested.getAttributes();
+            }
+        }
+        # Clear refs after resolution to avoid re-processing
+        nestedAttrGroupRefs = ();
+    }
+
+    #! Returns the qualified name for map lookup: "{namespace_uri}local_name" or just "local_name" if no namespace
+    string getQualifiedName() {
+        return nsUri ? sprintf("{%s}%s", nsUri, name) : name;
     }
 }
 
@@ -2755,31 +2807,69 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
 
         # resolve group references
         if (unresolved && groupMap) {
-            *list<string> groupRefs = unresolved.getGroupRefs(self);
-            foreach string groupRef in (groupRefs) {
-                # Parse the group reference (may have namespace prefix)
-                string localName = groupRef;
-                if (groupRef =~ /:/) {
-                    localName = (groupRef =~ x/:(.+)$/)[0];
+            *list<hash<GroupRefInfo>> groupRefList = unresolved.getGroupRefs(self);
+            foreach hash<GroupRefInfo> groupRefInfo in (groupRefList) {
+                # Resolve the reference to a qualified key
+                string qualifiedKey = resolveGroupRef(groupRefInfo.ref, ns, nsc);
+                *XsdGroup grp = groupMap{qualifiedKey};
+                if (!grp) {
+                    # Fallback: try local name for backwards compatibility
+                    string localName = groupRefInfo.ref;
+                    if (groupRefInfo.ref =~ /:/) {
+                        localName = (groupRefInfo.ref =~ x/:(.+)$/)[0];
+                    }
+                    grp = groupMap{localName};
                 }
-                *XsdGroup grp = groupMap{localName};
                 if (grp) {
                     # Merge group elements into this complex type's element map
-                    elementmap += grp.getElements();
+                    # Apply group-level occurrence constraints to elements
+                    hash<string, XsdElement> groupElements = grp.getElements();
+                    if (groupRefInfo.minOccurs == 0) {
+                        # If the group ref has minOccurs=0, make all elements optional
+                        foreach string elemName in (keys groupElements) {
+                            XsdElement elem = groupElements{elemName};
+                            # Only make optional if not already optional
+                            if (elem.minOccurs > 0) {
+                                elem.minOccurs = 0;
+                            }
+                        }
+                    }
+                    if (groupRefInfo.maxOccurs == -1 || groupRefInfo.maxOccurs > 1) {
+                        # If the group ref allows multiple occurrences, set maxOccurs on elements
+                        foreach string elemName in (keys groupElements) {
+                            XsdElement elem = groupElements{elemName};
+                            if (groupRefInfo.maxOccurs == -1) {
+                                elem.maxOccurs = -1;
+                            } else if (elem.maxOccurs != -1) {
+                                elem.maxOccurs = max(elem.maxOccurs, groupRefInfo.maxOccurs);
+                            }
+                        }
+                    }
+                    elementmap += groupElements;
                 }
             }
         }
 
         # resolve attribute group references
         if (unresolved && attrGroupMap) {
+            # First resolve nested attribute groups within all attribute groups
+            foreach XsdAttributeGroup ag in (attrGroupMap.iterator()) {
+                ag.resolveNestedGroups(attrGroupMap, nsc);
+            }
+
             *list<string> attrGroupRefs = unresolved.getAttrGroupRefs(self);
             foreach string attrGroupRef in (attrGroupRefs) {
-                # Parse the attribute group reference (may have namespace prefix)
-                string localName = attrGroupRef;
-                if (attrGroupRef =~ /:/) {
-                    localName = (attrGroupRef =~ x/:(.+)$/)[0];
+                # Resolve the reference to a qualified key
+                string qualifiedKey = resolveGroupRef(attrGroupRef, ns, nsc);
+                *XsdAttributeGroup attrGrp = attrGroupMap{qualifiedKey};
+                if (!attrGrp) {
+                    # Fallback: try local name for backwards compatibility
+                    string localName = attrGroupRef;
+                    if (attrGroupRef =~ /:/) {
+                        localName = (attrGroupRef =~ x/:(.+)$/)[0];
+                    }
+                    attrGrp = attrGroupMap{localName};
                 }
-                *XsdAttributeGroup attrGrp = attrGroupMap{localName};
                 if (attrGrp) {
                     # Merge attribute group attributes into this complex type's attrs
                     attrs += attrGrp.getAttributes();
@@ -2868,13 +2958,25 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
     #! Parse group references within a content model element
     /** Group references are stored and resolved during the finalize() phase,
         where the group's elements are merged into this complex type's element map.
+        minOccurs/maxOccurs on the group ref are captured and applied to elements.
     */
     private parseGroupReferences(reference<hash<auto>> content, XsdLateResolverHelper unresolved, Namespaces nsc) {
         foreach hash<auto> g in (content.group) {
-            *string groupRef = g."^attributes^".ref;
+            *hash<auto> attrs = g."^attributes^";
+            *string groupRef = attrs.ref;
             if (groupRef) {
-                # Store group reference for resolution during finalization
-                unresolved.addGroupRef(self, groupRef);
+                # Parse occurrence constraints (defaults: minOccurs=1, maxOccurs=1)
+                int minOccurs = exists attrs.minOccurs ? int(attrs.minOccurs) : 1;
+                int maxOccurs;
+                if (attrs.maxOccurs == "unbounded") {
+                    maxOccurs = -1;
+                } else if (exists attrs.maxOccurs) {
+                    maxOccurs = int(attrs.maxOccurs);
+                } else {
+                    maxOccurs = 1;
+                }
+                # Store group reference with occurrence info for resolution during finalization
+                unresolved.addGroupRef(self, groupRef, minOccurs, maxOccurs);
             }
         }
         delete content.group;
@@ -4041,12 +4143,22 @@ public class WSMessage inherits WSDL::XsdNamedData {
     }
 }
 
+#! Group reference info with occurrence constraints
+public hashdecl GroupRefInfo {
+    #! The group reference string (e.g., "tns:AddressGroup")
+    string ref;
+    #! Minimum occurrences (default 1)
+    int minOccurs = 1;
+    #! Maximum occurrences (-1 = unbounded, default 1)
+    int maxOccurs = 1;
+}
+
 # private helper class for lazy name resolution
 class XsdLateResolverHelper {
     private {
         list<object> l();
-        #! Group references: maps complexType -> list of group ref names
-        hash<string, list<string>> groupRefs();
+        #! Group references: maps complexType -> list of group ref info
+        hash<string, list<hash<GroupRefInfo>>> groupRefs();
         #! Attribute group references: maps complexType -> list of attribute group ref names
         hash<string, list<string>> attrGroupRefs();
     }
@@ -4063,12 +4175,21 @@ class XsdLateResolverHelper {
     }
 
     #! Add a group reference to be resolved later
-    addGroupRef(XsdComplexType ct, string groupRef) {
+    /** @param ct the complex type containing the group reference
+        @param groupRef the group reference string
+        @param minOccurs the minimum occurrences (default 1)
+        @param maxOccurs the maximum occurrences (-1 for unbounded, default 1)
+    */
+    addGroupRef(XsdComplexType ct, string groupRef, int minOccurs = 1, int maxOccurs = 1) {
         string key = ct.uniqueHash();
         if (!groupRefs{key}) {
             groupRefs{key} = ();
         }
-        groupRefs{key} += groupRef;
+        groupRefs{key} += <GroupRefInfo>{
+            "ref": groupRef,
+            "minOccurs": minOccurs,
+            "maxOccurs": maxOccurs,
+        };
     }
 
     #! Add an attribute group reference to be resolved later
@@ -4081,7 +4202,7 @@ class XsdLateResolverHelper {
     }
 
     #! Get group references for a complex type
-    *list<string> getGroupRefs(XsdComplexType ct) {
+    *list<hash<GroupRefInfo>> getGroupRefs(XsdComplexType ct) {
         return groupRefs{ct.uniqueHash()};
     }
 
@@ -5781,6 +5902,33 @@ return rv;
 return rv;
 }
 
+#! Resolves a group/attributeGroup reference to a qualified key for map lookup
+/** @param ref the reference string (e.g., "tns:AddressGroup" or "AddressGroup")
+    @param defaultNsUri the default namespace URI to use for unqualified refs
+    @param nsc the Namespaces object for resolving prefixes
+    @return the qualified key in format "{namespace_uri}local_name" or just "local_name" if no namespace
+*/
+string sub resolveGroupRef(string ref, *string defaultNsUri, Namespaces nsc) {
+    string localName = ref;
+    *string nsUri = defaultNsUri;
+
+    # Parse prefix if present
+    if (ref =~ /:/) {
+        (*string prefix, *string name) = (ref =~ x/^([^:]+):(.+)$/);
+        if (name) {
+            localName = name;
+            # Resolve prefix to namespace URI
+            *string resolvedNs = nsc.getInputNamespaceUri(prefix);
+            if (resolvedNs) {
+                nsUri = resolvedNs;
+            }
+        }
+    }
+
+    # Return qualified key
+    return nsUri ? sprintf("{%s}%s", nsUri, localName) : localName;
+}
+
 # private functions
 XsdElement sub emap_get(hash<string, hash<string, XsdElement>> emap, string ns, string name) {
 if (!emap{ns})
@@ -6446,18 +6594,20 @@ public class WebService inherits WSDL::XsdBase, Qore::Serializable {
             # parse xs:group definitions
             foreach hash<auto> g in (schema.group) {
                 XsdGroup grp(g, nsc, unresolved, usedocns);
-                if (groupMap{grp.name}) {
-                    throw WSDL_ERROR, sprintf("%s: group %y declared twice", nph.getDesc(), grp.name);
+                string qualifiedName = grp.getQualifiedName();
+                if (groupMap{qualifiedName}) {
+                    throw WSDL_ERROR, sprintf("%s: group %y declared twice", nph.getDesc(), qualifiedName);
                 }
-                groupMap{grp.name} = grp;
+                groupMap{qualifiedName} = grp;
             }
             # parse xs:attributeGroup definitions
             foreach hash<auto> ag in (schema.attributeGroup) {
                 XsdAttributeGroup attrGrp(ag, nsc, unresolved);
-                if (attrGroupMap{attrGrp.name}) {
-                    throw WSDL_ERROR, sprintf("%s: attributeGroup %y declared twice", nph.getDesc(), attrGrp.name);
+                string qualifiedName = attrGrp.getQualifiedName();
+                if (attrGroupMap{qualifiedName}) {
+                    throw WSDL_ERROR, sprintf("%s: attributeGroup %y declared twice", nph.getDesc(), qualifiedName);
                 }
-                attrGroupMap{attrGrp.name} = attrGrp;
+                attrGroupMap{qualifiedName} = attrGrp;
             }
             # make element map
             foreach hash<auto> el in (schema.element) {
@@ -6497,7 +6647,7 @@ public class WebService inherits WSDL::XsdBase, Qore::Serializable {
         map cast<XsdComplexType>($1).finalize(tmap, nsc, groupMap, attrGroupMap, unresolved), tmap.iterator(), $1 instanceof XsdComplexType;
 
         # finalize array types
-        map cast<XsdArrayType>($1).finalize(tmap, nsc), tmap.iterator(), $1 instanceof XsdArrayType;
+        map cast<XsdArrayType>($1).finalize(tmap, nsc, groupMap, attrGroupMap, unresolved), tmap.iterator(), $1 instanceof XsdArrayType;
 
         map (map cast<XsdComplexType>($1.type).finalize(tmap, nsc, groupMap, attrGroupMap, unresolved), $1.iterator(), $1.type instanceof XsdComplexType), emap.iterator();
 
