@@ -883,6 +883,29 @@ public class XsdBase inherits Qore::Serializable {
             }
         }
     }
+
+    #! Removes namespace prefixes from all keys in the given hash
+    /** This function is designed for flat attribute hashes where values may be strings.
+        Unlike removeNS(), this processes keys directly regardless of value types.
+    */
+    static removeNSKeys(reference<*hash<auto>> h) {
+        if (!h) {
+            return;
+        }
+        foreach string k in (keys h) {
+            (*string ns, *string name) = k =~ x/([^:]+):([^:]+)/;
+            if (ns && name) {
+                if (exists h{name}) {
+                    # If the unqualified key already exists, make it a list
+                    softlist<auto> l = h{name};
+                    l += remove h{k};
+                    h{name} = l;
+                } else {
+                    h{name} = remove h{k};
+                }
+            }
+        }
+    }
 }
 
 #! base class for XSD data classes
@@ -1654,7 +1677,7 @@ public class XsdBaseType inherits WSDL::XsdAbstractType {
     }
 }
 
-#! class for XSD array types; currently only supports single dimensional arrays
+#! class for XSD array types; supports single and multi-dimensional arrays
 public class XsdArrayType inherits WSDL::XsdAbstractType {
     private {
         bool finalized;
@@ -1663,11 +1686,44 @@ public class XsdArrayType inherits WSDL::XsdAbstractType {
     public {
         *hash<auto> typeinfo;
         XsdAbstractType elementType;
+
+        #! number of dimensions for multi-dimensional arrays (1 = single dimension)
+        int dimensions = 1;
     }
 
     constructor(string t, string ns, string arrayType, Namespaces nsc, XsdLateResolverHelper unresolved) : XsdAbstractType(t, ns, nsc) {
-        # remove [] from the end of the string
-        arrayType =~ s/\[\]$//;
+        # Parse array dimensions - handles both [] and [,] notation
+        # SOAP 1.1 Section 5.4.2 supports:
+        # - Single dimension: type[] or type[n]
+        # - Multi-dimension: type[,] or type[n,m] (comma-separated)
+        # - Nested arrays: type[][] (multiple bracket pairs)
+
+        # Count dimensions from bracket notation using extract mode (x//)
+        # Handle comma-separated dimensions first (e.g., [,] = 2D, [n,m] = 2D)
+        # Note: use + not * to only match brackets with actual content
+        *list<*string> match = (arrayType =~ x/\[([,\d]+)\]$/);
+        if (match) {
+            *string dimSpec = match[0];
+            # Count commas + 1 for comma-separated dimensions (e.g., [,] = 2D, [,,] = 3D)
+            # Use regex_subst to remove commas and calculate count from length difference
+            string noCommas = regex_subst(dimSpec, ",", "", RE_Global);
+            int commaCount = dimSpec.length() - noCommas.length();
+            dimensions = commaCount + 1;
+            # Remove the bracket suffix
+            arrayType =~ s/\[([,\d]+)\]$//;
+        }
+
+        # Handle empty bracket pairs (e.g., type[][] = 2D, type[] = 1D)
+        # Count all [] pairs and set dimensions to that count
+        int bracketCount = 0;
+        while (arrayType =~ /\[\]$/) {
+            bracketCount++;
+            arrayType =~ s/\[\]$//;
+        }
+        if (bracketCount > 0) {
+            dimensions = bracketCount;
+        }
+
         if (!nsc.doType(arrayType, \typeinfo, \elementType)) {
             unresolved.add(self);
         } else {
@@ -1676,7 +1732,12 @@ public class XsdArrayType inherits WSDL::XsdAbstractType {
     }
 
     AbstractDataProviderType getDataProviderType() {
-        return new ListDataType(elementType.getDataProviderType());
+        # Build nested list type for multi-dimensional arrays
+        AbstractDataProviderType innerType = elementType.getDataProviderType();
+        for (int i = 0; i < dimensions; i++) {
+            innerType = new ListDataType(innerType);
+        }
+        return innerType;
     }
 
     finalize(hash<string, XsdAbstractType> tmap, Namespaces nsc, *hash<string, XsdGroup> groupMap,
@@ -1698,10 +1759,12 @@ public class XsdArrayType inherits WSDL::XsdAbstractType {
         switch (name) {
             case "binary": {
                 int t = val.typeCode();
-                if (t === NT_STRING)
+                if (t === NT_STRING) {
                     val = binary(val);
-                else if (t !== NT_BINARY)
-                    throw SOAP_SERIALIZATION_ERROR, sprintf("cannot serialize type %y from type %y; requires string or binary", name, t);
+                } else if (t !== NT_BINARY) {
+                    throw SOAP_SERIALIZATION_ERROR, sprintf("cannot serialize type %y from type %y; requires "
+                        "string or binary", name, t);
+                }
                 return val;
             }
 
@@ -1709,15 +1772,20 @@ public class XsdArrayType inherits WSDL::XsdAbstractType {
                 # this must be an untyped hash
                 hash rv;
                 if (!omitType) {
-                    rv."^attributes^" = {"soapenc:arrayType": elementType.getNameWithNS() + "[]"};
+                    # Build arrayType attribute with proper dimension notation
+                    string dimSuffix = dimensions > 1
+                        ? "[" + strmul(",", dimensions - 1) + "]"
+                        : "[]";
+                    rv."^attributes^" = {"soapenc:arrayType": elementType.getNameWithNS() + dimSuffix};
                 }
                 if (val.typeCode() == NT_HASH && val.size() == 1) {
                     rv += {
-                        "soapenc:" + val.firstKey(): map elementType.serialize(nsc, $1, omitType), val.firstValue(),
+                        "soapenc:" + val.firstKey(): map serializeElement(nsc, $1, omitType, dimensions),
+                            val.firstValue(),
                     };
                 } else {
                     rv += {
-                        "^value^": (map elementType.serialize(nsc, $1, omitType), val),
+                        "^value^": (map serializeElement(nsc, $1, omitType, dimensions), val),
                     };
                 }
                 return rv;
@@ -1725,11 +1793,22 @@ public class XsdArrayType inherits WSDL::XsdAbstractType {
         }
     }
 
+    #! Serialize a single element, handling nested dimensions for multi-dimensional arrays
+    private auto serializeElement(Namespaces nsc, auto val, *softbool omitType, int remainingDims) {
+        if (remainingDims > 1 && val.typeCode() == NT_LIST) {
+            # For multi-dimensional arrays, recursively serialize nested lists
+            return map serializeElement(nsc, $1, omitType, remainingDims - 1), val;
+        }
+        return elementType.serialize(nsc, val, omitType);
+    }
+
     auto deserialize(string en, hash<string, XsdAbstractType> tmap, *hash<auto> mrh, auto val) {
         switch (name) {
             case "binary": {
-                if (val.typeCode() != NT_BINARY)
-                    throw SOAP_DESERIALIZATION_ERROR, sprintf("cannot deserialize type %y from type %y; requires binary", name, val.typeName());
+                if (val.typeCode() != NT_BINARY) {
+                    throw SOAP_DESERIALIZATION_ERROR, sprintf("cannot deserialize type %y from type %y; requires "
+                        "binary", name, val.typeName());
+                }
                 return val;
             }
 
@@ -1737,15 +1816,30 @@ public class XsdArrayType inherits WSDL::XsdAbstractType {
                 # remove any namespace marker from value
                 *string ns = remove val.".ns";
                 softint attr = val.hasKey("^attributes^");
-                #printf("val: %N\n", val);
-                if (val.typeCode() == NT_HASH && val.size() == (1 + attr)) {
-                    # get element name
-                    string ename = (map $1, keys val, $1 != "^attributes^")[0];
-                    return {ename: (map elementType.deserialize(en, tmap, mrh, $1), val{ename})};
+                if (val.typeCode() == NT_HASH) {
+                    # Handle ^value^ key specially - return deserialized content directly
+                    if (val.hasKey("^value^")) {
+                        return map deserializeElement(en, tmap, mrh, $1, dimensions), val."^value^";
+                    }
+                    # For other single-key hashes, preserve the element name
+                    if (val.size() == (1 + attr)) {
+                        string ename = (map $1, keys val, $1 != "^attributes^")[0];
+                        return {ename: (map deserializeElement(en, tmap, mrh, $1, dimensions), val{ename})};
+                    }
                 }
-                return map elementType.deserialize(en, tmap, mrh, $1), val;
+                return map deserializeElement(en, tmap, mrh, $1, dimensions), val;
             }
         }
+    }
+
+    #! Deserialize a single element, handling nested dimensions for multi-dimensional arrays
+    private auto deserializeElement(string en, hash<string, XsdAbstractType> tmap, *hash<auto> mrh, auto val,
+            int remainingDims) {
+        if (remainingDims > 1 && val.typeCode() == NT_LIST) {
+            # For multi-dimensional arrays, recursively deserialize nested lists
+            return map deserializeElement(en, tmap, mrh, $1, remainingDims - 1), val;
+        }
+        return elementType.deserialize(en, tmap, mrh, val);
     }
 }
 
@@ -2697,7 +2791,7 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
                             }
                         }
                         auto aa = d.restriction.attribute."^attributes^";
-                        WSDL::XsdBase::removeNS(\aa);
+                        WSDL::XsdBase::removeNSKeys(\aa);
                         if (!exists aa.arrayType)
                             throw WSDL_ERROR, sprintf("cannot parse complexType restriction: %y", d.restriction);
 
@@ -3835,16 +3929,15 @@ public class WSMessage inherits WSDL::XsdNamedData {
                 continue;
             }
             string k = pmap{part};
-            /* FIXME: handle multipart messages
-            #printf("DEBUG: WSMessage::serialize() k: %y args: %y, parts: %y\n", k, keys args, msginfo.parts);
-            if (msginfo.parts{k}) {
-                any ct = msginfo.parts{k};
-                if (ct.typeCode() == NT_LIST)
-                    ct = shift ct;
-                mpm.addPart(hv, sprintf("<%s>", k), ct);
-                hv."^attributes^".href = "cid:" + k;
+            # Handle multipart attachments - if this part is defined as a multipart content part
+            if (mpm && msginfo.parts{k}) {
+                auto partContentType = msginfo.parts{k};
+                if (partContentType.typeCode() == NT_LIST) {
+                    partContentType = shift partContentType;
+                }
+                mpm.addPart(hv, sprintf("<%s>", k), partContentType);
+                hv = {"^attributes^": {"href": "cid:" + k}};
             }
-            */
             rh{args{k}.element ? (ons + ":" +  k) : k} = hv;
         }
 
@@ -3907,7 +4000,21 @@ public class WSMessage inherits WSDL::XsdNamedData {
                 XsdBase::removeNS2(\val);
             #printf("DEBUG: k: %y val: %y, args: %y\n", k, val, keys args);
             hash<auto> arg = args{k};
-            if (arg.element) {
+            # Handle multipart attachments - if this part is defined as a multipart content part
+            if (mpm && msginfo.parts{k}) {
+                auto partContentType = msginfo.parts{k};
+                if (partContentType.typeCode() == NT_LIST) {
+                    partContentType = shift partContentType;
+                }
+                mpm.addPart(val, sprintf("<%s>", k), partContentType);
+                # For document style with element parts, use element name with namespace
+                if (arg.element) {
+                    string ons = nsc.getOutputNamespacePrefix(arg.element.ns);
+                    rh{ons + ":" + k} = {"^attributes^": {"href": "cid:" + k}};
+                } else {
+                    rh{p} = {"^attributes^": {"href": "cid:" + k}};
+                }
+            } else if (arg.element) {
                 auto th = arg.element.serialize(nsc, val, !encoded, k, name);
                 string ons = nsc.getOutputNamespacePrefix(arg.element.ns);
                 rh{ons + ":" + k} = th;
@@ -4305,14 +4412,18 @@ public class SoapBinding inherits WSDL::OperationalBinding {
         rv.body = make_xml(serializeSoapMessage(op, msg, h, header, nsh, request, soap12, \mpm, faultmsg), xml_opts, enc);
 
         string ct = WSDLLib::getSoapMimeType12(soap12);
-        # FIXME: fix multipart message handling
-        /*
-        if (mpm) {
-            mpm.splicePart(rv.body, sprintf("<%s>", (bmd.body.parts ?? keys msg.args).join(" ")), ct);
 
-            rv = mpm.getMsgAndHeaders();
+        # Handle multipart message assembly - splice SOAP body as first part
+        if (mpm && mpm.size() > 0) {
+            BindingMessageDescription bmd = self{request ? "input" : "output"};
+            string partId = sprintf("<%s>", (bmd.body.parts ?? (msg ? keys msg.args : ())).join(" "));
+            mpm.splicePart(rv.body, partId, ct);
+            hash<Mime::MessageInfo> mpmResult = mpm.getMsgAndHeaders();
+            rv.body = mpmResult.body;
+            rv.hdr += mpmResult.hdr;
+            # Content-Type will be overwritten below if not multipart
+            ct = rv.hdr."Content-Type";
         }
-        */
 
         if (req_soapaction) {
             rv.hdr += {"SOAPAction": req_soapaction};
@@ -4349,11 +4460,10 @@ public class SoapBinding inherits WSDL::OperationalBinding {
 
         BindingMessageDescription bmd = self{io};
 
-        # FIXME: implement multipart support
-        /*
-        if (exists bmd.multipart)
+        # Create multipart message container if multipartRelated binding is used
+        if (exists bmd.multipart) {
             mpm = new MultiPartRelatedMessage();
-        */
+        }
 
         bool fault = exists faultmsg;
 
@@ -4572,13 +4682,35 @@ public class SoapBinding inherits WSDL::OperationalBinding {
         WSDL::XsdBase::removeNS2(\mrh.body);
 
         # issue #2902: get all multiref elements with an "id" tag
+        # SOAP 1.1 Section 5.4.1 defines multiref elements with:
+        # - id: unique identifier for the element
+        # - root: "1" = root element, "0" = not a root (referenced only), absent = may be root
+        # - xsi:type: polymorphic type indicator
         foreach hash<auto> hh in (body.pairIterator()) {
             if (!exists hh.value."^attributes^".id) {
                 continue;
             }
             hash<auto> h = remove body{hh.key};
+            hash<auto> attrs = h."^attributes^";
             string id = remove h."^attributes^".id;
-            # FIXME: issue #2902: process root & type
+
+            # Process root attribute (SOAP 1.1 Section 5.4.1)
+            # root="1" means this is a root element, root="0" means it's only referenced
+            # If absent, the element may be a root
+            *string rootAttr = attrs.root;
+            if (rootAttr == "1") {
+                # This is explicitly marked as a root element - keep track of it
+                mrh.rootIds{id} = True;
+            }
+            remove h."^attributes^".root;
+
+            # Process xsi:type attribute for polymorphic type resolution
+            # Store the type info for use during deserialization
+            *string xsiType = attrs."xsi:type";
+            if (xsiType) {
+                mrh.typeMap{id} = xsiType;
+            }
+
             mrh.mrh{id} = h;
         }
 
@@ -4668,8 +4800,8 @@ public class HttpBinding inherits WSDL::OperationalBinding {
             ct = MimeTypeFormUrlEncoded;
             # application/x-www-form-urlencoded Content-Type does not have any parameters
             delete enc;
-            # TODO: throws exception when character is > 127:
-            # ex: e.g. https://www.w3.org/TR/html5/forms.html#application/x-www-form-urlencoded-encoding-algorithm
+            # Non-ASCII characters (> 127) are properly percent-encoded as UTF-8 bytes
+            # per https://www.w3.org/TR/html5/forms.html#application/x-www-form-urlencoded-encoding-algorithm
             rv.body = mime_get_form_urlencoded_string(msg.serializeAllPartData(h));
         } else if (bmd.content) {
             hash<auto> v = msg.serializeData(op.nsc, bmd.content.part, h);
@@ -4819,8 +4951,60 @@ public class HttpBinding inherits WSDL::OperationalBinding {
 
     hash<auto> deserializeRequestPathImpl(WSOperation op, string path) {
         if (input.urlReplacement) {
-            # all parameters are somehow encoded in path
-            throw SOAP_DESERIALIZATION_ERROR, sprintf("url replacement message deserialization is not supported in binding %y", name);
+            # Parse URL replacement parameters from path
+            # urlReplacement hash contains alternating string literals and part names:
+            # {"string^1": "/api/users/", "part^2": "userId", "string^3": "/profile/", ...}
+            hash<auto> values;
+            int pos = 0;
+
+            foreach string k in (keys input.urlReplacement) {
+                if (k =~ /^string/) {
+                    # String literal - must match exactly at current position
+                    string expected = input.urlReplacement{k};
+                    if (substr(path, pos, expected.size()) != expected) {
+                        throw SOAP_DESERIALIZATION_ERROR, sprintf("URL replacement mismatch at position %d: "
+                            "expected %y, path: %y", pos, expected, path);
+                    }
+                    pos += expected.size();
+                } else if (k =~ /^part/) {
+                    # Part value - extract until next string literal or end of path
+                    string partName = input.urlReplacement{k};
+
+                    # Find the next string literal to know where this part value ends
+                    *string nextLiteral;
+                    bool foundNext = False;
+                    foreach string k2 in (keys input.urlReplacement) {
+                        if (foundNext && k2 =~ /^string/) {
+                            nextLiteral = input.urlReplacement{k2};
+                            break;
+                        }
+                        if (k2 == k) {
+                            foundNext = True;
+                        }
+                    }
+
+                    int endPos;
+                    if (nextLiteral) {
+                        endPos = index(path, nextLiteral, pos);
+                        if (endPos < 0) {
+                            throw SOAP_DESERIALIZATION_ERROR, sprintf("URL replacement: cannot find delimiter %y "
+                                "after position %d in path: %y", nextLiteral, pos, path);
+                        }
+                    } else {
+                        # No next literal - value goes to end of path (excluding query string)
+                        endPos = index(path, "?", pos);
+                        if (endPos < 0) {
+                            endPos = path.size();
+                        }
+                    }
+
+                    string partValue = decode_url(substr(path, pos, endPos - pos));
+                    values{partName} = partValue;
+                    pos = endPos;
+                }
+            }
+
+            return op.input.deserializeAllPartData(values);
         }
         if (input.urlEncoded) {
             hash<auto> h;
@@ -5023,6 +5207,16 @@ public class BindingMessageDescription inherits Serializable {
 
         #! optional mimeXml message scription
         *WSDL::MimeXmlMessageDescription mimeXml;
+
+        #! multipart type (e.g., Mime::MPT_RELATED) if multipartRelated binding is used
+        /** @see https://www.w3.org/TR/wsdl#_mime:multipartRelated
+        */
+        *string multipart;
+
+        #! hash of part names to content types for multipart messages
+        /** Keys are part names, values are content type strings or lists of content type strings
+        */
+        *hash<auto> parts;
     }
 
     private:internal {
@@ -5203,65 +5397,75 @@ public class Binding inherits WSDL::XsdNamedData {
                 }
 
                 if (exists op{io}.multipartRelated) {
-                    if (bmd.body)
-                        throw WSDL_ERROR, sprintf("%s binding %y for operation %y specifies both body and multipart elements", io, name, opname);
+                    if (bmd.body) {
+                        throw WSDL_ERROR, sprintf("%s binding %y for operation %y specifies both body and "
+                            "multipart elements", io, name, opname);
+                    }
 
-                    throw WSDL_ERROR, "unsupported multipartRelated";
-
-                    /*
-                    ioh{io}.multipart = Mime::MPT_RELATED;
-                    ioh{io}.parts = {};
+                    bmd.multipart = Mime::MPT_RELATED;
+                    bmd.parts = {};
                     WSDL::XsdBase::removeNS(\op{io}.multipartRelated);
 
-                    if (!exists op{io}.multipartRelated.part)  # TODO: do I need explicite check or is handled by validator ?
-                        throw WSDL_ERROR, sprintf("binding %y is missing part definition(s) in %s message definition for operation %y: %y", name, io, opname, op);
+                    if (!exists op{io}.multipartRelated.part) {
+                        throw WSDL_ERROR, sprintf("binding %y is missing part definition(s) in %s message "
+                            "definition for operation %y: %y", name, io, opname, op);
+                    }
 
-                    foreach any part in (op{io}.multipartRelated.part) {
+                    foreach auto part in (op{io}.multipartRelated.part) {
                         WSDL::XsdBase::removeNS(\part);
-                        #any a = part."^attributes^";
                         part -= "^attributes^";
                         if (exists part.body) {
-                            if (exists op{io}.body)
-                                throw WSDL_ERROR, sprintf("%s binding %y for operation %y specifies multiple body parts in multipart elements", io, name, opname);
-                            any pa = part.body."^attributes^";
-                            if (pa.use != "literal")
-                                throw WSDL_ERROR, sprintf("unsupported body part without use=\"literal\": %y", part.body);
-
-                            ioh{io}.body.parts = pa.parts;
+                            if (bmd.body) {
+                                throw WSDL_ERROR, sprintf("%s binding %y for operation %y specifies multiple "
+                                    "body parts in multipart elements", io, name, opname);
+                            }
+                            auto bodyAttrs = part.body."^attributes^";
+                            if (bodyAttrs.use != "literal") {
+                                throw WSDL_ERROR, sprintf("unsupported body part without use=\"literal\": %y",
+                                    part.body);
+                            }
+                            # Create body description for the SOAP body part within multipart message
+                            bmd.body = new BindingMessageBodyDescription(False, NOTHING, NOTHING,
+                                bodyAttrs.parts);
                         } else if (exists part.content) {
                             *string pcname;
-                            foreach any c in (part.content) {
+                            foreach auto c in (part.content) {
                                 WSDL::XsdBase::removeNS(\c);
-                                any pa = c."^attributes^";
-                                any name = pa.part;
-                                if (!exists name)
-                                    throw WSDL_ERROR, sprintf("unsupported content part without part attribute: %y", c);
-                                if (pcname) {
-                                    if (pcname != name)
-                                        throw WSDL_ERROR, sprintf("multiple content part names inside part section: %y!=%y", name, pcname);
-                                } else {
-                                    pcname = name;
-                                    name = portTypes{port}.operations{opname}{io}.checkPart(name);
+                                auto contentAttrs = c."^attributes^";
+                                auto partName = contentAttrs.part;
+                                if (!exists partName) {
+                                    throw WSDL_ERROR, sprintf("unsupported content part without part "
+                                        "attribute: %y", c);
                                 }
-                                any type = pa.type;
-                                if (!exists type)
-                                    throw WSDL_ERROR, sprintf("unsupported content part without type attribute: %y", c);
+                                if (pcname) {
+                                    if (pcname != partName) {
+                                        throw WSDL_ERROR, sprintf("multiple content part names inside part "
+                                            "section: %y!=%y", partName, pcname);
+                                    }
+                                } else {
+                                    pcname = partName;
+                                    partName = portTypes{port}.operations{opname}{io}.checkPart(partName);
+                                }
+                                auto contentType = contentAttrs.type;
+                                if (!exists contentType) {
+                                    throw WSDL_ERROR, sprintf("unsupported content part without type "
+                                        "attribute: %y", c);
+                                }
 
-                                if (!exists op{io}.parts{name})
-                                    ioh{io}.parts{name} = type;
-                                else {
-                                    if (op{io}.parts{name}.typeCode() != NT_LIST)
-                                        ioh{io}.parts{name} = list(op{io}.parts{name});
-                                    ioh{io}.parts{name} += type;
+                                if (!exists bmd.parts{partName}) {
+                                    bmd.parts{partName} = contentType;
+                                } else {
+                                    if (bmd.parts{partName}.typeCode() != NT_LIST) {
+                                        bmd.parts{partName} = list(bmd.parts{partName});
+                                    }
+                                    bmd.parts{partName} += contentType;
                                 }
                             }
-                        } else
+                        } else {
                             throw WSDL_ERROR, sprintf("cannot parse part: %y", part);
-
-                        #printf("DEBUG: part: %y\nmsg: %y\n", part, op{io});;
+                        }
                     }
                     delete op{io}.multipartRelated;
-                    */
                 }
 
                 if (exists op{io}.header) {
@@ -6586,7 +6790,8 @@ public class WebService inherits WSDL::XsdBase, Qore::Serializable {
                 if (tmap{t.name}) {
                     throw WSDL_ERROR, sprintf("%s: type (complexType) %y declared twice", nph.getDesc(), t.name);
                 }
-                tmap{t.name} = t;
+                # If the complexType is purely an array wrapper, store the XsdArrayType directly
+                tmap{t.name} = t.array ?? t;
 
                 #tmap.add(t);
                 #printf("DEBUG: ct: %y\n", t.name);
