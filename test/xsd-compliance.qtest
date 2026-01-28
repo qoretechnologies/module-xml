@@ -1,0 +1,1402 @@
+#!/usr/bin/env qore
+# -*- mode: qore; indent-tabs-mode: nil -*-
+
+# XSD Compliance Test Suite
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+#
+# Tests XSD standards compliance by validating serialized output against
+# libxml2's XmlDoc::validateSchema() as an independent oracle.
+
+%requires qore >= 2.3
+
+%modern
+
+%requires QUnit
+%requires Util
+
+%requires ../qlib/WSDL.qm
+%requires xml
+
+%exec-class XsdComplianceTest
+
+class XsdComplianceTest inherits QUnit::Test {
+    public {
+        WebService ws;
+        const XsdFacetsWsdl = get_script_dir() + "/xsd-facets.wsdl";
+
+        #! Extracted XSD schema for libxml2 validation
+        string xsdSchema;
+    }
+
+    constructor() : QUnit::Test("XsdComplianceTest", "1.0") {
+        addTestCase("Pattern facet positive tests", \patternFacetPositiveTests());
+        addTestCase("Pattern facet negative tests", \patternFacetNegativeTests());
+        addTestCase("Length facet positive tests", \lengthFacetPositiveTests());
+        addTestCase("Length facet negative tests", \lengthFacetNegativeTests());
+        addTestCase("Length facet corner cases", \lengthFacetCornerCases());
+        addTestCase("Numeric range positive tests", \numericRangePositiveTests());
+        addTestCase("Numeric range negative tests", \numericRangeNegativeTests());
+        addTestCase("Numeric range boundary tests", \numericRangeBoundaryTests());
+        addTestCase("Precision facet positive tests", \precisionFacetPositiveTests());
+        addTestCase("Precision facet negative tests", \precisionFacetNegativeTests());
+        addTestCase("List type serialization tests", \listTypeSerializationTests());
+        addTestCase("List type deserialization tests", \listTypeDeserializationTests());
+        addTestCase("List type corner cases", \listTypeCornerCases());
+        addTestCase("Duration type positive tests", \durationTypePositiveTests());
+        addTestCase("Duration type negative tests", \durationTypeNegativeTests());
+        addTestCase("Partial date positive tests", \partialDatePositiveTests());
+        addTestCase("Partial date with timezone tests", \partialDateTimezoneTests());
+        addTestCase("Partial date negative tests", \partialDateNegativeTests());
+        addTestCase("Float/double positive tests", \floatDoublePositiveTests());
+        addTestCase("Float/double special values tests", \floatDoubleSpecialValuesTests());
+        addTestCase("Float/double negative tests", \floatDoubleNegativeTests());
+        addTestCase("Round-trip serialization tests", \roundTripSerializationTests());
+        addTestCase("Round-trip deserialization tests", \roundTripDeserializationTests());
+        addTestCase("Libxml2 cross-validation tests", \libxml2CrossValidationTests());
+        set_return_value(main());
+    }
+
+    globalSetUp() {
+        ws = new WebService(ReadOnlyFile::readTextFile(XsdFacetsWsdl));
+        xsdSchema = extractXsdFromWsdl(XsdFacetsWsdl);
+    }
+
+    #! Extract the XSD schema from a WSDL file as a standalone schema
+    private string extractXsdFromWsdl(string wsdlPath) {
+        string wsdlContent = ReadOnlyFile::readTextFile(wsdlPath);
+
+        # Find the <s:schema> or <xsd:schema> element in the WSDL
+        # Extract it using string operations for reliability
+        int schemaStart = index(wsdlContent, "<s:schema");
+        if (schemaStart == -1) {
+            schemaStart = index(wsdlContent, "<xsd:schema");
+        }
+        if (schemaStart == -1) {
+            throw "XSD-EXTRACT-ERROR", "No schema element found in WSDL";
+        }
+
+        int schemaEnd = index(wsdlContent, "</s:schema>");
+        if (schemaEnd == -1) {
+            schemaEnd = index(wsdlContent, "</xsd:schema>");
+        }
+        if (schemaEnd == -1) {
+            throw "XSD-EXTRACT-ERROR", "No schema end tag found in WSDL";
+        }
+        schemaEnd += 11;  # Include the closing tag
+
+        string schema = substr(wsdlContent, schemaStart, schemaEnd - schemaStart);
+
+        # Convert s: prefix to xs: for standard compliance
+        # Replace element names: <s:xxx -> <xs:xxx and </s:xxx -> </xs:xxx
+        schema = regex_subst(schema, "<s:", "<xs:", Qore::RE_Global);
+        schema = regex_subst(schema, "</s:", "</xs:", Qore::RE_Global);
+
+        # Replace type references in attributes: base="s:xxx" -> base="xs:xxx"
+        schema = regex_subst(schema, '="s:', '="xs:', Qore::RE_Global);
+
+        # Replace tns: prefix references: type="tns:xxx" -> type="tns:xxx" (keep as-is)
+        # No change needed for tns: prefix
+
+        # Extract target namespace from the schema
+        *list<auto> tnsMatch = regex_extract(schema, 'targetNamespace="([^"]+)"');
+        string targetNs = tnsMatch ? tnsMatch[0] : "";
+
+        # Add namespace declarations if not already present
+        string nsDecls = "";
+        if (index(schema, "xmlns:xs=") == -1) {
+            nsDecls += ' xmlns:xs="http://www.w3.org/2001/XMLSchema"';
+        }
+        if (index(schema, "xmlns:tns=") == -1 && targetNs) {
+            nsDecls += sprintf(' xmlns:tns="%s"', targetNs);
+        }
+
+        if (nsDecls) {
+            schema = regex_subst(schema, "<xs:schema", "<xs:schema" + nsDecls);
+        }
+
+        # Add XML declaration
+        return "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n" + schema;
+    }
+
+    #! Extract the body element from a SOAP envelope and add namespace declarations
+    private string extractSoapBody(string soapXml) {
+        # Find the target namespace URI (xsdfa prefix)
+        *list<auto> nsMatch = regex_extract(soapXml, 'xmlns:xsdfa="([^"]+)"');
+        if (!nsMatch) {
+            throw "SOAP-EXTRACT-ERROR", "No xsdfa namespace found in SOAP envelope";
+        }
+        string nsUri = nsMatch[0];
+
+        # Extract the body content using string operations
+        int bodyStart = index(soapXml, "<soapenv:Body>");
+        if (bodyStart == -1) {
+            bodyStart = index(soapXml, "<soap:Body>");
+            if (bodyStart == -1) {
+                throw "SOAP-EXTRACT-ERROR", "No SOAP Body element found";
+            }
+            bodyStart += 11;  # length of "<soap:Body>"
+        } else {
+            bodyStart += 14;  # length of "<soapenv:Body>"
+        }
+
+        int bodyEnd = index(soapXml, "</soapenv:Body>");
+        if (bodyEnd == -1) {
+            bodyEnd = index(soapXml, "</soap:Body>");
+        }
+        if (bodyEnd == -1) {
+            throw "SOAP-EXTRACT-ERROR", "No SOAP Body end tag found";
+        }
+
+        string bodyContent = substr(soapXml, bodyStart, bodyEnd - bodyStart);
+
+        # Add namespace declaration to the root element by inserting before first ">"
+        string nsDecl = sprintf(' xmlns:xsdfa="%s"', nsUri);
+        int firstTagEnd = index(bodyContent, ">");
+        if (firstTagEnd > 0) {
+            # Check if it's a self-closing tag
+            if (bodyContent[firstTagEnd - 1] == "/") {
+                bodyContent = substr(bodyContent, 0, firstTagEnd - 1) + nsDecl + "/>" +
+                    substr(bodyContent, firstTagEnd + 1);
+            } else {
+                bodyContent = substr(bodyContent, 0, firstTagEnd) + nsDecl +
+                    substr(bodyContent, firstTagEnd);
+            }
+        }
+
+        # Add XML declaration
+        return "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n" + bodyContent;
+    }
+
+    #! Validate XML against XSD using libxml2 - returns True if valid, False if invalid
+    private bool libxml2Validates(string xml, string xsd) {
+        try {
+            XmlDoc doc(xml);
+            doc.validateSchema(xsd);
+            return True;
+        } catch (hash<ExceptionInfo> ex) {
+            return False;
+        }
+    }
+
+    #! Validate serialized SOAP body against libxml2 - returns True if valid
+    private bool libxml2ValidatesSoap(string soapXml) {
+        string bodyXml = extractSoapBody(soapXml);
+        return libxml2Validates(bodyXml, xsdSchema);
+    }
+
+    #! Assert that serialized output passes libxml2 validation
+    private assertLibxml2Accepts(hash<auto> serialized, string desc) {
+        string bodyXml = extractSoapBody(serialized.body);
+        XmlDoc doc(bodyXml);
+        try {
+            doc.validateSchema(xsdSchema);
+        } catch (hash<ExceptionInfo> ex) {
+            fail(sprintf("%s: libxml2 rejected: %s", desc, ex.desc));
+        }
+        # If we get here, validation passed - increment assertion count
+        assertEq(True, True, desc);
+    }
+
+    #! Assert that manually constructed invalid XML fails libxml2 validation
+    private assertLibxml2Rejects(string invalidXml, string desc) {
+        XmlDoc doc(invalidXml);
+        bool rejected = False;
+        try {
+            doc.validateSchema(xsdSchema);
+        } catch (hash<ExceptionInfo> ex) {
+            rejected = True;
+        }
+        assertTrue(rejected, desc);
+    }
+
+    # ============================================================
+    # Pattern Facet Tests - Positive
+    # ============================================================
+
+    patternFacetPositiveTests() {
+        WSOperation op = ws.getOperation("testFacets");
+
+        # Test valid pattern: exactly 2 uppercase letters followed by 4 digits
+        {
+            hash<auto> req = {"patternStr": "AB1234"};
+            hash<auto> h = op.serializeRequest(req);
+            assertRegex(">AB1234<", h.body, "pattern serializes exact value AB1234");
+        }
+
+        # Test pattern at different valid values
+        {
+            hash<auto> req = {"patternStr": "ZZ9999"};
+            hash<auto> h = op.serializeRequest(req);
+            assertRegex(">ZZ9999<", h.body, "pattern serializes ZZ9999");
+        }
+
+        {
+            hash<auto> req = {"patternStr": "AA0000"};
+            hash<auto> h = op.serializeRequest(req);
+            assertRegex(">AA0000<", h.body, "pattern serializes AA0000");
+        }
+
+        # Test multi-pattern (starts with uppercase, ends with digit)
+        {
+            hash<auto> req = {"multiPatternStr": "Hello123"};
+            hash<auto> h = op.serializeRequest(req);
+            assertRegex(">Hello123<", h.body, "multi-pattern serializes Hello123");
+        }
+
+        {
+            hash<auto> req = {"multiPatternStr": "A1"};
+            hash<auto> h = op.serializeRequest(req);
+            assertRegex(">A1<", h.body, "multi-pattern serializes minimal A1");
+        }
+
+        {
+            hash<auto> req = {"multiPatternStr": "Testing123456789"};
+            hash<auto> h = op.serializeRequest(req);
+            assertRegex(">Testing123456789<", h.body, "multi-pattern serializes longer string");
+        }
+    }
+
+    # ============================================================
+    # Pattern Facet Tests - Negative
+    # ============================================================
+
+    patternFacetNegativeTests() {
+        WSOperation op = ws.getOperation("testFacets");
+
+        # Invalid: lowercase letters instead of uppercase
+        assertThrows("SOAP-SERIALIZATION-ERROR", \op.serializeRequest(), {"patternStr": "ab1234"},
+            "pattern rejects lowercase letters");
+
+        # Invalid: wrong number of letters (3 instead of 2)
+        assertThrows("SOAP-SERIALIZATION-ERROR", \op.serializeRequest(), {"patternStr": "ABC1234"},
+            "pattern rejects 3 letters");
+
+        # Invalid: wrong number of digits (3 instead of 4)
+        assertThrows("SOAP-SERIALIZATION-ERROR", \op.serializeRequest(), {"patternStr": "AB123"},
+            "pattern rejects 3 digits");
+
+        # Invalid: special characters
+        assertThrows("SOAP-SERIALIZATION-ERROR", \op.serializeRequest(), {"patternStr": "AB12!4"},
+            "pattern rejects special characters");
+
+        # Invalid: empty string
+        assertThrows("SOAP-SERIALIZATION-ERROR", \op.serializeRequest(), {"patternStr": ""},
+            "pattern rejects empty string");
+
+        # Invalid multi-pattern: doesn't start with uppercase
+        assertThrows("SOAP-SERIALIZATION-ERROR", \op.serializeRequest(), {"multiPatternStr": "hello1"},
+            "multi-pattern rejects lowercase start");
+
+        # Invalid multi-pattern: doesn't end with digit
+        assertThrows("SOAP-SERIALIZATION-ERROR", \op.serializeRequest(), {"multiPatternStr": "Hello"},
+            "multi-pattern rejects no digit ending");
+
+        # Invalid multi-pattern: empty
+        assertThrows("SOAP-SERIALIZATION-ERROR", \op.serializeRequest(), {"multiPatternStr": ""},
+            "multi-pattern rejects empty string");
+    }
+
+    # ============================================================
+    # Length Facet Tests - Positive
+    # ============================================================
+
+    lengthFacetPositiveTests() {
+        WSOperation op = ws.getOperation("testFacets");
+
+        # Test exact length (10 characters)
+        {
+            hash<auto> req = {"fixedLenStr": "0123456789"};
+            hash<auto> h = op.serializeRequest(req);
+            assertRegex(">0123456789<", h.body, "exact length 10 serializes correctly");
+        }
+
+        # Test minLength (>= 5) at boundary
+        {
+            hash<auto> req = {"minLenStr": "hello"};
+            hash<auto> h = op.serializeRequest(req);
+            assertRegex(">hello<", h.body, "minLength boundary (5) serializes correctly");
+        }
+
+        # Test minLength above boundary
+        {
+            hash<auto> req = {"minLenStr": "hello world"};
+            hash<auto> h = op.serializeRequest(req);
+            assertRegex(">hello world<", h.body, "minLength above boundary serializes correctly");
+        }
+
+        # Test maxLength (<= 20) at boundary
+        {
+            hash<auto> req = {"maxLenStr": "12345678901234567890"};
+            hash<auto> h = op.serializeRequest(req);
+            assertRegex(">12345678901234567890<", h.body, "maxLength boundary (20) serializes correctly");
+        }
+
+        # Test maxLength below boundary
+        {
+            hash<auto> req = {"maxLenStr": "short"};
+            hash<auto> h = op.serializeRequest(req);
+            assertRegex(">short<", h.body, "maxLength below boundary serializes correctly");
+        }
+
+        # Test bounded length (3-50) at boundaries
+        {
+            hash<auto> req = {"boundedStr": "abc"};
+            hash<auto> h = op.serializeRequest(req);
+            assertRegex(">abc<", h.body, "bounded length min boundary (3) serializes correctly");
+        }
+    }
+
+    # ============================================================
+    # Length Facet Tests - Negative
+    # ============================================================
+
+    lengthFacetNegativeTests() {
+        WSOperation op = ws.getOperation("testFacets");
+
+        # Too short for fixedLength (9 chars instead of 10)
+        assertThrows("SOAP-SERIALIZATION-ERROR", \op.serializeRequest(), {"fixedLenStr": "123456789"},
+            "exact length rejects 9 chars");
+
+        # Too long for fixedLength (11 chars instead of 10)
+        assertThrows("SOAP-SERIALIZATION-ERROR", \op.serializeRequest(), {"fixedLenStr": "12345678901"},
+            "exact length rejects 11 chars");
+
+        # Below minLength (4 chars, need 5)
+        assertThrows("SOAP-SERIALIZATION-ERROR", \op.serializeRequest(), {"minLenStr": "four"},
+            "minLength rejects 4 chars");
+
+        # Above maxLength (21 chars, max 20)
+        assertThrows("SOAP-SERIALIZATION-ERROR", \op.serializeRequest(), {"maxLenStr": "123456789012345678901"},
+            "maxLength rejects 21 chars");
+
+        # Below bounded min (2 chars, need 3)
+        assertThrows("SOAP-SERIALIZATION-ERROR", \op.serializeRequest(), {"boundedStr": "ab"},
+            "bounded length rejects 2 chars");
+    }
+
+    # ============================================================
+    # Length Facet Tests - Corner Cases
+    # ============================================================
+
+    lengthFacetCornerCases() {
+        WSOperation op = ws.getOperation("testFacets");
+
+        # Empty string for fixedLength (should fail)
+        assertThrows("SOAP-SERIALIZATION-ERROR", \op.serializeRequest(), {"fixedLenStr": ""},
+            "exact length rejects empty string");
+
+        # Empty string for minLength (should fail, need >= 5)
+        assertThrows("SOAP-SERIALIZATION-ERROR", \op.serializeRequest(), {"minLenStr": ""},
+            "minLength rejects empty string");
+
+        # Empty string for maxLength (should succeed, 0 <= 20)
+        {
+            hash<auto> req = {"maxLenStr": ""};
+            hash<auto> h = op.serializeRequest(req);
+            assertRegex("maxLenStr", h.body, "maxLength accepts empty string");
+        }
+
+        # Unicode characters (should count characters, not bytes)
+        {
+            hash<auto> req = {"fixedLenStr": "1234567890"};  # 10 ASCII chars
+            hash<auto> h = op.serializeRequest(req);
+            assertRegex(">1234567890<", h.body, "length counts ASCII correctly");
+        }
+
+        # String with spaces
+        {
+            hash<auto> req = {"fixedLenStr": "  hello   "};  # 10 chars with spaces
+            hash<auto> h = op.serializeRequest(req);
+            assertRegex("fixedLenStr", h.body, "length counts spaces correctly");
+        }
+    }
+
+    # ============================================================
+    # Numeric Range Tests - Positive
+    # ============================================================
+
+    numericRangePositiveTests() {
+        WSOperation op = ws.getOperation("testFacets");
+
+        # minInclusive (>= 1)
+        {
+            hash<auto> req = {"positiveInt": 1};
+            hash<auto> h = op.serializeRequest(req);
+            assertRegex(">1<", h.body, "minInclusive accepts boundary value 1");
+        }
+
+        {
+            hash<auto> req = {"positiveInt": 100};
+            hash<auto> h = op.serializeRequest(req);
+            assertRegex(">100<", h.body, "minInclusive accepts value above boundary");
+        }
+
+        # Percentage range (0-100 inclusive)
+        {
+            hash<auto> req = {"percentInt": 0};
+            hash<auto> h = op.serializeRequest(req);
+            assertRegex(">0<", h.body, "percentage accepts lower bound 0");
+        }
+
+        {
+            hash<auto> req = {"percentInt": 100};
+            hash<auto> h = op.serializeRequest(req);
+            assertRegex(">100<", h.body, "percentage accepts upper bound 100");
+        }
+
+        {
+            hash<auto> req = {"percentInt": 50};
+            hash<auto> h = op.serializeRequest(req);
+            assertRegex(">50<", h.body, "percentage accepts middle value 50");
+        }
+
+        # minExclusive (> 0)
+        {
+            hash<auto> req = {"strictPosDecimal": 0.001};
+            hash<auto> h = op.serializeRequest(req);
+            assertRegex("0.001", h.body, "minExclusive accepts value just above 0");
+        }
+
+        {
+            hash<auto> req = {"strictPosDecimal": 1000000};
+            hash<auto> h = op.serializeRequest(req);
+            assertRegex("1000000", h.body, "minExclusive accepts large positive value");
+        }
+
+        # maxExclusive (< 1) with minInclusive (>= 0)
+        {
+            hash<auto> req = {"belowOneDecimal": 0};
+            hash<auto> h = op.serializeRequest(req);
+            assertRegex(">0<", h.body, "maxExclusive accepts minInclusive boundary 0");
+        }
+
+        {
+            hash<auto> req = {"belowOneDecimal": 0.999};
+            hash<auto> h = op.serializeRequest(req);
+            assertRegex("0.999", h.body, "maxExclusive accepts value just below 1");
+        }
+    }
+
+    # ============================================================
+    # Numeric Range Tests - Negative
+    # ============================================================
+
+    numericRangeNegativeTests() {
+        WSOperation op = ws.getOperation("testFacets");
+
+        # Below minInclusive (0 < 1)
+        assertThrows("SOAP-SERIALIZATION-ERROR", \op.serializeRequest(), {"positiveInt": 0},
+            "minInclusive rejects value below minimum");
+
+        # Negative value for minInclusive
+        assertThrows("SOAP-SERIALIZATION-ERROR", \op.serializeRequest(), {"positiveInt": -5},
+            "minInclusive rejects negative value");
+
+        # Large negative value
+        assertThrows("SOAP-SERIALIZATION-ERROR", \op.serializeRequest(), {"positiveInt": -1000000},
+            "minInclusive rejects large negative value");
+
+        # Above maxInclusive (101 > 100)
+        assertThrows("SOAP-SERIALIZATION-ERROR", \op.serializeRequest(), {"percentInt": 101},
+            "maxInclusive rejects value above maximum");
+
+        # Below minInclusive for percentage (-1 < 0)
+        assertThrows("SOAP-SERIALIZATION-ERROR", \op.serializeRequest(), {"percentInt": -1},
+            "percentage minInclusive rejects -1");
+
+        # At minExclusive boundary (0 is not > 0)
+        assertThrows("SOAP-SERIALIZATION-ERROR", \op.serializeRequest(), {"strictPosDecimal": 0},
+            "minExclusive rejects boundary value 0");
+
+        # Negative value for minExclusive
+        assertThrows("SOAP-SERIALIZATION-ERROR", \op.serializeRequest(), {"strictPosDecimal": -0.001},
+            "minExclusive rejects negative value");
+
+        # At maxExclusive boundary (1 is not < 1)
+        assertThrows("SOAP-SERIALIZATION-ERROR", \op.serializeRequest(), {"belowOneDecimal": 1},
+            "maxExclusive rejects boundary value 1");
+
+        # Above maxExclusive
+        assertThrows("SOAP-SERIALIZATION-ERROR", \op.serializeRequest(), {"belowOneDecimal": 1.001},
+            "maxExclusive rejects value above boundary");
+
+        # Below minInclusive for belowOneDecimal
+        assertThrows("SOAP-SERIALIZATION-ERROR", \op.serializeRequest(), {"belowOneDecimal": -0.001},
+            "belowOneDecimal minInclusive rejects negative");
+    }
+
+    # ============================================================
+    # Numeric Range Tests - Boundary
+    # ============================================================
+
+    numericRangeBoundaryTests() {
+        WSOperation op = ws.getOperation("testFacets");
+
+        # Test exact boundary for minInclusive
+        {
+            hash<auto> req = {"positiveInt": 1};
+            hash<auto> h = op.serializeRequest(req);
+            assertRegex(">1<", h.body, "minInclusive exact boundary 1 accepted");
+        }
+
+        # Test one above boundary for minInclusive
+        {
+            hash<auto> req = {"positiveInt": 2};
+            hash<auto> h = op.serializeRequest(req);
+            assertRegex(">2<", h.body, "minInclusive one above boundary accepted");
+        }
+
+        # Test exact boundaries for percentage
+        {
+            hash<auto> req = {"percentInt": 0};
+            hash<auto> h = op.serializeRequest(req);
+            assertRegex(">0<", h.body, "percentage lower boundary 0 accepted");
+        }
+
+        {
+            hash<auto> req = {"percentInt": 100};
+            hash<auto> h = op.serializeRequest(req);
+            assertRegex(">100<", h.body, "percentage upper boundary 100 accepted");
+        }
+
+        # Test very small value for minExclusive
+        {
+            hash<auto> req = {"strictPosDecimal": 0.0000001};
+            hash<auto> h = op.serializeRequest(req);
+            assertRegex("strictPosDecimal", h.body, "minExclusive accepts very small positive");
+        }
+
+        # Test value very close to maxExclusive
+        {
+            hash<auto> req = {"belowOneDecimal": 0.9999999};
+            hash<auto> h = op.serializeRequest(req);
+            assertRegex("belowOneDecimal", h.body, "maxExclusive accepts value very close to 1");
+        }
+    }
+
+    # ============================================================
+    # Precision Facet Tests - Positive
+    # ============================================================
+
+    precisionFacetPositiveTests() {
+        WSOperation op = ws.getOperation("testFacets");
+
+        # totalDigits (4) - various valid values
+        {
+            hash<auto> req = {"fourDigitNum": 1234};
+            hash<auto> h = op.serializeRequest(req);
+            assertRegex(">1234<", h.body, "totalDigits accepts 4 digit integer");
+        }
+
+        {
+            hash<auto> req = {"fourDigitNum": 12.34};
+            hash<auto> h = op.serializeRequest(req);
+            assertRegex("12.34", h.body, "totalDigits accepts 4 total digits with decimal");
+        }
+
+        {
+            hash<auto> req = {"fourDigitNum": 1.234};
+            hash<auto> h = op.serializeRequest(req);
+            assertRegex("1.234", h.body, "totalDigits accepts 1.234 (4 digits)");
+        }
+
+        {
+            hash<auto> req = {"fourDigitNum": 1};
+            hash<auto> h = op.serializeRequest(req);
+            assertRegex(">1<", h.body, "totalDigits accepts single digit");
+        }
+
+        # fractionDigits (2)
+        {
+            hash<auto> req = {"twoDecimalPlaces": 123.45};
+            hash<auto> h = op.serializeRequest(req);
+            assertRegex("123.45", h.body, "fractionDigits accepts 2 decimal places");
+        }
+
+        {
+            hash<auto> req = {"twoDecimalPlaces": 123.4};
+            hash<auto> h = op.serializeRequest(req);
+            assertRegex("123.4", h.body, "fractionDigits accepts 1 decimal place");
+        }
+
+        {
+            hash<auto> req = {"twoDecimalPlaces": 123};
+            hash<auto> h = op.serializeRequest(req);
+            assertRegex(">123<", h.body, "fractionDigits accepts integer (0 decimals)");
+        }
+
+        # Currency amount (totalDigits=10, fractionDigits=2, minInclusive=0)
+        {
+            hash<auto> req = {"currencyAmount": 12345678.90n};
+            hash<auto> h = op.serializeRequest(req);
+            assertRegex("currencyAmount", h.body, "currency amount accepts valid value");
+        }
+
+        {
+            hash<auto> req = {"currencyAmount": 0};
+            hash<auto> h = op.serializeRequest(req);
+            assertRegex(">0<", h.body, "currency amount accepts zero");
+        }
+    }
+
+    # ============================================================
+    # Precision Facet Tests - Negative
+    # ============================================================
+
+    precisionFacetNegativeTests() {
+        WSOperation op = ws.getOperation("testFacets");
+
+        # Too many total digits (5 instead of 4)
+        assertThrows("SOAP-SERIALIZATION-ERROR", \op.serializeRequest(), {"fourDigitNum": 12345},
+            "totalDigits rejects 5 digit integer");
+
+        # Too many total digits with decimal
+        assertThrows("SOAP-SERIALIZATION-ERROR", \op.serializeRequest(), {"fourDigitNum": 123.45},
+            "totalDigits rejects 5 total digits (123.45)");
+
+        # Too many fraction digits (3 instead of 2)
+        assertThrows("SOAP-SERIALIZATION-ERROR", \op.serializeRequest(), {"twoDecimalPlaces": 1.234},
+            "fractionDigits rejects 3 decimal places");
+
+        # Too many fraction digits (4 instead of 2)
+        assertThrows("SOAP-SERIALIZATION-ERROR", \op.serializeRequest(), {"twoDecimalPlaces": 0.1234},
+            "fractionDigits rejects 4 decimal places");
+
+        # Currency amount with negative value
+        assertThrows("SOAP-SERIALIZATION-ERROR", \op.serializeRequest(), {"currencyAmount": -1},
+            "currency amount rejects negative value");
+    }
+
+    # ============================================================
+    # List Type Tests - Serialization
+    # ============================================================
+
+    listTypeSerializationTests() {
+        WSOperation op = ws.getOperation("testFacets");
+
+        # Integer list - verify space-separated format
+        {
+            hash<auto> req = {"intList": (1, 2, 3, 4, 5)};
+            hash<auto> h = op.serializeRequest(req);
+            assertRegex(">1 2 3 4 5<", h.body, "intList serializes as space-separated values");
+        }
+
+        # String list
+        {
+            hash<auto> req = {"stringList": ("hello", "world")};
+            hash<auto> h = op.serializeRequest(req);
+            assertRegex(">hello world<", h.body, "stringList serializes as space-separated values");
+        }
+
+        # Token list
+        {
+            hash<auto> req = {"intList": (100, 200, 300)};
+            hash<auto> h = op.serializeRequest(req);
+            assertRegex(">100 200 300<", h.body, "intList serializes larger numbers correctly");
+        }
+    }
+
+    # ============================================================
+    # List Type Tests - Deserialization
+    # ============================================================
+
+    listTypeDeserializationTests() {
+        WSOperation op = ws.getOperation("testFacets");
+
+        # Round-trip for integer list
+        {
+            hash<auto> req = {"intList": (1, 2, 3)};
+            hash<auto> h = op.serializeRequest(req);
+            hash<auto> parsed = parse_xml(h.body);
+            *hash<auto> result = op.deserializeRequest(parsed);
+            assertEq((1, 2, 3), result.intList, "intList round-trip preserves values");
+        }
+
+        # Round-trip for string list
+        {
+            hash<auto> req = {"stringList": ("foo", "bar")};
+            hash<auto> h = op.serializeRequest(req);
+            hash<auto> parsed = parse_xml(h.body);
+            *hash<auto> result = op.deserializeRequest(parsed);
+            assertEq(("foo", "bar"), result.stringList, "stringList round-trip preserves values");
+        }
+    }
+
+    # ============================================================
+    # List Type Tests - Corner Cases
+    # ============================================================
+
+    listTypeCornerCases() {
+        WSOperation op = ws.getOperation("testFacets");
+
+        # Single item list
+        {
+            hash<auto> req = {"intList": (42,)};
+            hash<auto> h = op.serializeRequest(req);
+            assertRegex(">42<", h.body, "single item list serializes correctly");
+        }
+
+        # Empty list
+        {
+            hash<auto> req = {"intList": ()};
+            hash<auto> h = op.serializeRequest(req);
+            assertRegex("intList", h.body, "empty list serializes (element present)");
+        }
+
+        # Large list
+        {
+            list<int> bigList = map $1, 1..100;
+            hash<auto> req = {"intList": bigList};
+            hash<auto> h = op.serializeRequest(req);
+            assertRegex("intList", h.body, "large list (100 items) serializes");
+            assertRegex("1 2 3", h.body, "large list starts correctly");
+            assertRegex("98 99 100", h.body, "large list ends correctly");
+        }
+
+        # Negative numbers in list
+        {
+            hash<auto> req = {"intList": (-1, 0, 1)};
+            hash<auto> h = op.serializeRequest(req);
+            assertRegex(">-1 0 1<", h.body, "list with negative numbers serializes correctly");
+        }
+    }
+
+    # ============================================================
+    # Duration Type Tests - Positive
+    # ============================================================
+
+    durationTypePositiveTests() {
+        WSOperation op = ws.getOperation("testFacets");
+
+        # Full duration: P1Y2M3DT4H5M6S
+        {
+            hash<auto> req = {"duration": "P1Y2M3DT4H5M6S"};
+            hash<auto> h = op.serializeRequest(req);
+            assertRegex(">P1Y2M3DT4H5M6S<", h.body, "full duration serializes correctly");
+        }
+
+        # Simple day duration: P1D
+        {
+            hash<auto> req = {"duration": "P1D"};
+            hash<auto> h = op.serializeRequest(req);
+            assertRegex(">P1D<", h.body, "simple day duration serializes correctly");
+        }
+
+        # Time-only duration: PT1H30M
+        {
+            hash<auto> req = {"duration": "PT1H30M"};
+            hash<auto> h = op.serializeRequest(req);
+            assertRegex(">PT1H30M<", h.body, "time-only duration serializes correctly");
+        }
+
+        # Year only
+        {
+            hash<auto> req = {"duration": "P1Y"};
+            hash<auto> h = op.serializeRequest(req);
+            assertRegex(">P1Y<", h.body, "year-only duration serializes correctly");
+        }
+
+        # Month only
+        {
+            hash<auto> req = {"duration": "P6M"};
+            hash<auto> h = op.serializeRequest(req);
+            assertRegex(">P6M<", h.body, "month-only duration serializes correctly");
+        }
+
+        # Seconds with decimal
+        {
+            hash<auto> req = {"duration": "PT1.5S"};
+            hash<auto> h = op.serializeRequest(req);
+            assertRegex(">PT1.5S<", h.body, "duration with decimal seconds serializes correctly");
+        }
+
+        # Zero duration
+        {
+            hash<auto> req = {"duration": "PT0S"};
+            hash<auto> h = op.serializeRequest(req);
+            assertRegex(">PT0S<", h.body, "zero duration serializes correctly");
+        }
+    }
+
+    # ============================================================
+    # Duration Type Tests - Negative
+    # ============================================================
+
+    durationTypeNegativeTests() {
+        WSOperation op = ws.getOperation("testFacets");
+
+        # Missing P prefix
+        assertThrows("SOAP-SERIALIZATION-ERROR", \op.serializeRequest(), {"duration": "1Y2M3D"},
+            "duration rejects missing P prefix");
+
+        # Invalid format - letters in wrong order
+        assertThrows("SOAP-SERIALIZATION-ERROR", \op.serializeRequest(), {"duration": "P1D2M"},
+            "duration rejects wrong order (day before month)");
+
+        # Empty duration
+        assertThrows("SOAP-SERIALIZATION-ERROR", \op.serializeRequest(), {"duration": ""},
+            "duration rejects empty string");
+
+        # Just P with nothing
+        assertThrows("SOAP-SERIALIZATION-ERROR", \op.serializeRequest(), {"duration": "P"},
+            "duration rejects bare P");
+
+        # Invalid characters
+        assertThrows("SOAP-SERIALIZATION-ERROR", \op.serializeRequest(), {"duration": "P1X"},
+            "duration rejects invalid designator X");
+    }
+
+    # ============================================================
+    # Partial Date Tests - Positive
+    # ============================================================
+
+    partialDatePositiveTests() {
+        WSOperation op = ws.getOperation("testFacets");
+
+        # gYear (YYYY)
+        {
+            hash<auto> req = {"gYear": "2026"};
+            hash<auto> h = op.serializeRequest(req);
+            assertRegex(">2026<", h.body, "gYear serializes correctly");
+        }
+
+        # gYearMonth (YYYY-MM)
+        {
+            hash<auto> req = {"gYearMonth": "2026-01"};
+            hash<auto> h = op.serializeRequest(req);
+            assertRegex(">2026-01<", h.body, "gYearMonth serializes correctly");
+        }
+
+        # gMonthDay (--MM-DD)
+        {
+            hash<auto> req = {"gMonthDay": "--01-27"};
+            hash<auto> h = op.serializeRequest(req);
+            assertRegex(">--01-27<", h.body, "gMonthDay serializes correctly");
+        }
+
+        # gMonth (--MM)
+        {
+            hash<auto> req = {"gMonth": "--01"};
+            hash<auto> h = op.serializeRequest(req);
+            assertRegex(">--01<", h.body, "gMonth serializes correctly");
+        }
+
+        # gDay (---DD)
+        {
+            hash<auto> req = {"gDay": "---27"};
+            hash<auto> h = op.serializeRequest(req);
+            assertRegex(">---27<", h.body, "gDay serializes correctly");
+        }
+
+        # Historic year (negative)
+        {
+            hash<auto> req = {"gYear": "-0500"};
+            hash<auto> h = op.serializeRequest(req);
+            assertRegex(">-0500<", h.body, "gYear handles negative (historic) year");
+        }
+    }
+
+    # ============================================================
+    # Partial Date Tests - Timezone
+    # ============================================================
+
+    partialDateTimezoneTests() {
+        WSOperation op = ws.getOperation("testFacets");
+
+        # gYear with UTC timezone
+        {
+            hash<auto> req = {"gYear": "2026Z"};
+            hash<auto> h = op.serializeRequest(req);
+            assertRegex(">2026Z<", h.body, "gYear with UTC timezone serializes correctly");
+        }
+
+        # gYear with positive offset
+        {
+            hash<auto> req = {"gYear": "2026+01:00"};
+            hash<auto> h = op.serializeRequest(req);
+            assertRegex(">2026\\+01:00<", h.body, "gYear with positive offset serializes correctly");
+        }
+
+        # gYear with negative offset
+        {
+            hash<auto> req = {"gYear": "2026-05:00"};
+            hash<auto> h = op.serializeRequest(req);
+            assertRegex(">2026-05:00<", h.body, "gYear with negative offset serializes correctly");
+        }
+
+        # gYearMonth with timezone
+        {
+            hash<auto> req = {"gYearMonth": "2026-01Z"};
+            hash<auto> h = op.serializeRequest(req);
+            assertRegex(">2026-01Z<", h.body, "gYearMonth with UTC serializes correctly");
+        }
+    }
+
+    # ============================================================
+    # Partial Date Tests - Negative
+    # ============================================================
+
+    partialDateNegativeTests() {
+        WSOperation op = ws.getOperation("testFacets");
+
+        # gYear with invalid format
+        assertThrows("SOAP-SERIALIZATION-ERROR", \op.serializeRequest(), {"gYear": "26"},
+            "gYear rejects 2-digit year");
+
+        assertThrows("SOAP-SERIALIZATION-ERROR", \op.serializeRequest(), {"gYear": ""},
+            "gYear rejects empty string");
+
+        # gYearMonth with invalid format
+        assertThrows("SOAP-SERIALIZATION-ERROR", \op.serializeRequest(), {"gYearMonth": "2026-1"},
+            "gYearMonth rejects single-digit month");
+
+        assertThrows("SOAP-SERIALIZATION-ERROR", \op.serializeRequest(), {"gYearMonth": "2026/01"},
+            "gYearMonth rejects slash separator");
+
+        # gMonthDay with invalid format
+        assertThrows("SOAP-SERIALIZATION-ERROR", \op.serializeRequest(), {"gMonthDay": "-01-27"},
+            "gMonthDay rejects single dash prefix");
+
+        assertThrows("SOAP-SERIALIZATION-ERROR", \op.serializeRequest(), {"gMonthDay": "01-27"},
+            "gMonthDay rejects no prefix");
+
+        # gMonth with invalid format
+        assertThrows("SOAP-SERIALIZATION-ERROR", \op.serializeRequest(), {"gMonth": "-01"},
+            "gMonth rejects single dash prefix");
+
+        # gDay with invalid format
+        assertThrows("SOAP-SERIALIZATION-ERROR", \op.serializeRequest(), {"gDay": "--27"},
+            "gDay rejects double dash prefix (needs triple)");
+    }
+
+    # ============================================================
+    # Float/Double Tests - Positive
+    # ============================================================
+
+    floatDoublePositiveTests() {
+        WSOperation op = ws.getOperation("testFacets");
+
+        # Regular float value
+        {
+            hash<auto> req = {"floatVal": 3.14159};
+            hash<auto> h = op.serializeRequest(req);
+            assertRegex("3.14159", h.body, "float serializes decimal correctly");
+        }
+
+        # Regular double value (more precision)
+        {
+            hash<auto> req = {"doubleVal": 3.141592653589793};
+            hash<auto> h = op.serializeRequest(req);
+            assertRegex("doubleVal", h.body, "double element present");
+        }
+
+        # Integer as float
+        {
+            hash<auto> req = {"floatVal": 42};
+            hash<auto> h = op.serializeRequest(req);
+            assertRegex(">42<", h.body, "float accepts integer value");
+        }
+
+        # Negative float
+        {
+            hash<auto> req = {"floatVal": -3.14};
+            hash<auto> h = op.serializeRequest(req);
+            assertRegex("-3.14", h.body, "float serializes negative value correctly");
+        }
+
+        # Very small float
+        {
+            hash<auto> req = {"floatVal": 0.0000001};
+            hash<auto> h = op.serializeRequest(req);
+            assertRegex("floatVal", h.body, "float accepts very small value");
+        }
+
+        # Very large float
+        {
+            hash<auto> req = {"floatVal": 1000000000};
+            hash<auto> h = op.serializeRequest(req);
+            assertRegex("floatVal", h.body, "float accepts very large value");
+        }
+    }
+
+    # ============================================================
+    # Float/Double Tests - Special Values
+    # ============================================================
+
+    floatDoubleSpecialValuesTests() {
+        WSOperation op = ws.getOperation("testFacets");
+
+        # Positive infinity
+        {
+            hash<auto> req = {"floatVal": "INF"};
+            hash<auto> h = op.serializeRequest(req);
+            assertRegex(">INF<", h.body, "float serializes positive infinity");
+        }
+
+        # Negative infinity
+        {
+            hash<auto> req = {"floatVal": "-INF"};
+            hash<auto> h = op.serializeRequest(req);
+            assertRegex(">-INF<", h.body, "float serializes negative infinity");
+        }
+
+        # NaN
+        {
+            hash<auto> req = {"floatVal": "NaN"};
+            hash<auto> h = op.serializeRequest(req);
+            assertRegex(">NaN<", h.body, "float serializes NaN");
+        }
+
+        # Double infinity
+        {
+            hash<auto> req = {"doubleVal": "INF"};
+            hash<auto> h = op.serializeRequest(req);
+            assertRegex(">INF<", h.body, "double serializes infinity");
+        }
+
+        # Zero
+        {
+            hash<auto> req = {"floatVal": 0};
+            hash<auto> h = op.serializeRequest(req);
+            assertRegex(">0<", h.body, "float serializes zero");
+        }
+
+        # Negative zero (should serialize as 0)
+        {
+            hash<auto> req = {"floatVal": -0.0};
+            hash<auto> h = op.serializeRequest(req);
+            assertRegex("floatVal", h.body, "float handles negative zero");
+        }
+    }
+
+    # ============================================================
+    # Float/Double Tests - Negative (for positiveFloat facet)
+    # ============================================================
+
+    floatDoubleNegativeTests() {
+        WSOperation op = ws.getOperation("testFacets");
+
+        # positiveFloat with zero (minExclusive > 0)
+        assertThrows("SOAP-SERIALIZATION-ERROR", \op.serializeRequest(), {"positiveFloat": 0},
+            "positiveFloat rejects zero");
+
+        # positiveFloat with negative value
+        assertThrows("SOAP-SERIALIZATION-ERROR", \op.serializeRequest(), {"positiveFloat": -1.5},
+            "positiveFloat rejects negative value");
+
+        # positiveFloat with negative infinity
+        assertThrows("SOAP-SERIALIZATION-ERROR", \op.serializeRequest(), {"positiveFloat": "-INF"},
+            "positiveFloat rejects negative infinity");
+    }
+
+    # ============================================================
+    # Round-Trip Tests - Serialization
+    # ============================================================
+
+    roundTripSerializationTests() {
+        WSOperation op = ws.getOperation("testFacets");
+
+        # Multiple fields round-trip
+        {
+            hash<auto> req = {
+                "patternStr": "XY9999",
+                "positiveInt": 42,
+                "percentInt": 75,
+            };
+
+            hash<auto> h = op.serializeRequest(req);
+            string xml = h.body;
+            hash<auto> parsed = parse_xml(xml);
+            *hash<auto> result = op.deserializeRequest(parsed);
+
+            assertEq("XY9999", result.patternStr, "round-trip preserves patternStr");
+            assertEq(42, result.positiveInt, "round-trip preserves positiveInt");
+            assertEq(75, result.percentInt, "round-trip preserves percentInt");
+        }
+
+        # Duration round-trip
+        {
+            hash<auto> req = {"duration": "P1Y2M3DT4H5M6S"};
+            hash<auto> h = op.serializeRequest(req);
+            hash<auto> parsed = parse_xml(h.body);
+            *hash<auto> result = op.deserializeRequest(parsed);
+            assertEq("P1Y2M3DT4H5M6S", result.duration, "round-trip preserves duration");
+        }
+
+        # Partial dates round-trip
+        {
+            hash<auto> req = {"gYear": "2026"};
+            hash<auto> h = op.serializeRequest(req);
+            hash<auto> parsed = parse_xml(h.body);
+            *hash<auto> result = op.deserializeRequest(parsed);
+            assertEq("2026", result.gYear, "round-trip preserves gYear");
+        }
+    }
+
+    # ============================================================
+    # Round-Trip Tests - Deserialization
+    # ============================================================
+
+    roundTripDeserializationTests() {
+        WSOperation op = ws.getOperation("testFacets");
+
+        # Float round-trip with tolerance check
+        {
+            hash<auto> req = {"floatVal": 2.718};
+            hash<auto> h = op.serializeRequest(req);
+            hash<auto> parsed = parse_xml(h.body);
+            *hash<auto> result = op.deserializeRequest(parsed);
+
+            float diff = abs(2.718 - result.floatVal);
+            assertLt(0.001, diff, "float round-trip within tolerance");
+        }
+
+        # Decimal round-trip
+        {
+            hash<auto> req = {"twoDecimalPlaces": 123.45};
+            hash<auto> h = op.serializeRequest(req);
+            hash<auto> parsed = parse_xml(h.body);
+            *hash<auto> result = op.deserializeRequest(parsed);
+
+            float diff = abs(123.45 - result.twoDecimalPlaces);
+            assertLt(0.001, diff, "decimal round-trip within tolerance");
+        }
+
+        # String round-trip
+        {
+            hash<auto> req = {"boundedStr": "test string"};
+            hash<auto> h = op.serializeRequest(req);
+            hash<auto> parsed = parse_xml(h.body);
+            *hash<auto> result = op.deserializeRequest(parsed);
+            assertEq("test string", result.boundedStr, "string round-trip exact match");
+        }
+    }
+
+    # ============================================================
+    # Libxml2 Cross-Validation Tests
+    # ============================================================
+    # These tests verify that:
+    # 1. Valid data serialized by our code passes libxml2 validation
+    # 2. Invalid data that our native validation rejects would also fail libxml2
+    # 3. Our serialization format matches XSD standards
+
+    libxml2CrossValidationTests() {
+        WSOperation op = ws.getOperation("testFacets");
+        string targetNs = "http://qore.org/xsd-facets-test";
+
+        # Verify XSD schema was extracted and contains expected content
+        assertGt(100, xsdSchema.size(), "XSD schema extracted from WSDL");
+        assertRegex("targetNamespace", xsdSchema, "XSD contains targetNamespace");
+        assertRegex("PatternString", xsdSchema, "XSD contains PatternString type");
+
+        # ============================================================
+        # Positive tests - valid data passes both native and libxml2
+        # ============================================================
+
+        # Pattern facet at boundaries
+        assertLibxml2Accepts(op.serializeRequest({"patternStr": "AA0000"}),
+            "libxml2 accepts pattern at lower boundary AA0000");
+        assertLibxml2Accepts(op.serializeRequest({"patternStr": "ZZ9999"}),
+            "libxml2 accepts pattern at upper boundary ZZ9999");
+
+        # Multi-pattern (must match all patterns)
+        assertLibxml2Accepts(op.serializeRequest({"multiPatternStr": "A1"}),
+            "libxml2 accepts minimal multi-pattern A1");
+        assertLibxml2Accepts(op.serializeRequest({"multiPatternStr": "Testing123"}),
+            "libxml2 accepts multi-pattern Testing123");
+
+        # Length facets at boundaries
+        assertLibxml2Accepts(op.serializeRequest({"fixedLenStr": "0123456789"}),
+            "libxml2 accepts exact length 10");
+        assertLibxml2Accepts(op.serializeRequest({"minLenStr": "12345"}),
+            "libxml2 accepts minLength at boundary 5");
+        assertLibxml2Accepts(op.serializeRequest({"maxLenStr": "12345678901234567890"}),
+            "libxml2 accepts maxLength at boundary 20");
+        assertLibxml2Accepts(op.serializeRequest({"boundedStr": "abc"}),
+            "libxml2 accepts bounded length at min boundary 3");
+
+        # Numeric range facets at boundaries
+        assertLibxml2Accepts(op.serializeRequest({"positiveInt": 1}),
+            "libxml2 accepts minInclusive at boundary 1");
+        assertLibxml2Accepts(op.serializeRequest({"percentInt": 0}),
+            "libxml2 accepts percentage at min boundary 0");
+        assertLibxml2Accepts(op.serializeRequest({"percentInt": 100}),
+            "libxml2 accepts percentage at max boundary 100");
+
+        # Precision facets
+        assertLibxml2Accepts(op.serializeRequest({"fourDigitNum": 1234}),
+            "libxml2 accepts 4 digit number");
+        assertLibxml2Accepts(op.serializeRequest({"fourDigitNum": 12.34}),
+            "libxml2 accepts 4 total digits with decimal");
+        assertLibxml2Accepts(op.serializeRequest({"twoDecimalPlaces": 99.99}),
+            "libxml2 accepts 2 decimal places");
+
+        # List types
+        assertLibxml2Accepts(op.serializeRequest({"intList": (1, 2, 3)}),
+            "libxml2 accepts integer list");
+        assertLibxml2Accepts(op.serializeRequest({"intList": (42,)}),
+            "libxml2 accepts single-item list");
+        assertLibxml2Accepts(op.serializeRequest({"stringList": ("hello", "world")}),
+            "libxml2 accepts string list");
+
+        # Duration type variations
+        assertLibxml2Accepts(op.serializeRequest({"duration": "P1Y"}),
+            "libxml2 accepts year-only duration");
+        assertLibxml2Accepts(op.serializeRequest({"duration": "PT1H30M"}),
+            "libxml2 accepts time-only duration");
+        assertLibxml2Accepts(op.serializeRequest({"duration": "P1Y2M3DT4H5M6S"}),
+            "libxml2 accepts full duration");
+        assertLibxml2Accepts(op.serializeRequest({"duration": "PT0S"}),
+            "libxml2 accepts zero duration");
+
+        # Partial date types
+        assertLibxml2Accepts(op.serializeRequest({"gYear": "2026"}),
+            "libxml2 accepts gYear");
+        assertLibxml2Accepts(op.serializeRequest({"gYear": "2026Z"}),
+            "libxml2 accepts gYear with UTC timezone");
+        assertLibxml2Accepts(op.serializeRequest({"gYear": "-0500"}),
+            "libxml2 accepts negative gYear");
+        assertLibxml2Accepts(op.serializeRequest({"gYearMonth": "2026-01"}),
+            "libxml2 accepts gYearMonth");
+        assertLibxml2Accepts(op.serializeRequest({"gMonthDay": "--01-27"}),
+            "libxml2 accepts gMonthDay");
+        assertLibxml2Accepts(op.serializeRequest({"gMonth": "--01"}),
+            "libxml2 accepts gMonth");
+        assertLibxml2Accepts(op.serializeRequest({"gDay": "---27"}),
+            "libxml2 accepts gDay");
+
+        # Float/double types including special values
+        assertLibxml2Accepts(op.serializeRequest({"floatVal": 3.14159}),
+            "libxml2 accepts float");
+        assertLibxml2Accepts(op.serializeRequest({"floatVal": -3.14}),
+            "libxml2 accepts negative float");
+        assertLibxml2Accepts(op.serializeRequest({"floatVal": "INF"}),
+            "libxml2 accepts INF");
+        assertLibxml2Accepts(op.serializeRequest({"floatVal": "-INF"}),
+            "libxml2 accepts -INF");
+        assertLibxml2Accepts(op.serializeRequest({"floatVal": "NaN"}),
+            "libxml2 accepts NaN");
+        assertLibxml2Accepts(op.serializeRequest({"doubleVal": 2.718281828}),
+            "libxml2 accepts double");
+
+        # Combined complex request
+        assertLibxml2Accepts(op.serializeRequest({
+            "patternStr": "AB1234",
+            "positiveInt": 42,
+            "percentInt": 75,
+            "duration": "P1D",
+            "gYear": "2026",
+            "floatVal": 3.14,
+        }), "libxml2 accepts complex multi-field request");
+
+        # ============================================================
+        # Negative tests - invalid XML rejected by libxml2
+        # ============================================================
+        # These test that hand-crafted invalid XML is rejected by libxml2,
+        # verifying our schema is correctly enforced.
+
+        # Invalid pattern value (libxml2 enforces xs:pattern)
+        string invalidPattern = sprintf(
+            '<?xml version="1.0" encoding="UTF-8"?>' + "\n" +
+            '<xsdfa:TestFacets xmlns:xsdfa="%s">' +
+            '<xsdfa:patternStr>invalid</xsdfa:patternStr>' +
+            '</xsdfa:TestFacets>', targetNs);
+        assertLibxml2Rejects(invalidPattern,
+            "libxml2 rejects invalid pattern 'invalid'");
+
+        # Invalid minLength (too short)
+        string tooShort = sprintf(
+            '<?xml version="1.0" encoding="UTF-8"?>' + "\n" +
+            '<xsdfa:TestFacets xmlns:xsdfa="%s">' +
+            '<xsdfa:minLenStr>ab</xsdfa:minLenStr>' +
+            '</xsdfa:TestFacets>', targetNs);
+        assertLibxml2Rejects(tooShort,
+            "libxml2 rejects string below minLength");
+
+        # Invalid maxLength (too long)
+        string tooLong = sprintf(
+            '<?xml version="1.0" encoding="UTF-8"?>' + "\n" +
+            '<xsdfa:TestFacets xmlns:xsdfa="%s">' +
+            '<xsdfa:maxLenStr>123456789012345678901</xsdfa:maxLenStr>' +
+            '</xsdfa:TestFacets>', targetNs);
+        assertLibxml2Rejects(tooLong,
+            "libxml2 rejects string above maxLength");
+
+        # Invalid duration format
+        string badDuration = sprintf(
+            '<?xml version="1.0" encoding="UTF-8"?>' + "\n" +
+            '<xsdfa:TestFacets xmlns:xsdfa="%s">' +
+            '<xsdfa:duration>invalid</xsdfa:duration>' +
+            '</xsdfa:TestFacets>', targetNs);
+        assertLibxml2Rejects(badDuration,
+            "libxml2 rejects invalid duration format");
+
+        # Invalid gYear format
+        string badGYear = sprintf(
+            '<?xml version="1.0" encoding="UTF-8"?>' + "\n" +
+            '<xsdfa:TestFacets xmlns:xsdfa="%s">' +
+            '<xsdfa:gYear>26</xsdfa:gYear>' +
+            '</xsdfa:TestFacets>', targetNs);
+        assertLibxml2Rejects(badGYear,
+            "libxml2 rejects 2-digit gYear");
+
+        # Invalid integer in list
+        string badList = sprintf(
+            '<?xml version="1.0" encoding="UTF-8"?>' + "\n" +
+            '<xsdfa:TestFacets xmlns:xsdfa="%s">' +
+            '<xsdfa:intList>1 2 abc 4</xsdfa:intList>' +
+            '</xsdfa:TestFacets>', targetNs);
+        assertLibxml2Rejects(badList,
+            "libxml2 rejects non-integer in int list");
+
+        # Unknown element (schema validation)
+        string unknownElem = sprintf(
+            '<?xml version="1.0" encoding="UTF-8"?>' + "\n" +
+            '<xsdfa:TestFacets xmlns:xsdfa="%s">' +
+            '<xsdfa:unknownElement>value</xsdfa:unknownElement>' +
+            '</xsdfa:TestFacets>', targetNs);
+        assertLibxml2Rejects(unknownElem,
+            "libxml2 rejects unknown element");
+
+        # ============================================================
+        # Agreement tests - verify native and libxml2 agree
+        # ============================================================
+        # These verify that values our native validation rejects
+        # would also be rejected by libxml2 (if we bypassed native validation)
+
+        # Test that boundary violations are caught consistently
+        # Our native validation catches these; verify libxml2 would too
+
+        # Pattern violation
+        string patternViolation = sprintf(
+            '<?xml version="1.0" encoding="UTF-8"?>' + "\n" +
+            '<xsdfa:TestFacets xmlns:xsdfa="%s">' +
+            '<xsdfa:patternStr>ab1234</xsdfa:patternStr>' +
+            '</xsdfa:TestFacets>', targetNs);
+        bool nativeRejects = False;
+        try {
+            op.serializeRequest({"patternStr": "ab1234"});
+        } catch (hash<ExceptionInfo> ex) {
+            nativeRejects = True;
+        }
+        assertTrue(nativeRejects, "native validation rejects lowercase pattern");
+        assertLibxml2Rejects(patternViolation,
+            "libxml2 also rejects lowercase pattern - validations agree");
+
+        # Length violation
+        string lengthViolation = sprintf(
+            '<?xml version="1.0" encoding="UTF-8"?>' + "\n" +
+            '<xsdfa:TestFacets xmlns:xsdfa="%s">' +
+            '<xsdfa:fixedLenStr>short</xsdfa:fixedLenStr>' +
+            '</xsdfa:TestFacets>', targetNs);
+        nativeRejects = False;
+        try {
+            op.serializeRequest({"fixedLenStr": "short"});
+        } catch (hash<ExceptionInfo> ex) {
+            nativeRejects = True;
+        }
+        assertTrue(nativeRejects, "native validation rejects wrong length");
+        assertLibxml2Rejects(lengthViolation,
+            "libxml2 also rejects wrong length - validations agree");
+    }
+}

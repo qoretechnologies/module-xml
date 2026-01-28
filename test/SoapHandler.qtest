@@ -227,6 +227,11 @@ class SoapHandlerTest inherits QUnit::Test {
         addTestCase("logMethodFromSubclass", \logMethodFromSubclassTest());
         addTestCase("wsdlHttpErrorPropagation", \wsdlHttpErrorPropagationTest());
         addTestCase("wsdlHttpErrorTypes", \wsdlHttpErrorTypesTest());
+        addTestCase("independentRoundTrip", \independentRoundTripTest());
+        addTestCase("independentFaultTest", \independentFaultTest());
+        addTestCase("independentComplexNamespace", \independentComplexNamespaceTest());
+        addTestCase("independentKnownGoodMessages", \independentKnownGoodMessagesTest());
+        addTestCase("independentMalformedTest", \independentMalformedTest());
 
         # execute tests
         set_return_value(main());
@@ -598,6 +603,450 @@ class SoapHandlerTest inherits QUnit::Test {
             foreach string err in (non_http_errors) {
                 assertFalse(err =~ /^HTTP/, sprintf("'%s' does not match HTTP error pattern", err));
             }
+        }
+    }
+
+    independentRoundTripTest() {
+        # Test SOAP handler using raw HTTPClient - completely independent of SoapClient
+        # This verifies our server correctly handles standard SOAP messages
+
+        # Create raw HTTP client with error_passthru to get responses without exceptions
+        HTTPClient hc({"url": url1, "error_passthru": True});
+
+        # Test 1: Send hand-crafted SOAP 1.2 request (server uses SOAP 1.2 binding)
+        # Structure: operation wrapper (lowercase) > element from schema (matches schema element name)
+        # Note: The message part name "body" is NOT an XML element - it's just a reference
+        {
+            string soapRequest = '<?xml version="1.0" encoding="UTF-8"?>
+<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
+               xmlns:tns="http://qoretechnologies.com/simpletest">
+  <soap:Body>
+    <tns:getCompanyInfo>
+      <tns:GetCompanyInfo>
+        <tns:tickerSymbol>TEST123</tns:tickerSymbol>
+      </tns:GetCompanyInfo>
+    </tns:getCompanyInfo>
+  </soap:Body>
+</soap:Envelope>';
+
+            hash<auto> info;
+            string response = hc.post(path1, soapRequest, {
+                "Content-Type": "application/soap+xml; charset=utf-8",
+            }, \info);
+
+            # Verify HTTP response
+            assertEq(200, info."response-headers".status_code, "SOAP 1.2 request returns 200");
+            assertTrue(info."response-headers"."content-type" =~ /xml/i, "Response is XML");
+
+            # Parse and verify response structure independently
+            hash<auto> responseXml = parse_xml(response);
+            assertTrue(responseXml.firstKey() =~ /:Envelope$/,
+                       "Response has SOAP envelope");
+
+            # Verify we got a valid SOAP response with Body
+            assertTrue(response =~ /:Body>/i, "Response contains SOAP Body");
+
+            # Verify we got the expected result value (99.9 from server)
+            assertTrue(response =~ />99\.9</, "Response contains expected result value");
+        }
+
+        # Test 2: Verify WSDL retrieval works independently
+        {
+            hash<auto> info;
+            string wsdl = hc.get(path1 + "?wsdl", NOTHING, \info);
+            assertEq(200, info."response-headers".status_code, "WSDL request returns 200");
+            assertTrue(wsdl =~ /<wsdl:definitions/i || wsdl =~ /<definitions/i, "Response is WSDL");
+            assertTrue(wsdl =~ /getCompanyInfo/i, "WSDL contains operation name");
+        }
+
+        # Test 3: Verify response structure matches WSDL definition
+        # Send request and validate response has all expected parts
+        {
+            string soapRequest = '<?xml version="1.0" encoding="UTF-8"?>
+<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
+               xmlns:tns="http://qoretechnologies.com/simpletest">
+  <soap:Body>
+    <tns:getCompanyInfo>
+      <tns:GetCompanyInfo>
+        <tns:tickerSymbol>VALIDATE</tns:tickerSymbol>
+      </tns:GetCompanyInfo>
+    </tns:getCompanyInfo>
+  </soap:Body>
+</soap:Envelope>';
+
+            hash<auto> info;
+            string response = hc.post(path1, soapRequest, {
+                "Content-Type": "application/soap+xml; charset=utf-8",
+            }, \info);
+
+            assertEq(200, info."response-headers".status_code, "Validation request returns 200");
+            # Response should have getCompanyInfoResponse element
+            assertTrue(response =~ /getCompanyInfoResponse/i, "Response has operation response element");
+            # Response should contain docs (string) and logo (base64Binary) parts
+            assertTrue(response =~ /<[^>]*docs[^>]*>/i, "Response contains docs part");
+            assertTrue(response =~ /<[^>]*logo[^>]*>/i, "Response contains logo part");
+        }
+    }
+
+    independentFaultTest() {
+        # Test SOAP fault generation using raw HTTP client
+        HTTPClient hc({"url": url1, "error_passthru": True});
+
+        # Send request that triggers a fault (tickerSymbol="ERR" triggers server error)
+        # Using SOAP 1.2 format to match server binding
+        string faultRequest = '<?xml version="1.0" encoding="UTF-8"?>
+<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
+               xmlns:tns="http://qoretechnologies.com/simpletest">
+  <soap:Body>
+    <tns:getCompanyInfo>
+      <tns:GetCompanyInfo>
+        <tns:tickerSymbol>ERR</tns:tickerSymbol>
+      </tns:GetCompanyInfo>
+    </tns:getCompanyInfo>
+  </soap:Body>
+</soap:Envelope>';
+
+        hash<auto> info;
+        string response = hc.post(path1, faultRequest, {
+            "Content-Type": "application/soap+xml; charset=utf-8",
+        }, \info);
+
+        # Verify fault response (SOAP 1.2 uses 500 for server faults, SOAP 1.1 uses 400)
+        assertTrue(info."response-headers".status_code >= 400 && info."response-headers".status_code <= 500,
+                   "SOAP fault returns error status: " + string(info."response-headers".status_code));
+        assertTrue(response =~ /:Fault>/i || response =~ /<Fault>/i, "Response contains SOAP Fault");
+        assertTrue(response =~ /getCompanyInfoFault/i || response =~ /faultcode/i ||
+                   response =~ /faultstring/i || response =~ /a terrible error/i,
+                   "Fault contains error details");
+    }
+
+    independentComplexNamespaceTest() {
+        # Test SOAP handling with complex namespace scenarios using known-good external messages
+        # These messages are modeled after SoapUI-generated requests with complex namespace handling
+
+        HTTPClient hc({"url": url1, "error_passthru": True});
+
+        # Test 1: Multiple namespace prefixes for same namespace (common in real-world SOAP)
+        # Some tools generate different prefixes - server must handle this
+        {
+            string request = '<?xml version="1.0" encoding="UTF-8"?>
+<soapenv:Envelope xmlns:soapenv="http://www.w3.org/2003/05/soap-envelope"
+                  xmlns:ns1="http://qoretechnologies.com/simpletest"
+                  xmlns:tns="http://qoretechnologies.com/simpletest"
+                  xmlns:xsd="http://www.w3.org/2001/XMLSchema"
+                  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <soapenv:Body>
+    <ns1:getCompanyInfo>
+      <tns:GetCompanyInfo>
+        <ns1:tickerSymbol>MULTIPREFIX</ns1:tickerSymbol>
+      </tns:GetCompanyInfo>
+    </ns1:getCompanyInfo>
+  </soapenv:Body>
+</soapenv:Envelope>';
+
+            hash<auto> info;
+            string response = hc.post(path1, request, {
+                "Content-Type": "application/soap+xml; charset=utf-8",
+            }, \info);
+
+            assertEq(200, info."response-headers".status_code, "Multiple namespace prefixes handled");
+            assertTrue(response =~ />99\.9</, "Response contains expected value with mixed prefixes");
+        }
+
+        # Test 2: SOAP 1.1 envelope (different namespace than 1.2)
+        {
+            string soap11Request = '<?xml version="1.0" encoding="UTF-8"?>
+<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/"
+               xmlns:tns="http://qoretechnologies.com/simpletest"
+               xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <soap:Header/>
+  <soap:Body>
+    <tns:getCompanyInfo>
+      <tns:GetCompanyInfo>
+        <tns:tickerSymbol>SOAP11TEST</tns:tickerSymbol>
+      </tns:GetCompanyInfo>
+    </tns:getCompanyInfo>
+  </soap:Body>
+</soap:Envelope>';
+
+            hash<auto> info;
+            string response = hc.post(path1, soap11Request, {
+                "Content-Type": "text/xml; charset=utf-8",
+                "SOAPAction": "http://example.com/getCompanyInfo",
+            }, \info);
+
+            assertEq(200, info."response-headers".status_code, "SOAP 1.1 envelope accepted");
+            assertTrue(response =~ /Envelope/i, "SOAP 1.1 returns valid envelope");
+            assertTrue(response =~ />99\.9</, "SOAP 1.1 returns expected value");
+        }
+
+        # Test 3: Default namespace (no prefix) - common pattern
+        {
+            string defaultNsRequest = '<?xml version="1.0" encoding="UTF-8"?>
+<Envelope xmlns="http://www.w3.org/2003/05/soap-envelope"
+          xmlns:tns="http://qoretechnologies.com/simpletest">
+  <Body>
+    <tns:getCompanyInfo>
+      <tns:GetCompanyInfo>
+        <tns:tickerSymbol>DEFAULTNS</tns:tickerSymbol>
+      </tns:GetCompanyInfo>
+    </tns:getCompanyInfo>
+  </Body>
+</Envelope>';
+
+            hash<auto> info;
+            string response = hc.post(path1, defaultNsRequest, {
+                "Content-Type": "application/soap+xml; charset=utf-8",
+            }, \info);
+
+            assertEq(200, info."response-headers".status_code, "Default namespace envelope accepted");
+            assertTrue(response =~ />99\.9</, "Default namespace returns expected value");
+        }
+
+        # Test 4: Namespace declarations on child elements (SoapUI sometimes generates this)
+        {
+            string childNsRequest = '<?xml version="1.0" encoding="UTF-8"?>
+<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope">
+  <soap:Body>
+    <tns:getCompanyInfo xmlns:tns="http://qoretechnologies.com/simpletest">
+      <tns:GetCompanyInfo>
+        <tns:tickerSymbol>CHILDNS</tns:tickerSymbol>
+      </tns:GetCompanyInfo>
+    </tns:getCompanyInfo>
+  </soap:Body>
+</soap:Envelope>';
+
+            hash<auto> info;
+            string response = hc.post(path1, childNsRequest, {
+                "Content-Type": "application/soap+xml; charset=utf-8",
+            }, \info);
+
+            assertEq(200, info."response-headers".status_code, "Child namespace declarations handled");
+            assertTrue(response =~ />99\.9</, "Child namespace returns expected value");
+        }
+
+        # Test 5: XML with processing instructions and comments (real-world SOAP often has these)
+        {
+            string annotatedRequest = '<?xml version="1.0" encoding="UTF-8"?>
+<?xml-stylesheet type="text/xsl" href="soap.xsl"?>
+<!-- Generated by test framework -->
+<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
+               xmlns:tns="http://qoretechnologies.com/simpletest">
+  <!-- Request body follows -->
+  <soap:Body>
+    <tns:getCompanyInfo>
+      <!-- Company info request -->
+      <tns:GetCompanyInfo>
+        <tns:tickerSymbol>ANNOTATED</tns:tickerSymbol>
+      </tns:GetCompanyInfo>
+    </tns:getCompanyInfo>
+  </soap:Body>
+</soap:Envelope>';
+
+            hash<auto> info;
+            string response = hc.post(path1, annotatedRequest, {
+                "Content-Type": "application/soap+xml; charset=utf-8",
+            }, \info);
+
+            assertEq(200, info."response-headers".status_code, "Annotated XML with comments handled");
+            assertTrue(response =~ />99\.9</, "Annotated request returns expected value");
+        }
+
+        # Test 6: Whitespace variations (different tools format differently)
+        {
+            # Minimal whitespace (single line)
+            string compactRequest = '<?xml version="1.0"?><soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope" xmlns:tns="http://qoretechnologies.com/simpletest"><soap:Body><tns:getCompanyInfo><tns:GetCompanyInfo><tns:tickerSymbol>COMPACT</tns:tickerSymbol></tns:GetCompanyInfo></tns:getCompanyInfo></soap:Body></soap:Envelope>';
+
+            hash<auto> info;
+            string response = hc.post(path1, compactRequest, {
+                "Content-Type": "application/soap+xml; charset=utf-8",
+            }, \info);
+
+            assertEq(200, info."response-headers".status_code, "Compact single-line XML handled");
+            assertTrue(response =~ />99\.9</, "Compact request returns expected value");
+        }
+    }
+
+    independentKnownGoodMessagesTest() {
+        # Test using known-good SOAP messages that match real-world external tool output
+        # These are based on messages from SoapUI, .NET WCF, and other SOAP implementations
+
+        HTTPClient hc({"url": url1, "error_passthru": True});
+
+        # Test 1: SoapUI-style request with explicit encoding style
+        {
+            string soapUiStyle = '<?xml version="1.0" encoding="UTF-8"?>
+<soapenv:Envelope xmlns:soapenv="http://www.w3.org/2003/05/soap-envelope"
+                  xmlns:sim="http://qoretechnologies.com/simpletest"
+                  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                  xmlns:xsd="http://www.w3.org/2001/XMLSchema">
+   <soapenv:Header/>
+   <soapenv:Body>
+      <sim:getCompanyInfo>
+         <sim:GetCompanyInfo>
+            <sim:tickerSymbol>SOAPUI</sim:tickerSymbol>
+         </sim:GetCompanyInfo>
+      </sim:getCompanyInfo>
+   </soapenv:Body>
+</soapenv:Envelope>';
+
+            hash<auto> info;
+            string response = hc.post(path1, soapUiStyle, {
+                "Content-Type": "application/soap+xml; charset=utf-8",
+            }, \info);
+
+            assertEq(200, info."response-headers".status_code, "SoapUI-style request handled");
+            assertTrue(response =~ /Envelope.*Body.*Response/si, "SoapUI response has proper structure");
+        }
+
+        # Test 2: .NET WCF style (uses different namespace prefix conventions)
+        {
+            string wcfStyle = '<?xml version="1.0" encoding="utf-8"?>
+<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope"
+            xmlns:a="http://www.w3.org/2005/08/addressing">
+  <s:Header>
+    <a:Action s:mustUnderstand="1">http://example.com/getCompanyInfo</a:Action>
+    <a:To s:mustUnderstand="1">http://localhost/service</a:To>
+  </s:Header>
+  <s:Body xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+          xmlns:xsd="http://www.w3.org/2001/XMLSchema">
+    <getCompanyInfo xmlns="http://qoretechnologies.com/simpletest">
+      <GetCompanyInfo>
+        <tickerSymbol>WCFTEST</tickerSymbol>
+      </GetCompanyInfo>
+    </getCompanyInfo>
+  </s:Body>
+</s:Envelope>';
+
+            hash<auto> info;
+            hc.post(path1, wcfStyle, {
+                "Content-Type": "application/soap+xml; charset=utf-8; action=\"http://example.com/getCompanyInfo\"",
+            }, \info);
+
+            # WCF style with WS-Addressing may not be fully supported, but should not crash
+            assertTrue(info."response-headers".status_code == 200 || info."response-headers".status_code >= 400,
+                       "WCF-style request handled without crash: " + string(info."response-headers".status_code));
+        }
+
+        # Test 3: Apache Axis style (Java SOAP)
+        {
+            string axisStyle = '<?xml version="1.0" encoding="UTF-8"?>
+<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/"
+                  xmlns:xsd="http://www.w3.org/2001/XMLSchema"
+                  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <soapenv:Body>
+    <ns1:getCompanyInfo xmlns:ns1="http://qoretechnologies.com/simpletest"
+                        soapenv:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
+      <ns1:GetCompanyInfo>
+        <ns1:tickerSymbol xsi:type="xsd:string">AXISTEST</ns1:tickerSymbol>
+      </ns1:GetCompanyInfo>
+    </ns1:getCompanyInfo>
+  </soapenv:Body>
+</soapenv:Envelope>';
+
+            hash<auto> info;
+            string response = hc.post(path1, axisStyle, {
+                "Content-Type": "text/xml; charset=utf-8",
+                "SOAPAction": "\"http://example.com/getCompanyInfo\"",
+            }, \info);
+
+            assertEq(200, info."response-headers".status_code, "Axis-style SOAP 1.1 request handled");
+            assertTrue(response =~ />99\.9</, "Axis-style returns expected value");
+        }
+
+        # Test 4: Response structure validation - verify our response matches standard format
+        {
+            string request = '<?xml version="1.0" encoding="UTF-8"?>
+<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
+               xmlns:tns="http://qoretechnologies.com/simpletest">
+  <soap:Body>
+    <tns:getCompanyInfo>
+      <tns:GetCompanyInfo>
+        <tns:tickerSymbol>VALIDATE_RESPONSE</tns:tickerSymbol>
+      </tns:GetCompanyInfo>
+    </tns:getCompanyInfo>
+  </soap:Body>
+</soap:Envelope>';
+
+            hash<auto> info;
+            string response = hc.post(path1, request, {
+                "Content-Type": "application/soap+xml; charset=utf-8",
+            }, \info);
+
+            assertEq(200, info."response-headers".status_code, "Request for response validation");
+
+            # Validate response is well-formed XML
+            hash<auto> parsedResponse;
+            try {
+                parsedResponse = parse_xml(response);
+            } catch (hash<ExceptionInfo> ex) {
+                fail("Response is not valid XML: " + ex.desc);
+            }
+            assertTrue(True, "Response is well-formed XML");
+
+            # Validate SOAP structure
+            string envKey = parsedResponse.firstKey();
+            assertTrue(envKey =~ /Envelope$/i, "Response root is Envelope");
+
+            # Validate namespace declarations present
+            assertTrue(response =~ /xmlns:/i, "Response has namespace declarations");
+
+            # Validate Body present
+            assertTrue(response =~ /:Body>|<Body>/i, "Response has Body element");
+
+            # Validate response element present
+            assertTrue(response =~ /getCompanyInfoResponse/i, "Response has operation response element");
+        }
+    }
+
+    independentMalformedTest() {
+        # Test server handling of malformed requests using raw HTTP
+        HTTPClient hc({"url": url1, "error_passthru": True});
+
+        # Test 1: Completely invalid XML
+        {
+            hash<auto> info;
+            hc.post(path1, "this is not xml", {
+                "Content-Type": "text/xml; charset=utf-8",
+            }, \info);
+            assertTrue(info."response-headers".status_code >= 400, "Invalid XML returns error status: " + string(info."response-headers".status_code));
+        }
+
+        # Test 2: Valid XML but not SOAP
+        {
+            hash<auto> info;
+            hc.post(path1, '<?xml version="1.0"?><notsoap><data>test</data></notsoap>', {
+                "Content-Type": "text/xml; charset=utf-8",
+            }, \info);
+            assertTrue(info."response-headers".status_code >= 400, "Non-SOAP XML returns error status: " + string(info."response-headers".status_code));
+        }
+
+        # Test 3: SOAP envelope but wrong operation
+        {
+            string unknownOp = '<?xml version="1.0" encoding="UTF-8"?>
+<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
+               xmlns:tns="http://qoretechnologies.com/simpletest">
+  <soap:Body>
+    <tns:UnknownOperation>
+      <tns:param>value</tns:param>
+    </tns:UnknownOperation>
+  </soap:Body>
+</soap:Envelope>';
+
+            hash<auto> info;
+            hc.post(path1, unknownOp, {
+                "Content-Type": "application/soap+xml; charset=utf-8",
+            }, \info);
+            assertTrue(info."response-headers".status_code >= 400, "Unknown operation returns error status: " + string(info."response-headers".status_code));
+        }
+
+        # Test 4: Empty body request
+        {
+            hash<auto> info;
+            hc.post(path1, "", {
+                "Content-Type": "text/xml; charset=utf-8",
+            }, \info);
+            assertTrue(info."response-headers".status_code >= 400, "Empty body returns error status: " + string(info."response-headers".status_code));
         }
     }
 }

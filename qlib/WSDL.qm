@@ -301,6 +301,15 @@ public const SOAP_TRANSPORT = (
     SOAP_TRANSPORT_HTTP: True,
 );
 
+#! XOP (XML-binary Optimized Packaging) namespace URI
+public const XOP_NS = "http://www.w3.org/2004/08/xop/include";
+
+#! MTOM (Message Transmission Optimization Mechanism) content type
+public const MTOM_CONTENT_TYPE = "application/xop+xml";
+
+#! Minimum size in bytes for binary data to be optimized with MTOM
+public const MTOM_THRESHOLD = 1024;
+
 #! range of "short" values (16 bits)
 public const RANGE_SHORT = (-32768, 32767);
 
@@ -507,12 +516,14 @@ public class WSDLLib {
     #! takes a hash representation of a SOAP message and handles multipart messages, checks the content-type, and handles hrefs in the message
     static hash<auto> parseMultiPartSOAPMessage(hash<auto> msg) {
         if (exists msg."_qore_multipart") {
-            if (msg."_qore_multipart" != "related")
+            if (msg."_qore_multipart" != "related") {
                 throw "SOAP-MESSAGE-ERROR", sprintf("don't understand multipart/%s messages; expected multipart/related", msg."_qore_multipart");
+            }
 
             auto bdry = msg."_qore_multipart_boundary";
-            if (!bdry.val())
+            if (!bdry.val()) {
                 throw "SOAP-MESSAGE-ERROR", sprintf("multipart message received without multipart boundary; headers: %y", msg - "body");
+            }
 
             hash<auto> mpmsg;
             list<string> l = split("\r\n--" + bdry, msg.body);
@@ -532,9 +543,10 @@ public class WSDLLib {
                     #printf("hl: %y hi: %y ha: %y\n", hl, hi, ha);exit();
                     hh{hi} = ha;
                 }
-                if (!exists hh."content-id")
+                if (!exists hh."content-id") {
                     throw "SOAP-MESSAGE-ERROR", sprintf("expecting part header Content-ID in part %d; headers: %y",
                         i, hh);
+                }
 
                 auto b;
                 if (hh."content-transfer-encoding" == "binary") {
@@ -556,9 +568,10 @@ public class WSDLLib {
                     }
                 }
 
-                if (hh."content-id" !~ /^\<.*\>$/)
+                if (hh."content-id" !~ /^\<.*\>$/) {
                     throw "SOAP-MESSAGE-ERROR", sprintf("expected part ID to have the following format: <id>, "
                         "instead got %s", hh."content-id");
+                }
 
                 hash<auto> p = (
                     "hdr": hh,
@@ -573,11 +586,16 @@ public class WSDLLib {
                     mpmsg.part{id} = p;
                 }
             }
+
+            # Detect MTOM/XOP messages
+            bool is_mtom = mpmsg.body.hdr."content-type" =~ /application\/xop\+xml/i;
+
             return {
                 'content-type': mpmsg.body.hdr."content-type",
                 'header': msg.header + mpmsg.body.hdr,
                 'body': mpmsg.body.body,
                 'parts': mpmsg.part,
+                'is_mtom': is_mtom,
             };
         } else {
             return {
@@ -588,9 +606,120 @@ public class WSDLLib {
         }
     }
 
+    #! Resolves xop:Include references in an XML data structure
+    /** @param data reference to the XML data structure to process
+        @param parts hash of MIME parts keyed by content-id
+    */
+    static substXopInclude(reference<auto> data, hash<auto> parts) {
+        if (data.typeCode() == NT_HASH) {
+            # Check for xop:Include element
+            foreach string key in (keys data) {
+                if (key =~ /:Include$/ || key == "Include") {
+                    # This might be an xop:Include element
+                    *hash<auto> attrs = data{key}."^attributes^";
+                    if (attrs && attrs.href) {
+                        string href = attrs.href;
+                        if (href =~ /^cid:/) {
+                            # Extract content-id from cid: URI
+                            string cid = substr(href, 4);  # Remove "cid:" prefix
+                            if (parts{cid}) {
+                                # Replace the xop:Include with the binary data
+                                data = parts{cid}.body;
+                                return;
+                            }
+                        }
+                    }
+                } else {
+                    # Recursively process nested structures
+                    WSDLLib::substXopInclude(\data{key}, parts);
+                }
+            }
+        } else if (data.typeCode() == NT_LIST) {
+            for (int i = 0; i < data.size(); ++i) {
+                WSDLLib::substXopInclude(\data[i], parts);
+            }
+        }
+    }
+
+    #! Creates an MTOM/XOP multipart message from XML and binary attachments
+    /** @param xml the XML SOAP message body
+        @param attachments list of hashes with keys: 'cid' (content-id), 'content_type', 'data' (binary)
+        @param boundary optional multipart boundary string
+        @return hash with 'content_type' and 'body' keys for the multipart message
+    */
+    static hash<auto> packageMtom(string xml, list<hash<auto>> attachments, *string boundary) {
+        if (!boundary) {
+            boundary = "----=_Part_" + get_random_string(20);
+        }
+
+        # Build the root part (XOP document)
+        string root_cid = "root.message@qore.org";
+
+        # Build all parts into a list and join at the end
+        list<auto> parts = ();
+
+        # Root part header and content
+        string root_header = "--" + boundary + "\r\n";
+        root_header += "Content-Type: application/xop+xml; charset=utf-8; type=\"text/xml\"\r\n";
+        root_header += "Content-Transfer-Encoding: 8bit\r\n";
+        root_header += "Content-ID: <" + root_cid + ">\r\n";
+        root_header += "\r\n";
+        root_header += xml + "\r\n";
+        parts += root_header;
+
+        # Add each binary attachment
+        foreach hash<auto> att in (attachments) {
+            string att_header = "--" + boundary + "\r\n";
+            att_header += "Content-Type: " + (att.content_type ?? "application/octet-stream") + "\r\n";
+            att_header += "Content-Transfer-Encoding: binary\r\n";
+            att_header += "Content-ID: <" + att.cid + ">\r\n";
+            att_header += "\r\n";
+            parts += att_header;
+            parts += att.data;
+            parts += "\r\n";
+        }
+
+        # Close the multipart message
+        parts += "--" + boundary + "--\r\n";
+
+        # Join all parts - convert to binary if any binary parts exist
+        bool has_binary = False;
+        foreach auto p in (parts) {
+            if (p.typeCode() == NT_BINARY) {
+                has_binary = True;
+                break;
+            }
+        }
+
+        auto body;
+        if (has_binary) {
+            body = binary();
+            foreach auto p in (parts) {
+                if (p.typeCode() == NT_BINARY) {
+                    body += p;
+                } else {
+                    body += binary(p);
+                }
+            }
+        } else {
+            body = parts.join("");
+        }
+
+        return {
+            "content_type": sprintf("multipart/related; boundary=\"%s\"; type=\"application/xop+xml\"; start=\"<%s>\"",
+                boundary, root_cid),
+            "body": body,
+        };
+    }
+
     #! returns True is the message has a SOAP mime type
     static bool isSOAPMessage(hash<auto> msg) {
         return WsdlLibPriv::isContentType(msg."content-type", SoapMimeTypes);
+    }
+
+    #! returns True if the message is an MTOM/XOP message
+    static bool isMtomMessage(hash<auto> msg) {
+        return msg."content-type" =~ /application\/xop\+xml/i;
     }
 
     /**!
@@ -602,14 +731,19 @@ public class WSDLLib {
             hash<auto> h."content-type" = msg."content-type" ?? "text/plain";
             h.body = NOTHING;
             return h;
-        } else if (WSDLLib::isSOAPMessage(msg)) {
+        } else if (WSDLLib::isSOAPMessage(msg) || WSDLLib::isMtomMessage(msg)) {
             hash<auto> xmldata;
             if (msg.body) {
                 xmldata = parse_xml(msg.body);
             }
             if (msg.parts) {
-                # parse entire data structure to find "href"s or href attributes
-                WSDLLib::substHref(\xmldata, msg.parts);
+                # For MTOM messages, resolve xop:Include references
+                if (msg.is_mtom) {
+                    WSDLLib::substXopInclude(\xmldata, msg.parts);
+                } else {
+                    # For traditional multipart messages, parse entire data structure to find "href"s
+                    WSDLLib::substHref(\xmldata, msg.parts);
+                }
             }
             return xmldata;
         } else {
@@ -990,6 +1124,149 @@ public class XsdBaseType inherits WSDL::XsdAbstractType {
                 val = val.toString();
                 val =~ s/[\n\r\t]//g;
                 break;
+
+            case "float":
+            case "double":
+                # Handle IEEE 754 float/double
+                # Check for special values
+                if (val.typeCode() == NT_STRING) {
+                    switch (val) {
+                        case "INF":
+                        case "-INF":
+                        case "NaN":
+                            # These are valid lexical representations, pass through
+                            break;
+                        default:
+                            # Convert string to float
+                            val = float(val);
+                    }
+                } else {
+                    # Convert to float
+                    val = float(val);
+                }
+                break;
+
+            case "duration":
+                # ISO 8601 duration: P[n]Y[n]M[n]DT[n]H[n]M[n]S
+                if (val.typeCode() == NT_STRING) {
+                    # Validate duration format
+                    if (val !~ /^-?P(\d+Y)?(\d+M)?(\d+D)?(T(\d+H)?(\d+M)?(\d+(\.\d+)?S)?)?$/) {
+                        throw SOAP_SERIALIZATION_ERROR, sprintf("value %y is not a valid ISO 8601 duration for type %y", val, type);
+                    }
+                    # Reject empty durations: "P", "-P", "PT", "-PT"
+                    if (val =~ /^-?PT?$/) {
+                        throw SOAP_SERIALIZATION_ERROR, sprintf("value %y is an empty ISO 8601 duration (missing components) for type %y", val, type);
+                    }
+                } else if (val.typeCode() == NT_DATE) {
+                    # Convert date/time duration to ISO 8601 format
+                    # For relative dates, format appropriately
+                    int years = get_years(val);
+                    int months = get_months(val);
+                    int days = get_days(val);
+                    int hours = get_hours(val);
+                    int minutes = get_minutes(val);
+                    int seconds = get_seconds(val);
+
+                    string dur = "P";
+                    if (years) {
+                        dur += sprintf("%dY", years);
+                    }
+                    if (months) {
+                        dur += sprintf("%dM", months);
+                    }
+                    if (days) {
+                        dur += sprintf("%dD", days);
+                    }
+                    if (hours || minutes || seconds) {
+                        dur += "T";
+                        if (hours) {
+                            dur += sprintf("%dH", hours);
+                        }
+                        if (minutes) {
+                            dur += sprintf("%dM", minutes);
+                        }
+                        if (seconds) {
+                            dur += sprintf("%dS", seconds);
+                        }
+                    }
+                    if (dur == "P") {
+                        dur = "PT0S";  # Zero duration
+                    }
+                    val = dur;
+                } else {
+                    throw SOAP_SERIALIZATION_ERROR, sprintf("type %y requires a string or date value; type %y supplied", type, val.type());
+                }
+                break;
+
+            case "gYear":
+                # Format: YYYY with optional timezone
+                if (val.typeCode() == NT_DATE) {
+                    val = format_date("YYYY", date(val));
+                } else if (val.typeCode() == NT_STRING) {
+                    # Validate format
+                    if (val !~ /^-?\d{4,}(Z|[+-]\d{2}:\d{2})?$/) {
+                        throw SOAP_SERIALIZATION_ERROR, sprintf("value %y is not a valid gYear for type %y", val, type);
+                    }
+                } else {
+                    throw SOAP_SERIALIZATION_ERROR, sprintf("type %y requires a date or string value; type %y supplied", type, val.type());
+                }
+                break;
+
+            case "gYearMonth":
+                # Format: YYYY-MM with optional timezone
+                if (val.typeCode() == NT_DATE) {
+                    val = format_date("YYYY-MM", date(val));
+                } else if (val.typeCode() == NT_STRING) {
+                    # Validate format
+                    if (val !~ /^-?\d{4,}-\d{2}(Z|[+-]\d{2}:\d{2})?$/) {
+                        throw SOAP_SERIALIZATION_ERROR, sprintf("value %y is not a valid gYearMonth for type %y", val, type);
+                    }
+                } else {
+                    throw SOAP_SERIALIZATION_ERROR, sprintf("type %y requires a date or string value; type %y supplied", type, val.type());
+                }
+                break;
+
+            case "gMonthDay":
+                # Format: --MM-DD with optional timezone
+                if (val.typeCode() == NT_DATE) {
+                    val = format_date("--MM-DD", date(val));
+                } else if (val.typeCode() == NT_STRING) {
+                    # Validate format
+                    if (val !~ /^--\d{2}-\d{2}(Z|[+-]\d{2}:\d{2})?$/) {
+                        throw SOAP_SERIALIZATION_ERROR, sprintf("value %y is not a valid gMonthDay for type %y", val, type);
+                    }
+                } else {
+                    throw SOAP_SERIALIZATION_ERROR, sprintf("type %y requires a date or string value; type %y supplied", type, val.type());
+                }
+                break;
+
+            case "gMonth":
+                # Format: --MM with optional timezone
+                if (val.typeCode() == NT_DATE) {
+                    val = format_date("--MM", date(val));
+                } else if (val.typeCode() == NT_STRING) {
+                    # Validate format
+                    if (val !~ /^--\d{2}(Z|[+-]\d{2}:\d{2})?$/) {
+                        throw SOAP_SERIALIZATION_ERROR, sprintf("value %y is not a valid gMonth for type %y", val, type);
+                    }
+                } else {
+                    throw SOAP_SERIALIZATION_ERROR, sprintf("type %y requires a date or string value; type %y supplied", type, val.type());
+                }
+                break;
+
+            case "gDay":
+                # Format: ---DD with optional timezone
+                if (val.typeCode() == NT_DATE) {
+                    val = format_date("---DD", date(val));
+                } else if (val.typeCode() == NT_STRING) {
+                    # Validate format
+                    if (val !~ /^---\d{2}(Z|[+-]\d{2}:\d{2})?$/) {
+                        throw SOAP_SERIALIZATION_ERROR, sprintf("value %y is not a valid gDay for type %y", val, type);
+                    }
+                } else {
+                    throw SOAP_SERIALIZATION_ERROR, sprintf("type %y requires a date or string value; type %y supplied", type, val.type());
+                }
+                break;
         }
 
         #printf("DEBUG: FORCE: type: %y, nstype: %y, val: %y\n", type, nstype, val);
@@ -1181,11 +1458,96 @@ public class XsdBaseType inherits WSDL::XsdAbstractType {
                     return val.empty() ? binary() : binary(val);
                 }
 
+            case "float":
+            case "double":
+                # Handle IEEE 754 float/double
+                if (val.typeCode() == NT_STRING) {
+                    switch (val) {
+                        case "INF":
+                            return @inf@;
+                        case "-INF":
+                            return -@inf@;
+                        case "NaN":
+                            return @nan@;
+                        default:
+                            return float(val);
+                    }
+                }
+                return float(val);
+
+            case "duration":
+                # Return duration as string (ISO 8601 format)
+                # Applications can parse this as needed
+                if (val.typeCode() == NT_STRING) {
+                    # Validate format
+                    if (val !~ /^-?P(\d+Y)?(\d+M)?(\d+D)?(T(\d+H)?(\d+M)?(\d+(\.\d+)?S)?)?$/) {
+                        throw SOAP_DESERIALIZATION_ERROR, sprintf("value %y is not a valid ISO 8601 duration", val);
+                    }
+                    # Reject empty durations: "P", "-P", "PT", "-PT"
+                    if (val =~ /^-?PT?$/) {
+                        throw SOAP_DESERIALIZATION_ERROR, sprintf("value %y is an empty ISO 8601 duration (missing components)", val);
+                    }
+                    return val;
+                }
+                return string(val);
+
+            case "gYear":
+                # Return gYear as string (YYYY with optional timezone)
+                if (val.typeCode() == NT_STRING) {
+                    # Extract year portion for validation
+                    if (val !~ /^-?\d{4,}(Z|[+-]\d{2}:\d{2})?$/) {
+                        throw SOAP_DESERIALIZATION_ERROR, sprintf("value %y is not a valid gYear", val);
+                    }
+                    return val;
+                }
+                return string(val);
+
+            case "gYearMonth":
+                # Return gYearMonth as string (YYYY-MM with optional timezone)
+                if (val.typeCode() == NT_STRING) {
+                    if (val !~ /^-?\d{4,}-\d{2}(Z|[+-]\d{2}:\d{2})?$/) {
+                        throw SOAP_DESERIALIZATION_ERROR, sprintf("value %y is not a valid gYearMonth", val);
+                    }
+                    return val;
+                }
+                return string(val);
+
+            case "gMonthDay":
+                # Return gMonthDay as string (--MM-DD with optional timezone)
+                if (val.typeCode() == NT_STRING) {
+                    if (val !~ /^--\d{2}-\d{2}(Z|[+-]\d{2}:\d{2})?$/) {
+                        throw SOAP_DESERIALIZATION_ERROR, sprintf("value %y is not a valid gMonthDay", val);
+                    }
+                    return val;
+                }
+                return string(val);
+
+            case "gMonth":
+                # Return gMonth as string (--MM with optional timezone)
+                if (val.typeCode() == NT_STRING) {
+                    if (val !~ /^--\d{2}(Z|[+-]\d{2}:\d{2})?$/) {
+                        throw SOAP_DESERIALIZATION_ERROR, sprintf("value %y is not a valid gMonth", val);
+                    }
+                    return val;
+                }
+                return string(val);
+
+            case "gDay":
+                # Return gDay as string (---DD with optional timezone)
+                if (val.typeCode() == NT_STRING) {
+                    if (val !~ /^---\d{2}(Z|[+-]\d{2}:\d{2})?$/) {
+                        throw SOAP_DESERIALIZATION_ERROR, sprintf("value %y is not a valid gDay", val);
+                    }
+                    return val;
+                }
+                return string(val);
+
             default: {
                 if (name == "anyType")  {
                     *XsdAbstractType t = tmap_try_get(tmap, type);
-                    if (t)
+                    if (t) {
                         return t.deserialize(en, tmap, mrh, val);
+                    }
                 }
                 throw SOAP_DESERIALIZATION_ERROR, sprintf("don't know how to handle type %y", name);
             }
@@ -1214,6 +1576,8 @@ public class XsdBaseType inherits WSDL::XsdAbstractType {
                 return IntType;
 
             case "decimal":
+            case "float":
+            case "double":
                 return FloatType;
 
             case "date":
@@ -1227,6 +1591,12 @@ public class XsdBaseType inherits WSDL::XsdAbstractType {
             case "string":
             case "token":
             case "normalizedString":
+            case "duration":
+            case "gYear":
+            case "gYearMonth":
+            case "gMonthDay":
+            case "gMonth":
+            case "gDay":
                 return StringType;
 
             case "base64Binary":
@@ -1486,10 +1856,15 @@ public class XsdElement inherits WSDL::XsdTypedData {
         #printf("DEBUG: XsdElement::serializeAsIntern() name: %y (with type: %y) h: %y key: %y typename: %y (%y) minOccurs: %y nillable: %y (%y %y)\n", name, ((!omitType || type != self.type) && type.hasRealName()), h, key, typename, type.getName(), minOccurs, nillable, !exists h, !minOccurs);
 
         int tc = h.typeCode();
-        if (tc == NT_LIST && h.size() == 1)
+        # Don't unwrap single-element lists for XSD list types (they need the list value)
+        bool is_list_type = (type instanceof XsdSimpleType && cast<XsdSimpleType>(type).listItemType);
+        if (tc == NT_LIST && h.size() == 1 && !is_list_type) {
             h = h[0];
+        }
 
-        if (!exists h || (tc == NT_LIST && h.empty())) {
+        # For list types, empty lists are valid values (serialize to empty element content)
+        # For non-list types, empty lists with minOccurs=0 can be skipped
+        if (!exists h || (tc == NT_LIST && h.empty() && !is_list_type)) {
             if (!minOccurs)
                 return;
 
@@ -1515,13 +1890,31 @@ public class XsdElement inherits WSDL::XsdTypedData {
             pf = ("^attributes^": ("xsi:type": !usedocns ? type.getName() : type.getNameWithNS()));
 
         if (tc == NT_LIST) {
+            # For list types (XsdSimpleType with listItemType), the list value is passed
+            # directly to the type's serialize() which handles it as a space-separated value
+            if (is_list_type) {
+                # Let the list type handle the list value directly
+                auto rv = type.serialize(nsc, h, omitType);
+                if (!pf) {
+                    return rv;
+                }
+                if (rv.typeCode() != NT_HASH) {
+                    pf."^value^" = rv;
+                    return pf;
+                }
+                return pf + rv;
+            }
+
             int len = h.size();
-            if (maxOccurs == 1 && len > 1)
+            if (maxOccurs == 1 && len > 1) {
                 throw SOAP_SERIALIZATION_ERROR, sprintf("cannot serialize element %y of type %y from a list<auto> with %d elements because maxOccurs = 1", name, type.getName(), len);
-            if (len > maxOccurs && maxOccurs > 0)
+            }
+            if (len > maxOccurs && maxOccurs > 0) {
                 throw SOAP_SERIALIZATION_ERROR, sprintf("list<auto> for element %y of type %y has %d element%s, but maxOccurs = %d", name, type.getName(), elements h, elements h == 1 ? "" : "s", maxOccurs);
-            if (len < minOccurs)
+            }
+            if (len < minOccurs) {
                 throw SOAP_SERIALIZATION_ERROR, sprintf("list<auto> for element %y of type %y has %d element%s, but minOccurs = %d", name, type.getName(), elements h, elements h == 1 ? "" : "s", minOccurs);
+            }
 
             list<auto> l = ();
             foreach auto e in (h) {
@@ -1645,6 +2038,28 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
         XsdAbstractType type;
         AbstractDataProviderType dataType;
         bool usedocns;
+
+        #! XSD restriction facets
+        #! Pattern facets - list for multiple patterns (all must match)
+        *list<string> patterns;
+        #! String length facets
+        *softint minLength;
+        *softint maxLength;
+        *softint length;
+        #! Numeric range facets
+        *auto minInclusive;
+        *auto maxInclusive;
+        *auto minExclusive;
+        *auto maxExclusive;
+        #! Numeric precision facets
+        *softint totalDigits;
+        *softint fractionDigits;
+        #! WhiteSpace facet
+        *string whiteSpace;
+
+        #! List type support
+        *XsdAbstractType listItemType;
+        *hash<auto> listItemTypeInfo;
     }
 
     constructor(hash<auto> st, Namespaces nsc, XsdLateResolverHelper unresolved, bool n_usedocns, *string desc_name)
@@ -1667,8 +2082,58 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
 
             WSDL::XsdBase::removeNS(\r);
 
-            if (r.enumeration)
+            # Parse enumeration facet
+            if (r.enumeration) {
                 enumValues = map {$1."^attributes^".value: True}, r.enumeration;
+            }
+
+            # Parse pattern facets (multiple patterns allowed, all must match)
+            if (r.pattern) {
+                # Handle both single pattern (hash) and multiple patterns (list)
+                if (r.pattern.typeCode() == NT_LIST) {
+                    patterns = map $1."^attributes^".value, r.pattern;
+                } else {
+                    patterns = (r.pattern."^attributes^".value,);
+                }
+            }
+
+            # Parse length facets
+            if (r.length) {
+                length = int(r.length."^attributes^".value);
+            }
+            if (r.minLength) {
+                minLength = int(r.minLength."^attributes^".value);
+            }
+            if (r.maxLength) {
+                maxLength = int(r.maxLength."^attributes^".value);
+            }
+
+            # Parse numeric range facets
+            if (r.minInclusive) {
+                minInclusive = r.minInclusive."^attributes^".value;
+            }
+            if (r.maxInclusive) {
+                maxInclusive = r.maxInclusive."^attributes^".value;
+            }
+            if (r.minExclusive) {
+                minExclusive = r.minExclusive."^attributes^".value;
+            }
+            if (r.maxExclusive) {
+                maxExclusive = r.maxExclusive."^attributes^".value;
+            }
+
+            # Parse precision facets
+            if (r.totalDigits) {
+                totalDigits = int(r.totalDigits."^attributes^".value);
+            }
+            if (r.fractionDigits) {
+                fractionDigits = int(r.fractionDigits."^attributes^".value);
+            }
+
+            # Parse whiteSpace facet
+            if (r.whiteSpace) {
+                whiteSpace = r.whiteSpace."^attributes^".value;
+            }
         } else if (st.union) {
             hash<auto> u = st.union;
             *string memberTypes = u."^attributes^".memberTypes;
@@ -1694,7 +2159,19 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
                 dataType = new UnionDataType(unionTypes);
             }
         } else if (st.list) {
-            throw "XSD-SIMPLETYPE-ERROR", sprintf("unsupported list definition in simpleType %y", name);
+            hash<auto> l = st.list;
+            *string itemType = l."^attributes^".itemType;
+            if (itemType) {
+                if (!nsc.doType(itemType, \listItemTypeInfo, \listItemType)) {
+                    unresolved.add(self);
+                }
+            } else if (l.simpleType) {
+                # Inline simpleType definition for list items
+                listItemType = new XsdSimpleType(l.simpleType, nsc, unresolved, n_usedocns);
+            } else {
+                throw "XSD-SIMPLETYPE-ERROR", sprintf("list definition in simpleType %y requires itemType attribute "
+                    "or inline simpleType", name);
+            }
         } else {
             throw "XSD-SIMPLETYPE-ERROR", sprintf("missing restriction, union, or list element in simpleType %y",
                 name);
@@ -1707,9 +2184,16 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
         if (!type && unionTypes) {
             dataType = new UnionDataType(unionTypes);
         }
+        # Handle unresolved list item type
+        if (listItemTypeInfo && !listItemType) {
+            # Will be resolved later in type resolution
+        }
     }
 
     AbstractDataProviderType getDataProviderType() {
+        if (listItemType) {
+            return new ListDataType(listItemType.getDataProviderType());
+        }
         return dataType ?? type.getDataProviderType();
     }
 
@@ -1725,9 +2209,19 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
                     rh{k} = remove val{k};
                 }
             }
-            if (val.size() == 1 && val.firstKey() == "^value^")
+            if (val.size() == 1 && val.firstKey() == "^value^") {
                 val = val."^value^";
+            }
         }
+
+        # Handle list type serialization
+        if (listItemType) {
+            return serializeList(nsc, val, omitType, rh);
+        }
+
+        # Validate facets before serialization
+        validateFacets(val, "serialize");
+
         if (enumValues && !enumValues{val}) {
             throw "SOAP-SERIALIZATION-ERROR", sprintf("value %y passed to simpleType %y is not in the enumeration "
                 "list<auto> (%y)", val, name, enumValues.keys());
@@ -1751,7 +2245,143 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
         return rh + type.serialize(nsc, val, omitType);
     }
 
+    #! Serialize a list type value as space-separated string
+    private auto serializeList(Namespaces nsc, auto val, *softbool omitType, *hash<auto> rh) {
+        list<auto> items;
+        if (val.typeCode() == NT_LIST) {
+            items = val;
+        } else if (exists val) {
+            # Single value treated as single-item list
+            items = (val,);
+        } else {
+            items = ();
+        }
+
+        # Serialize each item and join with spaces
+        list<string> serializedItems = ();
+        foreach auto item in (items) {
+            auto serialized = listItemType.serialize(nsc, item, True);
+            if (serialized.typeCode() == NT_HASH && serialized.hasKey("^value^")) {
+                serializedItems += string(serialized."^value^");
+            } else {
+                serializedItems += string(serialized);
+            }
+        }
+
+        string result = serializedItems.join(" ");
+        if (rh) {
+            rh."^value^" = result;
+            return rh;
+        }
+        return result;
+    }
+
+    #! Validate restriction facets for serialization/deserialization
+    private validateFacets(auto val, string operation) {
+        # Skip validation for NOTHING values
+        if (!exists val) {
+            return;
+        }
+
+        # Pattern validation (all patterns must match)
+        if (patterns) {
+            string strVal = string(val);
+            foreach string pattern in (patterns) {
+                # Create full-match regex by anchoring
+                string fullPattern = "^" + pattern + "$";
+                if (!regex(strVal, fullPattern)) {
+                    throw "SOAP-SERIALIZATION-ERROR", sprintf("value %y for simpleType %y does not match "
+                        "pattern %y", val, name, pattern);
+                }
+            }
+        }
+
+        # Length validation
+        if (exists length || exists minLength || exists maxLength) {
+            int len;
+            if (val.typeCode() == NT_STRING) {
+                len = val.length();
+            } else if (val.typeCode() == NT_BINARY) {
+                len = val.size();
+            } else if (val.typeCode() == NT_LIST) {
+                len = val.size();
+            } else {
+                len = string(val).length();
+            }
+
+            if (exists length && len != length) {
+                throw "SOAP-SERIALIZATION-ERROR", sprintf("value %y for simpleType %y has length %d, "
+                    "but exact length %d is required", val, name, len, length);
+            }
+            if (exists minLength && len < minLength) {
+                throw "SOAP-SERIALIZATION-ERROR", sprintf("value %y for simpleType %y has length %d, "
+                    "but minimum length is %d", val, name, len, minLength);
+            }
+            if (exists maxLength && len > maxLength) {
+                throw "SOAP-SERIALIZATION-ERROR", sprintf("value %y for simpleType %y has length %d, "
+                    "but maximum length is %d", val, name, len, maxLength);
+            }
+        }
+
+        # Numeric range validation
+        if (exists minInclusive || exists maxInclusive || exists minExclusive || exists maxExclusive) {
+            auto numVal = val;
+            # Try to convert to number for comparison if it's a string
+            if (numVal.typeCode() == NT_STRING) {
+                numVal = float(numVal);
+            }
+
+            if (exists minInclusive && numVal < float(minInclusive)) {
+                throw "SOAP-SERIALIZATION-ERROR", sprintf("value %y for simpleType %y is less than "
+                    "minInclusive %y", val, name, minInclusive);
+            }
+            if (exists maxInclusive && numVal > float(maxInclusive)) {
+                throw "SOAP-SERIALIZATION-ERROR", sprintf("value %y for simpleType %y is greater than "
+                    "maxInclusive %y", val, name, maxInclusive);
+            }
+            if (exists minExclusive && numVal <= float(minExclusive)) {
+                throw "SOAP-SERIALIZATION-ERROR", sprintf("value %y for simpleType %y must be greater than "
+                    "minExclusive %y", val, name, minExclusive);
+            }
+            if (exists maxExclusive && numVal >= float(maxExclusive)) {
+                throw "SOAP-SERIALIZATION-ERROR", sprintf("value %y for simpleType %y must be less than "
+                    "maxExclusive %y", val, name, maxExclusive);
+            }
+        }
+
+        # Precision validation (totalDigits and fractionDigits)
+        if (exists totalDigits || exists fractionDigits) {
+            string strVal = string(val);
+            # Remove sign and decimal point for digit counting
+            strVal =~ s/^-//;
+            strVal =~ s/\+//;
+
+            if (exists totalDigits) {
+                string digitsOnly = strVal;
+                digitsOnly =~ s/\.//;
+                if (digitsOnly.length() > totalDigits) {
+                    throw "SOAP-SERIALIZATION-ERROR", sprintf("value %y for simpleType %y has %d total digits, "
+                        "but maximum is %d", val, name, digitsOnly.length(), totalDigits);
+                }
+            }
+
+            if (exists fractionDigits) {
+                *string fracPart = (strVal =~ x/\.(\d+)/)[0];
+                int fracLen = fracPart ? fracPart.length() : 0;
+                if (fracLen > fractionDigits) {
+                    throw "SOAP-SERIALIZATION-ERROR", sprintf("value %y for simpleType %y has %d fraction digits, "
+                        "but maximum is %d", val, name, fracLen, fractionDigits);
+                }
+            }
+        }
+    }
+
     auto deserialize(string en, hash<string, XsdAbstractType> tmap, *hash<auto> mrh, auto val) {
+        # Handle list type deserialization
+        if (listItemType) {
+            return deserializeList(en, tmap, mrh, val);
+        }
+
         if (unionTypes) {
             # exception list
             list<auto> exl;
@@ -1769,11 +2399,116 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
 
         auto v = type.deserialize(en, tmap, mrh, val);
 
-        if (enumValues && !enumValues{v})
+        # Validate facets after deserialization
+        validateFacets(v, "deserialize");
+
+        if (enumValues && !enumValues{v}) {
             throw "SOAP-DESERIALIZATION-ERROR", sprintf("value %y passed to simpleType %y while deserializing "
                 "element %y is not in the enumeration list<auto> (%y)", v, name, en, enumValues.keys());
+        }
 
         return v;
+    }
+
+    #! Deserialize a list type value from space-separated string
+    private auto deserializeList(string en, hash<string, XsdAbstractType> tmap, *hash<auto> mrh, auto val) {
+        # Extract value if it's in a hash
+        if (val.typeCode() == NT_HASH) {
+            if (val.hasKey("^value^")) {
+                val = val."^value^";
+            }
+        }
+
+        # Handle empty or null values
+        if (!exists val || val == "") {
+            return ();
+        }
+
+        # Split space-separated values
+        string strVal = string(val);
+        list<string> items = strVal.split(" ");
+
+        # Deserialize each item
+        list<auto> result = ();
+        foreach string item in (items) {
+            if (item != "") {  # Skip empty strings from multiple spaces
+                result += listItemType.deserialize(en, tmap, mrh, item);
+            }
+        }
+
+        return result;
+    }
+}
+
+#! XSD element group class for xs:group definitions
+public class XsdGroup inherits WSDL::XsdNamedData, Qore::Serializable {
+    public {
+        #! Elements in this group (from sequence, choice, or all)
+        hash<string, XsdElement> groupElements();
+        #! The group content model type: "sequence", "choice", or "all"
+        *string contentModel;
+    }
+
+    constructor(hash<auto> g, Namespaces nsc, XsdLateResolverHelper unresolved, bool usedocns) : XsdNamedData(\g) {
+        name = g."^attributes^".name;
+
+        WSDL::XsdBase::removeNS(\g);
+
+        # Parse the group content (sequence, choice, or all)
+        if (g.sequence) {
+            contentModel = "sequence";
+            WSDL::XsdBase::removeNS(\g.sequence);
+            foreach hash<auto> e in (g.sequence.element) {
+                XsdElement elem(e, nsc, NOTHING, unresolved, usedocns);
+                groupElements{elem.name} = elem;
+            }
+        } else if (g.choice) {
+            contentModel = "choice";
+            WSDL::XsdBase::removeNS(\g.choice);
+            foreach hash<auto> e in (g.choice.element) {
+                XsdElement elem(e, nsc, NOTHING, unresolved, usedocns);
+                groupElements{elem.name} = elem;
+            }
+        } else if (g.all) {
+            contentModel = "all";
+            WSDL::XsdBase::removeNS(\g.all);
+            foreach hash<auto> e in (g.all.element) {
+                XsdElement elem(e, nsc, NOTHING, unresolved, usedocns);
+                groupElements{elem.name} = elem;
+            }
+        }
+    }
+
+    #! Returns the elements in this group
+    hash<string, XsdElement> getElements() {
+        return groupElements;
+    }
+}
+
+#! XSD attribute group class for xs:attributeGroup definitions
+public class XsdAttributeGroup inherits WSDL::XsdNamedData, Qore::Serializable {
+    public {
+        #! Attributes in this group
+        hash<string, XsdAttribute> groupAttrs();
+    }
+
+    constructor(hash<auto> ag, Namespaces nsc, XsdLateResolverHelper unresolved) : XsdNamedData(\ag) {
+        name = ag."^attributes^".name;
+
+        WSDL::XsdBase::removeNS(\ag);
+
+        # Parse attributes
+        foreach hash<auto> ah in (ag.attribute) {
+            if (ah."^attributes^") {
+                XsdAttribute attr(ah, nsc, NOTHING, unresolved);
+                groupAttrs{attr.name} = attr;
+            }
+        }
+    }
+
+    #! Returns the attributes in this group
+    hash<string, XsdAttribute> getAttributes() {
+        return groupAttrs;
     }
 }
 
@@ -2002,15 +2737,22 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
             cx_type = XET_ALL;
             WSDL::XsdBase::removeNS(\d.all);
             elementmap = parseElements(d.all.element, unresolved, nsc);
+            # Handle group references in all
+            parseGroupReferences(\d.all, unresolved, nsc);
         } else if (k == "choice") {
             cx_type = XET_CHOICE;
             WSDL::XsdBase::removeNS(\d.choice);
             elementmap = parseElements(d.choice.element, unresolved, nsc);
+            # Handle group references in choice
+            parseGroupReferences(\d.choice, unresolved, nsc);
         } else if (k == "sequence") {
             cx_type = XET_SEQUENCE;
             WSDL::XsdBase::removeNS(\d.sequence);
-            if (d.sequence.element)
+            if (d.sequence.element) {
                 elementmap = parseElements(d.sequence.element, unresolved, nsc);
+            }
+            # Handle group references in sequence
+            parseGroupReferences(\d.sequence, unresolved, nsc);
             WSDL::XsdBase::removeNS(\d.sequence.choice);
             foreach hash<auto> ch in (d.sequence.choice) {
                 #printf("ch: %y\n", ch);
@@ -2026,9 +2768,25 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
             if (d.sequence."any") {
                 anyAttribute = True;
             }
+        } else if (k == "group") {
+            # Handle top-level group reference
+            cx_type = XET_SEQUENCE;  # Groups typically expand to sequences
+            parseGroupReferences(\d, unresolved, nsc);
         } else {
             throw "XSD-COMPLEXTYPE-ERROR", sprintf("unknown keys in %y", d);
         }
+    }
+
+    #! Parse group references within a content model element
+    private parseGroupReferences(reference<hash<auto>> content, XsdLateResolverHelper unresolved, Namespaces nsc) {
+        foreach hash<auto> g in (content.group) {
+            *string groupRef = g."^attributes^".ref;
+            if (groupRef) {
+                # Store group reference for resolution during finalization
+                unresolved.addGroupRef(self, groupRef);
+            }
+        }
+        delete content.group;
     }
 
     private parseAttributes(reference d, XsdLateResolverHelper unresolved, Namespaces nsc) {
@@ -2036,7 +2794,16 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
         foreach hash<auto> ah in (remove d.attribute) {
             if (ah."^attributes^") {
                 XsdAttribute attr(ah, nsc, NOTHING, unresolved);
-                attrs.(attr.name) = attr;
+                attrs{attr.name} = attr;
+            }
+        }
+
+        # Handle attributeGroup references
+        foreach hash<auto> ag in (remove d.attributeGroup) {
+            *string groupRef = ag."^attributes^".ref;
+            if (groupRef) {
+                # Store attribute group reference for resolution during finalization
+                unresolved.addAttrGroupRef(self, groupRef);
             }
         }
 
@@ -3187,6 +3954,10 @@ public class WSMessage inherits WSDL::XsdNamedData {
 class XsdLateResolverHelper {
     private {
         list<object> l();
+        #! Group references: maps complexType -> list of group ref names
+        hash<string, list<string>> groupRefs();
+        #! Attribute group references: maps complexType -> list of attribute group ref names
+        hash<string, list<string>> attrGroupRefs();
     }
 
     constructor() {
@@ -3198,6 +3969,34 @@ class XsdLateResolverHelper {
 
     list<auto> getList() {
         return l;
+    }
+
+    #! Add a group reference to be resolved later
+    addGroupRef(XsdComplexType ct, string groupRef) {
+        string key = ct.uniqueHash();
+        if (!groupRefs{key}) {
+            groupRefs{key} = ();
+        }
+        groupRefs{key} += groupRef;
+    }
+
+    #! Add an attribute group reference to be resolved later
+    addAttrGroupRef(XsdComplexType ct, string attrGroupRef) {
+        string key = ct.uniqueHash();
+        if (!attrGroupRefs{key}) {
+            attrGroupRefs{key} = ();
+        }
+        attrGroupRefs{key} += attrGroupRef;
+    }
+
+    #! Get group references for a complex type
+    *list<string> getGroupRefs(XsdComplexType ct) {
+        return groupRefs{ct.uniqueHash()};
+    }
+
+    #! Get attribute group references for a complex type
+    *list<string> getAttrGroupRefs(XsdComplexType ct) {
+        return attrGroupRefs{ct.uniqueHash()};
     }
 
     clearResolved() {
@@ -5385,6 +6184,13 @@ public class WebService inherits WSDL::XsdBase, Qore::Serializable {
     }
 
     private resolveType(XsdSimpleType t) {
+        # Handle list type resolution
+        if (t.listItemTypeInfo && !t.listItemType) {
+            t.listItemType = resolveType(t.listItemTypeInfo);
+            t.finalizeResolved();
+            return;
+        }
+        # Handle union type resolution
         if (!t.union) {
             throw "WSDL-TYPE-ERROR", sprintf("cannot resolve simpleType: %y type %y", t.name, t.typeinfo);
         }
@@ -5461,7 +6267,7 @@ public class WebService inherits WSDL::XsdBase, Qore::Serializable {
                 *hash<auto> a = import."^attributes^";
                 # import file
                 if (a.schemaLocation) {
-                    bool async_only = opts.async_only;
+                    bool async_only = opts.async_only ?? False;
                     *hash<auto> xsd_cache = opts.xsd_cache;
                     string cache_key = a.schemaLocation;
                     if (async_only) {
