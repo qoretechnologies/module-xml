@@ -2726,7 +2726,8 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
         }
     }
 
-    finalize(hash<string, XsdAbstractType> tmap, Namespaces nsc) {
+    finalize(hash<string, XsdAbstractType> tmap, Namespaces nsc, *hash<string, XsdGroup> groupMap,
+            *hash<string, XsdAttributeGroup> attrGroupMap, *XsdLateResolverHelper unresolved) {
         if (finalized)
             return;
         finalized = True;
@@ -2737,7 +2738,7 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
             XsdAbstractType t = tmap_get(tmap, restriction);
             if (!(t instanceof XsdComplexType))
                 throw WSDL_ERROR, sprintf("cannot restrict complexType %y with type %y", name, t.name);
-            cast<XsdComplexType>(t).finalize(tmap, nsc);
+            cast<XsdComplexType>(t).finalize(tmap, nsc, groupMap, attrGroupMap, unresolved);
             elementmap = cast<hash<string, XsdElement>>(cast<XsdComplexType>(t).elementmap + elementmap);
             #printf("DEBUG: extended %s with %s (%y)\n", name, restriction, cast<XsdComplexType>(t).elementmap.keys());
         } else if (extension) {
@@ -2745,11 +2746,45 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
             XsdAbstractType t = tmap_get(tmap, extension);
             if (!(t instanceof XsdComplexType))
                 throw WSDL_ERROR, sprintf("cannot extend complexType %y with type %y", name, t.name);
-            cast<XsdComplexType>(t).finalize(tmap, nsc);
+            cast<XsdComplexType>(t).finalize(tmap, nsc, groupMap, attrGroupMap, unresolved);
             # combine base type and new type
             elementmap = cast<hash<string, XsdElement>>(cast<XsdComplexType>(t).elementmap + elementmap);
             #printf("DEBUG: extended %s (%s) with %s (%y) elements: %y\n", name, self.uniqueHash(), extension,
             #     cast<XsdComplexType>(t).elementmap.keys(), keys elementmap);
+        }
+
+        # resolve group references
+        if (unresolved && groupMap) {
+            *list<string> groupRefs = unresolved.getGroupRefs(self);
+            foreach string groupRef in (groupRefs) {
+                # Parse the group reference (may have namespace prefix)
+                string localName = groupRef;
+                if (groupRef =~ /:/) {
+                    localName = (groupRef =~ x/:(.+)$/)[0];
+                }
+                *XsdGroup grp = groupMap{localName};
+                if (grp) {
+                    # Merge group elements into this complex type's element map
+                    elementmap += grp.getElements();
+                }
+            }
+        }
+
+        # resolve attribute group references
+        if (unresolved && attrGroupMap) {
+            *list<string> attrGroupRefs = unresolved.getAttrGroupRefs(self);
+            foreach string attrGroupRef in (attrGroupRefs) {
+                # Parse the attribute group reference (may have namespace prefix)
+                string localName = attrGroupRef;
+                if (attrGroupRef =~ /:/) {
+                    localName = (attrGroupRef =~ x/:(.+)$/)[0];
+                }
+                *XsdAttributeGroup attrGrp = attrGroupMap{localName};
+                if (attrGrp) {
+                    # Merge attribute group attributes into this complex type's attrs
+                    attrs += attrGrp.getAttributes();
+                }
+            }
         }
     }
 
@@ -2831,20 +2866,15 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
     }
 
     #! Parse group references within a content model element
-    /** @note Group reference resolution is not yet fully implemented. When a group reference
-        is encountered, a warning is logged and the reference is stored but not resolved.
-        This means elements defined in xs:group definitions will not be included in the
-        complex type's element map.
+    /** Group references are stored and resolved during the finalize() phase,
+        where the group's elements are merged into this complex type's element map.
     */
     private parseGroupReferences(reference<hash<auto>> content, XsdLateResolverHelper unresolved, Namespaces nsc) {
         foreach hash<auto> g in (content.group) {
             *string groupRef = g."^attributes^".ref;
             if (groupRef) {
-                # NOTE: Group resolution is not yet implemented - store reference for future use
-                # but warn that the group elements won't be included
+                # Store group reference for resolution during finalization
                 unresolved.addGroupRef(self, groupRef);
-                stderr.printf("WARNING: xs:group reference %y in complexType %y is not resolved; "
-                    "group elements will not be included\n", groupRef, name);
             }
         }
         delete content.group;
@@ -2859,15 +2889,12 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
             }
         }
 
-        # Handle attributeGroup references
-        # NOTE: Attribute group resolution is not yet fully implemented - references are
-        # stored but not resolved, so attributes from attribute groups won't be included
+        # Handle attributeGroup references - resolved during finalize()
         foreach hash<auto> ag in (remove d.attributeGroup) {
             *string groupRef = ag."^attributes^".ref;
             if (groupRef) {
+                # Store attribute group reference for resolution during finalization
                 unresolved.addAttrGroupRef(self, groupRef);
-                stderr.printf("WARNING: xs:attributeGroup reference %y in complexType %y is not resolved; "
-                    "group attributes will not be included\n", groupRef, name);
             }
         }
 
@@ -6071,6 +6098,12 @@ public class WebService inherits WSDL::XsdBase, Qore::Serializable {
         #! map of types
         transient hash<string, XsdAbstractType> tmap();
 
+        #! map of xs:group definitions by name
+        transient hash<string, XsdGroup> groupMap();
+
+        #! map of xs:attributeGroup definitions by name
+        transient hash<string, XsdAttributeGroup> attrGroupMap();
+
         #! hash of port names to port type information hashes
         transient hash<string, hash<PortTypeInfo>> portType();
 
@@ -6410,6 +6443,22 @@ public class WebService inherits WSDL::XsdBase, Qore::Serializable {
                 #tmap.add(t);
                 #printf("DEBUG: ct: %y\n", t.name);
             }
+            # parse xs:group definitions
+            foreach hash<auto> g in (schema.group) {
+                XsdGroup grp(g, nsc, unresolved, usedocns);
+                if (groupMap{grp.name}) {
+                    throw WSDL_ERROR, sprintf("%s: group %y declared twice", nph.getDesc(), grp.name);
+                }
+                groupMap{grp.name} = grp;
+            }
+            # parse xs:attributeGroup definitions
+            foreach hash<auto> ag in (schema.attributeGroup) {
+                XsdAttributeGroup attrGrp(ag, nsc, unresolved);
+                if (attrGroupMap{attrGrp.name}) {
+                    throw WSDL_ERROR, sprintf("%s: attributeGroup %y declared twice", nph.getDesc(), attrGrp.name);
+                }
+                attrGroupMap{attrGrp.name} = attrGrp;
+            }
             # make element map
             foreach hash<auto> el in (schema.element) {
                 *hash<auto> attr = el."^attributes^";
@@ -6444,13 +6493,13 @@ public class WebService inherits WSDL::XsdBase, Qore::Serializable {
         map resolveType($1), unresolved.getList();
         unresolved.clearResolved();
 
-        # finalize complex types
-        map cast<XsdComplexType>($1).finalize(tmap, nsc), tmap.iterator(), $1 instanceof XsdComplexType;
+        # finalize complex types with group resolution
+        map cast<XsdComplexType>($1).finalize(tmap, nsc, groupMap, attrGroupMap, unresolved), tmap.iterator(), $1 instanceof XsdComplexType;
 
         # finalize array types
         map cast<XsdArrayType>($1).finalize(tmap, nsc), tmap.iterator(), $1 instanceof XsdArrayType;
 
-        map (map cast<XsdComplexType>($1.type).finalize(tmap, nsc), $1.iterator(), $1.type instanceof XsdComplexType), emap.iterator();
+        map (map cast<XsdComplexType>($1.type).finalize(tmap, nsc, groupMap, attrGroupMap, unresolved), $1.iterator(), $1.type instanceof XsdComplexType), emap.iterator();
 
         map resolveType($1), unresolved.getList();
     }
