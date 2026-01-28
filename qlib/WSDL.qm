@@ -301,6 +301,15 @@ public const SOAP_TRANSPORT = (
     SOAP_TRANSPORT_HTTP: True,
 );
 
+#! XOP (XML-binary Optimized Packaging) namespace URI
+public const XOP_NS = "http://www.w3.org/2004/08/xop/include";
+
+#! MTOM (Message Transmission Optimization Mechanism) content type
+public const MTOM_CONTENT_TYPE = "application/xop+xml";
+
+#! Minimum size in bytes for binary data to be optimized with MTOM
+public const MTOM_THRESHOLD = 1024;
+
 #! range of "short" values (16 bits)
 public const RANGE_SHORT = (-32768, 32767);
 
@@ -507,12 +516,14 @@ public class WSDLLib {
     #! takes a hash representation of a SOAP message and handles multipart messages, checks the content-type, and handles hrefs in the message
     static hash<auto> parseMultiPartSOAPMessage(hash<auto> msg) {
         if (exists msg."_qore_multipart") {
-            if (msg."_qore_multipart" != "related")
+            if (msg."_qore_multipart" != "related") {
                 throw "SOAP-MESSAGE-ERROR", sprintf("don't understand multipart/%s messages; expected multipart/related", msg."_qore_multipart");
+            }
 
             auto bdry = msg."_qore_multipart_boundary";
-            if (!bdry.val())
+            if (!bdry.val()) {
                 throw "SOAP-MESSAGE-ERROR", sprintf("multipart message received without multipart boundary; headers: %y", msg - "body");
+            }
 
             hash<auto> mpmsg;
             list<string> l = split("\r\n--" + bdry, msg.body);
@@ -532,9 +543,10 @@ public class WSDLLib {
                     #printf("hl: %y hi: %y ha: %y\n", hl, hi, ha);exit();
                     hh{hi} = ha;
                 }
-                if (!exists hh."content-id")
+                if (!exists hh."content-id") {
                     throw "SOAP-MESSAGE-ERROR", sprintf("expecting part header Content-ID in part %d; headers: %y",
                         i, hh);
+                }
 
                 auto b;
                 if (hh."content-transfer-encoding" == "binary") {
@@ -556,9 +568,10 @@ public class WSDLLib {
                     }
                 }
 
-                if (hh."content-id" !~ /^\<.*\>$/)
+                if (hh."content-id" !~ /^\<.*\>$/) {
                     throw "SOAP-MESSAGE-ERROR", sprintf("expected part ID to have the following format: <id>, "
                         "instead got %s", hh."content-id");
+                }
 
                 hash<auto> p = (
                     "hdr": hh,
@@ -573,11 +586,16 @@ public class WSDLLib {
                     mpmsg.part{id} = p;
                 }
             }
+
+            # Detect MTOM/XOP messages
+            bool is_mtom = mpmsg.body.hdr."content-type" =~ /application\/xop\+xml/i;
+
             return {
                 'content-type': mpmsg.body.hdr."content-type",
                 'header': msg.header + mpmsg.body.hdr,
                 'body': mpmsg.body.body,
                 'parts': mpmsg.part,
+                'is_mtom': is_mtom,
             };
         } else {
             return {
@@ -588,9 +606,160 @@ public class WSDLLib {
         }
     }
 
+    #! Checks if an element is an xop:Include element by verifying the namespace
+    /** @param key the element key (may include prefix like "xop:Include")
+        @param node the element node (hash with attributes)
+        @return True if this is a valid xop:Include element
+    */
+    private static bool isXopIncludeElement(string key, auto node) {
+        # Determine local name and optional prefix from the element key
+        string prefix;
+        string local;
+        if (key =~ /^([^:]+):(.*)$/) {
+            prefix = ($1)[0];
+            local = ($1)[1];
+        } else {
+            prefix = "";
+            local = key;
+        }
+
+        if (local != "Include") {
+            return False;
+        }
+
+        if (!node || node.typeCode() != NT_HASH) {
+            return False;
+        }
+
+        *hash<auto> attrs = node."^attributes^";
+        if (!attrs) {
+            return False;
+        }
+
+        # If there is a prefix, require a matching xmlns:<prefix> declaration
+        if (prefix) {
+            string ns_attr = "xmlns:" + prefix;
+            return attrs{ns_attr} == XOP_NS;
+        }
+
+        # No prefix: require default namespace to be the XOP namespace
+        return attrs{"xmlns"} == XOP_NS;
+    }
+
+    #! Resolves xop:Include references in an XML data structure
+    /** @param data reference to the XML data structure to process
+        @param parts hash of MIME parts keyed by content-id
+    */
+    static substXopInclude(reference<auto> data, hash<auto> parts) {
+        if (data.typeCode() == NT_HASH) {
+            # Check for xop:Include element
+            foreach string key in (keys data) {
+                if ((key =~ /:Include$/ || key == "Include") && isXopIncludeElement(key, data{key})) {
+                    # This is a verified xop:Include element
+                    *hash<auto> attrs = data{key}."^attributes^";
+                    if (attrs && attrs.href) {
+                        string href = attrs.href;
+                        if (href =~ /^cid:/) {
+                            # Extract content-id from cid: URI
+                            string cid = substr(href, 4);  # Remove "cid:" prefix
+                            if (parts{cid}) {
+                                # Replace the xop:Include with the binary data
+                                data = parts{cid}.body;
+                                return;
+                            }
+                        }
+                    }
+                } else {
+                    # Recursively process nested structures
+                    WSDLLib::substXopInclude(\data{key}, parts);
+                }
+            }
+        } else if (data.typeCode() == NT_LIST) {
+            for (int i = 0; i < data.size(); ++i) {
+                WSDLLib::substXopInclude(\data[i], parts);
+            }
+        }
+    }
+
+    #! Creates an MTOM/XOP multipart message from XML and binary attachments
+    /** @param xml the XML SOAP message body
+        @param attachments list of hashes with keys: 'cid' (content-id), 'content_type', 'data' (binary)
+        @param boundary optional multipart boundary string
+        @return hash with 'content_type' and 'body' keys for the multipart message
+    */
+    static hash<auto> packageMtom(string xml, list<hash<auto>> attachments, *string boundary) {
+        if (!boundary) {
+            boundary = "----=_Part_" + get_random_string(20);
+        }
+
+        # Build the root part (XOP document)
+        string root_cid = "root.message@qore.org";
+
+        # Build all parts into a list and join at the end
+        list<auto> parts = ();
+
+        # Root part header and content
+        string root_header = "--" + boundary + "\r\n";
+        root_header += "Content-Type: application/xop+xml; charset=utf-8; type=\"text/xml\"\r\n";
+        root_header += "Content-Transfer-Encoding: 8bit\r\n";
+        root_header += "Content-ID: <" + root_cid + ">\r\n";
+        root_header += "\r\n";
+        root_header += xml + "\r\n";
+        parts += root_header;
+
+        # Add each binary attachment
+        foreach hash<auto> att in (attachments) {
+            string att_header = "--" + boundary + "\r\n";
+            att_header += "Content-Type: " + (att.content_type ?? "application/octet-stream") + "\r\n";
+            att_header += "Content-Transfer-Encoding: binary\r\n";
+            att_header += "Content-ID: <" + att.cid + ">\r\n";
+            att_header += "\r\n";
+            parts += att_header;
+            parts += att.data;
+            parts += "\r\n";
+        }
+
+        # Close the multipart message
+        parts += "--" + boundary + "--\r\n";
+
+        # Join all parts - convert to binary if any binary parts exist
+        bool has_binary = False;
+        foreach auto p in (parts) {
+            if (p.typeCode() == NT_BINARY) {
+                has_binary = True;
+                break;
+            }
+        }
+
+        auto body;
+        if (has_binary) {
+            body = binary();
+            foreach auto p in (parts) {
+                if (p.typeCode() == NT_BINARY) {
+                    body += p;
+                } else {
+                    body += binary(p);
+                }
+            }
+        } else {
+            body = parts.join("");
+        }
+
+        return {
+            "content_type": sprintf("multipart/related; boundary=\"%s\"; type=\"application/xop+xml\"; start=\"<%s>\"",
+                boundary, root_cid),
+            "body": body,
+        };
+    }
+
     #! returns True is the message has a SOAP mime type
     static bool isSOAPMessage(hash<auto> msg) {
         return WsdlLibPriv::isContentType(msg."content-type", SoapMimeTypes);
+    }
+
+    #! returns True if the message is an MTOM/XOP message
+    static bool isMtomMessage(hash<auto> msg) {
+        return msg."content-type" =~ /application\/xop\+xml/i;
     }
 
     /**!
@@ -602,14 +771,19 @@ public class WSDLLib {
             hash<auto> h."content-type" = msg."content-type" ?? "text/plain";
             h.body = NOTHING;
             return h;
-        } else if (WSDLLib::isSOAPMessage(msg)) {
+        } else if (WSDLLib::isSOAPMessage(msg) || WSDLLib::isMtomMessage(msg)) {
             hash<auto> xmldata;
             if (msg.body) {
                 xmldata = parse_xml(msg.body);
             }
             if (msg.parts) {
-                # parse entire data structure to find "href"s or href attributes
-                WSDLLib::substHref(\xmldata, msg.parts);
+                # For MTOM messages, resolve xop:Include references
+                if (msg.is_mtom) {
+                    WSDLLib::substXopInclude(\xmldata, msg.parts);
+                } else {
+                    # For traditional multipart messages, parse entire data structure to find "href"s
+                    WSDLLib::substHref(\xmldata, msg.parts);
+                }
             }
             return xmldata;
         } else {
@@ -705,6 +879,29 @@ public class XsdBase inherits Qore::Serializable {
                         h{name} = l;
                     } else
                         h{name} = remove h{k};
+                }
+            }
+        }
+    }
+
+    #! Removes namespace prefixes from all keys in the given hash
+    /** This function is designed for flat attribute hashes where values may be strings.
+        Unlike removeNS(), this processes keys directly regardless of value types.
+    */
+    static removeNSKeys(reference<*hash<auto>> h) {
+        if (!h) {
+            return;
+        }
+        foreach string k in (keys h) {
+            (*string ns, *string name) = k =~ x/([^:]+):([^:]+)/;
+            if (ns && name) {
+                if (exists h{name}) {
+                    # If the unqualified key already exists, make it a list
+                    softlist<auto> l = h{name};
+                    l += remove h{k};
+                    h{name} = l;
+                } else {
+                    h{name} = remove h{k};
                 }
             }
         }
@@ -990,6 +1187,149 @@ public class XsdBaseType inherits WSDL::XsdAbstractType {
                 val = val.toString();
                 val =~ s/[\n\r\t]//g;
                 break;
+
+            case "float":
+            case "double":
+                # Handle IEEE 754 float/double
+                # Check for special values
+                if (val.typeCode() == NT_STRING) {
+                    switch (val) {
+                        case "INF":
+                        case "-INF":
+                        case "NaN":
+                            # These are valid lexical representations, pass through
+                            break;
+                        default:
+                            # Convert string to float
+                            val = float(val);
+                    }
+                } else {
+                    # Convert to float
+                    val = float(val);
+                }
+                break;
+
+            case "duration":
+                # ISO 8601 duration: P[n]Y[n]M[n]DT[n]H[n]M[n]S
+                if (val.typeCode() == NT_STRING) {
+                    # Validate duration format
+                    if (val !~ /^-?P(\d+Y)?(\d+M)?(\d+D)?(T(\d+H)?(\d+M)?(\d+(\.\d+)?S)?)?$/) {
+                        throw SOAP_SERIALIZATION_ERROR, sprintf("value %y is not a valid ISO 8601 duration for type %y", val, type);
+                    }
+                    # Reject empty durations: "P", "-P", "PT", "-PT"
+                    if (val =~ /^-?PT?$/) {
+                        throw SOAP_SERIALIZATION_ERROR, sprintf("value %y is an empty ISO 8601 duration (missing components) for type %y", val, type);
+                    }
+                } else if (val.typeCode() == NT_DATE) {
+                    # Convert date/time duration to ISO 8601 format
+                    # For relative dates, format appropriately
+                    int years = get_years(val);
+                    int months = get_months(val);
+                    int days = get_days(val);
+                    int hours = get_hours(val);
+                    int minutes = get_minutes(val);
+                    int seconds = get_seconds(val);
+
+                    string dur = "P";
+                    if (years) {
+                        dur += sprintf("%dY", years);
+                    }
+                    if (months) {
+                        dur += sprintf("%dM", months);
+                    }
+                    if (days) {
+                        dur += sprintf("%dD", days);
+                    }
+                    if (hours || minutes || seconds) {
+                        dur += "T";
+                        if (hours) {
+                            dur += sprintf("%dH", hours);
+                        }
+                        if (minutes) {
+                            dur += sprintf("%dM", minutes);
+                        }
+                        if (seconds) {
+                            dur += sprintf("%dS", seconds);
+                        }
+                    }
+                    if (dur == "P") {
+                        dur = "PT0S";  # Zero duration
+                    }
+                    val = dur;
+                } else {
+                    throw SOAP_SERIALIZATION_ERROR, sprintf("type %y requires a string or date value; type %y supplied", type, val.type());
+                }
+                break;
+
+            case "gYear":
+                # Format: YYYY with optional timezone
+                if (val.typeCode() == NT_DATE) {
+                    val = format_date("YYYY", date(val));
+                } else if (val.typeCode() == NT_STRING) {
+                    # Validate format
+                    if (val !~ /^-?\d{4,}(Z|[+-]\d{2}:\d{2})?$/) {
+                        throw SOAP_SERIALIZATION_ERROR, sprintf("value %y is not a valid gYear for type %y", val, type);
+                    }
+                } else {
+                    throw SOAP_SERIALIZATION_ERROR, sprintf("type %y requires a date or string value; type %y supplied", type, val.type());
+                }
+                break;
+
+            case "gYearMonth":
+                # Format: YYYY-MM with optional timezone
+                if (val.typeCode() == NT_DATE) {
+                    val = format_date("YYYY-MM", date(val));
+                } else if (val.typeCode() == NT_STRING) {
+                    # Validate format
+                    if (val !~ /^-?\d{4,}-\d{2}(Z|[+-]\d{2}:\d{2})?$/) {
+                        throw SOAP_SERIALIZATION_ERROR, sprintf("value %y is not a valid gYearMonth for type %y", val, type);
+                    }
+                } else {
+                    throw SOAP_SERIALIZATION_ERROR, sprintf("type %y requires a date or string value; type %y supplied", type, val.type());
+                }
+                break;
+
+            case "gMonthDay":
+                # Format: --MM-DD with optional timezone
+                if (val.typeCode() == NT_DATE) {
+                    val = format_date("--MM-DD", date(val));
+                } else if (val.typeCode() == NT_STRING) {
+                    # Validate format
+                    if (val !~ /^--\d{2}-\d{2}(Z|[+-]\d{2}:\d{2})?$/) {
+                        throw SOAP_SERIALIZATION_ERROR, sprintf("value %y is not a valid gMonthDay for type %y", val, type);
+                    }
+                } else {
+                    throw SOAP_SERIALIZATION_ERROR, sprintf("type %y requires a date or string value; type %y supplied", type, val.type());
+                }
+                break;
+
+            case "gMonth":
+                # Format: --MM with optional timezone
+                if (val.typeCode() == NT_DATE) {
+                    val = format_date("--MM", date(val));
+                } else if (val.typeCode() == NT_STRING) {
+                    # Validate format
+                    if (val !~ /^--\d{2}(Z|[+-]\d{2}:\d{2})?$/) {
+                        throw SOAP_SERIALIZATION_ERROR, sprintf("value %y is not a valid gMonth for type %y", val, type);
+                    }
+                } else {
+                    throw SOAP_SERIALIZATION_ERROR, sprintf("type %y requires a date or string value; type %y supplied", type, val.type());
+                }
+                break;
+
+            case "gDay":
+                # Format: ---DD with optional timezone
+                if (val.typeCode() == NT_DATE) {
+                    val = format_date("---DD", date(val));
+                } else if (val.typeCode() == NT_STRING) {
+                    # Validate format
+                    if (val !~ /^---\d{2}(Z|[+-]\d{2}:\d{2})?$/) {
+                        throw SOAP_SERIALIZATION_ERROR, sprintf("value %y is not a valid gDay for type %y", val, type);
+                    }
+                } else {
+                    throw SOAP_SERIALIZATION_ERROR, sprintf("type %y requires a date or string value; type %y supplied", type, val.type());
+                }
+                break;
         }
 
         #printf("DEBUG: FORCE: type: %y, nstype: %y, val: %y\n", type, nstype, val);
@@ -1181,11 +1521,96 @@ public class XsdBaseType inherits WSDL::XsdAbstractType {
                     return val.empty() ? binary() : binary(val);
                 }
 
+            case "float":
+            case "double":
+                # Handle IEEE 754 float/double
+                if (val.typeCode() == NT_STRING) {
+                    switch (val) {
+                        case "INF":
+                            return @inf@;
+                        case "-INF":
+                            return -@inf@;
+                        case "NaN":
+                            return @nan@;
+                        default:
+                            return float(val);
+                    }
+                }
+                return float(val);
+
+            case "duration":
+                # Return duration as string (ISO 8601 format)
+                # Applications can parse this as needed
+                if (val.typeCode() == NT_STRING) {
+                    # Validate format
+                    if (val !~ /^-?P(\d+Y)?(\d+M)?(\d+D)?(T(\d+H)?(\d+M)?(\d+(\.\d+)?S)?)?$/) {
+                        throw SOAP_DESERIALIZATION_ERROR, sprintf("value %y is not a valid ISO 8601 duration", val);
+                    }
+                    # Reject empty durations: "P", "-P", "PT", "-PT"
+                    if (val =~ /^-?PT?$/) {
+                        throw SOAP_DESERIALIZATION_ERROR, sprintf("value %y is an empty ISO 8601 duration (missing components)", val);
+                    }
+                    return val;
+                }
+                return string(val);
+
+            case "gYear":
+                # Return gYear as string (YYYY with optional timezone)
+                if (val.typeCode() == NT_STRING) {
+                    # Extract year portion for validation
+                    if (val !~ /^-?\d{4,}(Z|[+-]\d{2}:\d{2})?$/) {
+                        throw SOAP_DESERIALIZATION_ERROR, sprintf("value %y is not a valid gYear", val);
+                    }
+                    return val;
+                }
+                return string(val);
+
+            case "gYearMonth":
+                # Return gYearMonth as string (YYYY-MM with optional timezone)
+                if (val.typeCode() == NT_STRING) {
+                    if (val !~ /^-?\d{4,}-\d{2}(Z|[+-]\d{2}:\d{2})?$/) {
+                        throw SOAP_DESERIALIZATION_ERROR, sprintf("value %y is not a valid gYearMonth", val);
+                    }
+                    return val;
+                }
+                return string(val);
+
+            case "gMonthDay":
+                # Return gMonthDay as string (--MM-DD with optional timezone)
+                if (val.typeCode() == NT_STRING) {
+                    if (val !~ /^--\d{2}-\d{2}(Z|[+-]\d{2}:\d{2})?$/) {
+                        throw SOAP_DESERIALIZATION_ERROR, sprintf("value %y is not a valid gMonthDay", val);
+                    }
+                    return val;
+                }
+                return string(val);
+
+            case "gMonth":
+                # Return gMonth as string (--MM with optional timezone)
+                if (val.typeCode() == NT_STRING) {
+                    if (val !~ /^--\d{2}(Z|[+-]\d{2}:\d{2})?$/) {
+                        throw SOAP_DESERIALIZATION_ERROR, sprintf("value %y is not a valid gMonth", val);
+                    }
+                    return val;
+                }
+                return string(val);
+
+            case "gDay":
+                # Return gDay as string (---DD with optional timezone)
+                if (val.typeCode() == NT_STRING) {
+                    if (val !~ /^---\d{2}(Z|[+-]\d{2}:\d{2})?$/) {
+                        throw SOAP_DESERIALIZATION_ERROR, sprintf("value %y is not a valid gDay", val);
+                    }
+                    return val;
+                }
+                return string(val);
+
             default: {
                 if (name == "anyType")  {
                     *XsdAbstractType t = tmap_try_get(tmap, type);
-                    if (t)
+                    if (t) {
                         return t.deserialize(en, tmap, mrh, val);
+                    }
                 }
                 throw SOAP_DESERIALIZATION_ERROR, sprintf("don't know how to handle type %y", name);
             }
@@ -1214,6 +1639,8 @@ public class XsdBaseType inherits WSDL::XsdAbstractType {
                 return IntType;
 
             case "decimal":
+            case "float":
+            case "double":
                 return FloatType;
 
             case "date":
@@ -1227,6 +1654,12 @@ public class XsdBaseType inherits WSDL::XsdAbstractType {
             case "string":
             case "token":
             case "normalizedString":
+            case "duration":
+            case "gYear":
+            case "gYearMonth":
+            case "gMonthDay":
+            case "gMonth":
+            case "gDay":
                 return StringType;
 
             case "base64Binary":
@@ -1244,7 +1677,7 @@ public class XsdBaseType inherits WSDL::XsdAbstractType {
     }
 }
 
-#! class for XSD array types; currently only supports single dimensional arrays
+#! class for XSD array types; supports single and multi-dimensional arrays
 public class XsdArrayType inherits WSDL::XsdAbstractType {
     private {
         bool finalized;
@@ -1253,11 +1686,44 @@ public class XsdArrayType inherits WSDL::XsdAbstractType {
     public {
         *hash<auto> typeinfo;
         XsdAbstractType elementType;
+
+        #! number of dimensions for multi-dimensional arrays (1 = single dimension)
+        int dimensions = 1;
     }
 
     constructor(string t, string ns, string arrayType, Namespaces nsc, XsdLateResolverHelper unresolved) : XsdAbstractType(t, ns, nsc) {
-        # remove [] from the end of the string
-        arrayType =~ s/\[\]$//;
+        # Parse array dimensions - handles both [] and [,] notation
+        # SOAP 1.1 Section 5.4.2 supports:
+        # - Single dimension: type[] or type[n]
+        # - Multi-dimension: type[,] or type[n,m] (comma-separated)
+        # - Nested arrays: type[][] (multiple bracket pairs)
+
+        # Count dimensions from bracket notation using extract mode (x//)
+        # Handle comma-separated dimensions first (e.g., [,] = 2D, [n,m] = 2D)
+        # Note: use + not * to only match brackets with actual content
+        *list<*string> match = (arrayType =~ x/\[([,\d]+)\]$/);
+        if (match) {
+            *string dimSpec = match[0];
+            # Count commas + 1 for comma-separated dimensions (e.g., [,] = 2D, [,,] = 3D)
+            # Use regex_subst to remove commas and calculate count from length difference
+            string noCommas = regex_subst(dimSpec, ",", "", RE_Global);
+            int commaCount = dimSpec.length() - noCommas.length();
+            dimensions = commaCount + 1;
+            # Remove the bracket suffix
+            arrayType =~ s/\[([,\d]+)\]$//;
+        }
+
+        # Handle empty bracket pairs (e.g., type[][] = 2D, type[] = 1D)
+        # Count all [] pairs and set dimensions to that count
+        int bracketCount = 0;
+        while (arrayType =~ /\[\]$/) {
+            bracketCount++;
+            arrayType =~ s/\[\]$//;
+        }
+        if (bracketCount > 0) {
+            dimensions = bracketCount;
+        }
+
         if (!nsc.doType(arrayType, \typeinfo, \elementType)) {
             unresolved.add(self);
         } else {
@@ -1266,18 +1732,26 @@ public class XsdArrayType inherits WSDL::XsdAbstractType {
     }
 
     AbstractDataProviderType getDataProviderType() {
-        return new ListDataType(elementType.getDataProviderType());
+        # Build nested list type for multi-dimensional arrays
+        AbstractDataProviderType innerType = elementType.getDataProviderType();
+        for (int i = 0; i < dimensions; i++) {
+            innerType = new ListDataType(innerType);
+        }
+        return innerType;
     }
 
-    finalize(hash<string, XsdAbstractType> tmap, Namespaces nsc) {
+    finalize(hash<string, XsdAbstractType> tmap, Namespaces nsc, *hash<string, XsdGroup> groupMap,
+            *hash<string, XsdAttributeGroup> attrGroupMap, *XsdLateResolverHelper unresolved) {
         if (finalized) {
             return;
         }
         finalized = True;
 
         XsdAbstractType t = tmap_get(tmap, typeinfo.val);
-        if (t.hasCallableMethod("finalize")) {
-            cast<object>(t).finalize(tmap, nsc);
+        if (t instanceof XsdComplexType) {
+            cast<XsdComplexType>(t).finalize(tmap, nsc, groupMap, attrGroupMap, unresolved);
+        } else if (t instanceof XsdArrayType) {
+            cast<XsdArrayType>(t).finalize(tmap, nsc, groupMap, attrGroupMap, unresolved);
         }
     }
 
@@ -1285,10 +1759,12 @@ public class XsdArrayType inherits WSDL::XsdAbstractType {
         switch (name) {
             case "binary": {
                 int t = val.typeCode();
-                if (t === NT_STRING)
+                if (t === NT_STRING) {
                     val = binary(val);
-                else if (t !== NT_BINARY)
-                    throw SOAP_SERIALIZATION_ERROR, sprintf("cannot serialize type %y from type %y; requires string or binary", name, t);
+                } else if (t !== NT_BINARY) {
+                    throw SOAP_SERIALIZATION_ERROR, sprintf("cannot serialize type %y from type %y; requires "
+                        "string or binary", name, t);
+                }
                 return val;
             }
 
@@ -1296,15 +1772,20 @@ public class XsdArrayType inherits WSDL::XsdAbstractType {
                 # this must be an untyped hash
                 hash rv;
                 if (!omitType) {
-                    rv."^attributes^" = {"soapenc:arrayType": elementType.getNameWithNS() + "[]"};
+                    # Build arrayType attribute with proper dimension notation
+                    string dimSuffix = dimensions > 1
+                        ? "[" + strmul(",", dimensions - 1) + "]"
+                        : "[]";
+                    rv."^attributes^" = {"soapenc:arrayType": elementType.getNameWithNS() + dimSuffix};
                 }
                 if (val.typeCode() == NT_HASH && val.size() == 1) {
                     rv += {
-                        "soapenc:" + val.firstKey(): map elementType.serialize(nsc, $1, omitType), val.firstValue(),
+                        "soapenc:" + val.firstKey(): map serializeElement(nsc, $1, omitType, dimensions),
+                            val.firstValue(),
                     };
                 } else {
                     rv += {
-                        "^value^": (map elementType.serialize(nsc, $1, omitType), val),
+                        "^value^": (map serializeElement(nsc, $1, omitType, dimensions), val),
                     };
                 }
                 return rv;
@@ -1312,11 +1793,22 @@ public class XsdArrayType inherits WSDL::XsdAbstractType {
         }
     }
 
+    #! Serialize a single element, handling nested dimensions for multi-dimensional arrays
+    private auto serializeElement(Namespaces nsc, auto val, *softbool omitType, int remainingDims) {
+        if (remainingDims > 1 && val.typeCode() == NT_LIST) {
+            # For multi-dimensional arrays, recursively serialize nested lists
+            return map serializeElement(nsc, $1, omitType, remainingDims - 1), val;
+        }
+        return elementType.serialize(nsc, val, omitType);
+    }
+
     auto deserialize(string en, hash<string, XsdAbstractType> tmap, *hash<auto> mrh, auto val) {
         switch (name) {
             case "binary": {
-                if (val.typeCode() != NT_BINARY)
-                    throw SOAP_DESERIALIZATION_ERROR, sprintf("cannot deserialize type %y from type %y; requires binary", name, val.typeName());
+                if (val.typeCode() != NT_BINARY) {
+                    throw SOAP_DESERIALIZATION_ERROR, sprintf("cannot deserialize type %y from type %y; requires "
+                        "binary", name, val.typeName());
+                }
                 return val;
             }
 
@@ -1324,15 +1816,30 @@ public class XsdArrayType inherits WSDL::XsdAbstractType {
                 # remove any namespace marker from value
                 *string ns = remove val.".ns";
                 softint attr = val.hasKey("^attributes^");
-                #printf("val: %N\n", val);
-                if (val.typeCode() == NT_HASH && val.size() == (1 + attr)) {
-                    # get element name
-                    string ename = (map $1, keys val, $1 != "^attributes^")[0];
-                    return {ename: (map elementType.deserialize(en, tmap, mrh, $1), val{ename})};
+                if (val.typeCode() == NT_HASH) {
+                    # Handle ^value^ key specially - return deserialized content directly
+                    if (val.hasKey("^value^")) {
+                        return map deserializeElement(en, tmap, mrh, $1, dimensions), val."^value^";
+                    }
+                    # For other single-key hashes, preserve the element name
+                    if (val.size() == (1 + attr)) {
+                        string ename = (map $1, keys val, $1 != "^attributes^")[0];
+                        return {ename: (map deserializeElement(en, tmap, mrh, $1, dimensions), val{ename})};
+                    }
                 }
-                return map elementType.deserialize(en, tmap, mrh, $1), val;
+                return map deserializeElement(en, tmap, mrh, $1, dimensions), val;
             }
         }
+    }
+
+    #! Deserialize a single element, handling nested dimensions for multi-dimensional arrays
+    private auto deserializeElement(string en, hash<string, XsdAbstractType> tmap, *hash<auto> mrh, auto val,
+            int remainingDims) {
+        if (remainingDims > 1 && val.typeCode() == NT_LIST) {
+            # For multi-dimensional arrays, recursively deserialize nested lists
+            return map deserializeElement(en, tmap, mrh, $1, remainingDims - 1), val;
+        }
+        return elementType.deserialize(en, tmap, mrh, val);
     }
 }
 
@@ -1486,10 +1993,15 @@ public class XsdElement inherits WSDL::XsdTypedData {
         #printf("DEBUG: XsdElement::serializeAsIntern() name: %y (with type: %y) h: %y key: %y typename: %y (%y) minOccurs: %y nillable: %y (%y %y)\n", name, ((!omitType || type != self.type) && type.hasRealName()), h, key, typename, type.getName(), minOccurs, nillable, !exists h, !minOccurs);
 
         int tc = h.typeCode();
-        if (tc == NT_LIST && h.size() == 1)
+        # Don't unwrap single-element lists for XSD list types (they need the list value)
+        bool is_list_type = (type instanceof XsdSimpleType && cast<XsdSimpleType>(type).listItemType);
+        if (tc == NT_LIST && h.size() == 1 && !is_list_type) {
             h = h[0];
+        }
 
-        if (!exists h || (tc == NT_LIST && h.empty())) {
+        # For list types, empty lists are valid values (serialize to empty element content)
+        # For non-list types, empty lists with minOccurs=0 can be skipped
+        if (!exists h || (tc == NT_LIST && h.empty() && !is_list_type)) {
             if (!minOccurs)
                 return;
 
@@ -1515,13 +2027,31 @@ public class XsdElement inherits WSDL::XsdTypedData {
             pf = ("^attributes^": ("xsi:type": !usedocns ? type.getName() : type.getNameWithNS()));
 
         if (tc == NT_LIST) {
+            # For list types (XsdSimpleType with listItemType), the list value is passed
+            # directly to the type's serialize() which handles it as a space-separated value
+            if (is_list_type) {
+                # Let the list type handle the list value directly
+                auto rv = type.serialize(nsc, h, omitType);
+                if (!pf) {
+                    return rv;
+                }
+                if (rv.typeCode() != NT_HASH) {
+                    pf."^value^" = rv;
+                    return pf;
+                }
+                return pf + rv;
+            }
+
             int len = h.size();
-            if (maxOccurs == 1 && len > 1)
+            if (maxOccurs == 1 && len > 1) {
                 throw SOAP_SERIALIZATION_ERROR, sprintf("cannot serialize element %y of type %y from a list<auto> with %d elements because maxOccurs = 1", name, type.getName(), len);
-            if (len > maxOccurs && maxOccurs > 0)
+            }
+            if (len > maxOccurs && maxOccurs > 0) {
                 throw SOAP_SERIALIZATION_ERROR, sprintf("list<auto> for element %y of type %y has %d element%s, but maxOccurs = %d", name, type.getName(), elements h, elements h == 1 ? "" : "s", maxOccurs);
-            if (len < minOccurs)
+            }
+            if (len < minOccurs) {
                 throw SOAP_SERIALIZATION_ERROR, sprintf("list<auto> for element %y of type %y has %d element%s, but minOccurs = %d", name, type.getName(), elements h, elements h == 1 ? "" : "s", minOccurs);
+            }
 
             list<auto> l = ();
             foreach auto e in (h) {
@@ -1645,6 +2175,28 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
         XsdAbstractType type;
         AbstractDataProviderType dataType;
         bool usedocns;
+
+        #! XSD restriction facets
+        #! Pattern facets - list for multiple patterns (all must match)
+        *list<string> patterns;
+        #! String length facets
+        *softint minLength;
+        *softint maxLength;
+        *softint length;
+        #! Numeric range facets
+        *auto minInclusive;
+        *auto maxInclusive;
+        *auto minExclusive;
+        *auto maxExclusive;
+        #! Numeric precision facets
+        *softint totalDigits;
+        *softint fractionDigits;
+        #! WhiteSpace facet
+        *string whiteSpace;
+
+        #! List type support
+        *XsdAbstractType listItemType;
+        *hash<auto> listItemTypeInfo;
     }
 
     constructor(hash<auto> st, Namespaces nsc, XsdLateResolverHelper unresolved, bool n_usedocns, *string desc_name)
@@ -1667,8 +2219,58 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
 
             WSDL::XsdBase::removeNS(\r);
 
-            if (r.enumeration)
+            # Parse enumeration facet
+            if (r.enumeration) {
                 enumValues = map {$1."^attributes^".value: True}, r.enumeration;
+            }
+
+            # Parse pattern facets (multiple patterns allowed, all must match)
+            if (r.pattern) {
+                # Handle both single pattern (hash) and multiple patterns (list)
+                if (r.pattern.typeCode() == NT_LIST) {
+                    patterns = map $1."^attributes^".value, r.pattern;
+                } else {
+                    patterns = (r.pattern."^attributes^".value,);
+                }
+            }
+
+            # Parse length facets
+            if (r.length) {
+                length = int(r.length."^attributes^".value);
+            }
+            if (r.minLength) {
+                minLength = int(r.minLength."^attributes^".value);
+            }
+            if (r.maxLength) {
+                maxLength = int(r.maxLength."^attributes^".value);
+            }
+
+            # Parse numeric range facets
+            if (r.minInclusive) {
+                minInclusive = r.minInclusive."^attributes^".value;
+            }
+            if (r.maxInclusive) {
+                maxInclusive = r.maxInclusive."^attributes^".value;
+            }
+            if (r.minExclusive) {
+                minExclusive = r.minExclusive."^attributes^".value;
+            }
+            if (r.maxExclusive) {
+                maxExclusive = r.maxExclusive."^attributes^".value;
+            }
+
+            # Parse precision facets
+            if (r.totalDigits) {
+                totalDigits = int(r.totalDigits."^attributes^".value);
+            }
+            if (r.fractionDigits) {
+                fractionDigits = int(r.fractionDigits."^attributes^".value);
+            }
+
+            # Parse whiteSpace facet
+            if (r.whiteSpace) {
+                whiteSpace = r.whiteSpace."^attributes^".value;
+            }
         } else if (st.union) {
             hash<auto> u = st.union;
             *string memberTypes = u."^attributes^".memberTypes;
@@ -1694,7 +2296,19 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
                 dataType = new UnionDataType(unionTypes);
             }
         } else if (st.list) {
-            throw "XSD-SIMPLETYPE-ERROR", sprintf("unsupported list definition in simpleType %y", name);
+            hash<auto> l = st.list;
+            *string itemType = l."^attributes^".itemType;
+            if (itemType) {
+                if (!nsc.doType(itemType, \listItemTypeInfo, \listItemType)) {
+                    unresolved.add(self);
+                }
+            } else if (l.simpleType) {
+                # Inline simpleType definition for list items
+                listItemType = new XsdSimpleType(l.simpleType, nsc, unresolved, n_usedocns);
+            } else {
+                throw "XSD-SIMPLETYPE-ERROR", sprintf("list definition in simpleType %y requires itemType attribute "
+                    "or inline simpleType", name);
+            }
         } else {
             throw "XSD-SIMPLETYPE-ERROR", sprintf("missing restriction, union, or list element in simpleType %y",
                 name);
@@ -1707,9 +2321,16 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
         if (!type && unionTypes) {
             dataType = new UnionDataType(unionTypes);
         }
+        # Handle unresolved list item type
+        if (listItemTypeInfo && !listItemType) {
+            # Will be resolved later in type resolution
+        }
     }
 
     AbstractDataProviderType getDataProviderType() {
+        if (listItemType) {
+            return new ListDataType(listItemType.getDataProviderType());
+        }
         return dataType ?? type.getDataProviderType();
     }
 
@@ -1725,9 +2346,19 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
                     rh{k} = remove val{k};
                 }
             }
-            if (val.size() == 1 && val.firstKey() == "^value^")
+            if (val.size() == 1 && val.firstKey() == "^value^") {
                 val = val."^value^";
+            }
         }
+
+        # Handle list type serialization
+        if (listItemType) {
+            return serializeList(nsc, val, omitType, rh);
+        }
+
+        # Validate facets before serialization
+        validateFacets(val, "serialize");
+
         if (enumValues && !enumValues{val}) {
             throw "SOAP-SERIALIZATION-ERROR", sprintf("value %y passed to simpleType %y is not in the enumeration "
                 "list<auto> (%y)", val, name, enumValues.keys());
@@ -1751,7 +2382,156 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
         return rh + type.serialize(nsc, val, omitType);
     }
 
+    #! Serialize a list type value as space-separated string
+    private auto serializeList(Namespaces nsc, auto val, *softbool omitType, *hash<auto> rh) {
+        list<auto> items;
+        if (val.typeCode() == NT_LIST) {
+            items = val;
+        } else if (exists val) {
+            # Single value treated as single-item list
+            items = (val,);
+        } else {
+            items = ();
+        }
+
+        # Serialize each item and join with spaces
+        list<string> serializedItems = ();
+        foreach auto item in (items) {
+            auto serialized = listItemType.serialize(nsc, item, True);
+            if (serialized.typeCode() == NT_HASH && serialized.hasKey("^value^")) {
+                serializedItems += string(serialized."^value^");
+            } else {
+                serializedItems += string(serialized);
+            }
+        }
+
+        string result = serializedItems.join(" ");
+        if (rh) {
+            rh."^value^" = result;
+            return rh;
+        }
+        return result;
+    }
+
+    #! Validate restriction facets for serialization/deserialization
+    /** @param val the value to validate
+        @param operation "serialize" or "deserialize" for error context
+    */
+    private validateFacets(auto val, string operation) {
+        # Skip validation for NOTHING values
+        if (!exists val) {
+            return;
+        }
+
+        # Determine error type based on operation
+        string errType = operation == "deserialize" ? "SOAP-DESERIALIZATION-ERROR" : "SOAP-SERIALIZATION-ERROR";
+
+        # Pattern validation (all patterns must match)
+        if (patterns) {
+            string strVal = string(val);
+            foreach string pattern in (patterns) {
+                # Create full-match regex by anchoring
+                string fullPattern = "^" + pattern + "$";
+                if (!regex(strVal, fullPattern)) {
+                    throw errType, sprintf("value %y for simpleType %y does not match "
+                        "pattern %y during %s", val, name, pattern, operation);
+                }
+            }
+        }
+
+        # Length validation
+        if (exists length || exists minLength || exists maxLength) {
+            int len;
+            if (val.typeCode() == NT_STRING) {
+                len = val.length();
+            } else if (val.typeCode() == NT_BINARY) {
+                len = val.size();
+            } else if (val.typeCode() == NT_LIST) {
+                len = val.size();
+            } else {
+                len = string(val).length();
+            }
+
+            if (exists length && len != length) {
+                throw errType, sprintf("value %y for simpleType %y has length %d, "
+                    "but exact length %d is required during %s", val, name, len, length, operation);
+            }
+            if (exists minLength && len < minLength) {
+                throw errType, sprintf("value %y for simpleType %y has length %d, "
+                    "but minimum length is %d during %s", val, name, len, minLength, operation);
+            }
+            if (exists maxLength && len > maxLength) {
+                throw errType, sprintf("value %y for simpleType %y has length %d, "
+                    "but maximum length is %d during %s", val, name, len, maxLength, operation);
+            }
+        }
+
+        # Numeric range validation
+        if (exists minInclusive || exists maxInclusive || exists minExclusive || exists maxExclusive) {
+            auto numVal = val;
+            # Try to convert to number for comparison if it's a string
+            if (numVal.typeCode() == NT_STRING) {
+                numVal = float(numVal);
+            }
+
+            if (exists minInclusive && numVal < float(minInclusive)) {
+                throw errType, sprintf("value %y for simpleType %y is less than "
+                    "minInclusive %y during %s", val, name, minInclusive, operation);
+            }
+            if (exists maxInclusive && numVal > float(maxInclusive)) {
+                throw errType, sprintf("value %y for simpleType %y is greater than "
+                    "maxInclusive %y during %s", val, name, maxInclusive, operation);
+            }
+            if (exists minExclusive && numVal <= float(minExclusive)) {
+                throw errType, sprintf("value %y for simpleType %y must be greater than "
+                    "minExclusive %y during %s", val, name, minExclusive, operation);
+            }
+            if (exists maxExclusive && numVal >= float(maxExclusive)) {
+                throw errType, sprintf("value %y for simpleType %y must be less than "
+                    "maxExclusive %y during %s", val, name, maxExclusive, operation);
+            }
+        }
+
+        # Precision validation (totalDigits and fractionDigits)
+        if (exists totalDigits || exists fractionDigits) {
+            string strVal = string(val);
+            # Remove sign for digit counting
+            strVal =~ s/^-//;
+            strVal =~ s/^\+//;
+
+            if (exists totalDigits) {
+                string digitsOnly = strVal;
+                # Remove decimal point
+                digitsOnly =~ s/\.//;
+                # Remove leading zeros per XSD spec (leading zeros don't count toward totalDigits)
+                digitsOnly =~ s/^0+//;
+                # Handle the case where value is all zeros (e.g., "0" or "0.00")
+                if (digitsOnly.empty()) {
+                    digitsOnly = "0";
+                }
+                if (digitsOnly.length() > totalDigits) {
+                    throw errType, sprintf("value %y for simpleType %y has %d total digits, "
+                        "but maximum is %d during %s", val, name, digitsOnly.length(), totalDigits, operation);
+                }
+            }
+
+            if (exists fractionDigits) {
+                *string fracPart = (strVal =~ x/\.(\d+)/)[0];
+                int fracLen = fracPart ? fracPart.length() : 0;
+                if (fracLen > fractionDigits) {
+                    throw errType, sprintf("value %y for simpleType %y has %d fraction digits, "
+                        "but maximum is %d during %s", val, name, fracLen, fractionDigits, operation);
+                }
+            }
+        }
+    }
+
     auto deserialize(string en, hash<string, XsdAbstractType> tmap, *hash<auto> mrh, auto val) {
+        # Handle list type deserialization
+        if (listItemType) {
+            return deserializeList(en, tmap, mrh, val);
+        }
+
         if (unionTypes) {
             # exception list
             list<auto> exl;
@@ -1769,11 +2549,165 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
 
         auto v = type.deserialize(en, tmap, mrh, val);
 
-        if (enumValues && !enumValues{v})
+        # Validate facets after deserialization
+        validateFacets(v, "deserialize");
+
+        if (enumValues && !enumValues{v}) {
             throw "SOAP-DESERIALIZATION-ERROR", sprintf("value %y passed to simpleType %y while deserializing "
                 "element %y is not in the enumeration list<auto> (%y)", v, name, en, enumValues.keys());
+        }
 
         return v;
+    }
+
+    #! Deserialize a list type value from space-separated string
+    private auto deserializeList(string en, hash<string, XsdAbstractType> tmap, *hash<auto> mrh, auto val) {
+        # Extract value if it's in a hash
+        if (val.typeCode() == NT_HASH) {
+            if (val.hasKey("^value^")) {
+                val = val."^value^";
+            }
+        }
+
+        # Handle empty or null values
+        if (!exists val || val == "") {
+            return ();
+        }
+
+        # Split space-separated values
+        string strVal = string(val);
+        list<string> items = strVal.split(" ");
+
+        # Deserialize each item
+        list<auto> result = ();
+        foreach string item in (items) {
+            if (item != "") {  # Skip empty strings from multiple spaces
+                result += listItemType.deserialize(en, tmap, mrh, item);
+            }
+        }
+
+        return result;
+    }
+}
+
+#! XSD element group class for xs:group definitions
+public class XsdGroup inherits WSDL::XsdNamedData, Qore::Serializable {
+    public {
+        #! Elements in this group (from sequence, choice, or all)
+        hash<string, XsdElement> groupElements();
+        #! The group content model type: "sequence", "choice", or "all"
+        *string contentModel;
+        #! Namespace URI where this group is defined
+        *string nsUri;
+    }
+
+    constructor(hash<auto> g, Namespaces nsc, XsdLateResolverHelper unresolved, bool usedocns) : XsdNamedData(\g) {
+        name = g."^attributes^".name;
+        nsUri = nsc.getTargetNamespaceUri();
+
+        WSDL::XsdBase::removeNS(\g);
+
+        # Parse the group content (sequence, choice, or all)
+        if (g.sequence) {
+            contentModel = "sequence";
+            WSDL::XsdBase::removeNS(\g.sequence);
+            foreach hash<auto> e in (g.sequence.element) {
+                XsdElement elem(e, nsc, NOTHING, unresolved, usedocns);
+                groupElements{elem.name} = elem;
+            }
+        } else if (g.choice) {
+            contentModel = "choice";
+            WSDL::XsdBase::removeNS(\g.choice);
+            foreach hash<auto> e in (g.choice.element) {
+                XsdElement elem(e, nsc, NOTHING, unresolved, usedocns);
+                groupElements{elem.name} = elem;
+            }
+        } else if (g.all) {
+            contentModel = "all";
+            WSDL::XsdBase::removeNS(\g.all);
+            foreach hash<auto> e in (g.all.element) {
+                XsdElement elem(e, nsc, NOTHING, unresolved, usedocns);
+                groupElements{elem.name} = elem;
+            }
+        }
+    }
+
+    #! Returns the elements in this group
+    hash<string, XsdElement> getElements() {
+        return groupElements;
+    }
+
+    #! Returns the qualified name for map lookup: "{namespace_uri}local_name" or just "local_name" if no namespace
+    string getQualifiedName() {
+        return nsUri ? sprintf("{%s}%s", nsUri, name) : name;
+    }
+}
+
+#! XSD attribute group class for xs:attributeGroup definitions
+public class XsdAttributeGroup inherits WSDL::XsdNamedData, Qore::Serializable {
+    public {
+        #! Attributes in this group
+        hash<string, XsdAttribute> groupAttrs();
+        #! Nested attributeGroup references to resolve later
+        list<string> nestedAttrGroupRefs();
+        #! Namespace URI where this attribute group is defined
+        *string nsUri;
+    }
+
+    constructor(hash<auto> ag, Namespaces nsc, XsdLateResolverHelper unresolved) : XsdNamedData(\ag) {
+        name = ag."^attributes^".name;
+        nsUri = nsc.getTargetNamespaceUri();
+
+        WSDL::XsdBase::removeNS(\ag);
+
+        # Parse attributes
+        foreach hash<auto> ah in (ag.attribute) {
+            if (ah."^attributes^") {
+                XsdAttribute attr(ah, nsc, NOTHING, unresolved);
+                groupAttrs{attr.name} = attr;
+            }
+        }
+
+        # Parse nested attributeGroup references
+        foreach hash<auto> nested in (ag.attributeGroup) {
+            *string nestedRef = nested."^attributes^".ref;
+            if (nestedRef) {
+                nestedAttrGroupRefs += nestedRef;
+            }
+        }
+    }
+
+    #! Returns the attributes in this group (including resolved nested groups)
+    hash<string, XsdAttribute> getAttributes() {
+        return groupAttrs;
+    }
+
+    #! Resolve nested attributeGroup references and merge their attributes
+    resolveNestedGroups(hash<string, XsdAttributeGroup> attrGroupMap, Namespaces nsc) {
+        foreach string nestedRef in (nestedAttrGroupRefs) {
+            string qualifiedKey = resolveGroupRef(nestedRef, nsUri, nsc);
+            *XsdAttributeGroup nested = attrGroupMap{qualifiedKey};
+            if (!nested) {
+                # Try local name fallback for backwards compatibility
+                string localName = nestedRef;
+                if (nestedRef =~ /:/) {
+                    localName = (nestedRef =~ x/:(.+)$/)[0];
+                }
+                nested = attrGroupMap{localName};
+            }
+            if (nested) {
+                # Recursively resolve nested group's own nested refs first
+                nested.resolveNestedGroups(attrGroupMap, nsc);
+                groupAttrs += nested.getAttributes();
+            }
+        }
+        # Clear refs after resolution to avoid re-processing
+        nestedAttrGroupRefs = ();
+    }
+
+    #! Returns the qualified name for map lookup: "{namespace_uri}local_name" or just "local_name" if no namespace
+    string getQualifiedName() {
+        return nsUri ? sprintf("{%s}%s", nsUri, name) : name;
     }
 }
 
@@ -1857,7 +2791,7 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
                             }
                         }
                         auto aa = d.restriction.attribute."^attributes^";
-                        WSDL::XsdBase::removeNS(\aa);
+                        WSDL::XsdBase::removeNSKeys(\aa);
                         if (!exists aa.arrayType)
                             throw WSDL_ERROR, sprintf("cannot parse complexType restriction: %y", d.restriction);
 
@@ -1938,7 +2872,8 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
         }
     }
 
-    finalize(hash<string, XsdAbstractType> tmap, Namespaces nsc) {
+    finalize(hash<string, XsdAbstractType> tmap, Namespaces nsc, *hash<string, XsdGroup> groupMap,
+            *hash<string, XsdAttributeGroup> attrGroupMap, *XsdLateResolverHelper unresolved) {
         if (finalized)
             return;
         finalized = True;
@@ -1949,7 +2884,7 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
             XsdAbstractType t = tmap_get(tmap, restriction);
             if (!(t instanceof XsdComplexType))
                 throw WSDL_ERROR, sprintf("cannot restrict complexType %y with type %y", name, t.name);
-            cast<XsdComplexType>(t).finalize(tmap, nsc);
+            cast<XsdComplexType>(t).finalize(tmap, nsc, groupMap, attrGroupMap, unresolved);
             elementmap = cast<hash<string, XsdElement>>(cast<XsdComplexType>(t).elementmap + elementmap);
             #printf("DEBUG: extended %s with %s (%y)\n", name, restriction, cast<XsdComplexType>(t).elementmap.keys());
         } else if (extension) {
@@ -1957,11 +2892,83 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
             XsdAbstractType t = tmap_get(tmap, extension);
             if (!(t instanceof XsdComplexType))
                 throw WSDL_ERROR, sprintf("cannot extend complexType %y with type %y", name, t.name);
-            cast<XsdComplexType>(t).finalize(tmap, nsc);
+            cast<XsdComplexType>(t).finalize(tmap, nsc, groupMap, attrGroupMap, unresolved);
             # combine base type and new type
             elementmap = cast<hash<string, XsdElement>>(cast<XsdComplexType>(t).elementmap + elementmap);
             #printf("DEBUG: extended %s (%s) with %s (%y) elements: %y\n", name, self.uniqueHash(), extension,
             #     cast<XsdComplexType>(t).elementmap.keys(), keys elementmap);
+        }
+
+        # resolve group references
+        if (unresolved && groupMap) {
+            *list<hash<GroupRefInfo>> groupRefList = unresolved.getGroupRefs(self);
+            foreach hash<GroupRefInfo> groupRefInfo in (groupRefList) {
+                # Resolve the reference to a qualified key
+                string qualifiedKey = resolveGroupRef(groupRefInfo.ref, ns, nsc);
+                *XsdGroup grp = groupMap{qualifiedKey};
+                if (!grp) {
+                    # Fallback: try local name for backwards compatibility
+                    string localName = groupRefInfo.ref;
+                    if (groupRefInfo.ref =~ /:/) {
+                        localName = (groupRefInfo.ref =~ x/:(.+)$/)[0];
+                    }
+                    grp = groupMap{localName};
+                }
+                if (grp) {
+                    # Merge group elements into this complex type's element map
+                    # Apply group-level occurrence constraints to elements
+                    hash<string, XsdElement> groupElements = grp.getElements();
+                    if (groupRefInfo.minOccurs == 0) {
+                        # If the group ref has minOccurs=0, make all elements optional
+                        foreach string elemName in (keys groupElements) {
+                            XsdElement elem = groupElements{elemName};
+                            # Only make optional if not already optional
+                            if (elem.minOccurs > 0) {
+                                elem.minOccurs = 0;
+                            }
+                        }
+                    }
+                    if (groupRefInfo.maxOccurs == -1 || groupRefInfo.maxOccurs > 1) {
+                        # If the group ref allows multiple occurrences, set maxOccurs on elements
+                        foreach string elemName in (keys groupElements) {
+                            XsdElement elem = groupElements{elemName};
+                            if (groupRefInfo.maxOccurs == -1) {
+                                elem.maxOccurs = -1;
+                            } else if (elem.maxOccurs != -1) {
+                                elem.maxOccurs = max(elem.maxOccurs, groupRefInfo.maxOccurs);
+                            }
+                        }
+                    }
+                    elementmap += groupElements;
+                }
+            }
+        }
+
+        # resolve attribute group references
+        if (unresolved && attrGroupMap) {
+            # First resolve nested attribute groups within all attribute groups
+            foreach XsdAttributeGroup ag in (attrGroupMap.iterator()) {
+                ag.resolveNestedGroups(attrGroupMap, nsc);
+            }
+
+            *list<string> attrGroupRefs = unresolved.getAttrGroupRefs(self);
+            foreach string attrGroupRef in (attrGroupRefs) {
+                # Resolve the reference to a qualified key
+                string qualifiedKey = resolveGroupRef(attrGroupRef, ns, nsc);
+                *XsdAttributeGroup attrGrp = attrGroupMap{qualifiedKey};
+                if (!attrGrp) {
+                    # Fallback: try local name for backwards compatibility
+                    string localName = attrGroupRef;
+                    if (attrGroupRef =~ /:/) {
+                        localName = (attrGroupRef =~ x/:(.+)$/)[0];
+                    }
+                    attrGrp = attrGroupMap{localName};
+                }
+                if (attrGrp) {
+                    # Merge attribute group attributes into this complex type's attrs
+                    attrs += attrGrp.getAttributes();
+                }
+            }
         }
     }
 
@@ -2002,15 +3009,22 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
             cx_type = XET_ALL;
             WSDL::XsdBase::removeNS(\d.all);
             elementmap = parseElements(d.all.element, unresolved, nsc);
+            # Handle group references in all
+            parseGroupReferences(\d.all, unresolved, nsc);
         } else if (k == "choice") {
             cx_type = XET_CHOICE;
             WSDL::XsdBase::removeNS(\d.choice);
             elementmap = parseElements(d.choice.element, unresolved, nsc);
+            # Handle group references in choice
+            parseGroupReferences(\d.choice, unresolved, nsc);
         } else if (k == "sequence") {
             cx_type = XET_SEQUENCE;
             WSDL::XsdBase::removeNS(\d.sequence);
-            if (d.sequence.element)
+            if (d.sequence.element) {
                 elementmap = parseElements(d.sequence.element, unresolved, nsc);
+            }
+            # Handle group references in sequence
+            parseGroupReferences(\d.sequence, unresolved, nsc);
             WSDL::XsdBase::removeNS(\d.sequence.choice);
             foreach hash<auto> ch in (d.sequence.choice) {
                 #printf("ch: %y\n", ch);
@@ -2026,9 +3040,40 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
             if (d.sequence."any") {
                 anyAttribute = True;
             }
+        } else if (k == "group") {
+            # Handle top-level group reference
+            cx_type = XET_SEQUENCE;  # Groups typically expand to sequences
+            parseGroupReferences(\d, unresolved, nsc);
         } else {
             throw "XSD-COMPLEXTYPE-ERROR", sprintf("unknown keys in %y", d);
         }
+    }
+
+    #! Parse group references within a content model element
+    /** Group references are stored and resolved during the finalize() phase,
+        where the group's elements are merged into this complex type's element map.
+        minOccurs/maxOccurs on the group ref are captured and applied to elements.
+    */
+    private parseGroupReferences(reference<hash<auto>> content, XsdLateResolverHelper unresolved, Namespaces nsc) {
+        foreach hash<auto> g in (content.group) {
+            *hash<auto> attrs = g."^attributes^";
+            *string groupRef = attrs.ref;
+            if (groupRef) {
+                # Parse occurrence constraints (defaults: minOccurs=1, maxOccurs=1)
+                int minOccurs = exists attrs.minOccurs ? int(attrs.minOccurs) : 1;
+                int maxOccurs;
+                if (attrs.maxOccurs == "unbounded") {
+                    maxOccurs = -1;
+                } else if (exists attrs.maxOccurs) {
+                    maxOccurs = int(attrs.maxOccurs);
+                } else {
+                    maxOccurs = 1;
+                }
+                # Store group reference with occurrence info for resolution during finalization
+                unresolved.addGroupRef(self, groupRef, minOccurs, maxOccurs);
+            }
+        }
+        delete content.group;
     }
 
     private parseAttributes(reference d, XsdLateResolverHelper unresolved, Namespaces nsc) {
@@ -2036,7 +3081,16 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
         foreach hash<auto> ah in (remove d.attribute) {
             if (ah."^attributes^") {
                 XsdAttribute attr(ah, nsc, NOTHING, unresolved);
-                attrs.(attr.name) = attr;
+                attrs{attr.name} = attr;
+            }
+        }
+
+        # Handle attributeGroup references - resolved during finalize()
+        foreach hash<auto> ag in (remove d.attributeGroup) {
+            *string groupRef = ag."^attributes^".ref;
+            if (groupRef) {
+                # Store attribute group reference for resolution during finalization
+                unresolved.addAttrGroupRef(self, groupRef);
             }
         }
 
@@ -2875,16 +3929,15 @@ public class WSMessage inherits WSDL::XsdNamedData {
                 continue;
             }
             string k = pmap{part};
-            /* FIXME: handle multipart messages
-            #printf("DEBUG: WSMessage::serialize() k: %y args: %y, parts: %y\n", k, keys args, msginfo.parts);
-            if (msginfo.parts{k}) {
-                any ct = msginfo.parts{k};
-                if (ct.typeCode() == NT_LIST)
-                    ct = shift ct;
-                mpm.addPart(hv, sprintf("<%s>", k), ct);
-                hv."^attributes^".href = "cid:" + k;
+            # Handle multipart attachments - if this part is defined as a multipart content part
+            if (mpm && msginfo.parts{k}) {
+                auto partContentType = msginfo.parts{k};
+                if (partContentType.typeCode() == NT_LIST) {
+                    partContentType = shift partContentType;
+                }
+                mpm.addPart(hv, sprintf("<%s>", k), partContentType);
+                hv = {"^attributes^": {"href": "cid:" + k}};
             }
-            */
             rh{args{k}.element ? (ons + ":" +  k) : k} = hv;
         }
 
@@ -2947,7 +4000,21 @@ public class WSMessage inherits WSDL::XsdNamedData {
                 XsdBase::removeNS2(\val);
             #printf("DEBUG: k: %y val: %y, args: %y\n", k, val, keys args);
             hash<auto> arg = args{k};
-            if (arg.element) {
+            # Handle multipart attachments - if this part is defined as a multipart content part
+            if (mpm && msginfo.parts{k}) {
+                auto partContentType = msginfo.parts{k};
+                if (partContentType.typeCode() == NT_LIST) {
+                    partContentType = shift partContentType;
+                }
+                mpm.addPart(val, sprintf("<%s>", k), partContentType);
+                # For document style with element parts, use element name with namespace
+                if (arg.element) {
+                    string ons = nsc.getOutputNamespacePrefix(arg.element.ns);
+                    rh{ons + ":" + k} = {"^attributes^": {"href": "cid:" + k}};
+                } else {
+                    rh{p} = {"^attributes^": {"href": "cid:" + k}};
+                }
+            } else if (arg.element) {
                 auto th = arg.element.serialize(nsc, val, !encoded, k, name);
                 string ons = nsc.getOutputNamespacePrefix(arg.element.ns);
                 rh{ons + ":" + k} = th;
@@ -3183,10 +4250,24 @@ public class WSMessage inherits WSDL::XsdNamedData {
     }
 }
 
+#! Group reference info with occurrence constraints
+public hashdecl GroupRefInfo {
+    #! The group reference string (e.g., "tns:AddressGroup")
+    string ref;
+    #! Minimum occurrences (default 1)
+    int minOccurs = 1;
+    #! Maximum occurrences (-1 = unbounded, default 1)
+    int maxOccurs = 1;
+}
+
 # private helper class for lazy name resolution
 class XsdLateResolverHelper {
     private {
         list<object> l();
+        #! Group references: maps complexType -> list of group ref info
+        hash<string, list<hash<GroupRefInfo>>> groupRefs();
+        #! Attribute group references: maps complexType -> list of attribute group ref names
+        hash<string, list<string>> attrGroupRefs();
     }
 
     constructor() {
@@ -3198,6 +4279,43 @@ class XsdLateResolverHelper {
 
     list<auto> getList() {
         return l;
+    }
+
+    #! Add a group reference to be resolved later
+    /** @param ct the complex type containing the group reference
+        @param groupRef the group reference string
+        @param minOccurs the minimum occurrences (default 1)
+        @param maxOccurs the maximum occurrences (-1 for unbounded, default 1)
+    */
+    addGroupRef(XsdComplexType ct, string groupRef, int minOccurs = 1, int maxOccurs = 1) {
+        string key = ct.uniqueHash();
+        if (!groupRefs{key}) {
+            groupRefs{key} = ();
+        }
+        groupRefs{key} += <GroupRefInfo>{
+            "ref": groupRef,
+            "minOccurs": minOccurs,
+            "maxOccurs": maxOccurs,
+        };
+    }
+
+    #! Add an attribute group reference to be resolved later
+    addAttrGroupRef(XsdComplexType ct, string attrGroupRef) {
+        string key = ct.uniqueHash();
+        if (!attrGroupRefs{key}) {
+            attrGroupRefs{key} = ();
+        }
+        attrGroupRefs{key} += attrGroupRef;
+    }
+
+    #! Get group references for a complex type
+    *list<hash<GroupRefInfo>> getGroupRefs(XsdComplexType ct) {
+        return groupRefs{ct.uniqueHash()};
+    }
+
+    #! Get attribute group references for a complex type
+    *list<string> getAttrGroupRefs(XsdComplexType ct) {
+        return attrGroupRefs{ct.uniqueHash()};
     }
 
     clearResolved() {
@@ -3294,14 +4412,18 @@ public class SoapBinding inherits WSDL::OperationalBinding {
         rv.body = make_xml(serializeSoapMessage(op, msg, h, header, nsh, request, soap12, \mpm, faultmsg), xml_opts, enc);
 
         string ct = WSDLLib::getSoapMimeType12(soap12);
-        # FIXME: fix multipart message handling
-        /*
-        if (mpm) {
-            mpm.splicePart(rv.body, sprintf("<%s>", (bmd.body.parts ?? keys msg.args).join(" ")), ct);
 
-            rv = mpm.getMsgAndHeaders();
+        # Handle multipart message assembly - splice SOAP body as first part
+        if (mpm && mpm.size() > 0) {
+            BindingMessageDescription bmd = self{request ? "input" : "output"};
+            string partId = sprintf("<%s>", (bmd.body.parts ?? (msg ? keys msg.args : ())).join(" "));
+            mpm.splicePart(rv.body, partId, ct);
+            hash<Mime::MessageInfo> mpmResult = mpm.getMsgAndHeaders();
+            rv.body = mpmResult.body;
+            rv.hdr += mpmResult.hdr;
+            # Content-Type will be overwritten below if not multipart
+            ct = rv.hdr."Content-Type";
         }
-        */
 
         if (req_soapaction) {
             rv.hdr += {"SOAPAction": req_soapaction};
@@ -3338,11 +4460,10 @@ public class SoapBinding inherits WSDL::OperationalBinding {
 
         BindingMessageDescription bmd = self{io};
 
-        # FIXME: implement multipart support
-        /*
-        if (exists bmd.multipart)
+        # Create multipart message container if multipartRelated binding is used
+        if (exists bmd.multipart) {
             mpm = new MultiPartRelatedMessage();
-        */
+        }
 
         bool fault = exists faultmsg;
 
@@ -3561,13 +4682,35 @@ public class SoapBinding inherits WSDL::OperationalBinding {
         WSDL::XsdBase::removeNS2(\mrh.body);
 
         # issue #2902: get all multiref elements with an "id" tag
+        # SOAP 1.1 Section 5.4.1 defines multiref elements with:
+        # - id: unique identifier for the element
+        # - root: "1" = root element, "0" = not a root (referenced only), absent = may be root
+        # - xsi:type: polymorphic type indicator
         foreach hash<auto> hh in (body.pairIterator()) {
             if (!exists hh.value."^attributes^".id) {
                 continue;
             }
             hash<auto> h = remove body{hh.key};
+            hash<auto> attrs = h."^attributes^";
             string id = remove h."^attributes^".id;
-            # FIXME: issue #2902: process root & type
+
+            # Process root attribute (SOAP 1.1 Section 5.4.1)
+            # root="1" means this is a root element, root="0" means it's only referenced
+            # If absent, the element may be a root
+            *string rootAttr = attrs.root;
+            if (rootAttr == "1") {
+                # This is explicitly marked as a root element - keep track of it
+                mrh.rootIds{id} = True;
+            }
+            remove h."^attributes^".root;
+
+            # Process xsi:type attribute for polymorphic type resolution
+            # Store the type info for use during deserialization
+            *string xsiType = attrs."xsi:type";
+            if (xsiType) {
+                mrh.typeMap{id} = xsiType;
+            }
+
             mrh.mrh{id} = h;
         }
 
@@ -3657,8 +4800,8 @@ public class HttpBinding inherits WSDL::OperationalBinding {
             ct = MimeTypeFormUrlEncoded;
             # application/x-www-form-urlencoded Content-Type does not have any parameters
             delete enc;
-            # TODO: throws exception when character is > 127:
-            # ex: e.g. https://www.w3.org/TR/html5/forms.html#application/x-www-form-urlencoded-encoding-algorithm
+            # Non-ASCII characters (> 127) are properly percent-encoded as UTF-8 bytes
+            # per https://www.w3.org/TR/html5/forms.html#application/x-www-form-urlencoded-encoding-algorithm
             rv.body = mime_get_form_urlencoded_string(msg.serializeAllPartData(h));
         } else if (bmd.content) {
             hash<auto> v = msg.serializeData(op.nsc, bmd.content.part, h);
@@ -3808,8 +4951,60 @@ public class HttpBinding inherits WSDL::OperationalBinding {
 
     hash<auto> deserializeRequestPathImpl(WSOperation op, string path) {
         if (input.urlReplacement) {
-            # all parameters are somehow encoded in path
-            throw SOAP_DESERIALIZATION_ERROR, sprintf("url replacement message deserialization is not supported in binding %y", name);
+            # Parse URL replacement parameters from path
+            # urlReplacement hash contains alternating string literals and part names:
+            # {"string^1": "/api/users/", "part^2": "userId", "string^3": "/profile/", ...}
+            hash<auto> values;
+            int pos = 0;
+
+            foreach string k in (keys input.urlReplacement) {
+                if (k =~ /^string/) {
+                    # String literal - must match exactly at current position
+                    string expected = input.urlReplacement{k};
+                    if (substr(path, pos, expected.size()) != expected) {
+                        throw SOAP_DESERIALIZATION_ERROR, sprintf("URL replacement mismatch at position %d: "
+                            "expected %y, path: %y", pos, expected, path);
+                    }
+                    pos += expected.size();
+                } else if (k =~ /^part/) {
+                    # Part value - extract until next string literal or end of path
+                    string partName = input.urlReplacement{k};
+
+                    # Find the next string literal to know where this part value ends
+                    *string nextLiteral;
+                    bool foundNext = False;
+                    foreach string k2 in (keys input.urlReplacement) {
+                        if (foundNext && k2 =~ /^string/) {
+                            nextLiteral = input.urlReplacement{k2};
+                            break;
+                        }
+                        if (k2 == k) {
+                            foundNext = True;
+                        }
+                    }
+
+                    int endPos;
+                    if (nextLiteral) {
+                        endPos = index(path, nextLiteral, pos);
+                        if (endPos < 0) {
+                            throw SOAP_DESERIALIZATION_ERROR, sprintf("URL replacement: cannot find delimiter %y "
+                                "after position %d in path: %y", nextLiteral, pos, path);
+                        }
+                    } else {
+                        # No next literal - value goes to end of path (excluding query string)
+                        endPos = index(path, "?", pos);
+                        if (endPos < 0) {
+                            endPos = path.size();
+                        }
+                    }
+
+                    string partValue = decode_url(substr(path, pos, endPos - pos));
+                    values{partName} = partValue;
+                    pos = endPos;
+                }
+            }
+
+            return op.input.deserializeAllPartData(values);
         }
         if (input.urlEncoded) {
             hash<auto> h;
@@ -4012,6 +5207,16 @@ public class BindingMessageDescription inherits Serializable {
 
         #! optional mimeXml message scription
         *WSDL::MimeXmlMessageDescription mimeXml;
+
+        #! multipart type (e.g., Mime::MPT_RELATED) if multipartRelated binding is used
+        /** @see https://www.w3.org/TR/wsdl#_mime:multipartRelated
+        */
+        *string multipart;
+
+        #! hash of part names to content types for multipart messages
+        /** Keys are part names, values are content type strings or lists of content type strings
+        */
+        *hash<auto> parts;
     }
 
     private:internal {
@@ -4192,65 +5397,75 @@ public class Binding inherits WSDL::XsdNamedData {
                 }
 
                 if (exists op{io}.multipartRelated) {
-                    if (bmd.body)
-                        throw WSDL_ERROR, sprintf("%s binding %y for operation %y specifies both body and multipart elements", io, name, opname);
+                    if (bmd.body) {
+                        throw WSDL_ERROR, sprintf("%s binding %y for operation %y specifies both body and "
+                            "multipart elements", io, name, opname);
+                    }
 
-                    throw WSDL_ERROR, "unsupported multipartRelated";
-
-                    /*
-                    ioh{io}.multipart = Mime::MPT_RELATED;
-                    ioh{io}.parts = {};
+                    bmd.multipart = Mime::MPT_RELATED;
+                    bmd.parts = {};
                     WSDL::XsdBase::removeNS(\op{io}.multipartRelated);
 
-                    if (!exists op{io}.multipartRelated.part)  # TODO: do I need explicite check or is handled by validator ?
-                        throw WSDL_ERROR, sprintf("binding %y is missing part definition(s) in %s message definition for operation %y: %y", name, io, opname, op);
+                    if (!exists op{io}.multipartRelated.part) {
+                        throw WSDL_ERROR, sprintf("binding %y is missing part definition(s) in %s message "
+                            "definition for operation %y: %y", name, io, opname, op);
+                    }
 
-                    foreach any part in (op{io}.multipartRelated.part) {
+                    foreach auto part in (op{io}.multipartRelated.part) {
                         WSDL::XsdBase::removeNS(\part);
-                        #any a = part."^attributes^";
                         part -= "^attributes^";
                         if (exists part.body) {
-                            if (exists op{io}.body)
-                                throw WSDL_ERROR, sprintf("%s binding %y for operation %y specifies multiple body parts in multipart elements", io, name, opname);
-                            any pa = part.body."^attributes^";
-                            if (pa.use != "literal")
-                                throw WSDL_ERROR, sprintf("unsupported body part without use=\"literal\": %y", part.body);
-
-                            ioh{io}.body.parts = pa.parts;
+                            if (bmd.body) {
+                                throw WSDL_ERROR, sprintf("%s binding %y for operation %y specifies multiple "
+                                    "body parts in multipart elements", io, name, opname);
+                            }
+                            auto bodyAttrs = part.body."^attributes^";
+                            if (bodyAttrs.use != "literal") {
+                                throw WSDL_ERROR, sprintf("unsupported body part without use=\"literal\": %y",
+                                    part.body);
+                            }
+                            # Create body description for the SOAP body part within multipart message
+                            bmd.body = new BindingMessageBodyDescription(False, NOTHING, NOTHING,
+                                bodyAttrs.parts);
                         } else if (exists part.content) {
                             *string pcname;
-                            foreach any c in (part.content) {
+                            foreach auto c in (part.content) {
                                 WSDL::XsdBase::removeNS(\c);
-                                any pa = c."^attributes^";
-                                any name = pa.part;
-                                if (!exists name)
-                                    throw WSDL_ERROR, sprintf("unsupported content part without part attribute: %y", c);
-                                if (pcname) {
-                                    if (pcname != name)
-                                        throw WSDL_ERROR, sprintf("multiple content part names inside part section: %y!=%y", name, pcname);
-                                } else {
-                                    pcname = name;
-                                    name = portTypes{port}.operations{opname}{io}.checkPart(name);
+                                auto contentAttrs = c."^attributes^";
+                                auto partName = contentAttrs.part;
+                                if (!exists partName) {
+                                    throw WSDL_ERROR, sprintf("unsupported content part without part "
+                                        "attribute: %y", c);
                                 }
-                                any type = pa.type;
-                                if (!exists type)
-                                    throw WSDL_ERROR, sprintf("unsupported content part without type attribute: %y", c);
+                                if (pcname) {
+                                    if (pcname != partName) {
+                                        throw WSDL_ERROR, sprintf("multiple content part names inside part "
+                                            "section: %y!=%y", partName, pcname);
+                                    }
+                                } else {
+                                    pcname = partName;
+                                    partName = portTypes{port}.operations{opname}{io}.checkPart(partName);
+                                }
+                                auto contentType = contentAttrs.type;
+                                if (!exists contentType) {
+                                    throw WSDL_ERROR, sprintf("unsupported content part without type "
+                                        "attribute: %y", c);
+                                }
 
-                                if (!exists op{io}.parts{name})
-                                    ioh{io}.parts{name} = type;
-                                else {
-                                    if (op{io}.parts{name}.typeCode() != NT_LIST)
-                                        ioh{io}.parts{name} = list(op{io}.parts{name});
-                                    ioh{io}.parts{name} += type;
+                                if (!exists bmd.parts{partName}) {
+                                    bmd.parts{partName} = contentType;
+                                } else {
+                                    if (bmd.parts{partName}.typeCode() != NT_LIST) {
+                                        bmd.parts{partName} = list(bmd.parts{partName});
+                                    }
+                                    bmd.parts{partName} += contentType;
                                 }
                             }
-                        } else
+                        } else {
                             throw WSDL_ERROR, sprintf("cannot parse part: %y", part);
-
-                        #printf("DEBUG: part: %y\nmsg: %y\n", part, op{io});;
+                        }
                     }
                     delete op{io}.multipartRelated;
-                    */
                 }
 
                 if (exists op{io}.header) {
@@ -4891,6 +6106,33 @@ return rv;
 return rv;
 }
 
+#! Resolves a group/attributeGroup reference to a qualified key for map lookup
+/** @param ref the reference string (e.g., "tns:AddressGroup" or "AddressGroup")
+    @param defaultNsUri the default namespace URI to use for unqualified refs
+    @param nsc the Namespaces object for resolving prefixes
+    @return the qualified key in format "{namespace_uri}local_name" or just "local_name" if no namespace
+*/
+string sub resolveGroupRef(string ref, *string defaultNsUri, Namespaces nsc) {
+    string localName = ref;
+    *string nsUri = defaultNsUri;
+
+    # Parse prefix if present
+    if (ref =~ /:/) {
+        (*string prefix, *string name) = (ref =~ x/^([^:]+):(.+)$/);
+        if (name) {
+            localName = name;
+            # Resolve prefix to namespace URI
+            *string resolvedNs = nsc.getInputNamespaceUri(prefix);
+            if (resolvedNs) {
+                nsUri = resolvedNs;
+            }
+        }
+    }
+
+    # Return qualified key
+    return nsUri ? sprintf("{%s}%s", nsUri, localName) : localName;
+}
+
 # private functions
 XsdElement sub emap_get(hash<string, hash<string, XsdElement>> emap, string ns, string name) {
 if (!emap{ns})
@@ -5208,6 +6450,12 @@ public class WebService inherits WSDL::XsdBase, Qore::Serializable {
         #! map of types
         transient hash<string, XsdAbstractType> tmap();
 
+        #! map of xs:group definitions by name
+        transient hash<string, XsdGroup> groupMap();
+
+        #! map of xs:attributeGroup definitions by name
+        transient hash<string, XsdAttributeGroup> attrGroupMap();
+
         #! hash of port names to port type information hashes
         transient hash<string, hash<PortTypeInfo>> portType();
 
@@ -5385,6 +6633,13 @@ public class WebService inherits WSDL::XsdBase, Qore::Serializable {
     }
 
     private resolveType(XsdSimpleType t) {
+        # Handle list type resolution
+        if (t.listItemTypeInfo && !t.listItemType) {
+            t.listItemType = resolveType(t.listItemTypeInfo);
+            t.finalizeResolved();
+            return;
+        }
+        # Handle union type resolution
         if (!t.union) {
             throw "WSDL-TYPE-ERROR", sprintf("cannot resolve simpleType: %y type %y", t.name, t.typeinfo);
         }
@@ -5461,7 +6716,7 @@ public class WebService inherits WSDL::XsdBase, Qore::Serializable {
                 *hash<auto> a = import."^attributes^";
                 # import file
                 if (a.schemaLocation) {
-                    bool async_only = opts.async_only;
+                    bool async_only = opts.async_only ?? False;
                     *hash<auto> xsd_cache = opts.xsd_cache;
                     string cache_key = a.schemaLocation;
                     if (async_only) {
@@ -5535,10 +6790,29 @@ public class WebService inherits WSDL::XsdBase, Qore::Serializable {
                 if (tmap{t.name}) {
                     throw WSDL_ERROR, sprintf("%s: type (complexType) %y declared twice", nph.getDesc(), t.name);
                 }
-                tmap{t.name} = t;
+                # If the complexType is purely an array wrapper, store the XsdArrayType directly
+                tmap{t.name} = t.array ?? t;
 
                 #tmap.add(t);
                 #printf("DEBUG: ct: %y\n", t.name);
+            }
+            # parse xs:group definitions
+            foreach hash<auto> g in (schema.group) {
+                XsdGroup grp(g, nsc, unresolved, usedocns);
+                string qualifiedName = grp.getQualifiedName();
+                if (groupMap{qualifiedName}) {
+                    throw WSDL_ERROR, sprintf("%s: group %y declared twice", nph.getDesc(), qualifiedName);
+                }
+                groupMap{qualifiedName} = grp;
+            }
+            # parse xs:attributeGroup definitions
+            foreach hash<auto> ag in (schema.attributeGroup) {
+                XsdAttributeGroup attrGrp(ag, nsc, unresolved);
+                string qualifiedName = attrGrp.getQualifiedName();
+                if (attrGroupMap{qualifiedName}) {
+                    throw WSDL_ERROR, sprintf("%s: attributeGroup %y declared twice", nph.getDesc(), qualifiedName);
+                }
+                attrGroupMap{qualifiedName} = attrGrp;
             }
             # make element map
             foreach hash<auto> el in (schema.element) {
@@ -5574,13 +6848,13 @@ public class WebService inherits WSDL::XsdBase, Qore::Serializable {
         map resolveType($1), unresolved.getList();
         unresolved.clearResolved();
 
-        # finalize complex types
-        map cast<XsdComplexType>($1).finalize(tmap, nsc), tmap.iterator(), $1 instanceof XsdComplexType;
+        # finalize complex types with group resolution
+        map cast<XsdComplexType>($1).finalize(tmap, nsc, groupMap, attrGroupMap, unresolved), tmap.iterator(), $1 instanceof XsdComplexType;
 
         # finalize array types
-        map cast<XsdArrayType>($1).finalize(tmap, nsc), tmap.iterator(), $1 instanceof XsdArrayType;
+        map cast<XsdArrayType>($1).finalize(tmap, nsc, groupMap, attrGroupMap, unresolved), tmap.iterator(), $1 instanceof XsdArrayType;
 
-        map (map cast<XsdComplexType>($1.type).finalize(tmap, nsc), $1.iterator(), $1.type instanceof XsdComplexType), emap.iterator();
+        map (map cast<XsdComplexType>($1.type).finalize(tmap, nsc, groupMap, attrGroupMap, unresolved), $1.iterator(), $1.type instanceof XsdComplexType), emap.iterator();
 
         map resolveType($1), unresolved.getList();
     }

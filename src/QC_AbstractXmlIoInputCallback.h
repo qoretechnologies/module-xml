@@ -4,7 +4,7 @@
 
     Qore Programming Language
 
-    Copyright (C) 2003 - 2025 Qore Technologies, s.r.o.
+    Copyright (C) 2003 - 2026 Qore Technologies, s.r.o.
 
     This library is free software; you can redistribute it and/or
     modify it under the terms of the GNU Lesser General Public
@@ -29,6 +29,7 @@
 #include "ql_xml.h"
 
 #include <qore/InputStream.h>
+#include <qore/QoreSandboxManager.h>
 
 DLLEXPORT extern qore_classid_t CID_ABSTRACTXMLIOINPUTCALLBACK;
 DLLLOCAL QoreClass *initAbstractXmlIoInputCallbackClass(QoreNamespace& ns);
@@ -52,12 +53,26 @@ public:
     // libxml2 I/O callback: can we provide the requested resource; 1 = true, 0 = false
     DLLLOCAL int match(const char* filename) {
         // validate preconditions with proper error handling
+        if (!filename || !filename[0]) {
+            printd(0, "AbstractXmlIoInputCallback::match() ERROR: null or empty filename\n");
+            return 0;
+        }
         if (input_stream) {
             printd(0, "AbstractXmlIoInputCallback::match() ERROR: input_stream already set\n");
             return 0;
         }
         if (!xsink) {
             printd(0, "AbstractXmlIoInputCallback::match() ERROR: no exception context\n");
+            return 0;
+        }
+
+        // Check filesystem security before allowing access to external resources
+        QoreSandboxManager* sm = runtime_get_sandbox_manager();
+        if (sm && !sm->checkFilesystemAccess(filename, QSEC_READ, xsink)) {
+            // Filesystem access denied - return 0 to indicate we can't provide this resource.
+            // The exception in xsink is intentionally preserved (not cleared) so the security
+            // error is reported to the caller after libxml2 finishes processing. This follows
+            // the same pattern as the evalMethod() call below which also keeps exceptions.
             return 0;
         }
 

@@ -1,0 +1,176 @@
+#!/usr/bin/env qore
+# -*- mode: qore; indent-tabs-mode: nil -*-
+
+# Sandboxing tests for the xml module
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+
+%requires qore >= 2.3
+%modern
+
+%enable-all-warnings
+%require-our
+
+%requires QUnit
+%requires xml
+
+%exec-class SandboxingTest
+
+class SandboxingTest inherits QUnit::Test {
+    public {
+        const TestXml = '<?xml version="1.0" encoding="UTF-8"?>
+<root>
+    <item>test1</item>
+    <item>test2</item>
+    <item>test3</item>
+</root>';
+    }
+
+    private {
+        string m_test_file;
+        string m_test_dir;
+    }
+
+    constructor() : QUnit::Test("SandboxingTest", "1.0") {
+        addTestCase("FileSaxIterator respects filesystem sandbox (parse-time)", \testFileSaxIteratorFilesystemParsetime());
+        addTestCase("FileSaxIterator works when filesystem allowed", \testFileSaxIteratorFilesystemAllowed());
+        addTestCase("FileSaxIterator handles non-existent file", \testFileSaxIteratorNonExistentFile());
+        addTestCase("XmlReader from string works in sandboxed program", \testXmlReaderStringSandbox());
+        addTestCase("XmlReader with parse_xml works in sandboxed program", \testParseXmlSandbox());
+        addTestCase("FileSaxIterator exercises init() filesystem check path", \testFileSaxIteratorInitPath());
+
+        set_return_value(main());
+    }
+
+    globalSetUp() {
+        # Create a temporary test directory and file
+        m_test_dir = ENV.TMPDIR ?? "/tmp";
+        m_test_file = m_test_dir + "/xml_sandbox_test_" + string(rand()) + ".xml";
+        File f();
+        f.open2(m_test_file, O_CREAT | O_WRONLY | O_TRUNC);
+        f.write(TestXml);
+        f.close();
+    }
+
+    globalTearDown() {
+        # Clean up temporary test file
+        if (m_test_file && is_file(m_test_file)) {
+            unlink(m_test_file);
+        }
+    }
+
+    testFileSaxIteratorFilesystemParsetime() {
+        # Test that FileSaxIterator respects PO_NO_FILESYSTEM restriction at parse time
+        # Create a sandboxed program with no filesystem access
+        Program p(PO_NEW_STYLE | PO_NO_FILESYSTEM);
+        p.loadModule("xml");
+
+        # Define code that tries to use FileSaxIterator - this should fail at parse time
+        # because FileSaxIterator::constructor() is marked with dom=FILESYSTEM
+        string code = sprintf("
+sub test_file_access() {
+    FileSaxIterator i(\"%s\", \"item\");
+}
+        ", m_test_file);
+
+        # Parse should fail due to sandbox restriction - FILESYSTEM domain not allowed
+        bool caught_exception = False;
+        try {
+            p.parse(code, "test");
+        } catch (hash<ExceptionInfo> ex) {
+            caught_exception = True;
+            # Check that the exception is about parse options not allowing access
+            assertRegex("parse options do not allow access", ex.desc,
+                "FileSaxIterator constructor should be blocked at parse time");
+        }
+        assertTrue(caught_exception, "Should throw exception when trying to use FileSaxIterator in no-filesystem sandbox");
+    }
+
+    testFileSaxIteratorFilesystemAllowed() {
+        # Test that FileSaxIterator works correctly when filesystem access is allowed
+        # This exercises the QoreXmlReader::init() code path including the filesystem check
+        # (the check passes because no QoreSandboxManager with restrictions is attached)
+        FileSaxIterator i(m_test_file, "item");
+        list<auto> items = ();
+        while (i.next()) {
+            items += i.getValue();
+        }
+        assertEq(3, items.size(), "FileSaxIterator should find 3 items");
+    }
+
+    testFileSaxIteratorNonExistentFile() {
+        # Test that FileSaxIterator properly handles non-existent files
+        # This exercises the error path in QoreXmlReader::init() after the filesystem check
+        string non_existent = m_test_dir + "/non_existent_file_" + string(rand()) + ".xml";
+        bool caught_exception = False;
+        try {
+            FileSaxIterator i(non_existent, "item");
+        } catch (hash<ExceptionInfo> ex) {
+            caught_exception = True;
+            assertEq("XML-READER-ERROR", ex.err, "Should throw XML-READER-ERROR for non-existent file");
+        }
+        assertTrue(caught_exception, "Should throw exception for non-existent file");
+    }
+
+    testXmlReaderStringSandbox() {
+        # Test that XmlReader works with strings even in a sandboxed environment
+        # (no filesystem access needed for string-based parsing)
+        Program p(PO_NEW_STYLE | PO_NO_FILESYSTEM);
+        p.loadModule("xml");
+
+        # Use make_xml/parse_xml instead of XmlReader to test sandbox compatibility
+        string code = "
+hash sub test_xml_parsing(string xml_str) {
+    return parse_xml(xml_str);
+}
+        ";
+
+        p.parse(code, "test");
+
+        # This should work fine - no filesystem access needed for parse_xml
+        auto result = p.callFunction("test_xml_parsing", TestXml);
+        assertEq(Type::Hash, result.type(), "parse_xml should return a hash");
+        assertTrue(result.root.hasKey("item"), "Result should have item elements");
+    }
+
+    testParseXmlSandbox() {
+        # Test that XML parsing functions work in sandboxed programs
+        Program p(PO_NEW_STYLE | PO_NO_FILESYSTEM);
+        p.loadModule("xml");
+
+        string code = "
+string sub test_make_xml(hash data) {
+    return make_xml(data);
+}
+        ";
+
+        p.parse(code, "test");
+
+        hash<auto> test_data = {"root": {"item": "value"}};
+        auto result = p.callFunction("test_make_xml", test_data);
+        assertEq(Type::String, result.type(), "make_xml should return a string");
+        assertRegex("<root>", result, "Result should contain root element");
+        assertRegex("<item>value</item>", result, "Result should contain item element");
+    }
+
+    testFileSaxIteratorInitPath() {
+        # Test that exercises the full init() path in QoreXmlReader with a valid file
+        # This ensures the filesystem security check code path is compiled and linked correctly
+        # The check passes since no restrictive sandbox manager is attached
+
+        # Test with explicit encoding parameter
+        FileSaxIterator i1(m_test_file, "item", "UTF-8");
+        int count1 = 0;
+        while (i1.next()) {
+            ++count1;
+        }
+        assertEq(3, count1, "FileSaxIterator with encoding should find 3 items");
+
+        # Test with options hash
+        FileSaxIterator i2(m_test_file, "item", {"encoding": "UTF-8"});
+        int count2 = 0;
+        while (i2.next()) {
+            ++count2;
+        }
+        assertEq(3, count2, "FileSaxIterator with options hash should find 3 items");
+    }
+}

@@ -4,7 +4,7 @@
 
     Qore Programming Language
 
-    Copyright (C) 2003 - 2025 Qore Technologies, s.r.o.
+    Copyright (C) 2003 - 2026 Qore Technologies, s.r.o.
 
     This library is free software; you can redistribute it and/or
     modify it under the terms of the GNU Lesser General Public
@@ -27,6 +27,7 @@
 #include <libxml/xmlreader.h>
 
 #include "qore/InputStream.h"
+#include "qore/QoreSandboxManager.h"
 
 #include "qore-xml-module.h"
 #include "QoreXmlDoc.h"
@@ -170,6 +171,13 @@ protected:
         assert(!xml);
         assert(!reader);
         assert(fd == -1);
+
+        // Check filesystem security before opening file
+        QoreSandboxManager* sm = runtime_get_sandbox_manager();
+        if (sm && !sm->checkFilesystemAccess(fn, QSEC_READ, xsink)) {
+            return;  // Exception already raised: FILESYSTEM-ACCESS-DENIED
+        }
+
         fd = open(fn, O_RDONLY);
         if (fd < 0) {
             reader = 0;
@@ -289,6 +297,11 @@ public:
     DLLLOCAL int read(ExceptionSink* xsink) {
         setExceptionContext(xsink);
 
+        // Check for interrupt before reading
+        if (qore_check_io_interrupt(xsink, "XML parsing")) {
+            return -1;
+        }
+
         int rc = read();
         if (rc == -1) {
             if (!*xsink)
@@ -300,6 +313,11 @@ public:
     // returns 1 = OK, 0 = no more nodes to read, -1 = error
     DLLLOCAL int read(const char* info, ExceptionSink* xsink) {
         setExceptionContext(xsink);
+
+        // Check for interrupt before reading
+        if (qore_check_io_interrupt(xsink, "XML parsing")) {
+            return -1;
+        }
 
         int rc = read();
         if (rc == -1) {
@@ -338,6 +356,10 @@ public:
             int nt = xmlTextReaderNodeType(reader);
             if (nt != XML_READER_TYPE_SIGNIFICANT_WHITESPACE)
                 break;
+            // Check for interrupt periodically during whitespace skipping
+            if (qore_check_io_interrupt(xsink, "XML parsing")) {
+                return -1;
+            }
         }
         return rc;
     }
@@ -352,6 +374,10 @@ public:
             int nt = xmlTextReaderNodeType(reader);
             if (nt != XML_READER_TYPE_SIGNIFICANT_WHITESPACE)
                 break;
+            // Check for interrupt periodically during whitespace skipping
+            if (qore_check_io_interrupt(xsink, "XML parsing")) {
+                return -1;
+            }
         }
         return rc;
     }
