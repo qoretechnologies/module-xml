@@ -69,8 +69,10 @@ public:
         // Check filesystem security before allowing access to external resources
         QoreSandboxManager* sm = runtime_get_sandbox_manager();
         if (sm && !sm->checkFilesystemAccess(filename, QSEC_READ, xsink)) {
-            // Filesystem access denied - return 0 to indicate we can't provide this resource
-            // Exception is already raised in xsink
+            // Filesystem access denied - return 0 to indicate we can't provide this resource.
+            // The exception in xsink is intentionally preserved (not cleared) so the security
+            // error is reported to the caller after libxml2 finishes processing. This follows
+            // the same pattern as the evalMethod() call below which also keeps exceptions.
             return 0;
         }
 
