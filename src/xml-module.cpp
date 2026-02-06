@@ -1,7 +1,7 @@
 /*
   Qore xml module
 
-  Copyright (C) 2010 - 2025 Qore Technologies, s.r.o.
+  Copyright (C) 2010 - 2026 Qore Technologies, s.r.o.
 
   This library is free software; you can redistribute it and/or
   modify it under the terms of the GNU Lesser General Public
@@ -34,8 +34,8 @@
 
 #include <stdarg.h>
 
-static QoreStringNode *xml_module_init();
-static void xml_module_ns_init(QoreNamespace *rns, QoreNamespace *qns);
+static void xml_module_init(QoreModuleInitContext& ctx, ExceptionSink& xsink);
+static void xml_module_ns_init(QoreNamespace* rns, QoreNamespace* qns, ExceptionSink& xsink);
 static void xml_module_delete();
 
 DLLLOCAL void init_option_constants(QoreNamespace& ns);
@@ -95,7 +95,7 @@ static int qoreXmlInputCloseCallback(void* context) {
     return xml_io_callback ? xml_io_callback->close(context) : 0;
 }
 
-QoreStringNode* xml_module_init() {
+static void xml_module_init(QoreModuleInitContext& ctx, ExceptionSink& xsink) {
     QoreString err;
 
     // set our generic error handler to catch initialization errors
@@ -104,8 +104,10 @@ QoreStringNode* xml_module_init() {
     // initialize libxml2 library
     LIBXML_TEST_VERSION
 
-    if (err.strlen())
-        return new QoreStringNode(err);
+    if (err.strlen()) {
+        xsink.raiseException("MODULE-INIT-ERROR", new QoreStringNode(err));
+        return;
+    }
 
     {
         // register input callbacks
@@ -113,8 +115,10 @@ QoreStringNode* xml_module_init() {
             (xmlInputOpenCallback)qoreXmlInputOpenCallback,
             (xmlInputReadCallback)qoreXmlInputReadCallback,
             (xmlInputCloseCallback)qoreXmlInputCloseCallback);
-        if (rc == -1)
-            return new QoreStringNodeMaker("error registering input callback; xmlRegisterInputCallbacks() returned %d; cannot initialize the libxml2 module", rc);
+        if (rc == -1) {
+            xsink.raiseException("MODULE-INIT-ERROR", new QoreStringNodeMaker("error registering input callback; xmlRegisterInputCallbacks() returned %d; cannot initialize the libxml2 module", rc));
+            return;
+        }
     }
 
     // ignore errors after initialization
@@ -140,11 +144,9 @@ QoreStringNode* xml_module_init() {
     XNS.addInitialNamespace(option);
 
     init_xml_functions(XNS);
-
-    return 0;
 }
 
-void xml_module_ns_init(QoreNamespace *rns, QoreNamespace *qns) {
+static void xml_module_ns_init(QoreNamespace* rns, QoreNamespace* qns, ExceptionSink& xsink) {
    qns->addNamespace(XNS.copy());
 }
 
