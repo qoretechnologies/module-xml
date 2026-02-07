@@ -2,9 +2,7 @@
 
 # this program implements an HTTP server with an XML-RPC handler
 
-# require global variables to be declared with "our" before use
-%require-our
-%enable-all-warnings
+%modern
 
 # require qore >= 0.8.5 for the XmlRpcHandler user module
 %requires qore >= 0.8.5
