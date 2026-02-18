@@ -102,7 +102,7 @@ set(SCRIPTS
     bin/webdav-server
 )
 
-qore_wrap_qpp_value(QPP_SOURCES ${QPP_SRC})
+qore_wrap_qpp_value(QPP_SOURCES METALIST QPP_META_SOURCES ${QPP_SRC})
 
 SET (module_name "xml")
 
@@ -131,6 +131,14 @@ qore_external_user_module("qlib/WebDavHandler" "")
 qore_external_user_module("qlib/XmlRpcConnection.qm" "")
 qore_external_user_module("qlib/XmlRpcHandler.qm" "")
 qore_external_user_module("qlib/SaxDataProvider" "")
+
+# install qpp metadata files
+if (COMMAND qore_install_qpp_metadata)
+    qore_install_qpp_metadata(${module_name} ${QPP_META_SOURCES})
+else()
+    install(FILES ${QPP_META_SOURCES}
+            DESTINATION ${CMAKE_INSTALL_DATADIR}/qore/metadata)
+endif()
 
 qore_dist("${VERSION_MAJOR}.${VERSION_MINOR}.${VERSION_PATCH}")
 
