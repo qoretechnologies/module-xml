@@ -49,20 +49,20 @@ public class SaxDataProvider inherits DataProvider::AbstractDataProvider {
                 "display_name": "XML Location",
                 "short_desc": "The location of the XML data to parse",
                 "type": AbstractDataProviderType::get(StringType),
-                "desc": "The location of the XML data; mutually exclusive with \"stream\"; resolved with a call to "
-                    "FileLocationHandler::getBinaryStreamFromLocation()",
+                "desc": "The location of the XML data; mutually exclusive with `stream`; resolved with a call to "
+                    "`FileLocationHandler::getBinaryStreamFromLocation()`",
             },
             "stream": <DataProviderOptionInfo>{
                 "display_name": "Input Stream",
                 "short_desc": "An input stream for XML data",
                 "type": AbstractDataProviderType::get(new Type("InputStream")),
-                "desc": "An input stream for XML data; mutually exclusive with \"location\"",
+                "desc": "An input stream for XML data; mutually exclusive with `location`",
             },
             "element_name": <DataProviderOptionInfo>{
                 "display_name": "Element Name",
                 "short_desc": "The name of the element to iterate",
                 "type": AbstractDataProviderTypeMap."string",
-                "desc": "the name of the element to iterate",
+                "desc": "The name of the element to iterate",
                 "required": True,
             },
             "encoding": <DataProviderOptionInfo>{

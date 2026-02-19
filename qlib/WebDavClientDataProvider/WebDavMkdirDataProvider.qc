@@ -30,7 +30,7 @@ public class WebDavMkdirDataProvider inherits WebDavClientDataProviderBase {
 
     *string getDesc() {
         return "WebDAV mkdir data provider; creates a directory (collection). "
-            "Request: {path: string}. Response: {success: bool}";
+            "Request: `{path: string}`. Response: `{success: bool}`";
     }
 
     private auto doRequestImpl(auto req, *hash<auto> request_options) {

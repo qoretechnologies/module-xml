@@ -30,7 +30,8 @@ public class WebDavMoveDataProvider inherits WebDavClientDataProviderBase {
 
     *string getDesc() {
         return "WebDAV move data provider; moves or renames a file or directory. "
-            "Request: {source: string, destination: string, overwrite: bool}. Response: {success: bool}";
+            "Request: `{source: string, destination: string, overwrite: bool}`. "
+            "Response: `{success: bool}`";
     }
 
     private auto doRequestImpl(auto req, *hash<auto> request_options) {

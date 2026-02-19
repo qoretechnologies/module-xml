@@ -77,7 +77,7 @@ public class SoapDataProvider inherits AbstractDataProvider {
                         DTT_FromLocation: True,
                     }),
                 ),
-                "desc": "The Swagger schema source URL",
+                "desc": "The WSDL schema source URL",
                 "required_groups": ("schema",),
             },
             "soapclient": <DataProviderOptionInfo>{
@@ -86,7 +86,7 @@ public class SoapDataProvider inherits AbstractDataProvider {
                 "type": AbstractDataProviderType::get(new Type("SoapClient"), NOTHING, {
                     DTT_ClientOnly: True,
                 }),
-                "desc": "The SoapClient object to use",
+                "desc": "The `SoapClient` object to use",
             },
             "url": <DataProviderOptionInfo>{
                 "display_name": "URL",
@@ -94,7 +94,7 @@ public class SoapDataProvider inherits AbstractDataProvider {
                 "type": AbstractDataProviderType::get(StringType, NOTHING, {
                     DTT_ClientOnly: True,
                 }),
-                "desc": "the URL to the SOAP server; overrides any URL in the schema or in any SoapClient object "
+                "desc": "The URL to the SOAP server; overrides any URL in the schema or in any `SoapClient` object "
                     "passed as an option",
             },
             "soapclient_options": <DataProviderOptionInfo>{
@@ -103,7 +103,7 @@ public class SoapDataProvider inherits AbstractDataProvider {
                 "type": AbstractDataProviderType::get(AutoHashType, NOTHING, {
                     DTT_ClientOnly: True,
                 }),
-                "desc": "Options to the SoapClient constructor; only used if a SoapClient object is created for a "
+                "desc": "Options to the `SoapClient` constructor; only used if a `SoapClient` object is created for a "
                     "call",
             },
         };

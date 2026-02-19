@@ -30,7 +30,8 @@ public class WebDavCopyDataProvider inherits WebDavClientDataProviderBase {
 
     *string getDesc() {
         return "WebDAV copy data provider; copies a file or directory. "
-            "Request: {source: string, destination: string, overwrite: bool}. Response: {success: bool}";
+            "Request: `{source: string, destination: string, overwrite: bool}`. "
+            "Response: `{success: bool}`";
     }
 
     private auto doRequestImpl(auto req, *hash<auto> request_options) {

@@ -30,7 +30,8 @@ public class WebDavPutDataProvider inherits WebDavClientDataProviderBase {
 
     *string getDesc() {
         return "WebDAV put file data provider; uploads a file to the server. "
-            "Request: {path: string, content: data, content_type: string}. Response: {created: bool}";
+            "Request: `{path: string, content: data, content_type: string}`. "
+            "Response: `{created: bool}`";
     }
 
     private auto doRequestImpl(auto req, *hash<auto> request_options) {

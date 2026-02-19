@@ -30,7 +30,7 @@ public class WebDavGetDataProvider inherits WebDavClientDataProviderBase {
 
     *string getDesc() {
         return "WebDAV get file data provider; downloads a file from the server. "
-            "Request: {path: string}. Response: {content: binary, found: bool}";
+            "Request: `{path: string}`. Response: `{content: binary, found: bool}`";
     }
 
     private auto doRequestImpl(auto req, *hash<auto> request_options) {

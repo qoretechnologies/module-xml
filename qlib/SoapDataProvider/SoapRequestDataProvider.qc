@@ -209,8 +209,8 @@ public class SoapRequestDataProvider inherits SoapDataProviderBase {
                 "display_name": "SOAP Action",
                 "short_desc": "Overrides the SOAPAction for the request",
                 "type": new QoreStringDataType(),
-                "desc": "An optional string that will override the SOAPAction for the request; en empty string here "
-                    "will prevent the SOAPAction from being sent",
+                "desc": "An optional string that will override the `SOAPAction` for the request; an empty string here "
+                    "will prevent the `SOAPAction` from being sent",
             },
             "binding": <DataProviderOptionInfo>{
                 "display_name": "SOAP Binding",

@@ -30,7 +30,7 @@ public class WebDavDeleteDataProvider inherits WebDavClientDataProviderBase {
 
     *string getDesc() {
         return "WebDAV delete data provider; deletes a file or directory. "
-            "Request: {path: string}. Response: {success: bool}";
+            "Request: `{path: string}`. Response: `{success: bool}`";
     }
 
     private auto doRequestImpl(auto req, *hash<auto> request_options) {

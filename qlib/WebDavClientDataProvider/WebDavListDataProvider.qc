@@ -29,8 +29,8 @@ public class WebDavListDataProvider inherits WebDavClientDataProviderBase {
     }
 
     *string getDesc() {
-        return "WebDAV list directory data provider; lists files and directories using PROPFIND. "
-            "Request: {path: string, depth: string}. Response: {resources: list<hash>}";
+        return "WebDAV list directory data provider; lists files and directories using `PROPFIND`. "
+            "Request: `{path: string, depth: string}`. Response: `{resources: list<hash>}`";
     }
 
     private auto doRequestImpl(auto req, *hash<auto> request_options) {
