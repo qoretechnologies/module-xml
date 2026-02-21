@@ -298,7 +298,7 @@ public:
         setExceptionContext(xsink);
 
         // Check for interrupt before reading
-        if (qore_check_io_interrupt(xsink, "XML parsing")) {
+        if (qore_check_cancel(xsink, "XML parsing")) {
             return -1;
         }
 
@@ -315,7 +315,7 @@ public:
         setExceptionContext(xsink);
 
         // Check for interrupt before reading
-        if (qore_check_io_interrupt(xsink, "XML parsing")) {
+        if (qore_check_cancel(xsink, "XML parsing")) {
             return -1;
         }
 
@@ -357,7 +357,7 @@ public:
             if (nt != XML_READER_TYPE_SIGNIFICANT_WHITESPACE)
                 break;
             // Check for interrupt periodically during whitespace skipping
-            if (qore_check_io_interrupt(xsink, "XML parsing")) {
+            if (qore_check_cancel(xsink, "XML parsing")) {
                 return -1;
             }
         }
@@ -375,7 +375,7 @@ public:
             if (nt != XML_READER_TYPE_SIGNIFICANT_WHITESPACE)
                 break;
             // Check for interrupt periodically during whitespace skipping
-            if (qore_check_io_interrupt(xsink, "XML parsing")) {
+            if (qore_check_cancel(xsink, "XML parsing")) {
                 return -1;
             }
         }
