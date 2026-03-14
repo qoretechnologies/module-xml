@@ -100,7 +100,7 @@ public class InMemoryWebDavLockHandler inherits AbstractWebDavLockHandler {
         }
 
         # Store the lock
-        locks{lock_info.token} = lock_info + {"resource": resource};
+        locks{lock_info.token} = cast<hash<WebDavLockInfo>>(lock_info + {"resource": resource});
 
         # Add to resource mapping
         if (!resource_locks{resource}) {
