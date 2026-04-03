@@ -1,7 +1,7 @@
 # -*- mode: qore; indent-tabs-mode: nil -*-
 #! Qore SaxDataProviderFactory class definition
 
-/** SaxDataProviderFactory.qc Copyright 2019 - 2022 Qore Technologies, s.r.o.
+/** SaxDataProviderFactory.qc Copyright 2019 - 2026 Qore Technologies, s.r.o.
 
     Permission is hereby granted, free of charge, to any person obtaining a
     copy of this software and associated documentation files (the "Software"),

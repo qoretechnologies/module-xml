@@ -1,6 +1,6 @@
 # -*- mode: qore; indent-tabs-mode: nil -*-
 
-/*  WebDavClientDataProvider.qm Copyright 2019 - 2025 Qore Technologies, s.r.o.
+/*  WebDavClientDataProvider.qm Copyright 2019 - 2026 Qore Technologies, s.r.o.
     MIT License - see LICENSE file
 */
 
