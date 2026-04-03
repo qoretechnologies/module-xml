@@ -21,15 +21,6 @@
     DEALINGS IN THE SOFTWARE.
 */
 
-%requires HttpServerUtil
-%requires xml
-%requires RestClient
-%requires Util
-%requires FsUtil
-%try-module uuid
-%define NO_UUID
-%endtry
-
 #! Main public WebDavHandler namespace
 public namespace WebDavHandler {
 #! Filesystem WebDavHandler inteface class

@@ -21,8 +21,6 @@
     DEALINGS IN THE SOFTWARE.
 */
 
-%requires json
-
 #! Main public WebDavHandler namespace
 public namespace WebDavHandler {
 

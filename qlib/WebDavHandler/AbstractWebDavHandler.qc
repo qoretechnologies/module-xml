@@ -21,8 +21,6 @@
     DEALINGS IN THE SOFTWARE.
 */
 
-%requires Logger
-
 #! Main public WebDavHandler namespace
 public namespace WebDavHandler {
 #! PROPPATCH action info
