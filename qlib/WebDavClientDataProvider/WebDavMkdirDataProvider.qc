@@ -17,8 +17,8 @@ public class WebDavMkdirDataProvider inherits WebDavClientDataProviderBase {
             AbstractDataProvider::DataProviderSummaryInfoKeys
         });
 
-        const RequestType = AbstractDataProviderTypeMap."hash";
-        const ResponseType = AbstractDataProviderTypeMap."hash";
+        static WebDavMkdirRequestDataType RequestType();
+        static WebDavSuccessResponseDataType ResponseType();
     }
 
     constructor(WebDavClient::WebDavClient client) : WebDavClientDataProviderBase(client) {

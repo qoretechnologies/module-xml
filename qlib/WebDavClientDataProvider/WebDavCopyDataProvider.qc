@@ -17,8 +17,8 @@ public class WebDavCopyDataProvider inherits WebDavClientDataProviderBase {
             AbstractDataProvider::DataProviderSummaryInfoKeys
         });
 
-        const RequestType = AbstractDataProviderTypeMap."hash";
-        const ResponseType = AbstractDataProviderTypeMap."hash";
+        static WebDavCopyRequestDataType RequestType();
+        static WebDavSuccessResponseDataType ResponseType();
     }
 
     constructor(WebDavClient::WebDavClient client) : WebDavClientDataProviderBase(client) {
