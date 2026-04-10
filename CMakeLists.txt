@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.5)
 project(qore-xml-module)
 
 set (VERSION_MAJOR 2)
-set (VERSION_MINOR 1)
+set (VERSION_MINOR 2)
 set (VERSION_PATCH 0)
 
 find_package(Qore 1.0 REQUIRED)
@@ -95,6 +95,7 @@ set(QMOD
     qlib/WebDavClient.qm
     qlib/WebDavClientDataProvider
     qlib/WebDavHandler
+    qlib/WebContentUtil
 )
 
 set(SCRIPTS
@@ -131,6 +132,7 @@ qore_external_user_module("qlib/WebDavHandler" "")
 qore_external_user_module("qlib/XmlRpcConnection.qm" "")
 qore_external_user_module("qlib/XmlRpcHandler.qm" "")
 qore_external_user_module("qlib/SaxDataProvider" "")
+qore_external_user_module("qlib/WebContentUtil" "HttpClientIo;Util")
 
 # install qpp metadata files
 if (COMMAND qore_install_qpp_metadata)
