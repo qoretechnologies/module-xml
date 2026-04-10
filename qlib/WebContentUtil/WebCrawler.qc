@@ -137,6 +137,12 @@ public class WebCrawler {
         HttpClientIo::HttpClientConnectionManager mgr;
         hash<auto> req_headers;
 
+        # Caller-supplied extra headers (auth tokens, custom User-Agent
+        # overrides, X-Forwarded-For for testing, etc.) merged into every
+        # request after the built-in headers so callers can override
+        # anything except the User-Agent default
+        *hash<string, string> extra_headers;
+
         # Shared crawl state — guarded by state_mutex
         Mutex state_mutex();
         hash<string, bool> visited = {};
@@ -198,6 +204,9 @@ public class WebCrawler {
         # Optional thread launcher (required under PO_NO_THREAD_CONTROL)
         start_thread = opts.start_thread;
 
+        # Caller-supplied extra HTTP headers
+        extra_headers = opts.headers;
+
         # Validate seed URL — throws SSRF-BLOCKED if private and not allowed
         SsrfFilter::checkUrl(seed_url, {
             "allow_private": allow_private_ips,
@@ -206,7 +215,7 @@ public class WebCrawler {
 
         # Phase C: fetch robots.txt for the seed origin
         if (respect_robots) {
-            robots = RobotsTxt::fetch(seed_url, user_agent);
+            robots = RobotsTxt::fetch(seed_url, user_agent, NOTHING, extra_headers);
             if (robots) {
                 *int rdelay = robots.getCrawlDelay();
                 if (rdelay && rdelay * 1000 > delay_ms) {
@@ -239,6 +248,12 @@ public class WebCrawler {
         req_headers = {
             "User-Agent": user_agent,
         };
+        # Merge caller-supplied headers; caller wins over the built-in
+        # User-Agent so e.g. an Authorization header doesn't get clobbered
+        # but a custom UA does override the constructor default
+        if (extra_headers) {
+            req_headers += extra_headers;
+        }
     }
 
     #! Run the crawl and return the collected pages
@@ -351,6 +366,9 @@ return c.run();
           - \c user_agent (\c *string): User-Agent header
           - \c max_response_bytes (int, default 10485760): skip pages larger than this
           - \c respect_robots (bool, default True): honor robots.txt
+          - \c headers (\c *hash<string, string>): extra HTTP request headers added
+            to every request — typically auth credentials (\c Authorization,
+            \c Cookie), session tokens, or custom \c X- headers
           - \c start_thread (\c *code<int(code<nothing()>)>): thread launcher; REQUIRED
             when imported into a context with @ref Qore::PO_NO_THREAD_CONTROL set
         @return list of page hashes

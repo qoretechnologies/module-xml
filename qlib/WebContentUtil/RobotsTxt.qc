@@ -80,10 +80,13 @@ public class RobotsTxt {
         @param user_agent the User-Agent string (used both as the request header
             and as the matching key against User-agent: directives in the file)
         @param request_timeout per-request HTTP timeout
+        @param extra_headers optional extra HTTP headers (auth tokens, cookies)
+            merged into the robots.txt request — required for sites that gate
+            even robots.txt behind authentication
         @return parsed RobotsTxt instance, or NOTHING if unreachable / not present
     */
     static *RobotsTxt fetch(string base_url, *string user_agent,
-            *timeout request_timeout) {
+            *timeout request_timeout, *hash<string, string> extra_headers) {
         timeout effective_timeout = request_timeout ?? DefaultRequestTimeout;
         string ua = user_agent ?? "*";
 
@@ -113,12 +116,16 @@ public class RobotsTxt {
             parts.protocol ?? "https",
             parts.host,
             parts.port ? sprintf(":%d", parts.port) : "");
+        hash<auto> req_headers = {
+            "User-Agent": ua,
+            "Accept": "text/plain, */*",
+        };
+        if (extra_headers) {
+            req_headers += extra_headers;
+        }
         hash<auto> resp;
         try {
-            resp = mgr.request(base_only, "GET", "/robots.txt", {
-                "User-Agent": ua,
-                "Accept": "text/plain, */*",
-            });
+            resp = mgr.request(base_only, "GET", "/robots.txt", req_headers);
         } catch (hash<ExceptionInfo> ex) {
             # Network failure — treat as permissive (RFC 9309 §2.3.1.3)
             return NOTHING;

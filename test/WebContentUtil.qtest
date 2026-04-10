@@ -22,8 +22,16 @@
 
 #! Static HTML site handler for crawler integration test
 class StaticSiteHandler inherits AbstractHttpRequestHandler {
+    public {
+        #! Captured request headers from the most recent request, indexed by
+        #! request path.  Used by tests that need to assert what headers the
+        #! crawler sent (e.g. WebCrawler::headers option, auth credentials).
+        hash<string, hash<auto>> captured_headers = {};
+    }
+
     private {
         hash<string, string> pages;
+        Mutex hdr_mutex();
     }
 
     constructor(hash<string, string> pages) {
@@ -37,6 +45,12 @@ class StaticSiteHandler inherits AbstractHttpRequestHandler {
         }
         if (!path.val() || path == "/") {
             path = "index.html";
+        }
+        # Snapshot the request headers for later inspection by tests
+        {
+            hdr_mutex.lock();
+            on_exit hdr_mutex.unlock();
+            captured_headers{path} = hdr;
         }
         if (!exists pages{path}) {
             return makeResponse({"Content-Type": "text/plain"}, 404, "not found: " + path);
@@ -93,6 +107,10 @@ public class WebContentUtilTest inherits QUnit::Test {
         addTestCase("WebCrawler max_depth", \testWebCrawlerMaxDepth());
         addTestCase("WebCrawler url_filter", \testWebCrawlerUrlFilter());
         addTestCase("WebCrawler progress callback", \testWebCrawlerProgress());
+        # Phase 5 features (push generic crawler features into WebCrawler so
+        # AiCrawlExecutor can stop maintaining parallel implementations)
+        addTestCase("WebCrawler headers option sends custom headers",
+            \testWebCrawlerHeaders());
         # Phase A: SSRF + URL extension + scheme filters
         addTestCase("SsrfFilter IPv4 private ranges", \testSsrfFilterIpv4Private());
         addTestCase("SsrfFilter IPv4 public", \testSsrfFilterIpv4Public());
@@ -640,7 +658,7 @@ public class WebContentUtilTest inherits QUnit::Test {
         srv.setHandler("static", "", NOTHING, handler);
         srv.setDefaultHandler("static", handler);
         hash<auto> linfo = srv.addListener(<HttpListenerOptionInfo>{"service": 0});
-        return {"server": srv, "port": linfo.port};
+        return {"server": srv, "port": linfo.port, "handler": handler};
     }
 
     private string longBody(string id, list<string> links) {
@@ -779,6 +797,50 @@ public class WebContentUtilTest inherits QUnit::Test {
         assertGt(0, progress_calls.size());
         # Final reported page count should be 3
         assertEq(3, progress_calls[progress_calls.size() - 1]);
+    }
+
+    #
+    # Phase 5: generic crawler features added so AiCrawlExecutor can stop
+    # maintaining parallel implementations of auth, cancel, change-detection,
+    # streaming, sitemap seeding, and DNS pinning.
+    #
+
+    testWebCrawlerHeaders() {
+        hash<string, string> pages = {
+            "index.html": longBody("Home", ("a.html",)),
+            "a.html": longBody("A", ()),
+        };
+        hash<auto> site = startSite(pages);
+        on_exit site.server.stop();
+        int port = site.port;
+
+        # Custom auth + tracking headers that the test will look for in the
+        # captured request hash on the server side.
+        WebCrawler::crawl(sprintf("http://localhost:%d/", port), {
+            "max_depth": 2, "max_pages": 10, "concurrency": 2,
+            "allow_private_ips": True,
+            "headers": {
+                "Authorization": "Bearer test-token-12345",
+                "X-Tenant-Id": "tenant-42",
+                "Cookie": "session=abcdef",
+            },
+        });
+
+        # The crawler must have hit at least the index page; verify our
+        # custom headers were sent on every captured request.
+        StaticSiteHandler h = site.handler;
+        assertGt(0, h.captured_headers.size(),
+            "site handler should have captured at least one request");
+        foreach string path in (keys h.captured_headers) {
+            hash<auto> req_hdr = h.captured_headers{path};
+            # Header keys are normalized lowercase by HttpServer
+            assertEq("Bearer test-token-12345", req_hdr.authorization,
+                sprintf("Authorization header missing/wrong on %y", path));
+            assertEq("tenant-42", req_hdr."x-tenant-id",
+                sprintf("X-Tenant-Id header missing/wrong on %y", path));
+            assertEq("session=abcdef", req_hdr.cookie,
+                sprintf("Cookie header missing/wrong on %y", path));
+        }
     }
 
     #
