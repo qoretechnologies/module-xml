@@ -267,6 +267,10 @@ public class WebCrawler {
         # Caller-supplied post-fetch hook
         page_callback = opts.page_callback;
 
+        # Sitemap pre-seeding (Phase 5 feature 5)
+        bool use_sitemap = opts.use_sitemap ?? False;
+        *string sitemap_url = opts.sitemap_url;
+
         # Validate seed URL — throws SSRF-BLOCKED if private and not allowed
         SsrfFilter::checkUrl(seed_url, {
             "allow_private": allow_private_ips,
@@ -314,6 +318,74 @@ public class WebCrawler {
         if (extra_headers) {
             req_headers += extra_headers;
         }
+
+        # Pre-seed the queue from sitemap.xml if requested.  Sitemap URLs
+        # are subject to the same scope/dedup/SSRF filters as URLs
+        # discovered through link extraction during the BFS — see the
+        # filter chain in fetchOne() at the link-claim step.
+        if (use_sitemap) {
+            seedFromSitemap(sitemap_url ?? sprintf("%s/sitemap.xml", originOf(seed_url)));
+        }
+    }
+
+    #! Internal: pre-seed the queue with URLs discovered from a sitemap.xml
+    /** Fetches the sitemap via @ref SitemapParser::fetchAndParse(), normalizes
+        each URL, and adds those that pass the same filter chain the BFS link
+        extractor uses (URL prefix, dedup against \c visited, scheme/extension
+        filters, robots.txt, SSRF).  Failures are logged silently — sitemap
+        seeding is best-effort and the crawl falls back to BFS-only.
+
+        @param url the URL of the sitemap or sitemap-index file to fetch
+    */
+    private seedFromSitemap(string url) {
+        list<string> sitemap_urls;
+        try {
+            sitemap_urls = SitemapParser::fetchAndParse(url, {
+                "user_agent": user_agent,
+                "headers": extra_headers,
+            });
+        } catch (hash<ExceptionInfo> ex) {
+            return;
+        }
+        foreach string surl in (sitemap_urls) {
+            string normalized = UrlNormalizer::normalize(surl);
+            if (visited{normalized}) {
+                continue;
+            }
+            # Same-site filter: only seed URLs under the seed prefix
+            if (normalized.find(url_prefix) != 0) {
+                continue;
+            }
+            # Extension and scheme filters
+            if (WebCrawler::hasBlockedExtension(normalized, skip_ext_set)) {
+                continue;
+            }
+            # robots.txt
+            if (robots) {
+                hash<auto> link_parts = parse_url(normalized);
+                string link_path = link_parts.path ?? "/";
+                if (!robots.isAllowed(link_path)) {
+                    continue;
+                }
+            }
+            # SSRF
+            try {
+                SsrfFilter::checkUrl(normalized, {
+                    "allow_private": allow_private_ips,
+                    "blocked_hostnames": blocked_hostnames,
+                });
+            } catch (hash<ExceptionInfo> ex) {
+                continue;
+            }
+            visited{normalized} = True;
+            queue += {"url": normalized, "depth": 0};
+        }
+    }
+
+    #! Internal: extract scheme://host[:port] from a URL
+    private static string originOf(string url) {
+        *string origin = (url =~ x/^(https?:\/\/[^\/?#]+)/)[0];
+        return origin ?? url;
     }
 
     #! Run the crawl and return the collected pages
@@ -458,6 +530,14 @@ return c.run();
             from the page proceeds regardless of the callback's return value.
             The callback is invoked outside the state mutex to avoid deadlocks
             when it acquires its own locks (e.g. DB transactions)
+          - \c use_sitemap (bool, default False): pre-seed the BFS queue from
+            \c /sitemap.xml at the seed origin (or from \c sitemap_url if set).
+            Sitemap-index files are recursively followed up to 3 levels deep.
+            Discovered URLs are subject to the same scope/dedup/SSRF/robots.txt
+            filters as URLs found via link extraction.  Sitemap fetch failures
+            are silent — the crawl falls back to BFS-only
+          - \c sitemap_url (\c *string): explicit sitemap URL to use when
+            \c use_sitemap is True; defaults to \c {seed_origin}/sitemap.xml
           - \c start_thread (\c *code<int(code<nothing()>)>): thread launcher; REQUIRED
             when imported into a context with @ref Qore::PO_NO_THREAD_CONTROL set
         @return list of page hashes

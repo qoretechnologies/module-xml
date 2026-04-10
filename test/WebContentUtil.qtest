@@ -27,10 +27,15 @@ class StaticSiteHandler inherits AbstractHttpRequestHandler {
         #! request path.  Used by tests that need to assert what headers the
         #! crawler sent (e.g. WebCrawler::headers option, auth credentials).
         hash<string, hash<auto>> captured_headers = {};
+
+        #! Page bodies served by this handler, keyed by request path (after
+        #! query stripping).  Public so tests can mutate it after the server
+        #! is running (e.g. inject a sitemap.xml whose contents reference the
+        #! actual listening port).
+        hash<string, string> pages;
     }
 
     private {
-        hash<string, string> pages;
         Mutex hdr_mutex();
     }
 
@@ -55,7 +60,12 @@ class StaticSiteHandler inherits AbstractHttpRequestHandler {
         if (!exists pages{path}) {
             return makeResponse({"Content-Type": "text/plain"}, 404, "not found: " + path);
         }
-        return makeResponse({"Content-Type": "text/html; charset=utf-8"}, 200, pages{path});
+        # Use text/xml for .xml paths so sitemap fetches get the right
+        # content type — required by SitemapParser's XML parsing path
+        string ctype = path =~ /\.xml$/
+            ? "application/xml; charset=utf-8"
+            : "text/html; charset=utf-8";
+        return makeResponse({"Content-Type": ctype}, 200, pages{path});
     }
 }
 
@@ -121,6 +131,19 @@ public class WebContentUtilTest inherits QUnit::Test {
             \testWebCrawlerPageCallback());
         addTestCase("WebCrawler page_callback NOTHING suppresses accumulation",
             \testWebCrawlerPageCallbackStreaming());
+        # SitemapParser unit tests
+        addTestCase("SitemapParser parses urlset", \testSitemapParserUrlset());
+        addTestCase("SitemapParser parses sitemapindex",
+            \testSitemapParserSitemapIndex());
+        addTestCase("SitemapParser handles namespaced sitemap",
+            \testSitemapParserNamespaced());
+        addTestCase("SitemapParser malformed XML returns empty",
+            \testSitemapParserMalformed());
+        addTestCase("SitemapParser isIndex detection",
+            \testSitemapParserIsIndex());
+        # WebCrawler use_sitemap integration
+        addTestCase("WebCrawler use_sitemap pre-seeds queue",
+            \testWebCrawlerUseSitemap());
         # Phase A: SSRF + URL extension + scheme filters
         addTestCase("SsrfFilter IPv4 private ranges", \testSsrfFilterIpv4Private());
         addTestCase("SsrfFilter IPv4 public", \testSsrfFilterIpv4Public());
@@ -881,6 +904,121 @@ public class WebContentUtilTest inherits QUnit::Test {
         # The cancel slice is 250 ms; allow generous margin (3 s).
         assertLt(3s, elapsed,
             sprintf("cancel did not interrupt sleep, elapsed=%y", elapsed));
+    }
+
+    #
+    # SitemapParser unit tests (no network)
+    #
+
+    testSitemapParserUrlset() {
+        string xml = '<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url>
+    <loc>https://example.com/page1</loc>
+    <lastmod>2026-01-01</lastmod>
+  </url>
+  <url>
+    <loc>https://example.com/page2</loc>
+  </url>
+  <url>
+    <loc>https://example.com/page3</loc>
+  </url>
+</urlset>';
+        list<string> urls = SitemapParser::parseUrls(xml);
+        assertEq(3, urls.size());
+        assertEq("https://example.com/page1", urls[0]);
+        assertEq("https://example.com/page3", urls[2]);
+    }
+
+    testSitemapParserSitemapIndex() {
+        string xml = '<?xml version="1.0" encoding="UTF-8"?>
+<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <sitemap>
+    <loc>https://example.com/sitemap-pages.xml</loc>
+  </sitemap>
+  <sitemap>
+    <loc>https://example.com/sitemap-posts.xml</loc>
+  </sitemap>
+</sitemapindex>';
+        list<string> urls = SitemapParser::parseUrls(xml);
+        assertEq(2, urls.size());
+        assertEq("https://example.com/sitemap-pages.xml", urls[0]);
+        assertEq(True, SitemapParser::isIndex(xml));
+    }
+
+    testSitemapParserNamespaced() {
+        # Namespace-prefixed sitemap (rare but valid)
+        string xml = '<?xml version="1.0" encoding="UTF-8"?>
+<sm:urlset xmlns:sm="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <sm:url><sm:loc>https://example.com/a</sm:loc></sm:url>
+  <sm:url><sm:loc>https://example.com/b</sm:loc></sm:url>
+</sm:urlset>';
+        list<string> urls = SitemapParser::parseUrls(xml);
+        assertEq(2, urls.size());
+        assertEq("https://example.com/a", urls[0]);
+    }
+
+    testSitemapParserMalformed() {
+        string xml = "this is not xml at all";
+        list<string> urls = SitemapParser::parseUrls(xml);
+        assertEq(0, urls.size());
+    }
+
+    testSitemapParserIsIndex() {
+        string urlset = '<?xml version="1.0"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"></urlset>';
+        string index = '<?xml version="1.0"?><sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"></sitemapindex>';
+        assertEq(False, SitemapParser::isIndex(urlset));
+        assertEq(True, SitemapParser::isIndex(index));
+        assertEq(False, SitemapParser::isIndex("garbage"));
+    }
+
+    testWebCrawlerUseSitemap() {
+        # Build a site whose index page links to NOTHING (so BFS alone would
+        # only find one page).  Sitemap pre-seeding adds the other pages.
+        # This proves the sitemap was used to populate the queue.
+        hash<string, string> pages = {
+            "index.html": longBody("Home", ()),  # no links from BFS
+            "deep1.html": longBody("Deep1", ()),
+            "deep2.html": longBody("Deep2", ()),
+            "deep3.html": longBody("Deep3", ()),
+        };
+        # Defer adding the sitemap until we know the port number
+        hash<auto> site = startSite(pages);
+        on_exit site.server.stop();
+        int port = site.port;
+
+        # Build sitemap.xml referencing the deep pages and inject it
+        string sitemap = sprintf(
+            '<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url><loc>http://localhost:%d/deep1.html</loc></url>
+  <url><loc>http://localhost:%d/deep2.html</loc></url>
+  <url><loc>http://localhost:%d/deep3.html</loc></url>
+</urlset>', port, port, port);
+        # We need to mutate the handler's pages map to register sitemap.xml
+        # AND a robots.txt to avoid the failing fetch generating noise.
+        # The handler already serves text/xml for paths ending in .xml.
+        StaticSiteHandler h = site.handler;
+        # Add sitemap.xml directly into the pages map (handler reads from it
+        # at request time so this update is visible)
+        h.pages{"sitemap.xml"} = sitemap;
+
+        list<hash<auto>> result = WebCrawler::crawl(sprintf("http://localhost:%d/", port), {
+            "max_depth": 0,  # only seeds (no link following) — proves sitemap added them
+            "max_pages": 100,
+            "concurrency": 2,
+            "allow_private_ips": True,
+            "respect_robots": False,  # skip robots.txt fetching for the test
+            "use_sitemap": True,
+        });
+
+        # Should have visited at least the index plus the deep pages
+        # (4 total: index.html, deep1, deep2, deep3)
+        assertEq(4, result.size(), "expected sitemap-seeded crawl to visit 4 pages");
+        list<string> urls = map $1.url, result;
+        assertEq(True, inlist(sprintf("http://localhost:%d/deep1.html", port), urls));
+        assertEq(True, inlist(sprintf("http://localhost:%d/deep2.html", port), urls));
+        assertEq(True, inlist(sprintf("http://localhost:%d/deep3.html", port), urls));
     }
 
     testWebCrawlerPageCallback() {
