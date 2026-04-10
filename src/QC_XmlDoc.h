@@ -40,6 +40,11 @@ public:
    }
    DLLLOCAL QoreXmlDocData(const QoreString &xml) : QoreXmlDoc(xml) {
    }
+   // HTML constructor — uses libxml2's lenient HTML parser via QoreXmlDoc
+   DLLLOCAL QoreXmlDocData(const QoreString& html, QoreXmlDocHtmlTag tag,
+           const char* encoding = 0)
+       : QoreXmlDoc(html, tag, encoding) {
+   }
    DLLLOCAL QoreXmlDocData(const QoreXmlDocData &orig) : QoreXmlDoc(orig) {
    }
    DLLLOCAL QoreXmlNodeData *getRootElement();

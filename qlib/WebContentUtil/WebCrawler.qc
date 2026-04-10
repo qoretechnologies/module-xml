@@ -186,9 +186,9 @@ public class WebCrawler {
         # background fetcher threads. The visited index and queue must always be updated
         # together under the lock to prevent duplicate enqueueing or lost claims.
         Mutex state_mutex();
-        hash<string, bool> visited;
-        list<hash<auto>> queue;
-        list<hash<auto>> pages;
+        hash<string, bool> visited = {};
+        list<hash<auto>> queue = ();
+        list<hash<auto>> pages = ();
 
         # Seed the crawl atomically
         string seed_norm = UrlNormalizer::normalize(seed_url);
@@ -383,35 +383,23 @@ public class WebCrawler {
     private static list<hash<auto>> extractLinks(string html, string page_url, int depth,
             string url_prefix) {
         list<hash<auto>> links = ();
-        list<string> parts = html.split("href=");
-        shift parts;
-        foreach string part in (parts) {
-            *list<*string> m = regex_extract(part, "^[\"']([^\"']+)[\"']");
-            if (!m || !m[0].val()) {
-                continue;
-            }
-            string href = m[0];
 
-            # Phase A: skip blocked link schemes (mailto:, javascript:, tel:, etc.)
-            # before any URL resolution work
-            if (WebCrawler::hasBlockedScheme(href)) {
-                continue;
-            }
+        # Delegate the HTML parsing and link extraction to HtmlExtractor, which
+        # uses parse_html() (libxml2's lenient parser) for proper DOM handling.
+        # HtmlExtractor::extractLinks already filters rel="nofollow", excludes
+        # non-HTTP schemes (mailto:, javascript:, etc.), resolves relative URLs
+        # against page_url, and finds <link rel="canonical">.
+        hash<LinkInfo> info;
+        try {
+            info = HtmlExtractor::extractLinks(html, page_url);
+        } catch (hash<ExceptionInfo> ex) {
+            return links;
+        }
 
-            if (href =~ /^\//) {
-                # Absolute path — resolve against scheme+host
-                *string base = (page_url =~ x/^(https?:\/\/[^\/]+)/)[0];
-                if (base) {
-                    href = base + href;
-                }
-            } else if (href !~ /^https?:\/\//i) {
-                # Relative path — resolve against page base
-                string base_dir = page_url =~ /\/$/ ? page_url : dirname(page_url) + "/";
-                href = base_dir + href;
-            }
-            href = UrlNormalizer::normalize(href);
-            if (href =~ /^https?:\/\//i && href.find(url_prefix) == 0) {
-                links += {"url": href, "depth": depth + 1};
+        foreach string href in (info.hrefs) {
+            string normalized = UrlNormalizer::normalize(href);
+            if (normalized =~ /^https?:\/\//i && normalized.find(url_prefix) == 0) {
+                links += {"url": normalized, "depth": depth + 1};
             }
         }
         return links;

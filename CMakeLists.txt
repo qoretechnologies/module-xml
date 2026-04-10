@@ -132,7 +132,7 @@ qore_external_user_module("qlib/WebDavHandler" "")
 qore_external_user_module("qlib/XmlRpcConnection.qm" "")
 qore_external_user_module("qlib/XmlRpcHandler.qm" "")
 qore_external_user_module("qlib/SaxDataProvider" "")
-qore_external_user_module("qlib/WebContentUtil" "HttpClientIo;Util")
+qore_external_user_module("qlib/WebContentUtil" "")
 
 # install qpp metadata files
 if (COMMAND qore_install_qpp_metadata)

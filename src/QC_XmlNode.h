@@ -58,6 +58,26 @@ public:
    DLLLOCAL operator bool() const {
       return ptr;
    }
+   //! Detach this node from its parent's child list
+   /** After this call the node is removed from its containing document tree
+       but the underlying libxml2 node is still allocated.  The QoreXmlNodeData
+       wrapper takes ownership of the detached node and frees it when destroyed
+       (by setting the internal \c del flag).
+
+       The wrapper itself remains fully functional after this call — the
+       caller can still read the node's content, attributes, children, etc.
+       The only effect is that the node is no longer reachable via XPath
+       queries on the parent document, which is the desired effect for
+       HTML/XML scrubbing use cases (CSS-selector content stripping).
+   */
+   DLLLOCAL void unlinkNode() {
+      if (ptr && !del) {
+         xmlUnlinkNode(ptr);
+         // Take ownership: the destructor will xmlFreeNode this detached node
+         // along with releasing the doc reference, in the correct order.
+         del = true;
+      }
+   }
    DLLLOCAL int64 childElementCount() {
 #ifdef HAVE_XMLCHILDELEMENTCOUNT
       return xmlChildElementCount(ptr);
@@ -248,7 +268,13 @@ public:
       xmlBufferPtr buf = xmlBufferCreate();
       assert(buf);
       int rc = xmlNodeDump(buf, doc->getDocPtr(), ptr, 0, 0);
-      QoreStringNode *str = (rc != -1 && buf->size) ? new QoreStringNode((const char *)buf->content, buf->size, QCS_UTF8) : 0;
+      // buf->size is the allocated capacity; buf->use is the actual content
+      // length.  Use xmlBufferLength() (which returns buf->use) to avoid
+      // copying uninitialized buffer padding into the resulting string.
+      int len = (int)xmlBufferLength(buf);
+      QoreStringNode *str = (rc != -1 && len > 0)
+          ? new QoreStringNode((const char *)xmlBufferContent(buf), len, QCS_UTF8)
+          : 0;
       xmlBufferFree(buf);
       return str;
    }

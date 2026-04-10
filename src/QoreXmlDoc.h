@@ -30,6 +30,7 @@
 #endif
 
 #include <libxml/parser.h>
+#include <libxml/HTMLparser.h>
 
 #define XML_PARSE_NOBLANKS 0
 
@@ -47,15 +48,39 @@
 #define QORE_XML_PARSER_OPTIONS XML_PARSE_NOERROR | XML_PARSE_NOWARNING | XML_PARSE_NOBLANKS QORE_XML_PARSER_OPTIONS_ADDONS
 #endif
 
+// HTML parser options for lenient real-world HTML parsing.
+//
+// HTML_PARSE_RECOVER: keep parsing on errors (essential for malformed HTML5)
+// HTML_PARSE_NOERROR / NOWARNING: silence libxml2's stderr noise (the
+// caller wants the DOM, not parser diagnostics)
+// HTML_PARSE_NOBLANKS: drop ignorable whitespace text nodes
+// HTML_PARSE_NONET: never fetch external entities (security — prevents
+// SSRF via DTD/external resource loading during parsing)
+#define QORE_HTML_PARSER_OPTIONS \
+    (HTML_PARSE_RECOVER | HTML_PARSE_NOERROR | HTML_PARSE_NOWARNING \
+     | HTML_PARSE_NOBLANKS | HTML_PARSE_NONET)
+
 DLLLOCAL QoreStringNode *doString(xmlChar *str);
 class QoreXmlNodeData;
 class QoreXmlDocData;
 DLLLOCAL QoreXmlNodeData *doNode(xmlNodePtr p, QoreXmlDocData *doc);
 
+// Tag types for QoreXmlDoc constructor overloads.  Used so the HTML parsing
+// path can be selected at the type level rather than via a runtime bool flag.
+struct QoreXmlDocHtmlTag {};
+constexpr QoreXmlDocHtmlTag QoreXmlDocHtml{};
+
 class QoreXmlDoc {
 private:
    DLLLOCAL void init(const char *buf, int size, const char *encoding = 0) {
       ptr = xmlReadMemory(buf, size, 0, encoding, QORE_XML_PARSER_OPTIONS);
+   }
+
+   // Lenient HTML parser path (libxml2 htmlReadMemory).  Tolerates
+   // real-world malformed HTML5; suitable for crawler / scraper use cases
+   // where the input may not be valid XHTML.
+   DLLLOCAL void initHtml(const char *buf, int size, const char *encoding = 0) {
+      ptr = htmlReadMemory(buf, size, 0, encoding, QORE_HTML_PARSER_OPTIONS);
    }
 
 protected:
@@ -70,6 +95,12 @@ public:
    }
    DLLLOCAL QoreXmlDoc(const QoreString *xml) {
       init(xml->getBuffer(), xml->strlen(), xml->getEncoding()->getCode());
+   }
+   // HTML constructor — tag-dispatched to avoid colliding with the XML overloads
+   DLLLOCAL QoreXmlDoc(const QoreString& html, QoreXmlDocHtmlTag,
+           const char* encoding = 0) {
+      initHtml(html.getBuffer(), html.strlen(),
+               encoding ? encoding : html.getEncoding()->getCode());
    }
    DLLLOCAL QoreXmlDoc(const QoreXmlDoc &orig) {
       ptr = orig.ptr ? xmlCopyDoc(orig.ptr, 1) : 0;
