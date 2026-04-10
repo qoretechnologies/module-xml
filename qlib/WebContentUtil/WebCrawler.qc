@@ -165,6 +165,16 @@ public class WebCrawler {
         # anything except the User-Agent default
         *hash<string, string> extra_headers;
 
+        # DNS pinning state — when dns_pin is True we resolve each unique
+        # host once via SsrfFilter::resolveAndValidate and cache the
+        # validated IP, then rewrite subsequent fetch URLs to use the IP
+        # directly (with Host header set to the original hostname).  This
+        # closes the TOCTOU window between SSRF check and HTTP fetch where
+        # a DNS-rebinding attack could flip the resolution to a private IP.
+        bool dns_pin;
+        Mutex dns_pin_mutex();
+        hash<string, *string> dns_pin_cache = {};
+
         # Shared crawl state — guarded by state_mutex
         Mutex state_mutex();
         hash<string, bool> visited = {};
@@ -270,6 +280,9 @@ public class WebCrawler {
         # Sitemap pre-seeding (Phase 5 feature 5)
         bool use_sitemap = opts.use_sitemap ?? False;
         *string sitemap_url = opts.sitemap_url;
+
+        # DNS pinning (Phase 5 feature 6)
+        dns_pin = opts.dns_pin ?? False;
 
         # Validate seed URL — throws SSRF-BLOCKED if private and not allowed
         SsrfFilter::checkUrl(seed_url, {
@@ -386,6 +399,46 @@ public class WebCrawler {
     private static string originOf(string url) {
         *string origin = (url =~ x/^(https?:\/\/[^\/?#]+)/)[0];
         return origin ?? url;
+    }
+
+    #! Internal: look up or compute the pinned IP for a host
+    /** Cache key is the bare hostname (no scheme/port).  On first sight,
+        calls @ref SsrfFilter::resolveAndValidate to validate AND get the
+        first public IP, then caches the result for the rest of the crawl.
+        On subsequent lookups returns the cached value without re-resolving
+        — DNS pinning means once we've validated a host, we don't ask DNS
+        about it again.
+
+        SSRF rejections from resolveAndValidate are cached as NOTHING-with-
+        a-tombstone-marker so subsequent fetches for the same host are
+        skipped without re-attempting DNS.
+
+        @param host the hostname to resolve and pin
+        @return the validated public IP, or NOTHING if the host is already
+            an IP literal (no pinning needed) or DNS resolution failed
+            (caller should fall back to the unpinned hostname)
+        @throw SSRF-BLOCKED if the host resolves to a private/blocked address
+    */
+    private *string resolvePinnedIp(string host) {
+        dns_pin_mutex.lock();
+        on_exit dns_pin_mutex.unlock();
+        if (dns_pin_cache.hasKey(host)) {
+            return dns_pin_cache{host};
+        }
+        *string ip;
+        try {
+            ip = SsrfFilter::resolveAndValidate("http://" + host + "/", {
+                "allow_private": allow_private_ips,
+                "blocked_hostnames": blocked_hostnames,
+            });
+        } catch (hash<ExceptionInfo> ex) {
+            # Cache the rejection as NOTHING so we don't re-resolve next time;
+            # the caller's exception handler in fetchOne will skip this URL
+            dns_pin_cache{host} = NOTHING;
+            rethrow;
+        }
+        dns_pin_cache{host} = ip;
+        return ip;
     }
 
     #! Run the crawl and return the collected pages
@@ -538,6 +591,17 @@ return c.run();
             are silent — the crawl falls back to BFS-only
           - \c sitemap_url (\c *string): explicit sitemap URL to use when
             \c use_sitemap is True; defaults to \c {seed_origin}/sitemap.xml
+          - \c dns_pin (bool, default False): SSRF TOCTOU hardening — when
+            True, each unique hostname is resolved once via SsrfFilter and
+            the validated public IP is cached for the rest of the crawl.
+            Subsequent fetches connect directly to the pinned IP with the
+            \c Host header set to the original hostname, eliminating the
+            window where a DNS-rebinding attack could flip the resolution
+            to a private address between SSRF check and HTTP fetch.
+            **Caveat**: HTTPS targets may fail TLS hostname verification
+            since the connection is made to an IP rather than the hostname;
+            use this primarily for HTTP crawling or in combination with an
+            HTTP client configured to use the original hostname for SNI
           - \c start_thread (\c *code<int(code<nothing()>)>): thread launcher; REQUIRED
             when imported into a context with @ref Qore::PO_NO_THREAD_CONTROL set
         @return list of page hashes
@@ -584,12 +648,27 @@ return c.run();
                 return;
             }
             hash<auto> url_parts = parse_url(citem.url);
+            string original_host = url_parts.host;
+            string fetch_host = original_host;
+            hash<auto> fetch_headers = req_headers;
+            # DNS pinning: substitute the validated IP for the hostname in
+            # the connect URL so the HTTP client connects to the pinned IP
+            # rather than re-resolving the host (which could now point to a
+            # private address).  Set Host header to the original hostname
+            # so virtual-hosted servers route correctly.
+            if (dns_pin) {
+                *string pinned_ip = resolvePinnedIp(original_host);
+                if (pinned_ip.val()) {
+                    fetch_host = pinned_ip;
+                    fetch_headers = req_headers + {"Host": original_host};
+                }
+            }
             string base_url = sprintf("%s://%s%s",
                 url_parts.protocol ?? "https",
-                url_parts.host,
+                fetch_host,
                 url_parts.port ? sprintf(":%d", url_parts.port) : "");
             string req_path = url_parts.path ?? "/";
-            hash<auto> resp = mgr.request(base_url, "GET", req_path, req_headers);
+            hash<auto> resp = mgr.request(base_url, "GET", req_path, fetch_headers);
 
             if (resp.status_code == 429 || resp.status_code == 503) {
                 # Atomic re-queue for retry: re-clear visited so the URL

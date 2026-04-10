@@ -102,6 +102,117 @@ public class SsrfFilter {
         }
     }
 
+    #! Resolve a URL's hostname and return a validated public IP for DNS pinning
+    /** Performs the same SSRF check as @ref checkUrl() but ALSO returns the
+        validated public IP address that the caller should use to fetch the
+        resource.  Use this when you need to close the TOCTOU window between
+        the SSRF check and the HTTP fetch — by pinning the resolved IP, you
+        prevent DNS rebinding attacks where the attacker's DNS server flips
+        the record between validation and fetch.
+
+        Typical usage in a crawler:
+        @code{.py}
+*string pinned_ip = SsrfFilter::resolveAndValidate(url, {"allow_private": False});
+if (pinned_ip) {
+    # Replace the host in the URL with the IP, set Host header to the
+    # original hostname, and fetch.  The HTTP client will connect to the
+    # validated IP regardless of any DNS changes that happen later.
+    string fetch_url = url with hostname replaced by pinned_ip;
+    headers.Host = original_hostname;
+    http.request(fetch_url, ..., headers);
+}
+        @endcode
+
+        For HTTPS targets, the caller is responsible for SNI handling — the
+        substituted IP would normally fail TLS hostname verification.  When
+        using this for HTTPS, either:
+        - Configure the HTTP client to use the original hostname for SNI/cert
+          validation while connecting to the pinned IP, or
+        - Accept the (small) TOCTOU window and use \c checkUrl() instead
+
+        @param url the URL to validate
+        @param opts validation options:
+          - \c allow_private (bool, default \c False): allow private/internal targets
+          - \c blocked_hostnames (\c *list<string>): additional hostnames to reject
+        @return the first validated public IP from DNS resolution, suitable for
+            DNS pinning; or @ref nothing if the host is already an IP literal
+            (no pinning needed) or DNS resolution failed
+        @throw SSRF-BLOCKED if the URL targets a blocked address and allow_private is not True
+        @throw SSRF-BLOCKED-HOSTNAME if the URL targets an explicitly blocked hostname
+    */
+    static *string resolveAndValidate(string url, *hash<auto> opts) {
+        bool allow_private = opts.allow_private ?? False;
+        *list<string> blocked_hostnames = opts.blocked_hostnames;
+
+        hash<auto> parts;
+        try {
+            parts = parse_url(url);
+        } catch (hash<ExceptionInfo> ex) {
+            throw "SSRF-BLOCKED", sprintf("URL %y could not be parsed: %s: %s",
+                url, ex.err, ex.desc);
+        }
+        *string host = parts.host;
+        if (!host.val()) {
+            throw "SSRF-BLOCKED", sprintf("URL %y has no host", url);
+        }
+
+        # Caller-supplied blocklist (case-insensitive exact match)
+        if (blocked_hostnames) {
+            string lhost = host.lwr();
+            foreach string blocked in (blocked_hostnames) {
+                if (lhost == blocked.lwr()) {
+                    throw "SSRF-BLOCKED-HOSTNAME",
+                        sprintf("URL %y targets explicitly-blocked hostname %y", url, host);
+                }
+            }
+        }
+
+        # Hostname pattern check (loopback, k8s DNS, etc.)
+        if (!allow_private && SsrfFilter::isPrivateHostname(host)) {
+            throw "SSRF-BLOCKED",
+                sprintf("URL %y targets a private/internal address (host: %y)", url, host);
+        }
+
+        # Already an IP literal — no pinning needed (caller can use the URL as-is)
+        if (ip_address_type(host) != "invalid") {
+            if (!allow_private && SsrfFilter::isPrivateIp(host)) {
+                throw "SSRF-BLOCKED",
+                    sprintf("URL %y targets a private/internal address (host: %y)", url, host);
+            }
+            return NOTHING;
+        }
+
+        # Resolve via DNS, validate every returned address, and pin the first
+        # public one for the caller to use.
+        list<hash<auto>> addrs;
+        try {
+            addrs = getaddrinfo(host, NOTHING, AF_UNSPEC, AI_ADDRCONFIG);
+        } catch (hash<ExceptionInfo> ex) {
+            # DNS failure — let the HTTP client handle it (return NOTHING so
+            # the caller falls back to the unpinned URL)
+            return NOTHING;
+        }
+        if (!addrs) {
+            return NOTHING;
+        }
+        *string first_public_ip;
+        foreach hash<auto> a in (addrs) {
+            *string addr = a.address;
+            if (!addr.val()) {
+                continue;
+            }
+            if (!allow_private && SsrfFilter::isPrivateIp(addr)) {
+                throw "SSRF-BLOCKED",
+                    sprintf("URL %y resolves to private/reserved IP address %y",
+                        url, addr);
+            }
+            if (!first_public_ip) {
+                first_public_ip = addr;
+            }
+        }
+        return first_public_ip;
+    }
+
     #! Throws SSRF-BLOCKED if the URL targets a private/internal address
     /** @param url the URL to validate
         @param opts validation options:
