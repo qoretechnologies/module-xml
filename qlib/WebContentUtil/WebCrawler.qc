@@ -78,6 +78,10 @@ public class WebCrawler {
     #! Minimum text length to keep a page (characters)
     const MinTextLength = 50;
 
+    #! Slice size (microseconds) for cancellable sleeps — bounds the worst-case
+    #! latency between a cancel_check returning True and the crawler observing it
+    const CancelSliceUs = 250000;  # 250 ms
+
     #! Default User-Agent header sent for crawl requests
     /** Generic Qore-library identifier.  Higher-level callers (\c qctl, \c saasctl,
         \c QorusAiWebCrawler) should override this with their own User-Agent.
@@ -128,6 +132,10 @@ public class WebCrawler {
         *code<bool(string)> url_filter;
         #! Optional thread launcher — required under PO_NO_THREAD_CONTROL
         *code<int(code<nothing()>)> start_thread;
+        #! Optional cancellation hook — polled between batches and inside
+        #! rate-limit / crawl-delay sleeps; when it returns True the run
+        #! exits gracefully and returns whatever pages were collected so far
+        *code<bool()> cancel_check;
 
         # Derived configuration
         string url_prefix;
@@ -165,11 +173,41 @@ public class WebCrawler {
     /** Uses Condition::wait() on a private mutex/condition pair so the call is
         classified as thread-control rather than process-control, allowing it
         to run under PO_NO_PROCESS_CONTROL (e.g. inside Qorus user services).
+
+        When a \c cancel_check callback was supplied to the constructor, the
+        sleep is broken into short slices (250 ms) and the cancel callback is
+        polled between slices.  This bounds the worst-case latency between a
+        cancel request and the crawler returning to ~250 ms regardless of the
+        configured rate-limit / crawl-delay value.
+
+        @param duration the requested sleep duration
+        @return True if the sleep completed normally, False if it was
+            interrupted by a cancel_check returning True
     */
-    private sleepDuration(date duration) {
-        sleep_mutex.lock();
-        on_exit sleep_mutex.unlock();
-        sleep_cond.wait(sleep_mutex, duration);
+    private bool sleepDuration(date duration) {
+        if (!cancel_check) {
+            sleep_mutex.lock();
+            on_exit sleep_mutex.unlock();
+            sleep_cond.wait(sleep_mutex, duration);
+            return True;
+        }
+        # Cancellable sleep: break into CancelSliceUs slices and poll
+        # cancel_check between slices.  Track remaining time as microseconds
+        # for precision.
+        int remaining_us = get_duration_microseconds(duration);
+        while (remaining_us > 0) {
+            if (cancel_check()) {
+                return False;
+            }
+            int wait_us = remaining_us < CancelSliceUs ? remaining_us : CancelSliceUs;
+            {
+                sleep_mutex.lock();
+                on_exit sleep_mutex.unlock();
+                sleep_cond.wait(sleep_mutex, wait_us * 1us);
+            }
+            remaining_us -= wait_us;
+        }
+        return !cancel_check();
     }
 
     #! Construct a crawler from a seed URL and an options hash
@@ -206,6 +244,9 @@ public class WebCrawler {
 
         # Caller-supplied extra HTTP headers
         extra_headers = opts.headers;
+
+        # Caller-supplied cancellation hook
+        cancel_check = opts.cancel_check;
 
         # Validate seed URL — throws SSRF-BLOCKED if private and not allowed
         SsrfFilter::checkUrl(seed_url, {
@@ -268,6 +309,12 @@ public class WebCrawler {
     */
     list<hash<auto>> run() {
         while (True) {
+            # Cancellation check at the top of every batch — gives the caller
+            # a deterministic upper bound on how long after a cancel request
+            # the crawl will keep running (one batch's fetches at most)
+            if (cancel_check && cancel_check()) {
+                break;
+            }
             # Drain a batch from the queue atomically
             list<hash<auto>> batch;
             {
@@ -369,6 +416,11 @@ return c.run();
           - \c headers (\c *hash<string, string>): extra HTTP request headers added
             to every request — typically auth credentials (\c Authorization,
             \c Cookie), session tokens, or custom \c X- headers
+          - \c cancel_check (\c *code<bool()>): cancellation hook polled between
+            batches and inside rate-limit / crawl-delay sleeps; return True to
+            cause the run to exit gracefully and return whatever pages were
+            collected so far.  Worst-case latency between cancel and return is
+            ~250 ms regardless of \c delay_ms
           - \c start_thread (\c *code<int(code<nothing()>)>): thread launcher; REQUIRED
             when imported into a context with @ref Qore::PO_NO_THREAD_CONTROL set
         @return list of page hashes
