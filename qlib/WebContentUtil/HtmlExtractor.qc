@@ -86,6 +86,57 @@ public class HtmlExtractor {
         "vbscript:", "file:", "chrome:", "about:", "ftp:", "ftps:",
     );
 
+    #! Strip CSS-selected elements from HTML, returning the cleaned HTML
+    /** Parses the HTML into a DOM via @ref Qore::Xml::parse_html(), removes
+        every element matching any of the supplied CSS selectors, and serializes
+        the remaining DOM back to an HTML string.
+
+        Useful for callers that need to keep HTML structure (for downstream
+        processors that consume HTML, e.g. document ingesters that re-parse
+        the HTML to extract structured fields) but want to drop noise like
+        navigation menus, sidebars, footers, scripts, and ads BEFORE handing
+        the document downstream.
+
+        @param html raw HTML string
+        @param strip_selectors optional list of CSS selectors to strip; appended
+            to @ref DefaultStripSelectors.  Supported selector forms: \c element,
+            \c .class, \c #id, \c [attr='value'], and combinations (e.g.
+            \c div.sidebar).  Compound and pseudo-class selectors are not
+            supported and will be silently skipped.
+        @return the cleaned HTML — body subtree if present, otherwise the
+            document root; on parse failure returns the original \a html
+            unchanged
+    */
+    static string stripElements(string html, *list<string> strip_selectors) {
+        try {
+            XmlDoc doc = parse_html(html);
+            list<string> selectors = DefaultStripSelectors;
+            if (strip_selectors) {
+                selectors += strip_selectors;
+            }
+            foreach string sel in (selectors) {
+                *string xpath = HtmlExtractor::cssToXPath(sel);
+                if (!xpath) {
+                    continue;  # unsupported selector — silently skipped
+                }
+                HtmlExtractor::removeMatching(doc, xpath);
+            }
+            # Serialize the cleaned DOM back to HTML — prefer the body subtree
+            # so we don't include the <html><head> wrapper that libxml2 adds
+            list<auto> body = doc.evalXPath("//body");
+            if (body) {
+                return body[0].getXML();
+            }
+            list<auto> root = doc.evalXPath("/*");
+            if (root) {
+                return root[0].getXML();
+            }
+        } catch (hash<ExceptionInfo> ex) {
+            # Parse failure — fall through and return original
+        }
+        return html;
+    }
+
     #! Extract readable text from HTML, stripping non-content elements
     /** Parses the HTML into a DOM via @ref Qore::Xml::parse_html() "parse_html()",
         removes elements matching the strip selectors, and returns the remaining
