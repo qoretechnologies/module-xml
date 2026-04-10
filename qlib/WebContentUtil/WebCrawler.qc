@@ -28,17 +28,20 @@ public namespace WebContentUtil {
 /** Crawls a website starting from a seed URL using breadth-first traversal with
     parallel HTTP requests via @ref HttpClientIo::HttpClientConnectionManager. Features:
 
-    - HTTP/2 and HTTP/3 multiplexing for high throughput (both protocols supported on a single
-      connection); automatic protocol auto-selection via Alt-Svc discovery upgrades from HTTP/2
-      to HTTP/3 when available
+    - HTTP/2 and HTTP/3 multiplexing for high throughput (both protocols supported on a
+      single connection); automatic protocol auto-selection via Alt-Svc discovery upgrades
+      from HTTP/2 to HTTP/3 when available
     - HTTP/1.1 fallback with multiple connections per host
     - Redirect following (via \c request() method)
     - Automatic rate limiting detection and throttling on 429/503 responses
     - URL normalization and deduplication
+    - SSRF protection (default-deny private/internal addresses)
+    - robots.txt compliance (RFC 9309)
+    - URL extension and link scheme blacklists
     - Configurable depth, page cap, concurrency, and delay
     - Progress reporting via callback
-
-    All methods are static.
+    - Pluggable thread launcher (\c start_thread option) — required when imported into a
+      context where @ref Qore::PO_NO_THREAD_CONTROL is set, such as Qorus services
 
     @par Example
     @code{.py}
@@ -47,6 +50,7 @@ list<hash<auto>> pages = WebCrawler::crawl("https://docs.example.com/", {
     "max_pages": 500,
     "concurrency": 10,
     "delay_ms": 50,
+    "user_agent": "MyBot/1.0",
     "progress": sub (int pages, int queued) {
         stderr.printf("  crawled %d pages, %d queued\n", pages, queued);
     },
@@ -108,64 +112,102 @@ public class WebCrawler {
         "vbscript:", "file:", "chrome:", "about:", "ftp:", "ftps:",
     );
 
-    #! Crawl a website starting from seed_url
-    /** Performs a breadth-first crawl starting from the seed URL. Only follows links
-        within the same URL prefix (same host and path prefix as the seed URL). Extracts
-        HTML text content and page titles from each page.
+    private {
+        # Configuration (set in constructor)
+        int max_depth;
+        int max_pages;
+        int concurrency;
+        int delay_ms;
+        bool allow_private_ips;
+        *list<string> blocked_hostnames;
+        hash<string, bool> skip_ext_set;
+        string user_agent;
+        int max_response_bytes;
+        bool respect_robots;
+        *code<nothing(int, int)> progress;
+        *code<bool(string)> url_filter;
+        #! Optional thread launcher — required under PO_NO_THREAD_CONTROL
+        *code<int(code<nothing()>)> start_thread;
+
+        # Derived configuration
+        string url_prefix;
+        *RobotsTxt robots;
+
+        # HTTP client
+        HttpClientIo::HttpClientConnectionManager mgr;
+        hash<auto> req_headers;
+
+        # Shared crawl state — guarded by state_mutex
+        Mutex state_mutex();
+        hash<string, bool> visited = {};
+        list<hash<auto>> queue = ();
+        list<hash<auto>> pages = ();
+
+        # Per-batch state (reset each batch)
+        int rate_limited;
+        Counter cnt;
+
+        # Sleep helper — Condition::wait(Mutex, timeout) is permitted under
+        # PO_NO_PROCESS_CONTROL while usleep()/sleep() are not, so we use a
+        # private mutex+condition for inter-batch and crawl-delay sleeps that
+        # works in Qorus service contexts.
+        Mutex sleep_mutex();
+        Condition sleep_cond();
+    }
+
+    #! Internal helper: sleep for the given duration without using usleep()
+    /** Uses Condition::wait() on a private mutex/condition pair so the call is
+        classified as thread-control rather than process-control, allowing it
+        to run under PO_NO_PROCESS_CONTROL (e.g. inside Qorus user services).
+    */
+    private sleepDuration(date duration) {
+        sleep_mutex.lock();
+        on_exit sleep_mutex.unlock();
+        sleep_cond.wait(sleep_mutex, duration);
+    }
+
+    #! Construct a crawler from a seed URL and an options hash
+    /** See @ref crawl() for the option documentation.
 
         @param seed_url the starting URL
-        @param opts crawl options hash:
-          - \c max_depth (int, default 3): maximum link-follow depth
-          - \c max_pages (int, default 500): hard page cap
-          - \c concurrency (int, default 10): parallel requests per batch
-          - \c delay_ms (int, default 0): delay between batches in milliseconds
-          - \c progress (code<nothing(int pages, int queued)>, optional): progress callback
-            invoked after each batch
-          - \c url_filter (code<bool(string url)>, optional): return True to accept a discovered
-            URL for crawling; called after normalization but before dedup check
-        @return list of page hashes, each containing:
-          - \c url (string): the page URL
-          - \c title (string): the page title (from HTML &lt;title&gt; tag, or URL if none)
-          - \c content (string): extracted plain text content
+        @param opts crawl options
+        @throw SSRF-BLOCKED if the seed URL targets a private/internal address
+            and \c allow_private_ips is not True
     */
-    static list<hash<auto>> crawl(string seed_url, *hash<auto> opts) {
-        int max_depth = opts.max_depth ?? DefaultMaxDepth;
-        int max_pages = opts.max_pages ?? DefaultMaxPages;
-        int concurrency = opts.concurrency ?? DefaultConcurrency;
-        int delay_ms = opts.delay_ms ?? 0;
-        *code<nothing(int, int)> progress = opts.progress;
-        *code<bool(string)> url_filter = opts.url_filter;
+    constructor(string seed_url, *hash<auto> opts) {
+        max_depth = opts.max_depth ?? DefaultMaxDepth;
+        max_pages = opts.max_pages ?? DefaultMaxPages;
+        concurrency = opts.concurrency ?? DefaultConcurrency;
+        delay_ms = opts.delay_ms ?? 0;
+        progress = opts.progress;
+        url_filter = opts.url_filter;
 
         # Phase A options
-        bool allow_private_ips = opts.allow_private_ips ?? False;
-        *list<string> blocked_hostnames = opts.blocked_hostnames;
+        allow_private_ips = opts.allow_private_ips ?? False;
+        blocked_hostnames = opts.blocked_hostnames;
         list<string> skip_extensions = opts.skip_extensions ?? DefaultSkipExtensions;
-        # Build a set for O(1) extension lookup
-        hash<string, bool> skip_ext_set;
         foreach string ext in (skip_extensions) {
             skip_ext_set{ext.lwr()} = True;
         }
 
         # Phase C options
-        string user_agent = opts.user_agent ?? DefaultUserAgent;
-        int max_response_bytes = opts.max_response_bytes ?? DefaultMaxResponseBytes;
-        bool respect_robots = opts.respect_robots ?? True;
+        user_agent = opts.user_agent ?? DefaultUserAgent;
+        max_response_bytes = opts.max_response_bytes ?? DefaultMaxResponseBytes;
+        respect_robots = opts.respect_robots ?? True;
 
-        # Validate seed URL with SsrfFilter (default-deny private IPs).
-        # Throws SSRF-BLOCKED if the seed targets a private/internal address.
+        # Optional thread launcher (required under PO_NO_THREAD_CONTROL)
+        start_thread = opts.start_thread;
+
+        # Validate seed URL — throws SSRF-BLOCKED if private and not allowed
         SsrfFilter::checkUrl(seed_url, {
             "allow_private": allow_private_ips,
             "blocked_hostnames": blocked_hostnames,
         });
 
-        # Phase C: fetch robots.txt for the seed origin (per RFC 9309 — unreachable
-        # robots.txt is treated as fully permissive).
-        *RobotsTxt robots;
+        # Phase C: fetch robots.txt for the seed origin
         if (respect_robots) {
             robots = RobotsTxt::fetch(seed_url, user_agent);
             if (robots) {
-                # If the file specifies a Crawl-delay larger than our configured
-                # delay, honor it (politeness)
                 *int rdelay = robots.getCrawlDelay();
                 if (rdelay && rdelay * 1000 > delay_ms) {
                     delay_ms = rdelay * 1000;
@@ -174,39 +216,42 @@ public class WebCrawler {
         }
 
         # Determine the URL prefix for same-site filtering
-        *string url_prefix = (seed_url =~ x/^(https?:\/\/[^\/]+\/[^?#]*)/)[0];
-        if (!url_prefix) {
-            url_prefix = seed_url;
+        *string up = (seed_url =~ x/^(https?:\/\/[^\/]+\/[^?#]*)/)[0];
+        if (!up) {
+            up = seed_url;
         }
-        if (url_prefix =~ /\.[a-z]+$/i) {
-            url_prefix = dirname(url_prefix) + "/";
+        if (up =~ /\.[a-z]+$/i) {
+            up = dirname(up) + "/";
         }
-
-        # Shared crawl state — guarded by state_mutex for atomic access from concurrent
-        # background fetcher threads. The visited index and queue must always be updated
-        # together under the lock to prevent duplicate enqueueing or lost claims.
-        Mutex state_mutex();
-        hash<string, bool> visited = {};
-        list<hash<auto>> queue = ();
-        list<hash<auto>> pages = ();
+        url_prefix = up;
 
         # Seed the crawl atomically
         string seed_norm = UrlNormalizer::normalize(seed_url);
         visited{seed_norm} = True;
         queue += {"url": seed_norm, "depth": 0};
 
-        HttpClientIo::HttpClientConnectionManager mgr(
+        # HTTP client
+        mgr = new HttpClientIo::HttpClientConnectionManager(
             <HttpClientIo::HttpClientConnectionManagerOptions>{
                 "connect_timeout": DefaultConnectTimeout,
                 "request_timeout": DefaultRequestTimeout,
             });
-
-        # Default request headers — passed per-request because
-        # HttpClientConnectionManagerOptions has no default_headers field
-        hash<auto> req_headers = {
+        req_headers = {
             "User-Agent": user_agent,
         };
+    }
 
+    #! Run the crawl and return the collected pages
+    /** Performs a breadth-first crawl from the seed URL passed to the constructor.
+        Spawns parallel fetcher threads via the configured launcher (\c start_thread
+        option, or @ref background under @ref Qore::PO_NO_THREAD_CONTROL).
+
+        @return list of page hashes, each containing:
+          - \c url (string): the page URL
+          - \c title (string): the page title (from HTML &lt;title&gt; tag, or URL if none)
+          - \c content (string): extracted plain text content
+    */
+    list<hash<auto>> run() {
         while (True) {
             # Drain a batch from the queue atomically
             list<hash<auto>> batch;
@@ -225,120 +270,34 @@ public class WebCrawler {
             }
 
             # Fetch all batch URLs in parallel
-            int rate_limited = 0;
-            Counter cnt(batch.size());
+            rate_limited = 0;
+            cnt = new Counter(batch.size());
 
             foreach hash<auto> item in (batch) {
-                # Pass 'item' as a closure parameter to avoid capture-by-reference
-                # issues with the foreach iteration variable
-                background sub (hash<auto> citem) {
-                    on_exit cnt.dec();
-                    try {
-                        hash<auto> url_parts = parse_url(citem.url);
-                        string base_url = sprintf("%s://%s%s",
-                            url_parts.protocol ?? "https",
-                            url_parts.host,
-                            url_parts.port ? sprintf(":%d", url_parts.port) : "");
-                        string req_path = url_parts.path ?? "/";
-                        hash<auto> resp = mgr.request(base_url, "GET", req_path, req_headers);
-
-                        if (resp.status_code == 429 || resp.status_code == 503) {
-                            # Atomic re-queue for retry: re-clear visited so the URL
-                            # can be re-queued and re-processed
-                            state_mutex.lock();
-                            on_exit state_mutex.unlock();
-                            ++rate_limited;
-                            remove visited{citem.url};
-                            queue += {"url": citem.url, "depth": citem.depth};
-                            return;
-                        }
-
-                        if (resp.status_code != 200
-                                || resp.headers."content-type" !~ /text\/html/i) {
-                            return;
-                        }
-                        # Phase C: enforce max response size
-                        int body_size = resp.body.typeCode() == NT_BINARY
-                            ? resp.body.size() : resp.body.size();
-                        if (body_size > max_response_bytes) {
-                            return;
-                        }
-                        *string html = resp.body.typeCode() == NT_BINARY
-                            ? resp.body.toString("UTF-8") : resp.body;
-                        if (!html) {
-                            return;
-                        }
-
-                        *string title = HtmlExtractor::extractTitle(html);
-                        if (!title) {
-                            title = citem.url;
-                        }
-
-                        string text = HtmlExtractor::extractText(html);
-                        if (text.size() < MinTextLength) {
-                            return;
-                        }
-
-                        # Extract links into a local list (no lock held during regex work)
-                        list<hash<auto>> new_links = ();
-                        if (citem.depth < max_depth) {
-                            new_links = WebCrawler::extractLinks(html, citem.url, citem.depth,
-                                url_prefix);
-                        }
-
-                        # Atomically commit the page result and any new link claims
-                        state_mutex.lock();
-                        on_exit state_mutex.unlock();
-                        if (pages.size() >= max_pages) {
-                            return;
-                        }
-                        pages += {
-                            "url": citem.url,
-                            "title": title,
-                            "content": text,
-                        };
-                        # Atomic check-and-claim for each discovered link.
-                        # Filters in order:
-                        #   1. dedup against visited
-                        #   2. URL extension blacklist (Phase A)
-                        #   3. caller-supplied url_filter
-                        #   4. robots.txt Disallow (Phase C)
-                        #   5. SSRF check (Phase A) — DNS-resolved
-                        # Cheap filters first; SSRF is last because it's a DNS lookup.
-                        foreach hash<auto> link in (new_links) {
-                            if (visited{link.url}) {
-                                continue;
-                            }
-                            if (WebCrawler::hasBlockedExtension(link.url, skip_ext_set)) {
-                                continue;
-                            }
-                            if (url_filter && !url_filter(link.url)) {
-                                continue;
-                            }
-                            if (robots) {
-                                hash<auto> link_parts = parse_url(link.url);
-                                string link_path = link_parts.path ?? "/";
-                                if (!robots.isAllowed(link_path)) {
-                                    continue;
-                                }
-                            }
-                            try {
-                                SsrfFilter::checkUrl(link.url, {
-                                    "allow_private": allow_private_ips,
-                                    "blocked_hostnames": blocked_hostnames,
-                                });
-                            } catch (hash<ExceptionInfo> ex) {
-                                # SSRF rejected — skip this link silently
-                                continue;
-                            }
-                            visited{link.url} = True;
-                            queue += link;
-                        }
-                    } catch () {
-                        # Request failed — drop this URL (already claimed in visited
-                        # so we won't retry it; this matches the previous behavior)
-                    }
-                }(item);
+                # Use the closure factory pattern to bind `item` at call time
+                # rather than relying on closure capture-by-reference of the
+                # foreach iteration variable.  Each makeFetchTask() invocation
+                # creates a fresh activation record with its own `citem` parameter,
+                # so each returned closure captures a different `citem`.
+%ifdef PO_NO_THREAD_CONTROL
+                # Under PO_NO_THREAD_CONTROL, the start_thread launcher is required
+                if (!start_thread) {
+                    cnt.dec();
+                    throw "WEBCRAWLER-START-THREAD-REQUIRED",
+                        "WebCrawler requires the 'start_thread' option when imported "
+                        "into a context with PO_NO_THREAD_CONTROL set";
+                }
+                call_function(start_thread, makeFetchTask(item));
+%else
+                if (start_thread) {
+                    call_function(start_thread, makeFetchTask(item));
+                } else {
+                    # background takes the call site argument by value, so item
+                    # is bound at the call site (not lazily).  This is the same
+                    # mechanism that makes makeFetchTask correct for start_thread.
+                    background fetchOne(item);
+                }
+%endif
             }
             cnt.waitForZero();
 
@@ -347,7 +306,7 @@ public class WebCrawler {
                 if (concurrency > 3) {
                     concurrency = concurrency / 2;
                 }
-                usleep(2s);
+                sleepDuration(2s);
             }
 
             if (progress) {
@@ -363,16 +322,185 @@ public class WebCrawler {
             }
 
             if (delay_ms > 0) {
-                usleep(delay_ms * 1ms);
+                sleepDuration(delay_ms * 1ms);
             }
         }
 
         return pages;
     }
 
-    #! Extract links from HTML and resolve them against the page URL
+    #! Static factory: construct a WebCrawler and run it in one call
+    /** This is the convenience entry point for callers that don't need an instance
+        reference.  Equivalent to:
+        @code{.py}
+WebCrawler c(seed_url, opts);
+return c.run();
+        @endcode
+
+        @param seed_url the starting URL
+        @param opts crawl options hash:
+          - \c max_depth (int, default 3): maximum link-follow depth
+          - \c max_pages (int, default 500): hard page cap
+          - \c concurrency (int, default 10): parallel requests per batch
+          - \c delay_ms (int, default 0): delay between batches in milliseconds
+          - \c progress (\c *code<nothing(int, int)>): progress callback (pages, queued)
+          - \c url_filter (\c *code<bool(string)>): return True to accept a URL
+          - \c skip_extensions (\c *list<string>): URL extensions to skip pre-fetch
+          - \c allow_private_ips (bool, default False): allow private/internal targets
+          - \c blocked_hostnames (\c *list<string>): additional blocked hostnames
+          - \c user_agent (\c *string): User-Agent header
+          - \c max_response_bytes (int, default 10485760): skip pages larger than this
+          - \c respect_robots (bool, default True): honor robots.txt
+          - \c start_thread (\c *code<int(code<nothing()>)>): thread launcher; REQUIRED
+            when imported into a context with @ref Qore::PO_NO_THREAD_CONTROL set
+        @return list of page hashes
+    */
+    static list<hash<auto>> crawl(string seed_url, *hash<auto> opts) {
+        WebCrawler c(seed_url, opts);
+        return c.run();
+    }
+
+    #! Build a 0-argument closure that fetches a specific item, with item bound by value
+    /** Closure-factory pattern: \c citem is THIS method's parameter, so each call to
+        makeFetchTask creates a fresh activation record.  The returned closure captures
+        \c citem from this fresh scope, so each task gets its own item value — even when
+        called inside a foreach loop.
+
+        @param citem the {url, depth} hash to fetch
+        @return a 0-arg closure suitable for @ref Qore::background or a \c start_thread launcher
+    */
+    private code<nothing()> makeFetchTask(hash<auto> citem) {
+        return sub () {
+            fetchOne(citem);
+        };
+    }
+
+    #! Fetch and process a single URL
+    /** Called by the background tasks.  Performs:
+        1. HTTP fetch via the connection manager
+        2. Rate limit detection (429/503) — atomic re-queue
+        3. Content-Type and size validation
+        4. Title and text extraction
+        5. Link discovery and atomic check-and-claim against the visited index
+
+        All access to the shared visited/queue/pages state is guarded by state_mutex.
+
+        @param citem the {url, depth} hash to fetch
+    */
+    private fetchOne(hash<auto> citem) {
+        on_exit cnt.dec();
+        try {
+            hash<auto> url_parts = parse_url(citem.url);
+            string base_url = sprintf("%s://%s%s",
+                url_parts.protocol ?? "https",
+                url_parts.host,
+                url_parts.port ? sprintf(":%d", url_parts.port) : "");
+            string req_path = url_parts.path ?? "/";
+            hash<auto> resp = mgr.request(base_url, "GET", req_path, req_headers);
+
+            if (resp.status_code == 429 || resp.status_code == 503) {
+                # Atomic re-queue for retry: re-clear visited so the URL
+                # can be re-queued and re-processed
+                state_mutex.lock();
+                on_exit state_mutex.unlock();
+                ++rate_limited;
+                remove visited{citem.url};
+                queue += {"url": citem.url, "depth": citem.depth};
+                return;
+            }
+
+            if (resp.status_code != 200
+                    || resp.headers."content-type" !~ /text\/html/i) {
+                return;
+            }
+            # Phase C: enforce max response size
+            int body_size = resp.body.size();
+            if (body_size > max_response_bytes) {
+                return;
+            }
+            *string html = resp.body.typeCode() == NT_BINARY
+                ? resp.body.toString("UTF-8") : resp.body;
+            if (!html) {
+                return;
+            }
+
+            *string title = HtmlExtractor::extractTitle(html);
+            if (!title) {
+                title = citem.url;
+            }
+
+            string text = HtmlExtractor::extractText(html);
+            if (text.size() < MinTextLength) {
+                return;
+            }
+
+            # Extract links into a local list (no lock held during regex work)
+            list<hash<auto>> new_links = ();
+            if (citem.depth < max_depth) {
+                new_links = WebCrawler::extractLinksForUrl(html, citem.url, citem.depth,
+                    url_prefix);
+            }
+
+            # Atomically commit the page result and any new link claims
+            state_mutex.lock();
+            on_exit state_mutex.unlock();
+            if (pages.size() >= max_pages) {
+                return;
+            }
+            pages += {
+                "url": citem.url,
+                "title": title,
+                "content": text,
+            };
+            # Atomic check-and-claim for each discovered link.
+            # Filters in order:
+            #   1. dedup against visited
+            #   2. URL extension blacklist (Phase A)
+            #   3. caller-supplied url_filter
+            #   4. robots.txt Disallow (Phase C)
+            #   5. SSRF check (Phase A) — DNS-resolved
+            # Cheap filters first; SSRF is last because it's a DNS lookup.
+            foreach hash<auto> link in (new_links) {
+                if (visited{link.url}) {
+                    continue;
+                }
+                if (WebCrawler::hasBlockedExtension(link.url, skip_ext_set)) {
+                    continue;
+                }
+                if (url_filter && !url_filter(link.url)) {
+                    continue;
+                }
+                if (robots) {
+                    hash<auto> link_parts = parse_url(link.url);
+                    string link_path = link_parts.path ?? "/";
+                    if (!robots.isAllowed(link_path)) {
+                        continue;
+                    }
+                }
+                try {
+                    SsrfFilter::checkUrl(link.url, {
+                        "allow_private": allow_private_ips,
+                        "blocked_hostnames": blocked_hostnames,
+                    });
+                } catch (hash<ExceptionInfo> ex) {
+                    # SSRF rejected — skip this link silently
+                    continue;
+                }
+                visited{link.url} = True;
+                queue += link;
+            }
+        } catch () {
+            # Request failed — drop this URL (already claimed in visited
+            # so we won't retry it; this matches the previous behavior)
+        }
+    }
+
+    #! Extract crawlable links from HTML, filtered to the same URL prefix
     /** Pure function — does not touch the visited index or queue. Returns a list of
         candidate links that the caller can atomically claim under the state mutex.
+        Delegates HTML parsing to @ref HtmlExtractor::extractLinks() which uses
+        @ref Qore::Xml::parse_html() (libxml2's lenient parser) for proper DOM handling
+        including \c rel="nofollow" filtering and non-HTTP scheme exclusion.
 
         @param html the HTML content to parse for links
         @param page_url the URL of the page containing the links
@@ -380,15 +508,9 @@ public class WebCrawler {
         @param url_prefix the URL prefix for same-site filtering
         @return list of \c {"url", "depth"} hashes for links matching the prefix
     */
-    private static list<hash<auto>> extractLinks(string html, string page_url, int depth,
+    private static list<hash<auto>> extractLinksForUrl(string html, string page_url, int depth,
             string url_prefix) {
         list<hash<auto>> links = ();
-
-        # Delegate the HTML parsing and link extraction to HtmlExtractor, which
-        # uses parse_html() (libxml2's lenient parser) for proper DOM handling.
-        # HtmlExtractor::extractLinks already filters rel="nofollow", excludes
-        # non-HTTP schemes (mailto:, javascript:, etc.), resolves relative URLs
-        # against page_url, and finds <link rel="canonical">.
         hash<LinkInfo> info;
         try {
             info = HtmlExtractor::extractLinks(html, page_url);
