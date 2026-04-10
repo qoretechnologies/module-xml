@@ -117,6 +117,10 @@ public class WebContentUtilTest inherits QUnit::Test {
             \testWebCrawlerCancelInterruptsSleep());
         addTestCase("WebCrawler should_fetch_callback skips pre-fetch",
             \testWebCrawlerShouldFetchCallback());
+        addTestCase("WebCrawler page_callback enriches and streams",
+            \testWebCrawlerPageCallback());
+        addTestCase("WebCrawler page_callback NOTHING suppresses accumulation",
+            \testWebCrawlerPageCallbackStreaming());
         # Phase A: SSRF + URL extension + scheme filters
         addTestCase("SsrfFilter IPv4 private ranges", \testSsrfFilterIpv4Private());
         addTestCase("SsrfFilter IPv4 public", \testSsrfFilterIpv4Public());
@@ -877,6 +881,83 @@ public class WebContentUtilTest inherits QUnit::Test {
         # The cancel slice is 250 ms; allow generous margin (3 s).
         assertLt(3s, elapsed,
             sprintf("cancel did not interrupt sleep, elapsed=%y", elapsed));
+    }
+
+    testWebCrawlerPageCallback() {
+        hash<string, string> pages = {
+            "index.html": longBody("Home", ("a.html",)),
+            "a.html": longBody("A", ()),
+        };
+        hash<auto> site = startSite(pages);
+        on_exit site.server.stop();
+        int port = site.port;
+
+        # Callback receives the rich page hash, computes a content hash and
+        # adds it as metadata, then returns the enriched hash.  Verify the
+        # enriched fields make it to the result list.
+        list<hash<auto>> result = WebCrawler::crawl(sprintf("http://localhost:%d/", port), {
+            "max_depth": 2, "max_pages": 10, "concurrency": 1,
+            "allow_private_ips": True,
+            "page_callback": *hash<auto> sub (hash<auto> pg) {
+                # The callback must see all the rich fields
+                if (!exists pg.url || !exists pg.raw_body || !exists pg.response_headers
+                        || !exists pg.depth) {
+                    throw "TEST-ERROR", sprintf("page hash missing required fields: %y",
+                        keys pg);
+                }
+                # Compute a content hash and add it as a custom field
+                pg.content_hash = make_hex_string(digest("sha256", pg.raw_body));
+                # Strip raw_body from the result so we don't blow up the
+                # test output (and to verify the caller can prune fields)
+                remove pg.raw_body;
+                return pg;
+            },
+        });
+
+        assertEq(2, result.size(), "should have 2 pages");
+        foreach hash<auto> pg in (result) {
+            assertEq(True, exists pg.content_hash,
+                "page must have content_hash from callback");
+            # raw_body was stripped by the callback
+            assertEq(False, exists pg.raw_body,
+                "raw_body should have been removed by the callback");
+            # response_headers was passed through
+            assertEq(True, exists pg.response_headers,
+                "response_headers should still be present");
+            assertEq(64, pg.content_hash.size(),
+                "sha256 hex hash should be 64 chars");
+        }
+    }
+
+    testWebCrawlerPageCallbackStreaming() {
+        hash<string, string> pages = {
+            "index.html": longBody("Home", ("a.html", "b.html")),
+            "a.html": longBody("A", ()),
+            "b.html": longBody("B", ()),
+        };
+        hash<auto> site = startSite(pages);
+        on_exit site.server.stop();
+        int port = site.port;
+
+        # Streaming mode: callback persists the page via side effect (in this
+        # test: appends to a local list) and returns NOTHING so the crawler
+        # does NOT accumulate it.  Verifies that the run() result is empty
+        # and link extraction still happened (we visited all 3 pages).
+        list<string> persisted_urls = ();
+        list<hash<auto>> result = WebCrawler::crawl(sprintf("http://localhost:%d/", port), {
+            "max_depth": 2, "max_pages": 10, "concurrency": 2,
+            "allow_private_ips": True,
+            "page_callback": *hash<auto> sub (hash<auto> pg) {
+                persisted_urls += pg.url;
+                # Return NOTHING — the crawler must skip pages.push for this entry
+                return NOTHING;
+            },
+        });
+
+        assertEq(0, result.size(),
+            "result list must be empty when callback returns NOTHING");
+        assertEq(3, persisted_urls.size(),
+            "callback should have been invoked for all 3 pages");
     }
 
     testWebCrawlerShouldFetchCallback() {

@@ -142,6 +142,14 @@ public class WebCrawler {
         #! denylists, cache-based dedup against a trusted cached link graph,
         #! per-tenant URL policies that change between crawls
         *code<bool(string)> should_fetch_callback;
+        #! Optional post-fetch hook — called after a page is successfully
+        #! fetched, with the rich page hash (url, title, content, raw_body,
+        #! response_headers, depth).  The callback can perform side effects
+        #! (DB persistence, ingestion enqueue, hash-based change detection)
+        #! and return either a modified page hash to include in the pages
+        #! list, or @ref nothing to skip accumulation entirely (streaming /
+        #! memory-pressure mode).  Link extraction proceeds regardless.
+        *code<*hash<auto>(hash<auto>)> page_callback;
 
         # Derived configuration
         string url_prefix;
@@ -255,6 +263,9 @@ public class WebCrawler {
 
         # Caller-supplied pre-fetch filter
         should_fetch_callback = opts.should_fetch_callback;
+
+        # Caller-supplied post-fetch hook
+        page_callback = opts.page_callback;
 
         # Validate seed URL — throws SSRF-BLOCKED if private and not allowed
         SsrfFilter::checkUrl(seed_url, {
@@ -437,6 +448,16 @@ return c.run();
             this is a *pre*-fetch hook; for *post*-fetch decisions (e.g.
             content-hash change detection where the body is needed) use
             \c page_callback instead
+          - \c page_callback (\c *code<*hash<auto>(hash<auto>)>): post-fetch
+            hook called with a rich page hash containing \c url, \c title,
+            \c content, \c raw_body, \c response_headers, \c depth.  Return
+            either a (possibly modified) page hash to include in the result
+            list, or @ref nothing to skip accumulation entirely (streaming /
+            memory-pressure mode where the caller already persisted the page
+            via side effect and doesn't need it kept in RAM).  Link extraction
+            from the page proceeds regardless of the callback's return value.
+            The callback is invoked outside the state mutex to avoid deadlocks
+            when it acquires its own locks (e.g. DB transactions)
           - \c start_thread (\c *code<int(code<nothing()>)>): thread launcher; REQUIRED
             when imported into a context with @ref Qore::PO_NO_THREAD_CONTROL set
         @return list of page hashes
@@ -533,17 +554,43 @@ return c.run();
                     url_prefix);
             }
 
+            # Build the rich page hash for the post-fetch hook.  Includes
+            # raw_body and response_headers so the callback can compute
+            # content hashes, parse Last-Modified / ETag headers, etc.
+            hash<auto> page = {
+                "url": citem.url,
+                "title": title,
+                "content": text,
+                "raw_body": html,
+                "response_headers": resp.headers,
+                "depth": citem.depth,
+            };
+
+            # Run page_callback OUTSIDE the state mutex to avoid deadlocks
+            # when the callback acquires its own locks (DB transaction, etc.).
+            *hash<auto> result_page;
+            if (page_callback) {
+                result_page = page_callback(page);
+            } else {
+                # No callback — use the lean default schema {url, title, content}
+                # to keep the in-memory pages list small for callers that just
+                # want to collect everything at the end.
+                result_page = {
+                    "url": citem.url,
+                    "title": title,
+                    "content": text,
+                };
+            }
+
             # Atomically commit the page result and any new link claims
             state_mutex.lock();
             on_exit state_mutex.unlock();
             if (pages.size() >= max_pages) {
                 return;
             }
-            pages += {
-                "url": citem.url,
-                "title": title,
-                "content": text,
-            };
+            if (result_page) {
+                pages += result_page;
+            }
             # Atomic check-and-claim for each discovered link.
             # Filters in order:
             #   1. dedup against visited
