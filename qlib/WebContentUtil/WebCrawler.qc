@@ -127,6 +127,7 @@ public class WebCrawler {
         hash<string, bool> skip_ext_set;
         string user_agent;
         int max_response_bytes;
+        int min_text_length;
         bool respect_robots;
         *code<nothing(int, int)> progress;
         *code<bool(string)> url_filter;
@@ -260,6 +261,7 @@ public class WebCrawler {
         # Phase C options
         user_agent = opts.user_agent ?? DefaultUserAgent;
         max_response_bytes = opts.max_response_bytes ?? DefaultMaxResponseBytes;
+        min_text_length = opts.min_text_length ?? MinTextLength;
         respect_robots = opts.respect_robots ?? True;
 
         # Optional thread launcher (required under PO_NO_THREAD_CONTROL)
@@ -556,6 +558,10 @@ return c.run();
           - \c blocked_hostnames (\c *list<string>): additional blocked hostnames
           - \c user_agent (\c *string): User-Agent header
           - \c max_response_bytes (int, default 10485760): skip pages larger than this
+          - \c min_text_length (int, default 50): drop pages whose extracted text is
+            shorter than this many characters; set to 0 to keep every fetched page
+            regardless of size (callers that store HTML and let downstream stages
+            handle small content should pass 0)
           - \c respect_robots (bool, default True): honor robots.txt
           - \c headers (\c *hash<string, string>): extra HTTP request headers added
             to every request — typically auth credentials (\c Authorization,
@@ -702,7 +708,7 @@ return c.run();
             }
 
             string text = HtmlExtractor::extractText(html);
-            if (text.size() < MinTextLength) {
+            if (text.size() < min_text_length) {
                 return;
             }
 
