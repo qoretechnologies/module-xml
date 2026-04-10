@@ -78,9 +78,9 @@ public class WebCrawler {
     #! Minimum text length to keep a page (characters)
     const MinTextLength = 50;
 
-    #! Slice size (microseconds) for cancellable sleeps — bounds the worst-case
-    #! latency between a cancel_check returning True and the crawler observing it
-    const CancelSliceUs = 250000;  # 250 ms
+    #! Slice size for cancellable sleeps — bounds the worst-case latency
+    #! between a cancel_check returning True and the crawler observing it
+    const CancelSlice = 250ms;
 
     #! Default User-Agent header sent for crawl requests
     /** Generic Qore-library identifier.  Higher-level callers (\c qctl, \c saasctl,
@@ -191,21 +191,20 @@ public class WebCrawler {
             sleep_cond.wait(sleep_mutex, duration);
             return True;
         }
-        # Cancellable sleep: break into CancelSliceUs slices and poll
-        # cancel_check between slices.  Track remaining time as microseconds
-        # for precision.
-        int remaining_us = get_duration_microseconds(duration);
-        while (remaining_us > 0) {
+        # Cancellable sleep: break into CancelSlice slices and poll
+        # cancel_check between slices.
+        date remaining = duration;
+        while (remaining > 0s) {
             if (cancel_check()) {
                 return False;
             }
-            int wait_us = remaining_us < CancelSliceUs ? remaining_us : CancelSliceUs;
+            date wait_dur = remaining < CancelSlice ? remaining : CancelSlice;
             {
                 sleep_mutex.lock();
                 on_exit sleep_mutex.unlock();
-                sleep_cond.wait(sleep_mutex, wait_us * 1us);
+                sleep_cond.wait(sleep_mutex, wait_dur);
             }
-            remaining_us -= wait_us;
+            remaining -= wait_dur;
         }
         return !cancel_check();
     }
