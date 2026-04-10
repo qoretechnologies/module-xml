@@ -136,6 +136,12 @@ public class WebCrawler {
         #! rate-limit / crawl-delay sleeps; when it returns True the run
         #! exits gracefully and returns whatever pages were collected so far
         *code<bool()> cancel_check;
+        #! Optional pre-fetch filter — called with each URL just before the
+        #! HTTP request; return False to skip the fetch entirely (no body,
+        #! no link extraction, no page recorded).  Use cases: external
+        #! denylists, cache-based dedup against a trusted cached link graph,
+        #! per-tenant URL policies that change between crawls
+        *code<bool(string)> should_fetch_callback;
 
         # Derived configuration
         string url_prefix;
@@ -246,6 +252,9 @@ public class WebCrawler {
 
         # Caller-supplied cancellation hook
         cancel_check = opts.cancel_check;
+
+        # Caller-supplied pre-fetch filter
+        should_fetch_callback = opts.should_fetch_callback;
 
         # Validate seed URL — throws SSRF-BLOCKED if private and not allowed
         SsrfFilter::checkUrl(seed_url, {
@@ -420,6 +429,14 @@ return c.run();
             cause the run to exit gracefully and return whatever pages were
             collected so far.  Worst-case latency between cancel and return is
             ~250 ms regardless of \c delay_ms
+          - \c should_fetch_callback (\c *code<bool(string)>): pre-fetch filter
+            called with each URL just before the HTTP round trip; return False
+            to skip the fetch entirely (no body, no link extraction, no page
+            recorded).  Use cases: external denylists, cache-based dedup,
+            per-tenant URL policies that change between crawls.  Note that
+            this is a *pre*-fetch hook; for *post*-fetch decisions (e.g.
+            content-hash change detection where the body is needed) use
+            \c page_callback instead
           - \c start_thread (\c *code<int(code<nothing()>)>): thread launcher; REQUIRED
             when imported into a context with @ref Qore::PO_NO_THREAD_CONTROL set
         @return list of page hashes
@@ -459,6 +476,12 @@ return c.run();
     private fetchOne(hash<auto> citem) {
         on_exit cnt.dec();
         try {
+            # Pre-fetch filter — caller can veto this URL before the network
+            # round trip (denylist, cached dedup, dynamic policy, etc.).
+            # Skipped URLs are dropped entirely: no body, no links, no page.
+            if (should_fetch_callback && !should_fetch_callback(citem.url)) {
+                return;
+            }
             hash<auto> url_parts = parse_url(citem.url);
             string base_url = sprintf("%s://%s%s",
                 url_parts.protocol ?? "https",
