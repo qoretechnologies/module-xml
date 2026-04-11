@@ -195,7 +195,13 @@ if (pinned_ip) {
         if (!addrs) {
             return NOTHING;
         }
-        *string first_public_ip;
+        # Validate all addresses and collect by type.  Prefer IPv4 for
+        # the pinned result because IPv6 literal addresses in URLs require
+        # bracket notation and many TLS clients set SNI to the IP literal
+        # instead of the original hostname, causing handshake failures with
+        # CDNs like Cloudflare that require hostname-based SNI.
+        *string first_ipv4;
+        *string first_ipv6;
         foreach hash<auto> a in (addrs) {
             *string addr = a.address;
             if (!addr.val()) {
@@ -206,11 +212,14 @@ if (pinned_ip) {
                     sprintf("URL %y resolves to private/reserved IP address %y",
                         url, addr);
             }
-            if (!first_public_ip) {
-                first_public_ip = addr;
+            string addr_type = ip_address_type(addr);
+            if (!first_ipv4 && addr_type == "IPv4") {
+                first_ipv4 = addr;
+            } else if (!first_ipv6 && addr_type == "IPv6") {
+                first_ipv6 = addr;
             }
         }
-        return first_public_ip;
+        return first_ipv4 ?? first_ipv6;
     }
 
     #! Throws SSRF-BLOCKED if the URL targets a private/internal address

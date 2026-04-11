@@ -151,6 +151,9 @@ public class WebCrawler {
         #! list, or @ref nothing to skip accumulation entirely (streaming /
         #! memory-pressure mode).  Link extraction proceeds regardless.
         *code<*hash<auto>(hash<auto>)> page_callback;
+        #! Optional error callback — called when a page fetch fails with
+        #! the URL and exception info.  Without this, fetch errors are silent.
+        *code<nothing(string, hash<ExceptionInfo>)> error_callback;
 
         # Derived configuration
         string url_prefix;
@@ -278,6 +281,9 @@ public class WebCrawler {
 
         # Caller-supplied post-fetch hook
         page_callback = opts.page_callback;
+
+        # Caller-supplied error callback
+        error_callback = opts.error_callback;
 
         # Sitemap pre-seeding (Phase 5 feature 5)
         bool use_sitemap = opts.use_sitemap ?? False;
@@ -589,6 +595,9 @@ return c.run();
             from the page proceeds regardless of the callback's return value.
             The callback is invoked outside the state mutex to avoid deadlocks
             when it acquires its own locks (e.g. DB transactions)
+          - \c error_callback (\c *code<nothing(string, hash<ExceptionInfo>)>):
+            called when a page fetch fails, with the URL and exception info.
+            Without this callback, fetch errors are silent (the URL is skipped)
           - \c use_sitemap (bool, default False): pre-seed the BFS queue from
             \c /sitemap.xml at the seed origin (or from \c sitemap_url if set).
             Sitemap-index files are recursively followed up to 3 levels deep.
@@ -665,13 +674,25 @@ return c.run();
             if (dns_pin) {
                 *string pinned_ip = resolvePinnedIp(original_host);
                 if (pinned_ip.val()) {
-                    fetch_host = pinned_ip;
-                    fetch_headers = req_headers + {"Host": original_host};
+                    # For HTTPS, substituting the IP in the URL breaks TLS SNI
+                    # (the HTTP client sets SNI to the IP literal instead of the
+                    # hostname, causing handshake failures with CDNs like
+                    # Cloudflare).  The SSRF protection is still effective: we
+                    # validated all resolved IPs above and would have thrown
+                    # SSRF-BLOCKED if any was private.  For HTTP, we can safely
+                    # pin since there's no SNI concern.
+                    if ((url_parts.protocol ?? "https") == "http") {
+                        fetch_host = pinned_ip;
+                        fetch_headers = req_headers + {"Host": original_host};
+                    }
                 }
             }
+            # IPv6 literal addresses must be enclosed in brackets in URLs
+            string url_host = ip_address_type(fetch_host) == "IPv6"
+                ? sprintf("[%s]", fetch_host) : fetch_host;
             string base_url = sprintf("%s://%s%s",
                 url_parts.protocol ?? "https",
-                fetch_host,
+                url_host,
                 url_parts.port ? sprintf(":%d", url_parts.port) : "");
             string req_path = url_parts.path ?? "/";
             hash<auto> resp = mgr.request(base_url, "GET", req_path, fetch_headers);
@@ -793,9 +814,13 @@ return c.run();
                 visited{link.url} = True;
                 queue += link;
             }
-        } catch () {
+        } catch (hash<ExceptionInfo> ex) {
             # Request failed — drop this URL (already claimed in visited
-            # so we won't retry it; this matches the previous behavior)
+            # so we won't retry it).  Log the error via the error_callback
+            # if one was provided; otherwise the failure is silent.
+            if (error_callback) {
+                error_callback(citem.url, ex);
+            }
         }
     }
 
