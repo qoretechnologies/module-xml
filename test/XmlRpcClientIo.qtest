@@ -1,0 +1,380 @@
+#!/usr/bin/env qore
+# -*- mode: qore; indent-tabs-mode: nil -*-
+
+%modern
+
+%requires xml
+%requires QUnit
+%requires HttpServer
+%requires Logger
+%requires Mime
+%requires ../qlib/XmlRpcHandler.qm
+%requires ../qlib/XmlRpcClientIo
+
+%exec-class XmlRpcClientIoTest
+
+class TestXmlRpcHandler inherits XmlRpcHandler {
+    public {
+        const ApiMethods = (
+            {
+                "name": "^system\\.echo$",
+                "text": "system.echo",
+                "function": \TestXmlRpcHandler::echo(),
+                "help": "echos the argument",
+                "logopt": 0,
+            }, {
+                "name": "^system\\.add$",
+                "text": "system.add",
+                "function": \TestXmlRpcHandler::add(),
+                "help": "adds two numbers",
+                "logopt": 0,
+            }, {
+                "name": "^system\\.error$",
+                "text": "system.error",
+                "function": \TestXmlRpcHandler::error(),
+                "help": "throws an error",
+                "logopt": 0,
+            },
+        );
+    }
+
+    constructor() : XmlRpcHandler(new PermissiveAuthenticator(), ApiMethods) {
+    }
+
+    static auto echo(auto arg) {
+        return arg;
+    }
+
+    static int add(int a, int b) {
+        return a + b;
+    }
+
+    static nothing error(auto arg) {
+        throw "TEST-ERROR", arg;
+    }
+}
+
+public class XmlRpcClientIoTest inherits QUnit::Test {
+    private {
+        HttpServer server;
+        XmlRpcClientIo::XmlRpcClientIo client;
+        TestXmlRpcHandler handler();
+        int port;
+    }
+
+    public {
+        const SimpleHashValue = {"a": 1};
+        const LargerHashValue = {"a": 1, "b": "two"};
+        const ListValue = (1, "two", 3.1);
+    }
+
+    constructor() : Test("XmlRpcClientIo test", "1.0") {
+        addTestCase("basic call test", \testBasicCall());
+        addTestCase("callArgs test", \testCallArgs());
+        addTestCase("callWithInfo test", \testCallWithInfo());
+        addTestCase("callArgsWithInfo test", \testCallArgsWithInfo());
+        addTestCase("error handling test", \testErrorHandling());
+        addTestCase("connection provider test", \testConnectionProvider());
+        addTestCase("connection hash constructor test", \testConnectionHashConstructor());
+        addTestCase("connection scheme info test", \testConnectionSchemeInfo());
+        addTestCase("connection serialization test", \testConnectionSerialization());
+        addTestCase("legacy constructor test", \testLegacyConstructor());
+        addTestCase("URL scheme mapping test", \testUrlSchemeMapping());
+        addTestCase("default path test", \testDefaultPath());
+        addTestCase("constructor negative test", \testConstructorNegative());
+        addTestCase("close and reuse test", \testCloseAndReuse());
+        addTestCase("multi-arg varargs test", \testMultiArgVarargs());
+        addTestCase("custom headers test", \testCustomHeaders());
+
+        set_return_value(main());
+    }
+
+    globalSetUp() {
+        Logger logger("test", LoggerLevel::getLevelInfo());
+        if (m_options.verbose > 2) {
+            logger.addAppender(new TestAppender());
+        }
+        hash<HttpServerOptionInfo> http_opts = <HttpServerOptionInfo>{
+            "logger": logger,
+            "debug": True,
+        };
+        server = new HttpServer(http_opts);
+        server.setHandler("xmlrpc-handler", "", MimeTypeXml, handler);
+        server.setDefaultHandler("xmlrpc-handler", handler);
+        port = server.addListener(<HttpListenerOptionInfo>{"service": 0}).port;
+
+        client = new XmlRpcClientIo::XmlRpcClientIo("http://localhost:" + port + "/RPC2");
+    }
+
+    globalTearDown() {
+        client.close();
+        server.stop();
+        delete server;
+    }
+
+    testBasicCall() {
+        # Test basic call with single arg
+        hash<auto> h = client.call("system.echo", "hello");
+        assertEq("hello", h.params, "should echo back the argument");
+
+        # Test call with no args
+        h = client.call("system.echo");
+        assertEq(NOTHING, h.params, "no args should return nothing");
+
+        # Test call with hash arg
+        h = client.call("system.echo", SimpleHashValue);
+        assertEq(SimpleHashValue, h.params, "should echo back hash");
+
+        # Test call with a hash containing a list (XML-RPC response can only return a single value)
+        hash<auto> list_wrapper = {"items": ListValue};
+        h = client.call("system.echo", list_wrapper);
+        assertEq(list_wrapper, h.params, "should echo back hash containing list");
+
+        # Test call with integer arg
+        h = client.call("system.echo", 42);
+        assertEq(42, h.params, "should echo back integer");
+
+        # Test call with string arg
+        h = client.call("system.echo", "test string");
+        assertEq("test string", h.params, "should echo back string");
+    }
+
+    testCallArgs() {
+        # Test callArgs with single arg
+        hash<auto> h = client.callArgs("system.echo", "hello");
+        assertEq("hello", h.params, "callArgs should echo back argument");
+
+        # Test callArgs with list as multiple positional params -- use system.add which takes two ints
+        h = client.callArgs("system.add", (3, 4));
+        assertEq(7, h.params, "callArgs with list should expand as positional params");
+
+        # Test callArgs with hash
+        h = client.callArgs("system.echo", SimpleHashValue);
+        assertEq(SimpleHashValue, h.params, "callArgs should echo back hash");
+
+        # Test callArgs with no args
+        h = client.callArgs("system.echo");
+        assertEq(NOTHING, h.params, "callArgs with no args should return nothing");
+    }
+
+    testCallWithInfo() {
+        hash<auto> info;
+        hash<auto> h = client.callWithInfo(\info, "system.echo", "info-test");
+
+        assertEq("info-test", h.params, "should echo back the argument");
+
+        # Verify info hash is populated
+        assertTrue(info.request.val(), "info.request should be set");
+        assertTrue(info.request.find("system.echo") >= 0, "request should contain method name");
+        assertTrue(info.request_headers instanceof hash, "info.request_headers should be a hash");
+        assertEq("text/xml;charset=utf-8", info.request_headers."Content-Type",
+            "should have Content-Type header");
+        assertEq(200, info.response_code, "info.response_code should be 200");
+        assertTrue(info.response.val(), "info.response should be set");
+        assertTrue(info.response_headers instanceof hash, "info.response_headers should be a hash");
+    }
+
+    testCallArgsWithInfo() {
+        hash<auto> info;
+        hash<auto> h = client.callArgsWithInfo(\info, "system.echo", "args-info-test");
+
+        assertEq("args-info-test", h.params, "should echo back the argument");
+        assertTrue(info.request.val(), "info.request should be set");
+        assertEq(200, info.response_code, "info.response_code should be 200");
+    }
+
+    testErrorHandling() {
+        # Test XML-RPC fault response (server returns error in XML-RPC format)
+        hash<auto> h = client.call("system.error", "test error message");
+        assertTrue(exists h.fault, "should have fault in response");
+        assertTrue(h.fault.faultString.val(), "faultString should not be empty");
+        assertTrue(h.fault.faultString.find("TEST-ERROR") >= 0,
+            "fault message should include exception name");
+    }
+
+    testConnectionProvider() {
+        string url = "xmlrpcios://localhost:" + port + "/RPC2";
+        XmlRpcIoConnection conn("test", "test connection", url, {"monitor": False});
+        XmlRpcClientIo::XmlRpcClientIo conn_client = conn.get(False);
+
+        assertEq("xmlrpcio", conn.getType(), "connection type should be xmlrpcio");
+        assertEq("https://localhost:" + port + "/RPC2", conn_client.getUrl(),
+            "URL should be mapped to https");
+
+        # Test with non-SSL scheme
+        url = "xmlrpcio://localhost:" + port + "/RPC2";
+        conn = new XmlRpcIoConnection("test-http", "HTTP test", url, {"monitor": False});
+        conn_client = conn.get(False);
+        assertEq("http://localhost:" + port + "/RPC2", conn_client.getUrl(),
+            "URL should be mapped to http");
+
+        # Test that the connected client works
+        hash<auto> h = conn_client.call("system.echo", "connection-test");
+        assertEq("connection-test", h.params, "connected client should work");
+    }
+
+    testConnectionHashConstructor() {
+        hash<auto> config = {
+            "name": "hash-test",
+            "display_name": "Hash Test Connection",
+            "short_desc": "Short description",
+            "desc": "Long description",
+            "url": "xmlrpcio://localhost:" + port + "/RPC2",
+        };
+
+        XmlRpcIoConnection conn(config, {"monitor": False});
+        assertEq("xmlrpcio", conn.getType(), "connection type from hash constructor");
+
+        XmlRpcClientIo::XmlRpcClientIo conn_client = conn.get(False);
+        hash<auto> h = conn_client.call("system.echo", "hash-ctor-test");
+        assertEq("hash-ctor-test", h.params, "client from hash constructor should work");
+    }
+
+    testConnectionSchemeInfo() {
+        hash<ConnectionSchemeInfo> scheme_info = XmlRpcIoConnection::ConnectionScheme;
+
+        assertTrue(exists scheme_info.display_name, "should have display_name");
+        assertTrue(exists scheme_info.short_desc, "should have short_desc");
+        assertTrue(exists scheme_info.desc, "should have desc");
+        assertTrue(exists scheme_info.cls, "should have cls");
+        assertTrue(exists scheme_info.options, "should have options");
+        assertTrue(exists scheme_info.schemes, "should have schemes");
+        assertTrue(exists scheme_info.base_scheme_map, "should have base_scheme_map");
+
+        # Verify schemes
+        assertTrue(scheme_info.schemes.xmlrpcio, "should support xmlrpcio");
+        assertTrue(scheme_info.schemes.xmlrpcios, "should support xmlrpcios");
+
+        # Verify base scheme map
+        assertEq("xmlrpcios", scheme_info.base_scheme_map.https, "https -> xmlrpcios");
+        assertEq("xmlrpcio", scheme_info.base_scheme_map.http, "http -> xmlrpcio");
+    }
+
+    testConnectionSerialization() {
+        string url = "xmlrpcio://localhost:" + port + "/RPC2";
+        XmlRpcIoConnection conn("serialize-test", "test", url, {"monitor": False});
+
+        # Test serialization round-trip
+        XmlRpcIoConnection conn2 = Serializable::deserialize(conn.serialize());
+        assertEq(conn.url, conn2.url, "URL should survive serialization");
+        assertEq("xmlrpcio", conn2.getType(), "type should survive serialization");
+    }
+
+    testLegacyConstructor() {
+        # Test hash-based constructor (legacy compatible)
+        auto legacy_client = new XmlRpcClientIo::XmlRpcClientIo(
+            {"url": "http://localhost:" + port, "timeout": 30000});
+        hash<auto> h = legacy_client.call("system.echo", "legacy-test");
+        assertEq("legacy-test", h.params, "legacy constructor should work");
+        legacy_client.close();
+    }
+
+    testUrlSchemeMapping() {
+        # Test that xmlrpc:// and xmlrpcs:// schemes are mapped
+        auto xrpc_client = new XmlRpcClientIo::XmlRpcClientIo(
+            "xmlrpc://localhost:" + port + "/RPC2");
+        assertEq("http://localhost:" + port + "/RPC2", xrpc_client.getUrl(),
+            "xmlrpc:// should map to http://");
+        hash<auto> h = xrpc_client.call("system.echo", "scheme-test");
+        assertEq("scheme-test", h.params, "xmlrpc:// client should work");
+        xrpc_client.close();
+
+        # Test xmlrpcio:// scheme
+        xrpc_client = new XmlRpcClientIo::XmlRpcClientIo(
+            "xmlrpcio://localhost:" + port + "/RPC2");
+        assertEq("http://localhost:" + port + "/RPC2", xrpc_client.getUrl(),
+            "xmlrpcio:// should map to http://");
+        xrpc_client.close();
+
+        # Test xmlrpcs:// scheme
+        xrpc_client = new XmlRpcClientIo::XmlRpcClientIo(
+            "xmlrpcs://localhost:" + port + "/RPC2");
+        assertEq("https://localhost:" + port + "/RPC2", xrpc_client.getUrl(),
+            "xmlrpcs:// should map to https://");
+        xrpc_client.close();
+
+        # Test xmlrpcios:// scheme
+        xrpc_client = new XmlRpcClientIo::XmlRpcClientIo(
+            "xmlrpcios://localhost:" + port + "/RPC2");
+        assertEq("https://localhost:" + port + "/RPC2", xrpc_client.getUrl(),
+            "xmlrpcios:// should map to https://");
+        xrpc_client.close();
+    }
+
+    testDefaultPath() {
+        # URL without path should get /RPC2 appended
+        auto path_client = new XmlRpcClientIo::XmlRpcClientIo(
+            "http://localhost:" + port);
+        assertTrue(path_client.getUrl().find("/RPC2") >= 0, "should have /RPC2 in URL");
+        path_client.close();
+
+        # URL with custom path
+        path_client = new XmlRpcClientIo::XmlRpcClientIo(
+            "http://localhost:" + port + "/custom");
+        assertEq("http://localhost:" + port + "/custom", path_client.getUrl(),
+            "should preserve custom path");
+        path_client.close();
+
+        # Custom default_path option
+        path_client = new XmlRpcClientIo::XmlRpcClientIo(
+            "http://localhost:" + port, {"default_path": "XMLRPC"});
+        assertTrue(path_client.getUrl().find("/XMLRPC") >= 0, "should use custom default_path");
+        path_client.close();
+    }
+
+    testConstructorNegative() {
+        # Missing URL in hash constructor
+        assertThrows("XMLRPCCLIENTIO-ERROR", sub () {
+            new XmlRpcClientIo::XmlRpcClientIo({});
+        });
+
+        # Empty URL in hash constructor
+        assertThrows("XMLRPCCLIENTIO-ERROR", sub () {
+            new XmlRpcClientIo::XmlRpcClientIo({"url": ""});
+        });
+    }
+
+    testCloseAndReuse() {
+        # Create a client, use it, close it, then use it again
+        auto reuse_client = new XmlRpcClientIo::XmlRpcClientIo(
+            "http://localhost:" + port + "/RPC2");
+        hash<auto> h = reuse_client.call("system.echo", "before-close");
+        assertEq("before-close", h.params, "call before close should work");
+
+        reuse_client.close();
+
+        h = reuse_client.call("system.echo", "after-close");
+        assertEq("after-close", h.params, "call after close should work (reconnect on demand)");
+        reuse_client.close();
+    }
+
+    testMultiArgVarargs() {
+        # Test call() with multiple varargs expanding to positional params
+        hash<auto> h = client.call("system.add", 10, 20);
+        assertEq(30, h.params, "call with multiple varargs should work");
+    }
+
+    testCustomHeaders() {
+        # Test that custom headers option is accepted and doesn't break requests
+        auto hdr_client = new XmlRpcClientIo::XmlRpcClientIo(
+            "http://localhost:" + port + "/RPC2",
+            {"headers": {"X-Custom-Header": "test-value"}});
+        hash<auto> h = hdr_client.call("system.echo", "header-test");
+        assertEq("header-test", h.params, "client with custom headers should work");
+        hdr_client.close();
+    }
+}
+
+class TestAppender inherits LoggerAppenderWithLayout {
+    constructor() : LoggerAppenderWithLayout("test", new LoggerLayoutPattern("%d T%t [%p]: %m%n")) {
+        open();
+    }
+
+    processEventImpl(int type, auto params) {
+        switch (type) {
+            case EVENT_LOG:
+                print(params);
+                break;
+        }
+    }
+}
