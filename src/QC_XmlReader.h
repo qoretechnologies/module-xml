@@ -101,20 +101,23 @@ public:
       return xml_parse_options;
    }
 
-    DLLLOCAL static const char* processOptionsGetEncoding(const QoreHashNode* opts, const char* ename, ExceptionSink* xsink) {
-        const char* encoding = nullptr;
+    DLLLOCAL static bool processOptionsGetEncoding(const QoreHashNode* opts, const char* ename, std::string& encoding,
+            ExceptionSink* xsink) {
+        encoding.clear();
         if (opts) {
             bool found = false;
             QoreValue v = opts->getKeyValueExistence("encoding", found);
             if (found) {
                 if (v.getType() != NT_STRING) {
                     xsink->raiseException(ename, "expecting type 'string' with option 'encoding'; got type '%s' instead", v.getTypeName());
-                    return nullptr;
+                    return false;
                 }
-                encoding = v.get<const QoreStringNode>()->c_str();
+                QoreStringValueHelper str(v);
+                encoding.assign(str->c_str(), str->size());
+                return true;
             }
         }
-        return encoding;
+        return false;
     }
 };
 

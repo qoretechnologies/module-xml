@@ -67,8 +67,8 @@ void QoreXmlReader::processOpts(const QoreHashNode* opts, ExceptionSink* xsink) 
                 return;
 
 #ifdef HAVE_XMLTEXTREADERSETSCHEMA
-            const QoreStringNode* xsd = n.get<const QoreStringNode>();
-            std::unique_ptr<QoreXmlSchemaContext> schema(new QoreXmlSchemaContext(*xsd, xsink));
+            QoreStringValueHelper xsd(n);
+            std::unique_ptr<QoreXmlSchemaContext> schema(new QoreXmlSchemaContext(**xsd, xsink));
             if (*xsink)
                 return;
 
