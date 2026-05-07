@@ -85,6 +85,13 @@ module WSDL {
       @ref WSDL::XsdSchema class so that bare XSD documents (for example, industry message
       standards delivered as XSD packages) can be parsed and queried without a WSDL wrapper;
       \c WebService now inherits from \c XsdSchema with no API change to existing callers
+    - fixed the type registry to support XSDs that reuse the same local type name across
+      different target namespaces (for example, UN/CEFACT \c PictureType is defined in both
+      \c UnqualifiedDataType:37 and \c ReusableAggregateBusinessInformationEntity:37). Types
+      are now keyed by \c "{namespace_uri}local_name" alongside a backward-compatible local-name
+      fallback entry. Type resolution prefers namespace-qualified lookup when the input
+      namespace prefix is known. Single-namespace WSDLs continue to work unchanged. New helper
+      @ref WSDL::make_qname() exposes the qualified-key construction.
 
     @subsection wsdl_0_5_7 WSDL v0.5.7
     - moved WSDL class declarations inside the WSDL namespace for compatibility with %strong-encapsulation
@@ -6077,8 +6084,21 @@ public class Namespaces inherits Serializable {
             return True;
         }
 
-        if (tmap && (rtype = tmap_try_get(cast<hash<string, XsdAbstractType>>(tmap), type))) {
-            return True;
+        if (tmap) {
+            # Prefer namespace-qualified lookup so types reused across namespaces resolve correctly
+            *string uri = imap{ns};
+            if (uri) {
+                *XsdAbstractType qt = tmap_try_get(cast<hash<string, XsdAbstractType>>(tmap),
+                    sprintf("{%s}%s", uri, type));
+                if (qt) {
+                    rtype = qt;
+                    return True;
+                }
+            }
+            # Fall back to local-name lookup
+            if ((rtype = tmap_try_get(cast<hash<string, XsdAbstractType>>(tmap), type))) {
+                return True;
+            }
         }
 
         typeinfo = {"ns": getOutputNamespacePrefix(getInputNamespaceUri(ns)), "val": type};
@@ -6121,6 +6141,17 @@ return rv;
 *XsdAbstractType sub tmap_try_get(hash<string, XsdAbstractType> tmap, string name) {
 *XsdAbstractType rv := tmap{name};
 return rv;
+}
+
+#! Returns a namespace-qualified key in James-Clark notation: \c "{namespace_uri}local_name", or
+#! \c local_name when no namespace URI is given.
+/** Used for keying the type/element/group registries so that identifiers reused across different
+    target namespaces (typical of UN/CEFACT and other multi-namespace XSD packages) do not collide.
+
+    @since %WSDL 0.5.8
+*/
+public string sub make_qname(*string nsUri, string localName) {
+    return nsUri ? sprintf("{%s}%s", nsUri, localName) : localName;
 }
 
 #! Resolves a group/attributeGroup reference to a qualified key for map lookup
@@ -6677,7 +6708,18 @@ public class XsdSchema inherits WSDL::XsdBase {
         if (exists v.ns && nsc.isSchema(v.ns)) {
             rv = getBaseType(v.val);
         } else {
-            # find type
+            # Prefer namespace-qualified lookup when an output prefix is available; this is
+            # required for correctness when multiple namespaces declare the same local type name.
+            if (exists v.ns) {
+                *string uri = nsc.getOutputNamespaceUri(v.ns);
+                if (uri) {
+                    *XsdAbstractType qt = tmap_try_get(tmap, make_qname(uri, v.val));
+                    if (qt) {
+                        return qt;
+                    }
+                }
+            }
+            # Fall back to local-name lookup (matches legacy single-namespace WSDL behavior).
             rv = tmap_get(tmap, v.val);
         }
         #printf("resolveType(hash), ns: %y, val: %y -> %y\n", v.ns, v.val, rv.name);
@@ -6768,26 +6810,35 @@ public class XsdSchema inherits WSDL::XsdBase {
                 }
             }
 
+            *string tns_uri = nsc.getTargetNamespaceUri();
             foreach hash<auto> st in (schema.simpleType) {
                 XsdSimpleType t(st, nsc, unresolved, usedocns);
-                if (tmap{t.name}) {
-                    throw WSDL_ERROR, sprintf("%s: type (simpleType) %y declared twice", nph.getDesc(), t.name);
+                # Key types by "{nsUri}localName" so identifiers reused across different target
+                # namespaces (UN/CEFACT-style multi-namespace XSD packages) do not collide.
+                string qname = make_qname(tns_uri, t.name);
+                if (tmap{qname}) {
+                    throw WSDL_ERROR, sprintf("%s: type (simpleType) %y declared twice", nph.getDesc(), qname);
                 }
-                tmap{t.name} = t;
-
-                #tmap.add(t);
-                #printf("DEBUG: st: %y\n", t.name);
+                tmap{qname} = t;
+                # Backward-compat: keep a local-name entry pointing at the first occurrence so that
+                # public consumers (and existing tests) that look up types by bare local name keep
+                # working for single-namespace WSDLs.
+                if (!tmap{t.name}) {
+                    tmap{t.name} = t;
+                }
             }
             foreach hash<auto> ct in (schema.complexType) {
                 XsdComplexType t(ct, nsc, unresolved, usedocns);
-                if (tmap{t.name}) {
-                    throw WSDL_ERROR, sprintf("%s: type (complexType) %y declared twice", nph.getDesc(), t.name);
+                string qname = make_qname(tns_uri, t.name);
+                if (tmap{qname}) {
+                    throw WSDL_ERROR, sprintf("%s: type (complexType) %y declared twice", nph.getDesc(), qname);
                 }
                 # If the complexType is purely an array wrapper, store the XsdArrayType directly
-                tmap{t.name} = t.array ?? t;
-
-                #tmap.add(t);
-                #printf("DEBUG: ct: %y\n", t.name);
+                XsdAbstractType stored = t.array ?? t;
+                tmap{qname} = stored;
+                if (!tmap{t.name}) {
+                    tmap{t.name} = stored;
+                }
             }
             # parse xs:group definitions
             foreach hash<auto> g in (schema.group) {
