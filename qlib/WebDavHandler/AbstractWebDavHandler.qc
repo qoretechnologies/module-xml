@@ -94,6 +94,22 @@ public class AbstractWebDavHandler inherits public HttpServer::AbstractHttpReque
 
         #! PROPPATCH action: set
         const PPA_Set = "S";
+
+        #! Default body-streaming threshold in bytes
+        /** Request bodies for \c PUT and \c POST whose size exceeds this threshold (or whose
+            size is unknown because of \c "Transfer-Encoding: chunked") are delivered to the
+            handler as a stream rather than buffered in memory. The default is 4 MB; override
+            per-instance via @ref setBodyStreamingThreshold().
+        */
+        const BodyStreamingThreshold = 4 * 1024 * 1024;
+
+        #! Default per-chunk read timeout used by @ref streamBodyToOutputStream() (5 minutes)
+        const DefaultStreamingTimeout = 5m;
+    }
+
+    private {
+        #! the per-instance body-streaming threshold (bytes); see @ref BodyStreamingThreshold
+        int body_streaming_threshold = BodyStreamingThreshold;
     }
 
     private {
@@ -105,6 +121,106 @@ public class AbstractWebDavHandler inherits public HttpServer::AbstractHttpReque
 
         #! The Logger for this object
         Logger logger;
+    }
+
+    #! Drains the streaming request body into the supplied output stream
+    /** Used by per-method handlers (typically @c PUT and @c POST) when the framework has
+        opted in to body streaming via @ref wantsBodyStreaming() and therefore did not
+        buffer the body. Branches on @c cx."header-info" to pick the protocol-specific
+        async-I/O reader so callers don't touch protocol-specific APIs:
+
+        - <b>HTTP/3</b>: loops @ref Qore::Socket::readQuicStreamDataBlock() until it
+          returns @ref NOTHING (end-of-stream)
+        - <b>HTTP/2</b>: registers a @ref Qore::Thread::Queue "Queue" via
+          \c cx."header-info".register_body_queue(stream_id, q) and drains it until a
+          \c NOTHING sentinel
+        - <b>HTTP/1.1</b>: the framework buffers HTTP/1.1 bodies before invoking the
+          handler regardless of @ref wantsBodyStreaming(), so streaming is effectively a
+          no-op here; callers will not normally reach this branch with HTTP/1.1
+
+        @param cx the request context
+        @param hdr the request headers
+        @param out the destination output stream; chunks are written as they arrive
+        @param io_timeout per-chunk read timeout (default @ref DefaultStreamingTimeout)
+
+        @throw WEBDAV-STREAMING-ERROR the streaming context could not be resolved (e.g.
+        \c stream_id missing from \c cx."header-info" on a request the framework chose to
+        stream)
+    */
+    static streamBodyToOutputStream(hash<auto> cx, hash<auto> hdr, Qore::OutputStream out,
+            timeout io_timeout = DefaultStreamingTimeout) {
+        *hash<auto> hi = cx."header-info";
+        if (hi.http3 && hi.sock instanceof Qore::Socket && exists hi.session_id && exists hi.stream_id) {
+            Qore::Socket sock = hi.sock;
+            int sid = hi.session_id;
+            int strm = hi.stream_id;
+            while (True) {
+                *binary chunk = sock.readQuicStreamDataBlock(sid, strm, io_timeout);
+                if (!exists chunk) {
+                    break;
+                }
+                out.write(chunk);
+            }
+            return;
+        }
+        if (hi.http2 && exists hi.stream_id && hi.register_body_queue.callp()) {
+            Qore::Thread::Queue q();
+            call_function_args(hi.register_body_queue, (hi.stream_id, q));
+            while (True) {
+                *binary chunk = q.get(io_timeout);
+                if (!exists chunk) {
+                    break;
+                }
+                out.write(chunk);
+            }
+            return;
+        }
+        throw "WEBDAV-STREAMING-ERROR", sprintf("could not resolve a streaming-body context "
+            "in cx.\"header-info\" for method %y on a request the framework chose to stream; "
+            "header-info keys: %y", hdr.method, keys hi);
+    }
+
+    #! Sets the body-streaming threshold for this handler instance
+    /** Bodies of @c PUT or @c POST requests larger than this are delivered to the handler
+        via @ref wantsBodyStreaming() instead of being fully buffered. See
+        @ref BodyStreamingThreshold for the default.
+
+        @param threshold the new threshold in bytes; pass \c 0 to stream every PUT/POST body
+        regardless of size
+    */
+    setBodyStreamingThreshold(int threshold) {
+        body_streaming_threshold = threshold;
+    }
+
+    #! Returns the currently configured body-streaming threshold in bytes
+    int getBodyStreamingThreshold() {
+        return body_streaming_threshold;
+    }
+
+    #! Returns @ref True for PUT/POST requests whose body should be delivered as a stream
+    /** Override of @ref HttpServer::AbstractHttpRequestHandler::wantsBodyStreaming() that
+        opts in to incremental delivery for PUT and POST bodies that are either chunked
+        (\c "Transfer-Encoding: chunked") or larger than @ref body_streaming_threshold.
+        Smaller / fixed-size requests stay buffered (the handler receives the full body in
+        the @c body argument), which is faster for small uploads and for non-bulk methods
+        like @c PROPFIND or @c LOCK.
+
+        @param cx the request context
+        @param hdr the request headers
+        @return @ref True if the framework should deliver the body as a stream
+    */
+    bool wantsBodyStreaming(hash<auto> cx, hash<auto> hdr) {
+        if (hdr.method != "PUT" && hdr.method != "POST") {
+            return False;
+        }
+        if (hdr."transfer-encoding" == "chunked") {
+            return True;
+        }
+        *string clen_str = hdr."content-length";
+        if (!exists clen_str) {
+            return False;
+        }
+        return int(clen_str) > body_streaming_threshold;
     }
 
     #! Creates the object with an empty logger and an in-memory property handler

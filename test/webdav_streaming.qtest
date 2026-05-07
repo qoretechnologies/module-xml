@@ -1,0 +1,178 @@
+#!/usr/bin/env qore
+
+%modern
+
+%requires qore >= 2.3
+%requires HttpServer
+%requires ../qlib/WebDavHandler
+%requires ../qlib/WebDavClientIo
+%requires QUnit
+%requires FsUtil
+%requires Logger
+
+%exec-class Main
+
+# Test the WebDavHandler v1.3 automatic body-streaming for PUT/POST.
+#
+# The framework's wantsBodyStreaming opt-in is honored only on HTTP/2 and HTTP/3 — HTTP/1.1
+# bodies are framework-buffered regardless. The unit tests here exercise the policy method
+# and the streamBodyToOutputStream helper directly with a mocked HTTP/2 cx hash, then a
+# round-trip test confirms the buffered path is unaffected for clients that don't speak
+# HTTP/2.
+class Main inherits QUnit::Test {
+    public {
+        # Test fixtures are global so the policy and helper unit tests don't need a server.
+        const TestNs = "test";
+    }
+
+    constructor() : QUnit::Test("webdav-streaming", "1.0") {
+        addTestCase("wantsBodyStreaming policy matrix", \testPolicy());
+        addTestCase("setBodyStreamingThreshold mutates policy", \testThresholdSetter());
+        addTestCase("streamBodyToOutputStream HTTP/2 path", \testStreamHttp2());
+        addTestCase("streamBodyToOutputStream errors with no streaming context",
+            \testStreamMissingContext());
+        addTestCase("buffered PUT round-trip (HTTP/1.1)", \testBufferedRoundTrip());
+
+        set_return_value(main());
+    }
+
+    private WebDavHandler::FsWebDavHandler newHandler() {
+        TmpDir tmp();
+        return new WebDavHandler::FsWebDavHandler(tmp.path);
+    }
+
+    testPolicy() {
+        WebDavHandler::FsWebDavHandler h = newHandler();
+        # PROPFIND etc. are never streamed — body is small XML
+        assertEq(False, h.wantsBodyStreaming({}, {"method": "PROPFIND",
+            "transfer-encoding": "chunked"}));
+        assertEq(False, h.wantsBodyStreaming({}, {"method": "GET",
+            "content-length": "100000000"}));
+
+        # PUT with no Content-Length and not chunked — buffered
+        assertEq(False, h.wantsBodyStreaming({}, {"method": "PUT"}));
+
+        # PUT with chunked Transfer-Encoding — always streams (size unknown)
+        assertEq(True, h.wantsBodyStreaming({}, {"method": "PUT",
+            "transfer-encoding": "chunked"}));
+
+        # PUT with small Content-Length — stays buffered
+        assertEq(False, h.wantsBodyStreaming({}, {"method": "PUT",
+            "content-length": "1024"}));
+
+        # PUT with Content-Length over the default 4MB threshold — streams
+        assertEq(True, h.wantsBodyStreaming({}, {"method": "PUT",
+            "content-length": sprintf("%d", 8 * 1024 * 1024)}));
+
+        # POST follows the same policy as PUT
+        assertEq(True, h.wantsBodyStreaming({}, {"method": "POST",
+            "content-length": sprintf("%d", 8 * 1024 * 1024)}));
+    }
+
+    testThresholdSetter() {
+        WebDavHandler::FsWebDavHandler h = newHandler();
+        assertEq(WebDavHandler::AbstractWebDavHandler::BodyStreamingThreshold,
+            h.getBodyStreamingThreshold());
+
+        # Lower the threshold and verify the policy responds
+        h.setBodyStreamingThreshold(2048);
+        assertEq(2048, h.getBodyStreamingThreshold());
+        assertEq(True, h.wantsBodyStreaming({}, {"method": "PUT",
+            "content-length": "4096"}));
+        assertEq(False, h.wantsBodyStreaming({}, {"method": "PUT",
+            "content-length": "1024"}));
+
+        # Threshold 0 forces streaming for every PUT/POST
+        h.setBodyStreamingThreshold(0);
+        assertEq(True, h.wantsBodyStreaming({}, {"method": "PUT",
+            "content-length": "1"}));
+    }
+
+    # Validate streamBodyToOutputStream's HTTP/2 path by mocking the framework's
+    # register_body_queue closure: producer thread feeds chunks (and a NOTHING sentinel)
+    # into the queue, the helper drains them into a BinaryOutputStream and we compare bytes.
+    testStreamHttp2() {
+        Qore::Thread::Queue captured_q;
+        code register_body_queue = sub (int stream_id, Qore::Thread::Queue q) {
+            captured_q = q;
+        };
+
+        binary captured_data;
+        binary expected = <0102030405060708> + <c0deca7e>;
+
+        Qore::Thread::Counter started();
+        started.inc();
+        # The Qore stream classes are thread-affine: we create the BinaryOutputStream in the
+        # background worker that drives the helper so all writes happen on its TID.
+        background sub () {
+            on_exit started.dec();
+            BinaryOutputStream out();
+            WebDavHandler::AbstractWebDavHandler::streamBodyToOutputStream(
+                {
+                    "header-info": {
+                        "http2": True,
+                        "stream_id": 1,
+                        "register_body_queue": register_body_queue,
+                    },
+                },
+                {"method": "PUT"},
+                out,
+                30s,
+            );
+            captured_data = out.getData();
+        }();
+
+        # Wait for the helper to register the queue; spin briefly to give it a chance.
+        int spins = 0;
+        while (!captured_q && spins < 100) {
+            usleep(10ms);
+            ++spins;
+        }
+        assertTrue(exists captured_q, "helper registered the body queue");
+
+        # Feed two chunks, then end-of-stream
+        captured_q.push(<0102030405060708>);
+        captured_q.push(<c0deca7e>);
+        captured_q.push(NOTHING);
+
+        started.waitForZero();
+        assertEq(expected, captured_data);
+    }
+
+    testStreamMissingContext() {
+        BinaryOutputStream out();
+        # No http2/http3 markers — helper has nothing to read from
+        assertThrows("WEBDAV-STREAMING-ERROR",
+            \WebDavHandler::AbstractWebDavHandler::streamBodyToOutputStream(),
+            ({"header-info": {}}, {"method": "PUT"}, out));
+    }
+
+    # End-to-end round-trip via HTTP/1.1 — the buffered path. The streaming PUT/POST branch
+    # in FsWebDavHandler isn't exercised here because the framework buffers HTTP/1.1
+    # request bodies regardless of wantsBodyStreaming(). The point of this test is to
+    # confirm the streaming branch's existence didn't break the buffered path.
+    testBufferedRoundTrip() {
+        TmpDir tmp();
+        WebDavHandler::FsWebDavHandler handler(tmp.path);
+        Logger logger("test", LoggerLevel::getLevelInfo());
+        HttpServer srv(<HttpServerOptionInfo>{"logger": logger, "debug": True});
+        srv.setHandler("webdavhandler", "/", NOTHING, handler);
+        srv.setDefaultHandler("webdavhandler", handler);
+        map srv.addHttpMethod($1), handler.getHttpMethods();
+        int port = srv.addListener(<HttpListenerOptionInfo>{"service": 0}).port;
+        on_exit srv.stop();
+
+        WebDavClientIo::WebDavClientIo wd({"url": "http://localhost:" + port});
+        on_exit wd.close();
+        # Force the policy to engage by setting threshold to 0; even so HTTP/1.1 buffers
+        # everything, so we expect the buffered path to still succeed.
+        handler.setBodyStreamingThreshold(0);
+
+        # Build a 32 KB payload that would qualify for streaming on HTTP/2/3
+        string text = strmul("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789", 1024);
+        binary payload = binary(text);
+        wd.put("/big.bin", payload, "application/octet-stream");
+        *data fetched = wd.get("/big.bin");
+        assertEq(payload, binary(fetched));
+    }
+}

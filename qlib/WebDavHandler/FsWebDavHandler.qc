@@ -385,18 +385,26 @@ public class FsWebDavHandler inherits AbstractWebDavHandler {
             return response(409, "Parent collection does not exist");
         }
 
-        # Save data. The async HttpServer framework buffers the request body before invoking
-        # the handler, so `body` already contains the full payload regardless of whether the
-        # client used Content-Length or Transfer-Encoding: chunked. (For very large uploads
-        # opt-in to incremental delivery via wantsBodyStreaming() if multi-GB uploads
-        # need to bypass framework buffering — see release notes.)
+        # Save data. Branch on whether the framework buffered the body or chose to stream
+        # it (controlled by AbstractWebDavHandler::wantsBodyStreaming): when `body` is
+        # populated we got a buffered payload; when it's NOTHING the framework is delivering
+        # the body incrementally and we drain it via streamBodyToOutputStream(). The
+        # streaming branch writes to a temp path first and renames into place atomically so
+        # a mid-upload failure doesn't leave a partial file at the target.
         try {
-            File f();
-            if (f.open(path, O_CREAT | O_TRUNC | O_WRONLY, 0644, "UTF-8")) {
-                return response(500, "Could not create new file: %s", strerror());
-            }
             if (exists body) {
+                File f();
+                if (f.open(path, O_CREAT | O_TRUNC | O_WRONLY, 0644, "UTF-8")) {
+                    return response(500, "Could not create new file: %s", strerror());
+                }
                 f.write(body);
+            } else {
+                string tmp_path = path + ".webdav-upload";
+                on_error if (is_file(tmp_path)) unlink(tmp_path);
+                FileOutputStream fos(tmp_path);
+                AbstractWebDavHandler::streamBodyToOutputStream(cx, hdr, fos, IoTimeout);
+                fos.close();
+                rename(tmp_path, path);
             }
         } catch (hash<ExceptionInfo> ex) {
             return response(400, "Destination path is not a regular file");
@@ -466,18 +474,26 @@ public class FsWebDavHandler inherits AbstractWebDavHandler {
             return response(405, "Cannot PUT over a collection");
         }
 
-        # Save data. The async HttpServer framework buffers the request body before invoking
-        # the handler, so `body` already contains the full payload regardless of whether the
-        # client used Content-Length or Transfer-Encoding: chunked. (For very large uploads
-        # opt-in to incremental delivery via wantsBodyStreaming() if multi-GB uploads
-        # need to bypass framework buffering — see release notes.)
+        # Save data. Branch on whether the framework buffered the body or chose to stream
+        # it (controlled by AbstractWebDavHandler::wantsBodyStreaming): when `body` is
+        # populated we got a buffered payload; when it's NOTHING the framework is delivering
+        # the body incrementally and we drain it via streamBodyToOutputStream(). The
+        # streaming branch writes to a temp path first and renames into place atomically so
+        # a mid-upload failure doesn't leave a partial file at the target.
         try {
-            File f();
-            if (f.open(path, O_CREAT | O_TRUNC | O_WRONLY, 0644)) {
-                return response(500, "Could not create/update file: %s", strerror());
-            }
             if (exists body) {
+                File f();
+                if (f.open(path, O_CREAT | O_TRUNC | O_WRONLY, 0644)) {
+                    return response(500, "Could not create/update file: %s", strerror());
+                }
                 f.write(body);
+            } else {
+                string tmp_path = path + ".webdav-upload";
+                on_error if (is_file(tmp_path)) unlink(tmp_path);
+                FileOutputStream fos(tmp_path);
+                AbstractWebDavHandler::streamBodyToOutputStream(cx, hdr, fos, IoTimeout);
+                fos.close();
+                rename(tmp_path, path);
             }
         } catch (hash<ExceptionInfo> ex) {
             return response(500, "Error writing file: %s", ex.desc);
