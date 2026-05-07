@@ -21,13 +21,24 @@ noinst_HEADERS = src/QC_XmlDoc.h \
 USER_MODULES = qlib/XmlRpcHandler.qm qlib/WSDL.qm qlib/SoapClient.qm qlib/SoapHandler.qm qlib/XmlRpcConnection.qm \
     qlib/SalesforceSoapClient.qm qlib/WebDavClient.qm
 
-USER_SPLIT_MODULES = qlib/SaxDataProvider qlib/SoapDataProvider qlib/WebDavClientDataProvider qlib/WebDavHandler
+USER_SPLIT_MODULES = qlib/SaxDataProvider qlib/SoapDataProvider qlib/CargoXmlDataProvider qlib/WebDavClientDataProvider qlib/WebDavHandler
 
 SaxDataProvider_moddir= $(moddir)/SaxDataProvider
 dist_SaxDataProvider_mod_DATA = $(wildcard qlib/SaxDataProvider*.q[cm])
 
 SoapDataProvider_moddir= $(moddir)/SoapDataProvider
 dist_SoapDataProvider_mod_DATA = $(wildcard qlib/SoapDataProvider/*.q[cm])
+
+CargoXmlDataProvider_moddir = $(moddir)/CargoXmlDataProvider
+dist_CargoXmlDataProvider_mod_DATA = $(wildcard qlib/CargoXmlDataProvider/*.q[cm])
+
+# bundled UN/CEFACT D25A schema tree (data/standard, codelist/standard, identifierlist/standard)
+CargoXmlDataProvider_data_moddir = $(moddir)/CargoXmlDataProvider/schemas/uncefact-D25A/data/standard
+dist_CargoXmlDataProvider_data_mod_DATA = $(wildcard qlib/CargoXmlDataProvider/schemas/uncefact-D25A/data/standard/*.xsd)
+CargoXmlDataProvider_codelist_moddir = $(moddir)/CargoXmlDataProvider/schemas/uncefact-D25A/codelist/standard
+dist_CargoXmlDataProvider_codelist_mod_DATA = $(wildcard qlib/CargoXmlDataProvider/schemas/uncefact-D25A/codelist/standard/*.xsd)
+CargoXmlDataProvider_idlist_moddir = $(moddir)/CargoXmlDataProvider/schemas/uncefact-D25A/identifierlist/standard
+dist_CargoXmlDataProvider_idlist_mod_DATA = $(wildcard qlib/CargoXmlDataProvider/schemas/uncefact-D25A/identifierlist/standard/*.xsd)
 
 WebDavClientDataProvider_moddir= $(moddir)/WebDavClientDataProvider
 dist_WebDavClientDataProvider_mod_DATA = $(wildcard qlib/WebDavClientDataProvider/*.q[cm])
