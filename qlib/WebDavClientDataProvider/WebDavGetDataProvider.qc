@@ -21,7 +21,7 @@ public class WebDavGetDataProvider inherits WebDavClientDataProviderBase {
         static WebDavGetResponseDataType ResponseType();
     }
 
-    constructor(WebDavClient::WebDavClient client) : WebDavClientDataProviderBase(client) {
+    constructor(object client) : WebDavClientDataProviderBase(client) {
     }
 
     string getName() {

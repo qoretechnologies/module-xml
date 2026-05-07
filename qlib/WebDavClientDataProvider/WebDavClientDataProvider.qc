@@ -54,15 +54,26 @@ public class WebDavClientDataProvider inherits WebDavClientDataProviderBase {
         const ConstructorOptions = {
             "webdavclient": <DataProviderOptionInfo>{
                 "display_name": "WebDAV Client",
-                "short_desc": "The WebDAV client for accessing the server",
+                "short_desc": "The synchronous WebDAV client object to use",
                 "type": AbstractDataProviderType::get(new Type("WebDavClient::WebDavClient")),
-                "desc": "The WebDAV client for accessing the server",
+                "desc": "An existing synchronous @ref WebDavClient::WebDavClient \"WebDavClient\" "
+                    "object to use; mutually exclusive with `webdavclientio` and `url`",
+            },
+            "webdavclientio": <DataProviderOptionInfo>{
+                "display_name": "WebDAV Client (Async I/O)",
+                "short_desc": "The async-I/O WebDAV client object to use",
+                "type": AbstractDataProviderType::get(new Type("WebDavClientIo::WebDavClientIo")),
+                "desc": "An existing async-I/O @ref WebDavClientIo::WebDavClientIo "
+                    "\"WebDavClientIo\" object to use; recommended for new code. Mutually "
+                    "exclusive with `webdavclient` and `url`.",
             },
             "url": <DataProviderOptionInfo>{
                 "display_name": "URL",
                 "short_desc": "The URL to the WebDAV server",
                 "type": AbstractDataProviderTypeMap."string",
-                "desc": "The URL to the WebDAV server",
+                "desc": "The URL to the WebDAV server. When provided alone the data provider "
+                    "instantiates a new @ref WebDavClientIo::WebDavClientIo \"WebDavClientIo\" "
+                    "(async I/O) for accessing the server.",
             },
         };
     }
@@ -84,20 +95,33 @@ public class WebDavClientDataProvider inherits WebDavClientDataProviderBase {
             WebDavClientDataProvider::getClient(options)) {
     }
 
-    #! Creates the object from an existing WebDavClient
-    constructor(WebDavClient::WebDavClient client) : WebDavClientDataProviderBase(client) {
+    #! Creates the object from an existing WebDAV client
+    /** @param client either a @ref WebDavClient::WebDavClient "WebDavClient" (sync) or a
+        @ref WebDavClientIo::WebDavClientIo "WebDavClientIo" (async I/O) object
+    */
+    constructor(object client) : WebDavClientDataProviderBase(client) {
     }
 
     #! Returns a WebDAV client from options
-    static WebDavClient::WebDavClient getClient(*hash<auto> options) {
+    /** Selects, in priority order:
+        - an existing @ref WebDavClientIo::WebDavClientIo "WebDavClientIo" passed as
+          `webdavclientio`
+        - an existing @ref WebDavClient::WebDavClient "WebDavClient" passed as `webdavclient`
+        - a new @ref WebDavClientIo::WebDavClientIo "WebDavClientIo" built from `url`
+          (async I/O is the preferred default for new instances)
+    */
+    static object getClient(*hash<auto> options) {
+        if (options.webdavclientio) {
+            return options.webdavclientio;
+        }
         if (options.webdavclient) {
             return options.webdavclient;
         }
         if (!options.url) {
-            throw "CONSTRUCTOR-ERROR", "no 'webdavclient' or 'url' option passed; "
-                "cannot create WebDAV client without a URL";
+            throw "CONSTRUCTOR-ERROR", "no 'webdavclientio', 'webdavclient', or 'url' option "
+                "passed; cannot create a WebDAV data provider without one of them";
         }
-        return new WebDavClient::WebDavClient({"url": options.url});
+        return new WebDavClientIo::WebDavClientIo({"url": options.url});
     }
 
     #! Returns the data provider name

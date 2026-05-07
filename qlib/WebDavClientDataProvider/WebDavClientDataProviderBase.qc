@@ -28,11 +28,22 @@ public namespace WebDavClientDataProvider {
 public class WebDavClientDataProviderBase inherits DataProvider::AbstractDataProvider {
     public {
         #! The WebDAV client object
-        WebDavClient::WebDavClient client;
+        /** Typed as @ref object so the data provider accepts either the synchronous
+            @ref WebDavClient::WebDavClient "WebDavClient" or the async-I/O
+            @ref WebDavClientIo::WebDavClientIo "WebDavClientIo". Both expose the same
+            method surface (\c options / \c list / \c propfind / \c get / \c put / \c del /
+            \c mkcol / \c copyResource / \c moveResource / \c lock / \c unlock / \c exists /
+            \c getURL), so the per-action providers call them duck-typed.
+        */
+        object client;
     }
 
     #! Creates the object
-    constructor(WebDavClient::WebDavClient client) {
+    /** @param client a WebDAV client object — either @ref WebDavClient::WebDavClient
+        "WebDavClient" (sync) or @ref WebDavClientIo::WebDavClientIo "WebDavClientIo"
+        (async I/O)
+    */
+    constructor(object client) {
         self.client = client;
     }
 

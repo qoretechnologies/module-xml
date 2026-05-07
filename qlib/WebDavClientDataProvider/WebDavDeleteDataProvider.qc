@@ -21,7 +21,7 @@ public class WebDavDeleteDataProvider inherits WebDavClientDataProviderBase {
         static WebDavSuccessResponseDataType ResponseType();
     }
 
-    constructor(WebDavClient::WebDavClient client) : WebDavClientDataProviderBase(client) {
+    constructor(object client) : WebDavClientDataProviderBase(client) {
     }
 
     string getName() {
