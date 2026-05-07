@@ -113,7 +113,17 @@ public class CargoXmlBuildMessageRequestDataType inherits HashDataType {
                 "desc": "The message payload to serialize. The top-level key must be the "
                     "message's qualified element name with the appropriate `xmlns` declarations "
                     "on `^attributes^`. Nested elements are nested keys; attributes go under "
-                    "`^attributes^`; text content goes under `^value^`.",
+                    "`^attributes^`; text content goes under `^value^`.\n\n"
+                    "**Example** (UN/CEFACT Cross-Industry Order):\n"
+                    "```\n"
+                    "{\n"
+                    "  \"rsm:CrossIndustryOrder\": {\n"
+                    "    \"^attributes^\": {\"xmlns:rsm\": \"urn:un:unece:uncefact:data:standard:CrossIndustryOrder:27\"},\n"
+                    "    \"rsm:ExchangedDocument\": { ... },\n"
+                    "    \"rsm:SupplyChainTradeTransaction\": { ... }\n"
+                    "  }\n"
+                    "}\n"
+                    "```",
             },
             "validate": {
                 "type": SoftBoolType,
