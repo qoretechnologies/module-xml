@@ -117,6 +117,17 @@ public class CargoXmlMessageDataProvider inherits AbstractDataProvider {
     }
 
     #! serializes a Qore hash as XML and optionally validates it against the XSD
+    /** @param data the message payload to serialize; the top-level key must be the message's
+            qualified element name with appropriate \c xmlns declarations on \c "^attributes^"
+        @param validate if @ref True, validate the generated XML against the message's XSD file
+            (multi-file imports resolved by libxml2)
+
+        @return the serialized XML string
+
+        @throw XSD-ERROR the generated document is not valid against the schema
+        @throw XSD-SYNTAX-ERROR the schema or its imports could not be loaded
+        @throw MAKE-XML-ERROR an error occurred serializing the input hash
+    */
     string buildMessage(hash<auto> data, bool validate = True) {
         string xml = make_xml(data);
         if (validate) {
