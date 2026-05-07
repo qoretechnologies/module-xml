@@ -1,0 +1,170 @@
+#!/usr/bin/env qore
+# -*- mode: qore; indent-tabs-mode: nil -*-
+
+%modern
+
+%requires qore >= 2.3
+%requires HttpServer
+%requires ../qlib/WebDavHandler
+%requires ../qlib/WebDavClientIo
+%requires QUnit
+%requires FsUtil
+%requires Logger
+%requires xml
+
+%exec-class Main
+
+# Spin up a minimal HTTP server so we can exercise WebDavClientIo end-to-end
+# against the existing FsWebDavHandler. The point of the test is the client's
+# async-I/O code path (HttpClientConnectionManager); the sync server is the
+# easiest way to validate every request type round-trips correctly.
+class Server inherits HttpServer {
+    private {
+        int port;
+    }
+
+    constructor(hash<HttpServerOptionInfo> http_opts, WebDavHandler::AbstractWebDavHandler handler) : HttpServer(http_opts) {
+        setHandler("webdavhandler", "/", NOTHING, handler);
+        setDefaultHandler("webdavhandler", handler);
+        map addHttpMethod($1), handler.getHttpMethods();
+        port = addListener(<HttpListenerOptionInfo>{"service": 0}).port;
+    }
+
+    int getPort() {
+        return port;
+    }
+}
+
+class Main inherits QUnit::Test {
+    private {
+        TmpDir tmp;
+        Server srv;
+        WebDavClientIo::WebDavClientIo wd;
+    }
+
+    constructor() : QUnit::Test("webdavclientio", "1.0") {
+        addTestCase("options + put + get + del round-trip", \testRoundTrip());
+        addTestCase("mkcol + propfind + list", \testCollections());
+        addTestCase("copy + move", \testCopyMove());
+        addTestCase("exists 200 / 404", \testExists());
+        addTestCase("get of missing returns NOTHING", \testGetMissing());
+        addTestCase("setDebug toggles cleanly", \testSetDebug());
+
+        set_return_value(main());
+    }
+
+    private startServer() {
+        tmp = new TmpDir();
+        WebDavHandler::FsWebDavHandler handler(tmp.path);
+        Logger logger("test", LoggerLevel::getLevelInfo());
+        srv = new Server(<HttpServerOptionInfo>{
+            "logger": logger,
+            "debug": True,
+        }, handler);
+        wd = new WebDavClientIo::WebDavClientIo({
+            "url": "http://localhost:" + srv.getPort(),
+        });
+    }
+
+    private stopServer() {
+        if (wd) {
+            wd.close();
+            delete wd;
+        }
+        if (srv) {
+            srv.stop();
+            delete srv;
+        }
+        delete tmp;
+    }
+
+    testRoundTrip() {
+        startServer();
+        on_exit stopServer();
+
+        # OPTIONS: must include at least DAV class "1"
+        list<string> dav = wd.options("/");
+        assertTrue(dav.contains("1"), "DAV class 1 reported");
+
+        # PUT new file, GET it back, DELETE it
+        bool created = wd.put("/round-trip.txt", "hello world", "text/plain");
+        assertEq(True, created, "PUT returns True for created");
+
+        *data content = wd.get("/round-trip.txt");
+        assertEq("hello world", content.toString());
+
+        wd.del("/round-trip.txt");
+        # Re-fetch should now return NOTHING
+        assertEq(NOTHING, wd.get("/round-trip.txt"));
+    }
+
+    testCollections() {
+        startServer();
+        on_exit stopServer();
+
+        wd.mkcol("/coll/");
+        wd.put("/coll/a.txt", "alpha");
+        wd.put("/coll/b.txt", "beta");
+
+        list<hash<WebDavClient::WebDavResourceInfo>> entries = wd.list("/coll/");
+        # FsWebDavHandler reports the collection itself plus its children
+        assertTrue(entries.size() >= 2, "PROPFIND returned at least the two files");
+
+        # All children are files (not collections)
+        bool found_a = False;
+        bool found_b = False;
+        foreach hash<WebDavClient::WebDavResourceInfo> e in (entries) {
+            if (e.href =~ /a\.txt$/) {
+                found_a = True;
+                assertEq("file", e.type);
+            }
+            if (e.href =~ /b\.txt$/) {
+                found_b = True;
+                assertEq("file", e.type);
+            }
+        }
+        assertTrue(found_a && found_b, "PROPFIND surfaced both files");
+    }
+
+    testCopyMove() {
+        startServer();
+        on_exit stopServer();
+
+        wd.put("/src.txt", "data");
+        wd.copyResource("/src.txt", "/copy.txt");
+        assertEq("data", wd.get("/copy.txt").toString());
+        # original should still exist
+        assertEq("data", wd.get("/src.txt").toString());
+
+        wd.moveResource("/copy.txt", "/moved.txt");
+        assertEq("data", wd.get("/moved.txt").toString());
+        # source of the move should now be gone
+        assertEq(NOTHING, wd.get("/copy.txt"));
+    }
+
+    testExists() {
+        startServer();
+        on_exit stopServer();
+
+        wd.put("/exists.txt", "x");
+        assertTrue(wd.exists("/exists.txt"));
+        assertEq(False, wd.exists("/no-such.txt"));
+    }
+
+    testGetMissing() {
+        startServer();
+        on_exit stopServer();
+        # GET on a missing resource must surface NOTHING (not throw) so callers can
+        # use the cheap probe pattern; matches the WebDavClient sync API.
+        assertEq(NOTHING, wd.get("/no-such.txt"));
+    }
+
+    testSetDebug() {
+        startServer();
+        on_exit stopServer();
+        # Just exercise the toggle; nothing observable beyond it not throwing.
+        wd.setDebug(True);
+        wd.setDebug(False);
+        assertTrue(True);
+    }
+}

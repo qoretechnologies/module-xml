@@ -21,7 +21,7 @@ noinst_HEADERS = src/QC_XmlDoc.h \
 USER_MODULES = qlib/XmlRpcHandler.qm qlib/WSDL.qm qlib/SoapClient.qm qlib/SoapHandler.qm qlib/XmlRpcConnection.qm \
     qlib/SalesforceSoapClient.qm qlib/WebDavClient.qm
 
-USER_SPLIT_MODULES = qlib/SaxDataProvider qlib/SoapDataProvider qlib/CargoXmlDataProvider qlib/WebDavClientDataProvider qlib/WebDavHandler
+USER_SPLIT_MODULES = qlib/SaxDataProvider qlib/SoapDataProvider qlib/CargoXmlDataProvider qlib/WebDavClientDataProvider qlib/WebDavClientIo qlib/WebDavHandler
 
 SaxDataProvider_moddir= $(moddir)/SaxDataProvider
 dist_SaxDataProvider_mod_DATA = $(wildcard qlib/SaxDataProvider*.q[cm])
@@ -42,6 +42,9 @@ dist_CargoXmlDataProvider_idlist_mod_DATA = $(wildcard qlib/CargoXmlDataProvider
 
 WebDavClientDataProvider_moddir= $(moddir)/WebDavClientDataProvider
 dist_WebDavClientDataProvider_mod_DATA = $(wildcard qlib/WebDavClientDataProvider/*.q[cm])
+
+WebDavClientIo_moddir = $(moddir)/WebDavClientIo
+dist_WebDavClientIo_mod_DATA = $(wildcard qlib/WebDavClientIo/*.q[cm])
 
 WebDavHandler_moddir= $(moddir)/WebDavHandler
 dist_WebDavHandler_mod_DATA = $(wildcard qlib/WebDavHandler/*.q[cm])
