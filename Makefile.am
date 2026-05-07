@@ -30,7 +30,7 @@ SoapDataProvider_moddir= $(moddir)/SoapDataProvider
 dist_SoapDataProvider_mod_DATA = $(wildcard qlib/SoapDataProvider/*.q[cm])
 
 CargoXmlDataProvider_moddir = $(moddir)/CargoXmlDataProvider
-dist_CargoXmlDataProvider_mod_DATA = $(wildcard qlib/CargoXmlDataProvider/*.q[cm])
+dist_CargoXmlDataProvider_mod_DATA = $(wildcard qlib/CargoXmlDataProvider/*.q[cm]) $(wildcard qlib/CargoXmlDataProvider/*.svg)
 
 # bundled UN/CEFACT D25A schema tree (data/standard, codelist/standard, identifierlist/standard)
 CargoXmlDataProvider_data_moddir = $(moddir)/CargoXmlDataProvider/schemas/uncefact-D25A/data/standard

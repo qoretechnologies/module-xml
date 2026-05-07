@@ -51,6 +51,17 @@ public class CargoXmlDataProvider inherits AbstractDataProvider {
         #! catalog of discovered messages keyed by \c "{namespace}name"
         hash<string, hash<CargoXmlMessageInfo>> messages;
 
+        #! static action provider children, mapped by name -> Qore class
+        /** The two action providers (\c parse-message, \c build-message) are exposed as
+            children alongside the dynamically discovered per-message data providers, so
+            \c registerAction \c path entries resolve correctly during the framework's
+            child-tree walk.
+        */
+        const ChildMap = {
+            "parse-message": Class::forName("CargoXmlDataProvider::CargoXmlParseMessageDataProvider"),
+            "build-message": Class::forName("CargoXmlDataProvider::CargoXmlBuildMessageDataProvider"),
+        };
+
         #! provider info
         const ProviderInfo = <DataProviderInfo>{
             "type": "CargoXmlDataProvider",
@@ -129,22 +140,59 @@ public class CargoXmlDataProvider inherits AbstractDataProvider {
         return messages;
     }
 
-    #! returns the names of child providers (one per discovered message)
-    /** @return a list of message identifiers in James-Clark notation
-        (\c "{namespace_uri}local_name") so that messages with the same local name in
-        different namespaces (which occur in real-world packages) remain distinct
+    #! returns the names of child providers
+    /** Includes both the static action provider names (\c parse-message, \c build-message)
+        and every dynamically-discovered message identifier in James-Clark notation
+        (\c "{namespace_uri}local_name").
     */
     private *list<string> getChildProviderNamesImpl() {
-        return keys messages;
+        return keys ChildMap + keys messages;
     }
 
-    #! returns the child provider for the named message, or @ref nothing if unknown
+    #! returns the child provider for the given name, or @ref nothing if unknown
+    /** Static action providers in @ref ChildMap take precedence over the dynamic
+        per-message providers.
+    */
     private *AbstractDataProvider getChildProviderImpl(string name) {
+        *Class cls = ChildMap{name};
+        if (cls) {
+            return cls.newObject(self);
+        }
         *hash<CargoXmlMessageInfo> mi = messages{name};
         if (!mi) {
             return;
         }
         return new CargoXmlMessageDataProvider(mi);
+    }
+
+    #! returns the kinds of reference data this provider supports
+    /** @return a hash with the keys this provider supports for the \c ref_data
+        attribute on action options
+    */
+    *hash<string, bool> getSupportedReferenceData() {
+        return {"cargo-xml-message": True};
+    }
+
+    #! returns reference data for the given kind
+    /** @param type the kind of reference data to return
+        @param action_opts options for the lookup (currently unused by this provider)
+        @return a list of @ref AllowedValueInfo entries, one per discovered message,
+            with the qualified name as the value and a human-readable
+            \c "<local-name> @ <namespace>" label as the display name
+    */
+    private *list<hash<AllowedValueInfo>> getReferenceDataImpl(string type, *hash<auto> action_opts) {
+        if (type != "cargo-xml-message") {
+            return;
+        }
+        list<hash<AllowedValueInfo>> rv = ();
+        foreach string qname in (sort(keys messages)) {
+            hash<CargoXmlMessageInfo> mi = messages{qname};
+            rv += <AllowedValueInfo>{
+                "value": qname,
+                "display_name": sprintf("%s (%s)", mi.name, mi.namespace),
+            };
+        }
+        return rv;
     }
 
     private hash<DataProviderInfo> getStaticInfoImpl() {
