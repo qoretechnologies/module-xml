@@ -72,6 +72,10 @@ public:
             delete utf8str;
     }
 
+    DLLLOCAL const char* c_str() const { return utf8str->c_str(); }
+    DLLLOCAL size_t size() const { return utf8str->size(); }
+    DLLLOCAL const QoreString* getString() const { return utf8str; }
+
 protected:
     QoreString* utf8str;
     bool temp;

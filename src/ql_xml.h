@@ -49,13 +49,25 @@ DLLLOCAL const char* get_xml_element_type_name(int t);
 DLLLOCAL const char* get_xml_node_type_name(int t);
 
 #ifdef HAVE_XMLTEXTREADERSETSCHEMA
-class QoreXmlSchemaContext : public AbstractXmlValidator, Utf8StringHelper {
+// Tag struct used to dispatch the file-path constructor of QoreXmlSchemaContext.
+// Selecting the file-based parsing path at the type level keeps the API explicit and
+// avoids the ambiguity of an overloaded const char*/QoreString constructor pair.
+struct QoreXmlSchemaFilePathTag {};
+constexpr QoreXmlSchemaFilePathTag QoreXmlSchemaFilePath{};
+
+class QoreXmlSchemaContext : public AbstractXmlValidator {
 protected:
     xmlSchemaPtr schema = nullptr;
     xmlSchemaValidCtxtPtr ctx = nullptr;
 
 public:
+    // Construct from in-memory XSD string.  Imports referenced via xsd:import are not
+    // resolvable in this mode because libxml2 has no base URL.
     DLLLOCAL QoreXmlSchemaContext(const QoreString& xsd, ExceptionSink* xsink);
+
+    // Construct from an XSD file path.  libxml2 resolves xsd:import schemaLocation
+    // entries relative to the file path, so multi-file XSD packages work.
+    DLLLOCAL QoreXmlSchemaContext(QoreXmlSchemaFilePathTag, const char* path, ExceptionSink* xsink);
 
     DLLLOCAL virtual ~QoreXmlSchemaContext() {
         if (ctx)
@@ -78,6 +90,11 @@ public:
         getPtr();
         return xmlSchemaValidateDoc(ctx, doc);
     }
+
+private:
+    // Common parser-context driver used by both constructors after the parser context
+    // has been created.  Takes ownership of scp and frees it before returning.
+    DLLLOCAL void parseSchema(xmlSchemaParserCtxtPtr scp, ExceptionSink* xsink);
 };
 #endif
 
