@@ -388,7 +388,8 @@ public class FsWebDavHandler inherits AbstractWebDavHandler {
         # Save data. The async HttpServer framework buffers the request body before invoking
         # the handler, so `body` already contains the full payload regardless of whether the
         # client used Content-Length or Transfer-Encoding: chunked. (For very large uploads
-        # opt-in to incremental delivery via wantsBodyStreaming() — TODO follow-up.)
+        # opt-in to incremental delivery via wantsBodyStreaming() if multi-GB uploads
+        # need to bypass framework buffering — see release notes.)
         try {
             File f();
             if (f.open(path, O_CREAT | O_TRUNC | O_WRONLY, 0644, "UTF-8")) {
@@ -468,7 +469,8 @@ public class FsWebDavHandler inherits AbstractWebDavHandler {
         # Save data. The async HttpServer framework buffers the request body before invoking
         # the handler, so `body` already contains the full payload regardless of whether the
         # client used Content-Length or Transfer-Encoding: chunked. (For very large uploads
-        # opt-in to incremental delivery via wantsBodyStreaming() — TODO follow-up.)
+        # opt-in to incremental delivery via wantsBodyStreaming() if multi-GB uploads
+        # need to bypass framework buffering — see release notes.)
         try {
             File f();
             if (f.open(path, O_CREAT | O_TRUNC | O_WRONLY, 0644)) {
