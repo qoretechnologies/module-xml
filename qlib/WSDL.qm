@@ -81,6 +81,10 @@ module WSDL {
 
     @subsection wsdl_0_5_8 WSDL v0.5.8
     - added support for async schema import caching for polling operations
+    - extracted the XSD schema parsing infrastructure from \c WebService into a new public
+      @ref WSDL::XsdSchema class so that bare XSD documents (for example, industry message
+      standards delivered as XSD packages) can be parsed and queried without a WSDL wrapper;
+      \c WebService now inherits from \c XsdSchema with no API change to existing callers
 
     @subsection wsdl_0_5_7 WSDL v0.5.7
     - moved WSDL class declarations inside the WSDL namespace for compatibility with %strong-encapsulation
@@ -6421,44 +6425,35 @@ public class WsdlPollOperation inherits Qore::AbstractPollOperation {
     }
 }
 
-public class WebService inherits WSDL::XsdBase, Qore::Serializable {
+#! Encapsulates XSD schema parsing and the resulting type/element/group registry
+/** This class isolates the XSD parsing logic so it can be used independently of WSDL parsing.
+    @ref WebService inherits from this class to add WSDL-specific parsing on top of the XSD machinery,
+    while modules that need to work with bare XSD documents (for example, industry message standards
+    delivered as XSD packages) can use this class directly.
+
+    Construct an empty schema and add documents incrementally, or pass one or more XSD documents
+    to the constructor:
+    @code{.py}
+        XsdSchema xs();
+        xs.addSchemaFile("/path/to/Header.xsd");
+        xs.addSchemaDir("/path/to/messages/");
+    @endcode
+
+    @since %WSDL 0.5.8
+*/
+public class XsdSchema inherits WSDL::XsdBase {
     public {
-        #! the WSDL string
-        string wsdl;
-
-        #! a cryptographic hash for the WSDL source
-        string wsdl_hash;
-
-        #! options used in the constructor
+        #! options used to parse the schema
         *hash<auto> opts;
 
         #! flag if the object has a "try_import" closure or call reference
         bool has_try_import = False;
 
-        #! the name of the WebService
-        /** @since %WSDL 0.5
-        */
-        string name;
-
-        #! the digest of the WSDL source
-        /** @since %WSDL 0.5
-        */
-        string hash_str;
-
         #! namespace container
         transient Namespaces nsc;
 
-        #! list of services in this WSDL
-        transient list<string> wsdl_services();
-
-        #! a hash of element names to XsdElement objects for top-level document-style bindings
-        transient hash<string, XsdElement> idocmap();
-
-        #! map of elements
+        #! map of elements keyed by namespace URI then element name
         transient hash<string, hash<string, XsdElement>> emap();
-
-        #! hash of messages names to messages
-        transient hash<string, WSMessage> messages();
 
         #! map of types
         transient hash<string, XsdAbstractType> tmap();
@@ -6468,9 +6463,6 @@ public class WebService inherits WSDL::XsdBase, Qore::Serializable {
 
         #! map of xs:attributeGroup definitions by name
         transient hash<string, XsdAttributeGroup> attrGroupMap();
-
-        #! hash of port names to port type information hashes
-        transient hash<string, hash<PortTypeInfo>> portType();
 
         #! optional closure/call reference to try to resolve import declarations
         transient *code try_import;
@@ -6482,163 +6474,151 @@ public class WebService inherits WSDL::XsdBase, Qore::Serializable {
     }
 
     private {
-        # service definitions; name -> service info hash
-        hash<string, hash<WSDL::ServiceInfo>> services();
-
-        # service bindings; name -> Binding
-        hash<string, Binding> binding();
-
         #! issue #4449: map of imports used while parsing
         transient hash<string, bool> import_map;
     }
 
-    #! creates the WebService object
-    /** @param str the XML string representing the WSDL
-        @param opts an optional hash of options with the following possible keys:
-        - \c "compat_allow_any_header": allow any SOAP header to be sent without checking the WSDL
-        - \c "compat_empty_string_is_nothing": deserialize empty strings to @ref nothing instead of an empty string
-        - \c "def_path": the default path to use when retrieving referenced XSDs
-        - \c "try_import": a call reference or closure to be passed a string name for XSD imports without any scheme to retrieve the data, must take a string argument (the resource name) and return a string (the resource data)
-        - \c "http_client": a HTTPClient object for retrieving data from import commands
-        - \c "http_headers": a hash of optional HTTP header info to use when retrieving data from import commands
-        - \c "xsd_cache": a hash mapping schema locations to cached schema data for async parsing
-        - \c "async_only": if @ref True then external imports must be satisfied by \c "xsd_cache" and no blocking
-          I/O is performed
-
-        @since 0.3.7 added the \c "compat_empty_string_is_nothing" and \c "compat_allow_any_header" options for backwards compatibility
+    #! creates an empty XsdSchema
+    /** Use this constructor when you intend to add XSD documents incrementally via @ref addSchemaString,
+        @ref addSchemaFile, or @ref addSchemaDir, or when this class is used as a base class.
     */
-    constructor(string str, *hash<auto> opts) {
-        doInit(str, opts);
+    constructor() {
+        nsc = new Namespaces({});
     }
 
-    #! returns the name of the service
-    /** @return the name of the service
-
-        @since %WSDL 0.5
+    #! creates an XsdSchema by parsing one or more XSD source documents
+    /** @param xsd a single XSD document string, or a list of XSD document strings (parsed in order)
+        @param opts an optional hash of options:
+        - \c "def_path": default path for retrieving referenced XSD imports
+        - \c "try_import": call reference or closure to resolve XSD imports without a scheme; takes a
+          string argument (the resource name) and returns a string (the resource data)
+        - \c "http_client": HTTPClient object for retrieving XSD imports
+        - \c "http_headers": hash of HTTP headers for XSD imports
+        - \c "xsd_cache": hash mapping schema locations to cached schema data
+        - \c "async_only": if @ref True then external imports must be satisfied by xsd_cache
+        - \c "compat_empty_string_is_nothing": deserialize empty strings to NOTHING instead of ""
     */
-    string getName() {
-        return name;
-    }
-
-    #! returns a unique hash for the WSDL that can be used to compare schemas for equality
-    /** @return a unique hash for the WSDL that can be used to compare schemas for equality
-
-        @since %WSDL 0.5
-    */
-    synchronized string getHash() {
-        if (!hash_str) {
-            hash_str = digest("sha256", wsdl).toHex();
+    constructor(softlist<string> xsd, *hash<auto> opts) {
+        initOptions(opts);
+        nsc = new Namespaces({});
+        if (opts.compat_empty_string_is_nothing || global_compat_empty_string_is_nothing) {
+            nsc.opt_empty_string_is_nothing = True;
         }
-        return hash_str;
-    }
-
-    #! returns the given operation or throws an exception if it cannot be found; operations are searched in portTypes in the order they are declared
-    /** @throw WSDL-OPERATION-ERROR if the operation is unknown
-    */
-    WSDL::WSOperation getOperation(string opname) {
-        @assert(opname, "operation name is required");
-        foreach hash<auto> pt in (portType.iterator()) {
-            if (pt.operations{opname})
-                return pt.operations{opname};
-        }
-        throw "WSDL-OPERATION-ERROR", sprintf("cannot retrieve operation %y; known operations: %y", opname,
-            (foldl $1 + $2, (map $1.operations.keys(), portType.iterator())));
-    }
-
-    #! returns a list of known operation names
-    softlist<string> getOperationNames() {
-        return foldl $1 + $2, (map keys $1.operations, portType.iterator());
-    }
-
-    #! returns the given operation for particular porttype or throws an exception if it cannot be found
-    WSDL::WSOperation getPortTypeOperation(string ptname, string opname) {
-        @assert(ptname, "port type name is required");
-        @assert(opname, "operation name is required");
-        *WSOperation op = portType{ptname}.operations{opname};
-        if (op)
-            return op;
-        if (!portType{ptname})
-            throw "WSDL-OPERATION-ERROR", sprintf("port %y is not a defined port; known ports: %y", ptname, portType.keys());
-        throw "WSDL-OPERATION-ERROR", sprintf("operation %y is not known in port %y; known operations: %y", opname, ptname, portType{ptname}.operations.keys());
-    }
-
-    #! returns the given operation for particular binding or throws an exception if it cannot be found
-    WSDL::WSOperation getBindingOperation(*string bname, string opname) {
-        @assert(opname, "operation name is required");
-        if (!exists bname) {
-            return getOperation(opname);
-        } else {
-            WSDL::Binding b = getBinding(bname);
-            @assert(b, "binding %y must exist", bname);
-            return getPortTypeOperation(b.getPort(), opname);
+        foreach string s in (xsd) {
+            addSchemaString(s);
         }
     }
 
-    #! returns a list of hashes giving supported operation names for each port in the WSDL
-    /** @return a list of hashes giving supported operation names for each port in the WSDL; each hash<auto> has the following keys:
-        - \c "port": the name of the port defining the operation
-        - \c "operation": the @ref WSDL::WSOperation object for the operation
-     */
-    list<hash<OperationInfo>> listOperations() {
-        list<hash<OperationInfo>> l();
-        foreach hash<auto> ph in (portType.pairIterator()) {
-            foreach WSOperation op in (ph.value.operations.iterator()) {
-                l += cast<hash<OperationInfo>>((
-                    "port": ph.key,
-                    "operation": op,
-                ));
-            }
+    #! adds an XSD document to the schema and parses its types
+    /** @param xsd an XSD document string
+
+        Multiple schemas with their own \c targetNamespace can be added via repeated calls.
+    */
+    addSchemaString(string xsd) {
+        hash<auto> h = parse_xml(xsd);
+        if (h.size() != 1) {
+            throw "XSD-ERROR", sprintf("expecting a single root element in XSD; got: %y", h.keys());
         }
-        return l;
+        string root_key = h.firstKey();
+        if (root_key !~ /(?:^|:)schema$/) {
+            throw "XSD-ERROR", sprintf("expected XSD root element <schema> or <prefix:schema>; got <%s>",
+                root_key);
+        }
+        # Use a fresh namespace context for the schema being added so that target/default namespaces
+        # set during parsing persist after parseTypes' NamespacePrefixHelper unwinds (mirroring the
+        # XSD-import logic in parseTypes()).
+        Namespaces n_nsc = nsc;
+        *hash<auto> root_attrs = h{root_key}."^attributes^";
+        if (root_attrs) {
+            nsc = new Namespaces(root_attrs, n_nsc);
+            nsc.opt_empty_string_is_nothing = n_nsc.opt_empty_string_is_nothing;
+            nsc.opt_allow_any_header = n_nsc.opt_allow_any_header;
+        }
+        on_exit nsc = n_nsc;
+        on_success n_nsc.merge(nsc);
+
+        parseTypes(h, opts.http_client instanceof HTTPClient ? opts.http_client : NOTHING, opts.http_headers);
     }
 
-    #! return a @ref WSDL::Binding object describing the requested binding
-    /** @param name the name of the binding
-
-        @return a @ref WSDL::Binding object
-
-        @throw WSDL-BINDING-ERROR unknown binding
-     */
-    WSDL::Binding getBinding(string name) {
-        *Binding b = binding{name};
-        if (!b)
-            throw "WSDL-BINDING-ERROR", sprintf("binding %y is not a known binding; known bindings: %y", name, binding.keys());
-        return b;
+    #! parses an XSD file and adds its type information to this schema
+    /** Sets @ref def_path to the directory containing the file if not already set so that relative
+        XSD imports resolve correctly.
+    */
+    addSchemaFile(string path) {
+        if (!def_path) {
+            def_path = dirname(path);
+        }
+        File f();
+        f.open2(path, O_RDONLY);
+        addSchemaString(f.read(-1));
     }
 
-    #! returns a list of services defined in the WSDL
-    /** @return a list of hashes of services defined in the WSDL; each hash<auto> has the following keys:
-        - \c "name": the name of the service
-        - \c "port": a hash of port information; the keys are port names and the values have the following keys:
-          - \c "address": the location of the port
-          - \c "binding": the binding of the port
-     */
-    list<hash<WSDL::ServiceInfo>> listServices() {
-        return map cast<hash<WSDL::ServiceInfo>>($1), services.iterator();
-        #return cast<list<hash<WSDL::ServiceInfo>>>(services.values());
+    #! parses every matching XSD file in the given directory (non-recursive)
+    /** @param dir the directory containing XSD files
+        @param regex regex anchored against each file name (default matches filenames ending in \c .xsd)
+
+        Sets @ref def_path to \a dir if not already set so that relative imports resolve.
+    */
+    addSchemaDir(string dir, string regex = "\\.xsd$") {
+        if (!def_path) {
+            def_path = dir;
+        }
+        Dir d();
+        d.chdir(dir);
+        list<string> files = d.listFiles(regex);
+        foreach string f in (sort(files)) {
+            addSchemaFile(dir + DirSep + f);
+        }
     }
 
-    #! returns a hash describing the requested service
-    /** @param name the name of the service
-        @return a hash describing the service with the following keys:
-        - \c "name": the name of the service
-        - \c "port": a hash of port information; where each hash<auto> is keyed by port name and the values have the following keys:
-          - \c "address": the location of the port
-          - \c "binding": the binding of the port
-
-        @throw WSDL-SERVICE-ERROR the service is not known
-     */
-    hash<WSDL::ServiceInfo> getService(string name) {
-        *hash<WSDL::ServiceInfo> h = services{name};
-        if (!h)
-            throw "WSDL-SERVICE-ERROR", sprintf("service %y is not a known service; known services: %y", name, services.keys());
-        return h;
+    #! returns the list of namespace URIs in which top-level elements are declared
+    list<string> getElementNamespaces() {
+        return keys emap;
     }
 
-    #! return a hash value that can be used to serialize a value as a particular type
+    #! returns the names of all top-level elements declared in the given namespace
+    /** @param ns the namespace URI; if not provided, returns names from all namespaces
+    */
+    list<string> getElementNames(*string ns) {
+        if (exists ns) {
+            return keys (emap{ns} ?? {});
+        }
+        list<string> result = ();
+        foreach string n in (keys emap) {
+            result += keys emap{n};
+        }
+        return result;
+    }
+
+    #! returns the top-level element by namespace and local name, or NOTHING if not found
+    *XsdElement getElement(string ns, string name) {
+        return emap{ns}{name};
+    }
+
+    #! looks up a type by name; returns NOTHING if not found
+    *XsdAbstractType findType(string name) {
+        return tmap{name};
+    }
+
+    #! returns the underlying type map (name -> XsdAbstractType)
+    hash<string, XsdAbstractType> getTypeMap() {
+        return tmap;
+    }
+
+    #! returns a hash value that can be used to serialize a value as a particular type
     hash<auto> getType(string name, auto v) {
-        #printf("DBG getType() %y: %y\n", name, tmap);
         return ("^type^": tmap_get(tmap, name), "^val^": v);
+    }
+
+    #! parse \a opts into XSD-specific state
+    private initOptions(*hash<auto> opts) {
+        self.opts = opts;
+        try_import = opts.try_import;
+        if (try_import) {
+            remove self.opts.try_import;
+            has_try_import = True;
+        }
+        def_path = opts.def_path;
     }
 
     private XsdBaseType getBaseType(string t) {
@@ -6870,6 +6850,189 @@ public class WebService inherits WSDL::XsdBase, Qore::Serializable {
         map (map cast<XsdComplexType>($1.type).finalize(tmap, nsc, groupMap, attrGroupMap, unresolved), $1.iterator(), $1.type instanceof XsdComplexType), emap.iterator();
 
         map resolveType($1), unresolved.getList();
+    }
+}
+
+public class WebService inherits WSDL::XsdSchema {
+    public {
+        #! the WSDL string
+        string wsdl;
+
+        #! a cryptographic hash for the WSDL source
+        string wsdl_hash;
+
+        #! the name of the WebService
+        /** @since %WSDL 0.5
+        */
+        string name;
+
+        #! the digest of the WSDL source
+        /** @since %WSDL 0.5
+        */
+        string hash_str;
+
+        #! list of services in this WSDL
+        transient list<string> wsdl_services();
+
+        #! a hash of element names to XsdElement objects for top-level document-style bindings
+        transient hash<string, XsdElement> idocmap();
+
+        #! hash of messages names to messages
+        transient hash<string, WSMessage> messages();
+
+        #! hash of port names to port type information hashes
+        transient hash<string, hash<PortTypeInfo>> portType();
+    }
+
+    private {
+        # service definitions; name -> service info hash
+        hash<string, hash<WSDL::ServiceInfo>> services();
+
+        # service bindings; name -> Binding
+        hash<string, Binding> binding();
+    }
+
+    #! creates the WebService object
+    /** @param str the XML string representing the WSDL
+        @param opts an optional hash of options with the following possible keys:
+        - \c "compat_allow_any_header": allow any SOAP header to be sent without checking the WSDL
+        - \c "compat_empty_string_is_nothing": deserialize empty strings to @ref nothing instead of an empty string
+        - \c "def_path": the default path to use when retrieving referenced XSDs
+        - \c "try_import": a call reference or closure to be passed a string name for XSD imports without any scheme to retrieve the data, must take a string argument (the resource name) and return a string (the resource data)
+        - \c "http_client": a HTTPClient object for retrieving data from import commands
+        - \c "http_headers": a hash of optional HTTP header info to use when retrieving data from import commands
+        - \c "xsd_cache": a hash mapping schema locations to cached schema data for async parsing
+        - \c "async_only": if @ref True then external imports must be satisfied by \c "xsd_cache" and no blocking
+          I/O is performed
+
+        @since 0.3.7 added the \c "compat_empty_string_is_nothing" and \c "compat_allow_any_header" options for backwards compatibility
+    */
+    constructor(string str, *hash<auto> opts) {
+        doInit(str, opts);
+    }
+
+    #! returns the name of the service
+    /** @return the name of the service
+
+        @since %WSDL 0.5
+    */
+    string getName() {
+        return name;
+    }
+
+    #! returns a unique hash for the WSDL that can be used to compare schemas for equality
+    /** @return a unique hash for the WSDL that can be used to compare schemas for equality
+
+        @since %WSDL 0.5
+    */
+    synchronized string getHash() {
+        if (!hash_str) {
+            hash_str = digest("sha256", wsdl).toHex();
+        }
+        return hash_str;
+    }
+
+    #! returns the given operation or throws an exception if it cannot be found; operations are searched in portTypes in the order they are declared
+    /** @throw WSDL-OPERATION-ERROR if the operation is unknown
+    */
+    WSDL::WSOperation getOperation(string opname) {
+        @assert(opname, "operation name is required");
+        foreach hash<auto> pt in (portType.iterator()) {
+            if (pt.operations{opname})
+                return pt.operations{opname};
+        }
+        throw "WSDL-OPERATION-ERROR", sprintf("cannot retrieve operation %y; known operations: %y", opname,
+            (foldl $1 + $2, (map $1.operations.keys(), portType.iterator())));
+    }
+
+    #! returns a list of known operation names
+    softlist<string> getOperationNames() {
+        return foldl $1 + $2, (map keys $1.operations, portType.iterator());
+    }
+
+    #! returns the given operation for particular porttype or throws an exception if it cannot be found
+    WSDL::WSOperation getPortTypeOperation(string ptname, string opname) {
+        @assert(ptname, "port type name is required");
+        @assert(opname, "operation name is required");
+        *WSOperation op = portType{ptname}.operations{opname};
+        if (op)
+            return op;
+        if (!portType{ptname})
+            throw "WSDL-OPERATION-ERROR", sprintf("port %y is not a defined port; known ports: %y", ptname, portType.keys());
+        throw "WSDL-OPERATION-ERROR", sprintf("operation %y is not known in port %y; known operations: %y", opname, ptname, portType{ptname}.operations.keys());
+    }
+
+    #! returns the given operation for particular binding or throws an exception if it cannot be found
+    WSDL::WSOperation getBindingOperation(*string bname, string opname) {
+        @assert(opname, "operation name is required");
+        if (!exists bname) {
+            return getOperation(opname);
+        } else {
+            WSDL::Binding b = getBinding(bname);
+            @assert(b, "binding %y must exist", bname);
+            return getPortTypeOperation(b.getPort(), opname);
+        }
+    }
+
+    #! returns a list of hashes giving supported operation names for each port in the WSDL
+    /** @return a list of hashes giving supported operation names for each port in the WSDL; each hash<auto> has the following keys:
+        - \c "port": the name of the port defining the operation
+        - \c "operation": the @ref WSDL::WSOperation object for the operation
+     */
+    list<hash<OperationInfo>> listOperations() {
+        list<hash<OperationInfo>> l();
+        foreach hash<auto> ph in (portType.pairIterator()) {
+            foreach WSOperation op in (ph.value.operations.iterator()) {
+                l += cast<hash<OperationInfo>>((
+                    "port": ph.key,
+                    "operation": op,
+                ));
+            }
+        }
+        return l;
+    }
+
+    #! return a @ref WSDL::Binding object describing the requested binding
+    /** @param name the name of the binding
+
+        @return a @ref WSDL::Binding object
+
+        @throw WSDL-BINDING-ERROR unknown binding
+     */
+    WSDL::Binding getBinding(string name) {
+        *Binding b = binding{name};
+        if (!b)
+            throw "WSDL-BINDING-ERROR", sprintf("binding %y is not a known binding; known bindings: %y", name, binding.keys());
+        return b;
+    }
+
+    #! returns a list of services defined in the WSDL
+    /** @return a list of hashes of services defined in the WSDL; each hash<auto> has the following keys:
+        - \c "name": the name of the service
+        - \c "port": a hash of port information; the keys are port names and the values have the following keys:
+          - \c "address": the location of the port
+          - \c "binding": the binding of the port
+     */
+    list<hash<WSDL::ServiceInfo>> listServices() {
+        return map cast<hash<WSDL::ServiceInfo>>($1), services.iterator();
+        #return cast<list<hash<WSDL::ServiceInfo>>>(services.values());
+    }
+
+    #! returns a hash describing the requested service
+    /** @param name the name of the service
+        @return a hash describing the service with the following keys:
+        - \c "name": the name of the service
+        - \c "port": a hash of port information; where each hash<auto> is keyed by port name and the values have the following keys:
+          - \c "address": the location of the port
+          - \c "binding": the binding of the port
+
+        @throw WSDL-SERVICE-ERROR the service is not known
+     */
+    hash<WSDL::ServiceInfo> getService(string name) {
+        *hash<WSDL::ServiceInfo> h = services{name};
+        if (!h)
+            throw "WSDL-SERVICE-ERROR", sprintf("service %y is not a known service; known services: %y", name, services.keys());
+        return h;
     }
 
     private parseMessages(*softlist<auto> message) {
