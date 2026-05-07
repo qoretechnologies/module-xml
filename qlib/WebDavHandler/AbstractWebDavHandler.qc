@@ -110,7 +110,7 @@ public class AbstractWebDavHandler inherits public HttpServer::AbstractHttpReque
     #! Creates the object with an empty logger and an in-memory property handler
     /** @param auth the authentication object to use to authenticate connections
     */
-    constructor(*AbstractAuthenticator auth) : AbstractHttpRequestHandler(auth, True) {
+    constructor(*AbstractAuthenticator auth) : AbstractHttpRequestHandler(auth, False) {
         init(new Logger("WebDAV", LoggerLevel::getLevelInfo()), new InMemoryWebDavPropertyHandler(), "/");
     }
 
@@ -120,7 +120,7 @@ public class AbstractWebDavHandler inherits public HttpServer::AbstractHttpReque
         stripped from requests internally when serving WebDavHandler resources
     */
     constructor(*AbstractAuthenticator auth, string virtual_relative_path_base) 
-          : AbstractHttpRequestHandler(auth, True) {
+          : AbstractHttpRequestHandler(auth, False) {
         init(new Logger("WebDAV", LoggerLevel::getLevelInfo()), new InMemoryWebDavPropertyHandler(), 
           virtual_relative_path_base);
     }
@@ -132,7 +132,7 @@ public class AbstractWebDavHandler inherits public HttpServer::AbstractHttpReque
         stripped from requests internally when serving WebDavHandler resources
     */
     constructor(*AbstractAuthenticator auth, AbstractWebDavPropertyHandler property_handler,
-            string virtual_relative_path_base = "/") : AbstractHttpRequestHandler(auth, True) {
+            string virtual_relative_path_base = "/") : AbstractHttpRequestHandler(auth, False) {
         init(new Logger("WebDAV", LoggerLevel::getLevelInfo()), property_handler, virtual_relative_path_base);
     }
 
@@ -145,7 +145,7 @@ public class AbstractWebDavHandler inherits public HttpServer::AbstractHttpReque
     */
     constructor(*AbstractAuthenticator auth, Logger logger, AbstractWebDavPropertyHandler property_handler
                 = new InMemoryWebDavPropertyHandler(),
-            string virtual_relative_path_base = "/") : AbstractHttpRequestHandler(auth, True) {
+            string virtual_relative_path_base = "/") : AbstractHttpRequestHandler(auth, False) {
         init(logger, property_handler, virtual_relative_path_base);
     }
 
@@ -160,8 +160,13 @@ public class AbstractWebDavHandler inherits public HttpServer::AbstractHttpReque
     }
 
     #! Handles HTTP/WebDavHandler requests and returns the response
-    hash<HttpResponseInfo> handleRequest(HttpListenerInterface listener, Socket s, hash<auto> cx, hash<auto> hdr,
-            *data body) {
+    /** Implements the modern 3-arg handler signature; the framework handles all socket I/O
+        asynchronously and dispatches handler invocation onto a thread pool worker. The handler
+        receives the fully-buffered request body in @a body for non-streaming requests; the
+        response is returned by setting @ref HttpResponseInfo fields (use \c body /
+        \c chunked_body / \c send_callback for streaming responses).
+    */
+    hash<HttpResponseInfo> handleRequest(hash<auto> cx, hash<auto> hdr, *data body) {
         if (*string method = RequestMethods{hdr.method}) {
             # parse destination path if needed
             if (DestMethods{hdr.method}) {
@@ -175,8 +180,7 @@ public class AbstractWebDavHandler inherits public HttpServer::AbstractHttpReque
             cx.webdav_path = getRealPath(cx.raw_path);
             *hash<HttpResponseInfo> rv = checkAuth(hdr.method, cx, hdr, body);
             if (!rv) {
-                #printf("%y\n", cx{"raw_path", "webdav_path", "webdav_dest_path"});
-                rv = call_object_method(self, method, s, cx, hdr, body);
+                rv = call_object_method(self, method, cx, hdr, body);
             }
             # MUST have a Content-Length header in the response, even for HTTP responses that cannot return a msg body
             if (!rv.body && !rv.hdr."Content-Length" && !rv.hdr."Transfer-Encoding") {
@@ -420,8 +424,8 @@ public class AbstractWebDavHandler inherits public HttpServer::AbstractHttpReque
 
         @note this base class method calls handleOptionsImpl() to process the request
     */
-    hash<HttpResponseInfo> handleOptions(Socket s, hash<auto> cx, hash<auto> hdr, *data body) {
-        return handleOptionsImpl(s, cx, hdr, body);
+    hash<HttpResponseInfo> handleOptions(hash<auto> cx, hash<auto> hdr, *data body) {
+        return handleOptionsImpl(cx, hdr, body);
     }
 
     #! Handles HTTP GET requests for WebDavHandler resources
@@ -461,8 +465,8 @@ public class AbstractWebDavHandler inherits public HttpServer::AbstractHttpReque
 
         @note this base class method calls handleGetImpl() to process the request
     */
-    hash<HttpResponseInfo> handleGet(Socket s, hash<auto> cx, hash<auto> hdr, *data body) {
-        return handleGetImpl(s, cx, hdr, body);
+    hash<HttpResponseInfo> handleGet(hash<auto> cx, hash<auto> hdr, *data body) {
+        return handleGetImpl(cx, hdr, body);
     }
 
     #! Handles HTTP HEAD requests for WebDavHandler resources
@@ -502,8 +506,8 @@ public class AbstractWebDavHandler inherits public HttpServer::AbstractHttpReque
 
         @note this base class method calls handleHeadImpl() to process the request
     */
-    hash<HttpResponseInfo> handleHead(Socket s, hash<auto> cx, hash<auto> hdr, *data body) {
-        return handleHeadImpl(s, cx, hdr, body);
+    hash<HttpResponseInfo> handleHead(hash<auto> cx, hash<auto> hdr, *data body) {
+        return handleHeadImpl(cx, hdr, body);
     }
 
     #! Handles HTTP POST requests for WebDavHandler resources
@@ -543,8 +547,8 @@ public class AbstractWebDavHandler inherits public HttpServer::AbstractHttpReque
 
         @note this base class method calls handlePostImpl() to process the request
     */
-    hash<HttpResponseInfo> handlePost(Socket s, hash<auto> cx, hash<auto> hdr, *data body) {
-        return handlePostImpl(s, cx, hdr, body);
+    hash<HttpResponseInfo> handlePost(hash<auto> cx, hash<auto> hdr, *data body) {
+        return handlePostImpl(cx, hdr, body);
     }
 
     #! Handles HTTP PUT requests for WebDavHandler resources
@@ -584,8 +588,8 @@ public class AbstractWebDavHandler inherits public HttpServer::AbstractHttpReque
 
         @note this base class method calls handlePutImpl() to process the request
     */
-    hash<HttpResponseInfo> handlePut(Socket s, hash<auto> cx, hash<auto> hdr, *data body) {
-        return handlePutImpl(s, cx, hdr, body);
+    hash<HttpResponseInfo> handlePut(hash<auto> cx, hash<auto> hdr, *data body) {
+        return handlePutImpl(cx, hdr, body);
     }
 
     #! Handles HTTP DELETE requests for WebDavHandler resources
@@ -625,8 +629,8 @@ public class AbstractWebDavHandler inherits public HttpServer::AbstractHttpReque
 
         @note this base class method calls handleDeleteImpl() to process the request
     */
-    hash<HttpResponseInfo> handleDelete(Socket s, hash<auto> cx, hash<auto> hdr, *data body) {
-        return handleDeleteImpl(s, cx, hdr, body);
+    hash<HttpResponseInfo> handleDelete(hash<auto> cx, hash<auto> hdr, *data body) {
+        return handleDeleteImpl(cx, hdr, body);
     }
 
     #! Handles WebDavHandler COPY requests for WebDavHandler resources
@@ -666,8 +670,8 @@ public class AbstractWebDavHandler inherits public HttpServer::AbstractHttpReque
 
         @note this base class method calls handleCopyImpl() to process the request
     */
-    hash<HttpResponseInfo> handleCopy(Socket s, hash<auto> cx, hash<auto> hdr, *data body) {
-        return handleCopyImpl(s, cx, hdr, body);
+    hash<HttpResponseInfo> handleCopy(hash<auto> cx, hash<auto> hdr, *data body) {
+        return handleCopyImpl(cx, hdr, body);
     }
 
     #! Handles WebDavHandler MOVE requests for WebDavHandler resources
@@ -707,8 +711,8 @@ public class AbstractWebDavHandler inherits public HttpServer::AbstractHttpReque
 
         @note this base class method calls handleMoveImpl() to process the request
     */
-    hash<HttpResponseInfo> handleMove(Socket s, hash<auto> cx, hash<auto> hdr, *data body) {
-        return handleMoveImpl(s, cx, hdr, body);
+    hash<HttpResponseInfo> handleMove(hash<auto> cx, hash<auto> hdr, *data body) {
+        return handleMoveImpl(cx, hdr, body);
     }
 
     #! Handles WebDavHandler LOCK requests for WebDavHandler resources
@@ -748,8 +752,8 @@ public class AbstractWebDavHandler inherits public HttpServer::AbstractHttpReque
 
         @note this base class method calls handleLockImpl() to process the request
     */
-    hash<HttpResponseInfo> handleLock(Socket s, hash<auto> cx, hash<auto> hdr, *data body) {
-        return handleLockImpl(s, cx, hdr, body);
+    hash<HttpResponseInfo> handleLock(hash<auto> cx, hash<auto> hdr, *data body) {
+        return handleLockImpl(cx, hdr, body);
     }
 
     #! Handles WebDavHandler UNLOCK requests for WebDavHandler resources
@@ -789,8 +793,8 @@ public class AbstractWebDavHandler inherits public HttpServer::AbstractHttpReque
 
         @note this base class method calls handleUnlockImpl() to process the request
     */
-    hash<HttpResponseInfo> handleUnlock(Socket s, hash<auto> cx, hash<auto> hdr, *data body) {
-        return handleUnlockImpl(s, cx, hdr, body);
+    hash<HttpResponseInfo> handleUnlock(hash<auto> cx, hash<auto> hdr, *data body) {
+        return handleUnlockImpl(cx, hdr, body);
     }
 
     #! Handles WebDavHandler MKCOL requests for WebDavHandler resources
@@ -830,8 +834,8 @@ public class AbstractWebDavHandler inherits public HttpServer::AbstractHttpReque
 
         @note this base class method calls handleMkcolImpl() to process the request
     */
-    hash<HttpResponseInfo> handleMkcol(Socket s, hash<auto> cx, hash<auto> hdr, *data body) {
-        return handleMkcolImpl(s, cx, hdr, body);
+    hash<HttpResponseInfo> handleMkcol(hash<auto> cx, hash<auto> hdr, *data body) {
+        return handleMkcolImpl(cx, hdr, body);
     }
 
     #! Handles WebDavHandler PROPFIND requests for WebDavHandler resources; reetrieves properties from WebDavHandler resources
@@ -872,8 +876,8 @@ public class AbstractWebDavHandler inherits public HttpServer::AbstractHttpReque
 
         @note this base class method calls handlePropfindImpl() to process the request
     */
-    hash<HttpResponseInfo> handlePropfind(Socket s, hash<auto> cx, hash<auto> hdr, *data body) {
-        return handlePropfindImpl(s, cx, hdr, body);
+    hash<HttpResponseInfo> handlePropfind(hash<auto> cx, hash<auto> hdr, *data body) {
+        return handlePropfindImpl(cx, hdr, body);
     }
 
     #! Handles WebDavHandler PROPPATCH requests for WebDavHandler resources; sets or removes properties on WebDavHandler resources
@@ -914,15 +918,13 @@ public class AbstractWebDavHandler inherits public HttpServer::AbstractHttpReque
 
         @note this base class method calls handleProppatchImpl() to process the request
     */
-    hash<HttpResponseInfo> handleProppatch(Socket s, hash<auto> cx, hash<auto> hdr, *data body) {
+    hash<HttpResponseInfo> handleProppatch(hash<auto> cx, hash<auto> hdr, *data body) {
         # parse the mandatory XML body
         hash<auto> request_xml;
         # action list
         list<hash<PropPatchActionInfo>> actions;
 
-        if (!body) {
-            body = getMessageBody(s, cx.hdr);
-        }
+        # body is already buffered by the async HttpServer framework
 
         if (exists body) {
             try {
@@ -1093,7 +1095,7 @@ public class AbstractWebDavHandler inherits public HttpServer::AbstractHttpReque
 
         @return a 200 response with headers indicating WebDavHandler support
     */
-    private hash<HttpResponseInfo> handleOptionsImpl(Socket s, hash<auto> cx, hash<auto> hdr, *data body) {
+    private hash<HttpResponseInfo> handleOptionsImpl(hash<auto> cx, hash<auto> hdr, *data body) {
         return <HttpResponseInfo>{
             "code" : 200,
             "hdr": {
@@ -1139,7 +1141,7 @@ public class AbstractWebDavHandler inherits public HttpServer::AbstractHttpReque
 
         @return the response to the HTTP request
     */
-    private abstract hash<HttpResponseInfo> handleGetImpl(Socket s, hash<auto> cx, hash<auto> hdr, *data body);
+    private abstract hash<HttpResponseInfo> handleGetImpl(hash<auto> cx, hash<auto> hdr, *data body);
 
     #! Handles HTTP HEAD requests for WebDavHandler resources
     /**  @param cx call context hash; this hash will have the following keys:
@@ -1176,7 +1178,7 @@ public class AbstractWebDavHandler inherits public HttpServer::AbstractHttpReque
 
         @return the response to the HTTP request
     */
-    private abstract hash<HttpResponseInfo> handleHeadImpl(Socket s, hash<auto> cx, hash<auto> hdr, *data body);
+    private abstract hash<HttpResponseInfo> handleHeadImpl(hash<auto> cx, hash<auto> hdr, *data body);
 
     #! Handles HTTP POST requests for WebDavHandler resources
     /**  @param cx call context hash; this hash will have the following keys:
@@ -1213,7 +1215,7 @@ public class AbstractWebDavHandler inherits public HttpServer::AbstractHttpReque
 
         @return the response to the HTTP request
     */
-    private abstract hash<HttpResponseInfo> handlePostImpl(Socket s, hash<auto> cx, hash<auto> hdr, *data body);
+    private abstract hash<HttpResponseInfo> handlePostImpl(hash<auto> cx, hash<auto> hdr, *data body);
 
     #! Handles HTTP PUT requests for WebDavHandler resources
     /**  @param cx call context hash; this hash will have the following keys:
@@ -1250,7 +1252,7 @@ public class AbstractWebDavHandler inherits public HttpServer::AbstractHttpReque
 
         @return the response to the HTTP request
     */
-    private abstract hash<HttpResponseInfo> handlePutImpl(Socket s, hash<auto> cx, hash<auto> hdr, *data body);
+    private abstract hash<HttpResponseInfo> handlePutImpl(hash<auto> cx, hash<auto> hdr, *data body);
 
     #! Handles HTTP DELETE requests for WebDavHandler resources
     /**  @param cx call context hash; this hash will have the following keys:
@@ -1287,7 +1289,7 @@ public class AbstractWebDavHandler inherits public HttpServer::AbstractHttpReque
 
         @return the response to the HTTP request
     */
-    private abstract hash<HttpResponseInfo> handleDeleteImpl(Socket s, hash<auto> cx, hash<auto> hdr, *data body);
+    private abstract hash<HttpResponseInfo> handleDeleteImpl(hash<auto> cx, hash<auto> hdr, *data body);
 
     #! Handles WebDavHandler COPY requests for WebDavHandler resources
     /**  @param cx call context hash; this hash will have the following keys:
@@ -1324,7 +1326,7 @@ public class AbstractWebDavHandler inherits public HttpServer::AbstractHttpReque
 
         @return the response to the WebDavHandler request
     */
-    private abstract hash<HttpResponseInfo> handleCopyImpl(Socket s, hash<auto> cx, hash<auto> hdr, *data body);
+    private abstract hash<HttpResponseInfo> handleCopyImpl(hash<auto> cx, hash<auto> hdr, *data body);
 
     #! Handles WebDavHandler MOVE requests for WebDavHandler resources
     /**  @param cx call context hash; this hash will have the following keys:
@@ -1361,7 +1363,7 @@ public class AbstractWebDavHandler inherits public HttpServer::AbstractHttpReque
 
         @return the response to the WebDavHandler request
     */
-    private abstract hash<HttpResponseInfo> handleMoveImpl(Socket s, hash<auto> cx, hash<auto> hdr, *data body);
+    private abstract hash<HttpResponseInfo> handleMoveImpl(hash<auto> cx, hash<auto> hdr, *data body);
 
     #! Handles WebDavHandler LOCK requests for WebDavHandler resources
     /**  @param cx call context hash; this hash will have the following keys:
@@ -1398,7 +1400,7 @@ public class AbstractWebDavHandler inherits public HttpServer::AbstractHttpReque
 
         @return the response to the WebDavHandler request
     */
-    private abstract hash<HttpResponseInfo> handleLockImpl(Socket s, hash<auto> cx, hash<auto> hdr, *data body);
+    private abstract hash<HttpResponseInfo> handleLockImpl(hash<auto> cx, hash<auto> hdr, *data body);
 
     #! Handles WebDavHandler UNLOCK requests for WebDavHandler resources
     /**  @param cx call context hash; this hash will have the following keys:
@@ -1435,7 +1437,7 @@ public class AbstractWebDavHandler inherits public HttpServer::AbstractHttpReque
 
         @return the response to the WebDavHandler request
     */
-    private abstract hash<HttpResponseInfo> handleUnlockImpl(Socket s, hash<auto> cx, hash<auto> hdr, *data body);
+    private abstract hash<HttpResponseInfo> handleUnlockImpl(hash<auto> cx, hash<auto> hdr, *data body);
 
     #! Handles WebDavHandler MKCOL requests for WebDavHandler resources
     /**  @param cx call context hash; this hash will have the following keys:
@@ -1472,7 +1474,7 @@ public class AbstractWebDavHandler inherits public HttpServer::AbstractHttpReque
 
         @return the response to the WebDavHandler request
     */
-    private abstract hash<HttpResponseInfo> handleMkcolImpl(Socket s, hash<auto> cx, hash<auto> hdr, *data body);
+    private abstract hash<HttpResponseInfo> handleMkcolImpl(hash<auto> cx, hash<auto> hdr, *data body);
 
     #! Handles WebDavHandler PROPFIND requests for WebDavHandler resources; reetrieves properties from WebDavHandler resources
     /**
@@ -1510,7 +1512,7 @@ public class AbstractWebDavHandler inherits public HttpServer::AbstractHttpReque
 
         @return the response to the WebDavHandler request
     */
-    private abstract hash<HttpResponseInfo> handlePropfindImpl(Socket s, hash<auto> cx, hash<auto> hdr, *data body);
+    private abstract hash<HttpResponseInfo> handlePropfindImpl(hash<auto> cx, hash<auto> hdr, *data body);
 
     #! Internal method for handling PROPPATCH requests
     /** @param href the href for the response

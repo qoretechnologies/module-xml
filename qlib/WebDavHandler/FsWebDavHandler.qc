@@ -186,7 +186,7 @@ public class FsWebDavHandler inherits AbstractWebDavHandler {
         );
     }
 
-    private:internal hash<HttpResponseInfo> internalGet(Socket s, hash<auto> cx, hash<auto> hdr, *data body,
+    private:internal hash<HttpResponseInfo> internalGet(hash<auto> cx, hash<auto> hdr, *data body,
             bool get = True) {
         # load file
         string path = cx.webdav_path;
@@ -235,14 +235,10 @@ public class FsWebDavHandler inherits AbstractWebDavHandler {
         if (b) {
             rv.body = b;
         } else if (get) {
-            # semd a chunked reply
-            rv.hdr."Transfer-Encoding" = "chunked";
-            FileInputStream is(path, IoTimeout);
-            code send = auto sub () {
-                return is.read(BlockSize);
-            };
-            s.sendHTTPResponseWithCallback(send, 200, HttpServer::HttpCodes{"200"}, "1.1", rv.hdr, IoTimeout);
-            rv.reply_sent = True;
+            # Stream the file as a chunked response. HttpResponseInfo.chunked_body lets the
+            # async framework drive the chunked send via the underlying socket; the handler
+            # never has to touch the socket directly.
+            rv.chunked_body = new FileInputStream(path, IoTimeout);
         }
         return rv;
     }
@@ -288,9 +284,9 @@ public class FsWebDavHandler inherits AbstractWebDavHandler {
 
         @return the response to the HTTP request
     */
-    private hash<HttpResponseInfo> handleGetImpl(Socket s, hash<auto> cx, hash<auto> hdr, *data body) {
+    private hash<HttpResponseInfo> handleGetImpl(hash<auto> cx, hash<auto> hdr, *data body) {
         # True = GET, False = HEAD
-        return internalGet(s, cx, hdr, body, True);
+        return internalGet(cx, hdr, body, True);
     }
 
     #! Handles HTTP HEAD requests for WebDavHandler resources
@@ -330,9 +326,9 @@ public class FsWebDavHandler inherits AbstractWebDavHandler {
 
         @return the response to the HTTP request
     */
-    private hash<HttpResponseInfo> handleHeadImpl(Socket s, hash<auto> cx, hash<auto> hdr, *data body) {
+    private hash<HttpResponseInfo> handleHeadImpl(hash<auto> cx, hash<auto> hdr, *data body) {
         # True = GET, False = HEAD
-        return internalGet(s, cx, hdr, body, False);
+        return internalGet(cx, hdr, body, False);
     }
 
     #! Handles HTTP POST requests for WebDavHandler resources
@@ -372,7 +368,7 @@ public class FsWebDavHandler inherits AbstractWebDavHandler {
 
         @return the response to the HTTP request
     */
-    private hash<HttpResponseInfo> handlePostImpl(Socket s, hash<auto> cx, hash<auto> hdr, *data body) {
+    private hash<HttpResponseInfo> handlePostImpl(hash<auto> cx, hash<auto> hdr, *data body) {
         string path = cx.webdav_path;
         if (path =~ /\/$/) {
             return response(400, "root directory already exists");
@@ -389,22 +385,17 @@ public class FsWebDavHandler inherits AbstractWebDavHandler {
             return response(409, "Parent collection does not exist");
         }
 
-        # save data
+        # Save data. The async HttpServer framework buffers the request body before invoking
+        # the handler, so `body` already contains the full payload regardless of whether the
+        # client used Content-Length or Transfer-Encoding: chunked. (For very large uploads
+        # opt-in to incremental delivery via wantsBodyStreaming() — TODO follow-up.)
         try {
-            if (!exists body && (hdr."transfer-encoding" == "chunked")) {
-                FileOutputStream os(path);
-                s.readHTTPChunkedBodyToOutputStream(os, IoTimeout);
-            } else {
-                if (!body) {
-                    body = getMessageBody(s, hdr);
-                }
-                File f();
-                if (f.open(path, O_CREAT | O_TRUNC | O_WRONLY, 0644, "UTF-8")) {
-                    return response(500, "Could not create new file: %s", strerror());
-                }
-                if (exists body) {
-                    f.write(body);
-                }
+            File f();
+            if (f.open(path, O_CREAT | O_TRUNC | O_WRONLY, 0644, "UTF-8")) {
+                return response(500, "Could not create new file: %s", strerror());
+            }
+            if (exists body) {
+                f.write(body);
             }
         } catch (hash<ExceptionInfo> ex) {
             return response(400, "Destination path is not a regular file");
@@ -452,7 +443,7 @@ public class FsWebDavHandler inherits AbstractWebDavHandler {
 
         @return the response to the HTTP request
     */
-    private hash<HttpResponseInfo> handlePutImpl(Socket s, hash<auto> cx, hash<auto> hdr, *data body) {
+    private hash<HttpResponseInfo> handlePutImpl(hash<auto> cx, hash<auto> hdr, *data body) {
         string path = cx.webdav_path;
 
         # PUT cannot target a collection (path ending with /)
@@ -474,22 +465,17 @@ public class FsWebDavHandler inherits AbstractWebDavHandler {
             return response(405, "Cannot PUT over a collection");
         }
 
-        # Save data
+        # Save data. The async HttpServer framework buffers the request body before invoking
+        # the handler, so `body` already contains the full payload regardless of whether the
+        # client used Content-Length or Transfer-Encoding: chunked. (For very large uploads
+        # opt-in to incremental delivery via wantsBodyStreaming() — TODO follow-up.)
         try {
-            if (!exists body && (hdr."transfer-encoding" == "chunked")) {
-                FileOutputStream os(path);
-                s.readHTTPChunkedBodyToOutputStream(os, IoTimeout);
-            } else {
-                if (!body) {
-                    body = getMessageBody(s, hdr);
-                }
-                File f();
-                if (f.open(path, O_CREAT | O_TRUNC | O_WRONLY, 0644)) {
-                    return response(500, "Could not create/update file: %s", strerror());
-                }
-                if (exists body) {
-                    f.write(body);
-                }
+            File f();
+            if (f.open(path, O_CREAT | O_TRUNC | O_WRONLY, 0644)) {
+                return response(500, "Could not create/update file: %s", strerror());
+            }
+            if (exists body) {
+                f.write(body);
             }
         } catch (hash<ExceptionInfo> ex) {
             return response(500, "Error writing file: %s", ex.desc);
@@ -538,7 +524,7 @@ public class FsWebDavHandler inherits AbstractWebDavHandler {
 
         @return the response to the HTTP request
     */
-    private hash<HttpResponseInfo> handleDeleteImpl(Socket s, hash<auto> cx, hash<auto> hdr, *data body) {
+    private hash<HttpResponseInfo> handleDeleteImpl(hash<auto> cx, hash<auto> hdr, *data body) {
         string path = cx.webdav_path;
 
         *hash<StatInfo> h = hstat(path);
@@ -586,8 +572,8 @@ public class FsWebDavHandler inherits AbstractWebDavHandler {
 
         @return the response to the WebDavHandler request
     */
-    private hash<HttpResponseInfo> handleCopyImpl(Socket s, hash<auto> cx, hash<auto> hdr, *data body) {
-        return doCopyMoveIntern(s, cx, hdr, body, True);
+    private hash<HttpResponseInfo> handleCopyImpl(hash<auto> cx, hash<auto> hdr, *data body) {
+        return doCopyMoveIntern(cx, hdr, body, True);
     }
 
     #! Handles WebDavHandler MOVE requests for WebDavHandler resources
@@ -625,11 +611,11 @@ public class FsWebDavHandler inherits AbstractWebDavHandler {
 
         @return the response to the WebDavHandler request
     */
-    private hash<HttpResponseInfo> handleMoveImpl(Socket s, hash<auto> cx, hash<auto> hdr, *data body) {
+    private hash<HttpResponseInfo> handleMoveImpl(hash<auto> cx, hash<auto> hdr, *data body) {
         # additional deletion of source
         string src_path = cx.webdav_path;
         # copy to target first
-        hash<HttpResponseInfo> ret = doCopyMoveIntern(s, cx, hdr, body, False);
+        hash<HttpResponseInfo> ret = doCopyMoveIntern(cx, hdr, body, False);
         # then remove src
         if (ret.code >= 200 && ret.code < 300) {
             FsUtil::remove_path(src_path);
@@ -672,11 +658,11 @@ public class FsWebDavHandler inherits AbstractWebDavHandler {
 
         @return the response to the WebDavHandler request
     */
-    private hash<HttpResponseInfo> handleLockImpl(Socket s, hash<auto> cx, hash<auto> hdr, *data body) {
+    private hash<HttpResponseInfo> handleLockImpl(hash<auto> cx, hash<auto> hdr, *data body) {
         string path = cx.webdav_path;
 
         if (!body) {
-            body = getMessageBody(s, cx.hdr);
+            # body is already buffered by the async HttpServer framework; no need to fetch
         }
 
         # Check for lock refresh (If header with lock token, no body)
@@ -924,7 +910,7 @@ public class FsWebDavHandler inherits AbstractWebDavHandler {
 
         @return the response to the WebDavHandler request
     */
-    private hash<HttpResponseInfo> handleUnlockImpl(Socket s, hash<auto> cx, hash<auto> hdr, *data body) {
+    private hash<HttpResponseInfo> handleUnlockImpl(hash<auto> cx, hash<auto> hdr, *data body) {
         string path = cx.webdav_path;
 
         # Lock-Token header is required for UNLOCK
@@ -995,9 +981,9 @@ public class FsWebDavHandler inherits AbstractWebDavHandler {
 
         @return the response to the WebDavHandler request
     */
-    private hash<HttpResponseInfo> handleMkcolImpl(Socket s, hash<auto> cx, hash<auto> hdr, *data body) {
+    private hash<HttpResponseInfo> handleMkcolImpl(hash<auto> cx, hash<auto> hdr, *data body) {
         if (!body) {
-            body = getMessageBody(s, cx.hdr);
+            # body is already buffered by the async HttpServer framework; no need to fetch
         }
 
         # litmus: MKCOL with weird body must fail (RFC2518:8.3.1)
@@ -1074,7 +1060,7 @@ public class FsWebDavHandler inherits AbstractWebDavHandler {
 
         @return the response to the WebDavHandler request
     */
-    private hash<HttpResponseInfo> handlePropfindImpl(Socket s, hash<auto> cx, hash<auto> hdr, *data body) {
+    private hash<HttpResponseInfo> handlePropfindImpl(hash<auto> cx, hash<auto> hdr, *data body) {
         #if (debug) {
             #printf("FsWebDavHandler::handlePropfindImpl() PPP: \n%N\n%N\n%N\n", cx, hdr, body);
         #}
@@ -1088,7 +1074,7 @@ public class FsWebDavHandler inherits AbstractWebDavHandler {
         hash<string, hash<string, bool>> additional_props;
         bool all_props = False;
         if (!body) {
-            body = getMessageBody(s, cx.hdr);
+            # body is already buffered by the async HttpServer framework; no need to fetch
         }
         if (body) {
             # parse the mandatory XML body
@@ -1207,9 +1193,9 @@ public class FsWebDavHandler inherits AbstractWebDavHandler {
     }
 
     #! Process copy and moves (without deletion) internally including properties (properties are moved, files are copied)
-    private:internal hash<HttpResponseInfo> doCopyMoveIntern(Socket s, hash<auto> cx, hash<auto> hdr, *data body, bool copy_props) {
+    private:internal hash<HttpResponseInfo> doCopyMoveIntern(hash<auto> cx, hash<auto> hdr, *data body, bool copy_props) {
         try {
-            internalCopyMove(s, cx, hdr, body, copy_props);
+            internalCopyMove(cx, hdr, body, copy_props);
         } catch (hash<ExceptionInfo> ex) {
             if (ex.err =~ /^[0-9]{3}$/) {
                 return response(ex.err.toInt(), ex.desc);
@@ -1223,9 +1209,9 @@ public class FsWebDavHandler inherits AbstractWebDavHandler {
     }
 
     #! Copy or move the file and any properties
-    private:internal internalCopyMove(Socket s, hash<auto> cx, hash<auto> hdr, *data body, bool copy_props) {
+    private:internal internalCopyMove(hash<auto> cx, hash<auto> hdr, *data body, bool copy_props) {
         if (!body) {
-            body = getMessageBody(s, cx.hdr);
+            # body is already buffered by the async HttpServer framework; no need to fetch
         }
 
         string dest_path = cx.webdav_dest_path;
