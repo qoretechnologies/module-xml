@@ -184,6 +184,13 @@ public class WebCrawler {
         hash<string, bool> visited = {};
         list<hash<auto>> queue = ();
         list<hash<auto>> pages = ();
+        # Count of pages actually fetched and committed.  This is what the
+        # max_pages cap is enforced against — NOT pages.size(), because callers
+        # using streaming mode return NOTHING from page_callback (so nothing is
+        # appended to `pages`) yet every fetch must still count toward the cap.
+        # In non-streaming mode num_fetched == pages.size(), so behaviour is
+        # unchanged for callers that accumulate results.
+        int num_fetched = 0;
 
         # Per-batch state (reset each batch)
         int rate_limited;
@@ -472,7 +479,7 @@ public class WebCrawler {
             {
                 state_mutex.lock();
                 on_exit state_mutex.unlock();
-                if (pages.size() >= max_pages) {
+                if (num_fetched >= max_pages) {
                     break;
                 }
                 while (queue && batch.size() < concurrency) {
@@ -771,9 +778,12 @@ return c.run();
             # Atomically commit the page result and any new link claims
             state_mutex.lock();
             on_exit state_mutex.unlock();
-            if (pages.size() >= max_pages) {
+            if (num_fetched >= max_pages) {
                 return;
             }
+            # count this fetch against the cap regardless of whether the caller
+            # accumulates it (streaming callers return NOTHING from page_callback)
+            ++num_fetched;
             if (result_page) {
                 pages += result_page;
             }
