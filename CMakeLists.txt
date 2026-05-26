@@ -91,6 +91,7 @@ set(QMOD
     qlib/XmlRpcHandler.qm
     qlib/XmlRpcConnection.qm
     qlib/XmlRpcClientIo
+    qlib/CdaDataProvider
     qlib/SaxDataProvider
     qlib/SoapDataProvider
     qlib/WebDavClient.qm
@@ -135,6 +136,7 @@ qore_external_user_module("qlib/WebDavHandler" "")
 qore_external_user_module("qlib/XmlRpcConnection.qm" "XmlRpcClientIo")
 qore_external_user_module("qlib/XmlRpcHandler.qm" "")
 qore_external_user_module("qlib/XmlRpcClientIo" "")
+qore_external_user_module("qlib/CdaDataProvider" "")
 qore_external_user_module("qlib/SaxDataProvider" "")
 qore_external_user_module("qlib/WebContentUtil" "")
 

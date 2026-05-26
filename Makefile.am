@@ -21,7 +21,7 @@ noinst_HEADERS = src/QC_XmlDoc.h \
 USER_MODULES = qlib/XmlRpcHandler.qm qlib/WSDL.qm qlib/SoapClient.qm qlib/SoapHandler.qm qlib/XmlRpcConnection.qm \
     qlib/SalesforceSoapClient.qm qlib/WebDavClient.qm
 
-USER_SPLIT_MODULES = qlib/SaxDataProvider qlib/SoapDataProvider qlib/CargoXmlDataProvider qlib/WebDavClientDataProvider qlib/WebDavClientIo qlib/WebDavHandler
+USER_SPLIT_MODULES = qlib/SaxDataProvider qlib/SoapDataProvider qlib/CargoXmlDataProvider qlib/CdaDataProvider qlib/WebDavClientDataProvider qlib/WebDavClientIo qlib/WebDavHandler
 
 SaxDataProvider_moddir= $(moddir)/SaxDataProvider
 dist_SaxDataProvider_mod_DATA = $(wildcard qlib/SaxDataProvider*.q[cm])
@@ -31,6 +31,9 @@ dist_SoapDataProvider_mod_DATA = $(wildcard qlib/SoapDataProvider/*.q[cm])
 
 CargoXmlDataProvider_moddir = $(moddir)/CargoXmlDataProvider
 dist_CargoXmlDataProvider_mod_DATA = $(wildcard qlib/CargoXmlDataProvider/*.q[cm]) $(wildcard qlib/CargoXmlDataProvider/*.svg)
+
+CdaDataProvider_moddir = $(moddir)/CdaDataProvider
+dist_CdaDataProvider_mod_DATA = $(wildcard qlib/CdaDataProvider/*.q[cm]) $(wildcard qlib/CdaDataProvider/*.svg)
 
 # bundled UN/CEFACT D25A schema tree (data/standard, codelist/standard, identifierlist/standard)
 CargoXmlDataProvider_data_moddir = $(moddir)/CargoXmlDataProvider/schemas/uncefact-D25A/data/standard
