@@ -184,6 +184,13 @@ public class WebCrawler {
         hash<string, bool> visited = {};
         list<hash<auto>> queue = ();
         list<hash<auto>> pages = ();
+        # Count of pages actually fetched and committed.  This is what the
+        # max_pages cap is enforced against — NOT pages.size(), because callers
+        # using streaming mode return NOTHING from page_callback (so nothing is
+        # appended to `pages`) yet every fetch must still count toward the cap.
+        # In non-streaming mode num_fetched == pages.size(), so behaviour is
+        # unchanged for callers that accumulate results.
+        int num_fetched = 0;
 
         # Per-batch state (reset each batch)
         int rate_limited;
@@ -472,7 +479,7 @@ public class WebCrawler {
             {
                 state_mutex.lock();
                 on_exit state_mutex.unlock();
-                if (pages.size() >= max_pages) {
+                if (num_fetched >= max_pages) {
                     break;
                 }
                 while (queue && batch.size() < concurrency) {
@@ -733,10 +740,20 @@ return c.run();
                 return;
             }
 
-            # Extract links into a local list (no lock held during regex work)
+            # Extract links into a local list (no lock held during regex work).
+            # Resolve relative links against the effective (post-redirect) URL,
+            # like a browser, so a directory-canonicalisation redirect (e.g.
+            # /docs -> /docs/) doesn't make relative links resolve against the
+            # parent directory and fall outside the crawl scope.  Skip the
+            # effective URL when dns-pinning substituted an IP for the host (it
+            # would then carry the IP rather than the hostname links must
+            # resolve against), and when the HTTP client is too old to report it.
+            string link_base = (fetch_host == original_host && resp.effective_url.val())
+                ? resp.effective_url
+                : citem.url;
             list<hash<auto>> new_links = ();
             if (citem.depth < max_depth) {
-                new_links = WebCrawler::extractLinksForUrl(html, citem.url, citem.depth,
+                new_links = WebCrawler::extractLinksForUrl(html, link_base, citem.depth,
                     url_prefix);
             }
 
@@ -771,9 +788,12 @@ return c.run();
             # Atomically commit the page result and any new link claims
             state_mutex.lock();
             on_exit state_mutex.unlock();
-            if (pages.size() >= max_pages) {
+            if (num_fetched >= max_pages) {
                 return;
             }
+            # count this fetch against the cap regardless of whether the caller
+            # accumulates it (streaming callers return NOTHING from page_callback)
+            ++num_fetched;
             if (result_page) {
                 pages += result_page;
             }

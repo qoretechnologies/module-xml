@@ -33,20 +33,32 @@ class StaticSiteHandler inherits AbstractHttpRequestHandler {
         #! is running (e.g. inject a sitemap.xml whose contents reference the
         #! actual listening port).
         hash<string, string> pages;
+
+        #! Optional 301 redirects, keyed by request path (after query
+        #! stripping, before the "" -> index.html remap); value is the
+        #! Location header to return.  Used to test post-redirect URL handling.
+        hash<string, string> redirects = {};
     }
 
     private {
         Mutex hdr_mutex();
     }
 
-    constructor(hash<string, string> pages) {
+    constructor(hash<string, string> pages, *hash<string, string> redirects) {
         self.pages = pages;
+        if (redirects) {
+            self.redirects = redirects;
+        }
     }
 
     hash<HttpResponseInfo> handleRequest(hash<auto> cx, hash<auto> hdr, *data body) {
         string path = hdr.path ?? "";
         if (path.find("?") >= 0) {
             path = path.substr(0, path.find("?"));
+        }
+        # 301 redirect (checked on the raw path, before the index remap)
+        if (exists redirects{path}) {
+            return makeResponse({"Location": redirects{path}}, 301, "");
         }
         if (!path.val() || path == "/") {
             path = "index.html";
@@ -133,6 +145,8 @@ public class WebContentUtilTest inherits QUnit::Test {
             \testWebCrawlerPageCallback());
         addTestCase("WebCrawler page_callback NOTHING suppresses accumulation",
             \testWebCrawlerPageCallbackStreaming());
+        addTestCase("WebCrawler max_pages caps streaming-mode fetches",
+            \testWebCrawlerMaxPagesStreaming());
         # SitemapParser unit tests
         addTestCase("SitemapParser parses urlset", \testSitemapParserUrlset());
         addTestCase("SitemapParser parses sitemapindex",
@@ -190,6 +204,8 @@ public class WebContentUtilTest inherits QUnit::Test {
             \testRobotsTxtCommentsBlankLines());
         addTestCase("WebCrawler honors robots.txt Disallow",
             \testWebCrawlerRobotsDisallow());
+        addTestCase("WebCrawler resolves links against the post-redirect URL",
+            \testWebCrawlerRedirectBaseUrl());
         set_return_value(main());
     }
 
@@ -728,10 +744,10 @@ public class WebContentUtilTest inherits QUnit::Test {
         assertEq(50, WebCrawler::MinTextLength);
     }
 
-    private hash<auto> startSite(hash<string, string> pages) {
+    private hash<auto> startSite(hash<string, string> pages, *hash<string, string> redirects) {
         Logger lg("test", LoggerLevel::getLevelInfo());
         HttpServer srv(<HttpServerOptionInfo>{"logger": lg});
-        StaticSiteHandler handler(pages);
+        StaticSiteHandler handler(pages, redirects);
         srv.setHandler("static", "", NOTHING, handler);
         srv.setDefaultHandler("static", handler);
         hash<auto> linfo = srv.addListener(<HttpListenerOptionInfo>{"service": 0});
@@ -1191,6 +1207,46 @@ public class WebContentUtilTest inherits QUnit::Test {
             "callback should have been invoked for all 3 pages");
     }
 
+    testWebCrawlerMaxPagesStreaming() {
+        # Regression: max_pages must cap the crawl even in streaming mode, where
+        # page_callback returns NOTHING so the crawler's `pages` result list
+        # stays empty.  The cap is enforced against the count of fetched pages,
+        # NOT pages.size() — otherwise it never fires and the crawl runs until
+        # the entire link frontier within max_depth is exhausted.
+        hash<string, string> pages = {
+            "index.html": longBody("Home",
+                ("a.html", "b.html", "c.html", "d.html", "e.html")),
+            "a.html": longBody("A", ()),
+            "b.html": longBody("B", ()),
+            "c.html": longBody("C", ()),
+            "d.html": longBody("D", ()),
+            "e.html": longBody("E", ()),
+        };
+        hash<auto> site = startSite(pages);
+        on_exit site.server.stop();
+        int port = site.port;
+
+        # concurrency 1 makes the cap exact: the callback fires once per
+        # committed page, so the invocation count equals the cap.  Use the
+        # IPv4 loopback literal rather than "localhost": the fixture server
+        # binds IPv4, and "localhost" can resolve to ::1 first, yielding a
+        # non-deterministic crawl (0 pages when the connect fails).
+        list<string> persisted_urls = ();
+        list<hash<auto>> result = WebCrawler::crawl(sprintf("http://127.0.0.1:%d/", port), {
+            "max_depth": 5, "max_pages": 3, "concurrency": 1,
+            "allow_private_ips": True,
+            "page_callback": *hash<auto> sub (hash<auto> pg) {
+                persisted_urls += pg.url;
+                return NOTHING;
+            },
+        });
+
+        assertEq(0, result.size(),
+            "streaming result list stays empty (callback returns NOTHING)");
+        assertEq(3, persisted_urls.size(),
+            "max_pages must cap fetched pages in streaming mode (6 reachable, cap 3)");
+    }
+
     testWebCrawlerShouldFetchCallback() {
         # Site with three pages all linked from index.  The pre-fetch filter
         # will deny "skip.html" — the crawler should still visit the other two.
@@ -1623,5 +1679,50 @@ public class WebContentUtilTest inherits QUnit::Test {
         assertEq(True, inlist("Page Good", titles));
         assertEq(False, inlist("Page BlockedPage", titles));
         assertEq(2, result.size());
+    }
+
+    testWebCrawlerRedirectBaseUrl() {
+        # A directory URL "/sub" 301-redirects to "/sub/"; the index served at
+        # "/sub/" links to relative pages.  Relative links must resolve against
+        # the POST-redirect URL "/sub/" (-> "/sub/leaf1.html"), not the
+        # pre-redirect "/sub" (which would yield "/leaf1.html", outside the
+        # crawl scope).  This exercises HttpClientResponseInfo::effective_url:
+        # without it the crawl follows no links and only the index is fetched.
+        hash<string, string> pages = {
+            "sub/": longBody("SubIndex", ("leaf1.html", "leaf2.html")),
+            "sub/leaf1.html": longBody("Leaf1", ()),
+            "sub/leaf2.html": longBody("Leaf2", ()),
+        };
+        hash<auto> site = startSite(pages, {"sub": "/sub/"});
+        on_exit site.server.stop();
+        int port = site.port;
+
+        # this behaviour depends on HttpClientIo exposing the post-redirect URL
+        # (HttpClientResponseInfo::effective_url); skip gracefully on an older
+        # qore that predates it so this module test stays independent of the
+        # qore release it's run against
+        {
+            HttpClientIo::HttpClientConnectionManager probe();
+            hash<auto> pr = probe.request(sprintf("http://127.0.0.1:%d", port), "GET",
+                "/sub/leaf1.html", {});
+            if (!pr.effective_url.val()) {
+                testSkip("HttpClientIo does not expose effective_url (requires a newer qore)");
+            }
+        }
+
+        # seed the directory WITH a trailing slash; the normalizer strips it to
+        # "/sub", which the server 301s back to "/sub/"
+        list<hash<auto>> result = WebCrawler::crawl(sprintf("http://127.0.0.1:%d/sub/", port), {
+            "max_depth": 3, "max_pages": 10, "concurrency": 1,
+            "allow_private_ips": True, "respect_robots": False,
+        });
+
+        list<string> titles = sort(map $1.title, result);
+        assertEq(True, inlist("Page SubIndex", titles), "post-redirect index crawled");
+        assertEq(True, inlist("Page Leaf1", titles),
+            "relative link resolved against the post-redirect /sub/ base");
+        assertEq(True, inlist("Page Leaf2", titles), "second relative link followed");
+        assertEq(3, result.size(),
+            "redirect-base resolution must follow all in-scope relative links");
     }
 }

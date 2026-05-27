@@ -85,7 +85,7 @@ xml module.
 
 %files doc
 %defattr(-,root,root,-)
-%doc docs/xml docs/XmlRpcHandler docs/SalesforceSoapClient docs/SaxDataProvider docs/SoapClient docs/SoapDataProvider docs/SoapHandler docs/WSDL docs/XmlRpcConnection test examples
+%doc docs/xml docs/CdaDataProvider docs/XmlRpcHandler docs/SalesforceSoapClient docs/SaxDataProvider docs/SoapClient docs/SoapDataProvider docs/SoapHandler docs/WSDL docs/XmlRpcConnection test examples
 
 %prep
 %setup -q
@@ -124,6 +124,7 @@ qore -l ./xml-api-%{module_api}.qmod test/SoapClient.qtest -v
 qore -l ./xml-api-%{module_api}.qmod test/SoapHandler.qtest -v
 qore -l ./xml-api-%{module_api}.qmod test/XmlRpcClient.qtest -v
 qore -l ./xml-api-%{module_api}.qmod test/XmlRpcHandler.qtest -v
+qore -l ./xml-api-%{module_api}.qmod test/CdaDataProvider.qtest -v
 qore -l ./xml-api-%{module_api}.qmod test/soap.qtest -v
 qore -l ./xml-api-%{module_api}.qmod test/webdav_DummyWebDavHandler.qtest -v
 qore -l ./xml-api-%{module_api}.qmod test/webdav_FsWebDavHandler.qtest -v
