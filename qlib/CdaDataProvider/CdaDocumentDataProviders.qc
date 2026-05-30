@@ -28,7 +28,7 @@ public namespace CdaDataProvider {
 public class CdaParseDocumentDataProvider inherits AbstractDataProvider {
     public {
         #! Request type singleton
-        const RequestType = CdaValidateDocumentRequestDataType;
+        const RequestType = CdaParseDocumentRequestDataType;
 
         #! Response type singleton
         const ResponseType = CdaParseDocumentResponseDataType;
@@ -78,7 +78,7 @@ public class CdaParseDocumentDataProvider inherits AbstractDataProvider {
 public class CdaValidateDocumentDataProvider inherits AbstractDataProvider {
     public {
         #! Request type singleton
-        const RequestType = CdaParseDocumentRequestDataType;
+        const RequestType = CdaValidateDocumentRequestDataType;
 
         #! Response type singleton
         const ResponseType = CdaValidateDocumentResponseDataType;

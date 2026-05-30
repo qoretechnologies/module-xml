@@ -135,6 +135,72 @@ public class CdaPatientDataType inherits HashDataType {
 #! Singleton CDA patient metadata type
 public const CdaPatientDataType = new CdaPatientDataType();
 
+#! DataProvider metadata for CDA organizations
+public class CdaOrganizationDataType inherits HashDataType {
+    private {
+        const Fields = {
+            "id": {
+                "display_name": "Organization ID",
+                "short_desc": "Organization identifier",
+                "desc": "The CDA organization identifier.",
+                "type": CdaIdentifierDataType,
+            },
+            "name": {
+                "display_name": "Organization Name",
+                "short_desc": "Organization name",
+                "desc": "The CDA organization name, when present.",
+                "type": StringOrNothingType,
+            },
+        };
+    }
+
+    constructor() : HashDataType("CdaOrganization") {
+        addQoreFields(Fields);
+    }
+}
+
+#! Singleton CDA organization metadata type
+public const CdaOrganizationDataType = new CdaOrganizationDataType();
+
+#! DataProvider metadata for CDA authors
+public class CdaAuthorDataType inherits HashDataType {
+    private {
+        const Fields = {
+            "time": {
+                "display_name": "Time",
+                "short_desc": "Author time",
+                "desc": "The CDA author `time/@value`, when present.",
+                "type": StringOrNothingType,
+            },
+            "id": {
+                "display_name": "Author ID",
+                "short_desc": "Author identifier",
+                "desc": "The CDA author identifier.",
+                "type": CdaIdentifierDataType,
+            },
+            "name": {
+                "display_name": "Author Name",
+                "short_desc": "Author display name",
+                "desc": "A compact author name assembled from CDA name elements.",
+                "type": StringOrNothingType,
+            },
+            "represented_organization": {
+                "display_name": "Represented Organization",
+                "short_desc": "Represented organization",
+                "desc": "The organization represented by the author, when present.",
+                "type": CdaOrganizationDataType,
+            },
+        };
+    }
+
+    constructor() : HashDataType("CdaAuthor") {
+        addQoreFields(Fields);
+    }
+}
+
+#! Singleton CDA author metadata type
+public const CdaAuthorDataType = new CdaAuthorDataType();
+
 #! DataProvider metadata for CDA document metadata
 public class CdaDocumentMetadataDataType inherits HashDataType {
     private {
@@ -199,6 +265,18 @@ public class CdaDocumentMetadataDataType inherits HashDataType {
                 "desc": "Synthetic patient metadata extracted from the CDA header.",
                 "type": CdaPatientDataType,
             },
+            "authors": {
+                "display_name": "Authors",
+                "short_desc": "CDA authors",
+                "desc": "Authors extracted from the CDA header.",
+                "type": new ListDataType(CdaAuthorDataType),
+            },
+            "custodian": {
+                "display_name": "Custodian",
+                "short_desc": "Custodian organization",
+                "desc": "The CDA custodian organization.",
+                "type": CdaOrganizationDataType,
+            },
         };
     }
 
@@ -210,6 +288,108 @@ public class CdaDocumentMetadataDataType inherits HashDataType {
 #! Singleton CDA document metadata type
 public const CdaDocumentMetadataDataType = new CdaDocumentMetadataDataType();
 
+#! DataProvider metadata for CDA structured entry values
+public class CdaEntryValueDataType inherits HashDataType {
+    private {
+        const Fields = {
+            "type": {
+                "display_name": "Type",
+                "short_desc": "Value type",
+                "desc": "The CDA value type, including namespaced `type` attributes such as `xsi:type`.",
+                "type": StringOrNothingType,
+            },
+            "value": {
+                "display_name": "Value",
+                "short_desc": "Value",
+                "desc": "The CDA value attribute, when present.",
+                "type": StringOrNothingType,
+            },
+            "unit": {
+                "display_name": "Unit",
+                "short_desc": "Unit",
+                "desc": "The CDA value unit, when present.",
+                "type": StringOrNothingType,
+            },
+            "code": {
+                "display_name": "Code",
+                "short_desc": "Coded value",
+                "desc": "Coded value attributes, when present.",
+                "type": CdaCodeDataType,
+            },
+        };
+    }
+
+    constructor() : HashDataType("CdaEntryValue") {
+        addQoreFields(Fields);
+    }
+}
+
+#! Singleton CDA structured entry value metadata type
+public const CdaEntryValueDataType = new CdaEntryValueDataType();
+
+#! DataProvider metadata for CDA structured entries
+public class CdaEntryDataType inherits HashDataType {
+    private {
+        const Fields = {
+            "section_index": {
+                "display_name": "Section Index",
+                "short_desc": "Parent section index",
+                "desc": "The one-based index of the parent CDA section.",
+                "type": IntType,
+            },
+            "type": {
+                "display_name": "Type",
+                "short_desc": "Clinical statement type",
+                "desc": "The CDA clinical statement element name such as `observation` or `procedure`.",
+                "type": StringType,
+            },
+            "template_ids": {
+                "display_name": "Template IDs",
+                "short_desc": "Entry template identifiers",
+                "desc": "Template identifiers extracted from the clinical statement.",
+                "type": new ListDataType(CdaIdentifierDataType),
+            },
+            "code": {
+                "display_name": "Code",
+                "short_desc": "Entry code",
+                "desc": "The clinical statement code.",
+                "type": CdaCodeDataType,
+            },
+            "status_code": {
+                "display_name": "Status",
+                "short_desc": "Status code",
+                "desc": "The CDA clinical statement `statusCode/@code`, when present.",
+                "type": StringOrNothingType,
+            },
+            "effective_time": {
+                "display_name": "Effective Time",
+                "short_desc": "Effective time",
+                "desc": "The CDA clinical statement effective time value or low/high interval.",
+                "type": StringOrNothingType,
+            },
+            "text": {
+                "display_name": "Text",
+                "short_desc": "Entry text",
+                "desc": "Compact text extracted from the clinical statement text element.",
+                "type": StringOrNothingType,
+            },
+            "value": {
+                "display_name": "Value",
+                "short_desc": "Entry value",
+                "desc": "Structured CDA value metadata.",
+                "type": CdaEntryValueDataType,
+            },
+        };
+    }
+
+    constructor() : HashDataType("CdaEntry") {
+        addQoreFields(Fields);
+    }
+}
+
+#! Singleton CDA structured entry metadata type
+public const CdaEntryDataType = new CdaEntryDataType();
+
 #! DataProvider metadata for CDA section summaries
 public class CdaSectionDataType inherits HashDataType {
     private {
@@ -219,6 +399,12 @@ public class CdaSectionDataType inherits HashDataType {
                 "short_desc": "One-based section index",
                 "desc": "The one-based section index in document order.",
                 "type": IntType,
+            },
+            "template_ids": {
+                "display_name": "Template IDs",
+                "short_desc": "Section template identifiers",
+                "desc": "Template identifiers extracted from the CDA section.",
+                "type": new ListDataType(CdaIdentifierDataType),
             },
             "code": {
                 "display_name": "Section Code",
@@ -237,6 +423,12 @@ public class CdaSectionDataType inherits HashDataType {
                 "short_desc": "Section narrative text",
                 "desc": "Compact narrative text extracted from the CDA section `text` element.",
                 "type": StringOrNothingType,
+            },
+            "entries": {
+                "display_name": "Entries",
+                "short_desc": "Structured entries",
+                "desc": "Structured clinical entries extracted from the CDA section.",
+                "type": new ListDataType(CdaEntryDataType),
             },
         };
     }
