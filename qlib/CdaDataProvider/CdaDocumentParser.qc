@@ -47,6 +47,20 @@ public hashdecl CdaPatientInfo {
     *string administrative_gender_code;
 }
 
+#! CDA organization metadata
+public hashdecl CdaOrganizationInfo {
+    hash<CdaIdentifierInfo> id;
+    *string name;
+}
+
+#! CDA author metadata
+public hashdecl CdaAuthorInfo {
+    *string time;
+    hash<CdaIdentifierInfo> id;
+    *string name;
+    hash<CdaOrganizationInfo> represented_organization;
+}
+
 #! CDA document metadata
 public hashdecl CdaDocumentMetadata {
     hash<CdaIdentifierInfo> document_id;
@@ -59,14 +73,38 @@ public hashdecl CdaDocumentMetadata {
     hash<CdaIdentifierInfo> set_id;
     *string version_number;
     hash<CdaPatientInfo> patient;
+    list<hash<CdaAuthorInfo>> authors;
+    hash<CdaOrganizationInfo> custodian;
+}
+
+#! CDA structured entry value metadata
+public hashdecl CdaEntryValueInfo {
+    *string type;
+    *string value;
+    *string unit;
+    hash<CdaCodeInfo> code;
+}
+
+#! CDA structured section entry summary
+public hashdecl CdaEntryInfo {
+    int section_index;
+    string type;
+    list<hash<CdaIdentifierInfo>> template_ids;
+    hash<CdaCodeInfo> code;
+    *string status_code;
+    *string effective_time;
+    *string text;
+    hash<CdaEntryValueInfo> value;
 }
 
 #! CDA document section summary
 public hashdecl CdaSectionInfo {
     int index;
+    list<hash<CdaIdentifierInfo>> template_ids;
     hash<CdaCodeInfo> code;
     *string title;
     *string text;
+    list<hash<CdaEntryInfo>> entries;
 }
 
 #! CDA parse response hash
@@ -162,6 +200,8 @@ public class CdaDocumentParser {
             "set_id": identifierInfo(set_id),
             "version_number": attr(version, "value"),
             "patient": patientInfo(root),
+            "authors": authorInfos(root),
+            "custodian": custodianInfo(root),
         };
     }
 
@@ -178,6 +218,34 @@ public class CdaDocumentParser {
         };
     }
 
+    private static list<hash<CdaAuthorInfo>> authorInfos(hash<auto> root) {
+        list<hash<CdaAuthorInfo>> rv = ();
+        foreach hash<auto> author in (childList(root, "author")) {
+            hash<auto> assigned_author = firstChild(author, "assignedAuthor") ?? {};
+            hash<auto> assigned_person = firstChild(assigned_author, "assignedPerson") ?? {};
+            push rv, <CdaAuthorInfo>{
+                "time": attr(firstChild(author, "time") ?? {}, "value"),
+                "id": identifierInfo(firstChild(assigned_author, "id") ?? {}),
+                "name": nodeText(firstChildValue(assigned_person, "name")),
+                "represented_organization": organizationInfo(firstChild(
+                    assigned_author, "representedOrganization") ?? {}),
+            };
+        }
+        return rv;
+    }
+
+    private static hash<CdaOrganizationInfo> custodianInfo(hash<auto> root) {
+        hash<auto> assigned_custodian = firstChild(firstChild(root, "custodian") ?? {}, "assignedCustodian") ?? {};
+        return organizationInfo(firstChild(assigned_custodian, "representedCustodianOrganization") ?? {});
+    }
+
+    private static hash<CdaOrganizationInfo> organizationInfo(hash<auto> node) {
+        return <CdaOrganizationInfo>{
+            "id": identifierInfo(firstChild(node, "id") ?? {}),
+            "name": nodeText(firstChildValue(node, "name")),
+        };
+    }
+
     private static list<hash<CdaSectionInfo>> extractSections(hash<auto> root) {
         list<hash<auto>> raw_sections = collectSections(root);
         list<hash<CdaSectionInfo>> rv = ();
@@ -186,12 +254,84 @@ public class CdaDocumentParser {
             ++index;
             push rv, <CdaSectionInfo>{
                 "index": index,
+                "template_ids": (map identifierInfo($1), childList(section, "templateId")),
                 "code": codeInfo(firstChild(section, "code") ?? {}),
                 "title": nodeText(firstChildValue(section, "title")),
                 "text": compactText(firstChildValue(section, "text")),
+                "entries": extractEntries(section, index),
             };
         }
         return rv;
+    }
+
+    private static list<hash<CdaEntryInfo>> extractEntries(hash<auto> section, int section_index) {
+        list<hash<CdaEntryInfo>> rv = ();
+        foreach hash<auto> entry in (childList(section, "entry")) {
+            *hash<auto> statement = firstElementChild(entry);
+            *string type = firstElementChildName(entry);
+            if (!statement || !type) {
+                continue;
+            }
+            hash<auto> value = firstChild(statement, "value") ?? {};
+            push rv, <CdaEntryInfo>{
+                "section_index": section_index,
+                "type": type,
+                "template_ids": (map identifierInfo($1), childList(statement, "templateId")),
+                "code": codeInfo(firstChild(statement, "code") ?? {}),
+                "status_code": attr(firstChild(statement, "statusCode") ?? {}, "code"),
+                "effective_time": timeValue(firstChild(statement, "effectiveTime") ?? {}),
+                "text": nodeText(firstChildValue(statement, "text")),
+                "value": valueInfo(value),
+            };
+        }
+        return rv;
+    }
+
+    private static *hash<auto> firstElementChild(hash<auto> node) {
+        foreach string key in (keys node) {
+            if (key =~ /^\^/) {
+                continue;
+            }
+            list<hash<auto>> children = asHashList(node{key});
+            if (children) {
+                return children[0];
+            }
+        }
+        return NOTHING;
+    }
+
+    private static *string firstElementChildName(hash<auto> node) {
+        foreach string key in (keys node) {
+            if (key =~ /^\^/) {
+                continue;
+            }
+            if (asHashList(node{key})) {
+                return localName(key);
+            }
+        }
+        return NOTHING;
+    }
+
+    private static hash<CdaEntryValueInfo> valueInfo(hash<auto> node) {
+        return <CdaEntryValueInfo>{
+            "type": attrLocal(node, "type"),
+            "value": attr(node, "value"),
+            "unit": attr(node, "unit"),
+            "code": codeInfo(node),
+        };
+    }
+
+    private static *string timeValue(hash<auto> node) {
+        *string value = attr(node, "value");
+        if (value) {
+            return value;
+        }
+        *string low = attr(firstChild(node, "low") ?? {}, "value");
+        *string high = attr(firstChild(node, "high") ?? {}, "value");
+        if (low && high) {
+            return sprintf("%s/%s", low, high);
+        }
+        return low ?? high;
     }
 
     private static list<hash<auto>> collectSections(hash<auto> node) {
@@ -279,6 +419,18 @@ public class CdaDocumentParser {
             return NOTHING;
         }
         return node."^attributes^"{name};
+    }
+
+    private static *string attrLocal(hash<auto> node, string name) {
+        if (!exists node."^attributes^") {
+            return NOTHING;
+        }
+        foreach string key in (keys node."^attributes^") {
+            if (localName(key) == name) {
+                return node."^attributes^"{key};
+            }
+        }
+        return NOTHING;
     }
 
     private static *string nodeText(auto val) {
