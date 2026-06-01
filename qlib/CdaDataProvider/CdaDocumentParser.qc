@@ -177,7 +177,7 @@ public class CdaDocumentParser {
         if (localName(key) != "ClinicalDocument") {
             throw "CDA-PARSE-ERROR", sprintf("expected CDA ClinicalDocument root element, got %y", key);
         }
-        return cast<hash<auto>>(data{key});
+        return data{key};
     }
 
     private static hash<CdaDocumentMetadata> extractMetadata(hash<auto> root) {
@@ -403,11 +403,11 @@ public class CdaDocumentParser {
             return rv;
         }
         if (val.typeCode() == NT_HASH) {
-            push rv, cast<hash<auto>>(val);
+            push rv, val;
         } else if (val.typeCode() == NT_LIST) {
             foreach auto item in (val) {
                 if (item.typeCode() == NT_HASH) {
-                    push rv, cast<hash<auto>>(item);
+                    push rv, item;
                 }
             }
         }
@@ -460,7 +460,7 @@ public class CdaDocumentParser {
             case NT_LIST:
                 return joinTextList(val);
             case NT_HASH:
-                return textValueFromHash(cast<hash<auto>>(val));
+                return textValueFromHash(val);
         }
         return "";
     }
