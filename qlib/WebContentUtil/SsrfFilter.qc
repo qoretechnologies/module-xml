@@ -42,6 +42,9 @@ public namespace WebContentUtil {
     - **IPv6 IPv4-mapped**: ::ffff:0:0/96 (so a mapped IPv4 still goes through IPv4 checks)
     - **Hostnames**: localhost, *.local, *.svc.cluster.local, *.cluster.local,
       kubernetes.default*, metadata.google.internal, metadata.azure.com
+    - **Local-only schemes**: a \c file:// URL addresses the machine running the
+      code, so one with no authority implies \c "localhost" (see
+      @ref LocalSchemes)
 
     Hostname-based URLs are resolved to IPs via DNS and **all** returned addresses
     are checked — a hostname can resolve to multiple addresses, including a public
@@ -51,6 +54,9 @@ public namespace WebContentUtil {
     @code{.py}
 # Throws SSRF-BLOCKED unless allow_private is True
 SsrfFilter::checkUrl("http://10.0.0.1/admin");
+
+# Throws SSRF-BLOCKED — a file:// URL implies "localhost"
+SsrfFilter::checkUrl("file:///etc/passwd");
 
 # OK — public address
 SsrfFilter::checkUrl("https://example.com/");
@@ -80,6 +86,20 @@ public class SsrfFilter {
         "metadata.azure.com",        # Azure metadata (one of several)
     );
 
+    #! URL schemes whose target is always the machine running the code
+    /** RFC 8089 makes the authority component of a \c "file" URI optional, and an
+        empty authority means the local machine.  A \c file:// URL therefore names
+        a local target rather than an unknown one, and is validated as if its host
+        were @ref LocalSchemeHost — blocked by default like any other loopback
+        target, and permitted only with \c allow_private.
+    */
+    const LocalSchemes = {
+        "file": True,
+    };
+
+    #! The host implied by a @ref LocalSchemes "local-only scheme"
+    const LocalSchemeHost = "localhost";
+
     #! Returns True if the URL targets a private/internal address
     /** Performs both hostname pattern matching and DNS resolution.  Use this for
         a soft check; use @ref checkUrl() for an exception-throwing variant.
@@ -90,7 +110,7 @@ public class SsrfFilter {
     static bool isPrivateUrl(string url) {
         try {
             hash<auto> parts = parse_url(url);
-            *string host = parts.host;
+            *string host = SsrfFilter::getUrlHost(parts);
             if (!host.val()) {
                 # No host means we can't validate — treat as private (conservative)
                 return True;
@@ -100,6 +120,38 @@ public class SsrfFilter {
             # Unparseable URL — treat as private (conservative)
             return True;
         }
+    }
+
+    #! Returns the host a parsed URL targets, resolving local-only schemes
+    /** A @ref LocalSchemes "local-only scheme" carries no authority of its own, so
+        its target is reported as @ref LocalSchemeHost rather than as an unknown
+        host: the difference matters because "no host" is unvalidatable while
+        "localhost" is a target the caller can reason about (and opt into with
+        \c allow_private).
+
+        @param parts a URL parsed by \c parse_url()
+
+        @return the URL's host; @ref LocalSchemeHost for an authority-less
+            local-only scheme; @ref nothing when the URL names no host at all
+    */
+    static *string getUrlHost(hash<auto> parts) {
+        *string host = parts.host;
+        if (host.val()) {
+            return host;
+        }
+        if (SsrfFilter::isLocalScheme(parts.protocol)) {
+            return LocalSchemeHost;
+        }
+        return NOTHING;
+    }
+
+    #! Returns True if a URL scheme always addresses the local machine
+    /** @param scheme the URL scheme, without the \c "://" separator
+
+        @return True if the scheme is one of @ref LocalSchemes
+    */
+    static bool isLocalScheme(*string scheme) {
+        return scheme.val() ? LocalSchemes{scheme.lwr()} ?? False : False;
     }
 
     #! Resolve a URL's hostname and return a validated public IP for DNS pinning
@@ -151,7 +203,7 @@ if (pinned_ip) {
             throw "SSRF-BLOCKED", sprintf("URL %y could not be parsed: %s: %s",
                 url, ex.err, ex.desc);
         }
-        *string host = parts.host;
+        *string host = SsrfFilter::getUrlHost(parts);
         if (!host.val()) {
             throw "SSRF-BLOCKED", sprintf("URL %y has no host", url);
         }
@@ -171,6 +223,12 @@ if (pinned_ip) {
         if (!allow_private && SsrfFilter::isPrivateHostname(host)) {
             throw "SSRF-BLOCKED",
                 sprintf("URL %y targets a private/internal address (host: %y)", url, host);
+        }
+
+        # A local-only scheme addresses this machine, so there is no remote
+        # address to pin; the target has already been validated above
+        if (SsrfFilter::isLocalScheme(parts.protocol)) {
+            return NOTHING;
         }
 
         # Already an IP literal — no pinning needed (caller can use the URL as-is)
@@ -244,7 +302,7 @@ if (pinned_ip) {
                 url, ex.err, ex.desc);
         }
 
-        *string host = parts.host;
+        *string host = SsrfFilter::getUrlHost(parts);
         if (!host.val()) {
             throw "SSRF-BLOCKED", sprintf("URL %y has no host", url);
         }

@@ -116,6 +116,17 @@ public class WebCrawler {
         "vbscript:", "file:", "chrome:", "about:", "ftp:", "ftps:",
     );
 
+    #! URL schemes the crawler can fetch
+    /** The crawler is an HTTP client: it fetches with
+        @ref HttpClientIo::HttpClientConnectionManager "HttpClientConnectionManager"
+        and discovers further URLs from HTML responses.  A seed using any other
+        scheme cannot be crawled at all — see @ref checkCrawlableScheme().
+    */
+    const CrawlableSchemes = {
+        "http": True,
+        "https": True,
+    };
+
     private {
         # Configuration (set in constructor)
         int max_depth;
@@ -249,6 +260,8 @@ public class WebCrawler {
 
         @param seed_url the starting URL
         @param opts crawl options
+        @throw WEBCRAWLER-UNSUPPORTED-SCHEME if the seed URL is not an
+            @ref CrawlableSchemes "http:// or https:// URL"
         @throw SSRF-BLOCKED if the seed URL targets a private/internal address
             and \c allow_private_ips is not True
     */
@@ -298,6 +311,11 @@ public class WebCrawler {
 
         # DNS pinning (Phase 5 feature 6)
         dns_pin = opts.dns_pin ?? False;
+
+        # Reject a seed the crawler could never fetch before validating the
+        # target: otherwise the failure surfaces from the SSRF check, which
+        # reports what is wrong with the target rather than with the scheme
+        WebCrawler::checkCrawlableScheme(seed_url);
 
         # Validate seed URL — throws SSRF-BLOCKED if private and not allowed
         SsrfFilter::checkUrl(seed_url, {
@@ -627,6 +645,11 @@ return c.run();
           - \c start_thread (\c *code<int(code<nothing()>)>): thread launcher; REQUIRED
             when imported into a context with @ref Qore::PO_NO_THREAD_CONTROL set
         @return list of page hashes
+        @throw WEBCRAWLER-UNSUPPORTED-SCHEME if @ref seed_url is not an
+            @ref CrawlableSchemes "http:// or https:// URL"; local documentation
+            belongs to @ref WebContentUtil::LocalDocReader "LocalDocReader"
+        @throw SSRF-BLOCKED if @ref seed_url targets a private/internal address
+            and \c allow_private_ips is not True
     */
     static list<hash<auto>> crawl(string seed_url, *hash<auto> opts) {
         WebCrawler c(seed_url, opts);
@@ -889,6 +912,55 @@ return c.run();
             }
         }
         return False;
+    }
+
+    #! Throws unless the URL is one the crawler can fetch
+    /** Only @ref CrawlableSchemes can be crawled.  A \c file:// seed is the
+        common mistake: it names a local directory or file, which belongs to
+        @ref WebContentUtil::LocalDocReader "LocalDocReader" instead, and would
+        otherwise be rejected downstream by
+        @ref WebContentUtil::SsrfFilter "SsrfFilter" as a \c "localhost" target —
+        accurate about the target, but silent about the real problem.
+
+        @param url the seed URL to check
+
+        @throw WEBCRAWLER-UNSUPPORTED-SCHEME if the URL cannot be parsed, has no
+            scheme, or uses a scheme other than \c http or \c https
+
+        @par Example
+        Dispatching a documentation source given by an operator, where the
+        source may name either a site to crawl or a directory on this machine:
+        @code{.py}
+if (SsrfFilter::isLocalScheme(parse_url(source).protocol)) {
+    pages = LocalDocReader::read(local_path);
+} else {
+    # throws WEBCRAWLER-UNSUPPORTED-SCHEME for sftp://, ftp://, or no scheme
+    WebCrawler::checkCrawlableScheme(source);
+    pages = WebCrawler::crawl(source);
+}
+        @endcode
+    */
+    static checkCrawlableScheme(string url) {
+        *string scheme;
+        try {
+            scheme = parse_url(url).protocol;
+        } catch (hash<ExceptionInfo> ex) {
+            throw "WEBCRAWLER-UNSUPPORTED-SCHEME",
+                sprintf("seed URL %y cannot be parsed: %s: %s", url, ex.err, ex.desc);
+        }
+        if (!scheme.val()) {
+            throw "WEBCRAWLER-UNSUPPORTED-SCHEME",
+                sprintf("seed URL %y has no scheme; the crawler fetches %y URLs "
+                    "only", url, (keys CrawlableSchemes));
+        }
+        if (!(CrawlableSchemes{scheme.lwr()} ?? False)) {
+            throw "WEBCRAWLER-UNSUPPORTED-SCHEME",
+                sprintf("seed URL %y uses scheme %y, which cannot be crawled; the "
+                    "crawler fetches %y URLs only%s", url, scheme,
+                    (keys CrawlableSchemes),
+                    scheme.lwr() == "file"
+                        ? " (use LocalDocReader for local documentation)" : "");
+        }
     }
 
     #! Returns True if the URL's path ends with a blocked extension
