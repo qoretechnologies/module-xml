@@ -52,8 +52,11 @@ export QORE_MODULE_DIR=${MODULE_SRC_DIR}/qlib:${QORE_MODULE_DIR}
 cd ${MODULE_SRC_DIR}
 for test in test/*.qtest; do
     # run with debugging enabled to catch @debug block parse errors
-    gosu qore:qore qore -p enable-debug $test -vv
-    RESULTS="$RESULTS $?"
+    # capture the status instead of letting it propagate: under "set -e" a failing
+    # test aborts the job immediately, which skips every later test file and makes
+    # the RESULTS check below unreachable
+    gosu qore:qore qore -p enable-debug $test -vv && rc=0 || rc=$?
+    RESULTS="$RESULTS $rc"
 done
 
 # check the results
