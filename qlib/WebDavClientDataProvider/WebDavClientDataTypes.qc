@@ -23,6 +23,7 @@ public class WebDavListRequestDataType inherits HashDataType {
             "depth": {
                 "display_name": "Depth",
                 "type": StringOrNothingType,
+                "short_desc": "How much of the directory tree to list",
                 "desc": "The depth of the listing: `0` for the resource only, `1` for "
                     "immediate children (default), `infinity` for all descendants",
                 "default_value": "1",
