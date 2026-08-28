@@ -738,8 +738,29 @@ return c.run();
                 return;
             }
 
-            if (resp.status_code != 200
-                    || resp.headers."content-type" !~ /text\/html/i) {
+            if (resp.status_code != 200) {
+                # A rejected fetch is a failure, not a silent skip.  Dropping it
+                # quietly made a whole crawl indistinguishable from a site with
+                # nothing to crawl: a server answering 400 to every request
+                # produced "0 crawled, 0 skipped, 0 failed" and no way to see
+                # why.  Reported through error_callback so callers count and
+                # log it exactly as they do a connection failure.
+                try {
+                    throw "WEBCRAWLER-HTTP-STATUS-ERROR",
+                        sprintf("HTTP %d received fetching %y (content-type %y)",
+                            resp.status_code, citem.url,
+                            resp.headers."content-type" ?? "<none>");
+                } catch (hash<ExceptionInfo> ex) {
+                    if (error_callback) {
+                        error_callback(citem.url, ex);
+                    }
+                }
+                return;
+            }
+            # A successful response that is not HTML is skipped without comment:
+            # images, archives and documents are linked from ordinary pages and
+            # are not failures.
+            if (resp.headers."content-type" !~ /text\/html/i) {
                 return;
             }
             # Phase C: enforce max response size
