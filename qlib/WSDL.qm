@@ -80,6 +80,34 @@ module WSDL {
     @section wsdlrelnotes WSDL Module Release Notes
 
     @subsection wsdl_0_5_8 WSDL v0.5.8
+    - added support for the XSD \c include statement
+    - fixed resolving relative \c schemaLocation values; they are now resolved against the location of the document
+      containing the reference and not against the location of the top-level WSDL
+    - fixed handling element \c ref attributes with no namespace prefix
+    - fixed handling element declarations with no type information; such elements now have type \c xs:anyType
+    - fixed handling \c simpleType \c union definitions with more than one anonymous member type definition
+    - fixed resolving \c simpleType \c restriction base types declared after the restricting type in the schema
+    - fixed serializing XSD attribute values; attribute values are now serialized according to their type like
+      element values, so dates, booleans, and binary values are written in their XSD representation
+    - fixed serializing \c xs:boolean values given as strings; \c "false" and \c "0" are now serialized as
+      \c "false" instead of \c "true"
+    - fixed handling \c complexType \c choice definitions declared with \c minOccurs="0"; such choices no longer
+      require a member to be present
+    - fixed a runtime error serializing a \c complexType \c choice with no member supplied; a descriptive
+      exception is now thrown if the choice is required
+    - fixed a runtime error retrieving the data provider type for a \c complexType \c choice definition
+    - fixed deserializing messages whose parts are split between the SOAP header and the SOAP body; the body parts
+      are now taken from the \c parts attribute of the \c soap:body element, or, if that attribute is not present,
+      from the message parts not bound to a SOAP header
+    - fixed reporting enumeration values for numeric, boolean, and date types; they were always reported as strings,
+      which also caused an error when retrieving the data provider type for such a type
+    - data provider types for scalar XSD types are now soft types (ex: \c softint), matching the values accepted
+      when serializing
+    - fixed the data provider type for \c xs:boolean; string values are now parsed according to the XSD boolean
+      lexical space, so that \c "false" and \c "0" are converted to @ref False "False"
+    - fixed generating example messages for \c complexType \c choice definitions and \c simpleType \c union
+      definitions
+      (<a href="https://github.com/qoretechnologies/qore/issues/5405">issue 5405</a>)
     - added support for async schema import caching for polling operations
     - extracted the XSD schema parsing infrastructure from \c WebService into a new public
       @ref WSDL::XsdSchema class so that bare XSD documents (for example, industry message
@@ -394,6 +422,58 @@ public class WSDLLib {
         return "file://" + path;
     }
 
+    #! returns @ref True "True" if the given location has a URL scheme (ex: \c "http://...")
+    /** @since %WSDL 0.5.8
+    */
+    static bool hasScheme(string location) {
+        return location =~ /^[a-zA-Z][-+.a-zA-Z0-9]*:\/\//;
+    }
+
+    #! returns the base location to use when resolving locations relative to the given location
+    /** @param location the location of a WSDL or XSD document
+
+        @return the directory of the given path, or, if the location is a URL, the URL with the last path component
+        removed
+
+        @since %WSDL 0.5.8
+    */
+    static string getLocationBase(string location) {
+        if (WSDLLib::hasScheme(location)) {
+            # only the path component of the URL may be truncated; the authority must be kept intact
+            (*string scheme, *string rest) = (location =~ x/^([a-zA-Z][-+.a-zA-Z0-9]*:\/\/)(.*)$/);
+            *string base = (rest =~ x/^(.*)\/[^\/]*$/)[0];
+            return exists base ? scheme + base : location;
+        }
+        return dirname(location);
+    }
+
+    #! resolves a possibly-relative location against a base location
+    /** relative locations in \c schemaLocation and \c location attributes must be resolved against the location of
+        the document containing the attribute and not against the location of the top-level WSDL document
+
+        @param location the location to resolve; if it has a URL scheme or is an absolute path, it is returned
+        unchanged
+        @param base the base location as returned by
+        @ref WSDL::WSDLLib::getLocationBase() "WSDLLib::getLocationBase()"; if not present, then \a location is
+        returned unchanged
+
+        @return the resolved location
+
+        @since %WSDL 0.5.8
+    */
+    static string resolveLocation(string location, *string base) {
+        if (!base || WSDLLib::hasScheme(location) || absolute_path(location)) {
+            return location;
+        }
+        if (WSDLLib::hasScheme(base)) {
+            # resolve relative to the base URL; only the path component of the URL may be normalized
+            (*string scheme, *string rest) = (base =~ x/^([a-zA-Z][-+.a-zA-Z0-9]*:\/\/)(.*)$/);
+            (*string authority, *string path) = (rest =~ x/^([^\/]*)(\/.*)?$/);
+            return scheme + authority + normalize_dir((path ?? "") + "/" + location, "/");
+        }
+        return normalize_dir(base + DirSep + location);
+    }
+
     #! retrieves a file from a URL with HTTP and returns the file's contents as a string
     /** called by WSDLLib::getFileFromURL() in case the scheme is "http"
     */
@@ -490,14 +570,17 @@ public class WSDLLib {
                 map path = replace(path, "\$" + $1, ENV.$1), (path =~ x/\$(\w+)/g);
 
                 if (def_path && !absolute_path(path)) {
-                    path = def_path + DirSep + path;
-                } else {
-                    new_def_path = dirname(path);
+                    path = normalize_dir(def_path + DirSep + path);
                 }
+                # the base location must always be updated, otherwise nested relative references in
+                # externally-referenced schemas are resolved against the wrong directory
+                new_def_path = dirname(path);
                 return WSDLLib::getFile(path, as_string);
             }
 
             case /^http(s)?$/:
+                # allow relative references in externally-referenced schemas to be resolved
+                new_def_path = WSDLLib::getLocationBase(url);
                 return WSDLLib::getHTTP(url, u.path, http_client, http_headers, as_string);
 
             default:
@@ -1054,6 +1137,33 @@ public class XsdAbstractType inherits WSDL::XsdNamedData {
     abstract AbstractDataProviderType getDataProviderType();
 }
 
+#! data provider type for \c xs:boolean values
+/** accepts any value that can be converted to a boolean, but converts string values according to the XSD boolean
+    lexical space, so that \c "false" and \c "0" are converted to @ref False "False"
+
+    @note a plain \c softbool type cannot be used for XSD booleans, because %Qore's boolean conversion converts any
+    non-empty string to @ref True "True", which would silently turn the XSD value \c "false" into \c "true"
+
+    @since %WSDL 0.5.8
+*/
+public class XsdBooleanDataType inherits QoreDataType {
+    constructor() : QoreDataType(SoftBoolType) {
+    }
+
+    auto acceptsValue(auto value) {
+        # parse string values according to the XSD boolean lexical space before the type conversion
+        if (value.typeCode() == NT_STRING) {
+            value = parse_boolean(value);
+        }
+        return QoreDataType::acceptsValue(value);
+    }
+}
+
+#! the data provider type for \c xs:boolean values
+/** @since %WSDL 0.5.8
+*/
+public const XsdBooleanType = new WSDL::XsdBooleanDataType();
+
 #! class for XSD base types
 public class XsdBaseType inherits WSDL::XsdAbstractType {
     public {
@@ -1172,7 +1282,9 @@ public class XsdBaseType inherits WSDL::XsdAbstractType {
                 break;
 
             case "boolean":
-                val = val ? "true" : "false";
+                # use parse_boolean() so that string values are interpreted according to their content; a simple
+                # boolean conversion would turn the string "false" into "true", as any non-empty string is True
+                val = parse_boolean(val) ? "true" : "false";
                 break;
 
             case "time":
@@ -1649,11 +1761,32 @@ public class XsdBaseType inherits WSDL::XsdAbstractType {
         }
     }
 
+    #! maps the strict scalar types to the soft equivalents used for data provider types
+    /** serialization accepts any value that can be converted to the target type, so a strict type would reject
+        values that @ref WSDL::XsdBaseType::serializeValue() "XsdBaseType::serializeValue()" handles
+    */
+    const SoftTypeMap = {
+        "int": SoftIntType,
+        "float": SoftFloatType,
+        "date": SoftDateType,
+        "string": SoftStringType,
+    };
+
     AbstractDataProviderType getDataProviderType() {
+        # XSD booleans need a type that parses string values according to the XSD boolean lexical space; a plain
+        # "softbool" would convert the string "false" to True
+        if (name == "boolean") {
+            return XsdBooleanType;
+        }
         Type type = getDataProviderBaseType();
-        return AbstractDataProviderType::get(type);
+        return AbstractDataProviderType::get(SoftTypeMap{type.getName()} ?? type);
     }
 
+    #! returns the %Qore type closest to the XSD type
+    /** @note this returns the strict %Qore type; the data provider type returned by
+        @ref WSDL::XsdBaseType::getDataProviderType() "XsdBaseType::getDataProviderType()" is a soft type, because
+        serialization accepts any value convertible to the target type
+    */
     Type getDataProviderBaseType() {
         switch (name) {
             case "byte":
@@ -1928,6 +2061,22 @@ public class XsdAttribute inherits WSDL::XsdTypedData {
     auto getValue(string val) {
         return type.deserializeValue(name, new hash<string, XsdAbstractType>(), NOTHING, val);
     }
+
+    #! returns the attribute value serialized according to the attribute's type
+    /** attribute values must be converted like element values; otherwise dates, booleans, and binary values are
+        written to the XML message in Qore's default string representation instead of in their XSD representation
+
+        @param nsc the namespace container for the message being serialized
+        @param val the attribute value to serialize
+
+        @return the serialized attribute value
+
+        @since %WSDL 0.5.8
+    */
+    auto serializeAttributeValue(Namespaces nsc, auto val) {
+        # the type is not resolved for attributes declared with a "ref" attribute
+        return type ? type.serializeValue(nsc, val, True) : val;
+    }
 }
 
 #! XSD element class
@@ -1988,10 +2137,21 @@ public class XsdElement inherits WSDL::XsdTypedData {
             if (type.isNillable() && !exists a.nillable)
                 nillable = True;
         } else if (e."^attributes^".ref) {
+            # references without a namespace prefix refer to the default namespace
+            string ref_str = e."^attributes^".ref;
+            *string ref_pfx;
+            (ref_pfx, ref) = (ref_str =~ x/^([^:]+):(.+)$/);
+            if (!exists ref) {
+                ref = ref_str;
+            }
             # issue #2786: must resolve ns prefixes immediately as with late resolution the context may be different
-            (ref_ns, ref) = (e."^attributes^".ref =~ x/^([^:]*):(.*)$/);
-            ref_ns = nsc.getNamespaceUri(ref_ns);
+            ref_ns = exists ref_pfx
+                ? nsc.getNamespaceUri(ref_pfx)
+                : (nsc.getDefaultNs() ?? nsc.getTargetNamespaceUri());
             unresolved.add(self);
+        } else {
+            # an element declaration with no type information at all has type "xs:anyType"
+            type = nsc.getBaseType("anyType");
         }
     }
 
@@ -2331,8 +2491,10 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
                 }
             }
             WSDL::XsdBase::removeNS(\u);
-            if (u.simpleType) {
-                unionTypes += new XsdSimpleType(u.simpleType, nsc, unresolved, n_usedocns);
+            # a union can have any number of anonymous simpleType member definitions
+            foreach hash<auto> ust in (u.simpleType) {
+                unionTypes += new XsdSimpleType(ust, nsc, unresolved, n_usedocns,
+                    sprintf("simpleType %d for union simpleType %y", $# + 1, name));
             }
 
             if (union) {
@@ -2380,7 +2542,25 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
     }
 
     *list<auto> getAllowedValues() {
-        return keys enumValues;
+        if (!enumValues) {
+            return;
+        }
+        # enumeration values are stored as hash keys and are therefore always strings; convert them to the value
+        # type of the restricted type, otherwise numeric, boolean, and date enumerations are reported as strings
+        return map getEnumValue($1), keys enumValues;
+    }
+
+    #! returns the enumeration value converted to the value type of the restricted type
+    private auto getEnumValue(string val) {
+        if (!type) {
+            return val;
+        }
+        try {
+            return type.deserializeValue(name, new hash<string, XsdAbstractType>(), NOTHING, val);
+        } catch (hash<ExceptionInfo> ex) {
+            # if the enumeration value cannot be converted, then report it as declared in the schema
+            return val;
+        }
     }
 
     auto serializeValue(Namespaces nsc, auto val, *softbool omitType) {
@@ -3060,6 +3240,12 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
             cx_type = XET_CHOICE;
             WSDL::XsdBase::removeNS(\d.choice);
             elementmap = parseElements(d.choice.element, unresolved, nsc);
+            # parseElements() derives "required" from the choice members, but that only says whether a member
+            # requires a value if the choice is serialized at all; whether the choice itself must be present is
+            # given by the "minOccurs" attribute of the choice
+            if (exists d.choice."^attributes^".minOccurs && !d.choice."^attributes^".minOccurs.toInt()) {
+                required = requires_value = False;
+            }
             # Handle group references in choice
             parseGroupReferences(\d.choice, unresolved, nsc);
         } else if (k == "sequence") {
@@ -3145,6 +3331,13 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
         }
     }
 
+    #! returns @ref True "True" if the complexType is a choice, in which case only one element may be serialized
+    /** @since %WSDL 0.5.8
+    */
+    bool isChoice() {
+        return cx_type == XET_CHOICE;
+    }
+
     bool isNillable() {
         return nillable;
     }
@@ -3208,9 +3401,21 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
                 return rv;
             }
 
+            case XET_CHOICE: {
+                HashDataType rv(name);
+                # at most one member of a choice may be present, therefore all members must be optional
+                map rv.addField(new QoreDataField($1.key, NOTHING,
+                    $1.value.getDataProviderType().getOrNothingType(), NOTHING, $1.value.getAllowedValues())),
+                    elementmap.pairIterator();
+                return rv;
+            }
+
             case XET_NONE:
                 return AbstractDataProviderType::get(AbstractDataProviderType::nothingType);
         }
+
+        # complexTypes with no recognized content model accept any value
+        return AbstractDataProviderType::get(AbstractDataProviderType::anyType);
     }
 
     private *hash<auto> serializeElement(Namespaces nsc, string key, XsdElement element, auto h, *softbool omitType) {
@@ -3254,7 +3459,9 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
                         throw SOAP_SERIALIZATION_ERROR, sprintf("cannot set attribute %y of element %y; the WSDL "
                             "marks this attribute as prohibited", k, getName());
                     }
-                    ah{k} = mah{k};
+                    # attribute values must be serialized according to their type like element values; a missing
+                    # value is left untouched so that the check for required attributes below still catches it
+                    ah{k} = exists mah{k} ? attrs{k}.serializeAttributeValue(nsc, mah{k}) : mah{k};
                 }
             }
             # check for required attributes
@@ -3332,7 +3539,27 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
                         keys hch, getName());
                 }
             } else { # "choice" - union
-                rh = serializeChoice(nsc, elementmap, h, omitType, False);
+                # when generating example messages all choices are generated in a "^choices^" tag
+                *hash<auto> hch;
+                foreach string k in (keys h) {
+                    if (k =~ /^\^choices/) {
+                        hch += remove h{k};
+                    }
+                }
+                if (!h && !hch) {
+                    # no member of the choice was supplied; this is only an error if the choice is required
+                    if (required) {
+                        throw SOAP_SERIALIZATION_ERROR, sprintf("expecting one of %y to serialize choice / union "
+                            "in complexType %y but no such keys were supplied", elementmap.keys(), getName());
+                    }
+                } else {
+                    if (h) {
+                        rh += serializeChoice(nsc, elementmap, h, omitType, False);
+                    }
+                    if (hch) {
+                        rh += serializeChoice(nsc, elementmap, hch, omitType, True);
+                    }
+                }
             }
         } else { # "none"
             rh."^value^" = NOTHING;
@@ -3354,7 +3581,7 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
         return rh;
     }
 
-    private hash<auto> serializeChoice(Namespaces nsc, hash<string, XsdElement> emap, hash<auto> h,
+    private *hash<auto> serializeChoice(Namespaces nsc, hash<string, XsdElement> emap, hash<auto> h,
             *softbool omitType, bool all_members) {
         # normally there is only one choice but we also need output example message where all options are enumerated
         if (!all_members && elements h > 1)
@@ -3489,7 +3716,8 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
                     }
                 }
             } else { # "choice" - union
-                rh += parseChoice(val, elementmap, en, tmap, mrh, True);
+                # a choice declared with minOccurs = 0 does not have to have a member present
+                rh += parseChoice(val, elementmap, en, tmap, mrh, required);
             }
         }
 
@@ -4115,7 +4343,18 @@ public class WSMessage inherits WSDL::XsdNamedData {
         return ro;
     }
 
-    *hash<auto> deserializeDocument(*hash<auto> mrh, auto val, *string parts) {
+    #! deserializes the given message parts from a document-style message
+    /** @param mrh any multiRef hash for the message
+        @param val the message data
+        @param parts the names of the parts to deserialize; if not present, then all parts of the message are
+        deserialized
+        @param ignore_unknown if @ref True "True", then keys in \a val that do not correspond to a part being
+        deserialized are ignored; if not present, then unknown keys are ignored only if \a parts is given, for
+        backwards compatibility with SOAP header deserialization
+
+        @return a hash of deserialized part values keyed by part name
+    */
+    *hash<auto> deserializeDocument(*hash<auto> mrh, auto val, *softlist<string> parts, *bool ignore_unknown) {
         hash<auto> rh;
 
         *hash<auto> attr = remove val."^attributes^";
@@ -4146,7 +4385,7 @@ public class WSMessage inherits WSDL::XsdNamedData {
             }
         }
 
-        if (val && !exists parts)
+        if (val && !(ignore_unknown ?? exists parts))
             throw SOAP_DESERIALIZATION_ERROR, sprintf("additional keys %y included in %y message hash", val.keys(), name);
 
         #printf("DBG WSMessage::deserializeDocument() args: %y val: %y\nRH: %y\n", args.keys(), val, rh);
@@ -4677,7 +4916,9 @@ public class SoapBinding inherits WSDL::OperationalBinding {
             #any ns = msgh.".ns";
             msgh -= ("ns", ".ns");
             if (docstyle) {
-                rv = msg.deserializeDocument(mrh, msgh);
+                # only the parts appearing in the SOAP body may be deserialized from it; parts bound to SOAP
+                # headers are deserialized above
+                rv = msg.deserializeDocument(mrh, msgh, bmd.getBodyPartNames(msg), False);
             } else {
                 string mname = (request ? op.output_name : op.input_name) ?? (op.name + (request ? "" : "Response"));
                 if (!msgh{mname})
@@ -5281,6 +5522,32 @@ public class BindingMessageDescription inherits Serializable {
     #! returns a list of WSDL::BindingMessageHeaderDescription objects
     list<BindingMessageHeaderDescription> getHeaders() {
         return headers;
+    }
+
+    #! returns the names of the message parts that appear in the SOAP body
+    /** if the \c parts attribute is given in the \c soap:body element, then it determines the body parts, otherwise
+        all parts of the message that are not bound to a SOAP header appear in the body
+
+        @param msg the message bound to this description
+
+        @return the names of the parts appearing in the SOAP body, or @ref nothing if all parts of the message
+        appear in the body
+
+        @see https://www.w3.org/TR/wsdl#_soap:body
+
+        @since %WSDL 0.5.8
+    */
+    *list<string> getBodyPartNames(WSMessage msg) {
+        if (body.parts) {
+            return map $1, body.parts;
+        }
+        # parts bound to a header of the same message do not appear in the body
+        hash<string, bool> hdr_parts;
+        map hdr_parts{$1.part} = True, headers, $1.msg.name == msg.name;
+        if (!hdr_parts) {
+            return;
+        }
+        return select keys msg.pmap, !hdr_parts{$1};
     }
 
     setUrlReplacement(string loc) {
@@ -6674,11 +6941,15 @@ public class XsdSchema inherits WSDL::XsdBase {
             return;
         }
         # Handle union type resolution
-        if (!t.union) {
+        if (t.union) {
+            foreach hash<auto> typeinfo in (t.union) {
+                t.unionTypes += resolveType(typeinfo);
+            }
+        } else if (t.typeinfo) {
+            # resolve simpleTypes restricting a base type declared later in the schema
+            t.type = resolveType(t.typeinfo);
+        } else {
             throw "WSDL-TYPE-ERROR", sprintf("cannot resolve simpleType: %y type %y", t.name, t.typeinfo);
-        }
-        foreach hash<auto> typeinfo in (t.union) {
-            t.unionTypes += resolveType(typeinfo);
         }
         t.finalizeResolved();
     }
@@ -6736,6 +7007,88 @@ public class XsdSchema inherits WSDL::XsdBase {
         return rv;
     }
 
+    #! parses an XSD schema referenced by an \c import or \c include statement
+    /** @param schema_location the value of the \c schemaLocation attribute
+        @param namespace_uri the target namespace to use for the external schema if it does not declare one itself
+        @param nph the namespace prefix helper for the schema making the reference (for error messages)
+        @param http_client an optional HTTPClient object to use to retrieve external schemas
+        @param http_headers any HTTP headers to send with requests when retrieving external schemas
+    */
+    private parseExternalSchema(string schema_location, *string namespace_uri, NamespacePrefixHelper nph,
+            auto http_client, auto http_headers) {
+        # relative locations must be resolved against the location of the referencing document and not
+        # against the location of the top-level WSDL document
+        string loc = WSDLLib::resolveLocation(schema_location, def_path);
+
+        bool async_only = opts.async_only ?? False;
+        *hash<auto> xsd_cache = opts.xsd_cache;
+        # the async cache key must be a location that the poller can fetch directly
+        string cache_key = async_only ? WSDLLib::normalizeLocation(loc, "file", NOTHING) : loc;
+
+        # issue #4449: do not process the same schema more than once
+        if (import_map{cache_key}) {
+            return;
+        }
+        import_map{cache_key} = True;
+
+        # the base location for locations relative to the external schema
+        *string new_def_path;
+        string xsd;
+        hash<auto> h = parse_url(loc);
+        if (async_only) {
+            if (xsd_cache && exists xsd_cache{cache_key}) {
+                xsd = xsd_cache{cache_key};
+            } else {
+                throw "WSDL-ASYNC-IMPORT", sprintf("missing async import %y", cache_key), cache_key;
+            }
+            new_def_path = WSDLLib::getLocationBase(loc);
+        } else if (!h.protocol && try_import) {
+            xsd = call_function(try_import, schema_location);
+            new_def_path = def_path;
+        } else {
+            xsd = WSDLLib::getFileFromURL(loc, "file", http_client, http_headers, NOTHING, NOTHING, \new_def_path);
+            if (!new_def_path) {
+                new_def_path = WSDLLib::getLocationBase(loc);
+            }
+        }
+
+        # parse XML to Qore data structure ignoring XML element order
+        hash<auto> xh = parse_xml(xsd);
+
+        # parse namespace definitions in schema attributes
+        if (xh.size() != 1) {
+            throw WSDL_ERROR, sprintf("%s: expecting a single element indicating an XSD schema in %y; got instead: "
+                "%y", nph.getDesc(), schema_location, xh.keys());
+        }
+
+        # get schema member name
+        string sk = xh.firstKey();
+
+        # use temporary Namespaces object for the external schema
+        Namespaces n_nsc = nsc;
+        nsc = new Namespaces(xh{sk}."^attributes^", n_nsc, namespace_uri);
+        on_exit
+            nsc = n_nsc;
+        on_success
+            n_nsc.merge(nsc);
+
+        # verify that the top-level key indicates an XSD schema definition
+        (*string ns, *string mem) = (sk =~ x/^([^:]+):([^:]+)$/);
+        if (ns && !nsc.isSchema(ns)) {
+            throw WSDL_ERROR, sprintf("%s: expecting the schema definition in %y to be in XSD namespace %y, got "
+                "%y: %y instead", nph.getDesc(), schema_location, XSD_NS, ns, nsc.getInputNamespaceUri(ns));
+        }
+
+        # nested relative locations are resolved against the location of the external schema
+        *string old_def_path = def_path;
+        def_path = new_def_path;
+        on_exit
+            def_path = old_def_path;
+
+        # HTTP info must be passed on when parsing nested schemas
+        parseTypes(xh, http_client, http_headers);
+    }
+
     # parse XSD schema types
     private parseTypes(*hash<auto> data, auto http_client, auto http_headers) {
         #printf("DEBUG: parseTypes data: %y, http_client: %y, http_headers: %y\n", keys data, http_client, http_headers);
@@ -6761,62 +7114,17 @@ public class XsdSchema inherits WSDL::XsdBase {
                 *hash<auto> a = import."^attributes^";
                 # import file
                 if (a.schemaLocation) {
-                    bool async_only = opts.async_only ?? False;
-                    *hash<auto> xsd_cache = opts.xsd_cache;
-                    string cache_key = a.schemaLocation;
-                    if (async_only) {
-                        cache_key = WSDLLib::normalizeLocation(a.schemaLocation, "file", def_path);
-                    }
-                    # issue #4449: do not import the same schema more than once
-                    if (import_map{cache_key}) {
-                        continue;
-                    }
-                    import_map{cache_key} = True;
-                    hash<auto> h = parse_url(a.schemaLocation);
-                    string xsd;
-                    if (async_only) {
-                        if (xsd_cache && exists xsd_cache{cache_key}) {
-                            xsd = xsd_cache{cache_key};
-                        } else {
-                            throw "WSDL-ASYNC-IMPORT", sprintf("missing async import %y", cache_key), cache_key;
-                        }
-                    } else if (!h.protocol && try_import) {
-                        xsd = call_function(try_import, a.schemaLocation);
-                    } else {
-                        xsd = WSDLLib::getFileFromURL(a.schemaLocation, "file", http_client, http_headers, NOTHING,
-                            def_path);
-                    }
+                    parseExternalSchema(a.schemaLocation, a."namespace", nph, http_client, http_headers);
+                }
+            }
 
-                    # parse XML to Qore data structure ignoring XML element order
-                    hash<auto> xh = parse_xml(xsd);
-
-                    # parse namespace definitions in schema attributes
-                    if (xh.size() != 1)
-                        throw WSDL_ERROR, sprintf("%s: expecting a single element indicating an XSD schema in the "
-                            "imported file; got instead: %y", nph.getDesc(), xh.keys());
-
-                    # get schema member name
-                    string sk = xh.firstKey();
-
-                    #printf("*** DEBUG %y: sk: %y a: %y\n", a.schemaLocation, sk, xh{sk}."^attributes^");
-
-                    # use temporary Namespaces object for import
-                    Namespaces n_nsc = nsc;
-                    nsc = new Namespaces(xh{sk}."^attributes^", n_nsc, a."namespace");
-                    on_exit
-                        nsc = n_nsc;
-                    on_success
-                        n_nsc.merge(nsc);
-
-                    # verify that the top-level key indicates an XSD schema definition
-                    (*string ns, *string mem) = (sk =~ x/^([^:]+):([^:]+)$/);
-                    if (ns && !nsc.isSchema(ns)) {
-                        throw WSDL_ERROR, sprintf("%s: expecting imported schema definition to be in XSD namespace %y, "
-                            "got %y: %y instead", nph.getDesc(), XSD_NS, ns, nsc.getInputNamespaceUri(ns));
-                    }
-
-                    parseTypes(xh);
-                    continue;
+            # process XSD include if present; included schemas have no namespace of their own; they
+            # inherit the target namespace of the including schema
+            foreach hash<auto> inc in (schema.include) {
+                *hash<auto> a = inc."^attributes^";
+                if (a.schemaLocation) {
+                    parseExternalSchema(a.schemaLocation, nsc.getTargetNamespaceUri(), nph, http_client,
+                        http_headers);
                 }
             }
 
@@ -7373,10 +7681,19 @@ public class WSMessageHelper {
                     "value": "abc",
                 };
                 break;
+            # note: the XSD type is "anyURI"; "anyUri" is accepted as well for backwards compatibility
             case "anyUri":
+            case "anyURI":
                 res += {
                     "type": "string",
                     "value": "http://www.qore.com",
+                };
+                break;
+            case "anyType":
+            case "anySimpleType":
+                res += {
+                    "type": "string",
+                    "value": "abc",
                 };
                 break;
             case "byte":
@@ -7474,6 +7791,10 @@ public class WSMessageHelper {
                 }
                 res.comment = sprintf("Enum: %s",  (keys t.enumValues).join(','));
             }
+        } else if (t.unionTypes) {
+            # union types have no single base type; use the first member type for the example value
+            res = getTypeInfo(t.unionTypes[0]);
+            res.xtype = t.name;
         } else {
             res.xtype = t.name;
         }
@@ -7511,8 +7832,23 @@ public class WSMessageHelper {
                 val = {};
                 if (elem.type instanceof XsdComplexType) {
                     XsdComplexType ct = cast<XsdComplexType>(elem.type);
-                    foreach string name2 in (keys ct.elementmap) {
-                        val += getMessage(ct.elementmap{name2});
+                    if (ct.isChoice()) {
+                        # the complexType is a choice itself; only one of its members may be serialized
+                        if (opts.choices) {
+                            hash<auto> ch;
+                            foreach string name2 in (keys ct.elementmap) {
+                                ch += getMessage(ct.elementmap{name2},
+                                    opts.comments ? sprintf("choice[%d]", $# + 1) : NOTHING);
+                            }
+                            val."^choices1^" = ch;
+                        } else if (ct.elementmap) {
+                            val += getMessage(ct.elementmap.firstValue(),
+                                opts.comments ? sprintf("choice[1/%d]", ct.elementmap.size()) : NOTHING);
+                        }
+                    } else {
+                        foreach string name2 in (keys ct.elementmap) {
+                            val += getMessage(ct.elementmap{name2});
+                        }
                     }
                     foreach hash<ChoiceInfo> choice in (ct.choices) {
                         if (opts.choices) {
