@@ -546,6 +546,9 @@ class SoapTest inherits QUnit::Test {
 
     constructor() : QUnit::Test("SoapTest", "1.0") {
         addTestCase("SoapDataProvider tests", \soapDataProviderTest());
+        addTestCase("XSD include", \xsdIncludeTest());
+        addTestCase("attributes and choices", \attributeAndChoiceTest());
+        addTestCase("header and body message parts", \headerPartsTest());
         addTestCase("issue 4449", \issue4449());
         addTestCase("issue 3029", \issue3029());
         addTestCase("WSDLLib", \wsdlLibTest());
@@ -573,6 +576,269 @@ class SoapTest inherits QUnit::Test {
             AbstractDataField test = req.getField("test");
             assertEq(NT_STRING, test.getType().getBaseTypeCode());
             assertEq(("test", "other"), map $1.value, test.getAllowedValues());
+        }
+    }
+
+    #! tests XSD "include" support and location resolution relative to the referencing document
+    /** the test WSDL references its schemas as follows:
+        - \c wsdl/include-test.wsdl imports \c ../schemas/include-test.xsd
+        - \c schemas/include-test.xsd includes \c types/include-test-types.xsd
+
+        the location in the second reference is relative to the schema making it and not to the WSDL, so it can only
+        be resolved if the base location is updated for each document
+    */
+    xsdIncludeTest() {
+        # location resolution helpers
+        assertEq("/base/schemas/types/a.xsd", WSDLLib::resolveLocation("types/a.xsd", "/base/schemas"));
+        assertEq("/base/schemas/a.xsd", WSDLLib::resolveLocation("../schemas/a.xsd", "/base/wsdl"));
+        # absolute locations and locations with a scheme are not resolved against the base
+        assertEq("/abs/a.xsd", WSDLLib::resolveLocation("/abs/a.xsd", "/base/wsdl"));
+        assertEq("http://h/a.xsd", WSDLLib::resolveLocation("http://h/a.xsd", "/base/wsdl"));
+        # relative locations are also resolved against URL bases
+        assertEq("http://h/dir/types/a.xsd", WSDLLib::resolveLocation("types/a.xsd", "http://h/dir"));
+        assertEq("http://h/a/s/a.xsd", WSDLLib::resolveLocation("../s/a.xsd", "http://h/a/b"));
+        assertEq("http://h/a.xsd", WSDLLib::resolveLocation("a.xsd", "http://h"));
+        # with no base location the location is returned unchanged
+        assertEq("a.xsd", WSDLLib::resolveLocation("a.xsd"));
+
+        assertEq("/a/b", WSDLLib::getLocationBase("/a/b/c.xsd"));
+        assertEq("http://h/a/b", WSDLLib::getLocationBase("http://h/a/b/c.xsd"));
+        assertEq("http://h", WSDLLib::getLocationBase("http://h/c.xsd"));
+        # a URL with no path component must be returned unchanged
+        assertEq("http://h", WSDLLib::getLocationBase("http://h"));
+
+        string wsdl_path = get_script_dir() + "/wsdl-include/wsdl/include-test.wsdl";
+        WebService ws = WSDLLib::getWebServiceFromUrl(wsdl_path);
+
+        assertEq(("Create",), ws.getOperationNames());
+        WSOperation op = ws.getOperation("Create");
+
+        # "idType" and "statusType" are declared in the included schema; the elements using them are declared in the
+        # including schema, so the request can only be serialized if the include was processed
+        hash<auto> req = {
+            "createUser": {
+                "userId": "user-1",
+                "status": "ERASE",
+                "extra": "additional info",
+            },
+        };
+        hash<auto> h = op.serializeRequest(req, NOTHING, NOTHING, NOTHING, XGF_ADD_FORMATTING);
+        assertEq(Type::String, h.body.type());
+
+        # parse_xml() throws an exception if a namespace prefix used in the message is not declared in the envelope
+        hash<auto> xh = parse_xml(h.body);
+        assertEq(req, op.deserializeRequest(xh));
+
+        # verify that every namespace prefix used in the body is declared in the envelope
+        NsMap nsmap();
+        hash<auto> env = xh.firstValue();
+        map nsmap.set(($1 =~ x/^xmlns:(.*)$/)[0], env."^attributes^"{$1}),
+            keys env."^attributes^", $1 =~ /^xmlns:/;
+        checkPrefixesDeclared(env, nsmap);
+
+        # the union simpleType has two anonymous member types: an enumerated string and an int
+        hash<auto> h2 = op.serializeRequest(req + {"createUser": req.createUser + {"status": 42}});
+        assertEq(req.createUser.userId, op.deserializeRequest(parse_xml(h2.body)).createUser.userId);
+
+        # values accepted by no union member type cannot be serialized; the value below is neither in the
+        # enumeration of the first member type nor in the value range of the second ("xs:int")
+        assertThrows("SOAP-SERIALIZATION-ERROR", "union types",  \op.serializeRequest(),
+            (req + {"createUser": req.createUser + {"status": 4294967296}},));
+
+        # unknown elements are rejected
+        assertThrows("SOAP-SERIALIZATION-ERROR", \op.serializeRequest(),
+            (req + {"createUser": req.createUser + {"nosuchelement": "x"}},));
+
+        # example messages can be generated for all types used in the WSDL
+        WSMessageHelper mh(ws);
+        hash<auto> ex = mh.getMessage(op.input);
+        assertEq(Type::String, ex.Create.createUser.userId.type());
+        # the example value for a union type comes from its first member type
+        assertEq("ERASE", ex.Create.createUser.status);
+        # the example value for an element with no type declaration ("xs:anyType") is a string
+        assertEq(Type::String, ex.Create.createUser.extra.type());
+
+        # a reference to a schema that cannot be retrieved fails with an exception naming the resolved location,
+        # which verifies that the relative location was resolved against the location of the referencing document
+        assertThrows("FILE-OPEN2-ERROR", "wsdl-include/schemas/missing.xsd", sub () {
+            new WebService(replace(ReadOnlyFile::readTextFile(wsdl_path), "../schemas/include-test.xsd",
+                "../schemas/missing.xsd"), {"def_path": dirname(wsdl_path)});
+        });
+    }
+
+    #! tests attribute value serialization and \c choice complexType handling
+    attributeAndChoiceTest() {
+        WebService ws = WSDLLib::getWebServiceFromUrl(get_script_dir() + "/attr-choice.wsdl");
+        WSOperation op = ws.getOperation("Op");
+
+        hash<auto> req = {
+            "stamped": {
+                "^attributes^": {
+                    "when": 2015-01-31T10:20:30,
+                    "active": False,
+                    "raw": <abcd>,
+                },
+                "data": "x",
+            },
+            # a string value for an xs:boolean element must be parsed and not simply converted
+            "flag": "false",
+            "required-choice": {"a": "one"},
+            # an optional choice with no member supplied
+            "optional-choice": {},
+        };
+
+        hash<auto> h = op.serializeRequest(req, NOTHING, NOTHING, NOTHING, XGF_ADD_FORMATTING);
+        hash<auto> body = parse_xml(h.body).firstValue()."soapenv:Body"."ns:Req";
+
+        # attribute values must be written in their XSD representation and not in Qore's default representation
+        hash<auto> attrs = body."ns:stamped"."^attributes^";
+        assertEq("2015-01-31T10:20:30", attrs.when);
+        assertEq("false", attrs.active);
+        assertEq(make_base64_string(<abcd>), attrs.raw);
+
+        # "false" must not be serialized as "true" just because it is a non-empty string
+        assertEq("false", body."ns:flag");
+
+        # only the choice member supplied is serialized
+        assertEq(("ns:a",), keys body."ns:required-choice");
+
+        # values round-trip back to their Qore types
+        hash<auto> rt = op.deserializeRequest(parse_xml(h.body));
+        assertEq(2015-01-31T10:20:30, rt.stamped."^attributes^".when);
+        assertEq(False, rt.stamped."^attributes^".active);
+        assertEq(<abcd>, rt.stamped."^attributes^".raw);
+        assertEq(False, rt.flag);
+        assertEq({"a": "one"}, rt."required-choice");
+
+        # all the accepted boolean representations
+        foreach hash<auto> i in ((
+            {"in": True, "out": "true"},
+            {"in": False, "out": "false"},
+            {"in": "true", "out": "true"},
+            {"in": "false", "out": "false"},
+            {"in": "1", "out": "true"},
+            {"in": "0", "out": "false"},
+        )) {
+            hash<auto> bh = op.serializeRequest(req + {"flag": i.in});
+            assertEq(i.out, parse_xml(bh.body).firstValue()."soapenv:Body"."ns:Req"."ns:flag",
+                sprintf("boolean %y serializes as %y", i.in, i.out));
+        }
+
+        # a required choice with no member supplied must raise a descriptive error and not a runtime type error
+        assertThrows("SOAP-SERIALIZATION-ERROR", "no such keys were supplied", \op.serializeRequest(),
+            (req + {"required-choice": {}},));
+
+        # more than one member of a choice cannot be serialized
+        assertThrows("SOAP-SERIALIZATION-ERROR", "more than 1 member", \op.serializeRequest(),
+            (req + {"required-choice": {"a": "one", "b": "two"}},));
+
+        # members not belonging to the choice are rejected
+        assertThrows("SOAP-SERIALIZATION-ERROR", \op.serializeRequest(),
+            (req + {"required-choice": {"z": "one"}},));
+
+        # unknown attributes are rejected
+        assertThrows("SOAP-SERIALIZATION-ERROR", "unknown attribute", \op.serializeRequest(),
+            (req + {"stamped": req.stamped + {"^attributes^": req.stamped."^attributes^" + {"bogus": 1}}},));
+
+        # required attributes must be supplied
+        assertThrows("SOAP-SERIALIZATION-ERROR", "required", \op.serializeRequest(),
+            (req + {"stamped": req.stamped + {"^attributes^": req.stamped."^attributes^" - "when"}},));
+
+        # a data provider type can be retrieved for a "choice" complexType; all its members are optional
+        SoapDataProvider provider(ws);
+        AbstractDataProvider p0 = provider.getChildProviderPath("Op");
+        HashDataType rt0 = cast<HashDataType>(p0.getRequestType().getField("parameters").getType());
+        AbstractDataProviderType ct = rt0.getField("required-choice").getType();
+        assertEq(("a", "b"), keys ct.getFields());
+        map assertTrue(ct.getField($1).getType().isOrNothingType(),
+            sprintf("choice member %y is optional", $1)), keys ct.getFields();
+
+        # scalar types are reported as soft types, because serialization accepts any convertible value
+        assertEq(NT_BOOLEAN, rt0.getField("flag").getType().getBaseTypeCode());
+        assertTrue(rt0.getField("flag").getType().getName() =~ /^\*?soft/);
+
+        # xs:boolean values must be parsed according to the XSD boolean lexical space; a plain "softbool" type
+        # converts the string "false" to True, since any non-empty string is True in Qore
+        AbstractDataProviderType bt = rt0.getField("flag").getType();
+        assertEq(False, bt.acceptsValue("false"));
+        assertEq(False, bt.acceptsValue("0"));
+        assertEq(True, bt.acceptsValue("true"));
+        assertEq(True, bt.acceptsValue("1"));
+        assertEq(False, bt.acceptsValue(False));
+        assertEq(True, bt.acceptsValue(True));
+        # the "or nothing" variant of the type must behave identically
+        assertEq(False, bt.getOrNothingType().acceptsValue("false"));
+        assertEq(True, bt.getOrNothingType().acceptsValue("true"));
+        # "xs:int" and "xs:double" had no mapping at all and were reported as "any"
+        assertEq(NT_INT, rt0.getField("count").getType().getBaseTypeCode());
+        assertEq(NT_FLOAT, rt0.getField("ratio").getType().getBaseTypeCode());
+
+        # enumeration values are reported with the value type of the restricted type and not as strings
+        assertEq(NT_INT, rt0.getField("code").getType().getBaseTypeCode());
+        assertEq((1, 3), map $1.value, rt0.getField("code").getAllowedValues());
+        assertEq((1, 3), ws.getOperation("Op").input.args.Req.element.type.elementmap.code.getAllowedValues());
+
+        # values convertible to the declared type are accepted
+        hash<auto> nh = op.serializeRequest(req + {"count": "42", "ratio": "1.5", "code": "3"});
+        hash<auto> nb = parse_xml(nh.body).firstValue()."soapenv:Body"."ns:Req";
+        assertEq("42", nb."ns:count");
+        assertEq("1.5", nb."ns:ratio");
+        assertEq("3", nb."ns:code");
+        hash<auto> nrt = op.deserializeRequest(parse_xml(nh.body));
+        assertEq(42, nrt.count);
+        assertEq(1.5, nrt.ratio);
+        assertEq(3, nrt.code);
+
+        # values not in the enumeration are rejected
+        assertThrows("SOAP-SERIALIZATION-ERROR", "enumeration", \op.serializeRequest(),
+            (req + {"code": 2},));
+    }
+
+    #! tests messages whose parts are split between the SOAP header and the SOAP body
+    /** the parts appearing in the body are given by the \c parts attribute of the \c soap:body element; if that
+        attribute is not present, then all parts of the message not bound to a SOAP header appear in the body
+    */
+    headerPartsTest() {
+        WebService ws = WSDLLib::getWebServiceFromUrl(get_script_dir() + "/header-parts.wsdl");
+
+        # "OpExplicit" names the body parts in the soap:body element, "OpImplicit" does not
+        foreach string opname in (("OpExplicit", "OpImplicit")) {
+            WSOperation op = ws.getOperation(opname);
+            hash<auto> h = op.serializeRequest({"Req": {"a": "body-value"}}, {"SessionId": "sess-1"});
+            hash<auto> env = parse_xml(h.body).firstValue();
+
+            # the header part goes in the SOAP header and the body part in the SOAP body
+            assertEq(("ns:SessionId",), keys env."soapenv:Header", opname + ": header parts");
+            assertEq(("ns:Req",), keys env."soapenv:Body", opname + ": body parts");
+
+            # the body must be deserialized without requiring the header-bound part to be present in it
+            hash<auto> rt = op.deserializeRequest(parse_xml(h.body));
+            assertEq("body-value", rt.a, opname + ": body value");
+            assertEq("sess-1", rt.ReqM.SessionId, opname + ": header value");
+        }
+
+        # elements in the body that are not body parts are still rejected
+        WSOperation op = ws.getOperation("OpExplicit");
+        hash<auto> h = op.serializeRequest({"Req": {"a": "body-value"}}, {"SessionId": "sess-1"});
+        hash<auto> xh = parse_xml(h.body);
+        string env_key = xh.firstKey();
+        xh{env_key}."soapenv:Body"."ns:Bogus" = "x";
+        assertThrows("SOAP-DESERIALIZATION-ERROR", "additional keys", \op.deserializeRequest(), xh);
+    }
+
+    #! asserts that all namespace prefixes used in element names in \a h are declared in \a nsmap
+    private checkPrefixesDeclared(hash<auto> h, NsMap nsmap) {
+        foreach string key in (keys h) {
+            if (key =~ /^\^/) {
+                continue;
+            }
+            *string prefix = (key =~ x/^([^:]+):/)[0];
+            if (prefix) {
+                assertTrue(exists nsmap.pmap{prefix}, sprintf("prefix %y in element %y is declared", prefix, key));
+            }
+            if (h{key}.typeCode() == NT_HASH) {
+                checkPrefixesDeclared(h{key}, nsmap);
+            }
         }
     }
 
