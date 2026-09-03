@@ -2386,6 +2386,368 @@ public class UnionDataType inherits AbstractDataProviderType {
     }
 }
 
+#! helper class for XSD regular expressions
+/** The XSD regular expression language (XSD 1.0 part 2 appendix F) is not PCRE, which is what %Qore uses:
+    - \c "^" and \c "$" are ordinary characters in XSD; a pattern always has to match the entire value
+    - XSD has the multi-character escapes \c "\i", \c "\I", \c "\c", and \c "\C" for XML name characters,
+      which PCRE does not have
+    - XSD character classes support subtraction (ex: \c "[a-z-[aeiou]]"), which PCRE does not support
+    - \c "\s", \c "\w", and \c "\d" denote different character sets in the two languages; \c "\s" does not
+      include form feed or vertical tab in XSD, while \c "\w" and \c "\d" are not limited to ASCII
+
+    This class converts XSD regular expressions to the equivalent PCRE expressions, and generates sample values
+    matching them.
+
+    @note Unicode block names in \c "\p{IsXxx}" escapes are passed through unchanged; %Qore's regular expression
+    engine supports Unicode categories and scripts, but not XSD block names
+
+    @since %WSDL 0.5.8
+*/
+public class XsdRegexHelper {
+    public {
+        #! XML NameStartChar as used by the XSD "\i" escape (ASCII range)
+        const NameStartChars = "A-Za-z_:";
+        #! XML NameChar as used by the XSD "\c" escape (ASCII range)
+        const NameChars = "-.0-9A-Za-z_:";
+        #! the characters denoted by the XSD "\s" escape; PCRE also includes form feed and vertical tab
+        const SpaceChars = " \\t\\n\\r";
+        #! the character categories excluded by the XSD "\w" escape
+        const NonWordCategories = "\\p{P}\\p{Z}\\p{C}";
+    }
+
+    #! the maximum length of a generated sample value
+    const MaxSampleLength = 256;
+
+    #! the maximum nesting depth accepted when generating a sample value
+    const MaxSampleDepth = 32;
+
+    #! characters tried in order when looking for one accepted by a character class
+    const SampleChars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+        + " -_.:+@!$#%&*/=?,;'<>()[]{}|~^\"\\\t\n\r";
+
+    #! returns the shortest value matching the given XSD pattern, or @ref nothing if none can be generated
+    /** Only the constructs that appear in practice are supported; if the pattern uses anything else, or if the
+        generated value does not match the pattern, @ref nothing is returned so that the caller can fall back to
+        its own default.
+
+        @param xsd the XSD regular expression to generate a value for
+
+        @return the shortest value matching \a xsd, or @ref nothing if none could be generated
+    */
+    static *string getSampleValue(string xsd, int min_reps = 0) {
+        int i = 0;
+        string rv;
+        try {
+            rv = XsdRegexHelper::sampleAlternation(xsd, \i, 0, min_reps);
+            # the whole pattern must have been consumed
+            if (i < xsd.length()) {
+                return;
+            }
+        } catch (hash<ExceptionInfo> ex) {
+            return;
+        }
+        # never return a value that does not match the pattern it was generated from
+        try {
+            return regex(rv, "^(?:" + XsdRegexHelper::toPcre(xsd) + ")$") ? rv : NOTHING;
+        } catch (hash<ExceptionInfo> ex) {
+            return;
+        }
+    }
+
+    #! generates a sample for an alternation; the first branch is used
+    private static string sampleAlternation(string xsd, reference<int> i, int depth, int min_reps) {
+        if (depth > XsdRegexHelper::MaxSampleDepth) {
+            throw "XSD-REGEX-SAMPLE-ERROR", "expression nested too deeply";
+        }
+        string rv = XsdRegexHelper::sampleSequence(xsd, \i, depth, min_reps);
+        # parse and discard the remaining branches
+        while (i < xsd.length() && xsd[i] == "|") {
+            ++i;
+            XsdRegexHelper::sampleSequence(xsd, \i, depth, min_reps);
+        }
+        return rv;
+    }
+
+    #! generates a sample for a sequence of pieces
+    private static string sampleSequence(string xsd, reference<int> i, int depth, int min_reps) {
+        string rv = "";
+        while (i < xsd.length()) {
+            string c = xsd[i];
+            if (c == "|" || c == ")") {
+                break;
+            }
+            int before = i;
+            rv += XsdRegexHelper::samplePiece(xsd, \i, depth, min_reps);
+            if (i == before) {
+                throw "XSD-REGEX-SAMPLE-ERROR", sprintf("no progress parsing %y at offset %d", xsd, i);
+            }
+            if (rv.length() > XsdRegexHelper::MaxSampleLength) {
+                throw "XSD-REGEX-SAMPLE-ERROR", "sample value too long";
+            }
+        }
+        return rv;
+    }
+
+    #! generates a sample for an atom and its quantifier, repeating the atom the minimum number of times
+    private static string samplePiece(string xsd, reference<int> i, int depth, int min_reps) {
+        string atom = XsdRegexHelper::sampleAtom(xsd, \i, depth, min_reps);
+        int min = 1;
+        # the upper bound of the quantifier, if it has one
+        *int max = 1;
+        if (i < xsd.length()) {
+            switch (xsd[i]) {
+                case "?":
+                    min = 0;
+                    ++i;
+                    break;
+
+                case "*":
+                    min = 0;
+                    delete max;
+                    ++i;
+                    break;
+
+                case "+":
+                    delete max;
+                    ++i;
+                    break;
+
+                case "{": {
+                    int close = index(xsd, "}", i);
+                    if (close < 0) {
+                        throw "XSD-REGEX-SAMPLE-ERROR", "unterminated quantifier";
+                    }
+                    string body = xsd.substr(i + 1, close - i - 1);
+                    *string mn = (body =~ x/^([0-9]+)/)[0];
+                    if (!exists mn) {
+                        throw "XSD-REGEX-SAMPLE-ERROR", "unsupported quantifier";
+                    }
+                    min = mn.toInt();
+                    if (body !~ /,/) {
+                        max = min;
+                    } else {
+                        *string mx = (body =~ x/,\s*([0-9]+)$/)[0];
+                        if (exists mx) {
+                            max = mx.toInt();
+                        } else {
+                            delete max;
+                        }
+                    }
+                    i = close + 1;
+                    break;
+                }
+            }
+        }
+        # repeat the atom more often when a longer value is required, but never more than the quantifier allows
+        int reps = min_reps > min ? min_reps : min;
+        if (exists max && reps > max) {
+            reps = max;
+        }
+        if (reps * atom.length() > XsdRegexHelper::MaxSampleLength) {
+            throw "XSD-REGEX-SAMPLE-ERROR", "sample value too long";
+        }
+        string rv = "";
+        for (int j = 0; j < reps; ++j) {
+            rv += atom;
+        }
+        return rv;
+    }
+
+    #! generates a sample for a single atom
+    private static string sampleAtom(string xsd, reference<int> i, int depth, int min_reps) {
+        switch (xsd[i]) {
+            case "(": {
+                ++i;
+                # skip a non-capturing group marker
+                if (xsd.substr(i, 2) == "?:") {
+                    i += 2;
+                }
+                string rv = XsdRegexHelper::sampleAlternation(xsd, \i, depth + 1, min_reps);
+                if (i >= xsd.length() || xsd[i] != ")") {
+                    throw "XSD-REGEX-SAMPLE-ERROR", "unterminated group";
+                }
+                ++i;
+                return rv;
+            }
+
+            case "[":
+                return XsdRegexHelper::sampleClass(xsd, \i);
+
+            case "\\":
+                return XsdRegexHelper::sampleEscape(xsd, \i);
+
+            case ".":
+                ++i;
+                return "a";
+        }
+        string c = xsd[i];
+        ++i;
+        return c;
+    }
+
+    #! generates a sample character for an escape sequence
+    private static string sampleEscape(string xsd, reference<int> i) {
+        if (i + 1 >= xsd.length()) {
+            throw "XSD-REGEX-SAMPLE-ERROR", "trailing backslash";
+        }
+        string e = xsd[i + 1];
+        i += 2;
+        switch (e) {
+            case "d": return "0";
+            case "w":
+            case "i":
+            case "c": return "a";
+            case "s": return " ";
+            case "n": return "\n";
+            case "r": return "\r";
+            case "t": return "\t";
+            # the complement escapes: a character that is in none of the corresponding sets
+            case "D":
+            case "S": return "a";
+            case "W":
+            case "I":
+            case "C": return "!";
+            case "p":
+            case "P": {
+                if (i >= xsd.length() || xsd[i] != "{") {
+                    throw "XSD-REGEX-SAMPLE-ERROR", "unsupported property escape";
+                }
+                int close = index(xsd, "}", i);
+                if (close < 0) {
+                    throw "XSD-REGEX-SAMPLE-ERROR", "unterminated property escape";
+                }
+                string prop = xsd.substr(i + 1, close - i - 1);
+                i = close + 1;
+                if (e == "P") {
+                    return "!";
+                }
+                return prop =~ /^N/ ? "0" : "a";
+            }
+        }
+        return e;
+    }
+
+    #! generates a sample character accepted by a character class
+    private static string sampleClass(string xsd, reference<int> i) {
+        int start = i;
+        # convert the class first, so that negation and character class subtraction are handled
+        string pcre = XsdRegexHelper::classToPcre(xsd, \i);
+        for (int j = 0; j < XsdRegexHelper::SampleChars.length(); ++j) {
+            string ch = XsdRegexHelper::SampleChars[j];
+            if (regex(ch, "^(?:" + pcre + ")$")) {
+                return ch;
+            }
+        }
+        throw "XSD-REGEX-SAMPLE-ERROR", sprintf("no sample character for character class %y",
+            xsd.substr(start, i - start));
+    }
+
+    #! converts an XSD regular expression to the equivalent PCRE expression
+    static string toPcre(string xsd) {
+        string rv = "";
+        int i = 0;
+        while (i < xsd.length()) {
+            string c = xsd[i];
+            switch (c) {
+                case "\\":
+                    rv += XsdRegexHelper::escapeToPcre(xsd, \i, False);
+                    break;
+
+                # "^" and "$" are ordinary characters in the XSD regular expression language
+                case "^":
+                case "$":
+                    rv += "\\" + c;
+                    ++i;
+                    break;
+
+                case "[":
+                    rv += XsdRegexHelper::classToPcre(xsd, \i);
+                    break;
+
+                default:
+                    rv += c;
+                    ++i;
+                    break;
+            }
+        }
+        return rv;
+    }
+
+    #! converts one escape sequence; \a i is advanced past the sequence
+    private static string escapeToPcre(string xsd, reference<int> i, bool in_class) {
+        # a trailing backslash is not a valid escape; pass it through so that the regex engine reports the error
+        if (i + 1 >= xsd.length()) {
+            ++i;
+            return "\\";
+        }
+        string e = xsd[i + 1];
+        i += 2;
+        switch (e) {
+            # XML name character escapes; these do not exist in PCRE
+            case "i": return in_class ? XsdRegexHelper::NameStartChars : "[" + XsdRegexHelper::NameStartChars + "]";
+            case "I": return in_class ? "\\i" : "[^" + XsdRegexHelper::NameStartChars + "]";
+            case "c": return in_class ? XsdRegexHelper::NameChars : "[" + XsdRegexHelper::NameChars + "]";
+            case "C": return in_class ? "\\c" : "[^" + XsdRegexHelper::NameChars + "]";
+
+            # XSD "\s" is exactly space, tab, newline, and carriage return
+            case "s": return in_class ? XsdRegexHelper::SpaceChars : "[" + XsdRegexHelper::SpaceChars + "]";
+            case "S": return in_class ? "\\S" : "[^" + XsdRegexHelper::SpaceChars + "]";
+
+            # XSD "\d" is any Unicode decimal digit, while PCRE "\d" is ASCII only
+            case "d": return "\\p{Nd}";
+            case "D": return in_class ? "\\D" : "[^\\p{Nd}]";
+
+            # XSD "\w" is every character except punctuation, separators, and other; PCRE "\w" is ASCII only
+            case "w": return in_class ? "\\w" : "[^" + XsdRegexHelper::NonWordCategories + "]";
+            case "W": return in_class ? "\\W" : "[" + XsdRegexHelper::NonWordCategories + "]";
+
+            default: return "\\" + e;
+        }
+    }
+
+    #! converts a character class, including XSD character class subtraction; \a i is advanced past the class
+    private static string classToPcre(string xsd, reference<int> i) {
+        # skip the opening "["
+        ++i;
+        string cls = "";
+        # a "^" immediately after "[" negates the class in XSD as well
+        if (i < xsd.length() && xsd[i] == "^") {
+            cls += "^";
+            ++i;
+        }
+        # "]" immediately after "[" or "[^" is a literal "]" in XSD
+        if (i < xsd.length() && xsd[i] == "]") {
+            cls += "\\]";
+            ++i;
+        }
+        while (i < xsd.length()) {
+            string c = xsd[i];
+            if (c == "\\") {
+                cls += XsdRegexHelper::escapeToPcre(xsd, \i, True);
+                continue;
+            }
+            if (c == "]") {
+                ++i;
+                return "[" + cls + "]";
+            }
+            # XSD character class subtraction: "[base-[sub]]" matches base except the characters in sub
+            if (c == "-" && i + 1 < xsd.length() && xsd[i + 1] == "[") {
+                ++i;
+                string sub_cls = XsdRegexHelper::classToPcre(xsd, \i);
+                # the enclosing class must still be closed
+                if (i < xsd.length() && xsd[i] == "]") {
+                    ++i;
+                }
+                return "(?:(?!" + sub_cls + ")[" + cls + "])";
+            }
+            cls += c;
+            ++i;
+        }
+        # unterminated class; pass it through so that the regex engine reports the error
+        return "[" + cls;
+    }
+}
+
 #! XSD simple type class
 public class XsdSimpleType inherits WSDL::XsdAbstractType {
     public {
@@ -2656,6 +3018,200 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
         return result;
     }
 
+    #! returns @ref True if the value matches the given XSD pattern in its entirety
+    /** issue #5411: XSD patterns must match the entire value; the pattern is wrapped in a non-capturing group so
+        that a top-level alternation is anchored as a whole (ex: "a|b" must become "^(?:a|b)$" and not "^a|b$",
+        which matches any value starting with "a" or ending with "b").  The pattern is translated from the XSD
+        regular expression language to PCRE first; see @ref WSDL::XsdRegexHelper
+
+        @since %WSDL 0.5.8
+    */
+    private static bool matchesPattern(string str, string pattern) {
+        return boolean(regex(str, "^(?:" + XsdRegexHelper::toPcre(pattern) + ")$"));
+    }
+
+    #! returns @ref True if the value satisfies the \c pattern facets of this type and all its base types
+    /** @since %WSDL 0.5.8
+    */
+    bool patternsAccept(string val) {
+        if (patterns) {
+            bool matched = False;
+            foreach string pattern in (patterns) {
+                if (XsdSimpleType::matchesPattern(val, pattern)) {
+                    matched = True;
+                    break;
+                }
+            }
+            if (!matched) {
+                return False;
+            }
+        }
+        return type instanceof XsdSimpleType ? cast<XsdSimpleType>(type).patternsAccept(val) : True;
+    }
+
+    #! returns the \c pattern facets of the innermost type in the chain that declares any
+    /** @since %WSDL 0.5.8
+    */
+    static *list<string> getPatterns(*XsdAbstractType t) {
+        if (!(t instanceof XsdSimpleType)) {
+            return;
+        }
+        XsdSimpleType st = cast<XsdSimpleType>(t);
+        return st.patterns ?? XsdSimpleType::getPatterns(st.type);
+    }
+
+    #! returns the effective value of a constraining facet, searching this type and then its base types
+    /** @since %WSDL 0.5.8
+    */
+    private auto getEffectiveFacet(string facet) {
+        auto v;
+        switch (facet) {
+            case "length": v = length; break;
+            case "minLength": v = minLength; break;
+            case "maxLength": v = maxLength; break;
+            case "minInclusive": v = minInclusive; break;
+            case "maxInclusive": v = maxInclusive; break;
+            case "minExclusive": v = minExclusive; break;
+            case "maxExclusive": v = maxExclusive; break;
+            case "totalDigits": v = totalDigits; break;
+            case "fractionDigits": v = fractionDigits; break;
+        }
+        if (exists v) {
+            return v;
+        }
+        return type instanceof XsdSimpleType ? cast<XsdSimpleType>(type).getEffectiveFacet(facet) : NOTHING;
+    }
+
+    #! returns a sample value satisfying the \c pattern facets of this type, if one can be generated
+    /** @param min_length the minimum length the value must have, if any
+
+        @return a value matching the \c pattern facets declared in this type or in one of its base types, or
+        @ref nothing if none could be generated
+
+        @since %WSDL 0.5.8
+    */
+    *string getPatternSample(*softint min_length) {
+        *string sample = getPatternSampleIntern(0);
+        # the shortest matching value can be too short for the length facets; try longer values if so
+        if (exists sample && exists min_length && sample.length() < min_length) {
+            for (int reps = 1; reps <= min_length; ++reps) {
+                *string longer = getPatternSampleIntern(reps);
+                if (exists longer && longer.length() >= min_length) {
+                    sample = longer;
+                    break;
+                }
+            }
+        }
+        # the sample has to satisfy the pattern facets of every step in the derivation chain
+        return exists sample && patternsAccept(sample) ? sample : NOTHING;
+    }
+
+    #! returns a sample value for the innermost type declaring \c pattern facets
+    private *string getPatternSampleIntern(int min_reps) {
+        foreach string pattern in (patterns) {
+            *string sample = XsdRegexHelper::getSampleValue(pattern, min_reps);
+            if (exists sample) {
+                return sample;
+            }
+        }
+        if (type instanceof XsdSimpleType) {
+            return cast<XsdSimpleType>(type).getPatternSampleIntern(min_reps);
+        }
+    }
+
+    #! returns a sample value satisfying the constraining facets declared for this type
+    /** @param default_value the value to use as a starting point, normally the sample value for the base type
+
+        @return a value satisfying the type's constraining facets, derived from \a default_value where possible
+
+        Used to generate example messages that can actually be serialized; the placeholder value for a base type
+        does not normally satisfy the facets declared by a restriction of it.
+
+        @since %WSDL 0.5.8
+    */
+    auto getSampleValue(auto default_value) {
+        # a "pattern" facet is the most specific constraint; generate a value from it if one is declared
+        *softint min_length = getEffectiveFacet("length") ?? getEffectiveFacet("minLength");
+        *string sample = getPatternSample(min_length);
+        if (exists sample) {
+            return sample;
+        }
+
+        auto rv = default_value;
+
+        switch (rv.typeCode()) {
+            case NT_INT:
+            case NT_FLOAT:
+            case NT_NUMBER: {
+                # respect the digit facets first, as they determine the shape of the value
+                *softint td = getEffectiveFacet("totalDigits");
+                *softint fd = getEffectiveFacet("fractionDigits");
+                if (exists td || exists fd) {
+                    int frac = fd ?? 0;
+                    int int_digits = exists td ? td - frac : 1;
+                    if (int_digits < 1) {
+                        int_digits = 1;
+                    }
+                    string sv = strmul("1", int_digits);
+                    if (frac) {
+                        sv += "." + strmul("1", frac);
+                    }
+                    rv = frac ? number(sv) : sv.toInt();
+                }
+
+                number n = number(rv);
+                number orig = n;
+                auto v = getEffectiveFacet("minInclusive");
+                if (exists v && n < number(v)) {
+                    n = number(v);
+                }
+                v = getEffectiveFacet("minExclusive");
+                if (exists v && n <= number(v)) {
+                    n = number(v) + 1;
+                }
+                v = getEffectiveFacet("maxInclusive");
+                if (exists v && n > number(v)) {
+                    n = number(v);
+                }
+                v = getEffectiveFacet("maxExclusive");
+                if (exists v && n >= number(v)) {
+                    n = number(v) - 1;
+                }
+                if (n != orig) {
+                    rv = rv.typeCode() == NT_INT ? n.toInt() : n;
+                }
+                break;
+            }
+
+            case NT_STRING: {
+                *softint len = getEffectiveFacet("length");
+                rv = exists len
+                    ? XsdSimpleType::fitString(rv, len, len)
+                    : XsdSimpleType::fitString(rv, getEffectiveFacet("minLength"),
+                        getEffectiveFacet("maxLength"));
+                break;
+            }
+        }
+        return rv;
+    }
+
+    #! pads or truncates a sample string so that its length lies within the given bounds
+    private static string fitString(string str, *softint min_len, *softint max_len) {
+        if (exists max_len && str.length() > max_len) {
+            str = str.substr(0, max_len);
+        }
+        if (exists min_len && str.length() < min_len) {
+            if (!str.length()) {
+                str = "a";
+            }
+            while (str.length() < min_len) {
+                str += str;
+            }
+            str = str.substr(0, min_len);
+        }
+        return str;
+    }
+
     #! Validate restriction facets for serialization/deserialization
     /** @param val the value to validate
         @param operation "serialize" or "deserialize" for error context
@@ -2678,10 +3234,7 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
             string strVal = string(val);
             bool matched = False;
             foreach string pattern in (patterns) {
-                # issue #5411: XSD patterns must match the entire value; the pattern is wrapped in a non-capturing
-                # group so that a top-level alternation is anchored as a whole (ex: "a|b" must become "^(?:a|b)$"
-                # and not "^a|b$", which matches any value starting with "a" or ending with "b")
-                if (regex(strVal, "^(?:" + pattern + ")$")) {
+                if (XsdSimpleType::matchesPattern(strVal, pattern)) {
                     matched = True;
                     break;
                 }
@@ -2749,34 +3302,31 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
         }
 
         # Precision validation (totalDigits and fractionDigits)
+        # issue #5411: both facets constrain the digits of the value, so the sign is ignored and insignificant
+        # zeros do not count: "0012.3400" has 4 total digits and 2 fraction digits
         if (exists totalDigits || exists fractionDigits) {
             string strVal = string(val);
-            # Remove sign for digit counting
-            strVal =~ s/^-//;
-            strVal =~ s/^\+//;
+            strVal =~ s/^[+-]//;
+            string int_part = (strVal =~ x/^([0-9]*)/)[0] ?? "";
+            string frac_part = (strVal =~ x/\.([0-9]*)$/)[0] ?? "";
+            # leading zeros in the integer part and trailing zeros in the fraction are not significant
+            int_part =~ s/^0+//;
+            frac_part =~ s/0+$//;
 
-            if (exists totalDigits) {
-                string digitsOnly = strVal;
-                # Remove decimal point
-                digitsOnly =~ s/\.//;
-                # Remove leading zeros per XSD spec (leading zeros don't count toward totalDigits)
-                digitsOnly =~ s/^0+//;
-                # Handle the case where value is all zeros (e.g., "0" or "0.00")
-                if (digitsOnly.empty()) {
-                    digitsOnly = "0";
-                }
-                if (digitsOnly.length() > totalDigits) {
-                    throw errType, sprintf("value %y for simpleType %y has %d total digits, "
-                        "but maximum is %d during %s", val, name, digitsOnly.length(), totalDigits, operation);
-                }
+            if (exists fractionDigits && frac_part.length() > fractionDigits) {
+                throw errType, sprintf("value %y for simpleType %y has %d fraction digits, "
+                    "but maximum is %d during %s", val, name, frac_part.length(), fractionDigits, operation);
             }
 
-            if (exists fractionDigits) {
-                *string fracPart = (strVal =~ x/\.(\d+)/)[0];
-                int fracLen = fracPart ? fracPart.length() : 0;
-                if (fracLen > fractionDigits) {
-                    throw errType, sprintf("value %y for simpleType %y has %d fraction digits, "
-                        "but maximum is %d during %s", val, name, fracLen, fractionDigits, operation);
+            if (exists totalDigits) {
+                # a value of zero still has one digit
+                int total = int_part.length() + frac_part.length();
+                if (!total) {
+                    total = 1;
+                }
+                if (total > totalDigits) {
+                    throw errType, sprintf("value %y for simpleType %y has %d total digits, "
+                        "but maximum is %d during %s", val, name, total, totalDigits, operation);
                 }
             }
         }
@@ -8034,6 +8584,18 @@ public class WSMessageHelper {
                     res.value = sprintf("%s", (keys t.enumValues)[0]);
                 }
                 res.comment = sprintf("Enum: %s",  (keys t.enumValues).join(','));
+            } else {
+                # issue #5411: generate a value satisfying the type's constraining facets; otherwise the generated
+                # example message cannot be serialized, as the placeholder value for the base type does not
+                # normally satisfy them
+                auto sample = t.getSampleValue(res.value);
+                if (exists sample) {
+                    res.value = sample;
+                    *list<string> pl = XsdSimpleType::getPatterns(t);
+                    if (pl) {
+                        res.comment = sprintf("Pattern: %s", pl.join(" | "));
+                    }
+                }
             }
         } else if (t.unionTypes) {
             # union types have no single base type; use the first member type for the example value
