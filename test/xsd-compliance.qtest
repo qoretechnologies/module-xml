@@ -61,6 +61,7 @@ class XsdComplianceTest inherits QUnit::Test {
         addTestCase("Time format tests", \timeFormatTests());
         addTestCase("String-derived XSD type tests", \stringDerivedTypeTests());
         addTestCase("Data provider type mapping tests", \dataProviderTypeMappingTests());
+        addTestCase("Pattern facet combination tests", \patternFacetCombinationTests());
         set_return_value(main());
     }
 
@@ -244,7 +245,7 @@ class XsdComplianceTest inherits QUnit::Test {
             assertRegex(">AA0000<", h.body, "pattern serializes AA0000");
         }
 
-        # Test multi-pattern (starts with uppercase, ends with digit)
+        # issue #5411: sibling patterns are combined with "|", so matching either one is enough
         {
             hash<auto> req = {"multiPatternStr": "Hello123"};
             hash<auto> h = op.serializeRequest(req);
@@ -262,6 +263,61 @@ class XsdComplianceTest inherits QUnit::Test {
             hash<auto> h = op.serializeRequest(req);
             assertRegex(">Testing123456789<", h.body, "multi-pattern serializes longer string");
         }
+    }
+
+    # ============================================================
+    # Pattern Facet Combination Tests (issue #5411)
+    # ============================================================
+
+    #! tests how multiple \c pattern facets are combined and how a single pattern is anchored
+    /** XSD 1.0 part 2 4.3.4.3: sibling \c pattern facets declared in the same restriction are combined as if
+        they appeared in a single regular expression separated by \c "|", so a value matching any one of them is
+        valid.  Patterns declared in different derivation steps are intersected instead: the value must satisfy
+        every step.
+    */
+    patternFacetCombinationTests() {
+        WSOperation op = ws.getOperation("testFacets");
+
+        code accepts = bool sub (string field, auto value) {
+            try {
+                op.serializeRequest({field: value});
+                return True;
+            } catch (hash<ExceptionInfo> ex) {
+                assertEq("SOAP-SERIALIZATION-ERROR", ex.err, sprintf("%s %y: expected error type", field, value));
+                return False;
+            }
+        };
+
+        # sibling patterns "[A-Z].*" and ".*[0-9]" are united: matching either one is enough
+        assertTrue(accepts("multiPatternStr", "Hello"), "sibling patterns: matches the 1st pattern only");
+        assertTrue(accepts("multiPatternStr", "hello1"), "sibling patterns: matches the 2nd pattern only");
+        assertTrue(accepts("multiPatternStr", "Hello1"), "sibling patterns: matches both patterns");
+        assertFalse(accepts("multiPatternStr", "hello"), "sibling patterns: matches neither pattern");
+
+        # patterns declared in different derivation steps are intersected: "DerivedPatternString" restricts
+        # "DerivedPatternBase" ("[a-z]+") with ".{3}", so a value must satisfy both
+        assertTrue(accepts("derivedPatternStr", "abc"), "derivation steps: satisfies both steps");
+        assertFalse(accepts("derivedPatternStr", "ab"), "derivation steps: fails the restricting pattern");
+        assertFalse(accepts("derivedPatternStr", "123"), "derivation steps: fails the base pattern");
+
+        # a pattern with a top-level alternation must be anchored as a whole, so that partial matches at the
+        # start or the end of the value are not accepted
+        assertTrue(accepts("altPatternStr", "aaa"), "alternation: 1st branch");
+        assertTrue(accepts("altPatternStr", "bbb"), "alternation: 2nd branch");
+        assertFalse(accepts("altPatternStr", "aaaXXX"), "alternation: trailing text is not accepted");
+        assertFalse(accepts("altPatternStr", "XXXbbb"), "alternation: leading text is not accepted");
+        assertFalse(accepts("altPatternStr", "zzz"), "alternation: neither branch");
+
+        # a type declaring one pattern per alternative form (16 IPv6 forms here) accepts every valid form
+        assertTrue(accepts("ipv6Str", "$2001:0db8:0000:0000:0000:0000:0000:0001"), "IPv6: full 8-group form");
+        assertTrue(accepts("ipv6Str", "$2001:db8::1"), "IPv6: compressed form");
+        assertTrue(accepts("ipv6Str", "$::ffff:192.0.2.1"), "IPv6: IPv4-mapped form");
+        assertFalse(accepts("ipv6Str", "not-an-address"), "IPv6: invalid value");
+
+        # the same rules apply when deserializing
+        hash<auto> h = op.serializeRequest({"multiPatternStr": "Hello"});
+        assertEq("Hello", op.deserializeRequest(parse_xml(h.body)).multiPatternStr,
+            "sibling patterns: deserializes a value matching one pattern");
     }
 
     # ============================================================
@@ -291,13 +347,14 @@ class XsdComplianceTest inherits QUnit::Test {
         assertThrows("SOAP-SERIALIZATION-ERROR", \op.serializeRequest(), {"patternStr": ""},
             "pattern rejects empty string");
 
-        # Invalid multi-pattern: doesn't start with uppercase
-        assertThrows("SOAP-SERIALIZATION-ERROR", \op.serializeRequest(), {"multiPatternStr": "hello1"},
-            "multi-pattern rejects lowercase start");
+        # issue #5411: "MultiPatternString" declares "[A-Z].*" and ".*[0-9]" in the same restriction, and
+        # XSD 1.0 part 2 4.3.4.3 combines sibling patterns with "|"; a value is therefore only invalid if it
+        # matches neither pattern
+        assertThrows("SOAP-SERIALIZATION-ERROR", \op.serializeRequest(), {"multiPatternStr": "hello"},
+            "multi-pattern rejects a value matching neither pattern");
 
-        # Invalid multi-pattern: doesn't end with digit
-        assertThrows("SOAP-SERIALIZATION-ERROR", \op.serializeRequest(), {"multiPatternStr": "Hello"},
-            "multi-pattern rejects no digit ending");
+        assertThrows("SOAP-SERIALIZATION-ERROR", \op.serializeRequest(), {"multiPatternStr": "!!!"},
+            "multi-pattern rejects punctuation matching neither pattern");
 
         # Invalid multi-pattern: empty
         assertThrows("SOAP-SERIALIZATION-ERROR", \op.serializeRequest(), {"multiPatternStr": ""},
