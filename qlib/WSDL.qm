@@ -42,7 +42,7 @@
 %disable-warning unreferenced-variable
 
 module WSDL {
-    version = "0.5.7";
+    version = "0.5.8";
     desc = "WSDL module providing functionality for SOAP";
     author = "David Nichols <david@qore.org>";
     url = "http://qore.org";
@@ -120,6 +120,14 @@ module WSDL {
       fallback entry. Type resolution prefers namespace-qualified lookup when the input
       namespace prefix is known. Single-namespace WSDLs continue to work unchanged. New helper
       @ref WSDL::make_qname() exposes the qualified-key construction.
+    - fixed handling nested XSD model groups; elements declared in an \c xs:sequence, \c xs:choice, or \c xs:all
+      nested in another model group were silently dropped from the type, so they could neither be serialized nor
+      deserialized
+    - added support for \c xs:choice alternatives declared as nested model groups; all the elements of a single
+      alternative can now be serialized and deserialized together
+    - fixed the data provider type for a \c complexType with a \c sequence containing a \c choice block; the
+      members of the choice were not reported as fields
+      (<a href="https://github.com/qoretechnologies/qore/issues/5410">issue 5410</a>)
     - <b>API change</b>: renamed the XSD type \c serialize() and \c deserialize() instance
       methods on \c XsdAbstractType, \c XsdBaseType, \c XsdSimpleType, \c XsdComplexType,
       \c XsdArrayType, and \c XsdElement to \c serializeValue() and \c deserializeValue()
@@ -2938,8 +2946,19 @@ public class XsdAttributeGroup inherits WSDL::XsdNamedData, Qore::Serializable {
 
 #! complex type choice hash
 public hashdecl ChoiceInfo {
+    #! all elements that can appear in the choice
     hash<string, XsdElement> elementmap;
+
+    #! if a member of the choice must be present
     bool required;
+
+    #! the alternatives making up the choice
+    /** each alternative is a hash of the elements belonging to it; alternatives declared as nested model groups
+        (ex: an \c xs:sequence inside an \c xs:choice) have more than one element
+
+        @since %WSDL 0.5.8
+    */
+    list<hash<string, XsdElement>> alternatives = ();
 }
 
 #! XSD complex type class
@@ -2975,6 +2994,14 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
 
         # multiple choice blocks
         list<hash<ChoiceInfo>> choices();
+
+        #! the alternatives of a complexType that is itself a choice
+        /** each alternative is a hash of the elements belonging to it; alternatives declared as nested model groups
+            (ex: an \c xs:sequence inside an \c xs:choice) have more than one element
+
+            @since %WSDL 0.5.8
+        */
+        list<hash<string, XsdElement>> alternatives();
     }
 
     private {
@@ -3232,51 +3259,212 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
         string k = d.firstKey();
         if (k == "all") {
             cx_type = XET_ALL;
-            WSDL::XsdBase::removeNS(\d.all);
-            elementmap = parseElements(d.all.element, unresolved, nsc);
-            # Handle group references in all
-            parseGroupReferences(\d.all, unresolved, nsc);
+            # issue #5410: model groups can be nested
+            parseModelGroup(d.all, unresolved, nsc, False);
+            setGroupFlags();
         } else if (k == "choice") {
             cx_type = XET_CHOICE;
-            WSDL::XsdBase::removeNS(\d.choice);
-            elementmap = parseElements(d.choice.element, unresolved, nsc);
-            # parseElements() derives "required" from the choice members, but that only says whether a member
-            # requires a value if the choice is serialized at all; whether the choice itself must be present is
-            # given by the "minOccurs" attribute of the choice
+            # issue #5410: an alternative in a choice can be a nested model group with more than one element
+            alternatives = getChoiceAlternatives(d.choice, unresolved, nsc);
+            map elementmap += $1, alternatives;
+            foreach XsdElement elem in (elementmap.iterator()) {
+                if (elem.isRequired()) {
+                    required = True;
+                    break;
+                }
+            }
+            setGroupFlags();
+            # the element declarations only say whether a member requires a value if the choice is serialized at
+            # all; whether the choice itself must be present is given by the "minOccurs" attribute of the choice
             if (exists d.choice."^attributes^".minOccurs && !d.choice."^attributes^".minOccurs.toInt()) {
                 required = requires_value = False;
             }
-            # Handle group references in choice
-            parseGroupReferences(\d.choice, unresolved, nsc);
         } else if (k == "sequence") {
             cx_type = XET_SEQUENCE;
-            WSDL::XsdBase::removeNS(\d.sequence);
-            if (d.sequence.element) {
-                elementmap = parseElements(d.sequence.element, unresolved, nsc);
-            }
-            # Handle group references in sequence
-            parseGroupReferences(\d.sequence, unresolved, nsc);
-            WSDL::XsdBase::removeNS(\d.sequence.choice);
-            foreach hash<auto> ch in (d.sequence.choice) {
-                #printf("ch: %y\n", ch);
-                hash<string, XsdElement> h = parseElements(ch.element, unresolved, nsc, False);
-                if (h) {
-                    hash<ChoiceInfo> ech((
-                        "elementmap": cast<hash<string, XsdElement>>(h),
-                        "required": ch."^attributes^".minOccurs > 0,
-                    ));
-                    choices += ech;
-                }
-            }
-            if (d.sequence."any") {
-                anyAttribute = True;
-            }
+            # issue #5410: model groups can be nested
+            parseModelGroup(d.sequence, unresolved, nsc, False);
+            setGroupFlags();
         } else if (k == "group") {
             # Handle top-level group reference
             cx_type = XET_SEQUENCE;  # Groups typically expand to sequences
             parseGroupReferences(\d, unresolved, nsc);
         } else {
             throw "XSD-COMPLEXTYPE-ERROR", sprintf("unknown keys in %y", d);
+        }
+    }
+
+    #! parses a \c sequence or \c all model group, including any nested model groups
+    /** @param mg the model group to parse
+        @param unresolved the container for types that must be resolved after parsing
+        @param nsc the namespace container
+        @param optional if the model group itself is optional, in which case none of its members can be required
+
+        Elements declared in nested model groups belong to the enclosing model group, so they are added to the
+        element map of this complexType; \c choice blocks are added to @ref choices, and \c group references are
+        registered for resolution in finalize().
+
+        @note the XML parser does not preserve the relative order of elements with different names, therefore the
+        keys of the model group are processed in the order in which they first appear in the schema
+
+        @since %WSDL 0.5.8
+    */
+    private parseModelGroup(*hash<auto> mg, XsdLateResolverHelper unresolved, Namespaces nsc, bool optional) {
+        # an empty model group (ex: "<xs:sequence/>") is parsed as NOTHING
+        if (!mg) {
+            return;
+        }
+        WSDL::XsdBase::removeNS(\mg);
+        foreach string k in (keys mg) {
+            switch (k) {
+                case "element": {
+                    elementmap += parseElements(mg.element, unresolved, nsc, True, optional);
+                    break;
+                }
+
+                case "choice": {
+                    foreach hash<auto> ch in (mg.choice) {
+                        addChoiceBlock(ch, unresolved, nsc, optional);
+                    }
+                    break;
+                }
+
+                case "sequence":
+                case "all": {
+                    foreach hash<auto> nested in (mg{k}) {
+                        parseModelGroup(nested, unresolved, nsc,
+                            optional || XsdComplexType::isOptionalGroup(nested));
+                    }
+                    break;
+                }
+
+                case "group": {
+                    parseGroupReferences(\mg, unresolved, nsc);
+                    break;
+                }
+
+                case "any": {
+                    anyAttribute = True;
+                    break;
+                }
+            }
+        }
+    }
+
+    #! adds a \c choice block declared in a model group to @ref choices
+    /** @since %WSDL 0.5.8
+    */
+    private addChoiceBlock(*hash<auto> ch, XsdLateResolverHelper unresolved, Namespaces nsc, bool optional) {
+        list<hash<string, XsdElement>> alts = getChoiceAlternatives(ch, unresolved, nsc);
+        hash<string, XsdElement> h();
+        map h += $1, alts;
+        if (h) {
+            choices += <ChoiceInfo>{
+                "elementmap": h,
+                "required": !optional && ch."^attributes^".minOccurs > 0,
+                "alternatives": alts,
+            };
+        }
+    }
+
+    #! returns the alternatives of a \c choice model group
+    /** Each direct \c element child is an alternative on its own; each nested model group is a single alternative
+        made up of all the elements declared in it.
+
+        @note elements contributed by a \c group reference are merged into the element map in finalize() and
+        therefore do not belong to any single alternative
+
+        @since %WSDL 0.5.8
+    */
+    private list<hash<string, XsdElement>> getChoiceAlternatives(*hash<auto> ch, XsdLateResolverHelper unresolved,
+            Namespaces nsc) {
+        list<hash<string, XsdElement>> rv();
+        # an empty choice (ex: "<xs:choice/>") is parsed as NOTHING
+        if (!ch) {
+            return rv;
+        }
+        WSDL::XsdBase::removeNS(\ch);
+        foreach string k in (keys ch) {
+            switch (k) {
+                case "element": {
+                    foreach hash<auto> e in (ch.element) {
+                        rv += parseElements(e, unresolved, nsc, False);
+                    }
+                    break;
+                }
+
+                case "sequence":
+                case "all":
+                case "choice": {
+                    foreach hash<auto> nested in (ch{k}) {
+                        hash<string, XsdElement> h = flattenModelGroup(nested, unresolved, nsc);
+                        if (h) {
+                            rv += h;
+                        }
+                    }
+                    break;
+                }
+
+                case "group": {
+                    parseGroupReferences(\ch, unresolved, nsc);
+                    break;
+                }
+            }
+        }
+        return rv;
+    }
+
+    #! returns all elements declared in a model group, including any nested model groups
+    /** @since %WSDL 0.5.8
+    */
+    private hash<string, XsdElement> flattenModelGroup(*hash<auto> mg, XsdLateResolverHelper unresolved,
+            Namespaces nsc) {
+        hash<string, XsdElement> rv();
+        # an empty model group (ex: "<xs:sequence/>") is parsed as NOTHING
+        if (!mg) {
+            return rv;
+        }
+        WSDL::XsdBase::removeNS(\mg);
+        foreach string k in (keys mg) {
+            switch (k) {
+                case "element": {
+                    rv += parseElements(mg.element, unresolved, nsc, False);
+                    break;
+                }
+
+                case "sequence":
+                case "all":
+                case "choice": {
+                    foreach hash<auto> nested in (mg{k}) {
+                        rv += flattenModelGroup(nested, unresolved, nsc);
+                    }
+                    break;
+                }
+
+                case "group": {
+                    parseGroupReferences(\mg, unresolved, nsc);
+                    break;
+                }
+            }
+        }
+        return rv;
+    }
+
+    #! returns @ref True if the model group is declared with \c minOccurs="0"
+    /** @since %WSDL 0.5.8
+    */
+    private static bool isOptionalGroup(*hash<auto> mg) {
+        return exists mg."^attributes^".minOccurs && !mg."^attributes^".minOccurs.toInt();
+    }
+
+    #! sets the "nillable" and "requires_value" flags after the model group has been parsed
+    /** @since %WSDL 0.5.8
+    */
+    private setGroupFlags() {
+        if (elementmap.size() == 1 && elementmap.firstValue().isNillable()) {
+            nillable = True;
+        }
+        if (required && !nillable) {
+            requires_value = True;
         }
     }
 
@@ -3355,7 +3543,7 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
     }
 
     private hash<string, XsdElement> parseElements(softlist<auto> el, XsdLateResolverHelper unresolved,
-            Namespaces nsc, bool for_object = True) {
+            Namespaces nsc, bool for_object = True, bool optional = False) {
         #printf("DEBUG: XsdComplexType::parseElements(%y)\n", el);
         hash<string, XsdElement> h();
         foreach hash<auto> e in (el) {
@@ -3363,17 +3551,11 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
             XsdElement elem(e, nsc, NOTHING, unresolved, usedocns);
             h.(elem.name) = elem;
 
-            if (for_object && !required && elem.isRequired())
+            # issue #5410: elements declared in an optional model group can never be required
+            if (for_object && !optional && !required && elem.isRequired()) {
                 required = True;
+            }
         }
-
-        if (for_object) {
-            if (h.size() == 1 && h.firstValue().isNillable())
-                nillable = True;
-        }
-
-        if (for_object && required && !nillable)
-            requires_value = True;
 
         return h;
     }
@@ -3398,6 +3580,13 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
                 HashDataType rv(name);
                 map rv.addField(new QoreDataField($1.key, NOTHING, $1.value.getDataProviderType(), NOTHING,
                     $1.value.getAllowedValues())), elementmap.pairIterator();
+                # issue #5410: elements declared in a choice block in the model group must be included as well; at
+                # most one alternative of a choice can be present, therefore all its members must be optional
+                foreach hash<ChoiceInfo> ch in (choices) {
+                    map rv.addField(new QoreDataField($1.key, NOTHING,
+                        $1.value.getDataProviderType().getOrNothingType(), NOTHING, $1.value.getAllowedValues())),
+                        ch.elementmap.pairIterator();
+                }
                 return rv;
             }
 
@@ -3515,12 +3704,12 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
                                 "in complexType %y but no such keys were supplied", ch.elementmap.keys(), getName());
                     } else {
                         if (vh) {
-                            rh += serializeChoice(nsc, ch.elementmap, vh, omitType, False);
+                            rh += serializeChoice(nsc, ch.elementmap, vh, omitType, False, ch.alternatives);
                             # remove the serialized key from the input hash for the check below
                             map remove h{$1}, keys vh;
                         }
                         if (vhch) {
-                            rh += serializeChoice(nsc, ch.elementmap, vhch, omitType, True);
+                            rh += serializeChoice(nsc, ch.elementmap, vhch, omitType, True, ch.alternatives);
                             map remove hch{$1}, keys vhch;
                         }
                     }
@@ -3554,10 +3743,10 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
                     }
                 } else {
                     if (h) {
-                        rh += serializeChoice(nsc, elementmap, h, omitType, False);
+                        rh += serializeChoice(nsc, elementmap, h, omitType, False, alternatives);
                     }
                     if (hch) {
-                        rh += serializeChoice(nsc, elementmap, hch, omitType, True);
+                        rh += serializeChoice(nsc, elementmap, hch, omitType, True, alternatives);
                     }
                 }
             }
@@ -3582,13 +3771,21 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
     }
 
     private *hash<auto> serializeChoice(Namespaces nsc, hash<string, XsdElement> emap, hash<auto> h,
-            *softbool omitType, bool all_members) {
+            *softbool omitType, bool all_members, *list<hash<string, XsdElement>> alts) {
+        *hash<string, XsdElement> alt;
         # normally there is only one choice but we also need output example message where all options are enumerated
-        if (!all_members && elements h > 1)
-            throw SOAP_SERIALIZATION_ERROR, sprintf("cannot serialize choice / union in complexType %y with more "
-                "than 1 member (%y)", getName(), h.keys());
+        if (!all_members && elements h > 1) {
+            # issue #5410: an alternative can be a nested model group with more than one element; in that case all
+            # the keys supplied must belong to a single alternative
+            alt = XsdComplexType::getMatchingAlternative(alts, keys h);
+            if (!alt) {
+                throw SOAP_SERIALIZATION_ERROR, sprintf("cannot serialize choice / union in complexType %y with more "
+                    "than 1 member (%y)", getName(), h.keys());
+            }
+        }
         *hash<auto> rh;
-        foreach string key in (keys h) {
+        # if a model group alternative was matched, then serialize the elements in the order they are declared in it
+        foreach string key in (alt ? (select (keys alt), exists h{$1}) : (keys h)) {
             if (!emap{key})
                 throw SOAP_SERIALIZATION_ERROR, sprintf("%y is an invalid member of choice / union in complexType "
                     "%y; expecting one of: %y", key, getName(), emap.keys());
@@ -3598,6 +3795,18 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
         }
         # add namespace if necessary
         return rh;
+    }
+
+    #! returns the choice alternative containing all the given element names, if any
+    /** @since %WSDL 0.5.8
+    */
+    private static *hash<string, XsdElement> getMatchingAlternative(*list<hash<string, XsdElement>> alts,
+            list<auto> kl) {
+        foreach hash<string, XsdElement> alt in (alts) {
+            if (alt.size() > 1 && !(select kl, !exists alt{$1})) {
+                return alt;
+            }
+        }
     }
 
     auto deserializeValue(string en, hash<string, XsdAbstractType> tmap, *hash<auto> mrh, auto oval) {
@@ -3700,7 +3909,7 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
                 # also parse each choice block, if any
                 foreach hash<ChoiceInfo> ch in (choices) {
                     *hash<auto> vh = val.(ch.elementmap.keys());
-                    *hash<auto> h = parseChoice(vh, ch.elementmap, en, tmap, mrh, ch.required);
+                    *hash<auto> h = parseChoice(vh, ch.elementmap, en, tmap, mrh, ch.required, ch.alternatives);
                     if (h)
                         rh += h;
                     delete val.(h.keys());
@@ -3717,7 +3926,7 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
                 }
             } else { # "choice" - union
                 # a choice declared with minOccurs = 0 does not have to have a member present
-                rh += parseChoice(val, elementmap, en, tmap, mrh, required);
+                rh += parseChoice(val, elementmap, en, tmap, mrh, required, alternatives);
             }
         }
 
@@ -3731,11 +3940,23 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
     }
 
     private *hash<auto> parseChoice(hash<auto> val, hash<string, XsdElement> emap, string en,
-            hash<string, XsdAbstractType> tmap, *hash<auto> mrh, *bool required) {
+            hash<string, XsdAbstractType> tmap, *hash<auto> mrh, *bool required,
+            *list<hash<string, XsdElement>> alts) {
         list<auto> kl = val.keys();
-        if (elements kl > 1)
-            throw SOAP_DESERIALIZATION_ERROR, sprintf("too many elements supplied for choice / union in type %y for "
-                "element %y (%y)", getName(), en, kl);
+        if (elements kl > 1) {
+            # issue #5410: an alternative can be a nested model group with more than one element; in that case all
+            # the elements supplied must belong to a single alternative
+            *hash<string, XsdElement> alt = XsdComplexType::getMatchingAlternative(alts, kl);
+            if (!alt) {
+                throw SOAP_DESERIALIZATION_ERROR, sprintf("too many elements supplied for choice / union in type %y "
+                    "for element %y (%y)", getName(), en, kl);
+            }
+            hash<auto> rv();
+            foreach string key in (select (keys alt), val.hasKey($1)) {
+                rv{key} = emap{key}.deserializeValue(tmap, mrh, getValue(mrh, val{key}), True);
+            }
+            return rv;
+        }
         *string key = kl[0];
         if (!exists key) {
             if (required)
