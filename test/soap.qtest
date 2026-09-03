@@ -550,6 +550,9 @@ class SoapTest inherits QUnit::Test {
         addTestCase("attributes and choices", \attributeAndChoiceTest());
         addTestCase("nested model groups", \nestedModelGroupTest());
         addTestCase("XSD pattern facets", \xsdPatternTest());
+        addTestCase("XSD regular expression dialect", \xsdRegexTest());
+        addTestCase("XSD constraining facets", \xsdFacetTest());
+        addTestCase("XSD example message generation", \xsdSampleTest());
         addTestCase("header and body message parts", \headerPartsTest());
         addTestCase("issue 4449", \issue4449());
         addTestCase("issue 3029", \issue3029());
@@ -963,6 +966,139 @@ class SoapTest inherits QUnit::Test {
         string env_key = xh.firstKey();
         xh{env_key}."soapenv:Body"."ns:Req"."ns:single" = "bogus";
         assertThrows("SOAP-DESERIALIZATION-ERROR", "does not match", \op.deserializeRequest(), xh);
+    }
+
+    #! tests the conversion of XSD regular expressions to PCRE
+    /** the XSD regular expression language is not PCRE: \c "^" and \c "$" are ordinary characters, XSD has the
+        \c "\i", \c "\I", \c "\c", and \c "\C" escapes and character class subtraction, and \c "\s",
+        \c "\w", and \c "\d" denote different character sets
+    */
+    xsdRegexTest() {
+        code m = bool sub (string xsd, string value) {
+            return boolean(regex(value, "^(?:" + XsdRegexHelper::toPcre(xsd) + ")$"));
+        };
+
+        # "^" and "$" are ordinary characters in XSD, not anchors
+        assertTrue(m("a^b", "a^b"), "caret is a literal character");
+        assertFalse(m("a^b", "ab"), "caret is not an anchor");
+        assertTrue(m("a$", "a$"), "dollar is a literal character");
+        assertFalse(m("a$", "a"), "dollar is not an anchor");
+
+        # XML name character escapes, which PCRE does not have
+        assertTrue(m("\\i\\c*", "a-b.c"), "\\i\\c* matches an XML name");
+        assertFalse(m("\\i\\c*", "-abc"), "\\i does not match a leading hyphen");
+        assertTrue(m("\\I", "-"), "\\I matches a non-name-start character");
+
+        # XSD "\s" is exactly space, tab, newline and carriage return; PCRE also includes form feed
+        assertTrue(m("\\s", " "), "\\s matches a space");
+        assertFalse(m("\\s", "\f"), "\\s does not match a form feed");
+
+        # XSD "\w" is every character except punctuation, separators and other; PCRE "\w" is ASCII only
+        assertTrue(m("\\w+", "hello"), "\\w matches ASCII letters");
+        assertTrue(m("\\w+", "héllo"), "\\w matches non-ASCII letters");
+        assertFalse(m("\\w+", "a.b"), "\\w does not match punctuation");
+
+        # XSD "\d" is any Unicode decimal digit
+        assertTrue(m("\\d+", "123"), "\\d matches digits");
+        assertFalse(m("\\d+", "abc"), "\\d does not match letters");
+
+        # character class subtraction, which PCRE does not support
+        assertTrue(m("[a-z-[aeiou]]", "b"), "class subtraction keeps consonants");
+        assertFalse(m("[a-z-[aeiou]]", "a"), "class subtraction removes vowels");
+
+        # ordinary classes are unchanged
+        assertTrue(m("[^abc]", "d"), "negated class");
+        assertFalse(m("[^abc]", "a"), "negated class excludes its members");
+        assertTrue(m("[$^]", "$"), "caret and dollar are literal inside a class");
+
+        # the conversion is applied when validating
+        WebService ws = WSDLLib::getWebServiceFromUrl(get_script_dir() + "/xsd-patterns.wsdl");
+        WSOperation op = ws.getOperation("Op");
+        assertNothing(op.serializeRequest({"dialect": "a^b$c"}).body =~ x/nothing/,
+            "a pattern with literal caret and dollar serializes");
+        assertThrows("SOAP-SERIALIZATION-ERROR", "does not match", \op.serializeRequest(), {"dialect": "abc"},
+            "caret and dollar are not treated as anchors when validating");
+        assertThrows("SOAP-SERIALIZATION-ERROR", "does not match", \op.serializeRequest(), {"subtract": "aei"},
+            "class subtraction is applied when validating");
+    }
+
+    #! tests the constraining facets other than \c pattern and \c enumeration
+    xsdFacetTest() {
+        WebService ws = WSDLLib::getWebServiceFromUrl(get_script_dir() + "/xsd-patterns.wsdl");
+        WSOperation op = ws.getOperation("Op");
+
+        code accepts = bool sub (string field, auto value) {
+            try {
+                op.serializeRequest({field: value});
+                return True;
+            } catch (hash<ExceptionInfo> ex) {
+                assertEq("SOAP-SERIALIZATION-ERROR", ex.err, sprintf("%s %y: expected error type", field, value));
+                return False;
+            }
+        };
+
+        # minLength / maxLength
+        assertTrue(accepts("bounded", "abc"), "minLength: value at the minimum");
+        assertTrue(accepts("bounded", "abcdef"), "maxLength: value at the maximum");
+        assertFalse(accepts("bounded", "ab"), "minLength: value below the minimum");
+        assertFalse(accepts("bounded", "abcdefg"), "maxLength: value above the maximum");
+
+        # length
+        assertTrue(accepts("exact", "abcd"), "length: exact length");
+        assertFalse(accepts("exact", "abc"), "length: too short");
+        assertFalse(accepts("exact", "abcde"), "length: too long");
+
+        # minInclusive / maxInclusive
+        assertTrue(accepts("ranged", 10), "minInclusive: value at the bound");
+        assertTrue(accepts("ranged", 20), "maxInclusive: value at the bound");
+        assertFalse(accepts("ranged", 9), "minInclusive: value below the bound");
+        assertFalse(accepts("ranged", 21), "maxInclusive: value above the bound");
+
+        # minExclusive / maxExclusive
+        assertTrue(accepts("excl", 11), "minExclusive: value above the bound");
+        assertFalse(accepts("excl", 10), "minExclusive: value at the bound");
+        assertFalse(accepts("excl", 20), "maxExclusive: value at the bound");
+
+        # totalDigits / fractionDigits; insignificant zeros do not count
+        assertTrue(accepts("digits", "12.34"), "digits: at both maxima");
+        assertTrue(accepts("digits", "0012.3400"), "digits: insignificant zeros do not count");
+        assertFalse(accepts("digits", "123.45"), "totalDigits: too many digits");
+        assertFalse(accepts("digits", "1.234"), "fractionDigits: too many fraction digits");
+
+        # facets are applied when deserializing as well
+        hash<auto> h = op.serializeRequest({"ranged": 15});
+        hash<auto> xh = parse_xml(h.body);
+        string env_key = xh.firstKey();
+        xh{env_key}."soapenv:Body"."ns:Req"."ns:ranged" = "99";
+        assertThrows("SOAP-DESERIALIZATION-ERROR", "maxInclusive", \op.deserializeRequest(), xh);
+    }
+
+    #! tests that generated example messages satisfy the constraining facets of their types
+    xsdSampleTest() {
+        WebService ws = WSDLLib::getWebServiceFromUrl(get_script_dir() + "/xsd-patterns.wsdl");
+        WSOperation op = ws.getOperation("Op");
+        WSMessageHelper mh(ws);
+
+        # the generated example message must be serializable, which it can only be if every generated value
+        # satisfies the facets declared for its type
+        auto msg = mh.getMessage(op.input);
+        hash<auto> h = op.serializeRequest(msg);
+        assertTrue(exists h.body, "the generated example message serializes");
+
+        # and it must round-trip
+        assertEq(msg.Req.single, op.deserializeRequest(parse_xml(h.body)).single,
+            "the generated example message round-trips");
+        assertTrue(exists msg.Req.digits, "a value is generated for a type with digit facets");
+
+        # spot-check the generated values against their facets
+        assertRegex("^imsi-[0-9]{6,15}$", msg.Req.single, "sample satisfies a pattern facet");
+        assertRegex("^[a-z]{3}$", msg.Req.subtract, "sample satisfies a class subtraction pattern");
+        assertEq(4, msg.Req.exact.size(), "sample satisfies an exact length facet");
+        assertTrue(msg.Req.bounded.size() >= 3 && msg.Req.bounded.size() <= 6, "sample satisfies length bounds");
+        assertTrue(msg.Req.ranged >= 10 && msg.Req.ranged <= 20, "sample satisfies an inclusive range");
+        assertTrue(msg.Req.excl > 10 && msg.Req.excl < 20, "sample satisfies an exclusive range");
+        assertRegex("^[0-9]{6,}$", msg.Req.padded, "sample is extended to satisfy a length facet");
+        assertRegex("^\\$", msg.Req.ipv6, "sample satisfies a 16-alternative pattern facet");
     }
 
     #! tests messages whose parts are split between the SOAP header and the SOAP body
