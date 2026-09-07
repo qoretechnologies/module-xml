@@ -88,6 +88,9 @@ module WSDL {
     - fixed no-target-namespace type identity and retained global element attributes during type resolution
     - schema construction now rejects imports after component declarations and unexpected schema children,
       including in external and WSDL-inline schemas
+    - complex-content derivation bases retain expanded namespace identity and resolve builtin \c anyType;
+      empty extensions inherit base members/attributes, restrictions retain their own particle, and cyclic
+      derivations fail with a schema error
     - fixed serializing values in the upper half of the \c xs:unsignedShort and \c xs:unsignedInt ranges;
       the limits are now 65535 and 4294967295 respectively
     - fixed serializing native IEEE floating-point infinities and NaN as XSD \c INF, \c -INF, and \c NaN;
@@ -4370,6 +4373,13 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
         *string restriction;
         *string extension;
 
+        #! expanded complex-content base identity captured at its declaration
+        /** @since %WSDL 0.5.8 */
+        *hash<auto> baseTypeInfo;
+        #! resolved complex-content base type
+        /** @since %WSDL 0.5.8 */
+        *XsdAbstractType baseType;
+
         bool usedocns;
 
         hash<string, XsdElement> elementmap();
@@ -4408,6 +4418,7 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
     private {
         #! type of complexType object
         string cx_type;
+        bool finalizing = False;
 
         const XET_ALL      = "ALL";
         const XET_CHOICE   = "CHOICE";
@@ -4419,85 +4430,80 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
     # ct can be NOTHING in case of an empty complex type
     constructor(*hash<auto> ct, Namespaces nsc, XsdLateResolverHelper unresolved, bool n_usedocns, *string desc_name)
             : XsdAbstractType(\ct, nsc, desc_name) {
+        NamespacePrefixHelper declaration(nsc, ct."^attributes^");
         usedocns = n_usedocns;
         #any a = ct."^attributes^";
         delete ct."^attributes^";
 
         *hash<auto> d = ct.complexContent;
         if (d) {
+            NamespacePrefixHelper content_scope(nsc, d."^attributes^");
             WSDL::XsdBase::removeNS(\d);
-            if (d.restriction) {
+            if (d.hasKey("restriction")) {
+                NamespacePrefixHelper restriction_scope(nsc, d.restriction."^attributes^");
                 WSDL::XsdBase::removeNS(\d.restriction);
 
                 *string base = d.restriction."^attributes^".base;
-
-                # extract namespace prefix and type name from base
-                (*string ns, *string tn) = (base =~ x/([^:]+):([^:]+)/);
-                if (exists tn) {
-                    if (tn == "Array") {
-                        # validate that the namespace prefix refers to SOAP encoding namespace
-                        if (ns) {
-                            *string ns_uri = nsc.tryGetInputNamespaceUri(ns);
-                            if (ns_uri && ns_uri != SOAP_ENCODING) {
-                                throw WSDL_ERROR, sprintf("Array type restriction base %y uses namespace %y "
-                                    "which is not SOAP encoding namespace %y", base, ns_uri, SOAP_ENCODING);
-                            }
-                        }
-                        auto aa = d.restriction.attribute."^attributes^";
-                        WSDL::XsdBase::removeNSKeys(\aa);
-                        if (!exists aa.arrayType)
-                            throw WSDL_ERROR, sprintf("cannot parse complexType restriction: %y", d.restriction);
-
-                        delete d.restriction.attribute;
-
-                        # issue #2899: check for an array element
-                        if (d.restriction.sequence) {
-                            auto seq = d.restriction.sequence;
-                            WSDL::XsdBase::removeNS(\seq);
-
-                            auto sa = seq.element."^attributes^";
-                            # according to https://access.redhat.com/documentation/en-US/Fuse_ESB/4.4.1/html/Writing_WSDL_Contracts/files/WSDLDefiningArrays.html
-                            # if defining an element of an array, the element's maxOccurs attribute must be set to "unbounded"
-                            if (sa.maxOccurs != "unbounded") {
-                                throw "WSDL_ERROR", sprintf("array elements must have maxOccurs = \"unbounded\"; array type %y has maxOccurs = %y",
-                                    aa.arrayType, sa.maxOccurs);
-                            }
-                            arrayType = aa.arrayType;
-
-                            elementmap = parseElements(seq.element, unresolved, nsc);
-                            cx_type = XET_SEQUENCE;
-                        } else {
-                            array = new XsdArrayType(name, ns ?? "unknown", aa.arrayType, nsc, unresolved);
-                        }
-
-                        #printf("DEBUG: ans: %y atn: %y aa: %y\n", ans, atn, aa);
-                        return;
-                    } else {
-                        restriction = tn;
-                    }
+                if (!base) {
+                    throw WSDL_ERROR, sprintf("complexType %Y restriction requires a base", name);
                 }
+                baseTypeInfo = nsc.getTypeHash(base);
+
+                # The legacy array constructor takes the input prefix.
+                *string ns = (base =~ x/^([^:]+):/)[0];
+                if (baseTypeInfo.val == "Array" && baseTypeInfo.uri == SOAP_ENCODING) {
+                    auto aa = d.restriction.attribute."^attributes^";
+                    WSDL::XsdBase::removeNSKeys(\aa);
+                    if (!exists aa.arrayType) {
+                        throw WSDL_ERROR, sprintf("cannot parse complexType restriction: %y", d.restriction);
+                    }
+
+                    delete d.restriction.attribute;
+
+                    # issue #2899: check for an array element
+                    if (d.restriction.sequence) {
+                        auto seq = d.restriction.sequence;
+                        WSDL::XsdBase::removeNS(\seq);
+
+                        auto sa = seq.element."^attributes^";
+                        # according to https://access.redhat.com/documentation/en-US/Fuse_ESB/4.4.1/html/Writing_WSDL_Contracts/files/WSDLDefiningArrays.html
+                        # if defining an element of an array, the element's maxOccurs attribute must be set to "unbounded"
+                        if (sa.maxOccurs != "unbounded") {
+                            throw WSDL_ERROR, sprintf("array elements must have maxOccurs = \"unbounded\"; array type %y has maxOccurs = %y",
+                                aa.arrayType, sa.maxOccurs);
+                        }
+                        arrayType = aa.arrayType;
+
+                        elementmap = parseElements(seq.element, unresolved, nsc);
+                        cx_type = XET_SEQUENCE;
+                    } else {
+                        array = new XsdArrayType(name, ns ?? "", aa.arrayType, nsc, unresolved);
+                    }
+
+                    #printf("DEBUG: ans: %y atn: %y aa: %y\n", ans, atn, aa);
+                    baseTypeInfo = NOTHING;
+                    return;
+                }
+                restriction = baseTypeInfo.val;
 
                 delete d.restriction."^attributes^";
 
                 parseData(d.restriction, unresolved, nsc);
-            } else if (d.extension) {
-                string ext_base = d.extension."^attributes^".base;
-
-                # extract namespace prefix if present and validate SOAP encoding namespace
-                (*string ext_ns, *string ext_type) = (ext_base =~ x/([^:]+):([^:]+)/);
-                # use unqualified type name for type map lookup
-                if (ext_ns && ext_type) {
-                    extension = ext_type;
-                } else {
-                    # no namespace prefix - use as-is
-                    extension = ext_base;
+            } else if (d.hasKey("extension")) {
+                NamespacePrefixHelper extension_scope(nsc, d.extension."^attributes^");
+                *string ext_base = d.extension."^attributes^".base;
+                if (!ext_base) {
+                    throw WSDL_ERROR, sprintf("complexType %Y extension requires a base", name);
                 }
+                baseTypeInfo = nsc.getTypeHash(ext_base);
+                extension = baseTypeInfo.val;
                 delete d.extension."^attributes^";
                 WSDL::XsdBase::removeNS(\d.extension);
 
                 parseData(d.extension, unresolved, nsc);
-            } else
+            } else {
                 throw "XSD-COMPLEXCONTENT-ERROR", sprintf("can't parse complexContent %y %y information", getName(), d.firstKey());
+            }
         } else if (ct.simpleContent) {
             d = ct.simpleContent;
             WSDL::XsdBase::removeNS(\d);
@@ -4527,29 +4533,39 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
 
     finalize(hash<string, XsdAbstractType> tmap, Namespaces nsc, *hash<string, XsdGroup> groupMap,
             *hash<string, XsdAttributeGroup> attrGroupMap, *XsdLateResolverHelper unresolved) {
-        if (finalized)
+        if (finalized) {
             return;
-        finalized = True;
+        }
+        if (finalizing) {
+            throw WSDL_ERROR, sprintf("cyclic complex type derivation involving %Y", name);
+        }
+        finalizing = True;
+        on_exit finalizing = False;
+        on_success finalized = True;
 
-        # process restriction info
-        if (restriction) {
-            # combine base type and new type
-            XsdAbstractType t = tmap_get(tmap, restriction);
-            if (!(t instanceof XsdComplexType))
-                throw WSDL_ERROR, sprintf("cannot restrict complexType %y with type %y", name, t.name);
-            cast<XsdComplexType>(t).finalize(tmap, nsc, groupMap, attrGroupMap, unresolved);
-            elementmap = cast<hash<string, XsdElement>>(cast<XsdComplexType>(t).elementmap + elementmap);
-            #printf("DEBUG: extended %s with %s (%y)\n", name, restriction, cast<XsdComplexType>(t).elementmap.keys());
-        } else if (extension) {
-            # process extension info
-            XsdAbstractType t = tmap_get(tmap, extension);
-            if (!(t instanceof XsdComplexType))
-                throw WSDL_ERROR, sprintf("cannot extend complexType %y with type %y", name, t.name);
-            cast<XsdComplexType>(t).finalize(tmap, nsc, groupMap, attrGroupMap, unresolved);
-            # combine base type and new type
-            elementmap = cast<hash<string, XsdElement>>(cast<XsdComplexType>(t).elementmap + elementmap);
-            #printf("DEBUG: extended %s (%s) with %s (%y) elements: %y\n", name, self.uniqueHash(), extension,
-            #     cast<XsdComplexType>(t).elementmap.keys(), keys elementmap);
+        if (baseTypeInfo) {
+            XsdAbstractType resolved_base = baseTypeInfo.uri == XSD_NS ? nsc.getBaseType(baseTypeInfo.val)
+                : tmap_get(tmap, type_qname(baseTypeInfo.uri, baseTypeInfo.val));
+            if (resolved_base instanceof XsdComplexType) {
+                XsdComplexType base = cast<XsdComplexType>(resolved_base);
+                base.finalize(tmap, nsc, groupMap, attrGroupMap, unresolved);
+                attrs = base.attrs + attrs;
+                if (extension) {
+                    elementmap = base.elementmap + elementmap;
+                    choices = base.choices + choices;
+                    if (cx_type == XET_NONE || !cx_type) {
+                        cx_type = base.cx_type;
+                        alternatives = base.alternatives;
+                    }
+                    required = required || base.required;
+                    requires_value = requires_value || base.requires_value;
+                }
+            } else if (!(resolved_base instanceof XsdBaseType) || resolved_base.name != "anyType") {
+                throw WSDL_ERROR, sprintf("complexContent type %Y requires a complex base, got %Y", name,
+                    resolved_base.name);
+            }
+            # Publish the link only after validation; failed cycles must not retain cyclic base links.
+            baseType = resolved_base;
         }
 
         # resolve group references
@@ -4641,8 +4657,12 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
             if (ah.size() == 1 && ah.firstKey() =~ /documentation$/)
                 documentation = trim(ah.firstValue());
         }
-        if (!d)
+        if (!d) {
+            cx_type = XET_NONE;
+            required = True;
+            requires_value = False;
             return;
+        }
 
         parseAttributes(\d, unresolved, nsc);
 

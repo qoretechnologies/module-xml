@@ -1,0 +1,143 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires xml
+%requires ../qlib/WSDL.qm
+%exec-class DerivationContextTest
+
+class DerivationContextTest inherits QUnit::Test {
+    private {
+        const Xsd = "http://www.w3.org/2001/XMLSchema";
+        const Ns = "urn:qore:derivation";
+    }
+
+    constructor() : QUnit::Test("WSDL derivation namespace context", "1.0") {
+        addTestCase("Builtin anyType extension and restriction bases", \builtinBase());
+        addTestCase("Derived bases use expanded identity and local context", \baseIdentity());
+        addTestCase("Empty extensions inherit content and attributes", \emptyExtension());
+        addTestCase("Restriction replaces the base particle", \restrictionParticle());
+        addTestCase("Custom Array names are independent of SOAP encoding", \customArray());
+        addTestCase("Wrong namespaces and simple bases reject", \invalidBase());
+        addTestCase("Cyclic derivation rejects with schema error", \cyclicBase());
+        set_return_value(main());
+    }
+
+    private string schema(string contents, string ns = Ns) {
+        return sprintf('<xs:schema xmlns:xs="%s" xmlns:t="%s" targetNamespace="%s">%s</xs:schema>',
+            Xsd, ns, ns, contents);
+    }
+
+    private XsdSchema parse(string xml) {
+        return new XsdSchema(xml, {"async_only": True});
+    }
+
+    private XsdComplexType type(XsdSchema s, string name, string ns = Ns) {
+        return cast<XsdComplexType>(s.getTypeMap(){make_qname(ns, name)});
+    }
+
+    builtinBase() {
+        foreach string method in ("extension", "restriction") {
+            string xml = schema(sprintf('<xs:complexType name="Empty"><xs:complexContent>
+                <xs:%s xmlns="%s" base="anyType"><xs:sequence/></xs:%s>
+                </xs:complexContent></xs:complexType><xs:element name="value" type="t:Empty"/>', method, Xsd, method));
+            XsdSchema s = parse(xml);
+            assertEq("Empty", s.getElement(Ns, "value").type.getName());
+            assertEq(0, type(s, "Empty").elementmap.size());
+            XsdSchema restored = Serializable::deserialize(s.serialize());
+            assertEq("Empty", restored.getElement(Ns, "value").type.getName());
+        }
+    }
+
+    baseIdentity() {
+        XsdSchema s = parse(schema('<xs:complexType name="Base"><xs:sequence>
+            <xs:element name="first" type="xs:string"/></xs:sequence></xs:complexType>', "urn:a"));
+        s.addSchemaString(schema('<xs:complexType name="Base"><xs:sequence>
+            <xs:element name="first" type="xs:int"/></xs:sequence></xs:complexType>
+            <xs:complexType name="Derived"><xs:complexContent xmlns:k="urn:b">
+                <xs:extension base="k:Base"><xs:sequence><xs:element name="second" type="xs:boolean"/>
+                </xs:sequence></xs:extension></xs:complexContent></xs:complexType>', "urn:b"));
+        XsdComplexType derived = type(s, "Derived", "urn:b");
+        assertEq(("first", "second"), keys derived.elementmap);
+        hash<auto> value = derived.deserializeValue("value", s.getTypeMap(), NOTHING,
+            {"first": "42", "second": "true"});
+        assertEq(42, value.first);
+        assertEq(NT_INT, value.first.typeCode());
+        assertEq(True, value.second);
+        hash<auto> wire = derived.serializeValue(s.nsc, value, True);
+        assertEq(("first", "second"), keys wire);
+    }
+
+    emptyExtension() {
+        XsdSchema s = parse(schema('<xs:complexType name="Base"><xs:sequence>
+            <xs:element name="first" type="xs:string"/></xs:sequence>
+            <xs:attribute name="flag" type="xs:boolean" use="required"/></xs:complexType>
+            <xs:complexType name="Derived"><xs:complexContent>
+                <xs:extension base="t:Base"/></xs:complexContent></xs:complexType>'));
+        XsdComplexType derived = type(s, "Derived");
+        assertEq(("first",), keys derived.elementmap);
+        assertEq(("flag",), keys derived.attrs);
+        assertTrue(derived.isRequired());
+        hash<auto> value = derived.deserializeValue("value", s.getTypeMap(), NOTHING,
+            {"first": "data", "^attributes^": {"flag": "true"}});
+        assertEq("data", value.first);
+        assertEq(True, value."^attributes^".flag);
+        hash<auto> wire = derived.serializeValue(s.nsc, value, True);
+        assertEq("data", wire.first);
+        assertEq("true", wire."^attributes^".flag);
+        assertTrue(derived.getDataProviderType().getFields().hasKey("first"));
+        assertThrows("SOAP-SERIALIZATION-ERROR", \derived.serializeValue(), (s.nsc, {"first": "data"}, True));
+    }
+
+    restrictionParticle() {
+        XsdSchema s = parse(schema('<xs:complexType name="Base"><xs:sequence>
+            <xs:element name="kept" type="xs:string"/><xs:element name="removed" type="xs:int" minOccurs="0"/>
+            </xs:sequence></xs:complexType><xs:complexType name="Restricted"><xs:complexContent>
+            <xs:restriction base="t:Base"><xs:sequence><xs:element name="kept" type="xs:string"/></xs:sequence>
+            </xs:restriction></xs:complexContent></xs:complexType>'));
+        XsdComplexType restricted = type(s, "Restricted");
+        assertEq(("kept",), keys restricted.elementmap);
+        assertThrows("SOAP-DESERIALIZATION-ERROR", \restricted.deserializeValue(),
+            ("value", s.getTypeMap(), NOTHING, {"kept": "data", "removed": "42"}));
+    }
+
+    customArray() {
+        XsdSchema s = parse(schema('<xs:complexType name="Array"><xs:sequence/></xs:complexType>
+            <xs:complexType name="Restricted"><xs:complexContent><xs:restriction base="t:Array">
+            <xs:sequence/></xs:restriction></xs:complexContent></xs:complexType>'));
+        assertEq("Restricted", type(s, "Restricted").getName());
+    }
+
+    invalidBase() {
+        foreach string base in ("wrong:Base", "xs:string") {
+            string xml = schema(sprintf('<xs:import namespace="urn:wrong"/>
+                <xs:complexType name="Base"><xs:sequence/></xs:complexType>
+                <xs:complexType name="Derived"><xs:complexContent><xs:extension xmlns:wrong="urn:wrong"
+                base="%s"/></xs:complexContent></xs:complexType>', base));
+            assertThrows("WSDL-ERROR", \parse(), (xml,));
+        }
+        foreach string method in ("extension", "restriction") {
+            assertThrows("WSDL-ERROR", \parse(), (schema(sprintf('<xs:complexType name="Derived">
+                <xs:complexContent><xs:%s/></xs:complexContent></xs:complexType>', method)),));
+        }
+        assertThrows("WSDL-ERROR", \parse(), (schema('<xs:complexType name="BadArray"><xs:complexContent>
+            <xs:restriction xmlns:enc="http://schemas.xmlsoap.org/soap/encoding/" base="enc:Array">
+            <xs:sequence><xs:element name="item" type="xs:string" maxOccurs="2"/></xs:sequence>
+            <xs:attribute xmlns:wsdl="http://schemas.xmlsoap.org/wsdl/" ref="enc:arrayType"
+                wsdl:arrayType="xs:string[]"/></xs:restriction></xs:complexContent></xs:complexType>'),));
+    }
+
+    cyclicBase() {
+        string xml = schema('<xs:complexType name="A"><xs:complexContent><xs:extension base="t:B"/>
+            </xs:complexContent></xs:complexType><xs:complexType name="B"><xs:complexContent>
+            <xs:extension base="t:A"/></xs:complexContent></xs:complexType>');
+        assertThrows("WSDL-ERROR", \parse(), (xml,));
+        XsdSchema reusable = parse(schema('<xs:complexType name="Existing"><xs:sequence/></xs:complexType>'));
+        assertThrows("WSDL-ERROR", \reusable.addSchemaString(), (xml,));
+        reusable.addSchemaString(schema('<xs:complexType name="A"><xs:sequence/></xs:complexType>'));
+        assertEq("A", type(reusable, "A").getName());
+        assertEq("Existing", type(reusable, "Existing").getName());
+    }
+}

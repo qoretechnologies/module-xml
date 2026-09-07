@@ -19,6 +19,7 @@ from lxml import etree
 import corpus
 import coverage
 import survey
+from independent import SchemaJob, run as run_independent
 
 
 ROOT = Path(__file__).resolve().parent
@@ -111,6 +112,55 @@ class CoverageTest(unittest.TestCase):
                 self.assertEqual(f"{{{ns}}}sayHi" + ("Response" if row["direction"] == "response" else ""), body.tag)
                 if row["direction"] == "response":
                     self.assertEqual("Hello, world!", body.find(f"{{{ns}}}responseType").text)
+
+    def test_corrected_attribute_extension_keeps_original_source_and_values(self):
+        extracted = corpus.extract(self.root / "derivative-source")
+        metadata = corpus.read_manifest(ROOT / "derivatives/manifest.json")
+        ns = "{http://www.w3.org/2002/ws/databinding/examples/6/09/}"
+        name = "ComplexTypeAttributeExtension"
+        wsdl = extracted / name / f"echo{name}.wsdl"
+        document = etree.parse(str(wsdl))
+        schema_node = document.find(f"{{{coverage.contract.WSDL}}}types/{{{coverage.contract.XSD}}}schema")
+        # Materialize inherited WSDL namespace declarations on the standalone schema.
+        schema = etree.XMLSchema(etree.fromstring(etree.tostring(schema_node)))
+        messages, inputs = [], {}
+        self.assertEqual(2, len(metadata["files"]))
+        for entry in metadata["files"]:
+            original = (extracted / entry["source"]).read_bytes()
+            corpus.check_digest(original, entry["source_sha256"], entry["source"])
+            corrected = (ROOT / "derivatives" / entry["derivative"]).read_bytes()
+            corpus.check_digest(corrected, entry["sha256"], entry["derivative"])
+            expected = original
+            for change in entry["changes"]:
+                self.assertEqual(1, expected.count(change["old"].encode()))
+                expected = expected.replace(change["old"].encode(), change["new"].encode())
+            self.assertEqual(expected, corrected)
+            self.assertFalse(schema.validate(survey.payload(original, survey.parser(extracted))))
+            payload = survey.payload(corrected, survey.parser(extracted))
+            self.assertTrue(schema.validate(payload), str(schema.error_log))
+            inputs[entry["derivative"]] = etree.tostring(payload)
+            for direction in ("request", "response"):
+                messages.append({"file": entry["derivative"], "direction": direction,
+                    "path": str(ROOT / "derivatives" / entry["derivative"])})
+        rows = survey.run_worker([{"name": "CorrectedAttributeExtension", "wsdl": str(wsdl),
+            "operation": "echo" + name, "binding": "SoapBinding", "base": survey.SOURCE + name + "/",
+            "messages": messages}], {})
+        outputs = {}
+        for row in rows:
+            self.assertTrue(row["ok"], row)
+            if row["stage"] == "serialize":
+                payload = survey.payload(row["body"].encode(), survey.parser(extracted))
+                self.assertTrue(schema.validate(payload), str(schema.error_log))
+                owner = payload.find(ns + "complexTypeAttributeExtension")
+                self.assertEqual("female", owner.get("gender"))
+                self.assertEqual("Mary", owner.find(ns + "name").text)
+                self.assertIsNone(owner.find(ns + "name").get("gender"))
+                outputs[row["file"] + "/" + row["direction"]] = etree.tostring(payload)
+        self.assertEqual(4, len(outputs))
+        oracle = run_independent([SchemaJob("corrected", survey.SOURCE + name + f"/echo{name}.wsdl",
+            etree.tostring(schema_node), inputs | outputs)], {})
+        self.assertTrue(all(row["ok"] for row in oracle["documents"].values()), oracle)
+        self.assertEqual(6, len(oracle["documents"]))
 
     def test_full_strict_gate_keeps_later_failures_visible(self):
         path = corpus.extract(self.root / "complete")

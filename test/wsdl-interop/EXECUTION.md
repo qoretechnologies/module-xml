@@ -181,6 +181,43 @@ P1 corpus/adjudication acceptance is complete; P2 namespace/type work is in prog
 P3–P9 have not started. Later-phase failures remain recorded in the historical
 findings and current diagnostic reports.
 
+### P2-02: complex-content derivation
+
+- Seven reduced derivation tests initially all failed on `1a62154`, reproducing
+  builtin `anyType` lookup, wrong namespace selection, lost inherited attributes,
+  restricted particles incorrectly merged with removed base fields, custom `Array`
+  mistaken for SOAP encoding, invalid bases and cyclic derivation.
+- Complex-content bases now retain declaration-local URI identity and resolve
+  builtin types separately. Empty extensions inherit content/attributes and provider
+  field reporting; restrictions retain their declared particle. Finalization marks
+  completion only on success and detects cycles before publishing base links.
+- All 279 valid echo WSDLs and all 14 valid supplemental contracts now parse. The
+  14 invalid echo WSDLs and four grammar-invalid supplemental sources still reject.
+  `ComplexTypeAttributeExtension` now retains the inherited `name` element. Its
+  original payload is source-invalid: `gender` is on the child instead of the parent.
+  Unknown-attribute rejection remains a P2 failure; schema-valid output that drops
+  the misplaced attribute is not a passing interoperability result.
+- Separate attribute-owner derivatives retain both original/derived hashes and exact
+  byte substitutions in `derivatives/manifest.json`. Their original source bytes are
+  checked from the archive, never replaced; libxml2/Xerces validate the corrected
+  payload and four output directions, with exact `Mary`/`female` ownership assertions.
+- Newly reachable independent runtime failures are explicitly assigned to P5:
+  `GlobalElementComplexTypeSequenceExtension` needs generic `anyType` content
+  handling (valid `data` child rejected), and `MixedComplexContent` needs ordered
+  mixed text (valid `^value^` content rejected). Their parse/base resolution is fixed;
+  their eight direction failures remain in the report under the original primary P2
+  case ownership. No runtime passing claim or skip is added for those messages.
+- Simple-content derivation, full particle restriction validation (P4), dynamic type
+  identity (P5), and the other listed P2 acceptance work remain outstanding.
+- Empty extension/restriction declarations now check key presence even when parsed as
+  NOTHING, so missing bases consistently reject with WSDL-ERROR. Invalid SOAP array
+  occurrence declarations use the same schema error category.
+- Final checks: 235 Qore cases (seven new / 32 assertions) and 59 Python tests pass.
+  Strict selection passes all 26 descriptions / 84 directions. Full report: 428
+  failures, P2=36, P3=208, P4=76, P5=108; no missing/skipped stages. Every previously
+  successful valid stage/output is preserved. Catalog request counts: parse 279/14,
+  decode 996/120, encode 994/2, output 948/46; newly reachable failures stay visible.
+
 ## Commit and audit record
 
 - `8914353` — P1-01, `pin W3C corpus and isolate offline schema diagnostics`: verified archive,
@@ -202,8 +239,12 @@ findings and current diagnostic reports.
   acceptance: 58 Python tests and 209 Qore cases pass; original/catalog surveys
   unchanged. Full 62-item audit [audits/P1-04.md](audits/P1-04.md); all applicable checks pass.
 
-- P2-01 (this increment) — declaration namespace identity, schema reconstruction,
+- `1a62154` — P2-01 — declaration namespace identity, schema reconstruction,
   rollback and ordered schema construction: 58 Python tests and 228 Qore cases
   pass; 19 new cases / 112 assertions. Every previously successful wire output is
   byte-identical; the fixed W3C fixture adds eight request/response outputs. Full
   62-item audit [audits/P2-01.md](audits/P2-01.md); all applicable checks pass.
+
+- P2-02 (this increment) — complex-content base identity, inheritance and cycle
+  checks: 59 Python tests and 235 Qore cases pass. Complete 62-item audit
+  [audits/P2-02.md](audits/P2-02.md); all applicable checks pass. P2 remains in progress.

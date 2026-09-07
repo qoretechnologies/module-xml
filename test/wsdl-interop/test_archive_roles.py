@@ -33,10 +33,8 @@ class ArchiveRolesTest(unittest.TestCase):
             self.assertEqual(4, sum(c["source_valid"] is False for c in report["additional_contracts"]))
             for record in report["additional_contracts"]:
                 self.assertIn("qore", record)
-                if record["source_valid"] and not record["qore"]["ok"]:
-                    self.assertEqual("P2", record["phase"])
-                    self.assertTrue(record["default_namespace_type_evidence"])
-                    self.assertTrue(record["qore"]["desc"].startswith('no such type "anyType";'))
+                if record["source_valid"]:
+                    self.assertTrue(record["qore"]["ok"], record["qore"])
                 if not record["source_valid"]:
                     self.assertTrue(record["parse_requirement_passed"])
                     self.assertEqual("passed", record["grammar_rejection"]["status"])

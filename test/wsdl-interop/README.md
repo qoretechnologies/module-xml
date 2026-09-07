@@ -58,9 +58,18 @@ They also verify that missing, duplicate, malformed, or out-of-order worker resu
 The first P2 increment covers declaration-local namespaces, distinct no-namespace
 type identity, standalone schema reconstruction, failed-addition rollback and ordered
 schema grammar. `ElementTypeDefaultNamespace` is included in the strict gate with
-exact string comparisons in both directions: 24 descriptions and 76 message-direction
-combinations. The other broad failures remain visible; P2 is not yet complete.
+exact string comparisons in both directions. The derivation increment adds both empty
+extension fixtures: 26 descriptions and 84 message-direction combinations. The other broad failures remain
+visible; P2 is not yet complete.
 See [the implemented design](../../design/wsdl-schema-identity.md) and [execution record](EXECUTION.md).
+
+The attribute-extension source places `gender` on a string child that does not declare
+it. [Separately identified derivatives](derivatives/manifest.json) move that attribute
+to its declared parent, recording original/derived hashes and the two exact byte
+substitutions. Independent validators and both request/response paths verify the
+corrected parent's attribute and inherited child's text. The original remains an
+invalid-source rejection requirement; its schema-valid output after dropping the
+misplaced attribute is not a conformance pass.
 
 All files under `w3c/`, except our checksum manifest, are copied byte for byte from:
 
@@ -252,8 +261,8 @@ source defects, supported by the [schema grammar](https://www.w3.org/TR/xmlschem
 [element validity rules](https://www.w3.org/TR/xmlschema-1/#cvc-elt).
 
 Nine valid historical descriptions originally reproduced the local default-namespace type-resolution
-defect. Their source lines and expanded type identities are retained. Six now parse; three reach the
-remaining P2 builtin `anyType` derivation defect. The four invalid sources now fail the explicit
+defect. Their source lines and expanded type identities are retained. All fourteen valid supplemental
+contracts now parse after the namespace and builtin-base fixes. The four invalid sources fail the explicit
 ordered schema grammar check, which is credited independently of namespace/import failures.
 The full WSDL grammar matrix remains assigned to P6. The 16 output-oracle
 disagreements for unchanged invalid IDREF/IDREFS content are separately adjudicated using expanded
