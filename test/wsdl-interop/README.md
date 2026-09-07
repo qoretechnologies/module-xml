@@ -9,6 +9,7 @@ diagnostic tool with explicit failures and coverage limits, not a conformance ce
 
 See [PLAN.md](PLAN.md) for the phased implementation plan, acceptance checks, and a complete mapping
 of the recorded findings and validator disagreements to the work needed to resolve them.
+See [EXECUTION.md](EXECUTION.md) for implementation progress and commit/audit evidence.
 
 ## Sources and intended coverage
 
@@ -30,6 +31,7 @@ From the repository root:
 ```sh
 qore --enable-debug test/wsdl-interop.qtest
 python3 test/wsdl-interop/test_survey.py -v
+python3 test/wsdl-interop/test_corpus.py -v
 ```
 
 The Qore suite uses eight unmodified W3C WSDL/XSD pairs and 48 selected SOAP messages across SOAP 1.1 and
@@ -68,18 +70,50 @@ SHA-256. Each fixture preserves the W3C copyright and links to the
 
 ## Reproduce the full survey
 
-Download the archive above, verify its SHA-256, and extract it to a temporary directory. Then run:
+The original archive is pinned offline at `corpus/w3c-databinding.zip`.
+`corpus/inventory.json` records the sizes and SHA-256 hashes of all 4,191 original files,
+including HTML, standalone XML, and WSDL 2.0 artifacts that are outside the survey's execution scope.
+Extract into a **new** directory, or verify an existing extraction:
+
+```sh
+python3 test/wsdl-interop/corpus.py --extract /tmp/wsdl-corpus
+# Alternatively, verify every original file in an existing extraction:
+python3 test/wsdl-interop/corpus.py --verify /tmp/module-xml-wsdl-survey
+```
+
+Extraction validates archive/member hashes, paths, file types, and resource bounds before publishing
+the extracted directory. It refuses existing destinations and cleans up staged files on failure or
+interruption. The destination must not be created concurrently. No network access is needed.
+
+Then run:
 
 ```sh
 python3 test/wsdl-interop/survey.py \
   /tmp/wsdl-corpus/databinding/examples/6/09 \
+  --soap-version both --catalog test/wsdl-interop/corpus/catalog.json \
   --output /tmp/wsdl-survey.json
 ```
 
 Use `--soap-version both` to include both supplied envelope versions; the default is `11`.
 Use `--qore /path/to/qore` to select the executable. The driver always enables Qore debugging and uses
 the local WSDL module. It records the module checksum, input checksums, Qore version, and lxml/libxml2
-versions. Missing imports remain explicit failures; neither Qore nor the validator downloads schemas.
+versions. `--catalog` adds the checksum-verified imports to both Qore's async cache and the independent
+validator's resolver. Nested relative imports retain the source URI as their base. Unknown resources,
+conflicting cache entries, malformed catalogs, and changed bytes fail explicitly; neither Qore nor the
+validator downloads schemas. Omitting `--catalog` reproduces the original missing-resource conditions.
+
+The four W3C static dependency URLs and SOAP 1.1 encoding URL are recorded in `corpus/catalog.json`,
+with retrieval dates, hashes, original bytes, and provenance. Four contain XML schemas with no further
+imports. **W3C's `Imported.xsd` currently returns HTTP 200 with zero bytes**, also confirmed by its
+[published directory index](https://www.w3.org/2002/ws/databinding/examples/6/09/static/).
+The catalog preserves that empty source; it does not supply an invented schema. Parsing it must fail:
+an XML document requires a document element ([XML 1.0 §2.1](https://www.w3.org/TR/xml/#sec-well-formed)).
+Recovering a valid historical version, or closing its source-defect adjudication with complete
+reference evidence, remains part of P1. No missing dependency is counted as successful validation.
+
+Schema compilations use separate parsers. A resolver exception in one schema must not contaminate the
+next schema's diagnostics; the previous shared parser incorrectly attributed `ChoiceChoice` and
+`SchemaVersion` oracle results to unrelated missing imports. Historical findings remain unchanged.
 
 The driver exits successfully when it has produced a complete diagnostic report, even if that report
 contains compatibility failures. Worker errors, warnings, incomplete output, timeouts, and invalid corpus

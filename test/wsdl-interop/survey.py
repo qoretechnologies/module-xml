@@ -16,6 +16,8 @@ from urllib.parse import unquote, urlparse
 
 from lxml import etree
 
+from corpus import Catalog
+
 
 SOURCE = "http://www.w3.org/2002/ws/databinding/examples/6/09/"
 SOAP_NAMESPACES = (
@@ -46,11 +48,14 @@ def inventory(corpus, version):
 class CorpusResolver(etree.Resolver):
     """Resolve corpus URLs locally; reject all other resources deterministically."""
 
-    def __init__(self, corpus):
+    def __init__(self, corpus, catalog=None):
         super().__init__()
         self.corpus = corpus.resolve()
+        self.catalog = catalog
 
     def resolve(self, url, public_id, context):
+        if self.catalog is not None and url in self.catalog.resources:
+            return self.resolve_string(self.catalog.resources[url], context, base_url=url)
         if url.startswith(SOURCE):
             path = self.corpus / unquote(url[len(SOURCE):])
         else:
@@ -64,9 +69,9 @@ class CorpusResolver(etree.Resolver):
         return self.resolve_filename(str(path), context)
 
 
-def parser(corpus):
+def parser(corpus, catalog=None):
     result = etree.XMLParser(no_network=True, resolve_entities=False)
-    result.resolvers.add(CorpusResolver(corpus))
+    result.resolvers.add(CorpusResolver(corpus, catalog))
     return result
 
 
@@ -92,12 +97,14 @@ def validate(schema, wire, xml_parser):
         return {"ok": False, "desc": str(error)}
 
 
-def examine(corpus, cases, rows):
+def examine(corpus, cases, rows, catalog=None):
     """Record input oracle disagreements separately from proven serialization failures."""
-    xml_parser = parser(corpus)
     schema_cache = {}
     inputs = {}
     for case in cases:
+        # A parser that raised in a resolver can retain that exception. Each schema
+        # compilation needs its own parser so a bad import cannot contaminate another case.
+        xml_parser = parser(corpus, catalog)
         name = case["name"]
         try:
             path = corpus / name / f"echo{name}.xsd"
@@ -108,7 +115,7 @@ def examine(corpus, cases, rows):
             schema = schema_cache[name]
             inputs[message["file"]] = (
                 {"ok": None, "desc": schema} if isinstance(schema, str)
-                else validate(schema, Path(message["path"]).read_bytes(), xml_parser)
+                else validate(schema, Path(message["path"]).read_bytes(), parser(corpus, catalog))
             )
     for row in rows:
         if "file" in row:
@@ -118,7 +125,7 @@ def examine(corpus, cases, rows):
             wire = row.pop("body")
             row["output_validation"] = (
                 {"ok": None, "desc": schema} if isinstance(schema, str)
-                else validate(schema, wire.encode(), xml_parser)
+                else validate(schema, wire.encode(), parser(corpus, catalog))
             )
             if row["output_validation"]["ok"] is not True:
                 row["body"] = wire
@@ -168,13 +175,20 @@ def main():
     cli.add_argument("--output", type=Path, required=True, help="write the complete JSON report here")
     cli.add_argument("--soap-version", choices=("11", "12", "both"), default="11")
     cli.add_argument("--qore", default="qore")
+    cli.add_argument("--catalog", type=Path, help="checksum-verified offline import catalog")
     args = cli.parse_args()
     corpus = args.corpus.resolve()
     cases = inventory(corpus, args.soap_version)
+    catalog = Catalog(args.catalog) if args.catalog else None
     # Share one cache across all cases instead of duplicating the entire corpus in every manifest entry.
     cache = {}
     for path in sorted(corpus.rglob("*.xsd")):
         cache[SOURCE + path.relative_to(corpus).as_posix()] = path.read_text()
+    if catalog is not None:
+        for uri, content in catalog.qore_cache().items():
+            if uri in cache and cache[uri] != content:
+                raise ValueError(f"catalog conflicts with corpus resource: {uri}")
+            cache[uri] = content
     with tempfile.TemporaryDirectory(prefix="qore-wsdl-survey-") as temporary:
         manifest = Path(temporary) / "manifest.json"
         manifest.write_text(json.dumps({"cases": cases, "cache": cache}))
@@ -184,7 +198,8 @@ def main():
         raise RuntimeError(f"Qore emitted diagnostics:\n{run.stderr}")
     rows = [json.loads(line) for line in run.stdout.splitlines()]
     check_rows(cases, rows)
-    result = examine(corpus, cases, rows)
+    result = examine(corpus, cases, rows, catalog)
+    result["catalog_sha256"] = dict(catalog.sha256) if catalog is not None else {}
     sources = sorted({Path(c["wsdl"]) for c in cases}
                      | {Path(m["path"]) for c in cases for m in c["messages"]}
                      | set(corpus.rglob("*.xsd")))
