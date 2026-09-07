@@ -36,10 +36,11 @@ class ArchiveRolesTest(unittest.TestCase):
                 if record["source_valid"] and not record["qore"]["ok"]:
                     self.assertEqual("P2", record["phase"])
                     self.assertTrue(record["default_namespace_type_evidence"])
-                    self.assertTrue(record["qore"]["desc"].startswith('no such type "string";'))
+                    self.assertTrue(record["qore"]["desc"].startswith('no such type "anyType";'))
                 if not record["source_valid"]:
                     self.assertTrue(record["parse_requirement_passed"])
-                    self.assertEqual("unassessed", record["grammar_rejection"]["status"])
+                    self.assertEqual("passed", record["grammar_rejection"]["status"])
+                    self.assertEqual("XSD10-schema-import-order", record["grammar_rejection"]["requirement"])
                 for schema in record["schemas"]:
                     self.assertIs(schema["source_valid"], schema["xerces"]["ok"])
                     self.assertIs(schema["source_valid"], schema["lxml"]["ok"])

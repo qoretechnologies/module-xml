@@ -1,0 +1,296 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+# P2 namespace context, expanded type identity and serialization regressions.
+
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires xml
+%requires ../qlib/WSDL.qm
+%exec-class WsdlNamespaceContextTest
+
+class WsdlNamespaceContextTest inherits QUnit::Test {
+    private {
+        const Xsd = "http://www.w3.org/2001/XMLSchema";
+        const Ns = "urn:qore:namespace-context";
+    }
+
+    constructor() : QUnit::Test("WSDL namespace declaration context", "1.0") {
+        addTestCase("Local default namespace and sibling restoration", \localDefault());
+        addTestCase("Local prefix shadows the XSD prefix", \prefixShadow());
+        addTestCase("New local prefixes cannot escape their declaration", \prefixLeak());
+        addTestCase("Same local type name in different namespaces", \typeCollision());
+        addTestCase("Wrong namespace cannot use an unrelated local type", \wrongNamespace());
+        addTestCase("Unbound QName prefix is rejected", \unboundPrefix());
+        addTestCase("Declared element attributes survive type resolution", \elementAttributes());
+        addTestCase("Serialized schema preserves resolved type identity", \serializedSchema());
+        addTestCase("Failed additions restore registries and namespaces", \failedAddition());
+        addTestCase("Serialized imports use the captured dependency bytes", \serializedImport());
+        addTestCase("Empty schemas remain extensible after serialization", \serializedEmpty());
+        addTestCase("Failed imports can be retried on the same schema", \failedImport());
+        addTestCase("Absent namespace cannot use a local type alias", \absentNamespace());
+        addTestCase("No target namespace retains distinct component identity", \noTargetNamespace());
+        addTestCase("Simple type bases retain nested declaration contexts", \simpleTypeContexts());
+        addTestCase("Invalid namespace restoration leaves context unchanged", \invalidNamespaceState());
+        addTestCase("Legacy schema data without sources reports data loss", \legacySchema());
+        addTestCase("Schema imports precede declarations in source order", \schemaGrammar());
+        addTestCase("QName lexical syntax permits Unicode and rejects malformed names", \qnameSyntax());
+        set_return_value(main());
+    }
+
+    private string schema(string content, *string extra) {
+        return sprintf('<xs:schema xmlns:xs="%s" xmlns="%s" xmlns:t="%s" targetNamespace="%s" %s>%s</xs:schema>',
+            Xsd, Ns, Ns, Ns, extra ?? "", content);
+    }
+
+    private XsdSchema parse(string source) {
+        return new XsdSchema(source, {"async_only": True});
+    }
+
+    private auto decode(XsdSchema s, string ns, string element, string lexical) {
+        *XsdElement e = s.getElement(ns, element);
+        assertTrue(exists e, "element exists in its declared namespace");
+        return e.type.deserializeValue(element, s.getTypeMap(), NOTHING, lexical);
+    }
+
+    localDefault() {
+        string source = schema(sprintf('<xs:simpleType name="Local"><xs:restriction base="xs:boolean"/></xs:simpleType>
+            <xs:element name="value" xmlns="%s" type="string"/>
+            <xs:element name="after" type="Local"/>', Xsd));
+        XsdSchema s = parse(source);
+        assertEq("42", decode(s, Ns, "value", "42"));
+        assertEq(True, decode(s, Ns, "after", "true"));
+    }
+
+    simpleTypeContexts() {
+        string source = schema(sprintf('<xs:simpleType name="Local" xmlns="%s">
+            <xs:restriction base="string"/></xs:simpleType>
+            <xs:simpleType name="Nested"><xs:restriction xmlns="%s" base="int"/></xs:simpleType>
+            <xs:simpleType name="Items"><xs:list xmlns:k="%s" itemType="k:int"/></xs:simpleType>
+            <xs:simpleType name="Either"><xs:union xmlns:k="%s" memberTypes="k:int k:boolean"/></xs:simpleType>
+            <xs:element name="text" type="Local"/>
+            <xs:element name="number" type="Nested"/>
+            <xs:element name="items" type="Items"/>
+            <xs:element name="either" type="Either"/>
+            <xs:element name="attributes"><xs:complexType>
+                <xs:attribute name="flag" xmlns:k="%s" type="k:boolean"/>
+            </xs:complexType></xs:element>', Xsd, Xsd, Xsd, Xsd, Xsd));
+        XsdSchema s = parse(source);
+        assertEq("42", decode(s, Ns, "text", "42"));
+        assertEq(NT_INT, decode(s, Ns, "number", "42").typeCode());
+        assertEq((1, 2, 3), decode(s, Ns, "items", "1 2 3"));
+        assertEq(42, decode(s, Ns, "either", "42"));
+        XsdComplexType attributes = cast<XsdComplexType>(s.getElement(Ns, "attributes").type);
+        hash<auto> decoded = attributes.deserializeValue("attributes", s.getTypeMap(), NOTHING,
+            {"^attributes^": {"flag": "true"}});
+        assertEq(True, decoded."^attributes^".flag);
+    }
+
+    prefixShadow() {
+        string source = schema(sprintf('<xs:simpleType name="Local"><xs:restriction base="xs:string"/></xs:simpleType>
+            <xs:element name="value" xmlns:k="%s" type="k:Local"/>
+            <xs:element name="after" type="k:int"/>', Ns), sprintf('xmlns:k="%s"', Xsd));
+        XsdSchema s = parse(source);
+        assertEq("42", decode(s, Ns, "value", "42"));
+        assertEq(42, decode(s, Ns, "after", "42"));
+    }
+
+    prefixLeak() {
+        string source = schema(sprintf('<xs:element name="first" xmlns:local="%s" type="local:string"/>
+            <xs:element name="second" type="local:int"/>', Xsd));
+        assertThrows("WSDL-NAMESPACE-ERROR", \parse(), (source,));
+    }
+
+    invalidNamespaceState() {
+        Namespaces n({"xmlns:k": Xsd});
+        hash<string, hash<string, string>> before = n.getInputNamespaceState();
+        hash<string, hash<string, string>> invalid = before;
+        invalid.reverse{Xsd} = "absent";
+        assertThrows("WSDL-NAMESPACE-ERROR", \n.restoreInputNamespaceState(), (invalid,));
+        assertEq(before, n.getInputNamespaceState());
+        remove invalid.reverse;
+        assertThrows("WSDL-NAMESPACE-ERROR", \n.restoreInputNamespaceState(), (invalid,));
+        assertEq(before, n.getInputNamespaceState());
+    }
+
+    private XsdSchema collisionSchema() {
+        string a = sprintf('<xs:schema xmlns:xs="%s" xmlns:a="urn:a" targetNamespace="urn:a">
+            <xs:simpleType name="Same"><xs:restriction base="xs:string"/></xs:simpleType>
+            <xs:element name="value" type="a:Same"/></xs:schema>', Xsd);
+        string b = sprintf('<xs:schema xmlns:xs="%s" xmlns:b="urn:b" targetNamespace="urn:b">
+            <xs:simpleType name="Same"><xs:restriction base="xs:int"/></xs:simpleType>
+            <xs:element name="value" type="b:Same"/></xs:schema>', Xsd);
+        return new XsdSchema((a, b), {"async_only": True});
+    }
+
+    typeCollision() {
+        XsdSchema s = collisionSchema();
+        assertEq("42", decode(s, "urn:a", "value", "42"));
+        assertEq(42, decode(s, "urn:b", "value", "42"));
+        assertEq(NT_INT, decode(s, "urn:b", "value", "42").typeCode());
+        assertThrows("SOAP-DESERIALIZATION-ERROR", \decode(), (s, "urn:b", "value", "2147483648"));
+    }
+
+    wrongNamespace() {
+        string source = schema('<xs:import namespace="urn:wrong"/>
+            <xs:simpleType name="Same"><xs:restriction base="xs:string"/></xs:simpleType>
+            <xs:element name="value" type="wrong:Same"/>', 'xmlns:wrong="urn:wrong"');
+        assertThrows("WSDL-ERROR", \parse(), (source,));
+    }
+
+    absentNamespace() {
+        string source = schema('<xs:import/>
+            <xs:simpleType name="Same"><xs:restriction base="xs:string"/></xs:simpleType>
+            <xs:element name="value" xmlns="" type="Same"/>');
+        assertThrows("WSDL-ERROR", \parse(), (source,));
+    }
+
+    noTargetNamespace() {
+        XsdSchema s = collisionSchema();
+        s.addSchemaString(sprintf('<xs:schema xmlns:xs="%s">
+            <xs:simpleType name="Same"><xs:restriction base="xs:boolean"/></xs:simpleType>
+            <xs:element name="value" type="Same"/></xs:schema>', Xsd));
+        assertEq(True, decode(s, "", "value", "true"));
+        assertEq("42", decode(s, "urn:a", "value", "42"));
+        assertEq(42, decode(s, "urn:b", "value", "42"));
+        assertEq("Same", s.getElement("", "value").type.getNameWithNS());
+        XsdSchema restored = Serializable::deserialize(s.serialize());
+        assertEq(False, decode(restored, "", "value", "false"));
+    }
+
+    unboundPrefix() {
+        string source = schema('<xs:simpleType name="Same"><xs:restriction base="xs:string"/></xs:simpleType>
+            <xs:element name="value" type="missing:Same"/>');
+        assertThrows("WSDL-NAMESPACE-ERROR", \parse(), (source,));
+    }
+
+    qnameSyntax() {
+        Namespaces n({"xmlns:p": Ns});
+        foreach string value in ("", ":", "p:", ":Name", "p:a:b", "p:two words", "p:7bad", "p:bad/", "p:bad ") {
+            assertThrows("WSDL-NAMESPACE-ERROR", \n.getTypeHash(), (value,));
+        }
+        foreach string name in ("Δοκιμή", "名字", "_a-1.2", "á") {
+            hash<auto> value = n.getTypeHash(" \tp:" + name + "\r\n");
+            assertEq(Ns, value.uri);
+            assertEq(name, value.val);
+        }
+    }
+
+    elementAttributes() {
+        XsdSchema s = parse(schema('<xs:element name="value" type="xs:string" nillable="true"/>'));
+        *XsdElement e = s.getElement(Ns, "value");
+        assertTrue(exists e);
+        assertTrue(e.nillable, "global type resolution retains nillable");
+        assertEq("string", e.type.getName());
+    }
+
+    serializedSchema() {
+        XsdSchema original = collisionSchema();
+        XsdSchema restored = Serializable::deserialize(original.serialize());
+        assertEq("42", decode(restored, "urn:a", "value", "42"));
+        assertEq(NT_INT, decode(restored, "urn:b", "value", "42").typeCode());
+    }
+
+    failedAddition() {
+        XsdSchema s = collisionSchema();
+        string bad = schema('<xs:simpleType name="Temporary"><xs:restriction base="xs:string"/></xs:simpleType>
+            <xs:element name="first" type="Temporary"/>
+            <xs:element name="bad" type="missing:Absent"/>');
+        assertThrows("WSDL-NAMESPACE-ERROR", \s.addSchemaString(), (bad,));
+        assertFalse(exists s.getElement(Ns, "first"), "failed document leaves no global element");
+        assertFalse(exists s.getTypeMap(){"Temporary"}, "failed document leaves no local type alias");
+        assertFalse(exists s.getTypeMap(){make_qname(Ns, "Temporary")}, "failed document leaves no qualified type");
+        s.addSchemaString(schema('<xs:simpleType name="Temporary"><xs:restriction base="xs:boolean"/></xs:simpleType>
+            <xs:element name="first" type="Temporary"/>'));
+        assertEq(True, decode(s, Ns, "first", "true"));
+        assertEq("42", decode(s, "urn:a", "value", "42"));
+        XsdSchema restored = Serializable::deserialize(s.serialize());
+        assertEq(True, decode(restored, Ns, "first", "true"));
+    }
+
+    serializedImport() {
+        string imported = sprintf('<xs:schema xmlns:xs="%s" targetNamespace="urn:imported">
+            <xs:simpleType name="Remote"><xs:restriction base="xs:int"/></xs:simpleType></xs:schema>', Xsd);
+        int reads = 0;
+        code<string(string)> resolver = string sub (string path) {
+            assertEq("types.xsd", path);
+            ++reads;
+            return imported;
+        };
+        XsdSchema s(schema('<xs:import namespace="urn:imported" schemaLocation="types.xsd"/>
+            <xs:element name="value" type="r:Remote"/>', 'xmlns:r="urn:imported"'), {"try_import": resolver});
+        assertEq(1, reads);
+        # Neither the callback nor an external resource is needed to restore the schema.
+        XsdSchema restored = Serializable::deserialize(s.serialize());
+        assertEq(1, reads);
+        assertEq(42, decode(restored, Ns, "value", "42"));
+        assertEq(s.getElement(Ns, "value").getDataProviderType().getName(),
+            restored.getElement(Ns, "value").getDataProviderType().getName());
+
+        string wsdl = sprintf('<wsdl:definitions xmlns:wsdl="http://schemas.xmlsoap.org/wsdl/"
+            targetNamespace="%s"><wsdl:types>%s</wsdl:types></wsdl:definitions>', Ns,
+            schema('<xs:import namespace="urn:imported" schemaLocation="types.xsd"/>
+                <xs:element name="value" type="r:Remote"/>', 'xmlns:r="urn:imported"'));
+        WebService service(wsdl, {"try_import": resolver, "def_path": "relative-contracts/"});
+        assertEq(2, reads);
+        WebService copy = Serializable::deserialize(service.serialize());
+        assertEq(2, reads);
+        assertEq(42, decode(copy, Ns, "value", "42"));
+        assertEq(service.def_path, copy.def_path);
+    }
+
+    serializedEmpty() {
+        XsdSchema empty();
+        empty.def_path = "/virtual/partner/schemas/";
+        XsdSchema s = Serializable::deserialize(empty.serialize());
+        assertEq(0, s.getElementNamespaces().size());
+        assertEq(empty.def_path, s.def_path);
+        s.addSchemaString(schema('<xs:element name="value" type="xs:string"/>'));
+        assertEq("hello", decode(s, Ns, "value", "hello"));
+    }
+
+    legacySchema() {
+        XsdSchema s = collisionSchema();
+        hash<SerializationInfo> data = s.serializeToData();
+        remove data._index{"0"}._class_data{"WSDL::XsdSchema"}.schema_sources;
+        assertThrows("DESERIALIZATION-ERROR", \Serializable::deserialize(), (data,));
+    }
+
+    schemaGrammar() {
+        XsdSchema valid = parse(schema('<xs:annotation/><xs:import namespace="urn:a"/>
+            <xs:annotation/><xs:element name="value" type="xs:string"/><xs:annotation/>'));
+        assertEq("42", decode(valid, Ns, "value", "42"));
+        foreach string fragment in (
+                '<xs:element name="value" type="xs:string"/><xs:import namespace="urn:a"/>',
+                '<xs:import namespace="urn:a"/><xs:element name="value" type="xs:string"/>
+                    <xs:annotation/><xs:import namespace="urn:b"/>',
+                '<xs:element name="value" type="xs:string"/><xs:include schemaLocation="never-fetched.xsd"/>',
+                '<foreign xmlns="urn:foreign"/>') {
+            assertThrows("WSDL-ERROR", \parse(), (schema(fragment),));
+            string wsdl = sprintf('<w:definitions xmlns:w="http://schemas.xmlsoap.org/wsdl/">
+                <w:types>%s</w:types></w:definitions>', schema(fragment));
+            assertThrows("WSDL-ERROR", sub () { new WebService(wsdl, {"async_only": True}); });
+        }
+        # Schema-shaped annotation data is not a nested schema document.
+        XsdSchema annotation = parse(schema('<xs:annotation><xs:appinfo><xs:schema>
+            <xs:element/><xs:import/></xs:schema></xs:appinfo></xs:annotation>
+            <xs:element name="value" type="xs:string"/>'));
+        assertEq("kept", decode(annotation, Ns, "value", "kept"));
+    }
+
+    failedImport() {
+        XsdSchema s = parse(schema('<xs:element name="old" type="xs:string"/>'));
+        string imported = sprintf('<xs:schema xmlns:xs="%s" targetNamespace="urn:imported">
+            <xs:simpleType name="Remote"><xs:restriction base="xs:boolean"/></xs:simpleType></xs:schema>', Xsd);
+        string source = schema('<xs:import namespace="urn:imported" schemaLocation="types.xsd"/>
+            <xs:element name="value" type="r:Remote"/>', 'xmlns:r="urn:imported"');
+        assertThrows("WSDL-ASYNC-IMPORT", \s.addSchemaString(), (source,));
+        s.opts = s.opts + {"xsd_cache": {WSDLLib::normalizeLocation("types.xsd", "file", NOTHING): imported}};
+        s.addSchemaString(source);
+        assertEq(True, decode(s, Ns, "value", "true"));
+        assertEq("kept", decode(s, Ns, "old", "kept"));
+        s.opts.xsd_cache = {};
+        XsdSchema restored = Serializable::deserialize(s.serialize());
+        assertEq(True, decode(restored, Ns, "value", "true"));
+    }
+}

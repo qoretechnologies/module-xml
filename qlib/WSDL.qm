@@ -80,6 +80,14 @@ module WSDL {
     @section wsdlrelnotes WSDL Module Release Notes
 
     @subsection wsdl_0_5_8 WSDL v0.5.8
+    - fixed declaration-local namespace resolution for element and simple type QNames, including
+      default-namespace resets and shadowed prefixes; internal type resolution uses expanded names
+      without falling back to unrelated local-name aliases
+    - standalone \c XsdSchema objects now retain source documents and retrieved dependency bytes for
+      Serializable reconstruction; unsuccessful additions restore their component registries
+    - fixed no-target-namespace type identity and retained global element attributes during type resolution
+    - schema construction now rejects imports after component declarations and unexpected schema children,
+      including in external and WSDL-inline schemas
     - fixed serializing values in the upper half of the \c xs:unsignedShort and \c xs:unsignedInt ranges;
       the limits are now 65535 and 4294967295 respectively
     - fixed serializing native IEEE floating-point infinities and NaN as XSD \c INF, \c -INF, and \c NaN;
@@ -1118,11 +1126,10 @@ public class XsdAbstractType inherits WSDL::XsdNamedData {
     private resolveNamespace() {
         if (!ns) {
             *string tns = nsc.getTargetNamespaceUri();
-            if (!tns)
-                throw "WSDL-NAMESPACE-ERROR", sprintf("input namespace for %s %y was not given and there is no current target namespace", self.className(), name);
-            ons = nsc.getOutputNamespacePrefix(tns);
-        } else
+            ons = tns ? nsc.getOutputNamespacePrefix(tns) : "";
+        } else {
             ons = nsc.translateOutputNamespacePrefix(ns);
+        }
         #printf("DEBUG: type %y ns: %y ons: %y\n", name, ns, ons);
     }
 
@@ -1131,7 +1138,7 @@ public class XsdAbstractType inherits WSDL::XsdNamedData {
     }
 
     string getNameWithNS() {
-        return ons + ":" + name;
+        return ons ? ons + ":" + name : name;
     }
 
     bool isNillable() {
@@ -2118,6 +2125,7 @@ public class XsdAttribute inherits WSDL::XsdTypedData {
     }
 
     constructor(hash<auto> attr, Namespaces nsc, *XsdAbstractType n_type, XsdLateResolverHelper unresolved) : XsdTypedData(\attr) {
+        NamespacePrefixHelper declaration(nsc, attr."^attributes^");
         *hash<auto> aa = attr."^attributes^";
         if (aa.type) {
             if (!nsc.doType(aa.type, \typeinfo, \type))
@@ -2167,10 +2175,12 @@ public class XsdElement inherits WSDL::XsdTypedData {
 
     constructor(hash<auto> e, Namespaces nsc, *XsdAbstractType n_type, XsdLateResolverHelper unresolved,
             bool n_usedocns) : XsdTypedData(\e) {
+        NamespacePrefixHelper declaration(nsc, e."^attributes^");
         usedocns = n_usedocns;
 
-        if (!ns)
-            ns = nsc.getTargetNamespaceUri();
+        if (!ns) {
+            ns = nsc.getTargetNamespaceUri() ?? "";
+        }
 
         if (n_type) {
             type = n_type;
@@ -3554,6 +3564,7 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
 
     constructor(hash<auto> st, Namespaces nsc, XsdLateResolverHelper unresolved, bool n_usedocns, *string desc_name)
             : XsdAbstractType(\st, nsc, desc_name) {
+        NamespacePrefixHelper declaration(nsc, st."^attributes^");
         usedocns = n_usedocns;
         #any a = st."^attributes^";
         delete st."^attributes^";
@@ -3562,6 +3573,7 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
 
         if (st.restriction) {
             hash<auto> r = st.restriction;
+            NamespacePrefixHelper restriction_scope(nsc, r."^attributes^");
 
             *string base = r."^attributes^".base;
             if (!base)
@@ -3630,6 +3642,7 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
             }
         } else if (st.union) {
             hash<auto> u = st.union;
+            NamespacePrefixHelper union_scope(nsc, u."^attributes^");
             *string memberTypes = u."^attributes^".memberTypes;
             if (memberTypes) {
                 foreach string str in (memberTypes.split(" ")) {
@@ -3656,6 +3669,7 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
             }
         } else if (st.list) {
             hash<auto> l = st.list;
+            NamespacePrefixHelper list_scope(nsc, l."^attributes^");
             *string itemType = l."^attributes^".itemType;
             if (itemType) {
                 if (!nsc.doType(itemType, \listItemTypeInfo, \listItemType)) {
@@ -7519,8 +7533,9 @@ class NamespacePrefixHelper {
         #! namespaces data
         Namespaces nsc;
 
-        # overriden prefixes
-        hash<auto> h;
+        # complete input maps before entering this declaration's scope
+        hash<string, hash<string, string>> input_state;
+        bool active = False;
 
         # overridden target namespace
         bool targ_ns;
@@ -7540,6 +7555,9 @@ class NamespacePrefixHelper {
 
     constructor(Namespaces nsc, *hash<auto> nsattr) {
         self.nsc := nsc;
+        input_state = nsc.getInputNamespaceState();
+        active = True;
+        on_error restore();
 
         if (nsattr) {
             nsc.addNamespaces(nsattr, self);
@@ -7548,7 +7566,7 @@ class NamespacePrefixHelper {
                 targ_ns = True;
                 desc = sprintf("schema-%d-targetNamespace:%s", id, nsattr.targetNamespace);
             }
-            if (nsattr.xmlns) {
+            if (exists nsattr.xmlns) {
                 nsc.pushDefaultNamespace(nsattr.xmlns);
                 def_ns = True;
                 if (!desc) {
@@ -7563,16 +7581,21 @@ class NamespacePrefixHelper {
     }
 
     destructor() {
-        if (def_ns)
-            nsc.popDefaultNamespace();
-        if (targ_ns)
-            nsc.popTargetNamespace();
-        if (h)
-            nsc.restorePrefixes(h);
+        restore();
     }
 
-    save(string k, string v) {
-        h{k} = v;
+    private restore() {
+        if (!active) {
+            return;
+        }
+        active = False;
+        if (def_ns) {
+            nsc.popDefaultNamespace();
+        }
+        if (targ_ns) {
+            nsc.popTargetNamespace();
+        }
+        nsc.restoreInputNamespaceState(input_state);
     }
 
     string getDesc() {
@@ -7635,6 +7658,13 @@ public class Namespaces inherits Serializable {
         #! base type map
         hash<string, XsdBaseType> base_types;
 
+        # XML 1.0 (Fifth Edition), productions 4/4a with ':' excluded for NCName.
+        const NCNameStart = 'A-Z_a-z\x{C0}-\x{D6}\x{D8}-\x{F6}\x{F8}-\x{2FF}\x{370}-\x{37D}'
+            + '\x{37F}-\x{1FFF}\x{200C}-\x{200D}\x{2070}-\x{218F}\x{2C00}-\x{2FEF}'
+            + '\x{3001}-\x{D7FF}\x{F900}-\x{FDCF}\x{FDF0}-\x{FFFD}\x{10000}-\x{EFFFF}';
+        const NCNameRegex = '\A[' + NCNameStart + '][' + NCNameStart
+            + '\-.0-9\x{B7}\x{300}-\x{36F}\x{203F}-\x{2040}]*\z';
+
         #! maps namespaces to default prefixes
         const DefaultPrefixes = {
             SOAP_ENCODING: "soapenc",
@@ -7656,7 +7686,7 @@ public class Namespaces inherits Serializable {
         }
 
         # set default namespace for unprefixed definitions
-        if (nsh.xmlns) {
+        if (exists nsh.xmlns) {
             default_ns = nsh.xmlns;
         }
 
@@ -7671,6 +7701,43 @@ public class Namespaces inherits Serializable {
         return default_ns;
     }
 
+    #! returns input namespace maps for an exception-safe declaration scope
+    /** @return input prefix/URI and reverse maps; output prefixes are not scoped
+        @since %WSDL 0.5.8
+    */
+    hash<string, hash<string, string>> getInputNamespaceState() {
+        return {"input": imap, "reverse": imapr};
+    }
+
+    #! restores an input declaration scope, including newly introduced prefixes
+    /** @param state maps returned by getInputNamespaceState()
+        @throw WSDL-NAMESPACE-ERROR inconsistent or missing namespace maps
+        @since %WSDL 0.5.8
+    */
+    restoreInputNamespaceState(hash<string, hash<string, string>> state) {
+        if (!exists state.input || !exists state.reverse) {
+            throw "WSDL-NAMESPACE-ERROR", "input namespace state requires input and reverse maps";
+        }
+        foreach string uri in (keys state.reverse) {
+            if (state.input{state.reverse{uri}} != uri) {
+                throw "WSDL-NAMESPACE-ERROR", "input namespace state contains an inconsistent reverse map";
+            }
+        }
+        foreach string prefix in (keys state.input) {
+            if (!exists state.reverse{state.input{prefix}}) {
+                throw "WSDL-NAMESPACE-ERROR", "input namespace state has no reverse mapping for an input URI";
+            }
+        }
+        imap = state.input;
+        imapr = state.reverse;
+        xsd_schema = {};
+        foreach string prefix in (keys imap) {
+            if (imap{prefix} == XSD_NS) {
+                xsd_schema{prefix} = True;
+            }
+        }
+    }
+
     addNamespaces(hash<auto> nsh, *NamespacePrefixHelper nph) {
         foreach string k in (keys nsh) {
             *string ns = (k =~ x/xmlns:([^:]+)/)[0];
@@ -7683,16 +7750,9 @@ public class Namespaces inherits Serializable {
                 if (imap{ns} == nsh{k})
                     continue;
 
-                if (nph) {
-                    string ov = imap{ns};
-                    if (imapr{ov} == target_ns)
-                        remove imapr{ov};
-                    if (nsh{ns} == XSD_NS)
-                        remove xsd_schema{ns};
-                    nph.save(ns, ov);
-                }
-                else
+                if (!nph) {
                     throw "WSDL-NAMESPACE-ERROR", sprintf("namespace prefix %y defined twice", ns);
+                }
             }
             addNamespaceIntern(ns, nsh{k});
         }
@@ -7703,19 +7763,36 @@ public class Namespaces inherits Serializable {
     }
 
     private addNamespaceIntern(string ns, string val, *bool override) {
+        *string previous = imap{ns};
         imap{ns} = val;
 
-        if (override || !imapr{val})
+        if (exists previous && previous != val && imapr{previous} == ns) {
+            remove imapr{previous};
+            foreach string prefix in (keys imap) {
+                if (imap{prefix} == previous) {
+                    imapr{previous} = prefix;
+                    break;
+                }
+            }
+        }
+
+        if (override || !imapr{val}) {
             imapr{val} = ns;
+        }
 
-        if (val == XSD_NS)
+        if (val == XSD_NS) {
             xsd_schema{ns} = True;
+        } else {
+            remove xsd_schema{ns};
+        }
 
-        if (!hassoap11 && val == SOAP_11_NS)
+        if (!hassoap11 && val == SOAP_11_NS) {
             hassoap11 = True;
+        }
 
-        if (!hassoap12 && val == SOAP_12_NS)
+        if (!hassoap12 && val == SOAP_12_NS) {
             hassoap12 = True;
+        }
     }
 
     #! merges namespaces when parsing imported schemas
@@ -7854,7 +7931,7 @@ public class Namespaces inherits Serializable {
 
     #! pushes the current default namespace URI on the stack when parsing schemas and sets the current default namespace URI to the current value
     pushDefaultNamespace(string ns) {
-        @assert(ns, "namespace URI is required");
+        # An empty namespace is the explicit xmlns="" reset.
         dss += default_ns;
         default_ns = ns;
     }
@@ -7951,54 +8028,43 @@ public class Namespaces inherits Serializable {
     */
     bool doType(string t, reference<hash> typeinfo, reference<XsdAbstractType> rtype, *hash<string, XsdAbstractType> tmap) {
         @assert(t, "type name is required");
-        (*string ns, *string type) = t =~ x/([^:]+):([^:]+)/;
-        if (!type) {
-            # unprefixed type - check if default namespace is XSD
-            if (default_ns == XSD_NS) {
-                rtype = getBaseType(t);
-                return True;
-            }
-
-            typeinfo = {"val": t};
-            return False;
-        }
-
-        # if this is in the XML Schema namespace, then it's a base type
-        if (xsd_schema{ns}) {
-            rtype = getBaseType(type);
+        hash<auto> resolved = getTypeHash(t);
+        if (resolved.uri == XSD_NS) {
+            rtype = getBaseType(resolved.val);
             return True;
         }
-
         if (tmap) {
-            # Prefer namespace-qualified lookup so types reused across namespaces resolve correctly
-            *string uri = imap{ns};
-            if (uri) {
-                *XsdAbstractType qt = tmap_try_get(cast<hash<string, XsdAbstractType>>(tmap),
-                    sprintf("{%s}%s", uri, type));
-                if (qt) {
-                    rtype = qt;
-                    return True;
-                }
-            }
-            # Fall back to local-name lookup
-            if ((rtype = tmap_try_get(cast<hash<string, XsdAbstractType>>(tmap), type))) {
+            if ((rtype = tmap_try_get(tmap, type_qname(resolved.uri, resolved.val)))) {
                 return True;
             }
         }
-
-        typeinfo = {"ns": getOutputNamespacePrefix(getInputNamespaceUri(ns)), "val": type};
+        typeinfo = resolved;
         return False;
     }
 
+    #! captures a type QName in the current declaration's namespace context
+    /** @param t lexical type QName
+        @return local name, namespace URI (empty for no namespace), and optional output prefix
+        @throw WSDL-NAMESPACE-ERROR malformed QName or unbound prefix
+        @since %WSDL 0.5.8
+    */
     hash<auto> getTypeHash(string t) {
-        #printf("DEBUG: XsdBase::doType(%y)\n", t);
-        (*string ns, *string type) = t =~ x/([^:]+):([^:]+)/;
-        if (!type) {
-            #printf("DEBUG: XsdBase::doType(%y) xsd: %y\n", t, default_ns);
-            return ("val": t);
+        t =~ s/^[ \t\r\n]+|[ \t\r\n]+$//g;
+        list<string> parts = split(":", t);
+        if (t !~ /\A[^:]+(?::[^:]+)?\z/) {
+            throw "WSDL-NAMESPACE-ERROR", sprintf("invalid type QName %Y", t);
         }
-
-        return ("ns": getOutputNamespacePrefix(getInputNamespaceUri(ns)), "val": type);
+        foreach string part in (parts) {
+            if (!regex(part, NCNameRegex)) {
+                throw "WSDL-NAMESPACE-ERROR", sprintf("invalid type QName %Y", t);
+            }
+        }
+        string uri = parts.size() == 2 ? getInputNamespaceUri(parts[0]) : (default_ns ?? "");
+        hash<auto> info = {"uri": uri, "val": parts[-1]};
+        if (uri) {
+            info.ns = getOutputNamespacePrefix(uri);
+        }
+        return info;
     }
 
     XsdBaseType getBaseType(string t) {
@@ -8016,6 +8082,11 @@ public class Namespaces inherits Serializable {
 }
 
 # private functions
+# Unlike legacy local-name aliases, the no-namespace key must be unambiguous too.
+string sub type_qname(*string uri, string local_name) {
+    return sprintf("{%s}%s", uri ?? "", local_name);
+}
+
 XsdAbstractType sub tmap_get(hash<string, XsdAbstractType> tmap, string name) {
 if (!tmap{name})
     throw WSDL_ERROR, sprintf("no such type %y; known types: %y", name, tmap.keys());
@@ -8341,6 +8412,16 @@ public class WsdlPollOperation inherits Qore::AbstractPollOperation {
     }
 }
 
+#! Original schema source and resolution base used for Serializable reconstruction
+/** @since %WSDL 0.5.8
+*/
+public hashdecl XsdSourceInfo {
+    #! complete original XSD document
+    string xml;
+    #! base used to resolve relative imports and includes
+    *string base;
+}
+
 #! Encapsulates XSD schema parsing and the resulting type/element/group registry
 /** This class isolates the XSD parsing logic so it can be used independently of WSDL parsing.
     @ref WebService inherits from this class to add WSDL-specific parsing on top of the XSD machinery,
@@ -8354,6 +8435,22 @@ public class WsdlPollOperation inherits Qore::AbstractPollOperation {
         xs.addSchemaFile("/path/to/Header.xsd");
         xs.addSchemaDir("/path/to/messages/");
     @endcode
+
+    @par Example: cache a parsed partner message schema
+    @code{.py}
+        XsdSchema original(xsd_text, {"async_only": True, "xsd_cache": dependency_cache});
+        XsdSchema restored = Serializable::deserialize(original.serialize());
+        XsdElement invoice = restored.getElement("urn:partner:invoice", "Invoice");
+        AbstractDataProviderType fields = invoice.getDataProviderType();
+    @endcode
+
+    Original schema documents and successfully retrieved dependencies are saved with the object;
+    restoration rebuilds the transient type/element registries from those bytes. Import callbacks
+    are not serialized. Serialized schemas created before source retention cannot reconstruct
+    declarations that were not stored. Existing \c WebService objects retain their WSDL rebuild path.
+
+    @note Add documents before sharing the schema between threads. Concurrent mutations of one
+    schema are not supported. Failed additions leave previously parsed components usable.
 
     @since %WSDL 0.5.8
 */
@@ -8384,14 +8481,45 @@ public class XsdSchema inherits WSDL::XsdBase {
         transient *code try_import;
 
         #! default path for retrieving XSD references
-        /** @note there is no need to serialize \c def_path as it will be set with the saved options
+        /** Preserved separately from options because addSchemaFile() can set it after construction.
         */
-        transient *string def_path;
+        *string def_path;
     }
 
     private {
         #! issue #4449: map of imports used while parsing
-        transient hash<string, bool> import_map;
+        transient hash<string, bool> import_map();
+
+        # Original documents and their bases reconstruct transient component registries.
+        list<hash<XsdSourceInfo>> schema_sources();
+
+        # Successfully retrieved dependency bytes, indexed by normalized absolute location.
+        hash<string, string> schema_dependencies();
+    }
+
+    private:internal deserializeMembers(hash<auto> members) {
+        if (!exists members.schema_sources && !(self instanceof WebService)) {
+            throw "DESERIALIZATION-ERROR", "serialized XsdSchema has no source documents; recreate it from the original XSD";
+        }
+        initOptions(members.opts);
+        def_path = members.def_path ?? opts.def_path;
+        has_try_import = members.has_try_import ?? False;
+        nsc = new Namespaces({});
+        nsc.opt_empty_string_is_nothing = opts.compat_empty_string_is_nothing
+            || global_compat_empty_string_is_nothing;
+        emap = {};
+        tmap = {};
+        groupMap = {};
+        attrGroupMap = {};
+        import_map = {};
+        schema_sources = ();
+        schema_dependencies = members.schema_dependencies ?? {};
+        *string saved_base = def_path;
+        on_exit def_path = saved_base;
+        foreach hash<XsdSourceInfo> source in (members.schema_sources) {
+            def_path = source.base;
+            addSchemaString(source.xml);
+        }
     }
 
     #! creates an empty XsdSchema
@@ -8429,9 +8557,15 @@ public class XsdSchema inherits WSDL::XsdBase {
     /** @param xsd an XSD document string
 
         Multiple schemas with their own \c targetNamespace can be added via repeated calls.
+        @throw XSD-ERROR invalid schema document root
+        @throw WSDL-NAMESPACE-ERROR unresolved namespace prefix
+        @throw WSDL-ERROR unresolved or duplicate schema component
+        @throw WSDL-ASYNC-IMPORT an external schema is absent from the asynchronous cache
+        @note A failed addition does not retain declarations or dependency marks from that document.
     */
     addSchemaString(string xsd) {
         hash<auto> h = parse_xml(xsd);
+        validateSchemaGrammar(xsd);
         if (h.size() != 1) {
             throw "XSD-ERROR", sprintf("expecting a single root element in XSD; got: %y", h.keys());
         }
@@ -8440,20 +8574,38 @@ public class XsdSchema inherits WSDL::XsdBase {
             throw "XSD-ERROR", sprintf("expected XSD root element <schema> or <prefix:schema>; got <%s>",
                 root_key);
         }
+        # Registry updates are atomic: failed documents must not leave declarations or import marks.
+        hash<string, hash<string, XsdElement>> old_elements = emap;
+        hash<string, XsdAbstractType> old_types = tmap;
+        hash<string, XsdGroup> old_groups = groupMap;
+        hash<string, XsdAttributeGroup> old_attribute_groups = attrGroupMap;
+        hash<string, bool> old_imports = import_map;
+        hash<string, string> old_dependencies = schema_dependencies;
+        list<hash<XsdSourceInfo>> old_sources = schema_sources;
+        on_error {
+            emap = old_elements;
+            tmap = old_types;
+            groupMap = old_groups;
+            attrGroupMap = old_attribute_groups;
+            import_map = old_imports;
+            schema_dependencies = old_dependencies;
+            schema_sources = old_sources;
+        }
+
         # Use a fresh namespace context for the schema being added so that target/default namespaces
         # set during parsing persist after parseTypes' NamespacePrefixHelper unwinds (mirroring the
         # XSD-import logic in parseTypes()).
         Namespaces n_nsc = nsc;
         *hash<auto> root_attrs = h{root_key}."^attributes^";
-        if (root_attrs) {
-            nsc = new Namespaces(root_attrs, n_nsc);
-            nsc.opt_empty_string_is_nothing = n_nsc.opt_empty_string_is_nothing;
-            nsc.opt_allow_any_header = n_nsc.opt_allow_any_header;
-        }
+        nsc = new Namespaces(root_attrs ?? {}, n_nsc);
+        nsc.opt_empty_string_is_nothing = n_nsc.opt_empty_string_is_nothing;
+        nsc.opt_allow_any_header = n_nsc.opt_allow_any_header;
         on_exit nsc = n_nsc;
         on_success n_nsc.merge(nsc);
 
         parseTypes(h, opts.http_client instanceof HTTPClient ? opts.http_client : NOTHING, opts.http_headers);
+        hash<XsdSourceInfo> source = <XsdSourceInfo>{"xml": xsd, "base": def_path};
+        schema_sources += source;
     }
 
     #! parses an XSD file and adds its type information to this schema
@@ -8526,6 +8678,59 @@ public class XsdSchema inherits WSDL::XsdBase {
         return ("^type^": tmap_get(tmap, name), "^val^": v);
     }
 
+    # Check the ordered schema grammar before parseTypes groups declarations by name.
+    private validateSchemaGrammar(string xml) {
+        XmlReader reader(xml);
+        int schema_depth = -1;
+        bool declared = False;
+        bool definitions = False;
+        bool types = False;
+        const string wsdl_namespace = "http://schemas.xmlsoap.org/wsdl/";
+        const hash<string, bool> declarations = {"simpleType": True, "complexType": True, "group": True,
+            "attributeGroup": True, "element": True, "attribute": True, "notation": True};
+        while (reader.read()) {
+            int depth = reader.depth();
+            int kind = reader.nodeType();
+            if (kind == XML_NODE_TYPE_END_ELEMENT) {
+                if (depth == schema_depth) {
+                    schema_depth = -1;
+                }
+                if (depth == 1) {
+                    types = False;
+                }
+                continue;
+            }
+            if (kind != XML_NODE_TYPE_ELEMENT) {
+                continue;
+            }
+            *string uri = reader.namespaceUri();
+            string local = reader.localName();
+            if (depth == 0) {
+                definitions = uri == wsdl_namespace && local == "definitions";
+            }
+            if (depth == 1) {
+                types = definitions && uri == wsdl_namespace && local == "types";
+            }
+            if (uri == XSD_NS && local == "schema" && (depth == 0 || (depth == 2 && types))) {
+                schema_depth = reader.isEmptyElement() ? -1 : depth;
+                declared = False;
+            } else if (schema_depth >= 0 && depth == schema_depth + 1) {
+                if (uri != XSD_NS) {
+                    throw WSDL_ERROR, sprintf("schema grammar: unexpected child {%s}%s", uri ?? "", local);
+                }
+                if (local == "import" || local == "include" || local == "redefine") {
+                    if (declared) {
+                        throw WSDL_ERROR, sprintf("schema grammar: %s must precede component declarations", local);
+                    }
+                } else if (declarations{local}) {
+                    declared = True;
+                } else if (local != "annotation") {
+                    throw WSDL_ERROR, sprintf("schema grammar: unexpected child {%s}%s", uri, local);
+                }
+            }
+        }
+    }
+
     #! parse \a opts into XSD-specific state
     private initOptions(*hash<auto> opts) {
         self.opts = opts;
@@ -8593,6 +8798,13 @@ public class XsdSchema inherits WSDL::XsdBase {
     }
 
     private XsdAbstractType resolveType(hash<auto> v) {
+        if (exists v.uri) {
+            if (v.uri == XSD_NS) {
+                return getBaseType(v.val);
+            }
+            return tmap_get(tmap, type_qname(v.uri, v.val));
+        }
+        # Legacy serialized type info predating namespace-URI capture.
         XsdAbstractType rv;
         if (exists v.ns && nsc.isSchema(v.ns)) {
             rv = getBaseType(v.val);
@@ -8632,6 +8844,7 @@ public class XsdSchema inherits WSDL::XsdBase {
         *hash<auto> xsd_cache = opts.xsd_cache;
         # the async cache key must be a location that the poller can fetch directly
         string cache_key = async_only ? WSDLLib::normalizeLocation(loc, "file", NOTHING) : loc;
+        string dependency_key = WSDLLib::normalizeLocation(loc, "file", NOTHING);
 
         # issue #4449: do not process the same schema more than once
         if (import_map{cache_key}) {
@@ -8643,7 +8856,10 @@ public class XsdSchema inherits WSDL::XsdBase {
         *string new_def_path;
         string xsd;
         hash<auto> h = parse_url(loc);
-        if (async_only) {
+        if (exists schema_dependencies{dependency_key}) {
+            xsd = schema_dependencies{dependency_key};
+            new_def_path = WSDLLib::getLocationBase(loc);
+        } else if (async_only) {
             if (xsd_cache && exists xsd_cache{cache_key}) {
                 xsd = xsd_cache{cache_key};
             } else {
@@ -8652,7 +8868,7 @@ public class XsdSchema inherits WSDL::XsdBase {
             new_def_path = WSDLLib::getLocationBase(loc);
         } else if (!h.protocol && try_import) {
             xsd = call_function(try_import, schema_location);
-            new_def_path = def_path;
+            new_def_path = WSDLLib::getLocationBase(loc);
         } else {
             xsd = WSDLLib::getFileFromURL(loc, "file", http_client, http_headers, NOTHING, NOTHING, \new_def_path);
             if (!new_def_path) {
@@ -8662,6 +8878,7 @@ public class XsdSchema inherits WSDL::XsdBase {
 
         # parse XML to Qore data structure ignoring XML element order
         hash<auto> xh = parse_xml(xsd);
+        validateSchemaGrammar(xsd);
 
         # parse namespace definitions in schema attributes
         if (xh.size() != 1) {
@@ -8695,6 +8912,7 @@ public class XsdSchema inherits WSDL::XsdBase {
 
         # HTTP info must be passed on when parsing nested schemas
         parseTypes(xh, http_client, http_headers);
+        schema_dependencies{dependency_key} = xsd;
     }
 
     # parse XSD schema types
@@ -8741,7 +8959,7 @@ public class XsdSchema inherits WSDL::XsdBase {
                 XsdSimpleType t(st, nsc, unresolved, usedocns);
                 # Key types by "{nsUri}localName" so identifiers reused across different target
                 # namespaces (UN/CEFACT-style multi-namespace XSD packages) do not collide.
-                string qname = make_qname(tns_uri, t.name);
+                string qname = type_qname(tns_uri, t.name);
                 if (tmap{qname}) {
                     throw WSDL_ERROR, sprintf("%s: type (simpleType) %y declared twice", nph.getDesc(), qname);
                 }
@@ -8755,7 +8973,7 @@ public class XsdSchema inherits WSDL::XsdBase {
             }
             foreach hash<auto> ct in (schema.complexType) {
                 XsdComplexType t(ct, nsc, unresolved, usedocns);
-                string qname = make_qname(tns_uri, t.name);
+                string qname = type_qname(tns_uri, t.name);
                 if (tmap{qname}) {
                     throw WSDL_ERROR, sprintf("%s: type (complexType) %y declared twice", nph.getDesc(), qname);
                 }
@@ -8786,25 +9004,7 @@ public class XsdSchema inherits WSDL::XsdBase {
             }
             # make element map
             foreach hash<auto> el in (schema.element) {
-                *hash<auto> attr = el."^attributes^";
-                XsdElement element;
-                if (exists attr.type) {
-                    hash<auto> eattr.name = attr.name;
-
-                    *XsdAbstractType type;
-                    hash<auto> typeinfo;
-                    if (!nsc.doType(attr.type, \typeinfo, \type)) {
-                        type = tmap_try_get(tmap, typeinfo.val);
-                        if (!type)
-                            eattr.type = typeinfo.val;
-                        #printf("DEBUG: adding element %y type %y\n", attr.name, keys type);
-                    }
-
-                    element = new WSDL::XsdElement(("^attributes^": eattr), nsc, type, unresolved, usedocns);
-                } else {
-                    element = new WSDL::XsdElement(el, nsc, NOTHING, unresolved, usedocns);
-                    #printf("DEBUG: adding element %y (ns %y name %y)\n", attr.name, element.ns, element.name);
-                }
+                XsdElement element(el, nsc, NOTHING, unresolved, usedocns);
 
                 if (emap{element.ns}{element.name}) {
                     throw WSDL_ERROR, sprintf("%s: element %y declared twice in namespace %y", nph.getDesc(), element.name, element.ns);
@@ -9170,6 +9370,7 @@ public class WebService inherits WSDL::XsdSchema {
     */
     private:internal doInit(string str, *hash<auto> opts) {
         hash<auto> h = parse_xml(str);
+        validateSchemaGrammar(str);
 
         # save WSDL text
         wsdl = str;
@@ -9237,7 +9438,9 @@ public class WebService inherits WSDL::XsdSchema {
         tmap = {};
         portType = {};
 
-        doInit(members.wsdl, members.opts);
+        # Options now belong to XsdSchema and have already been restored by its hook.
+        # Accept locally stored options from older WebService serializations as well.
+        doInit(members.wsdl, members.opts ?? opts);
     }
 }
 

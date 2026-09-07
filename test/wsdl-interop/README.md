@@ -30,6 +30,7 @@ From the repository root:
 
 ```sh
 qore --enable-debug test/wsdl-interop.qtest
+qore --enable-debug test/wsdl-namespace-context.qtest
 python3 test/wsdl-interop/test_survey.py -v
 python3 test/wsdl-interop/test_corpus.py -v
 ```
@@ -53,6 +54,13 @@ malformed messages, offline resolution, and separation of input/output validatio
 They also verify that missing, duplicate, malformed, or out-of-order worker results fail the survey.
 
 ## Fixture provenance
+
+The first P2 increment covers declaration-local namespaces, distinct no-namespace
+type identity, standalone schema reconstruction, failed-addition rollback and ordered
+schema grammar. `ElementTypeDefaultNamespace` is included in the strict gate with
+exact string comparisons in both directions: 24 descriptions and 76 message-direction
+combinations. The other broad failures remain visible; P2 is not yet complete.
+See [the implemented design](../../design/wsdl-schema-identity.md) and [execution record](EXECUTION.md).
 
 All files under `w3c/`, except our checksum manifest, are copied byte for byte from:
 
@@ -243,10 +251,11 @@ linked to the corresponding qualified per-case fixture and its required expanded
 source defects, supported by the [schema grammar](https://www.w3.org/TR/xmlschema-1/#element-schema) and
 [element validity rules](https://www.w3.org/TR/xmlschema-1/#cvc-elt).
 
-Nine valid historical descriptions reproduce the local default-namespace type-resolution defect
-assigned to P2. Their source lines and expanded type identities are retained. A rejection caused by
-this namespace bug or an empty import does not prove that import ordering is validated; that grammar
-requirement remains explicitly unassessed in production and assigned to P6. The 16 output-oracle
+Nine valid historical descriptions originally reproduced the local default-namespace type-resolution
+defect. Their source lines and expanded type identities are retained. Six now parse; three reach the
+remaining P2 builtin `anyType` derivation defect. The four invalid sources now fail the explicit
+ordered schema grammar check, which is credited independently of namespace/import failures.
+The full WSDL grammar matrix remains assigned to P6. The 16 output-oracle
 disagreements for unchanged invalid IDREF/IDREFS content are separately adjudicated using expanded
 names and token values, preserving their existing P5 rejection failures.
 

@@ -4,7 +4,7 @@ Copyright (C) 2026 Qore Technologies, s.r.o.
 
 Execution started 2026-09-07 on `develop` at `c81b2db`, with a clean working tree.
 The authoritative scope and acceptance criteria remain in [PLAN.md](PLAN.md).
-P1 corpus/adjudication acceptance is complete; P2 is next. No scope reductions or workarounds are approved.
+P1 corpus/adjudication acceptance is complete; P2 namespace/type work is in progress. No scope reductions or workarounds are approved.
 
 ## P1: corpus provenance and adjudication (complete)
 
@@ -130,7 +130,55 @@ P1 corpus/adjudication acceptance is complete; P2 is next. No scope reductions o
 | Pinned CXF contracts and imports; actual SOAP 1.2 operation check | `cxf/catalog.json`; all eight contracts/import graph verified; distinct request/response body and text assertions |
 | Tests and commit audit | 58 Python tests; 209 Qore cases; both-version diagnostic surveys unchanged; complete 62-item `audits/P1-04.md` |
 
-P2–P9 have not started. Later-phase failures remain recorded in the historical
+## P2: namespace, type and attribute resolution (in progress)
+
+- `test/wsdl-namespace-context.qtest` first reproduces declaration-local default
+  namespace loss, stale XSD-prefix shadowing, same-local-name type collisions,
+  wrong-namespace fallback and lost global-element nillable metadata. Baseline on
+  `1854be2`: 8 cases, 2 pass / 6 errors. The implemented increment expands this to
+  19 cases covering namespace syntax, scope, reconstruction, rollback and grammar.
+- Additional P2 regression: Serializable reconstruction of bare XsdSchema loses all
+  element/type maps. These maps are transient and no original XSD sources or rebuild
+  hook are retained. WebService has its own deserializeMembers() rebuild path, while
+  XsdSchema previously had none. Source retention and reconstruction now pass for
+  empty, standalone, multi-namespace and callback-imported schemas and WebService.
+- Root code: parseTypes() reconstructs global typed elements with only name/type,
+  discarding declaration namespace attributes and nillability; doType()/resolveType()
+  use shared prefix/default state and local-name fallback; NamespacePrefixHelper saves
+  overridden prefixes only, does not scope new prefixes, cannot reset the default
+  namespace to empty, and leaves stale xsd_schema entries when prefixes are rebound.
+
+- P2-01 resolves element/simple-type QNames in declaration-local contexts, retains
+  URI identity (including a distinct `{}name` internal key), preserves global element
+  attributes and restores complete input namespace maps. QName lexical checks use
+  XML 1.0 name ranges, permitting Unicode and rejecting malformed names/colon forms.
+- Successful source/dependency retention reconstructs transient XsdSchema registries;
+  old standalone serialized data lacking sources now fails descriptively. Failed
+  schema additions restore component/import/source state, and retries work on the
+  same schema. Provider type metadata and WebService reconstruction are tested, including the
+  inherited-options/base-path bug exposed by relative imports during reconstruction.
+- Fixing namespace lookup exposed acceptance of two invalid historical descriptions
+  whose errors were previously masked. Ordered XSD child/import-position validation
+  now rejects all four grammar-invalid archive schemas for the normative reason.
+  This necessary regression fix covers XSD construction; complete WSDL grammar stays P6.
+- The original `ElementTypeDefaultNamespace` fixture passes both directions, both
+  output validators and exact string preservation. Strict selection: 24 descriptions,
+  76 message-direction combinations. Current broad echo failures: 440, with phase
+  ownership P2=48, P3=208, P4=76, P5=108; no missing/skipped stages.
+- Six additional valid historical descriptions now parse; the remaining three
+  (`dotnet_cs_2.0.50727.42`, `wcf_cs_3.0`, `zsi_python_2.0`) reach the known P2 builtin
+  base defect: complexType finalization strips the namespace and looks up `anyType`
+  in the named-type registry. This is the next derivation-resolution increment.
+- Additional independent P3 finding: `xs:int` accepts `not-an-integer` as zero through
+  permissive `int(val)` conversion in XsdBaseType::deserializeValue(). The P2 collision
+  regression uses a valid integer outside the int range to verify correct type selection;
+  strict lexical rejection remains an explicit P3 requirement, not a passing test.
+- P2 remains incomplete: builtin/complex derivations, remaining QName/ref contexts,
+  implicit-prefix handling, import/include/chameleon identity/cycles, attribute
+  references/types/use/form/default/fixed, and the additive lossless payload contract.
+  Current changes do not alter the public scalar/hash payload representation.
+
+P3–P9 have not started. Later-phase failures remain recorded in the historical
 findings and current diagnostic reports.
 
 ## Commit and audit record
@@ -150,6 +198,12 @@ findings and current diagnostic reports.
   are exactly unchanged from P1-02. Full 62-item audit:
   [audits/P1-03.md](audits/P1-03.md); all applicable checks pass.
 
-- P1-04 — whole-archive accounting, supplemental source/parse evidence and P1
+- `1854be2` — P1-04, whole-archive accounting, supplemental source/parse evidence and P1
   acceptance: 58 Python tests and 209 Qore cases pass; original/catalog surveys
   unchanged. Full 62-item audit [audits/P1-04.md](audits/P1-04.md); all applicable checks pass.
+
+- P2-01 (this increment) — declaration namespace identity, schema reconstruction,
+  rollback and ordered schema construction: 58 Python tests and 228 Qore cases
+  pass; 19 new cases / 112 assertions. Every previously successful wire output is
+  byte-identical; the fixed W3C fixture adds eight request/response outputs. Full
+  62-item audit [audits/P2-01.md](audits/P2-01.md); all applicable checks pass.

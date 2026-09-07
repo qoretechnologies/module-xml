@@ -220,10 +220,17 @@ def assess(root: Path) -> dict:
         record["parse_requirement_passed"] = row["ok"] if record["source_valid"] else (
             not row["ok"] and row["err"] in expected_errors)
         if not record["source_valid"]:
-            # A shared namespace bug can reject a grammar-invalid description for
-            # an unrelated reason. Do not credit that rejection as grammar coverage.
-            record["grammar_rejection"] = {"status": "unassessed", "phase": "P6",
-                "reason": "earlier namespace/import failure does not establish import-order validation"}
+            # Credit the ordered schema check only for its own diagnostic and a
+            # corresponding independently established source violation.
+            requirement = ("XSD10-schema-import-order" if "must precede component declarations" in row.get("desc", "")
+                           else "XSD10-schema-content")
+            violations = {e["requirement"] for schema in record["schemas"] for e in schema["normative_errors"]}
+            if (not row["ok"] and row["err"] == "WSDL-ERROR" and row["desc"].startswith("schema grammar:")
+                    and requirement in violations):
+                record["grammar_rejection"] = {"status": "passed", "phase": "P2", "requirement": requirement}
+            else:
+                record["grammar_rejection"] = {"status": "unassessed", "phase": "P6",
+                    "reason": "earlier namespace/import failure does not establish schema grammar validation"}
     # The aggregate message lists contain unqualified echo wrappers. Link each
     # original entry to the separately supplied, correctly qualified echo file.
     message_files = {}
