@@ -599,6 +599,53 @@ findings and current diagnostic reports.
 - Full 62-item incremental audit: [audits/P2-08.md](audits/P2-08.md). P2 remains
   active; this is not a green full Python run or phase-boundary acceptance.
 
+### P2-09 array item identity and output prefix reservation
+
+- Array construction read `wsdl:arrayType` after stripping attribute prefixes but
+  never entered that attribute's declaration scope. Locally introduced/default
+  prefixes failed; a rebound prefix could select the wrong same-local-name type.
+  Array finalization also repeated a bare local-name lookup after the item object
+  was already resolved, making the optional public alias necessary internally.
+- The array annotation now has its own namespace guard. Finalization uses the
+  resolved item or its canonical expanded registry key and restores its completion
+  flag on failure. The named array uses the declaring target namespace rather than
+  the SOAP encoding namespace of its base. WSDL 1.1 section 2.2 / array examples
+  and SOAP 1.1 section 5 describe the QName-based item annotation and derived array
+  types: https://www.w3.org/TR/wsdl.html#_types and
+  https://www.w3.org/TR/2000/NOTE-SOAP-20000508/#_Toc478383512.
+- The collision regression exposed a second construction error: independent child
+  namespace containers allocated prefixes already used by the enclosing registry.
+  `merge()` later renamed prefixes after types had cached them. New contexts now
+  reserve enclosing output maps through copy-on-write assignment before allocating
+  their own prefixes, and reuse the existing target URI's prefix. Added schemas
+  and nested imports therefore retain captured output names. Input scopes remain
+  local; no global mutable registry was introduced.
+- `test/wsdl-array-context.qtest`: five of six initial cases failed before the fix.
+  Final nine cases / 46 assertions pass: attribute/default scopes, same-local-name
+  and no-namespace items, canonical registries, failed-addition recovery, typed
+  values, provider metadata, Serializable reconstruction, and nested output-prefix
+  collisions. No array wire algorithm, rank, sparse/reference or SOAP-version
+  encoding behavior is claimed here; those remain P8 requirements.
+- A concurrent core build redirected `qlib/DataProvider/DataProvider.qmod` to the
+  Debug artifact dated September 3, which lacks core fix `5c8899669`. This caused
+  one required-field regression with the former source-directory-only module path.
+  The source still contains the fix; no core source or symlink was changed here.
+  Tests now explicitly prepend `../qore/build/qlib-qmod/DataProvider` before core
+  `qlib`, selecting the verified Release artifact, SHA-256
+  `6c833e067863e19a1fd2b38761d937c3b5657b890a622f2ecfb67caa215f22c1`.
+  README commands use this reproducible dependency selection.
+- All 339 Qore cases in 21 suites pass with debugging enabled and the pinned core
+  module path. Full Python: 71 tests / 69 passing tests; the same six P4/P6 subtest
+  failures remain, with no errors or warnings. Final namespace/composition/array/
+  SOAP and four independent attribute tests rerun after copy-on-write refinement.
+  Logs: `/tmp/wsdl-p2-09-final-<suite>.log` and
+  `/tmp/wsdl-p2-09-independent-final.log`.
+- Both final corpus reports retain every previous result, differing only in
+  module SHA-256 `b2e2479cb824702e82b6f1321dfc1240ebe7b16c91aa2c4b3c751d3e56c38ca3`.
+  Strict gate: 38 descriptions / 140 directions with zero selected failures;
+  broad coverage: 384 failures, zero missing/skipped cases. Full incremental audit:
+  [audits/P2-09.md](audits/P2-09.md). P2 acceptance remains open.
+
 ### Remaining P2 acceptance work
 
 - Incoming element namespace identity and same-local-name element collisions; the
@@ -609,7 +656,7 @@ findings and current diagnostic reports.
   lexical forms, QName values, selected dynamic types, ordered particles, mixed
   text and wildcard nodes, including client/handler/provider/example consumers.
 - Remaining inherited constraint/derivation checks, named mixed emptiable simple-content restrictions,
-  expanded array item lookup and imported-reference permissions.
+  and imported-reference permissions.
 - P2 phase-boundary acceptance must pass before P3 starts. P3–P9 remain unstarted;
   no push or external publication is authorized or performed.
 
@@ -669,3 +716,5 @@ findings and current diagnostic reports.
 - `4ae38d1` — P2-07 — attributed simple-content provider fields, scalar compatibility
   and complete-value choices; 322 Qore cases pass, with the two recorded P6 subtest
   failures. Full 62-item audit [audits/P2-07.md](audits/P2-07.md). No push.
+- `b67d61c` — P2-08 — compositor namespace scopes; 330 Qore cases pass, with six
+  routed P4/P6 subtest failures. Full audit [audits/P2-08.md](audits/P2-08.md). No push.

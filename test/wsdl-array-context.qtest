@@ -1,0 +1,156 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires xml
+%requires ../qlib/WSDL.qm
+%exec-class ArrayContextTest
+
+class ArrayContextTest inherits QUnit::Test {
+    private {
+        const Xsd = "http://www.w3.org/2001/XMLSchema";
+        const Ns = "urn:qore:array-context";
+        const Enc = "http://schemas.xmlsoap.org/soap/encoding/";
+    }
+
+    constructor() : QUnit::Test("WSDL encoded array schema identity", "1.0") {
+        addTestCase("Array item QNames use attribute declaration scope", \attributeScope());
+        addTestCase("Array types retain the schema target namespace", \ownNamespace());
+        addTestCase("Array finalization accepts canonical registries without local aliases", \canonicalRegistry());
+        addTestCase("Failed array additions preserve the schema for a later dependency", \failedResolution());
+        addTestCase("Wrong and unbound array item namespaces reject", \invalidNamespaces());
+        addTestCase("Array metadata and reconstruction preserve selected item types", \consumers());
+        addTestCase("Identical item local names retain their selected namespace", \collidingItemNames());
+        addTestCase("Default resets retain no-namespace item types", \noNamespaceItems());
+        addTestCase("Added and nested schema contexts preserve captured output prefixes", \capturedPrefixes());
+        set_return_value(main());
+    }
+
+    private string schema(string body) {
+        return sprintf('<xs:schema xmlns:xs="%s" xmlns:t="%s" xmlns:e="%s" xmlns:w="http://schemas.xmlsoap.org/wsdl/"
+            targetNamespace="%s"><xs:import namespace="%s"/>%s</xs:schema>', Xsd, Ns, Enc, Ns, Enc, body);
+    }
+
+    private string array(string item, string declarations = "") {
+        return sprintf('<xs:complexType name="Items"><xs:complexContent><xs:restriction base="e:Array">
+            <xs:attribute ref="e:arrayType" w:arrayType="%s[]" %s/>
+            </xs:restriction></xs:complexContent></xs:complexType>', item, declarations);
+    }
+
+    private XsdSchema parse(string body) {
+        return new XsdSchema(schema(body), {"async_only": True});
+    }
+
+    private XsdArrayType items(XsdSchema s) {
+        return cast<XsdArrayType>(s.findType(make_qname(Ns, "Items")));
+    }
+
+    attributeScope() {
+        foreach string declaration in (sprintf('xmlns:q="%s"', Xsd), sprintf('xmlns="%s"', Xsd)) {
+            XsdSchema s = parse(array(declaration =~ /xmlns:q/ ? "q:boolean" : "boolean", declaration));
+            assertEq("boolean", items(s).elementType.name);
+            assertEq((False, True), items(s).deserializeValue("Items", s.getTypeMap(), NOTHING,
+                {"^value^": ("false", "true")}));
+        }
+        XsdSchema s = parse(array("t:Number", sprintf('xmlns:t="%s"', Ns)) +
+            '<xs:simpleType name="Number"><xs:restriction base="xs:int"/></xs:simpleType>');
+        assertEq("Number", items(s).elementType.name);
+        assertEq(Ns, s.nsc.getInputNamespaceUri("t"));
+    }
+
+    ownNamespace() {
+        XsdSchema s = parse(array("xs:int"));
+        assertEq(Ns, s.nsc.getOutputNamespaceUri(items(s).getOutputNamespacePrefix()));
+        assertEq(s.nsc.getOutputNamespacePrefix(Ns) + ":Items", items(s).getNameWithNS());
+    }
+
+    canonicalRegistry() {
+        XsdSchema s = parse('<xs:simpleType name="Number"><xs:restriction base="xs:int"/></xs:simpleType>');
+        XsdAbstractType number = s.findType(make_qname(Ns, "Number"));
+        # The public registry may retain only canonical entries; source QNames must never need an alias.
+        remove s.tmap.Number;
+        s.addSchemaString(schema(array("t:Number")));
+        assertEq(number, items(s).elementType);
+        assertEq((0, 7), items(s).deserializeValue("Items", s.getTypeMap(), NOTHING, {"^value^": ("0", "7")}));
+    }
+
+    failedResolution() {
+        XsdSchema s = parse('<xs:element name="existing" type="xs:boolean"/>');
+        assertThrows("WSDL-ERROR", \s.addSchemaString(), (schema(array("t:Number")),));
+        assertFalse(s.tmap.hasKey(make_qname(Ns, "Items")));
+        s.addSchemaString(schema(array("t:Number") +
+            '<xs:simpleType name="Number"><xs:restriction base="xs:int"/></xs:simpleType>'));
+        assertEq("Number", items(s).elementType.name);
+        assertEq((0,), items(s).deserializeValue("Items", s.getTypeMap(), NOTHING, {"^value^": ("0",)}));
+    }
+
+    invalidNamespaces() {
+        foreach string declaration in ('xmlns:t="urn:wrong"', 'xmlns="urn:wrong"') {
+            string item = declaration =~ /xmlns:t/ ? "t:Number" : "Number";
+            assertThrows("WSDL-ERROR", \parse(), (array(item, declaration) +
+                '<xs:simpleType name="Number"><xs:restriction base="xs:int"/></xs:simpleType>',));
+        }
+        assertThrows("WSDL-NAMESPACE-ERROR", \parse(), (array("missing:Number"),));
+    }
+
+    consumers() {
+        XsdSchema original = parse(array("q:Number", sprintf('xmlns:q="%s"', Ns)) +
+            '<xs:simpleType name="Number"><xs:restriction base="xs:int"/></xs:simpleType>');
+        XsdSchema restored = Serializable::deserialize(original.serialize());
+        foreach XsdSchema s in (original, restored) {
+            AbstractDataProviderType provider = items(s).getDataProviderType();
+            assertEq(NT_INT, provider.getElementType().getBaseTypeCode());
+            assertEq((0, 7), provider.acceptsValue((0, 7)));
+            assertEq((0, 7), items(s).serializeValue(s.nsc, (0, 7), True)."^value^");
+            assertEq(Ns, s.nsc.getOutputNamespaceUri(items(s).getOutputNamespacePrefix()));
+        }
+    }
+
+    collidingItemNames() {
+        XsdSchema s(sprintf('<xs:schema xmlns:xs="%s" targetNamespace="urn:other">
+            <xs:simpleType name="Number"><xs:restriction base="xs:boolean"/></xs:simpleType></xs:schema>', Xsd));
+        s.addSchemaString(schema('<xs:import namespace="urn:other"/>' + array("t:Number", 'xmlns:t="urn:other"') +
+            '<xs:simpleType name="Number"><xs:restriction base="xs:int"/></xs:simpleType>'));
+        assertEq(s.findType(make_qname("urn:other", "Number")), items(s).elementType);
+        assertEq((False, True), items(s).deserializeValue("Items", s.getTypeMap(), NOTHING,
+            {"^value^": ("false", "true")}));
+        assertEq(Ns, s.nsc.getOutputNamespaceUri(items(s).getOutputNamespacePrefix()));
+    }
+
+    noNamespaceItems() {
+        XsdSchema s(sprintf('<xs:schema xmlns:xs="%s"><xs:simpleType name="Number">
+            <xs:restriction base="xs:boolean"/></xs:simpleType></xs:schema>', Xsd));
+        s.addSchemaString(schema('<xs:import/>' + array("Number", 'xmlns=""') +
+            '<xs:simpleType name="Number"><xs:restriction base="xs:int"/></xs:simpleType>'));
+        assertEq(s.findType("{}Number"), items(s).elementType);
+        assertEq((False,), items(s).deserializeValue("Items", s.getTypeMap(), NOTHING, {"^value^": ("false",)}));
+    }
+
+    capturedPrefixes() {
+        XsdSchema original = parse('<xs:simpleType name="Number"><xs:restriction base="xs:int"/></xs:simpleType>');
+        list<string> namespaces = (Ns, "https://first.invalid/types", "https://second.invalid/types");
+        foreach string uri in (select namespaces, $1 != Ns) {
+            original.addSchemaString(sprintf('<xs:schema xmlns:xs="%s" targetNamespace="%s">
+                <xs:simpleType name="Number"><xs:restriction base="xs:boolean"/></xs:simpleType></xs:schema>',
+                Xsd, uri));
+        }
+        XsdSchema restored = Serializable::deserialize(original.serialize());
+        foreach XsdSchema s in (original, restored) {
+            foreach string uri in (namespaces) {
+                XsdAbstractType type = s.findType(make_qname(uri, "Number"));
+                assertEq(uri, s.nsc.getOutputNamespaceUri(type.getOutputNamespacePrefix()));
+                assertEq(s.nsc.getOutputNamespacePrefix(uri) + ":Number", type.getNameWithNS());
+            }
+            Namespaces child({"targetNamespace": "https://third.invalid/types"}, s.nsc);
+            Namespaces grandchild({"targetNamespace": "https://fourth.invalid/types"}, child);
+            string child_prefix = child.getTargetNamespaceOutputPrefix();
+            string grandchild_prefix = grandchild.getTargetNamespaceOutputPrefix();
+            child.merge(grandchild);
+            s.nsc.merge(child);
+            assertEq("https://third.invalid/types", s.nsc.getOutputNamespaceUri(child_prefix));
+            assertEq("https://fourth.invalid/types", s.nsc.getOutputNamespaceUri(grandchild_prefix));
+        }
+    }
+}

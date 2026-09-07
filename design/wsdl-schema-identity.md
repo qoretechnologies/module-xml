@@ -43,6 +43,24 @@ local name, so unrelated custom types named Array remain usable. Finalization
 distinguishes an active derivation from a completed type and rejects cycles before
 publishing base links. Generic/mixed content handling is separate from base identity.
 
+Encoded array item QNames use the namespace scope of the attribute carrying
+`wsdl:arrayType`, including default resets. Finalization uses the resolved item
+object (or its canonical expanded registry key), never a bare-name alias, and
+restores its completion flag after failure. The named array itself belongs to its
+declaring schema's target namespace. For example, an array of invoice quantities
+can declare the scalar namespace on the array annotation:
+
+```xml
+<xs:attribute ref="soapenc:arrayType"
+              xmlns:scalar="http://www.w3.org/2001/XMLSchema"
+              wsdl:arrayType="scalar:int[]"/>
+```
+
+New schema namespace contexts reserve the enclosing output registry before
+allocating prefixes. Types can therefore retain their captured output names
+through subsequent merges, including nested imports and namespaces with the same
+last URI segment. Input prefix scopes remain local to each source declaration.
+
 Simple-content derivations retain the expanded base identity as well. Extensions
 inherit scalar content and attributes; restrictions apply their facets to the
 effective scalar base, including anonymous restrictions and the anyType ur-type

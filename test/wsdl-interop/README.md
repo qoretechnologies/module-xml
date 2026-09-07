@@ -85,6 +85,12 @@ The Python test also retains four failing subtests for
 alternatives together and accepts an independently invalid combination. This
 particle-model defect is assigned to P4 and is not a passing namespace check.
 
+`qore --enable-debug test/wsdl-array-context.qtest` covers array annotation scopes,
+canonical item lookup, same-local-name and no-namespace items, schema-addition
+rollback, provider metadata, reconstruction and captured output prefixes across
+added/nested schema contexts. These are P2 schema identity checks; complete legacy
+array wire semantics and SOAP-version encoding requirements remain assigned to P8.
+
 The attribute-extension source places `gender` on a string child that does not declare
 it. [Separately identified derivatives](derivatives/manifest.json) move that attribute
 to its declared parent, recording original/derived hashes and the two exact byte
@@ -371,9 +377,13 @@ Simple-content provider coverage requires the Qore DataProvider fix in commit
 
 ```sh
 cmake --build ../qore/build --target DataProvider-qmod
-QORE_MODULE_DIR="$PWD/../qore/qlib" qore --enable-debug test/wsdl-attribute-consumers.qtest
-QORE_MODULE_DIR="$PWD/../qore/qlib" python3 test/wsdl-interop/test_attribute_values.py -v
+QORE_MODULE_DIR="$PWD/../qore/build/qlib-qmod/DataProvider:$PWD/../qore/qlib" qore --enable-debug test/wsdl-attribute-consumers.qtest
+QORE_MODULE_DIR="$PWD/../qore/build/qlib-qmod/DataProvider:$PWD/../qore/qlib" python3 test/wsdl-interop/test_attribute_values.py -v
 ```
+
+The explicit DataProvider artifact directory keeps these tests on the rebuilt
+Release module if another build changes the source-tree qmod symlink. Use the same
+module path for the other Qore suites and Python subprocess tests in this directory.
 
 The worker now passes all twelve examples, including simple content, through provider
 conversion before serialization. `getFields()` exposes `^value^` and `^attributes^`;
