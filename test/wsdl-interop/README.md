@@ -7,6 +7,9 @@ XSDs, and SOAP messages. Running it against this module exposed defects that the
 The small regression suite runs offline in the normal `test/*.qtest` CI loop. The larger survey is a
 diagnostic tool with explicit failures and coverage limits, not a conformance certification.
 
+See [PLAN.md](PLAN.md) for the phased implementation plan, acceptance checks, and a complete mapping
+of the recorded findings and validator disagreements to the work needed to resolve them.
+
 ## Sources and intended coverage
 
 | Source | Use |
