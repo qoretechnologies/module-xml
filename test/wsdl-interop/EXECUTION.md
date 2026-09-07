@@ -459,6 +459,27 @@ findings and current diagnostic reports.
 - Full 62-item incremental audit: [audits/P2-04.md](audits/P2-04.md). All applicable
   P2 increment checks pass. This does not close the phase boundary or full-suite gate.
 
+### P2-05 file-relative source bases
+
+- Three new file/directory scenarios reproduced incorrect reuse of the first root's
+  directory and failure to restore the initial default on errors. Each file now
+  resolves against its own containing directory; successful first additions retain
+  the legacy default, and subsequent additions restore the configured default.
+  Failed file/directory calls restore the previous default. Successfully added
+  files retain their own bases through Serializable reconstruction.
+- Composition suite: 14 cases / 66 assertions pass, including missing files, invalid
+  roots, exact int/boolean values, directory additions, reconstruction and recovery.
+  The source-bases fixture manifest records all five authored files and hashes.
+  Five independent composition tests pass; the new case checks both schema graphs
+  and four positive/negative oracle payloads.
+- Full affected Qore run: 310 cases pass in 18 suites (`/tmp/wsdl-p2-05-<suite>.log`).
+  Python: 68 tests, 67 pass and the existing test retains its two P6 version subtest
+  failures. The full Python suite is not green. Both-version survey and strict gate
+  results are unchanged except the module digest: 38 descriptions / 140 directions
+  selected with no failures; 384 complete diagnostic failures remain.
+- Complete 62-item audit: [audits/P2-05.md](audits/P2-05.md). No C++ change, push,
+  P6 implementation or phase-order exception.
+
 ### Remaining P2 acceptance work
 
 - Incoming element namespace identity and same-local-name element collisions; the
@@ -470,7 +491,7 @@ findings and current diagnostic reports.
   text and wildcard nodes, including client/handler/provider/example consumers.
 - Attribute provider field metadata and example generation, remaining inherited
   constraint/derivation checks, named mixed emptiable simple-content restrictions,
-  expanded array item lookup, multi-root base paths and imported-reference permissions.
+  expanded array item lookup and imported-reference permissions.
 - P2 phase-boundary acceptance must pass before P3 starts. P3–P9 remain unstarted;
   no push or external publication is authorized or performed.
 
@@ -509,3 +530,9 @@ findings and current diagnostic reports.
   declaration form metadata and unconditional use validation: 59 Python tests and
   246 Qore cases pass. Complete 62-item audit [audits/P2-03.md](audits/P2-03.md);
   all applicable checks pass. P2 remains in progress.
+
+- `505a38b` — P2-04 — schema dependency graphs, simple content, group context,
+  attribute values and expanded names: 307 Qore cases pass; strict 38-description/
+  140-direction gate passes. Full Python run: 66 of 67 tests pass, with the remaining
+  test reporting the two explicitly routed P6 binding-version failures. Full 62-item
+  incremental audit [audits/P2-04.md](audits/P2-04.md); P2 remains in progress.

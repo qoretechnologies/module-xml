@@ -108,7 +108,12 @@ auto typed_flag = flag.getValue("false");  // False for an xs:boolean declaratio
 
 `XsdSchema` stores original XSD documents with their resolution bases in
 `XsdSourceInfo` records. Successfully retrieved import/include bytes are cached by
-normalized location. Serializable reconstruction rebuilds transient registries from
+normalized location. File additions temporarily use the file's containing directory,
+so two root files may import different dependencies with the same relative filename.
+The first successful addition establishes an unset default base; subsequent additions
+restore the existing default. File or directory failures restore the prior default.
+Each successfully added file retains its own base for reconstruction.
+Serializable reconstruction rebuilds transient registries from
 the saved documents and dependencies, without invoking the original import callback.
 `WebService` retains its WSDL reconstruction hook and inherits the dependency cache.
 Old standalone serialized schemas with no source documents produce

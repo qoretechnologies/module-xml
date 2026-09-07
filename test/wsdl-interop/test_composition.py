@@ -45,6 +45,34 @@ def compile_schema(source, uri, resources, requests=None):
 
 
 class CompositionTest(unittest.TestCase):
+    def test_distinct_root_file_bases(self):
+        root = ROOT / "regressions/source-bases"
+        manifest = corpus.read_manifest(root / "manifest.json")
+        for name, digest in manifest["files"].items():
+            corpus.check_digest((root / name).read_bytes(), digest, name)
+        base = BASE + "source-bases/"
+        resources = {base + directory + "/dependency.xsd": (root / directory / "dependency.xsd").read_bytes()
+                     for directory in ("a", "b")}
+        jobs, cases = [], []
+        for directory, value, invalid in (("a", "42", "false"), ("b", "false", "2")):
+            uri = base + directory + "/root.xsd"
+            source = (root / directory / "root.xsd").read_bytes()
+            documents = {directory + "/valid": f'<Value xmlns="urn:root:{directory}">{value}</Value>'.encode(),
+                         directory + "/invalid": f'<Value xmlns="urn:root:{directory}">{invalid}</Value>'.encode()}
+            compiled = compile_schema(source, uri, resources)
+            self.assertTrue(compiled.validate(etree.fromstring(documents[directory + "/valid"])))
+            self.assertFalse(compiled.validate(etree.fromstring(documents[directory + "/invalid"])))
+            jobs.append(SchemaJob(directory, uri, source, documents))
+            cases.append({"name": directory, "wsdl": str(root / directory / "root.xsd"),
+                          "base": base + directory + "/", "schema_only": True, "messages": []})
+        rows = survey.run_worker(cases, {key: value.decode() for key, value in resources.items()})
+        self.assertEqual(2, len(rows))
+        self.assertTrue(all(row["ok"] for row in rows), rows)
+        oracle = run_independent(jobs, resources)
+        self.assertEqual(4, len(oracle["documents"]))
+        for name, row in oracle["documents"].items():
+            self.assertEqual(name.endswith("/valid"), row["ok"], (name, row))
+
     def test_group_reference_context_and_cycles(self):
         declarations = {
             "element-group": ('<xs:group name="Fields" xmlns:k="http://www.w3.org/2001/XMLSchema">'
