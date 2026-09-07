@@ -343,3 +343,13 @@ negative messages rejected for the intended reason, and independent client/serve
 CXF or other SOAP implementation. Add WS-I requirements and W3C SOAP 1.2 protocol assertions as explicit
 tests for actions, empty bodies, one-way operations, binding selection, faults, roles/`mustUnderstand`, and
 attachments. Keep unsupported features and unresolved findings visible rather than marking them as passing.
+
+## P2 attribute consumer regression
+
+Run `qore --enable-debug test/wsdl-attribute-consumers.qtest` from the repository
+root for provider metadata and generated examples. The independent
+`test_attribute_values.py` test runs `attribute-consumers.qr` against separate
+actual SOAP 1.1/1.2 bindings and validates both request and response outputs with
+libxml2 and pinned Xerces. Exact typed defaults, fixed values, child values and
+qualified attribute names are asserted; schema validity alone is insufficient.
+The worker has a thirty-second deadline and uses temporary local descriptions.

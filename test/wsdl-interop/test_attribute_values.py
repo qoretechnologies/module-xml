@@ -5,6 +5,8 @@ Copyright (C) 2026 Qore Technologies, s.r.o.
 """
 
 from pathlib import Path
+import json
+import subprocess
 import tempfile
 import unittest
 
@@ -49,6 +51,60 @@ def description(version, schema_text=None):
 
 
 class AttributeValuesTest(unittest.TestCase):
+    def test_provider_values_and_generated_examples_in_actual_bindings(self):
+        attributes = '''<xs:attribute name="code" fixed="EUR" use="required"/>
+          <xs:attribute name="flag" type="xs:boolean" fixed="false"/>
+          <xs:attribute name="count" type="xs:int" default="0"/>
+          <xs:attribute name="text" default=""/>
+          <xs:attribute name="unit" type="xs:string" fixed="kg" form="qualified"/>'''
+        models = {
+            "empty": attributes,
+            "sequence": '<xs:sequence><xs:element name="child" type="xs:int"/></xs:sequence>' + attributes,
+            "simple": '<xs:simpleContent><xs:extension base="xs:string">' + attributes
+                      + '</xs:extension></xs:simpleContent>',
+        }
+        jobs = []
+        with tempfile.TemporaryDirectory(prefix="wsdl-attribute-consumers-") as temporary:
+            for kind, content in models.items():
+                source = f'''<xs:schema xmlns:xs="{XSD}" xmlns:t="{NS}" targetNamespace="{NS}">
+                  <xs:complexType name="Record">{content}</xs:complexType>
+                  <xs:element name="Submit" type="t:Record"/><xs:element name="Reply" type="t:Record"/>
+                </xs:schema>'''
+                compiled = etree.XMLSchema(etree.fromstring(source.encode()))
+                documents = {}
+                for version, envelope_ns in zip(("11", "12"), survey.SOAP_NAMESPACES):
+                    path = Path(temporary) / f"{kind}-{version}.wsdl"
+                    path.write_text(description(version, source))
+                    process = subprocess.run(
+                        ["qore", "--enable-debug", str(Path(__file__).with_name("attribute-consumers.qr")),
+                         str(path), "Soap" + version], text=True, capture_output=True, timeout=30, check=True)
+                    self.assertEqual("", process.stderr)
+                    rows = [json.loads(line) for line in process.stdout.splitlines()]
+                    self.assertEqual(["request", "response"], [r["direction"] for r in rows])
+                    for row in rows:
+                        self.assertEqual({"code": "EUR", "flag": False, "count": 0, "text": "", "unit": "kg"},
+                                         row["value"]["^attributes^"])
+                        self.assertIs(False, row["value"]["^attributes^"]["flag"])
+                        self.assertIs(int, type(row["value"]["^attributes^"]["count"]))
+                        envelope = etree.fromstring(row["body"].encode())
+                        self.assertEqual(f"{{{envelope_ns}}}Envelope", envelope.tag)
+                        payload = envelope.find("{*}Body")[0]
+                        self.assertEqual(f"{{{NS}}}" + ("Submit" if row["direction"] == "request" else "Reply"),
+                                         payload.tag)
+                        self.assertEqual({"code": "EUR", "flag": "false", "count": "0", "text": "",
+                                          f"{{{NS}}}unit": "kg"}, dict(payload.attrib))
+                        if kind == "simple":
+                            self.assertEqual("abc", payload.text)
+                        elif kind == "sequence":
+                            self.assertEqual([("child", "123")], [(c.tag, c.text) for c in payload])
+                        self.assertTrue(compiled.validate(payload), str(compiled.error_log))
+                        documents[f"{kind}/{version}/{row['direction']}"] = etree.tostring(payload)
+                jobs.append(SchemaJob(kind, f"http://example.invalid/{kind}.xsd", source.encode(), documents))
+        oracle = run_independent(jobs)
+        self.assertEqual(12, len(oracle["documents"]))
+        for name, result in oracle["documents"].items():
+            self.assertTrue(result["ok"], (name, result))
+
     def test_qualified_collisions_in_actual_bindings_and_both_directions(self):
         source_schema = f'''<xs:schema xmlns:xs="{XSD}" xmlns:t="{NS}" targetNamespace="{NS}">
           <xs:complexType name="Record">

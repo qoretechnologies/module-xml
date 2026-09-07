@@ -164,3 +164,36 @@ values, referenced constraints, reconstruction and both SOAP request/response di
 scope recovery and bounded namespace materialization. `test_attribute_values.py`
 also checks exact attribute infosets against both validators through separate
 SOAP 1.1/1.2 bindings in both directions.
+
+## Attribute consumer fields and examples
+
+Complex types with element content or empty content expose their declared attributes
+through a `^attributes^` provider field. The nested fields use the same local or
+expanded collision keys as serialization. Each reports its use's requiredness,
+typed optional default/fixed values, and finite allowed choices. Required fixed
+attributes have an example and allowed choice but no default: callers must supply
+them. `XsdAttributeDataType` enforces presence separately from scalar conversion,
+including default `anySimpleType`, union and list representations. Optional copies
+do not modify the original type. Prohibited uses contribute no provider field.
+
+For example, an invoice with required fixed `currency="EUR"` and optional
+`approved` defaulting to false accepts:
+
+```qore
+hash<auto> input = {"^attributes^": {"currency": "EUR"}};
+auto fields = schema.getElement("urn:invoice", "invoice").getDataProviderType();
+auto converted = fields.acceptsValue(input);
+# converted.^attributes^ also contains approved: False
+```
+
+`WSMessageHelper` uses a resolved attribute constraint before attempting a generated
+scalar example. This applies to simple content as well as element/empty content;
+false, zero and empty-string constraints are retained. Unconstrained attributes
+continue to use the existing type-specific example generator. The simple-content
+provider's scalar/structured contract is tracked separately in P2 and is not
+changed by this increment.
+
+Tests: `wsdl-attribute-consumers.qtest` checks metadata, conversions, rejection,
+namespace collisions and reconstruction. `test_attribute_values.py` independently
+validates twelve generated request/response payloads from actual SOAP 1.1 and 1.2
+contracts; eight also pass through provider default insertion.

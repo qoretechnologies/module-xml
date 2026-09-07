@@ -480,6 +480,39 @@ findings and current diagnostic reports.
 - Complete 62-item audit: [audits/P2-05.md](audits/P2-05.md). No C++ change, push,
   P6 implementation or phase-order exception.
 
+### P2-06 attribute consumer fields and examples
+
+- Provider construction omitted declared attributes on element/empty complex content;
+  WSMessageHelper generated scalar placeholders before considering constraints. Seven
+  initial consumer cases failed. Attribute fields now expose the existing `^attributes^`
+  shape, namespace collision keys, use requiredness, typed defaults/fixed choices and
+  typed enumerations. Generated samples use resolved constraints, including false,
+  zero and empty strings, on simple/element/empty content.
+- Requiredness cannot be inferred from `anySimpleType`/union scalar providers: their
+  `auto` type accepts omitted values. `XsdAttributeDataType` enforces attribute presence
+  separately, retains scalar/list conversion and makes optional/mandatory variants
+  without mutating the source type. Required fixed uses have examples but no default.
+- Normative basis: XSD 1.0 Structures sections 3.2 and 3.5, Attribute Locally Valid
+  and Attribute Use Properties Correct (https://www.w3.org/TR/xmlschema-1/#cvc-attribute
+  and https://www.w3.org/TR/xmlschema-1/#au-props-correct). P3 still owns complete scalar
+  value-space semantics. Simple-content provider representation remains open in P2;
+  this increment changes only its attribute example generation.
+- Focused Qore coverage: 8 cases / 93 assertions, including typed choices, missing and
+  invalid values, unknown fields, immutability, namespace collisions and reconstruction.
+  All 318 Qore cases pass in 19 suites with debugging enabled, without warnings or
+  unhandled errors (`/tmp/wsdl-p2-06-<suite>.log`).
+- Four independent attribute tests pass (`/tmp/wsdl-p2-06-independent-final.log`). The
+  new worker checks 12 generated payloads from separate actual SOAP 1.1/1.2 bindings,
+  both directions; eight also serialize provider-defaulted values. libxml2 and pinned
+  Xerces validate all outputs, with exact typed values and qualified names asserted.
+- Full Python run: 69 tests, 68 pass, with the same two P6-selected-binding-version
+  subtest failures in the remaining test (`/tmp/wsdl-p2-06-python.log`). Final worker
+  and exact-type assertion refinements were rerun in the four independent tests.
+- Both corpus reports are exactly unchanged from 2387dd0 except the module digest.
+  Strict selection remains 38 descriptions / 140 directions with no selected failures;
+  384 complete diagnostic failures remain. No phase-boundary or full-suite pass claimed.
+- Full 62-item audit: [audits/P2-06.md](audits/P2-06.md). No C++ change or push.
+
 ### Remaining P2 acceptance work
 
 - Incoming element namespace identity and same-local-name element collisions; the
@@ -489,7 +522,7 @@ findings and current diagnostic reports.
 - Complete and test the additive public lossless contract beyond attribute keys:
   lexical forms, QName values, selected dynamic types, ordered particles, mixed
   text and wildcard nodes, including client/handler/provider/example consumers.
-- Attribute provider field metadata and example generation, remaining inherited
+- Simple-content provider scalar/structured metadata, remaining inherited
   constraint/derivation checks, named mixed emptiable simple-content restrictions,
   expanded array item lookup and imported-reference permissions.
 - P2 phase-boundary acceptance must pass before P3 starts. P3–P9 remain unstarted;
@@ -536,3 +569,8 @@ findings and current diagnostic reports.
   140-direction gate passes. Full Python run: 66 of 67 tests pass, with the remaining
   test reporting the two explicitly routed P6 binding-version failures. Full 62-item
   incremental audit [audits/P2-04.md](audits/P2-04.md); P2 remains in progress.
+
+- `2387dd0` — P2-05 — per-file schema dependency bases and exception-safe default
+  restoration: 310 Qore cases pass; 67 of 68 Python tests pass with the existing
+  two P6 subtest failures. Corpus reports unchanged except module digest. Full
+  62-item incremental audit [audits/P2-05.md](audits/P2-05.md).

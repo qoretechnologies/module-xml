@@ -114,6 +114,9 @@ module WSDL {
       local form overrides; unknown attributes are rejected and colliding local names use expanded field keys
     - adding schema files from multiple directories resolves imports relative to each file, preserves their
       bases through reconstruction, and restores the previous default base when an addition fails
+    - complex element-content and empty-content provider types expose \c ^attributes^ fields with requiredness,
+      typed defaults, fixed/enumerated choices and expanded collision keys; generated attribute examples honor
+      fixed/default values, including on simple content
     - fixed serializing values in the upper half of the \c xs:unsignedShort and \c xs:unsignedInt ranges;
       the limits are now 65535 and 4294967295 respectively
     - fixed serializing native IEEE floating-point infinities and NaN as XSD \c INF, \c -INF, and \c NaN;
@@ -2815,6 +2818,80 @@ public class XsdElement inherits WSDL::XsdTypedData {
             throw SOAP_DESERIALIZATION_ERROR, sprintf("single value passed for element %y, but minOccurs: %d", name, minOccurs);
 
         return type.deserializeValue(name, tmap, mrh, getValue(mrh, val));
+    }
+}
+
+#! provider type enforcing attribute-use presence independently of the scalar type
+/** Attribute uses can be required even when their scalar representation accepts NOTHING, for example
+    \c anySimpleType or a union. This type preserves the scalar conversion while enforcing that requirement.
+
+    @since %WSDL 0.5.8
+
+    @par Example
+    A required invoice currency attribute remains mandatory even when its schema omits an explicit type.
+    Optional boolean attributes keep XSD boolean conversion, so the string \c "false" remains false.
+*/
+public class XsdAttributeDataType inherits QoreDataType {
+    private {
+        AbstractDataProviderType value_type;
+        bool required;
+    }
+
+    #! wraps a scalar provider type with the attribute use's requiredness
+    /** @param value_type provider type used to convert supplied values
+        @param required whether the attribute use requires a supplied value
+    */
+    constructor(AbstractDataProviderType value_type, bool required)
+            : QoreDataType(required ? (value_type.getValueType() ?? AutoType)
+                : (value_type.getValueType() ?? AutoType).getOrNothingType()) {
+        self.value_type = value_type;
+        self.required = required;
+    }
+
+    #! returns whether the attribute must be supplied
+    /** @return the requiredness of the attribute use */
+    bool isMandatory() {
+        return required;
+    }
+
+    #! returns whether the attribute can be omitted
+    /** @return True for optional attribute uses */
+    bool isOrNothingType() {
+        return !required;
+    }
+
+    #! converts a supplied value after checking attribute presence
+    /** @param value the caller's attribute value
+        @return the converted value, or NOTHING for an omitted optional attribute
+        @throw MISSING-VALUE-ERROR a required attribute was omitted
+        @throw RUNTIME-TYPE-ERROR the scalar provider type rejects the value
+    */
+    auto acceptsValue(auto value) {
+        if (!exists value) {
+            if (required) {
+                throw "MISSING-VALUE-ERROR", "A required XML attribute must be supplied";
+            }
+            return;
+        }
+        return value_type.acceptsValue(value);
+    }
+
+    #! returns an optional equivalent without modifying this type
+    /** @return an equivalent type accepting omitted values */
+    AbstractDataProviderType getOrNothingType() {
+        return required ? new XsdAttributeDataType(value_type, False) : self;
+    }
+
+    #! returns a mandatory equivalent without modifying this type
+    /** @return an equivalent type requiring a supplied value */
+    AbstractDataProviderType getMandatoryType() {
+        return required ? self : new XsdAttributeDataType(value_type, True);
+    }
+
+    #! returns the item type for list-valued attributes
+    /** @return the scalar provider's element type, or NOTHING */
+    *AbstractDataProviderType getElementType() {
+        return value_type.getElementType();
     }
 }
 
@@ -5592,9 +5669,66 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
 
     AbstractDataProviderType getDataProviderType() {
         AbstractDataProviderType rv = getDataProviderTypeIntern();
-        return nillable || !required
+        return nillable || (!required && !hasRequiredAttributes())
             ? rv.getOrNothingType()
             : rv;
+    }
+
+    private bool hasRequiredAttributes() {
+        foreach XsdAttribute attr in (attrs.iterator()) {
+            if (attr.use == "required") {
+                return True;
+            }
+        }
+        return False;
+    }
+
+    #! adds the existing public attribute hash to a complex content provider type
+    private HashDataType addAttributeFields(HashDataType rv) {
+        if (!attrs) {
+            return rv;
+        }
+        HashDataType attributes(name + " attributes");
+        *hash<auto> defaults;
+        foreach string key in (keys attrs) {
+            XsdAttribute attr = attrs{key};
+            bool mandatory = attr.use == "required";
+            AbstractDataProviderType attr_type = attr.type.getDataProviderType();
+            hash<auto> info = {
+                "name": key,
+                "display_name": key,
+                "short_desc": mandatory ? "Required XML attribute" : "Optional XML attribute",
+                "desc": sprintf("%s XML attribute `%s`", mandatory ? "Required" : "Optional",
+                    make_qname(attr.namespaceUri, attr.name)),
+                "type": new XsdAttributeDataType(attr_type, mandatory),
+            };
+            *list<auto> allowed = exists attr.fixedLexical ? (attr.getDefaultValue(),)
+                : attr.type.getAllowedValues();
+            if (exists allowed) {
+                info.allowed_values = map ("value": $1, "display_name": string($1)), allowed;
+            }
+            if (attr.hasValueConstraint()) {
+                info.example_value = attr.getDefaultValue();
+                if (!mandatory) {
+                    info.default_value = attr.getDefaultValue();
+                    defaults{key} = attr.getDefaultValue();
+                }
+            }
+            attributes.addField(new QoreDataField(info));
+        }
+        if (anyAttribute) {
+            attributes.setDefaultOtherFieldType(AbstractDataProviderType::get(AbstractDataProviderType::anyType));
+        }
+        bool mandatory = hasRequiredAttributes();
+        rv.addField(new QoreDataField({
+            "name": "^attributes^",
+            "display_name": "XML attributes",
+            "short_desc": "XML attribute values",
+            "desc": "XML attribute values keyed by local name, or expanded name when local names collide",
+            "type": mandatory ? attributes : attributes.getOrNothingType(),
+            "default_value": mandatory ? NOTHING : defaults,
+        }));
+        return rv;
     }
 
     private AbstractDataProviderType getDataProviderTypeIntern() {
@@ -5617,7 +5751,7 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
                         $1.value.getDataProviderType().getOrNothingType(), NOTHING, $1.value.getAllowedValues())),
                         ch.elementmap.pairIterator();
                 }
-                return rv;
+                return addAttributeFields(rv);
             }
 
             case XET_CHOICE: {
@@ -5626,10 +5760,13 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
                 map rv.addField(new QoreDataField($1.key, NOTHING,
                     $1.value.getDataProviderType().getOrNothingType(), NOTHING, $1.value.getAllowedValues())),
                     elementmap.pairIterator();
-                return rv;
+                return addAttributeFields(rv);
             }
 
             case XET_NONE:
+                if (attrs) {
+                    return addAttributeFields(new HashDataType(name));
+                }
                 return AbstractDataProviderType::get(AbstractDataProviderType::nothingType);
         }
 
@@ -10668,7 +10805,12 @@ public class WSMessageHelper {
             }
             if (vi.attrs) {
                 foreach string name2 in (keys cast<XsdComplexType>(elem.type).attrs) {
-                    hash<auto> vi2 = getTypeInfo(cast<XsdComplexType>(elem.type).attrs{name2}.type);
+                    XsdAttribute attr = cast<XsdComplexType>(elem.type).attrs{name2};
+                    if (attr.hasValueConstraint()) {
+                        v{'^attributes^'}{name2} = attr.getDefaultValue();
+                        continue;
+                    }
+                    hash<auto> vi2 = getTypeInfo(attr.type);
                     if (vi2.type) {
                         v{'^attributes^'}{name2} = vi2.value;
                     }
