@@ -1,0 +1,154 @@
+# WSDL and SOAP interoperability coverage
+
+Copyright (C) 2026 Qore Technologies, s.r.o. The W3C fixtures retain their original copyright notices.
+
+The W3C XML Schema Databinding collection is a useful independent source of WSDL 1.1 descriptions,
+XSDs, and SOAP messages. Running it against this module exposed defects that the existing tests missed.
+The small regression suite runs offline in the normal `test/*.qtest` CI loop. The larger survey is a
+diagnostic tool with explicit failures and coverage limits, not a conformance certification.
+
+## Sources and intended coverage
+
+| Source | Use |
+| --- | --- |
+| [W3C XML Schema Databinding examples](https://www.w3.org/2002/ws/databinding/examples/6/09/) and [test suite](https://www.w3.org/2002/ws/databinding/testsuite/) | Independent WSDL/XSD/message pairs for primitive types, facets, namespaces, attributes, groups, inheritance, and wildcards. This is the corpus actually surveyed here. |
+| [WS-I Basic Profile 1.2](https://docs.oasis-open.org/ws-brsp/BasicProfile/v1.2/BasicProfile-v1.2.html) and [2.0](https://docs.oasis-open.org/ws-brsp/BasicProfile/v2.0/BasicProfile-v2.0.html) | Requirement matrix for interoperable WSDL 1.1 and SOAP 1.1/1.2 respectively, including messages, bindings, actions, and faults. Use the [WS-I assertions](https://ws-i.org/Testing/Tools/2005/01/BP11_TAD_1-1.htm) for the older Basic Profile 1.1 checks. These profiles have not been fully tested by this survey. |
+| [W3C SOAP 1.2 assertions and test collection](https://www.w3.org/TR/soap12-testcollection/) | Protocol tests for envelope structure, roles, `mustUnderstand`, faults, encoding, and HTTP bindings. These require a purpose-built local service/intermediary harness beyond WSDL parsing. |
+| [Apache CXF WSDL fixtures](https://github.com/apache/cxf/tree/main/testutils/src/main/resources/wsdl) | Additional implementation interoperability cases: `doc_lit_bare.wsdl`, `hello_world_rpc_lit.wsdl`, `hello_world_soap12.wsdl`, `header_doc_lit.wsdl`, `header_rpc_lit.wsdl`, `no_body_parts.wsdl`, `mtom_xop.wsdl`, and `swa-mime.wsdl`. Pin a commit and all imports when adding these. They are candidates, not tested results in this report. |
+
+Keep WSDL 2.0 tests separate: the current `WebService` parser consumes WSDL 1.1 `definitions`.
+Keep legacy RPC/encoded compatibility separate from WS-I profile conformance; Basic Profile literal-binding
+requirements do not certify SOAP encoding support. Public demo endpoints are unnecessary for these tests.
+
+## Reproduce the regression tests
+
+From the repository root:
+
+```sh
+qore --enable-debug test/wsdl-interop.qtest
+python3 test/wsdl-interop/test_survey.py -v
+```
+
+The Qore suite uses eight unmodified W3C WSDL/XSD pairs and 48 selected SOAP messages across SOAP 1.1 and
+1.2. It validates incoming payloads and serialized request/response payloads with libxml2, checks boolean
+and unsigned values, and exercises unsigned boundaries, out-of-range rejection, and native/string IEEE
+special values. It imports the development `qlib/WSDL.qm` using a relative path. No public service is called.
+The W3C WSDLs bind SOAP 1.1; receiving their supplied SOAP 1.2 payloads tests decoding, not negotiation or
+SOAP 1.2 outbound binding selection.
+
+The archive's unsigned cases numbered 02 (`-0`) and 03 (`+42`) are retained for the survey but excluded
+from the regression subset's source-validation assertions: these signed examples are not unambiguous
+XSD 1.0 unsigned lexical oracles, and libxml2 rejects `-0`. The regression suite uses the ordinary positive
+case and the maximum case; it does not suppress validation failures or alter fixtures.
+
+The Python tests require Python 3.10+, `lxml`, and Qore's `json` module in addition to `xml`. They test the
+real Qore subprocess, version selection, fixture checksums, empty input, namespace preservation,
+malformed messages, offline resolution, and separation of input/output validation failures.
+They also verify that missing, duplicate, malformed, or out-of-order worker results fail the survey.
+
+## Fixture provenance
+
+All files under `w3c/`, except our checksum manifest, are copied byte for byte from:
+
+```text
+https://www.w3.org/2002/ws/databinding/testsuite/releases/testsuite-latest.zip
+SHA-256: 510b1528e5bdaee527c416524e6462c73f5e82b5237af4a4f7fef65904b90aca
+Archive path: databinding/examples/6/09/<pattern>/<filename>
+Retrieved: 2026-09-07
+```
+
+The archive's generated examples identify `examples.xml` revision 1.57 dated 2008-02-20. The website's
+current examples need not be byte-identical to this archive. `w3c/manifest.json` records every copied file's
+SHA-256. Each fixture preserves the W3C copyright and links to the
+[W3C document use terms](https://www.w3.org/Consortium/Legal/copyright-documents) and
+[IPR notice](https://www.w3.org/Consortium/Legal/ipr-notice). Local code is not part of the W3C test suite.
+
+## Reproduce the full survey
+
+Download the archive above, verify its SHA-256, and extract it to a temporary directory. Then run:
+
+```sh
+python3 test/wsdl-interop/survey.py \
+  /tmp/wsdl-corpus/databinding/examples/6/09 \
+  --output /tmp/wsdl-survey.json
+```
+
+Use `--soap-version both` to include both supplied envelope versions; the default is `11`.
+Use `--qore /path/to/qore` to select the executable. The driver always enables Qore debugging and uses
+the local WSDL module. It records the module checksum, input checksums, Qore version, and lxml/libxml2
+versions. Missing imports remain explicit failures; neither Qore nor the validator downloads schemas.
+
+The driver exits successfully when it has produced a complete diagnostic report, even if that report
+contains compatibility failures. Worker errors, warnings, incomplete output, timeouts, and invalid corpus
+paths fail the command. Review `counts` and `rows`; a zero exit code does not mean conformance.
+
+The checks are WSDL parsing, decoding supplied requests, serializing their values, and independent XSD
+validation of payloads before and after serialization. It does not prove value equality for every datatype,
+validate the complete WSDL grammar, validate the SOAP envelope against its schema, or test HTTP behavior.
+In particular, schema-valid output can still lose decimal precision, timezone information, or dynamic type
+information; those require explicit value and infoset assertions.
+
+## Results, 2026-09-07
+
+Results below include the numeric fixes in this change, using the pinned archive, Qore 3.0.0, and the
+Python validator's libxml2 2.12.10. See [findings.json](findings.json) for retained failure evidence and
+environment details; regenerate a full report to obtain all successful rows and every input checksum.
+
+| Check | Result |
+| --- | --- |
+| WSDL 1.1 descriptions inventoried | 293 |
+| Supplied SOAP 1.1 messages inventoried | 568 |
+| WSDLs parsed / failed | 271 / 22 |
+| Messages decoded / failed | 493 / 58; 17 messages could not reach decoding because their WSDL failed |
+| Decoded values serialized / failed | 492 / 1 |
+| Serialized payloads accepted / rejected / unassessed by XSD oracle | 465 / 24 / 3 |
+| Supplied payloads accepted / rejected / unassessed by XSD oracle | 510 / 52 / 6 |
+| Oracle-valid inputs rejected during decoding | 52 |
+| Oracle-valid inputs decoded but rejected during serialization | 1 |
+| Oracle-valid inputs producing oracle-invalid output | 11 |
+
+These are stage counts, not percentages of standards compliance. Some generated descriptions have missing
+echo wrappers or incorrect references. Five WSDLs need imports absent from the archive/cache. Some source
+payloads disagree with the validator, including unsigned signed-zero examples, enormous integers, and
+ENTITY/ENTITIES examples. Such results need manual standards analysis or a second XSD processor; they
+must not all be labeled module defects. The report records these separately.
+
+Before the fixes, serialization failed on six decoded values; it now fails on one. Two additional
+oracle-valid messages previously produced invalid lowercase infinity; their outputs now validate.
+
+## Fixed defects
+
+`XsdBaseType::serializeValue()` checked `unsignedShort` and `unsignedInt` against the signed maxima
+32767 and 2147483647. It now uses the XSD maxima 65535 and 4294967295. The W3C element and attribute
+fixtures reproduce both defects. Negative values and the first values above the unsigned maxima remain
+rejected. See [XSD unsignedShort](https://www.w3.org/TR/xmlschema-2/#unsignedShort) and
+[unsignedInt](https://www.w3.org/TR/xmlschema-2/#unsignedInt).
+
+Floating-point decoding returns native IEEE values. Serialization previously passed native infinities and
+NaN to generic XML formatting, producing lowercase spellings, although the string inputs `INF`, `-INF`,
+and `NaN` worked. Serialization now maps native special values to the required XSD spellings. See
+[XSD float lexical representation](https://www.w3.org/TR/xmlschema-2/#float-lexical-representation).
+
+## Remaining findings and priorities
+
+These issues remain open. No full compliance claim is justified by the current results.
+
+| Priority | Reproducer | Finding and cause |
+| --- | --- | --- |
+| High | `SequenceChoice` | A choice preceding `Cvalue` is serialized after it. `XsdComplexType::serializeValue()` emits `elementmap` before separately stored choices, losing compositor order. Two independently valid inputs produce invalid output. |
+| High | `ElementFormUnqualified` | A local `form="unqualified"` element is emitted in the target namespace. Element serialization uses the complex type's `usedocns` setting and does not honor the local form override. |
+| High | `QNameElement`, `QNameAttribute` | QName text such as `ex:QNameElement` is retained while the `ex` namespace declaration is lost. Base QName handling treats the value as a string; output namespace allocation is independent of the value's original context. |
+| High | `ExtendedSequenceLax`, `ExtendedSequenceSkip`, `ExtendedSequenceStrict` and related `Other`/`Any` examples | Wildcard children lose their original namespaces on the decode/encode path. Six valid inputs produce invalid output. Namespace context must survive in the value representation. |
+| High | `IntSimpleTypePattern`, `DateSimpleTypePattern`, `DecimalSimpleTypePattern`, float/double variants | `XsdSimpleType::deserializeValue()` converts values before validating lexical patterns: `009` becomes `9`, and dates acquire Qore formatting. Patterns must inspect the normalized XML lexical form, while numeric facets inspect the value. |
+| High | `FloatEnumerationType`, `DoubleEnumerationType` | Enumeration membership uses lexical hash keys after converting values to floating point. Equivalent scientific-notation values then fail membership. Enumeration needs value-space comparison. |
+| High | `SequenceMinOccurs0`, `SequenceMaxOccursUnbounded`, `ChoiceMaxOccursUnbounded`, related group cases | Model groups are flattened into element/choice maps. Group cardinality and ordered repetitions are not represented sufficiently, so valid optional/repeated sequences and choices fail. Simply relaxing member occurrence checks would not preserve ordering. |
+| Medium | `ExtendedSimpleContent`, `LocalAttributeSimpleType` | Attributes without an explicit `type` or with an anonymous `simpleType` leave `XsdAttribute.type` unset; decoding calls a method on NOTHING. Attribute defaults and anonymous type resolution need implementation. |
+| Medium | `AnyTypeElement`, `AnySimpleTypeElement`/`Attribute`, `MixedContentType`, `SubstitutionGroup`, `TypeSubstitutionUsingXsiType` | Further supported-representation gaps: untyped content, mixed text, substitution-group selection, and preserving a derived type for reserialization. The report retains concrete failures; full implementation requires more than parser acceptance. |
+| Medium | `ElementTypeDefaultNamespace`, `GlobalComplexTypeEmptyExtension`, related `anyType` derivations | QName resolution gaps during parsing: declarations can change namespace context locally, and some complex base types are resolved through the named-type registry rather than the builtin-type path. These deserve reduced schema tests before changing resolution. |
+| Medium | `DateElement`, `DateTimeElement` and attribute variants | Valid five-digit years reach Qore's date parser and fail. Check the date representation and parsing boundary, including timezone and precision preservation, before choosing the API behavior. |
+
+The next acceptance checks should include schema-valid output **and** preserved values/expanded QNames,
+negative messages rejected for the intended reason, and independent client/server exchanges using a pinned
+CXF or other SOAP implementation. Add WS-I requirements and W3C SOAP 1.2 protocol assertions as explicit
+tests for actions, empty bodies, one-way operations, binding selection, faults, roles/`mustUnderstand`, and
+attachments. Keep unsupported features and unresolved findings visible rather than marking them as passing.

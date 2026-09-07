@@ -1,0 +1,123 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+# Offline interoperability tests using unmodified W3C Databinding fixtures.
+
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires xml
+%requires ../qlib/WSDL.qm
+%exec-class WsdlInteropTest
+
+class WsdlInteropTest inherits QUnit::Test {
+    private {
+        const FixtureNames = ("BooleanElement", "BooleanAttribute", "UnsignedShortElement",
+            "UnsignedShortAttribute", "UnsignedIntElement", "UnsignedIntAttribute", "FloatElement",
+            "DoubleElement");
+    }
+
+    constructor() : QUnit::Test("W3C WSDL interoperability", "1.0") {
+        foreach string name in (FixtureNames) {
+            addTestCase(name, \testFixture(), name);
+        }
+        addTestCase("Unsigned integer boundaries and rejection", \testUnsignedBoundaries());
+        addTestCase("Native IEEE special values", \testSpecialValues());
+        set_return_value(main());
+    }
+
+    private string fixturePath(string name) {
+        return get_script_dir() + "/wsdl-interop/w3c/" + name + "/";
+    }
+
+    private WebService service(string name) {
+        return new WebService(ReadOnlyFile::readTextFile(fixturePath(name) + "echo" + name + ".wsdl"),
+            {"async_only": True});
+    }
+
+    # Validate the SOAP body with the independently supplied W3C schema. Keep namespace declarations
+    # on ancestors: QName values and local element form cannot be checked after stripping namespaces.
+    private validateBody(string name, string wire) {
+        hash<auto> envelope = parse_xml(wire).firstValue();
+        hash<auto> body = envelope."env:Body" ?? envelope."soapenv:Body";
+        string key = body.firstKey();
+        body{key}."^attributes^" = envelope."^attributes^" + body{key}."^attributes^";
+        hash<auto> checked = parse_xml_with_schema(make_xml(body),
+            ReadOnlyFile::readTextFile(fixturePath(name) + "echo" + name + ".xsd"));
+        assertEq(key, checked.firstKey(), name + " schema validates the SOAP payload");
+    }
+
+    testFixture(string name) {
+        WebService ws = service(name);
+        WSOperation op = ws.getOperation("echo" + name);
+        # The unsigned regression subset selects an ordinary positive value and the maximum.
+        # The full survey separately records oracle disagreements for the archive's signed examples.
+        list<int> ids = name =~ /^Unsigned/ ? (1, 4) : name == "BooleanAttribute" ? (1, 2)
+            : name =~ /^(Float|Double)/ ? (1, 2, 3, 4, 5) : (1, 2, 3, 4);
+        foreach int i in (ids) {
+            foreach int version in ((11, 12)) {
+                string file = sprintf("%secho%s-%s%02d-soap%d.xml", fixturePath(name), name, name, i, version);
+                string wire = ReadOnlyFile::readTextFile(file);
+                validateBody(name, wire);
+                auto value = op.deserializeRequest(parse_xml(wire));
+                # The supplied echo contract uses the same element for requests and responses.
+                auto response = op.deserializeResponse(parse_xml(wire));
+                hash<auto> request = op.serializeRequest(value);
+                hash<auto> reply = op.serializeResponse(response, NOTHING, "UTF-8", NOTHING, False);
+                validateBody(name, request.body);
+                validateBody(name, reply.body);
+                if (name =~ /^Boolean/) {
+                    bool expected = name == "BooleanElement" ? i == 2 || i == 4 : i == 1 || i == 3;
+                    auto actual = name == "BooleanElement" ? value.booleanElement
+                        : value.booleanAttribute."^attributes^".boolean;
+                    assertEq(expected, actual, file + " preserves the boolean value");
+                } else if (name =~ /^Unsigned/) {
+                    string key = name;
+                    key =~ s/^U/u/;
+                    string attr = name =~ /^UnsignedShort/ ? "unsignedShort" : "unsignedInt";
+                    int expected = i == 1
+                        ? (name == "UnsignedShortAttribute" ? 22 : name == "UnsignedIntAttribute" ? 32334 : 1)
+                        : attr == "unsignedShort" ? 65535 : 4294967295;
+                    auto actual = name =~ /Attribute$/ ? value{key}."^attributes^"{attr} : value{key};
+                    assertEq(expected, actual, file + " preserves the unsigned value");
+                }
+            }
+        }
+    }
+
+    testUnsignedBoundaries() {
+        foreach string name in (("unsignedShort", "unsignedInt")) {
+            Namespaces nsc({});
+            XsdBaseType type = nsc.getBaseType(name);
+            int max = name == "unsignedShort" ? 65535 : 4294967295;
+            foreach int value in ((0, max / 2, max / 2 + 1, max)) {
+                assertEq(value, type.serializeValue(nsc, value, True), name + " serialization boundary");
+                assertEq(string(value), type.serializeValue(nsc, string(value), True),
+                    name + " lexical serialization boundary");
+                assertEq(value, type.deserializeValue("value", new hash<string, XsdAbstractType>(), NOTHING,
+                    string(value)), name + " deserialization boundary");
+            }
+            foreach int value in ((-1, max + 1)) {
+                assertThrows("SOAP-SERIALIZATION-ERROR", \type.serializeValue(), (nsc, value, True));
+                assertThrows("SOAP-DESERIALIZATION-ERROR", \type.deserializeValue(), ("value",
+                    new hash<string, XsdAbstractType>(), NOTHING, string(value)));
+            }
+        }
+    }
+
+    testSpecialValues() {
+        foreach string name in (("float", "double")) {
+            Namespaces nsc({});
+            XsdBaseType type = nsc.getBaseType(name);
+            foreach string lexical in (("INF", "-INF", "NaN")) {
+                auto value = type.deserializeValue("value", new hash<string, XsdAbstractType>(), NOTHING, lexical);
+                assertEq(lexical, type.serializeValue(nsc, value, True), name + " native special value");
+                assertEq(lexical, type.serializeValue(nsc, lexical, True), name + " lexical special value");
+                assertEq(lexical, type.serializeValue(nsc, {"^value^": value}, False)."^value^",
+                    name + " special value with type annotation");
+            }
+            foreach float value in ((0.0, -1.25, 1.25, 1.0e100)) {
+                assertEq(value, type.serializeValue(nsc, value, True), name + " finite value");
+            }
+        }
+    }
+}
