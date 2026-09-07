@@ -218,6 +218,34 @@ findings and current diagnostic reports.
   successful valid stage/output is preserved. Catalog request counts: parse 279/14,
   decode 996/120, encode 994/2, output 948/46; newly reachable failures stay visible.
 
+### P2-03: attribute declaration construction
+
+- The reduced baseline on `592a649` fails all nine original attribute cases. Attribute
+  references and anonymous/default declarations leave `type` unset, schema-global
+  attributes have no registry, and use validation only runs for explicitly typed
+  attributes. Runtime required checks depend on a truthy attribute hash, and the
+  prohibited check reads the incoming hash rather than the declaration.
+- Global attributes now resolve by captured expanded name, anonymous types use normal
+  late resolution, and default types are `xs:anySimpleType`. Contradictory declarations
+  and complex/unresolved attribute types fail during schema construction. Global
+  registries roll back and reconstruct from original sources, including imported data.
+- Declaration form metadata honors local overrides and scoped schema defaults. Runtime
+  use checks cover absent attributes and empty values. Scalar anySimpleType handling
+  preserves lexical strings and rejects child structures rather than dropping them.
+- Strict selection adds AnySimpleTypeAttribute, AnySimpleTypeElement,
+  ExtendedSimpleContent and LocalAttributeSimpleType with text and attribute comparisons.
+  This fixes the default/anonymous attribute cause in ExtendedSimpleContent; full
+  simple-content base/attribute inheritance remains a separate P2 requirement.
+- P2 remains incomplete: qualified attribute instance processing (currently local-name
+  lookup can drop qualified data), defaults/fixed values, complete attribute groups and
+  collisions, builtin/declaration validation, remaining QName/ref contexts,
+  import/include/chameleon semantics, and the additive lossless value contract.
+- Final verification: 246 Qore cases (11 new / 70 assertions), 59 Python tests,
+  strict 30-description / 108-direction gate pass. All previous successful stages
+  and wire bodies are unchanged. Full failures: 404 (P2=28, P3=208, P4=76, P5=92).
+  Both-version catalog survey: parse 279/14, decode 1014/102, encode 1012/2,
+  output 960/52. Newly reachable invalid qualified-attribute outputs remain failures.
+
 ## Commit and audit record
 
 - `8914353` — P1-01, `pin W3C corpus and isolate offline schema diagnostics`: verified archive,
@@ -245,6 +273,11 @@ findings and current diagnostic reports.
   byte-identical; the fixed W3C fixture adds eight request/response outputs. Full
   62-item audit [audits/P2-01.md](audits/P2-01.md); all applicable checks pass.
 
-- P2-02 (this increment) — complex-content base identity, inheritance and cycle
+- `592a649` — P2-02 — complex-content base identity, inheritance and cycle
   checks: 59 Python tests and 235 Qore cases pass. Complete 62-item audit
   [audits/P2-02.md](audits/P2-02.md); all applicable checks pass. P2 remains in progress.
+
+- P2-03 (this increment) — global/anonymous/default attribute type construction,
+  declaration form metadata and unconditional use validation: 59 Python tests and
+  246 Qore cases pass. Complete 62-item audit [audits/P2-03.md](audits/P2-03.md);
+  all applicable checks pass. P2 remains in progress.

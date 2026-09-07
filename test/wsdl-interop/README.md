@@ -59,8 +59,9 @@ The first P2 increment covers declaration-local namespaces, distinct no-namespac
 type identity, standalone schema reconstruction, failed-addition rollback and ordered
 schema grammar. `ElementTypeDefaultNamespace` is included in the strict gate with
 exact string comparisons in both directions. The derivation increment adds both empty
-extension fixtures: 26 descriptions and 84 message-direction combinations. The other broad failures remain
-visible; P2 is not yet complete.
+extension fixtures. Attribute construction and scalar `anySimpleType` support add
+four families with exact text/attribute checks: 30 descriptions and 108 message-direction
+combinations. The other broad failures remain visible; P2 is not yet complete.
 See [the implemented design](../../design/wsdl-schema-identity.md) and [execution record](EXECUTION.md).
 
 The attribute-extension source places `gender` on a string child that does not declare

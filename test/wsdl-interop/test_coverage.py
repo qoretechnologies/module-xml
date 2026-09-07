@@ -187,7 +187,10 @@ class CoverageTest(unittest.TestCase):
         self.assertEqual("PARSE-XML-EXCEPTION", by_name["ImportSchema"]["expected_parse"])
         self.assertEqual("WSDL-ERROR", by_name["BlockDefault"]["expected_parse"])
         invalid = [m for m in by_name["GlobalAttribute"]["messages"] if m["source_valid"] is False]
-        self.assertTrue(all("wrong_error_category" in m["failures"] for m in invalid))
+        # The resolved attribute no longer fails through a method call on NOTHING.
+        # Its source-invalid unqualified payload remains a visible namespace rejection gap.
+        self.assertTrue(invalid)
+        self.assertTrue(all("invalid_input_accepted" in m["failures"] for m in invalid))
         disagreements = [m["output_oracle_disagreement"] for c in report["cases"] for m in c["messages"]
                          if "output_oracle_disagreement" in m]
         self.assertEqual(32, len(disagreements))

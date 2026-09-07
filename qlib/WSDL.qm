@@ -91,6 +91,9 @@ module WSDL {
     - complex-content derivation bases retain expanded namespace identity and resolve builtin \c anyType;
       empty extensions inherit base members/attributes, restrictions retain their own particle, and cyclic
       derivations fail with a schema error
+    - attribute declarations resolve global references and anonymous simple types, use \c anySimpleType when
+      no type is declared, and reject contradictory declarations or complex attribute types; required and
+      prohibited attribute uses are checked even when the value has no attribute hash
     - fixed serializing values in the upper half of the \c xs:unsignedShort and \c xs:unsignedInt ranges;
       the limits are now 65535 and 4294967295 respectively
     - fixed serializing native IEEE floating-point infinities and NaN as XSD \c INF, \c -INF, and \c NaN;
@@ -1236,6 +1239,9 @@ public class XsdBaseType inherits WSDL::XsdAbstractType {
     auto serializeValue(Namespaces nsc, auto val, *softbool omitType) {
         *hash<auto> comments;
         if (val.typeCode() == NT_HASH) {
+            if (name == "anySimpleType" && (select keys val, $1 != "^value^" && $1 !~ /^\^comment/)) {
+                throw SOAP_SERIALIZATION_ERROR, "anySimpleType cannot contain child elements or attributes";
+            }
             foreach string k in (keys val) {
                 if (k =~ /^\^comment/) {
                     comments{k} = val{k};
@@ -1259,6 +1265,14 @@ public class XsdBaseType inherits WSDL::XsdAbstractType {
             type = name;
         }
         switch (type) {
+            case "anySimpleType": {
+                if (exists val && !val.strp()) {
+                    throw SOAP_SERIALIZATION_ERROR, sprintf("type anySimpleType requires a scalar value, got %Y",
+                        val.type());
+                }
+                val = string(val);
+                break;
+            }
             case "byte": {
                 int v = int(val);
                 if (v < RANGE_BYTE[0] || v > RANGE_BYTE[1])
@@ -1586,6 +1600,10 @@ public class XsdBaseType inherits WSDL::XsdAbstractType {
 
     auto deserializeValue(string en, hash<string, XsdAbstractType> tmap, *hash<auto> mrh, auto val) {
         string type;
+        if (name == "anySimpleType" && val.typeCode() == NT_HASH
+                && (select keys val, $1 != "^value^" && $1 != "^attributes^" && $1 != ".ns")) {
+            throw SOAP_DESERIALIZATION_ERROR, "anySimpleType cannot contain child elements";
+        }
         if (val.typeCode() == NT_HASH && (val.hasKey("^value^") || val.hasKey("^attributes^"))) {
             if (val."^attributes^"."xsi:type") {
                 type = val."^attributes^"."xsi:type";
@@ -1611,6 +1629,7 @@ public class XsdBaseType inherits WSDL::XsdAbstractType {
         }
 
         switch (type) {
+            case "anySimpleType":
             case "string":
             case "token":
             case "normalizedString":
@@ -2120,6 +2139,14 @@ public class XsdAttribute inherits WSDL::XsdTypedData {
     public {
         string use = "optional";
 
+        #! expanded name of a referenced global attribute, captured at the declaration
+        /** @since %WSDL 0.5.8 */
+        *hash<auto> refInfo;
+
+        #! namespace URI of the attribute declaration; empty for an unqualified attribute
+        /** @since %WSDL 0.5.8 */
+        string namespaceUri = "";
+
         const AllowedUseValues = {
             "optional": True,
             "required": True,
@@ -2127,18 +2154,74 @@ public class XsdAttribute inherits WSDL::XsdTypedData {
         };
     }
 
-    constructor(hash<auto> attr, Namespaces nsc, *XsdAbstractType n_type, XsdLateResolverHelper unresolved) : XsdTypedData(\attr) {
+    #! constructs an attribute declaration or reference
+    /** @param attr the parsed XML attribute declaration
+        @param nsc its declaration namespace context
+        @param n_type an already resolved type, if supplied
+        @param unresolved the schema's late resolution queue
+        @param global_attribute True for a schema-level declaration
+        @throw WSDL-ERROR contradictory declaration or non-simple attribute type
+        @throw WSDL-NAMESPACE-ERROR invalid or unresolved QName prefix
+        @throw XSD-ATTRIBUTE-ERROR invalid use value
+    */
+    constructor(hash<auto> attr, Namespaces nsc, *XsdAbstractType n_type, XsdLateResolverHelper unresolved,
+            bool global_attribute = False) : XsdTypedData(\attr) {
         NamespacePrefixHelper declaration(nsc, attr."^attributes^");
         *hash<auto> aa = attr."^attributes^";
-        if (aa.type) {
-            if (!nsc.doType(aa.type, \typeinfo, \type))
-                unresolved.add(self);
-
-            if (aa.use) {
-                if (!AllowedUseValues.(aa.use))
-                    throw "XSD-ATTRIBUTE-ERROR", sprintf("attribute %y: use %y is unrecognized; recognized use values: %y", name, aa.use, AllowedUseValues.keys());
-                use = aa.use;
+        if (exists aa.use) {
+            if (!AllowedUseValues{aa.use}) {
+                throw "XSD-ATTRIBUTE-ERROR", sprintf("attribute %Y: use %Y is unrecognized; recognized values: %Y",
+                    name, aa.use, keys AllowedUseValues);
             }
+            use = aa.use;
+        }
+        if ((!aa.name && !aa.ref) || (exists aa.name && exists aa.ref)
+                || (aa.ref && (exists aa.type || exists aa.form || attr.hasKey("simpleType")))
+                || (exists aa.type && attr.hasKey("simpleType"))
+                || (exists aa.default && exists aa.fixed)
+                || (exists aa.default && use != "optional")
+                || (global_attribute && (aa.ref || exists aa.use || exists aa.form))
+                || (exists aa.form && aa.form != "qualified" && aa.form != "unqualified")
+                || (select keys attr, $1 != "^attributes^" && $1 != "ns" && $1 != "annotation"
+                    && $1 != "simpleType")
+                || (attr.hasKey("simpleType") && attr.simpleType.typeCode() != NT_HASH)) {
+            throw WSDL_ERROR, sprintf("invalid or contradictory attribute declaration %Y", aa);
+        }
+        if (global_attribute || (aa.form ?? nsc.attribute_form_default) == "qualified") {
+            namespaceUri = nsc.getTargetNamespaceUri() ?? "";
+        }
+        if (aa.ref) {
+            refInfo = nsc.getTypeHash(aa.ref);
+            namespaceUri = refInfo.uri;
+            unresolved.add(self);
+        } else {
+            if (n_type) {
+                type = n_type;
+            } else if (exists aa.type) {
+                nsc.doType(aa.type, \typeinfo, \type);
+            } else if (attr.hasKey("simpleType")) {
+                type = new XsdSimpleType(attr.simpleType, nsc, unresolved, False,
+                    sprintf("simpleType for attribute %Y", name));
+            } else {
+                type = nsc.getBaseType("anySimpleType");
+            }
+            if (type) {
+                validateType();
+            } else {
+                unresolved.add(self);
+            }
+        }
+    }
+
+    #! verifies that the resolved attribute type is simple
+    /** @throw WSDL-ERROR the attribute has no type or a complex type
+        @since %WSDL 0.5.8
+    */
+    validateType() {
+        if (!(type instanceof XsdSimpleType)
+                && (!(type instanceof XsdBaseType) || type.name == "anyType")) {
+            throw WSDL_ERROR, sprintf("attribute %Y requires a resolved simple type, got %Y", name,
+                type ? type.name : NOTHING);
         }
     }
 
@@ -2158,8 +2241,7 @@ public class XsdAttribute inherits WSDL::XsdTypedData {
         @since %WSDL 0.5.8
     */
     auto serializeAttributeValue(Namespaces nsc, auto val) {
-        # the type is not resolved for attributes declared with a "ref" attribute
-        return type ? type.serializeValue(nsc, val, True) : val;
+        return type.serializeValue(nsc, val, True);
     }
 }
 
@@ -4918,11 +5000,15 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
 
     private parseAttributes(reference d, XsdLateResolverHelper unresolved, Namespaces nsc) {
         # process attributes if any
-        foreach hash<auto> ah in (remove d.attribute) {
-            if (ah."^attributes^") {
-                XsdAttribute attr(ah, nsc, NOTHING, unresolved);
-                attrs{attr.name} = attr;
+        if (d.hasKey("attribute") && !d.attribute) {
+            throw WSDL_ERROR, "attribute declaration requires a name or reference";
+        }
+        foreach auto ah in (remove d.attribute) {
+            if (ah.typeCode() != NT_HASH) {
+                throw WSDL_ERROR, "attribute declaration requires a name or reference";
             }
+            XsdAttribute attr(ah, nsc, NOTHING, unresolved);
+            attrs{attr.name} = attr;
         }
 
         # Handle attributeGroup references - resolved during finalize()
@@ -5074,16 +5160,17 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
                     ah{k} = exists mah{k} ? attrs{k}.serializeAttributeValue(nsc, mah{k}) : mah{k};
                 }
             }
-            # check for required attributes
-            foreach XsdAttribute attr in (attrs.iterator()) {
-                if (attr.use == "required" && !exists ah.(attr.name))
-                    throw SOAP_SERIALIZATION_ERROR, sprintf("cannot serialize element %y without attribute %y; the "
-                        "WSDL marks this attribute as required", getName(), attr.name);
-            }
             foreach string k in (keys h) {
                 if (k =~ /^\^comment/) {
                     rh{k} = remove h{k};
                 }
+            }
+        }
+
+        foreach XsdAttribute attr in (attrs.iterator()) {
+            if (attr.use == "required" && !exists ah{attr.name}) {
+                throw SOAP_SERIALIZATION_ERROR, sprintf("cannot serialize element %Y without required attribute %Y",
+                    getName(), attr.name);
             }
         }
 
@@ -5236,8 +5323,9 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
             return array.deserializeValue(en, tmap, mrh, oval);
 
         if (!exists oval) {
-            if (!required)
+            if (!required && !attrs) {
                 return;
+            }
         }
 
         hash<auto> rh;
@@ -5256,21 +5344,22 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
 
         # attribute hash
         *hash<auto> ah;
-        if (attr) {
-            # parse incoming valid attributes
-            foreach XsdAttribute xa in (attrs.iterator()) {
-                *string attr_val = val."^attributes^".(xa.name);
-                if (xa.use == "required" && !exists attr_val)
-                    throw SOAP_DESERIALIZATION_ERROR, sprintf("cannot deserialize element %y without attribute %y; "
-                        "the WSDL marks this attribute as required", getName(), xa.name);
-                if (exists attr_val) {
-                    if (attr.use == "prohibited")
-                        throw SOAP_DESERIALIZATION_ERROR, sprintf("cannot deserialize element %y with attribute %y; "
-                            "the WSDL marks this attribute as prohibited", getName(), xa.name);
-                    ah.(xa.name) = xa.getValue(attr_val);
-                }
+        foreach XsdAttribute xa in (attrs.iterator()) {
+            *string attr_val = attr{xa.name};
+            if (xa.use == "required" && !exists attr_val) {
+                throw SOAP_DESERIALIZATION_ERROR, sprintf("cannot deserialize element %Y without required attribute %Y",
+                    getName(), xa.name);
             }
+            if (exists attr_val) {
+                if (xa.use == "prohibited") {
+                    throw SOAP_DESERIALIZATION_ERROR, sprintf("cannot deserialize element %Y with prohibited attribute %Y",
+                        getName(), xa.name);
+                }
+                ah{xa.name} = xa.getValue(attr_val);
+            }
+        }
 
+        if (attr) {
             delete val."^attributes^";
 
             # ensure types match
@@ -7629,6 +7718,10 @@ public class Namespaces inherits Serializable {
         # options are here since this object is passed through all serialization and deserialization
         bool opt_empty_string_is_nothing = False;
         bool opt_allow_any_header = False;
+
+        #! attribute form default in the schema currently being constructed
+        /** @since %WSDL 0.5.8 */
+        string attribute_form_default = "unqualified";
     }
 
     private {
@@ -8497,6 +8590,10 @@ public class XsdSchema inherits WSDL::XsdBase {
         #! map of xs:attributeGroup definitions by name
         transient hash<string, XsdAttributeGroup> attrGroupMap();
 
+        #! global attribute declarations, keyed by expanded namespace/local name
+        /** @since %WSDL 0.5.8 */
+        transient hash<string, XsdAttribute> attributeMap();
+
         #! optional closure/call reference to try to resolve import declarations
         transient *code try_import;
 
@@ -8531,6 +8628,7 @@ public class XsdSchema inherits WSDL::XsdBase {
         tmap = {};
         groupMap = {};
         attrGroupMap = {};
+        attributeMap = {};
         import_map = {};
         schema_sources = ();
         schema_dependencies = members.schema_dependencies ?? {};
@@ -8599,6 +8697,7 @@ public class XsdSchema inherits WSDL::XsdBase {
         hash<string, XsdAbstractType> old_types = tmap;
         hash<string, XsdGroup> old_groups = groupMap;
         hash<string, XsdAttributeGroup> old_attribute_groups = attrGroupMap;
+        hash<string, XsdAttribute> old_attributes = attributeMap;
         hash<string, bool> old_imports = import_map;
         hash<string, string> old_dependencies = schema_dependencies;
         list<hash<XsdSourceInfo>> old_sources = schema_sources;
@@ -8607,6 +8706,7 @@ public class XsdSchema inherits WSDL::XsdBase {
             tmap = old_types;
             groupMap = old_groups;
             attrGroupMap = old_attribute_groups;
+            attributeMap = old_attributes;
             import_map = old_imports;
             schema_dependencies = old_dependencies;
             schema_sources = old_sources;
@@ -8681,6 +8781,16 @@ public class XsdSchema inherits WSDL::XsdBase {
     #! returns the top-level element by namespace and local name, or NOTHING if not found
     *XsdElement getElement(string ns, string name) {
         return emap{ns}{name};
+    }
+
+    #! returns a global attribute by expanded name
+    /** @param ns the namespace URI, or an empty string for no namespace
+        @param name the local attribute name
+        @return the declaration, or NOTHING if it does not exist
+        @since %WSDL 0.5.8
+    */
+    *XsdAttribute getAttribute(string ns, string name) {
+        return attributeMap{type_qname(ns, name)};
     }
 
     #! looks up a type by name; returns NOTHING if not found
@@ -8804,8 +8914,21 @@ public class XsdSchema inherits WSDL::XsdBase {
     }
 
     private resolveType(XsdAttribute xd) {
-        xd.type = resolveType(xd.typeinfo);
-        #printf("resolveType(XsdTypedData), %y\n", xd.type.name);
+        if (xd.refInfo) {
+            string key = type_qname(xd.refInfo.uri, xd.refInfo.val);
+            *XsdAttribute declaration = attributeMap{key};
+            if (!declaration) {
+                throw WSDL_ERROR, sprintf("no such global attribute %Y", key);
+            }
+            if (!declaration.type) {
+                resolveType(declaration);
+            }
+            xd.type = declaration.type;
+            xd.namespaceUri = declaration.namespaceUri;
+        } else if (!xd.type) {
+            xd.type = resolveType(xd.typeinfo);
+        }
+        xd.validateType();
     }
 
     private resolveType(XsdComplexType ct) {
@@ -8948,6 +9071,13 @@ public class XsdSchema inherits WSDL::XsdBase {
             #    throw "OOPS";
             NamespacePrefixHelper nph(nsc, sa);
 
+            string previous_attribute_form = nsc.attribute_form_default;
+            on_exit nsc.attribute_form_default = previous_attribute_form;
+            nsc.attribute_form_default = sa.attributeFormDefault ?? "unqualified";
+            if (nsc.attribute_form_default != "qualified" && nsc.attribute_form_default != "unqualified") {
+                throw WSDL_ERROR, sprintf("invalid attributeFormDefault %Y", nsc.attribute_form_default);
+            }
+
             bool usedocns = sa.elementFormDefault == "qualified";
 
             #printf("DEBUG: schema sa: %y\n", sa);
@@ -8975,6 +9105,20 @@ public class XsdSchema inherits WSDL::XsdBase {
             }
 
             *string tns_uri = nsc.getTargetNamespaceUri();
+            if (schema.hasKey("attribute") && !schema.attribute) {
+                throw WSDL_ERROR, "global attribute declaration requires a name";
+            }
+            foreach auto declaration in (schema.attribute) {
+                if (declaration.typeCode() != NT_HASH) {
+                    throw WSDL_ERROR, "global attribute declaration requires a name";
+                }
+                XsdAttribute attribute(declaration, nsc, NOTHING, unresolved, True);
+                string key = type_qname(tns_uri, attribute.name);
+                if (attributeMap{key}) {
+                    throw WSDL_ERROR, sprintf("global attribute %Y declared twice", key);
+                }
+                attributeMap{key} = attribute;
+            }
             foreach hash<auto> st in (schema.simpleType) {
                 XsdSimpleType t(st, nsc, unresolved, usedocns);
                 # Key types by "{nsUri}localName" so identifiers reused across different target

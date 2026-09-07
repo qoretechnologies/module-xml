@@ -23,6 +23,28 @@ local name, so unrelated custom types named Array remain usable. Finalization
 distinguishes an active derivation from a completed type and rejects cycles before
 publishing base links. Generic/mixed content handling is separate from base identity.
 
+Global attributes have their own expanded-name registry, `XsdSchema::attributeMap`,
+and can be inspected with `getAttribute(uri, localName)`. Attribute references retain
+their declaration namespace in `refInfo`, resolve through this registry, and share the
+declared simple type. Local anonymous simple types enter the normal late-resolution
+queue. An attribute with no explicit type has `xs:anySimpleType`, whose scalar lexical
+strings remain strings, including empty content and whitespace.
+
+Attribute construction checks name/ref and type/anonymous exclusivity, global/local
+constraints, use/form values, and contradictory default/fixed declarations. It rejects
+complex attribute types before payload processing. Each declaration records its namespace
+URI, including local form overrides and the scoped schema attribute form default. Required
+and prohibited uses apply independently of whether the incoming value has an attribute hash.
+The attribute registry participates in failed-addition rollback and source reconstruction.
+
+For example, a consumer can inspect an imported partner flag without depending on the
+source prefix spelling:
+
+```qore
+XsdAttribute flag = schema.getAttribute("urn:partner:invoice", "approved");
+auto typed_flag = flag.getValue("false");  // False for an xs:boolean declaration
+```
+
 `XsdSchema` stores original XSD documents with their resolution bases in
 `XsdSourceInfo` records. Successfully retrieved import/include bytes are cached by
 normalized location. Serializable reconstruction rebuilds transient registries from
@@ -44,7 +66,8 @@ This implements those construction constraints, not the complete WSDL grammar.
 
 The implementation follows XSD 1.0 [QName resolution](https://www.w3.org/TR/xmlschema-1/#src-resolve),
 [complex type derivation](https://www.w3.org/TR/xmlschema-1/#derivation-ok-extension),
+[attribute declarations](https://www.w3.org/TR/xmlschema-1/#src-attribute),
 and [schema representation](https://www.w3.org/TR/xmlschema-1/#element-schema).
 Regression coverage is in `test/wsdl-namespace-context.qtest`,
-`test/wsdl-derivation-context.qtest`, the strict W3C namespace/empty-extension
+`test/wsdl-derivation-context.qtest`, `test/wsdl-attribute-context.qtest`, the strict W3C namespace/empty-extension
 selection, corrected attribute-owner derivatives, and whole-archive grammar checks.

@@ -1,0 +1,202 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires xml
+%requires ../qlib/WSDL.qm
+%exec-class AttributeContextTest
+
+class AttributeContextTest inherits QUnit::Test {
+    private {
+        const Xsd = "http://www.w3.org/2001/XMLSchema";
+        const Ns = "urn:qore:attributes";
+    }
+
+    constructor() : QUnit::Test("WSDL attribute declaration context", "1.0") {
+        addTestCase("Anonymous attribute type preserves its facets", \anonymousType());
+        addTestCase("Anonymous attribute type resolves a later base", \lateAnonymousType());
+        addTestCase("Default attribute type preserves lexical strings", \defaultType());
+        addTestCase("Global references retain declaration identity", \globalReferences());
+        addTestCase("Global anonymous attributes survive reconstruction", \globalAnonymous());
+        addTestCase("Imported global attributes reconstruct without I/O", \importedAttribute());
+        addTestCase("Attribute form metadata respects local overrides", \attributeForms());
+        addTestCase("Required and prohibited uses apply to every declaration", \attributeUse());
+        addTestCase("Contradictory attribute declarations reject", \invalidDeclaration());
+        addTestCase("Complex and unresolved attribute types reject", \invalidType());
+        addTestCase("Failed global attribute additions roll back", \rollback());
+        set_return_value(main());
+    }
+
+    private string schema(string contents, string ns = Ns) {
+        return sprintf('<xs:schema xmlns:xs="%s" xmlns:t="%s" targetNamespace="%s">%s</xs:schema>',
+            Xsd, ns, ns, contents);
+    }
+
+    private XsdSchema parse(string xml) {
+        return new XsdSchema(xml, {"async_only": True});
+    }
+
+    private XsdComplexType type(XsdSchema s, string name = "Record", string ns = Ns) {
+        return cast<XsdComplexType>(s.getTypeMap(){make_qname(ns, name)});
+    }
+
+    private string record(string attributes) {
+        return '<xs:complexType name="Record"><xs:sequence/>' + attributes + '</xs:complexType>';
+    }
+
+    anonymousType() {
+        XsdSchema s = parse(schema(record('<xs:attribute name="rank"><xs:simpleType>
+            <xs:restriction base="xs:int"><xs:minInclusive value="1"/><xs:maxInclusive value="3"/>
+            </xs:restriction></xs:simpleType></xs:attribute>')));
+        XsdComplexType t = type(s);
+        assertEq(2, t.attrs.rank.getValue("2"));
+        assertThrows("SOAP-DESERIALIZATION-ERROR", \t.attrs.rank.getValue(), ("4",));
+        assertThrows("SOAP-SERIALIZATION-ERROR", \t.attrs.rank.serializeAttributeValue(), (s.nsc, 0));
+        hash<auto> value = t.deserializeValue("Record", s.getTypeMap(), NOTHING,
+            {"^attributes^": {"rank": "3"}});
+        assertEq(3, value."^attributes^".rank);
+        hash<auto> wire = t.serializeValue(s.nsc, value, True);
+        assertEq(3, wire."^attributes^".rank);
+    }
+
+    lateAnonymousType() {
+        XsdSchema s = parse(schema(record('<xs:attribute name="value"><xs:simpleType>
+            <xs:restriction xmlns:k="urn:qore:attributes" base="k:Later"/>
+            </xs:simpleType></xs:attribute>') + '<xs:simpleType name="Later">
+            <xs:restriction base="xs:boolean"/></xs:simpleType>'));
+        assertEq(False, type(s).attrs.value.getValue("false"));
+    }
+
+    defaultType() {
+        XsdSchema s = parse(schema(record('<xs:attribute name="value"/>')));
+        XsdAttribute a = type(s).attrs.value;
+        assertEq("anySimpleType", a.type.getName());
+        foreach string value in ("", " 009 \t ", "false") {
+            assertEq(value, a.getValue(value));
+            assertEq(value, a.serializeAttributeValue(s.nsc, value));
+        }
+        assertThrows("SOAP-DESERIALIZATION-ERROR", \a.type.deserializeValue(),
+            ("value", s.getTypeMap(), NOTHING, {"unexpected": "child"}));
+        assertThrows("SOAP-DESERIALIZATION-ERROR", \a.type.deserializeValue(),
+            ("value", s.getTypeMap(), NOTHING, {"^attributes^": {"xmlns": "urn:a"}, "unexpected": "child"}));
+        foreach auto value in ({"unexpected": "child"}, ("one", "two")) {
+            assertThrows("SOAP-SERIALIZATION-ERROR", \a.serializeAttributeValue(), (s.nsc, value));
+        }
+    }
+
+    globalReferences() {
+        XsdSchema s = parse(schema('<xs:attribute name="flag" type="xs:string"/>' +
+            record('<xs:attribute xmlns:a="urn:a" ref="a:flag"/>'), "urn:a"));
+        s.addSchemaString(schema('<xs:attribute name="flag" type="xs:boolean"/>' +
+            record('<xs:attribute xmlns:a="urn:b" ref="a:flag"/>'), "urn:b"));
+        assertEq("false", type(s, "Record", "urn:a").attrs.flag.getValue("false"));
+        assertEq(False, type(s, "Record", "urn:b").attrs.flag.getValue("false"));
+        assertEq("urn:b", type(s, "Record", "urn:b").attrs.flag.namespaceUri);
+        assertEq("boolean", s.getAttribute("urn:b", "flag").type.getName());
+    }
+
+    globalAnonymous() {
+        string xml = schema('<xs:attribute name="flag"><xs:simpleType><xs:restriction base="xs:boolean"/>
+            </xs:simpleType></xs:attribute>' + record('<xs:attribute ref="t:flag"/>'));
+        XsdSchema restored = Serializable::deserialize(parse(xml).serialize());
+        assertEq(True, type(restored).attrs.flag.getValue("true"));
+        assertEq("flag", restored.getAttribute(Ns, "flag").getName());
+    }
+
+    attributeUse() {
+        XsdSchema s = parse(schema(record('<xs:attribute name="required" use="required"/>
+            <xs:attribute name="forbidden" use="prohibited"/>')));
+        XsdComplexType t = type(s);
+        assertThrows("SOAP-DESERIALIZATION-ERROR", \t.deserializeValue(),
+            ("Record", s.getTypeMap(), NOTHING, NOTHING));
+        assertThrows("SOAP-DESERIALIZATION-ERROR", \t.deserializeValue(),
+            ("Record", s.getTypeMap(), NOTHING, {"^attributes^": {"required": "yes", "forbidden": "no"}}));
+        assertThrows("SOAP-SERIALIZATION-ERROR", \t.serializeValue(), (s.nsc, NOTHING, True));
+        assertThrows("SOAP-SERIALIZATION-ERROR", \t.serializeValue(),
+            (s.nsc, {"^attributes^": {"required": "yes", "forbidden": "no"}}, True));
+        assertEq("yes", t.deserializeValue("Record", s.getTypeMap(), NOTHING,
+            {"^attributes^": {"required": "yes"}})."^attributes^".required);
+    }
+
+    importedAttribute() {
+        string dependency = schema('<xs:attribute name="flag" type="xs:boolean"/>', "urn:external");
+        string xml = schema('<xs:import namespace="urn:external" schemaLocation="attributes.xsd"/>'
+            + record('<xs:attribute xmlns:e="urn:external" ref="e:flag" use="required"/>'));
+        XsdSchema original(xml, {"async_only": True, "def_path": "https://example.invalid/schema/",
+            "xsd_cache": {"https://example.invalid/schema/attributes.xsd": dependency}});
+        assertEq(False, type(original).attrs.flag.getValue("false"));
+        assertEq("required", type(original).attrs.flag.use);
+        XsdSchema restored = Serializable::deserialize(original.serialize());
+        assertEq("urn:external", type(restored).attrs.flag.namespaceUri);
+        assertEq(True, type(restored).attrs.flag.getValue("true"));
+    }
+
+    attributeForms() {
+        string xml = sprintf('<xs:schema xmlns:xs="%s" targetNamespace="%s" attributeFormDefault="qualified">%s
+            </xs:schema>', Xsd, Ns, record('<xs:attribute name="qualified"/><xs:attribute name="local"
+                form="unqualified"/>'));
+        XsdSchema s = parse(xml);
+        assertEq(Ns, type(s).attrs.qualified.namespaceUri);
+        assertEq("", type(s).attrs.local.namespaceUri);
+        XsdSchema restored = Serializable::deserialize(s.serialize());
+        assertEq(Ns, type(restored).attrs.qualified.namespaceUri);
+        assertEq("unqualified", restored.nsc.attribute_form_default);
+        s.addSchemaString(schema('<xs:complexType name="Other"><xs:attribute name="local"/>
+            <xs:attribute name="qualified" form="qualified"/></xs:complexType>'));
+        assertEq("", type(s, "Other").attrs.local.namespaceUri);
+        assertEq(Ns, type(s, "Other").attrs.qualified.namespaceUri);
+        assertThrows("WSDL-ERROR", \parse(), (sprintf('<xs:schema xmlns:xs="%s"
+            attributeFormDefault="invalid"/>', Xsd),));
+    }
+
+    invalidDeclaration() {
+        foreach string declaration in ('<xs:attribute/>', '<xs:attribute name="a" ref="t:a"/>',
+                '<xs:attribute name="valid"/><xs:attribute/>',
+                '<xs:attribute><xs:annotation/></xs:attribute>',
+                '<xs:attribute ref="t:a" type="xs:string"/>',
+                '<xs:attribute ref="t:a" type=""/>',
+                '<xs:attribute name="a" ref=""/>',
+                '<xs:attribute ref="t:a" form="qualified"/>',
+                '<xs:attribute name="a" type="xs:string"><xs:simpleType><xs:restriction base="xs:string"/>
+                    </xs:simpleType></xs:attribute>',
+                '<xs:attribute name="a" default="a" fixed="a"/>',
+                '<xs:attribute name="a" default="a" use="required"/>',
+                '<xs:attribute name="a"><xs:complexType/></xs:attribute>',
+                '<xs:attribute name="a" form="invalid"/>') {
+            assertThrows("WSDL-ERROR", \parse(), (schema(record(declaration)),));
+        }
+        assertThrows("XSD-ATTRIBUTE-ERROR", \parse(),
+            (schema(record('<xs:attribute name="a" use="invalid"/>')),));
+        assertThrows("XSD-ATTRIBUTE-ERROR", \parse(),
+            (schema(record('<xs:attribute name="a" use=""/>')),));
+        foreach string declaration in ('<xs:attribute/>', '<xs:attribute name="valid"/><xs:attribute/>',
+                '<xs:attribute ref="t:a"/>', '<xs:attribute name="a" use="optional"/>',
+                '<xs:attribute name="a" form="unqualified"/>') {
+            assertThrows("WSDL-ERROR", \parse(), (schema(declaration),));
+        }
+    }
+
+    invalidType() {
+        foreach string declaration in ('<xs:attribute name="a" type="t:Record"/>',
+                '<xs:attribute name="a" type="xs:anyType"/>',
+                '<xs:attribute name="a" type="t:Missing"/>', '<xs:attribute ref="t:Missing"/>') {
+            assertThrows("WSDL-ERROR", \parse(), (schema(record(declaration)),));
+        }
+        assertThrows("WSDL-NAMESPACE-ERROR", \parse(),
+            (schema(record('<xs:attribute ref="missing:a"/>')),));
+        assertThrows("WSDL-ERROR", \parse(), (schema('<xs:attribute name="a" type="xs:string"/>' +
+            record('<xs:attribute xmlns:wrong="urn:wrong" ref="wrong:a"/>')),));
+    }
+
+    rollback() {
+        XsdSchema s = parse(schema('<xs:attribute name="existing" type="xs:boolean"/>'));
+        assertThrows("WSDL-ERROR", \s.addSchemaString(), (schema('<xs:attribute name="existing" type="xs:int"/>'),));
+        assertEq("boolean", s.getAttribute(Ns, "existing").type.getName());
+        assertThrows("WSDL-ERROR", \s.addSchemaString(), (schema('<xs:attribute name="new" type="t:Missing"/>'),));
+        assertFalse(exists s.getAttribute(Ns, "new"));
+        s.addSchemaString(schema('<xs:attribute name="new" type="xs:int"/>'));
+        assertEq(42, s.getAttribute(Ns, "new").getValue("42"));
+    }
+}
