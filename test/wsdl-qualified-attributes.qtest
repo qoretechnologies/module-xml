@@ -1,0 +1,230 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires xml
+%requires ../qlib/WSDL.qm
+%exec-class QualifiedAttributesTest
+
+class QualifiedAttributesTest inherits QUnit::Test {
+    constructor() : QUnit::Test("WSDL qualified attribute processing", "1.0") {
+        addTestCase("Qualified local attributes use the declared namespace", \qualified());
+        addTestCase("Local form overrides apply to incoming and outgoing attributes", \formOverrides());
+        addTestCase("Wrong, absent and unbound attribute namespaces are rejected", \invalidNamespaces());
+        addTestCase("Unknown attributes on complex and scalar values are rejected", \unknownAttributes());
+        addTestCase("SOAP processing retains inherited and rebound attribute prefixes", \soapContext());
+        addTestCase("Colliding local attribute names retain separate expanded identities", \collisions());
+        addTestCase("Attribute groups and inheritance preserve colliding names", \groupCollisions());
+        addTestCase("Duplicate expanded attribute declarations are schema errors", \duplicates());
+        addTestCase("Namespace scopes remain independent across siblings and failed calls", \scopeIsolation());
+        addTestCase("Deep namespace propagation materializes only required attribute bindings", \deepScopes());
+        addTestCase("Reserved namespace bindings cannot be overwritten", \reservedNamespaces());
+        addTestCase("Prohibitions remove inherited uses without creating duplicate attributes", \prohibitions());
+        set_return_value(main());
+    }
+
+    private XsdSchema parse(string attributes, string form = "qualified") {
+        return new XsdSchema('<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:t="urn:attributes"
+            targetNamespace="urn:attributes" attributeFormDefault="' + form + '"><xs:complexType name="Record">'
+            + attributes + '</xs:complexType><xs:element name="Record" type="t:Record"/></xs:schema>', {"async_only": True});
+    }
+
+    private XsdComplexType type(XsdSchema s) {
+        return cast<XsdComplexType>(s.findType(make_qname("urn:attributes", "Record")));
+    }
+
+    private XsdSchema parseDocument(string xml) {
+        return new XsdSchema(xml, {"async_only": True});
+    }
+
+    qualified() {
+        XsdSchema s = parse('<xs:attribute name="flag" type="xs:boolean" use="required"/>');
+        assertEq({"^attributes^": {"flag": False}}, type(s).deserializeValue("Record", s.getTypeMap(), NOTHING,
+            {"^attributes^": {"xmlns:q": "urn:attributes", "q:flag": "false"}}));
+        hash<auto> encoded = type(s).serializeValue(s.nsc, {"^attributes^": {"flag": False}}, True);
+        string prefix = s.nsc.getOutputNamespacePrefix("urn:attributes");
+        assertEq({prefix + ":flag": "false"}, encoded."^attributes^");
+    }
+
+    formOverrides() {
+        foreach string form in ("qualified", "unqualified") {
+            XsdSchema s = parse('<xs:attribute name="local" type="xs:int" form="unqualified"/>
+                <xs:attribute name="remote" type="xs:int" form="qualified"/>', form);
+            assertEq({"^attributes^": {"local": 1, "remote": 2}}, type(s).deserializeValue("Record", s.getTypeMap(), NOTHING,
+                {"^attributes^": {"xmlns:p": "urn:attributes", "local": "1", "p:remote": "2"}}));
+            string prefix = s.nsc.getOutputNamespacePrefix("urn:attributes");
+            assertEq({"local": 1, prefix + ":remote": 2},
+                type(s).serializeValue(s.nsc, {"^attributes^": {"local": 1, "remote": 2}}, True)."^attributes^");
+        }
+    }
+
+    invalidNamespaces() {
+        XsdSchema s = parse('<xs:attribute name="flag" type="xs:boolean"/>');
+        foreach hash<auto> attributes in ({"flag": "true"}, {"xmlns:p": "urn:wrong", "p:flag": "true"},
+                {"p:flag": "true"}) {
+            assertThrows("SOAP-DESERIALIZATION-ERROR", \type(s).deserializeValue(),
+                ("Record", s.getTypeMap(), NOTHING, {"^attributes^": attributes}));
+        }
+    }
+
+    unknownAttributes() {
+        XsdSchema s = parse('<xs:attribute name="flag" type="xs:boolean"/>', "unqualified");
+        assertThrows("SOAP-DESERIALIZATION-ERROR", \type(s).deserializeValue(),
+            ("Record", s.getTypeMap(), NOTHING, {"^attributes^": {"unknown": "value"}}));
+        XsdBaseType scalar("string", s.nsc);
+        assertThrows("SOAP-DESERIALIZATION-ERROR", \scalar.deserializeValue(),
+            ("value", s.getTypeMap(), NOTHING, {"^value^": "text", "^attributes^": {"unknown": "value"}}));
+    }
+
+    collisions() {
+        XsdSchema original = parse('<xs:attribute name="code" type="xs:int" form="unqualified" use="required"/>
+            <xs:attribute name="code" type="xs:boolean" form="qualified" use="required"/>');
+        foreach XsdSchema s in (original, Serializable::deserialize(original.serialize())) {
+            assertEq(2, type(s).attrs.size());
+            hash<auto> expected = {"^attributes^": {"{}code": 7, "{urn:attributes}code": False}};
+            assertEq(expected, type(s).deserializeValue("Record", s.getTypeMap(), NOTHING,
+                {"^attributes^": {"xmlns:p": "urn:attributes", "code": "7", "p:code": "false"}}));
+            string prefix = s.nsc.getOutputNamespacePrefix("urn:attributes");
+            assertEq({"code": 7, prefix + ":code": "false"},
+                type(s).serializeValue(s.nsc, expected, True)."^attributes^");
+            assertThrows("SOAP-SERIALIZATION-ERROR", \type(s).serializeValue(),
+                (s.nsc, {"^attributes^": {"code": 7}}, True));
+        }
+    }
+
+    groupCollisions() {
+        string schema = '<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:t="urn:attributes"
+            targetNamespace="urn:attributes"><xs:attributeGroup name="Remote"><xs:attribute name="code"
+            type="xs:boolean" form="qualified"/></xs:attributeGroup><xs:attributeGroup name="Both">
+            <xs:attribute name="code" type="xs:int"/><xs:attributeGroup ref="t:Remote"/></xs:attributeGroup>
+            <xs:complexType name="Base"><xs:attribute name="code" type="xs:int"/></xs:complexType>
+            <xs:complexType name="Record"><xs:complexContent><xs:extension base="t:Base">
+            <xs:attributeGroup ref="t:Remote"/></xs:extension></xs:complexContent></xs:complexType>
+            <xs:complexType name="Grouped"><xs:attributeGroup ref="t:Both"/></xs:complexType></xs:schema>';
+        XsdSchema s(schema, {"async_only": True});
+        foreach string name in ("Record", "Grouped") {
+            XsdComplexType t = cast<XsdComplexType>(s.findType(make_qname("urn:attributes", name)));
+            assertEq(2, t.attrs.size());
+            assertEq({"^attributes^": {"{}code": 7, "{urn:attributes}code": False}},
+                t.deserializeValue(name, s.getTypeMap(), NOTHING,
+                    {"^attributes^": {"xmlns:p": "urn:attributes", "code": "7", "p:code": "false"}}));
+        }
+    }
+
+    duplicates() {
+        assertThrows("WSDL-ERROR", \parse(), ('<xs:attribute name="code"/><xs:attribute name="code"/>',));
+        XsdSchema s = parse('<xs:attribute name="code"/>');
+        assertThrows("SOAP-DESERIALIZATION-ERROR", \type(s).deserializeValue(),
+            ("Record", s.getTypeMap(), NOTHING, {"^attributes^": {"xmlns:a": "urn:attributes",
+                "xmlns:b": "urn:attributes", "a:code": "one", "b:code": "two"}}));
+    }
+
+    scopeIsolation() {
+        hash<auto> source = {"^attributes^": {"xmlns:p": "urn:outer"}, "first": {
+            "^attributes^": {"xmlns:p": "urn:inner"}, "child": {"^attributes^": {"p:code": "one"}}},
+            "second": {"^attributes^": {"p:code": "two"}}, "^value^": (
+                {"^attributes^": {"p:code": "three"}}, {"^attributes^": {"p:code": "four"}})};
+        hash<auto> value = source;
+        XsdBase::inheritAttributeNamespaces(\value);
+        assertEq({"{urn:inner}code": "one"}, XsdBase::getExpandedAttributes(value.first.child."^attributes^"));
+        assertEq({"{urn:outer}code": "two"}, XsdBase::getExpandedAttributes(value.second."^attributes^"));
+        assertEq({"{urn:outer}code": "four"}, XsdBase::getExpandedAttributes(value."^value^"[1]."^attributes^"));
+        assertEq({"p:code": "two"}, source.second."^attributes^");
+        hash<string, string> inherited = {"p": "urn:original"};
+        hash<auto> broken = {"^attributes^": {"xmlns:p": "urn:changed"},
+            "child": {"^attributes^": {"xmlns:q": 7}}};
+        assertThrows("SOAP-DESERIALIZATION-ERROR", \XsdBase::inheritAttributeNamespaces(), (\broken, inherited));
+        assertEq({"p": "urn:original"}, inherited);
+        hash<auto> next = {"^attributes^": {"p:code": "five"}};
+        XsdBase::inheritAttributeNamespaces(\next, inherited);
+        assertEq({"{urn:original}code": "five"}, XsdBase::getExpandedAttributes(next."^attributes^"));
+    }
+
+    deepScopes() {
+        hash<auto> value = {"^attributes^": {"p:code": "leaf"}};
+        for (int depth = 0; depth < 128; ++depth) {
+            hash<auto> parent();
+            parent."^attributes^" = {"xmlns:n" + depth: "urn:depth:" + depth};
+            parent.child = value;
+            value = parent;
+        }
+        XsdBase::inheritAttributeNamespaces(\value, {"p": "urn:outer"});
+        for (int depth = 0; depth < 128; ++depth) {
+            assertEq(1, value."^attributes^".size());
+            value = value.child;
+        }
+        assertEq(2, value."^attributes^".size());
+        assertEq({"{urn:outer}code": "leaf"}, XsdBase::getExpandedAttributes(value."^attributes^"));
+    }
+
+    reservedNamespaces() {
+        assertEq("http://www.w3.org/XML/1998/namespace", XsdBase::getAttributeNamespaces({}, {"p": "urn:valid"}).xml);
+        foreach hash<auto> attributes in ({"xmlns:xml": "urn:wrong"}, {"xmlns:p": "http://www.w3.org/XML/1998/namespace"},
+                {"xmlns:xmlns": "urn:wrong"}, {"xmlns:p": "http://www.w3.org/2000/xmlns/"}, {"xmlns:p": ""},
+                {"xmlns:": "urn:wrong"}, {"xmlns:p": 7}) {
+            assertThrows("SOAP-DESERIALIZATION-ERROR", \XsdBase::getAttributeNamespaces(), (attributes,));
+            hash<auto> value = {"^attributes^": attributes};
+            assertThrows("SOAP-DESERIALIZATION-ERROR", \XsdBase::inheritAttributeNamespaces(), (\value,));
+        }
+    }
+
+    prohibitions() {
+        XsdSchema s = parse('<xs:attribute name="code" use="prohibited"/><xs:attribute name="code" use="prohibited"/>
+            <xs:attribute name="code" type="xs:int"/>', "unqualified");
+        assertEq(1, type(s).attrs.size());
+        assertEq({"^attributes^": {"code": 7}}, type(s).deserializeValue("Record", s.getTypeMap(), NOTHING,
+            {"^attributes^": {"code": "7"}}));
+        string declarations = '<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:t="urn:attributes"
+            targetNamespace="urn:attributes"><xs:attributeGroup name="None"><xs:attribute name="code"
+            use="prohibited"/><xs:attribute name="code" use="prohibited"/></xs:attributeGroup>
+            <xs:attributeGroup name="Local"><xs:attribute name="other" type="xs:string" use="required"/></xs:attributeGroup>
+            <xs:complexType name="Base"><xs:attribute name="code" type="xs:int"/><xs:attribute name="other"/>
+            </xs:complexType><xs:complexType name="Record"><xs:complexContent><xs:restriction base="t:Base">
+            <xs:attribute name="code" use="prohibited"/><xs:attributeGroup ref="t:Local"/>
+            <xs:attributeGroup ref="t:None"/></xs:restriction></xs:complexContent></xs:complexType></xs:schema>';
+        XsdSchema restricted(declarations, {"async_only": True});
+        assertEq(("other",), keys type(restricted).attrs);
+        assertEq("required", type(restricted).attrs.other.use);
+        assertEq({"^attributes^": {"other": "value"}}, type(restricted).deserializeValue("Record",
+            restricted.getTypeMap(), NOTHING, {"^attributes^": {"other": "value"}}));
+        assertThrows("SOAP-DESERIALIZATION-ERROR", \type(restricted).deserializeValue(),
+            ("Record", restricted.getTypeMap(), NOTHING, {"^attributes^": {"other": "value", "code": "7"}}));
+        string required = declarations;
+        required =~ s{<xs:attribute name="code" type="xs:int"/>}{<xs:attribute name="code" type="xs:int" use="required"/>};
+        assertThrows("WSDL-ERROR", \parseDocument(), (required,));
+        required =~ s{<xs:restriction base="t:Base">}{<xs:restriction base="t:Base"><xs:attribute name="code" type="xs:int" use="required"/>};
+        XsdSchema retained = parseDocument(required);
+        assertEq("required", type(retained).attrs.code.use);
+    }
+
+    soapContext() {
+        string wsdl = '<w:definitions xmlns:w="http://schemas.xmlsoap.org/wsdl/" xmlns:t="urn:attributes"
+            xmlns:s="http://schemas.xmlsoap.org/wsdl/soap/" targetNamespace="urn:attributes"><w:types>
+            <xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" targetNamespace="urn:attributes"
+            attributeFormDefault="qualified"><xs:complexType name="Record"><xs:attribute name="flag"
+            type="xs:boolean" use="required"/></xs:complexType><xs:element name="Request" type="t:Record"/>
+            <xs:element name="Response" type="t:Record"/></xs:schema></w:types>
+            <w:message name="In"><w:part name="body" element="t:Request"/></w:message>
+            <w:message name="Out"><w:part name="body" element="t:Response"/></w:message>
+            <w:portType name="Port"><w:operation name="submit"><w:input message="t:In"/><w:output message="t:Out"/>
+            </w:operation></w:portType><w:binding name="Soap" type="t:Port"><s:binding style="document"
+            transport="http://schemas.xmlsoap.org/soap/http"/><w:operation name="submit"><s:operation soapAction="urn:submit"/>
+            <w:input><s:body use="literal"/></w:input><w:output><s:body use="literal"/></w:output></w:operation></w:binding>
+            <w:service name="Service"><w:port name="Port" binding="t:Soap"><s:address location="http://example.invalid/"/>
+            </w:port></w:service></w:definitions>';
+        WebService ws(wsdl);
+        WSOperation op = ws.getBindingOperation("Soap", "submit");
+        foreach bool response in (False, True) {
+            string body = sprintf('<e:Envelope xmlns:e="http://schemas.xmlsoap.org/soap/envelope/" xmlns:p="urn:wrong">
+                <e:Body xmlns:p="urn:attributes"><p:%s p:flag="false"/></e:Body></e:Envelope>',
+                response ? "Response" : "Request");
+            hash<auto> parsed = parse_xml(body);
+            hash<auto> original = parsed;
+            auto value = response ? op.deserializeResponse(parsed, "Soap") : op.deserializeRequest(parsed, "Soap");
+            assertEq({"^attributes^": {"flag": False}}, value);
+            assertEq(original, parsed);
+        }
+    }
+}

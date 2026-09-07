@@ -1,0 +1,116 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires xml
+%requires ../qlib/WSDL.qm
+%exec-class GroupContextTest
+
+class GroupContextTest inherits QUnit::Test {
+    constructor() : QUnit::Test("WSDL group namespace context", "1.0") {
+        addTestCase("Group definitions and references retain local namespace scopes", \groupScopes());
+        addTestCase("Attribute groups retain local and nested reference scopes", \attributeScopes());
+        addTestCase("Absent and wrong namespaces do not fall back to local group names", \wrongNamespace());
+        addTestCase("Unreferenced undefined and cyclic groups fail during construction", \invalidGraphs());
+        addTestCase("No-namespace group identities remain usable", \noNamespace());
+        addTestCase("Nested groups resolve once and survive schema reconstruction", \nestedGroups());
+        addTestCase("Missing references fail without corrupting earlier groups", \missingReference());
+        set_return_value(main());
+    }
+
+    private XsdSchema parse(string body, *string namespace = "urn:groups") {
+        return new XsdSchema(sprintf('<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"
+            %s>%s</xs:schema>', namespace ? sprintf('targetNamespace="%s" xmlns:t="%s"', namespace, namespace) : "",
+            body), {"async_only": True});
+    }
+
+    groupScopes() {
+        XsdSchema s = parse('<xs:simpleType name="Text"><xs:restriction base="xs:string"/></xs:simpleType>
+            <xs:group name="Fields" xmlns:k="urn:groups"><xs:sequence><xs:element name="value" type="k:Text"/>
+            </xs:sequence></xs:group><xs:complexType name="Record"><xs:group xmlns:k="urn:groups" ref="k:Fields"/>
+            </xs:complexType>');
+        XsdComplexType type = cast<XsdComplexType>(s.findType(make_qname("urn:groups", "Record")));
+        assertEq("Text", type.elementmap.value.type.name);
+        assertEq({"value": "text"}, type.deserializeValue("Record", s.getTypeMap(), NOTHING, {"value": "text"}));
+        XsdSchema restored = Serializable::deserialize(s.serialize());
+        type = cast<XsdComplexType>(restored.findType(make_qname("urn:groups", "Record")));
+        assertEq("Text", type.elementmap.value.type.name);
+    }
+
+    attributeScopes() {
+        XsdSchema s = parse('<xs:attributeGroup name="Base" xmlns:k="http://www.w3.org/2001/XMLSchema">
+            <xs:attribute name="flag" type="k:boolean" use="required"/></xs:attributeGroup>
+            <xs:attributeGroup name="Outer"><xs:attributeGroup xmlns:k="urn:groups" ref="k:Base"/>
+            </xs:attributeGroup><xs:complexType name="Record"><xs:attributeGroup xmlns:k="urn:groups"
+            ref="k:Outer"/></xs:complexType>');
+        XsdComplexType type = cast<XsdComplexType>(s.findType(make_qname("urn:groups", "Record")));
+        assertEq("boolean", type.attrs.flag.type.name);
+        assertEq({"^attributes^": {"flag": False}}, type.deserializeValue("Record", s.getTypeMap(), NOTHING,
+            {"^attributes^": {"flag": "false"}}));
+        assertThrows("SOAP-DESERIALIZATION-ERROR", \type.deserializeValue(), ("Record", s.getTypeMap(), NOTHING, {}));
+    }
+
+    wrongNamespace() {
+        foreach string kind in ("group", "attributeGroup") {
+            string content = kind == "group" ? '<xs:sequence/>' : '<xs:attribute name="flag"/>';
+            foreach string reference in ("Fields", "wrong:Fields", "absent:Fields") {
+                assertThrows(reference == "absent:Fields" ? "WSDL-NAMESPACE-ERROR" : "WSDL-ERROR", \parse(),
+                    (sprintf('<xs:%s name="Fields">%s</xs:%s><xs:complexType name="Record">
+                    <xs:%s xmlns:wrong="urn:wrong" ref="%s"/></xs:complexType>', kind, content, kind, kind,
+                    reference),));
+            }
+        }
+    }
+
+    invalidGraphs() {
+        foreach string kind in ("group", "attributeGroup") {
+            string before = kind == "group" ? '<xs:sequence>' : "";
+            string after = kind == "group" ? '</xs:sequence>' : "";
+            foreach string reference in ("t:Absent", "t:A") {
+                assertThrows("WSDL-ERROR", \parse(), (sprintf('<xs:%s name="A">%s<xs:%s ref="%s"/>%s</xs:%s>',
+                    kind, before, kind, reference, after, kind),));
+            }
+        }
+    }
+
+    noNamespace() {
+        XsdSchema s = parse('<xs:group name="Fields"><xs:sequence><xs:element name="value" type="xs:int"/>
+            </xs:sequence></xs:group><xs:attributeGroup name="Flags"><xs:attribute name="flag" type="xs:boolean"/>
+            </xs:attributeGroup><xs:complexType name="Record"><xs:group ref="Fields"/>
+            <xs:attributeGroup ref="Flags"/></xs:complexType>', "");
+        XsdComplexType type = cast<XsdComplexType>(s.findType("Record"));
+        assertEq("int", type.elementmap.value.type.name);
+        assertEq("boolean", type.attrs.flag.type.name);
+    }
+
+    nestedGroups() {
+        XsdSchema s = parse('<xs:group name="Outer"><xs:sequence><xs:group xmlns:k="urn:groups" ref="k:Inner"/>
+            </xs:sequence></xs:group><xs:group name="Inner"><xs:sequence><xs:element name="value" type="xs:int"/>
+            </xs:sequence></xs:group><xs:complexType name="First"><xs:group ref="t:Outer"/></xs:complexType>
+            <xs:complexType name="Second"><xs:group ref="t:Outer"/></xs:complexType>');
+        foreach string name in ("First", "Second") {
+            XsdComplexType type = cast<XsdComplexType>(s.findType(make_qname("urn:groups", name)));
+            assertEq({"value": 42}, type.deserializeValue(name, s.getTypeMap(), NOTHING, {"value": "42"}));
+            assertEq(("value",), keys type.elementmap);
+        }
+        XsdSchema restored = Serializable::deserialize(s.serialize());
+        assertEq(("value",), keys cast<XsdComplexType>(restored.findType(make_qname("urn:groups", "First"))).elementmap);
+    }
+
+    missingReference() {
+        foreach string kind in ("group", "attributeGroup") {
+            assertThrows("WSDL-ERROR", \parse(), (sprintf('<xs:complexType name="Record"><xs:%s/></xs:complexType>',
+                kind),));
+        }
+        XsdSchema s = parse('<xs:attributeGroup name="Existing"><xs:attribute name="flag" type="xs:boolean"/>
+            </xs:attributeGroup>');
+        assertThrows("WSDL-ERROR", \s.addSchemaString(), ('<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
+            <xs:attributeGroup name="A"><xs:attributeGroup ref="A"/></xs:attributeGroup></xs:schema>',));
+        s.addSchemaString('<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:t="urn:groups">
+            <xs:import namespace="urn:groups"/><xs:complexType name="Record"><xs:attributeGroup ref="t:Existing"/>
+            </xs:complexType></xs:schema>');
+        assertEq("boolean", cast<XsdComplexType>(s.findType("Record")).attrs.flag.type.name);
+    }
+}

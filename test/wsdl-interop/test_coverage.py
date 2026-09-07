@@ -162,6 +162,81 @@ class CoverageTest(unittest.TestCase):
         self.assertTrue(all(row["ok"] for row in oracle["documents"].values()), oracle)
         self.assertEqual(6, len(oracle["documents"]))
 
+    def test_simple_content_independent_bindings_and_facets(self):
+        fixture = ROOT / "regressions/simple-content"
+        manifest = corpus.read_manifest(fixture / "manifest.json")
+        for name, digest in manifest["files"].items():
+            corpus.check_digest((fixture / name).read_bytes(), digest, name)
+        wsdl = fixture / "measurement.wsdl"
+        document = etree.parse(str(wsdl))
+        schema_xml = etree.tostring(document.find(
+            f"{{{coverage.contract.WSDL}}}types/{{{coverage.contract.XSD}}}schema"))
+        schema = etree.XMLSchema(etree.fromstring(schema_xml))
+        cases, documents, expected = [], {}, {}
+        for version in ("11", "12"):
+            messages = []
+            for direction in ("request", "response"):
+                name = f"{direction}-soap{version}.xml"
+                path = fixture / name
+                node = survey.payload(path.read_bytes(), survey.parser(fixture))
+                self.assertTrue(schema.validate(node), str(schema.error_log))
+                documents[name] = etree.tostring(node)
+                expected[name] = True
+                messages.append({"file": name, "path": str(path), "direction": direction})
+                for mutation in ("below", "above", "missing", "prohibited", "child"):
+                    envelope = etree.parse(str(path))
+                    body = envelope.find("{*}Body")[0]
+                    if mutation in ("below", "above"):
+                        body.text = "0" if mutation == "below" else "4"
+                    elif mutation == "missing":
+                        del body.attrib["unit"]
+                    elif mutation == "prohibited":
+                        body.set("note", "forbidden")
+                    else:
+                        etree.SubElement(body, "unexpected").text = "content"
+                    invalid_name = name + "/" + mutation
+                    invalid_path = self.root / (name + "-" + mutation)
+                    invalid_path.write_bytes(etree.tostring(envelope))
+                    self.assertFalse(schema.validate(body), invalid_name)
+                    documents[invalid_name] = etree.tostring(body)
+                    expected[invalid_name] = False
+                    messages.append({"file": invalid_name, "path": str(invalid_path), "direction": direction})
+            cases.append({"name": "Measurement" + version, "wsdl": str(wsdl), "base": "http://fixture.invalid/",
+                "operation": "submit", "binding": "Soap" + version, "messages": messages})
+        rows = survey.run_worker(cases, {})
+        self.assertEqual(4, survey.stage_accounting(cases, rows)["counts"]["serialize"]["ok"])
+        envelope_versions = []
+        for row in rows:
+            if row["stage"] == "parse":
+                self.assertTrue(row["ok"], row)
+            elif not expected[row["file"]]:
+                self.assertEqual("deserialize", row["stage"])
+                self.assertFalse(row["ok"], row)
+                self.assertEqual("SOAP-DESERIALIZATION-ERROR", row["err"])
+            else:
+                self.assertTrue(row["ok"], row)
+                if row["stage"] == "serialize":
+                    envelope = etree.fromstring(row["body"].encode())
+                    version = row["case"][-2:]
+                    envelope_versions.append((row["file"], version, envelope.tag))
+                    node = survey.payload(row["body"].encode(), survey.parser(fixture))
+                    response = row["direction"] == "response"
+                    self.assertEqual("{urn:qore:measurement}" + ("MeasurementReply" if response else "SubmitMeasurement"), node.tag)
+                    self.assertEqual("3" if response else "2", node.text)
+                    self.assertEqual({"unit": "cm", "flag": "true" if response else "false"}, dict(node.attrib))
+                    self.assertTrue(schema.validate(node), str(schema.error_log))
+                    name = row["file"] + "/output"
+                    documents[name], expected[name] = etree.tostring(node), True
+        oracle = run_independent([SchemaJob("measurement", "http://fixture.invalid/measurement.wsdl",
+            schema_xml, documents)], {})
+        self.assertEqual(28, len(oracle["documents"]))
+        for name, valid in expected.items():
+            self.assertEqual(valid, oracle["documents"][name]["ok"], name)
+        # Check every P2 payload before reporting the separately tracked P6 binding-version defect.
+        for file, version, tag in envelope_versions:
+            with self.subTest(file=file, requirement="P6-selected-binding-version"):
+                self.assertEqual(f"{{{survey.SOAP_NAMESPACES[int(version == '12')]}}}Envelope", tag)
+
     def test_full_strict_gate_keeps_later_failures_visible(self):
         path = corpus.extract(self.root / "complete")
         output = self.root / "coverage.json"
@@ -187,10 +262,12 @@ class CoverageTest(unittest.TestCase):
         self.assertEqual("PARSE-XML-EXCEPTION", by_name["ImportSchema"]["expected_parse"])
         self.assertEqual("WSDL-ERROR", by_name["BlockDefault"]["expected_parse"])
         invalid = [m for m in by_name["GlobalAttribute"]["messages"] if m["source_valid"] is False]
-        # The resolved attribute no longer fails through a method call on NOTHING.
-        # Its source-invalid unqualified payload remains a visible namespace rejection gap.
+        # A global attribute must be qualified; reject the source-invalid unqualified payloads.
         self.assertTrue(invalid)
-        self.assertTrue(all("invalid_input_accepted" in m["failures"] for m in invalid))
+        for message in invalid:
+            self.assertTrue(message["rejection_passed"], message)
+            self.assertEqual("SOAP-DESERIALIZATION-ERROR", message["deserialize"]["err"])
+            self.assertEqual([], message["failures"])
         disagreements = [m["output_oracle_disagreement"] for c in report["cases"] for m in c["messages"]
                          if "output_oracle_disagreement" in m]
         self.assertEqual(32, len(disagreements))

@@ -1,0 +1,126 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires xml
+%requires ../qlib/WSDL.qm
+%exec-class SimpleResolutionTest
+
+class SimpleResolutionTest inherits QUnit::Test {
+    constructor() : QUnit::Test("WSDL simple type reference construction", "1.0") {
+        addTestCase("Simple derivation and membership cycles fail during construction", \cycles());
+        addTestCase("Complex types cannot be used as simple type dependencies", \wrongKinds());
+        addTestCase("Forward union members retain declaration order and resolve once", \unionOrder());
+        addTestCase("Inline restrictions and lists resolve nested declarations", \inlineRestriction());
+        addTestCase("Simple type constructors reject contradictory declarations", \contradictions());
+        addTestCase("Failed recursive resolution leaves the schema reusable", \recovery());
+        addTestCase("List items must be atomic or unions of atomic types", \listKinds());
+        addTestCase("Shared union dependencies are resolved without repeated expansion", \sharedUnions());
+        set_return_value(main());
+    }
+
+    private string schema(string body) {
+        return '<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:t="urn:types"
+            targetNamespace="urn:types">' + body + '</xs:schema>';
+    }
+
+    private XsdSchema parse(string body) {
+        return new XsdSchema(schema(body), {"async_only": True});
+    }
+
+    cycles() {
+        foreach string declaration in ('<xs:restriction base="t:A"/>', '<xs:list itemType="t:A"/>',
+                '<xs:union memberTypes="xs:string t:A"/>') {
+            assertThrows("WSDL-ERROR", \parse(), ('<xs:simpleType name="A">' + declaration + '</xs:simpleType>',));
+        }
+        assertThrows("WSDL-ERROR", \parse(), ('<xs:simpleType name="A"><xs:restriction base="t:B"/></xs:simpleType>
+            <xs:simpleType name="B"><xs:restriction base="t:A"/></xs:simpleType>',));
+    }
+
+    wrongKinds() {
+        foreach string base in ("t:C", "xs:anyType") {
+            foreach string declaration in (sprintf('<xs:restriction base="%s"/>', base),
+                    sprintf('<xs:list itemType="%s"/>', base), sprintf('<xs:union memberTypes="%s"/>', base)) {
+                assertThrows("WSDL-ERROR", \parse(), ('<xs:complexType name="C"/><xs:simpleType name="A">'
+                    + declaration + '</xs:simpleType>',));
+            }
+        }
+    }
+
+    unionOrder() {
+        XsdSchema s = parse('<xs:simpleType name="Either"><xs:union memberTypes="t:Text&#x9;xs:int">
+            <xs:simpleType><xs:restriction base="xs:boolean"/></xs:simpleType></xs:union></xs:simpleType>
+            <xs:simpleType name="Text"><xs:restriction base="t:Base"/></xs:simpleType>
+            <xs:simpleType name="Base"><xs:restriction base="xs:string"/></xs:simpleType>');
+        XsdSimpleType type = cast<XsdSimpleType>(s.findType(make_qname("urn:types", "Either")));
+        assertEq(("Text", "int"), (type.unionTypes[0].name, type.unionTypes[1].name));
+        assertEq("boolean", cast<XsdSimpleType>(type.unionTypes[2]).type.name);
+        assertEq(3, type.unionTypes.size());
+        assertEq("42", type.deserializeValue("Either", s.getTypeMap(), NOTHING, "42"));
+        assertTrue(exists type.getDataProviderType());
+        XsdSchema restored = Serializable::deserialize(s.serialize());
+        type = cast<XsdSimpleType>(restored.findType(make_qname("urn:types", "Either")));
+        assertEq(3, type.unionTypes.size());
+        assertEq("42", type.deserializeValue("Either", restored.getTypeMap(), NOTHING, "42"));
+    }
+
+    inlineRestriction() {
+        XsdSchema s = parse('<xs:simpleType name="Small"><xs:restriction><xs:simpleType>
+            <xs:restriction base="xs:int"/></xs:simpleType><xs:minInclusive value="1"/>
+            </xs:restriction></xs:simpleType><xs:simpleType name="Items"><xs:list><xs:simpleType>
+            <xs:restriction base="t:Small"/></xs:simpleType></xs:list></xs:simpleType>');
+        XsdSimpleType type = cast<XsdSimpleType>(s.findType(make_qname("urn:types", "Items")));
+        assertEq((1, 2), type.deserializeValue("Items", s.getTypeMap(), NOTHING, "1 2"));
+        assertThrows("SOAP-DESERIALIZATION-ERROR", \type.deserializeValue(), ("Items", s.getTypeMap(), NOTHING, "0"));
+    }
+
+    sharedUnions() {
+        string declarations = '<xs:simpleType name="U0"><xs:restriction base="xs:string"/></xs:simpleType>';
+        for (int level = 1; level <= 20; ++level) {
+            declarations += sprintf('<xs:simpleType name="U%d"><xs:union memberTypes="t:U%d t:U%d"/></xs:simpleType>',
+                level, level - 1, level - 1);
+        }
+        declarations += '<xs:simpleType name="Items"><xs:list itemType="t:U20"/></xs:simpleType>';
+        XsdSchema s = parse(declarations);
+        XsdSimpleType t = cast<XsdSimpleType>(s.findType(make_qname("urn:types", "Items")));
+        assertEq(("alpha", "beta"), t.deserializeValue("Items", s.getTypeMap(), NOTHING, "alpha beta"));
+        assertEq(2, cast<XsdSimpleType>(t.listItemType).unionTypes.size());
+    }
+
+    contradictions() {
+        foreach string declaration in ('<xs:restriction base="xs:int"/><xs:list itemType="xs:int"/>',
+                '<xs:restriction base="xs:int"><xs:simpleType><xs:restriction base="xs:int"/>
+                </xs:simpleType></xs:restriction>',
+                '<xs:list itemType="xs:int"><xs:simpleType><xs:restriction base="xs:int"/></xs:simpleType></xs:list>',
+                '<xs:restriction base=""><xs:simpleType><xs:restriction base="xs:int"/></xs:simpleType></xs:restriction>',
+                '<xs:list itemType=""><xs:simpleType><xs:restriction base="xs:int"/></xs:simpleType></xs:list>',
+                '<xs:union/>', '<xs:restriction/>') {
+            assertThrows("XSD-SIMPLETYPE-ERROR", \parse(), ('<xs:simpleType name="A">' + declaration
+                + '</xs:simpleType>',));
+        }
+    }
+
+    recovery() {
+        XsdSchema s = parse('<xs:simpleType name="Existing"><xs:restriction base="xs:string"/></xs:simpleType>');
+        assertThrows("WSDL-ERROR", \s.addSchemaString(),
+            (schema('<xs:simpleType name="A"><xs:restriction base="t:A"/></xs:simpleType>'),));
+        s.addSchemaString(schema('<xs:simpleType name="A"><xs:restriction base="t:Existing"/></xs:simpleType>'));
+        assertEq("text", s.findType(make_qname("urn:types", "A")).deserializeValue("A", s.getTypeMap(), NOTHING, "text"));
+    }
+
+    listKinds() {
+        foreach string item in ("xs:anySimpleType", "xs:IDREFS", "xs:ENTITIES", "xs:NMTOKENS", "t:Items", "t:Union") {
+            assertThrows("WSDL-ERROR", \parse(), ('<xs:simpleType name="Items"><xs:list itemType="xs:int"/></xs:simpleType>
+                <xs:simpleType name="Union"><xs:union memberTypes="xs:string t:Items"/></xs:simpleType>
+                <xs:simpleType name="Invalid"><xs:list itemType="' + item + '"/></xs:simpleType>',));
+        }
+        assertThrows("WSDL-ERROR", \parse(),
+            ('<xs:simpleType name="Invalid"><xs:restriction base="xs:anySimpleType"/></xs:simpleType>',));
+        XsdSchema s = parse('<xs:simpleType name="Items"><xs:list itemType="t:Union"/></xs:simpleType>
+            <xs:simpleType name="Union"><xs:union memberTypes="xs:string xs:int"/></xs:simpleType>');
+        assertEq(("1", "two"), s.findType(make_qname("urn:types", "Items")).deserializeValue("Items",
+            s.getTypeMap(), NOTHING, "1 two"));
+    }
+}

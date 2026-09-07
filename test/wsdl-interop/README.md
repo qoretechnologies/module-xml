@@ -60,9 +60,19 @@ type identity, standalone schema reconstruction, failed-addition rollback and or
 schema grammar. `ElementTypeDefaultNamespace` is included in the strict gate with
 exact string comparisons in both directions. The derivation increment adds both empty
 extension fixtures. Attribute construction and scalar `anySimpleType` support add
-four families with exact text/attribute checks: 30 descriptions and 108 message-direction
-combinations. The other broad failures remain visible; P2 is not yet complete.
+four families with exact text/attribute checks. The local element-form fix adds
+ElementFormUnqualified. Qualified-attribute checks add four source-invalid families
+to mandatory rejection coverage. AttributeFormQualified, AttributeReference and
+AttributeReferenceUnqualified retain exact attribute and child values in the strict gate:
+38 descriptions and 140 message-direction combinations.
+The other broad failures remain visible; P2 is not yet complete.
 See [the implemented design](../../design/wsdl-schema-identity.md) and [execution record](EXECUTION.md).
+
+The current full Python suite reports a P6 binding-version failure in the authored
+dual-binding contract: selecting SOAP 1.1 emits a SOAP 1.2 envelope. Its request and
+response assertions remain failing. P2 payload checks execute before those assertions;
+separate actual SOAP 1.1/1.2 contracts check attribute values and namespaces in both
+directions. The strict corpus gate does not replace the full suite or phase acceptance.
 
 The attribute-extension source places `gender` on a string child that does not declare
 it. [Separately identified derivatives](derivatives/manifest.json) move that attribute

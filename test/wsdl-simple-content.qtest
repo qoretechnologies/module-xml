@@ -1,0 +1,169 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires xml
+%requires ../qlib/WSDL.qm
+%exec-class SimpleContentTest
+
+class SimpleContentTest inherits QUnit::Test {
+    private {
+        const Xsd = "http://www.w3.org/2001/XMLSchema";
+        const Ns = "urn:qore:simple-content";
+    }
+
+    constructor() : QUnit::Test("WSDL simple content derivation", "1.0") {
+        addTestCase("Simple content uses declaration-local base prefixes", \localBase());
+        addTestCase("Complex bases contribute scalar content and attributes", \inheritedContent());
+        addTestCase("Restriction applies facets and prohibited attributes", \restrictedContent());
+        addTestCase("Empty and inline restrictions preserve their effective simple type", \inlineRestriction());
+        addTestCase("Anonymous nested simple content is finalized", \nestedContent());
+        addTestCase("False zero and empty simple content stay scalar", \emptyContent());
+        addTestCase("Missing and wrong simple-content bases reject", \invalidBase());
+        addTestCase("Cyclic simple-content bases reject and restore state", \cyclicBase());
+        set_return_value(main());
+    }
+
+    private string schema(string contents, string ns = Ns) {
+        return sprintf('<xs:schema xmlns:xs="%s" xmlns:t="%s" targetNamespace="%s">%s</xs:schema>',
+            Xsd, ns, ns, contents);
+    }
+
+    private XsdSchema parse(string xml) {
+        return new XsdSchema(xml, {"async_only": True});
+    }
+
+    private XsdComplexType type(XsdSchema s, string name) {
+        return cast<XsdComplexType>(s.getTypeMap(){make_qname(Ns, name)});
+    }
+
+    localBase() {
+        XsdSchema s = parse(schema('<xs:complexType name="Number"><xs:simpleContent xmlns:k="urn:wrong">
+            <xs:extension xmlns:k="http://www.w3.org/2001/XMLSchema" base="k:int"/>
+            </xs:simpleContent></xs:complexType>'));
+        assertEq(42, type(s, "Number").deserializeValue("value", s.getTypeMap(), NOTHING, "42"));
+        assertEq("int", type(s, "Number").simpleType.getName());
+        assertEq(42, type(s, "Number").serializeValue(s.nsc, 42, True)."^value^");
+    }
+
+    private string baseDeclaration() {
+        return '<xs:complexType name="Base"><xs:simpleContent><xs:extension base="xs:int">
+            <xs:attribute name="unit" type="xs:string" use="required"/>
+            <xs:attribute name="optional" type="xs:string"/>
+            </xs:extension></xs:simpleContent></xs:complexType>';
+    }
+
+    inheritedContent() {
+        XsdSchema s = parse(schema('<xs:complexType name="Derived"><xs:simpleContent>
+            <xs:extension base="t:Base"><xs:attribute name="flag" type="xs:boolean"/>
+            </xs:extension></xs:simpleContent></xs:complexType>' + baseDeclaration()));
+        XsdComplexType derived = type(s, "Derived");
+        hash<auto> value = derived.deserializeValue("value", s.getTypeMap(), NOTHING,
+            {"^value^": "42", "^attributes^": {"unit": "cm", "flag": "false"}});
+        assertEq(42, value."^value^");
+        assertEq({"unit": "cm", "flag": False}, value."^attributes^");
+        assertEq("int", derived.simpleType.getName());
+        assertThrows("SOAP-DESERIALIZATION-ERROR", \derived.deserializeValue(),
+            ("value", s.getTypeMap(), NOTHING, "42"));
+        hash<auto> wire = derived.serializeValue(s.nsc, value, True);
+        assertEq(42, wire."^value^");
+        assertEq("false", wire."^attributes^".flag);
+        XsdSchema restored = Serializable::deserialize(s.serialize());
+        assertEq(value, type(restored, "Derived").deserializeValue("value", restored.getTypeMap(), NOTHING, wire));
+    }
+
+    restrictedContent() {
+        XsdSchema s = parse(schema(baseDeclaration() + '<xs:complexType name="Limited"><xs:simpleContent>
+            <xs:restriction base="t:Base"><xs:minInclusive value="1"/><xs:maxInclusive value="3"/>
+            <xs:attribute name="optional" use="prohibited"/>
+            </xs:restriction></xs:simpleContent></xs:complexType>'));
+        XsdComplexType limited = type(s, "Limited");
+        hash<auto> value = limited.deserializeValue("value", s.getTypeMap(), NOTHING,
+            {"^value^": "2", "^attributes^": {"unit": "cm"}});
+        assertEq(2, value."^value^");
+        assertEq("cm", value."^attributes^".unit);
+        assertThrows("SOAP-DESERIALIZATION-ERROR", \limited.deserializeValue(),
+            ("value", s.getTypeMap(), NOTHING, {"^value^": "4", "^attributes^": {"unit": "cm"}}));
+        assertThrows("SOAP-SERIALIZATION-ERROR", \limited.serializeValue(),
+            (s.nsc, {"^value^": 0, "^attributes^": {"unit": "cm"}}, True));
+        assertThrows("SOAP-DESERIALIZATION-ERROR", \limited.deserializeValue(),
+            ("value", s.getTypeMap(), NOTHING, {"^value^": "2", "^attributes^": {"unit": "cm", "optional": "x"}}));
+    }
+
+    nestedContent() {
+        XsdSchema s = parse(schema('<xs:complexType name="Outer"><xs:sequence><xs:element name="inner">
+            <xs:complexType><xs:simpleContent><xs:extension base="xs:boolean"/></xs:simpleContent></xs:complexType>
+            </xs:element></xs:sequence></xs:complexType>'));
+        hash<auto> value = type(s, "Outer").deserializeValue("outer", s.getTypeMap(), NOTHING, {"inner": "false"});
+        assertEq(False, value.inner);
+        assertEq("false", type(s, "Outer").serializeValue(s.nsc, value, True).inner."^value^");
+    }
+
+    inlineRestriction() {
+        XsdSchema s = parse(schema(baseDeclaration() + '<xs:complexType name="EmptyRestriction"><xs:simpleContent>
+            <xs:restriction base="t:Base"/></xs:simpleContent></xs:complexType>
+            <xs:complexType name="Inline"><xs:simpleContent><xs:restriction base="t:Base">
+            <xs:simpleType><xs:restriction xmlns:k="http://www.w3.org/2001/XMLSchema" base="k:int">
+                <xs:minInclusive value="1"/></xs:restriction></xs:simpleType><xs:maxInclusive value="3"/>
+            </xs:restriction></xs:simpleContent></xs:complexType>'));
+        assertEq("int", type(s, "EmptyRestriction").simpleType.name);
+        hash<auto> input = {"^value^": "2", "^attributes^": {"unit": "cm"}};
+        assertEq(2, type(s, "Inline").deserializeValue("value", s.getTypeMap(), NOTHING, input)."^value^");
+        foreach string bad in ("0", "4") {
+            input."^value^" = bad;
+            assertThrows("SOAP-DESERIALIZATION-ERROR", \type(s, "Inline").deserializeValue(),
+                ("value", s.getTypeMap(), NOTHING, input));
+        }
+        XsdSchema restored = Serializable::deserialize(s.serialize());
+        assertEq("int", type(restored, "EmptyRestriction").simpleType.name);
+        assertEq(3, type(restored, "Inline").deserializeValue("value", restored.getTypeMap(), NOTHING,
+            {"^value^": "3", "^attributes^": {"unit": "cm"}})."^value^");
+        s.addSchemaString(schema('<xs:complexType name="UrRestriction"><xs:simpleContent>
+            <xs:restriction base="xs:anyType"><xs:simpleType><xs:restriction base="xs:string"/>
+            </xs:simpleType><xs:length value="3"/></xs:restriction></xs:simpleContent></xs:complexType>'));
+        assertEq("abc", type(s, "UrRestriction").deserializeValue("value", s.getTypeMap(), NOTHING, "abc"));
+        assertThrows("SOAP-DESERIALIZATION-ERROR", \type(s, "UrRestriction").deserializeValue(),
+            ("value", s.getTypeMap(), NOTHING, "ab"));
+    }
+
+    emptyContent() {
+        foreach hash<auto> data in ({"type": "boolean", "input": "false", "value": False},
+                {"type": "int", "input": "0", "value": 0}, {"type": "string", "input": "", "value": ""}) {
+            XsdSchema s = parse(schema(sprintf('<xs:complexType name="Value"><xs:simpleContent>
+                <xs:extension base="xs:%s"/></xs:simpleContent></xs:complexType>', data.type)));
+            auto value = type(s, "Value").deserializeValue("value", s.getTypeMap(), NOTHING, data.input);
+            assertEq(data.value, value);
+            assertEq(data.value.typeCode(), value.typeCode());
+        }
+    }
+
+    invalidBase() {
+        foreach string content in ('<xs:simpleContent/>', '<xs:simpleContent><xs:extension/></xs:simpleContent>',
+                '<xs:simpleContent><xs:restriction/></xs:simpleContent>',
+                '<xs:simpleContent><xs:extension base="xs:anyType"/></xs:simpleContent>',
+                '<xs:simpleContent><xs:restriction base="xs:string"/></xs:simpleContent>',
+                '<xs:simpleContent><xs:restriction base="xs:anyType"/></xs:simpleContent>',
+                '<xs:simpleContent><xs:extension base="t:Missing"/></xs:simpleContent>',
+                '<xs:simpleContent><xs:extension base="xs:string"/><xs:restriction base="xs:string"/></xs:simpleContent>') {
+            assertThrows("WSDL-ERROR", \parse(), (schema('<xs:complexType name="Invalid">' + content
+                + '</xs:complexType>'),));
+        }
+        assertThrows("WSDL-ERROR", \parse(), (schema('<xs:complexType name="Base"><xs:sequence/>
+            </xs:complexType><xs:complexType name="Invalid"><xs:simpleContent><xs:extension base="t:Base"/>
+            </xs:simpleContent></xs:complexType>'),));
+    }
+
+    cyclicBase() {
+        string xml = schema('<xs:complexType name="A"><xs:simpleContent><xs:extension base="t:B"/>
+            </xs:simpleContent></xs:complexType><xs:complexType name="B"><xs:simpleContent>
+            <xs:extension base="t:A"/></xs:simpleContent></xs:complexType>');
+        assertThrows("WSDL-ERROR", \parse(), (xml,));
+        XsdSchema s = parse(schema('<xs:element name="existing" type="xs:string"/>'));
+        assertThrows("WSDL-ERROR", \s.addSchemaString(), (xml,));
+        s.addSchemaString(schema('<xs:complexType name="A"><xs:simpleContent><xs:extension base="xs:string"/>
+            </xs:simpleContent></xs:complexType>'));
+        assertEq("ok", type(s, "A").deserializeValue("value", s.getTypeMap(), NOTHING, "ok"));
+    }
+}

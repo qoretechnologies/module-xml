@@ -246,6 +246,234 @@ findings and current diagnostic reports.
   Both-version catalog survey: parse 279/14, decode 1014/102, encode 1012/2,
   output 960/52. Newly reachable invalid qualified-attribute outputs remain failures.
 
+### P2-04: simple-content derivation (uncommitted)
+
+- Baseline `4809f18` fails all seven reduced simple-content cases: local base prefix
+  loss, complex-base content passed to a scalar decoder without inherited attributes,
+  unparsed restrictions, unfinalized anonymous types, inconsistent false/zero/empty
+  return shapes, missing-base errors and accepted cycles.
+- Current implementation retains expanded bases, finalizes inherited simple content,
+  applies restrictions to the effective scalar type, supports inline restriction types
+  including the anyType ur-type, and finalizes nested anonymous declarations.
+  Eight Qore cases / 43 assertions pass. Broader tests still need final execution/audit.
+- The authored `regressions/simple-content` fixture has distinct request/response
+  wrappers, inherited required/boolean attributes and 1..3 scalar restrictions, with
+  actual SOAP 1.1 and SOAP 1.2 bindings. It exposed a P2 consumer bug: the bare-message
+  extractor only inspected complex element members, leaving ^value^/^attributes^
+  unconsumed. The extractor now consumes that existing representation explicitly.
+- A separate P6 defect remains a failing check in the new Python integration test:
+  WSOperation::serializeRequest/Response/Fault use nsc.hasSoap12(), which reflects
+  namespace declarations anywhere in the WSDL, instead of the selected binding.
+  Selecting Soap11 from this dual-binding contract therefore emits a SOAP 1.2 envelope.
+  An asynchronous user question requests permission to fix this bounded prerequisite
+  before its scheduled P6 phase. No binding-version implementation was changed while
+  that ordering decision is pending. This test is not counted as passing.
+- Additional construction work remains for simpleContent restrictions of named
+  mixed-content bases with emptiable particles; this needs the P2 schema-content
+  predicate coordinated with P4 particle validation. Generic mixed runtime behavior
+  remains P5. Full restriction/facet consistency remains part of P3/P4 validation.
+- While the bounded P6 ordering decision is pending, local element form/reference
+  work continues independently. `wsdl-element-form.qtest` reproduces four failures
+  out of five cases. The serializer uses the containing type's form flag instead of
+  the element's; refs fall back from absent namespace to the target namespace.
+  Declaration-local QName refs and local form overrides now pass five cases / 27
+  assertions. ElementFormUnqualified is promoted to the strict selection with exact
+  values, and the diagnostic failure count is 400 before final audit/verification.
+  Incoming element namespace validation remains a separate P2 requirement.
+
+
+### Additional P2 work while the binding-order decision is pending (uncommitted)
+
+- Removed the invented input `xsd` prefix while retaining canonical builtin output
+  prefixes. Recognized XSD builtin names and declaration NCNames are validated.
+  Namespace-context coverage now passes 22 cases / 152 assertions. The legacy
+  `binary` HTTP/MIME extension remains recognized and is explicitly distinguished
+  from XSD 1.0 builtins.
+- Schema composition uses a shared deferred-resolution queue for the complete
+  dependency graph, namespace-specific component deduplication, byte caching and
+  active source/base identities for root cycles. Chameleon references adopt the
+  including namespace. Imports require matching target namespaces; includes allow
+  matching or absent target namespaces. Standalone roots must be XSD schema
+  elements. Inline schemas no longer inherit the WSDL target namespace.
+  `wsdl-schema-composition.qtest` passes 11 cases / 40 assertions, including cycles,
+  two-namespace reuse, wrong reference kinds, root validation and rollback/retry.
+- The original issue-4449 fixture contains incorrect import namespaces. It is now
+  explicitly rejected. `derivatives/Issue4449/manifest.json` preserves original and
+  derived hashes and all exact substitutions. The corrected include graph retains
+  the duplicate-dependency regression in both soap.qtest and SoapClient.qtest.
+  Both independent validators compile the corrected schemas and validate the
+  expected payload. Originals remain unchanged.
+- `test_composition.py` passes two tests covering eight independent schema graphs,
+  positive/negative documents and derivative provenance. libxml2 2.12.10 accepts
+  two fetched, unused mismatched imports; Xerces 2.12.2 rejects them with
+  src-import.3.1. The normative invalid-source decision and executable oracle
+  exception are recorded in regressions/schema-composition/validator-notes.md.
+- Simple types now resolve dependency graphs before constructing provider metadata.
+  Cycles and complex dependencies fail as WSDL-ERROR; lists require atomic items or
+  unions of atomic items. Forward union members retain declared order without
+  duplicate resolution, including XML whitespace in memberTypes. Inline restriction
+  types are supported; contradictory forms and empty declarations fail explicitly.
+  `wsdl-simple-resolution.qtest` failed all six initial cases before the change and
+  now passes seven cases / 34 assertions. P3 lexical/value semantics remain separate.
+- Latest diagnostic files are /tmp/wsdl-coverage-p2-simple-resolution.json and
+  /tmp/wsdl-survey-p2-simple-resolution.json. Coverage retains 400 failures and no
+  selected failures (31 selected descriptions / 112 directions); request survey
+  parses 279 descriptions and rejects 14 invalid sources, with 1014 decode successes,
+  1012 encode successes, 962 independently valid outputs and 50 rejected outputs.
+  No phase completion is claimed. Reports still need final regeneration and audit.
+- The affected existing Qore suites passed after switching the second issue-4449
+  consumer to the provenance-checked derivative. Final full tests, exact-diff audit,
+  documentation and commits remain outstanding for these increments. The new
+  dual-binding Python test still exposes the independently tracked P6 version bug;
+  no binding-version implementation change has been made without the ordering decision.
+
+
+- Group construction now captures declaration/compositor/reference namespace scopes,
+  uses expanded keys without local-name fallback, and rejects missing or cyclic
+  definitions even when unused. Nested groups resolve before complex consumers;
+  no-namespace public registry aliases remain available. Group-context coverage
+  reproduced five failing cases and now passes seven cases / 27 assertions.
+  Existing group occurrence/order flattening remains an explicit P4 requirement.
+- `test_composition.py` now passes four independent tests: eight composition graphs,
+  eight simple dependency graphs, six group graphs, and derivative provenance.
+  Xerces 2.12.2 also accepts an invalid list whose item is xs:anySimpleType with
+  absent variety; libxml2 and Qore reject it. The explicit normative adjudication
+  is recorded beside the earlier libxml2 import limitation.
+- Most recent group diagnostic reports: /tmp/wsdl-coverage-p2-groups.json and
+  /tmp/wsdl-survey-p2-groups.json; 400 retained coverage failures and zero selected
+  failures. Full Python run before the two latest matrix additions ran 62 tests:
+  61 passed, the dual-binding P6 test failed. Log: /tmp/wsdl-p2-resolution-python.log.
+  It is not a green full-suite result. The full affected Qore run after initial
+  group fixes passed; latest small group guards/tests still need final full audit
+  checks. No commit or push has been made for this outstanding work.
+
+
+- Audit preparation reread the full audit-changes skill. Review found that expanded
+  attribute/element refs normalized their QName identity but retained whitespace in
+  the public field name. A new failing namespace regression proved the mismatch;
+  names now use the captured local QName. Namespace suite: 23 cases / 156 assertions.
+  Release notes and implemented design now describe the outstanding changes.
+  Audit checklist reporting and final tests are not yet complete; no commit gate
+  has been claimed to pass.
+
+
+- Latest full run before attribute-value changes: all 288 affected Qore cases
+  passed (logs /tmp/wsdl-p2-review-*.log). Python ran 64 tests with 63 passes and
+  the same pending P6 dual-binding failure (/tmp/wsdl-p2-review-python.log).
+- Attribute default/fixed work now has six initial cases / 22 passing assertions
+  in wsdl-attribute-values.qtest; all six initially failed (one original expectation
+  was corrected to inspect the attribute hash, preserving the existing empty-value
+  XML representation). Constraints retain their lexical forms, resolve typed values
+  after simple-type finalization, inherit through refs, reject inconsistent fixed
+  overrides, and populate absent optional attributes. Required fixed attributes
+  still require explicit values; serialization/deserialization check supplied fixed
+  values. New methods are XsdAttribute::resolveConstraints(), hasValueConstraint()
+  and getDefaultValue(). Broader and independent value-constraint verification,
+  qualified-attribute integration, documentation and final audit remain outstanding.
+  Current runs: /tmp/wsdl-p2-values-*.log; reports
+  /tmp/wsdl-coverage-p2-attribute-values.json and /tmp/wsdl-survey-p2-attribute-values.json.
+
+
+- Independent attribute-value testing uncovered another P2 bare-message extractor
+  defect: attributed complex values were left unserialized because the extractor
+  consumed only element members and returned NULL for empty content models. It now
+  consumes the existing attribute hash for complex messages, including empty models.
+  `test_attribute_values.py` validates eight outputs in separate actual SOAP 1.1
+  and SOAP 1.2 contracts, both directions, with exact default/explicit/fixed values.
+  Twenty documents are checked with pinned Xerces and libxml2; four wrong-fixed
+  inputs fail Qore deserialization. This does not alter the pending dual-binding
+  P6 test or its failing envelope assertion.
+- Three malformed attribute constraints are checked against Qore and Xerces. The
+  local-fixed-over-global-fixed mismatch exposes a libxml2 2.12.10 false acceptance,
+  adjudicated by au-props-correct.2; see
+  regressions/attribute-values/validator-notes.md. Two independent tests pass in
+  /tmp/wsdl-p2-values-independent5.log after that explicit oracle adjudication.
+- Full Qore tests and both-version diagnostics passed/completed before the final
+  attributed-message extractor change; the current exact diff still needs final
+  test execution, report regeneration and full audit. Nothing was committed or pushed.
+
+
+- Qualified-attribute baseline reproduced all five failing cases. Current code
+  propagates inherited prefix declarations to attributed SOAP descendants before
+  namespace stripping, resolves attribute QNames against the actual input context,
+  and matches declarations by expanded identity. Serialized attributes allocate
+  prefixes from declaration URIs; local form overrides work independently. Unknown
+  attributes on complex/simple values are rejected, except existing schema-instance,
+  SOAP encoding and internal transport metadata. No-namespace unqualified attribute
+  names never inherit the default namespace. The new suite passes five cases / 13
+  assertions before broader verification (/tmp/wsdl-p2-qualified-*.log).
+- This namespace increment is still under implementation: same-local-name attribute
+  collisions, scalar synthetic/legacy input regressions, broader corpus checks and
+  independent qualified-attribute tests require follow-up. Attribute maps still use
+  local field names internally, so collision handling has not been claimed fixed.
+  The new helper methods are XsdBase::getAttributeNamespaces(), inheritAttributeNamespaces(),
+  getExpandedAttributes(), isInstanceAttribute() and validateSimpleAttributes(), plus
+  XsdAttribute::getXmlName(). Nothing in binding-version selection was changed.
+
+### P2-04 final incremental audit and verification
+
+- Qualified attributes now preserve namespace identity through SOAP input/output,
+  including inherited/rebound prefixes, local form overrides and duplicate local
+  names. Unique names keep their existing keys; collisions use expanded keys in
+  public attribute maps and `^attributes^`. Reconstruction and both directions
+  pass. Eleven initial cases grew to twelve / 189 assertions after prohibition
+  checks. The scope/depth tests verify caller immutability, recovery and only the
+  required prefix declarations at 128 nested scopes.
+- Prohibitions contribute no attribute-use component. Local attribute groups
+  resolve before base inheritance; prohibitions cannot remove required base uses
+  without a required replacement. The independent composition matrix now includes
+  ten group graphs, including live duplicates, repeated prohibitions and invalid
+  required-base removal. All four independent composition tests pass.
+- Audit found and fixed empty base/itemType exclusivity checks and exponential
+  list-item validity traversal on shared union graphs. The twenty-level diamond
+  exceeded a ten-second deadline before per-type memoization and now completes
+  within the focused suite in under a second. Simple-resolution coverage is eight
+  cases / 38 assertions. Attribute maps merge in batches; identical schema references
+  reuse successful validation while differing include/import modes are checked.
+- The synthetic SOAP response's missing enc declaration remains a negative test;
+  its positive copy restores the declaration from the original XML comment. Array
+  fragment tests supply their enclosing namespace context. All existing SOAP tests pass.
+- Final Qore run: 307 cases pass in 18 suites, with debugging enabled and no warnings
+  or unhandled errors (`/tmp/wsdl-p2-audited-*.log`). Python runs 67 tests: 66 pass;
+  the dual-binding simple-content test reports two P6 subtest failures for SOAP 1.1
+  request/response envelope selection. All its P2 payload checks and 28 independent
+  document validations execute before those assertions. This is not a green full
+  Python suite. No skip or expected-failure marker was added.
+- The P6 finding is independent of these P2 changes: default envelope selection uses
+  namespace availability rather than the selected binding. It remains a real failure
+  under the execution prompt's explicit routing rule for later phases. The earlier
+  phase-order question is unanswered; no P6 code or ordering exception was applied.
+- The separate attribute-value and qualified-collision tests use actual individual
+  SOAP 1.1/1.2 bindings, both directions, and exact values/expanded names. All three
+  Python tests pass, with twenty default/fixed documents and sixteen qualified
+  attribute documents checked by pinned Xerces and libxml2.
+- Strict coverage grows to 38 descriptions / 140 directions: three positive qualified
+  attribute families have exact attribute/child assertions and four invalid families
+  must reject. Zero selected failures; 384 broad failures remain: P2=8, P3=208,
+  P4=76, P5=92. No new requirement failures or missing/skipped stages relative to
+  4809f18. Twenty wire bodies change for defaults/correct qualification; sixteen
+  previously serialized source-invalid directions now reject correctly.
+- Current reports were regenerated with both versions. Catalog survey: 279/14 parse,
+  1006/110 decode, 1004/2 serialize, 960/44 output validation. Stage completion does
+  not imply conformance; all original source/historical hashes remain unchanged.
+- Full 62-item incremental audit: [audits/P2-04.md](audits/P2-04.md). All applicable
+  P2 increment checks pass. This does not close the phase boundary or full-suite gate.
+
+### Remaining P2 acceptance work
+
+- Incoming element namespace identity and same-local-name element collisions; the
+  current element-prefix removal is still lossy. The remaining broad P2 decode
+  failures are GlobalElementComplexTypeSequenceExtension and MixedComplexContent
+  (four directions each); mixed runtime behavior is coordinated with P5.
+- Complete and test the additive public lossless contract beyond attribute keys:
+  lexical forms, QName values, selected dynamic types, ordered particles, mixed
+  text and wildcard nodes, including client/handler/provider/example consumers.
+- Attribute provider field metadata and example generation, remaining inherited
+  constraint/derivation checks, named mixed emptiable simple-content restrictions,
+  expanded array item lookup, multi-root base paths and imported-reference permissions.
+- P2 phase-boundary acceptance must pass before P3 starts. P3–P9 remain unstarted;
+  no push or external publication is authorized or performed.
+
 ## Commit and audit record
 
 - `8914353` — P1-01, `pin W3C corpus and isolate offline schema diagnostics`: verified archive,
@@ -277,7 +505,7 @@ findings and current diagnostic reports.
   checks: 59 Python tests and 235 Qore cases pass. Complete 62-item audit
   [audits/P2-02.md](audits/P2-02.md); all applicable checks pass. P2 remains in progress.
 
-- P2-03 (this increment) — global/anonymous/default attribute type construction,
+- `4809f18` — P2-03 — global/anonymous/default attribute type construction,
   declaration form metadata and unconditional use validation: 59 Python tests and
   246 Qore cases pass. Complete 62-item audit [audits/P2-03.md](audits/P2-03.md);
   all applicable checks pass. P2 remains in progress.
