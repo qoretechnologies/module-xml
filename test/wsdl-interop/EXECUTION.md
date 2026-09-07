@@ -513,6 +513,51 @@ findings and current diagnostic reports.
   384 complete diagnostic failures remain. No phase-boundary or full-suite pass claimed.
 - Full 62-item audit: [audits/P2-06.md](audits/P2-06.md). No C++ change or push.
 
+### P2-07 simple-content provider representations
+
+- Attributed simple content now exposes the existing structured `^value^` and
+  `^attributes^` representation through XsdSimpleContentDataType. Scalar input stays
+  scalar when all attributes are optional; a required attribute requires a hash.
+  Optional variants accept an omitted complete value without weakening requirements
+  of a supplied hash. Invalid hashes never fall back to scalar conversion.
+- Scalar enum choices belong to `^value^`, including in nested elements and message
+  parts. The additive getDataProviderAllowedValues() API reports complete-value
+  choices; the existing scalar getAllowedValues() API is preserved. Metadata exposes
+  a hash for required-attribute types and scalar/hash alternatives otherwise. The
+  existing SOAP provider assertion was updated because its fixture requires `info`;
+  it now checks the required attribute, scalar field type/choices, exact accepted
+  structure and missing-attribute rejection.
+- Four new scenarios failed before the change. The consumer suite now passes
+  12 cases / 137 assertions, including scalar false/zero/empty values, required and
+  optional copies, unknown/wrong fields, nested choices, WebService reconstruction
+  and direct Serializable provider reconstruction.
+- Qore core prerequisite: `5c8899669`, `fix: retain required hash fields when adding
+  defaults`, committed separately on Qore develop. postProcessAddedField forgot a
+  required field added before an optional default. The source fix records it in
+  either order. Four new core cases / 21 assertions and 45 existing core cases pass.
+  Full 62-item core audit: Qore repository
+  `examples/test/qlib/DataProvider/HashDataTypeRequiredFields.audit.md`.
+- Core AGENTS.md was read and DataProvider-qmod rebuilt with the existing /usr prefix
+  and release build. The first attempt detected source changes during compilation;
+  the retry succeeded. Optional quictls/LibreSSL CMake messages were recorded; test
+  runs have no warnings/errors. No C++ source changed or installation performed.
+- All WSDL tests use `QORE_MODULE_DIR=/home/david/src/qore/git/qore/qlib` to load that
+  local core fix. Without it, the installed DataProvider still shows the requiredness
+  regression. All 322 affected Qore cases pass in 19 suites. Logs:
+  `/tmp/wsdl-p2-07-<suite>.log` and `/tmp/wsdl-p2-07-core-*.log`.
+- Four independent attribute tests pass, with all 12 new generated payloads now
+  passing through provider conversion, including simple content, before serialization
+  in both directions of separate actual SOAP 1.1/1.2 contracts. Both validators and
+  exact typed/expanded-name assertions pass (`/tmp/wsdl-p2-07-independent-final.log`).
+- Full Python run: 69 tests, 68 pass; the remaining test retains the same two P6
+  selected-binding-version subtest failures (`/tmp/wsdl-p2-07-python.log`). Final
+  metadata refinements were rerun in the affected consumer/SOAP/independent tests.
+  Both-version survey and strict coverage are unchanged except the module digest:
+  38 descriptions / 140 directions pass; all 384 diagnostic failures remain visible.
+- Complete incremental audit: [audits/P2-07.md](audits/P2-07.md). P2 acceptance stays
+  open; broader lexical/QName/dynamic/ordered/mixed/wildcard representations and
+  remaining namespace/schema checks are still required. No push performed.
+
 ### Remaining P2 acceptance work
 
 - Incoming element namespace identity and same-local-name element collisions; the
@@ -522,8 +567,7 @@ findings and current diagnostic reports.
 - Complete and test the additive public lossless contract beyond attribute keys:
   lexical forms, QName values, selected dynamic types, ordered particles, mixed
   text and wildcard nodes, including client/handler/provider/example consumers.
-- Simple-content provider scalar/structured metadata, remaining inherited
-  constraint/derivation checks, named mixed emptiable simple-content restrictions,
+- Remaining inherited constraint/derivation checks, named mixed emptiable simple-content restrictions,
   expanded array item lookup and imported-reference permissions.
 - P2 phase-boundary acceptance must pass before P3 starts. P3–P9 remain unstarted;
   no push or external publication is authorized or performed.
@@ -574,3 +618,10 @@ findings and current diagnostic reports.
   restoration: 310 Qore cases pass; 67 of 68 Python tests pass with the existing
   two P6 subtest failures. Corpus reports unchanged except module digest. Full
   62-item incremental audit [audits/P2-05.md](audits/P2-05.md).
+
+- `6e93367` — P2-06 — complex attribute provider fields and constrained examples:
+  318 Qore cases pass; 68/69 Python tests pass with the recorded P6 failures. Full
+  62-item audit [audits/P2-06.md](audits/P2-06.md). No push.
+- Qore `5c8899669` — P2-07 prerequisite — required hash field tracking independent
+  of default insertion order; 49 core cases pass. Full audit in the Qore repository
+  at `examples/test/qlib/DataProvider/HashDataTypeRequiredFields.audit.md`.

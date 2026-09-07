@@ -353,3 +353,19 @@ actual SOAP 1.1/1.2 bindings and validates both request and response outputs wit
 libxml2 and pinned Xerces. Exact typed defaults, fixed values, child values and
 qualified attribute names are asserted; schema validity alone is insufficient.
 The worker has a thirty-second deadline and uses temporary local descriptions.
+
+Simple-content provider coverage requires the Qore DataProvider fix in commit
+`5c8899669` (required hash fields followed by defaulted fields). With sibling
+`module-xml` and `qore` checkouts, test it without installing:
+
+```sh
+cmake --build ../qore/build --target DataProvider-qmod
+QORE_MODULE_DIR="$PWD/../qore/qlib" qore --enable-debug test/wsdl-attribute-consumers.qtest
+QORE_MODULE_DIR="$PWD/../qore/qlib" python3 test/wsdl-interop/test_attribute_values.py -v
+```
+
+The worker now passes all twelve examples, including simple content, through provider
+conversion before serialization. `getFields()` exposes `^value^` and `^attributes^`;
+scalar choices are on `^value^`. Existing callers with valid bare scalars retain
+scalar outputs when every attribute is optional. Required attributes require the
+structured representation. Serializable schema and provider objects retain this contract.

@@ -117,6 +117,9 @@ module WSDL {
     - complex element-content and empty-content provider types expose \c ^attributes^ fields with requiredness,
       typed defaults, fixed/enumerated choices and expanded collision keys; generated attribute examples honor
       fixed/default values, including on simple content
+    - attributed simple-content providers accept the existing \c ^value^ / \c ^attributes^ representation and
+      expose its fields, while retaining scalar inputs/outputs when all attributes are optional; scalar choices
+      apply to the value field and invalid structured inputs cannot fall back to scalar conversion
     - fixed serializing values in the upper half of the \c xs:unsignedShort and \c xs:unsignedInt ranges;
       the limits are now 65535 and 4294967295 respectively
     - fixed serializing native IEEE floating-point infinities and NaN as XSD \c INF, \c -INF, and \c NaN;
@@ -1340,6 +1343,12 @@ public class XsdAbstractType inherits WSDL::XsdNamedData {
 
     *list<auto> getAllowedValues() {
         # this method intentionally left empty
+    }
+
+    #! returns finite choices for the complete provider value
+    /** @return scalar choices, or NOTHING when the complete value has no finite choice list */
+    *list<auto> getDataProviderAllowedValues() {
+        return getAllowedValues();
     }
 
     abstract auto serializeValue(Namespaces nsc, auto val, *softbool omitType);
@@ -2679,6 +2688,12 @@ public class XsdElement inherits WSDL::XsdTypedData {
         return type.getAllowedValues();
     }
 
+    #! returns finite choices for the complete provider value
+    /** @return the declared type's complete-value choices */
+    *list<auto> getDataProviderAllowedValues() {
+        return type.getDataProviderAllowedValues();
+    }
+
     assimilate(WSDL::XsdElement other) {
         map self{$1.key} = $1.value, other.pairIterator(), !exists self{$1.key};
         # we have to use the namespace of the referenced element
@@ -2892,6 +2907,146 @@ public class XsdAttributeDataType inherits QoreDataType {
     /** @return the scalar provider's element type, or NOTHING */
     *AbstractDataProviderType getElementType() {
         return value_type.getElementType();
+    }
+}
+
+#! provider type for the scalar and structured representations of attributed simple content
+/** Scalar inputs keep their scalar representation when all attributes are optional. Hash inputs use
+    \c ^value^ and \c ^attributes^ and are validated as that structure without a scalar fallback.
+
+    @since %WSDL 0.5.8
+*/
+public class XsdSimpleContentDataType inherits AbstractDataProviderType {
+    private {
+        string name;
+        QoreDataField value_field;
+        HashDataType structured_type;
+        bool allow_scalar;
+        bool optional;
+    }
+
+    #! constructs the two supported representations of attributed simple content
+    /** @param name schema type name
+        @param value_field scalar field with its conversion and finite choices
+        @param structured_type fields for the existing structured representation
+        @param allow_scalar whether scalar inputs can omit all attributes
+        @param optional whether the complete value may be omitted
+    */
+    constructor(string name, QoreDataField value_field, HashDataType structured_type, bool allow_scalar,
+            bool optional = False) {
+        self.name = name;
+        self.value_field = value_field;
+        self.structured_type = structured_type;
+        self.allow_scalar = allow_scalar;
+        self.optional = optional;
+    }
+
+    #! returns the schema type name
+    /** @return the name supplied at construction */
+    string getName() {
+        return name;
+    }
+
+    #! returns the Qore representation shared by the supported alternatives
+    /** @return AutoType when scalar inputs are supported; otherwise the appropriate hash type */
+    *Type getValueType() {
+        return allow_scalar ? AutoType : (optional ? AutoHashOrNothingType : AutoHashType);
+    }
+
+    #! returns whether the complete value must be supplied
+    /** @return False only for an optional variant */
+    bool isMandatory() {
+        return !optional;
+    }
+
+    #! returns whether the complete value may be omitted
+    /** @return True only for an optional variant */
+    bool isOrNothingType() {
+        return optional;
+    }
+
+    #! returns no outer list element type
+    /** @return NOTHING; list-valued simple content is described by the scalar field */
+    *AbstractDataProviderType getElementType() {
+        return;
+    }
+
+    #! returns the fields of the structured representation
+    /** @return the ^value^ and ^attributes^ fields */
+    *hash<string, AbstractDataField> getFields() {
+        return structured_type.getFields();
+    }
+
+    #! returns the input type names for the supported alternatives
+    /** @param simple request simplified type names
+        @return accepted scalar/hash type names and optionality
+    */
+    hash<string, bool> getAcceptTypeHash(*bool simple) {
+        hash<string, bool> rv = structured_type.getAcceptTypeHash(simple);
+        if (allow_scalar) {
+            rv += value_field.getType().getAcceptTypeHash(simple);
+        }
+        if (optional) {
+            rv.nothing = True;
+        } else {
+            delete rv.nothing;
+        }
+        return rv;
+    }
+
+    #! returns the output type names for the supported alternatives
+    /** @param simple request simplified type names
+        @return returned scalar/hash type names and optionality
+    */
+    hash<string, bool> getReturnTypeHash(*bool simple) {
+        hash<string, bool> rv = structured_type.getReturnTypeHash(simple);
+        if (allow_scalar) {
+            rv += value_field.getType().getReturnTypeHash(simple);
+        }
+        if (optional) {
+            rv.nothing = True;
+        } else {
+            delete rv.nothing;
+        }
+        return rv;
+    }
+
+    #! converts the selected representation without changing its shape
+    /** @param value a scalar or a hash with a ^value^ member and optional ^attributes^
+        @return the converted scalar, converted hash, or NOTHING for an omitted optional value
+        @throw MISSING-VALUE-ERROR a required value or attribute container is omitted
+        @throw RUNTIME-TYPE-ERROR invalid structured fields or scalar conversion
+        @throw FIELD-VALUE-ERROR the scalar value violates its finite choices
+    */
+    auto acceptsValue(auto value) {
+        if (!exists value) {
+            if (optional) {
+                return;
+            }
+            throw "MISSING-VALUE-ERROR", sprintf("Simple-content value %Y must be supplied", name);
+        }
+        if (value.typeCode() == NT_HASH) {
+            if (!value.hasKey("^value^")) {
+                throw "MISSING-VALUE-ERROR", sprintf("Structured simple content %Y requires a ^value^ field", name);
+            }
+            return structured_type.acceptsValue(value);
+        }
+        if (!allow_scalar) {
+            throw "MISSING-VALUE-ERROR", sprintf("Simple content %Y requires an ^attributes^ field", name);
+        }
+        return value_field.acceptsValue(value);
+    }
+
+    #! returns an optional equivalent without weakening requirements of a supplied hash
+    /** @return an optional variant sharing the field definitions */
+    AbstractDataProviderType getOrNothingType() {
+        return optional ? self : new XsdSimpleContentDataType(name, value_field, structured_type, allow_scalar, True);
+    }
+
+    #! returns a mandatory equivalent without changing the source type
+    /** @return a mandatory variant sharing the field definitions */
+    AbstractDataProviderType getMandatoryType() {
+        return optional ? new XsdSimpleContentDataType(name, value_field, structured_type, allow_scalar) : self;
     }
 }
 
@@ -5162,6 +5317,14 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
         }
     }
 
+    #! returns finite choices for the complete provider value
+    /** @return NOTHING for structured simple content, whose choices belong to its scalar field;
+        otherwise the existing scalar choices
+    */
+    *list<auto> getDataProviderAllowedValues() {
+        return simpleType && attrs ? NOTHING : getAllowedValues();
+    }
+
     finalize(hash<string, XsdAbstractType> tmap, Namespaces nsc, *hash<string, XsdGroup> groupMap,
             *hash<string, XsdAttributeGroup> attrGroupMap, *XsdLateResolverHelper unresolved) {
         if (finalized) {
@@ -5737,18 +5900,32 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
         }
         switch (cx_type) {
             case XET_SIMPLE:
+                if (attrs) {
+                    QoreDataField value_field({
+                        "name": "^value^",
+                        "display_name": "Value",
+                        "short_desc": "Simple content value",
+                        "desc": "The element's scalar value; XML attributes are supplied separately",
+                        "type": simpleType.getDataProviderType(),
+                        "allowed_values": map ("value": $1, "display_name": string($1)), simpleType.getAllowedValues(),
+                    });
+                    HashDataType structured_type(name);
+                    structured_type.addField(value_field);
+                    return new XsdSimpleContentDataType(name, value_field, addAttributeFields(structured_type),
+                        !hasRequiredAttributes());
+                }
                 return simpleType.getDataProviderType();
 
             case XET_SEQUENCE:
             case XET_ALL: {
                 HashDataType rv(name);
                 map rv.addField(new QoreDataField($1.key, NOTHING, $1.value.getDataProviderType(), NOTHING,
-                    $1.value.getAllowedValues())), elementmap.pairIterator();
+                    $1.value.getDataProviderAllowedValues())), elementmap.pairIterator();
                 # issue #5410: elements declared in a choice block in the model group must be included as well; at
                 # most one alternative of a choice can be present, therefore all its members must be optional
                 foreach hash<ChoiceInfo> ch in (choices) {
                     map rv.addField(new QoreDataField($1.key, NOTHING,
-                        $1.value.getDataProviderType().getOrNothingType(), NOTHING, $1.value.getAllowedValues())),
+                        $1.value.getDataProviderType().getOrNothingType(), NOTHING, $1.value.getDataProviderAllowedValues())),
                         ch.elementmap.pairIterator();
                 }
                 return addAttributeFields(rv);
@@ -5758,7 +5935,7 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
                 HashDataType rv(name);
                 # at most one member of a choice may be present, therefore all members must be optional
                 map rv.addField(new QoreDataField($1.key, NOTHING,
-                    $1.value.getDataProviderType().getOrNothingType(), NOTHING, $1.value.getAllowedValues())),
+                    $1.value.getDataProviderType().getOrNothingType(), NOTHING, $1.value.getDataProviderAllowedValues())),
                     elementmap.pairIterator();
                 return addAttributeFields(rv);
             }
@@ -6565,7 +6742,7 @@ public class WSMessage inherits WSDL::XsdNamedData {
                 NOTHING,
                 $1.type ? $1.type.getDataProviderType() : $1.element.getDataProviderType(),
                 NOTHING,
-                $1.type ? $1.type.getAllowedValues() : $1.element.getAllowedValues()
+                $1.type ? $1.type.getDataProviderAllowedValues() : $1.element.getDataProviderAllowedValues()
             )),
             args.iterator();
         return rv;

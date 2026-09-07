@@ -189,11 +189,29 @@ auto converted = fields.acceptsValue(input);
 `WSMessageHelper` uses a resolved attribute constraint before attempting a generated
 scalar example. This applies to simple content as well as element/empty content;
 false, zero and empty-string constraints are retained. Unconstrained attributes
-continue to use the existing type-specific example generator. The simple-content
-provider's scalar/structured contract is tracked separately in P2 and is not
-changed by this increment.
+continue to use the existing type-specific example generator. Attributed simple content uses
+`XsdSimpleContentDataType`: a scalar stays scalar when all attributes are optional,
+and a hash stays a hash with `^value^` and `^attributes^`. A supplied hash must have
+`^value^`; required attributes and finite scalar choices are checked in that shape.
+Missing optional attribute constraints are filled only for the structured provider
+value; scalar callers retain their original return shape, and serialization applies
+attribute defaults as usual. Optional provider variants accept an omitted complete
+value while retaining required fields when a hash is supplied.
+
+For example, an attributed integer measurement can be passed as
+`{"^value^": "0", "^attributes^": {"unit": "cm"}}`; its provider converts the
+value to integer zero and retains the unit. If `unit` is required, a bare scalar
+is rejected. If every attribute is optional, a bare scalar still converts to an
+integer without being silently wrapped. `getFields()` describes the structured
+alternative. Scalar enumerations belong to the `^value^` field, and
+`getDataProviderAllowedValues()` reports choices for complete values separately
+from the existing scalar `getAllowedValues()` API.
 
 Tests: `wsdl-attribute-consumers.qtest` checks metadata, conversions, rejection,
 namespace collisions and reconstruction. `test_attribute_values.py` independently
 validates twelve generated request/response payloads from actual SOAP 1.1 and 1.2
-contracts; eight also pass through provider default insertion.
+contracts; all twelve pass through provider default insertion, including simple content.
+
+Requiredness metadata depends on the Qore `HashDataType` insertion-order fix in
+commit `5c8899669`. The interoperability README documents loading the rebuilt local
+DataProvider during development without installing it.
