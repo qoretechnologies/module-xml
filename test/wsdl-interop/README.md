@@ -41,10 +41,11 @@ special values. It imports the development `qlib/WSDL.qm` using a relative path.
 The W3C WSDLs bind SOAP 1.1; receiving their supplied SOAP 1.2 payloads tests decoding, not negotiation or
 SOAP 1.2 outbound binding selection.
 
-The archive's unsigned cases numbered 02 (`-0`) and 03 (`+42`) are retained for the survey but excluded
-from the regression subset's source-validation assertions: these signed examples are not unambiguous
-XSD 1.0 unsigned lexical oracles, and libxml2 rejects `-0`. The regression suite uses the ordinary positive
-case and the maximum case; it does not suppress validation failures or alter fixtures.
+The archive's unsigned cases numbered 02 (`-0`) and 03 (`+42`) are invalid under the selected XSD 1.0
+unsigned lexical rules, which allow digits without a sign. They remain in the survey and the source
+adjudication's negative cases. Xerces accepts these spellings; `normative.py` independently checks the
+XSD 1.0 rule. The Qore numeric regression subset uses ordinary positive values and maxima; production
+rejection of the invalid signed inputs is assigned to P3.
 
 The Python tests require Python 3.10+, `lxml`, and Qore's `json` module in addition to `xml`. They test the
 real Qore subprocess, version selection, fixture checksums, empty input, namespace preservation,
@@ -108,8 +109,9 @@ imports. **W3C's `Imported.xsd` currently returns HTTP 200 with zero bytes**, al
 [published directory index](https://www.w3.org/2002/ws/databinding/examples/6/09/static/).
 The catalog preserves that empty source; it does not supply an invented schema. Parsing it must fail:
 an XML document requires a document element ([XML 1.0 §2.1](https://www.w3.org/TR/xml/#sec-well-formed)).
-Recovering a valid historical version, or closing its source-defect adjudication with complete
-reference evidence, remains part of P1. No missing dependency is counted as successful validation.
+Both independent validators reject the empty document. The `ImportSchema` wrapper also references an
+element absent from the pinned graph. These source defects are recorded explicitly in the adjudication.
+No missing dependency is counted as successful validation.
 
 Schema compilations use separate parsers. A resolver exception in one schema must not contaminate the
 next schema's diagnostics; the previous shared parser incorrectly attributed `ChoiceChoice` and
@@ -124,6 +126,65 @@ validation of payloads before and after serialization. It does not prove value e
 validate the complete WSDL grammar, validate the SOAP envelope against its schema, or test HTTP behavior.
 In particular, schema-valid output can still lose decimal precision, timezone information, or dynamic type
 information; those require explicit value and infoset assertions.
+
+## Independent source adjudication
+
+The second oracle is Apache Xerces-J 2.12.2, pinned by SHA-256 in `oracle/manifest.json` with the
+unmodified Maven JAR and its embedded license/notices. A JDK 11+ (`java`, `javac`) is required.
+The worker compiles with `-Xlint:all -Werror`, runs with a 256 MiB heap and a 60-second deadline, and
+accepts at most 10,000 schema/document/resource blobs with 64 MiB aggregate raw content. Imported
+resources are supplied as bytes; unlisted locations and DTDs are rejected. Tests exercise malformed
+results, missing dependencies, duplicate IDs, cancellation and cleanup. Nothing is downloaded at run time.
+
+```sh
+python3 -m unittest discover -s test/wsdl-interop -p 'test_*.py' -v
+python3 test/wsdl-interop/adjudicate.py /tmp/wsdl-corpus/databinding/examples/6/09 \
+  --strict --output /tmp/wsdl-adjudicated.json
+```
+
+`--strict` on this command means **every source disagreement is adjudicated**, not that Qore conforms.
+The report assesses every payload against the actual inline schema and the separately supplied echo
+schema using both libxml2 and Xerces. It also records expanded component names, request and response
+message references, parts, bindings, ports, and original/derived-extraction checksums. The SOAP 1.2 input
+samples still belong to SOAP 1.1 WSDL bindings; their schema validity is not SOAP 1.2 binding coverage.
+Extra source files, altered originals, duplicate cases, undocumented decisions and stale entries fail.
+
+[adjudications.json](adjudications.json) contains specification decisions and P1–P9 ownership;
+[adjudication-report.json](adjudication-report.json) contains all 293 echo WSDLs, 1,136 messages and
+three retained historical unassessed outputs. The source assessment finds 14 invalid generated WSDLs,
+88 invalid messages, and 1,048 valid payloads. All three historical unassessed outputs validate.
+These counts do not establish preserved typed values or production rejection of invalid messages.
+[current-report.json](current-report.json) retains the separate Qore diagnostic results.
+
+The adjudication explicitly distinguishes:
+
+- missing echo wrappers, unresolved element references, the `ImportTypesNamesapce` spelling and
+  invalid nested `wsdl` content generated from whole-schema patterns;
+- valid arbitrary-size decimal/integer literals beyond libxml2's precision limit, with exact-value
+  predicates that detect rounding and exponent output;
+- invalid ENTITY/ENTITIES references to parsed or undeclared entities;
+- the corrected XSD 1.0 `gMonth` syntax and timezone bounds (including erratum E2-12);
+- invalid qualified attributes, strict wildcards, content and occurrence counts;
+- four additional IDREF/IDREFS families whose dangling references Xerces rejects and libxml2 accepts,
+  assigned to P5;
+- Xerces acceptances of signed unsigned values and obsolete `gMonth` spellings, which are overridden
+  by executable normative assertions rather than counted as valid source inputs.
+
+Source defects do not remove the corresponding feature from the implementation plan. P1 still needs
+the strict selected-corpus Qore gate, complete stage accounting and response processing. The aggregate
+`examples.xsd`/`examples.wsdl` sources also contain a relative import resolving to a W3C URL that returns
+404 (`examples/6/static/RelativeIncluded.xsd`); these aggregate artifacts remain separately tracked
+from the 293 echo contracts. Their bytes remain pinned and verified.
+
+## Pinned CXF contracts
+
+All eight candidate contracts listed above are now pinned at Apache CXF tag `cxf-4.1.3`, commit
+`5b660b5f9d26ae1e606c6291e8beb61ef0d7fcc8`, under `cxf/`, along with the `header.xsd` import and license/
+notice files. `cxf/catalog.json` records original URLs, hashes and the complete import graph. The
+location-less SwA namespace import is satisfied by a second inline schema. The fixtures are reserved
+for P6–P8; pinning and metadata inspection do not claim runtime interoperability. `no_body_parts.wsdl`
+omits the body `parts` attribute inside MIME multipart; an explicit empty `parts=""` is a distinct case
+covered separately by the component-inventory tests and required by P6.
 
 ## Results, 2026-09-07
 

@@ -2,7 +2,9 @@
 
 Copyright (C) 2026 Qore Technologies, s.r.o.
 
-Status: proposed work, not implemented. Prepared 2026-09-07 after `cc13171` on `develop`.
+Status: implementation in progress; P1 components are being implemented on `develop`.
+See [EXECUTION.md](EXECUTION.md) for completed checks and remaining criteria. No phase is complete yet.
+Prepared 2026-09-07 after `cc13171` on `develop`.
 Keep proposals here; put durable implementation details in `design/` only after implementation.
 
 The objective is to close every finding in [findings.json](findings.json), resolve every recorded
