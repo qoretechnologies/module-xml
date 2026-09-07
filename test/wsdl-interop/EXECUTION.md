@@ -558,6 +558,47 @@ findings and current diagnostic reports.
   open; broader lexical/QName/dynamic/ordered/mixed/wildcard representations and
   remaining namespace/schema checks are still required. No push performed.
 
+### P2-08 compositor namespace scopes
+
+- Tracing incoming element identity exposed an earlier declaration-context defect:
+  `parseModelGroup()`, `getChoiceAlternatives()` and `flattenModelGroup()` ignored
+  namespace declarations on their compositor. Children with locally introduced
+  prefixes failed; rebound prefixes could incorrectly resolve an enclosing type.
+  The legacy array element-sequence path had the same omission.
+- These four paths now enter the existing exception-safe `NamespacePrefixHelper`
+  before constructing children. XML Namespaces 1.0 sections 6.1/6.2 and XSD 1.0
+  QName interpretation require the in-scope bindings, including default resets:
+  https://www.w3.org/TR/xml-names/#scoping and
+  https://www.w3.org/TR/xmlschema-1/#src-qname. No particle algorithm or public
+  data representation changes in this increment.
+- `test/wsdl-compositor-context.qtest`: the original seven cases all failed before
+  the fix. The final eight cases / 55 assertions pass, covering sequence/choice/all,
+  nested alternatives, sibling restoration, default/no namespace, deferred type
+  and element refs, invalid/unbound namespaces, failed-addition reuse, provider
+  metadata, Serializable reconstruction and legacy array element scope.
+- `test_compositor_context.py` verifies actual SOAP 1.1/1.2 contracts in both
+  directions. Sixteen input/output pairs preserve exact child names and false/zero
+  values; all 32 documents pass libxml2 and pinned Xerces. Separate negative checks
+  establish that both validators reject all four mixed-alternative payloads.
+- The negative experiment independently exposed `P4-nested-choice-exclusivity`:
+  `getChoiceAlternatives()` calls `flattenModelGroup()` for a nested choice and
+  collapses its mutually exclusive alternatives into one member map. This behavior
+  predates the scope guards and is assigned to P4's particle-model replacement.
+  `test_nested_choice_exclusivity_requirement_p4` retains four actual failing
+  request/response subtests in the normal Python discovery run. No skips, expected
+  failures or validator relaxations were added.
+- All 330 Qore cases in 20 suites pass with debugging enabled and the local core
+  module path (logs `/tmp/wsdl-p2-08-<suite>.log`). Full Python run: 71 tests,
+  69 pass; two tests retain six failing subtests (four P4 and the two existing P6
+  binding-version failures). No new namespace failures or warnings remain.
+- Both corpus reports are identical to P2-07 except the production module digest:
+  `0410a173e1a77c795b866e18ce04b1d4e062bf043f38a4ab918af99c1e7dcf4f`.
+  Strict gate: 38 descriptions / 140 directions, zero selected failures. Broad
+  coverage retains 384 failures, zero missing/skipped cases. Exact recursive JSON
+  comparisons checked every report row before replacing the current reports.
+- Full 62-item incremental audit: [audits/P2-08.md](audits/P2-08.md). P2 remains
+  active; this is not a green full Python run or phase-boundary acceptance.
+
 ### Remaining P2 acceptance work
 
 - Incoming element namespace identity and same-local-name element collisions; the
@@ -625,3 +666,6 @@ findings and current diagnostic reports.
 - Qore `5c8899669` — P2-07 prerequisite — required hash field tracking independent
   of default insertion order; 49 core cases pass. Full audit in the Qore repository
   at `examples/test/qlib/DataProvider/HashDataTypeRequiredFields.audit.md`.
+- `4ae38d1` — P2-07 — attributed simple-content provider fields, scalar compatibility
+  and complete-value choices; 322 Qore cases pass, with the two recorded P6 subtest
+  failures. Full 62-item audit [audits/P2-07.md](audits/P2-07.md). No push.

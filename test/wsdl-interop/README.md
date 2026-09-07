@@ -74,6 +74,17 @@ response assertions remain failing. P2 payload checks execute before those asser
 separate actual SOAP 1.1/1.2 contracts check attribute values and namespaces in both
 directions. The strict corpus gate does not replace the full suite or phase acceptance.
 
+Compositor namespace checks cover declarations on `sequence`, `choice`, and `all`,
+nested/default scopes, deferred references and restoration after errors. Run
+`qore --enable-debug test/wsdl-compositor-context.qtest` and
+`python3 test/wsdl-interop/test_compositor_context.py -v` with the local core module
+path described below. Actual SOAP 1.1/1.2 bindings exercise request and response
+payloads against libxml2 and pinned Xerces, with exact child names and values.
+The Python test also retains four failing subtests for
+`P4-nested-choice-exclusivity`: a choice nested in a choice currently flattens its
+alternatives together and accepts an independently invalid combination. This
+particle-model defect is assigned to P4 and is not a passing namespace check.
+
 The attribute-extension source places `gender` on a string child that does not declare
 it. [Separately identified derivatives](derivatives/manifest.json) move that attribute
 to its declared parent, recording original/derived hashes and the two exact byte

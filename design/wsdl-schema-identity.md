@@ -11,6 +11,23 @@ An input prefix must be declared even when its spelling is `xsd`; builtin output
 uses a separately registered canonical prefix. Builtin type names and component
 declaration NCNames are checked during construction.
 
+Compositors (`sequence`, `choice`, and `all`) establish namespace scopes before
+their children are constructed. This also applies while collecting nested choice
+alternatives and reading legacy array element sequences. Captured type/reference
+QNames retain those scopes through deferred resolution; sibling declarations see
+the enclosing bindings after each compositor exits. For example, an invoice schema
+can declare its quantity type prefix on the sequence itself:
+
+```xml
+<xs:sequence xmlns:scalar="http://www.w3.org/2001/XMLSchema">
+  <xs:element name="quantity" type="scalar:int"/>
+</xs:sequence>
+```
+
+Default namespace declarations likewise apply to unprefixed QName values in child
+`type` and `ref` attributes. `xmlns=""` restores no-namespace references. These
+declaration scopes do not change the public decoded value shape.
+
 The type registry contains canonical `{uri}name` keys, including `{}name` for types
 without a target namespace. Existing bare-name aliases remain available to public
 callers; source QName resolution never uses those aliases. `make_qname()` retains its
