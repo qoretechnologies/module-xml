@@ -170,8 +170,7 @@ The adjudication explicitly distinguishes:
 - Xerces acceptances of signed unsigned values and obsolete `gMonth` spellings, which are overridden
   by executable normative assertions rather than counted as valid source inputs.
 
-Source defects do not remove the corresponding feature from the implementation plan. P1 still needs
-the strict selected-corpus Qore gate, complete stage accounting and response processing. The aggregate
+Source defects do not remove the corresponding feature from the implementation plan. The aggregate
 `examples.xsd`/`examples.wsdl` sources also contain a relative import resolving to a W3C URL that returns
 404 (`examples/6/static/RelativeIncluded.xsd`); these aggregate artifacts remain separately tracked
 from the 293 echo contracts. Their bytes remain pinned and verified.
@@ -185,6 +184,41 @@ location-less SwA namespace import is satisfied by a second inline schema. The f
 for P6–P8; pinning and metadata inspection do not claim runtime interoperability. `no_body_parts.wsdl`
 omits the body `parts` attribute inside MIME multipart; an explicit empty `parts=""` is a distinct case
 covered separately by the component-inventory tests and required by P6.
+
+## Strict Qore selection and complete diagnostic coverage
+
+```sh
+python3 test/wsdl-interop/coverage.py /tmp/wsdl-corpus/databinding/examples/6/09 \
+  --strict --output /tmp/wsdl-coverage.json
+```
+
+This command runs all 293 echo descriptions and both request and response processing for every one of
+the 1,136 original SOAP inputs (2,272 message/direction combinations). It verifies the original hashes
+and records the actual inline schema hash, expanded message/part names, service, port and binding for
+each direction. The worker explicitly selects that binding and operation. Every serialized body is
+retained and independently checked with libxml2 and Xerces. Output envelope versions are checked against
+the selected binding; the W3C SOAP 1.2 inputs still exercise a SOAP 1.1 contract.
+
+`--strict` requires the explicit [strict-selection.json](strict-selection.json) to pass: 23 WSDLs,
+including all 14 source-invalid descriptions, and 68 selected message/direction combinations. Positive
+cases require independent exact-value assertions; negative cases require the intended exception category.
+Missing, duplicate, stale, malformed or unclassified entries fail. This selection is deliberately named
+and bounded; it does not turn known implementation failures elsewhere into passing conformance tests.
+
+[coverage-report.json](coverage-report.json) preserves the complete current ledger, including 449 failed
+requirements assigned to later phases. Its stage accounting includes unreachable, missing, skipped and
+unassessed work. In this run 1,860 value/infoset assessments remain unimplemented, explicitly counted as
+unassessed. Successful schema validation is insufficient to close them. Exact numeric checks already
+detect 40 failed value-preservation cases, including large integer derivatives clamped to 64-bit limits
+and decimal values emitted with exponent notation. The report retains each expected and actual value.
+Valid large `integer` values that preserve their exact number override only the documented libxml2
+precision limitation; new oracle disagreements remain failures.
+
+The tests also exercise the unmodified CXF `hello_world_soap12.wsdl` with distinct `sayHi` request and
+response body elements, a real SOAP 1.2 binding and independently asserted response text. This is local
+operation coverage; HTTP peer interoperability remains assigned to P6–P8. Worker tests cover real process
+termination/reaping on cancellation, deterministic readiness, temporary-file cleanup, missing stages,
+and a schema-valid changed boolean that the strict value gate rejects.
 
 ## Results, 2026-09-07
 

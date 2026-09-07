@@ -74,11 +74,28 @@ No phase is complete yet. No scope reductions or workarounds are approved.
   which returns HTTP 404. This is outside the 293 echo contracts and remains an
   explicit P1 aggregate-source adjudication item; no original file was changed.
 
-Outstanding P1 criteria: finish aggregate-source/import accounting; tie current
-module failures and expected exception categories to the adjudicated ledger;
-implement strict selected-corpus Qore reporting, complete missing/unreachable
-stage counts and independent request/response runs with actual binding identity;
-complete worker cancellation tests, phase checks and the full commit audits.
+- P1-03 implements `coverage.py` and `strict-selection.json`: all 293 echo WSDLs,
+  1,136 originals and 2,272 independent request/response executions. Each direction
+  records its inline schema, message/parts, service/port and explicitly selected binding.
+  The report retains every serialized body, error category, stage failure and phase owner.
+  The 23-description / 68-message-direction strict selection passes, including all 14
+  invalid descriptions and selected negative payloads. Missing/duplicate results fail.
+- Complete stage counts: parse 274 pass / 19 fail; decode 1,976 pass / 232 fail /
+  64 unreachable; encode 1,972 pass / 4 fail / 296 unreachable. Each output oracle
+  accepts 1,876 and rejects 96 (different sets); 300 outputs are unreachable. Explicit
+  values: 72 pass / 40 fail / 300 unreachable / 1,860 unassessed. Zero missing/skipped.
+  The 449 failed requirements remain diagnostic failures, assigned to their phases.
+- Exact value checks expose P3 large-integer derivative clamping to signed 64-bit limits
+  and decimal exponent output. Schema-valid clamped values are not counted as preserved.
+  A regression mutates a boolean to a different schema-valid value and proves the strict
+  gate fails it. No production runtime behavior was changed by this test infrastructure.
+- Real worker cancellation uses a readiness event and checks that the child is terminated
+  and reaped and its manifest removed. Unit tests cover failure/deadline cleanup, malformed
+  manifests, stale source hashes and complete stage accounting. A pinned CXF SOAP 1.2
+  binding passes separate request/response checks with distinct body QNames and response text.
+
+Outstanding P1 criteria: finish aggregate-source/import and whole-archive role accounting;
+complete the final classification/requirement register review and phase acceptance checks.
 
 P2–P9 have not started. Later-phase failures remain recorded in the historical
 findings and current diagnostic reports.
@@ -90,7 +107,12 @@ findings and current diagnostic reports.
   [audits/P1-01.md](audits/P1-01.md). All applicable checks pass; language/provider
   checks outside this diff are individually N/A. Committed after tests and the full audit; no push performed.
 
-- P1-02 — independent source adjudication and pinned CXF contracts: 44 Python tests,
+- `7a9692e` — P1-02, independent source adjudication and pinned CXF contracts: 44 Python tests,
   10 Qore interoperability cases and 199 affected Qore cases pass. Both-version
   catalog survey is exactly unchanged from P1-01. Full 62-item audit:
   [audits/P1-02.md](audits/P1-02.md); all applicable checks pass.
+
+- P1-03 — strict Qore selection, independent directions and complete reporting:
+  54 Python tests and 209 Qore cases pass. Both original/catalog request surveys
+  are exactly unchanged from P1-02. Full 62-item audit:
+  [audits/P1-03.md](audits/P1-03.md); all applicable checks pass.

@@ -6,12 +6,15 @@ Copyright (C) 2026 Qore Technologies, s.r.o.
 
 import hashlib
 import json
+import os
 from copy import deepcopy
 from pathlib import Path
 import subprocess
+import selectors
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from lxml import etree
 
@@ -125,6 +128,112 @@ class SurveyTest(unittest.TestCase):
         survey.check_rows(cases, rows)
         with self.assertRaises(RuntimeError):
             survey.check_rows(cases, rows[:-1])
+
+    def test_complete_stage_accounting(self):
+        cases = [{"name": "A", "messages": [{"file": "a", "direction": "request"},
+                   {"file": "a", "direction": "response"}]},
+                 {"name": "B", "messages": [{"file": "b"}]}]
+        rows = [{"case": "A", "stage": "parse", "ok": True},
+                {"case": "A", "file": "a", "direction": "request", "stage": "deserialize", "ok": True},
+                {"case": "A", "file": "a", "direction": "request", "stage": "serialize", "ok": False,
+                 "err": "SOAP-SERIALIZATION-ERROR", "desc": "failure"},
+                {"case": "A", "file": "a", "direction": "response", "stage": "deserialize", "ok": False,
+                 "err": "SOAP-DESERIALIZATION-ERROR", "desc": "failure"},
+                {"case": "B", "stage": "parse", "ok": False, "err": "WSDL-ERROR", "desc": "failure"}]
+        result = survey.stage_accounting(cases, rows)
+        self.assertEqual({"ok": 1, "failed": 1, "unreachable": 1, "missing": 0, "skipped": 0},
+                         result["counts"]["deserialize"])
+        self.assertEqual({"ok": 0, "failed": 1, "unreachable": 2, "missing": 0, "skipped": 0},
+                         result["counts"]["serialize"])
+        self.assertEqual(6, len(result["stages"]))
+        for variant in (rows[:-1], rows + rows[:1], rows[:2] + rows[3:]):
+            with self.assertRaises(RuntimeError):
+                survey.stage_accounting(cases, variant)
+
+    def test_worker_rejects_malformed_manifests(self):
+        cases = survey.inventory(FIXTURES, "11")
+        for key, value in (("name", ""), ("binding", None), ("operation", 42), ("messages", {})):
+            invalid = deepcopy(cases)
+            invalid[0][key] = value
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                survey.validate_cases(invalid)
+        invalid = deepcopy(cases)
+        invalid[0]["messages"][0]["direction"] = "typo"
+        for variant in ([], cases * 2, invalid):
+            with self.assertRaises(ValueError):
+                survey.validate_cases(variant)
+        duplicate = deepcopy(cases)
+        duplicate[0]["messages"].append(duplicate[0]["messages"][0])
+        with self.assertRaisesRegex(ValueError, "duplicate worker message"):
+            survey.validate_cases(duplicate)
+
+    def test_worker_failure_cancellation_and_cleanup(self):
+        cases = survey.inventory(FIXTURES, "11")
+        for error in (KeyboardInterrupt(), subprocess.TimeoutExpired("qore", 60),
+                      subprocess.CalledProcessError(1, "qore", "", "failure")):
+            manifests = []
+
+            def run(command, **kwargs):
+                manifests.append(Path(command[-1]))
+                self.assertTrue(manifests[0].is_file())
+                self.assertTrue(kwargs["check"])
+                self.assertEqual(60, kwargs["timeout"])
+                raise error
+
+            with patch.object(survey.subprocess, "run", side_effect=run), self.assertRaises(type(error)):
+                survey.run_worker(cases, {})
+            self.assertEqual(1, len(manifests))
+            self.assertFalse(manifests[0].parent.exists())
+
+    def test_cancelled_worker_is_terminated_and_reaped(self):
+        cases = survey.inventory(FIXTURES, "11")
+        processes, manifests = [], []
+        base_process = subprocess.Popen
+        test = self
+
+        class InterruptedProcess(base_process):
+            def __init__(self, command, **kwargs):
+                manifests.append(Path(command[-1]))
+                super().__init__(command, **kwargs)
+                processes.append(self)
+
+            def communicate(self, *args, **kwargs):
+                # One readiness event with a bounded deadline; no polling or sleeps.
+                with selectors.DefaultSelector() as ready:
+                    ready.register(self.stdout, selectors.EVENT_READ)
+                    test.assertTrue(ready.select(timeout=5), "child did not signal readiness")
+                    test.assertEqual("ready\n", self.stdout.readline())
+                raise KeyboardInterrupt()
+
+        with tempfile.TemporaryDirectory(prefix="wsdl-cancel-child-") as directory:
+            worker = Path(directory) / "worker"
+            worker.write_text("#!/usr/bin/env python3\nimport signal\nprint('ready', flush=True)\nsignal.pause()\n")
+            worker.chmod(0o755)
+            with patch.object(survey.subprocess, "Popen", InterruptedProcess), self.assertRaises(KeyboardInterrupt):
+                survey.run_worker(cases, {}, str(worker))
+        self.assertEqual(1, len(processes))
+        self.assertIsNotNone(processes[0].returncode)
+        with self.assertRaises(ProcessLookupError):
+            os.kill(processes[0].pid, 0)
+        self.assertFalse(manifests[0].parent.exists())
+
+    def test_explicit_binding_and_independent_directions(self):
+        case = next(c for c in survey.inventory(FIXTURES, "both") if c["name"] == "BooleanElement")
+        case["binding"] = "SoapBinding"
+        case["messages"] = [dict(m, direction=d) for m in case["messages"] for d in ("request", "response")]
+        rows = survey.run_worker([case], {})
+        self.assertEqual(16, survey.stage_accounting([case], rows)["counts"]["serialize"]["ok"])
+        report = survey.examine(FIXTURES, [case], rows, retain_bodies=True)
+        self.assertEqual(16, report["counts"]["output_valid"])
+        self.assertEqual(8, len(report["inputs"]))
+        for row in report["rows"]:
+            if row["stage"] == "serialize":
+                self.assertIn("body", row)
+                self.assertIn(row["direction"], ("request", "response"))
+        case["binding"] = "not-a-binding"
+        rows = survey.run_worker([case], {})
+        self.assertEqual(1, len(rows))
+        self.assertEqual("WSDL-BINDING-ERROR", rows[0]["err"])
 
 
 if __name__ == "__main__":

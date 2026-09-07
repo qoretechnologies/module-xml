@@ -97,7 +97,7 @@ def validate(schema, wire, xml_parser):
         return {"ok": False, "desc": str(error)}
 
 
-def examine(corpus, cases, rows, catalog=None):
+def examine(corpus, cases, rows, catalog=None, retain_bodies=False):
     """Record input oracle disagreements separately from proven serialization failures."""
     schema_cache = {}
     inputs = {}
@@ -127,7 +127,7 @@ def examine(corpus, cases, rows, catalog=None):
                 {"ok": None, "desc": schema} if isinstance(schema, str)
                 else validate(schema, wire.encode(), parser(corpus, catalog))
             )
-            if row["output_validation"]["ok"] is not True:
+            if retain_bodies or row["output_validation"]["ok"] is not True:
                 row["body"] = wire
     counts = Counter(f"{r['stage']}_{'ok' if r['ok'] else 'failed'}" for r in rows)
     for row in rows:
@@ -147,10 +147,11 @@ def check_rows(cases, rows):
     """Require one complete, ordered worker result for every reachable manifest operation."""
     results = iter(rows)
 
-    def take(name, stage, file=None):
+    def take(name, stage, file=None, direction=None):
         row = next(results, None)
         if (not isinstance(row, dict) or row.get("case") != name or row.get("stage") != stage
-                or row.get("file") != file or type(row.get("ok")) is not bool):
+                or row.get("file") != file or row.get("direction") != direction
+                or type(row.get("ok")) is not bool):
             raise RuntimeError(f"incomplete or unexpected Qore result for {name}/{file}: {stage}")
         if row["ok"] and stage == "serialize" and not isinstance(row.get("body"), str):
             raise RuntimeError(f"missing serialized body for {name}/{file}")
@@ -162,11 +163,83 @@ def check_rows(cases, rows):
         if not take(case["name"], "parse"):
             continue
         for message in case["messages"]:
-            if take(case["name"], "deserialize", message["file"]):
-                take(case["name"], "serialize", message["file"])
+            if take(case["name"], "deserialize", message["file"], message.get("direction")):
+                take(case["name"], "serialize", message["file"], message.get("direction"))
     end = object()
     if next(results, end) is not end:
         raise RuntimeError("unexpected trailing Qore survey results")
+
+
+def validate_cases(cases):
+    """Reject duplicate or malformed work before launching the Qore worker."""
+    if not isinstance(cases, list) or not cases:
+        raise ValueError("empty or invalid worker cases")
+    names, identities = set(), set()
+    for case in cases:
+        if not isinstance(case, dict):
+            raise ValueError("invalid worker case")
+        for key in ("name", "wsdl", "base"):
+            if not isinstance(case.get(key), str) or not case[key]:
+                raise ValueError(f"invalid worker case {key}")
+        if case["name"] in names or not isinstance(case.get("messages"), list):
+            raise ValueError("duplicate case or invalid messages")
+        names.add(case["name"])
+        for key in ("binding", "operation"):
+            if key in case and (not isinstance(case[key], str) or not case[key]):
+                raise ValueError(f"invalid worker {key}")
+        for message in case["messages"]:
+            if (not isinstance(message, dict) or
+                    any(not isinstance(message.get(key), str) or not message[key] for key in ("file", "path"))
+                    or message.get("direction", "request") not in ("request", "response")):
+                raise ValueError("invalid worker message")
+            identity = (message["file"], message.get("direction", "request"))
+            if identity in identities:
+                raise ValueError("duplicate worker message")
+            identities.add(identity)
+
+
+def run_worker(cases, cache, qore="qore"):
+    """Run one bounded offline worker; cleanup happens on success, failure and cancellation."""
+    validate_cases(cases)
+    if not isinstance(cache, dict) or any(not isinstance(k, str) or not isinstance(v, str) for k, v in cache.items()):
+        raise ValueError("invalid worker resource cache")
+    with tempfile.TemporaryDirectory(prefix="qore-wsdl-survey-") as temporary:
+        manifest = Path(temporary) / "manifest.json"
+        manifest.write_text(json.dumps({"cases": cases, "cache": cache}))
+        run = subprocess.run([qore, "--enable-debug", str(Path(__file__).with_name("probe.qr")),
+                              str(manifest)], text=True, capture_output=True, timeout=60, check=True)
+    if run.stderr.strip():
+        raise RuntimeError(f"Qore emitted diagnostics:\n{run.stderr}")
+    rows = [json.loads(line) for line in run.stdout.splitlines()]
+    check_rows(cases, rows)
+    return rows
+
+
+def stage_accounting(cases, rows):
+    """Count the complete execution graph, including all unreachable downstream stages.
+
+    Missing, duplicate, reordered or unexpected reachable results fail check_rows;
+    they can never improve counts. No worker operation may be skipped.
+    """
+    check_rows(cases, rows)
+    counts = {stage: {status: 0 for status in ("ok", "failed", "unreachable", "missing", "skipped")}
+              for stage in ("parse", "deserialize", "serialize")}
+    indexed = {(row["case"], row.get("file"), row.get("direction"), row["stage"]): row for row in rows}
+    details = []
+    for case in cases:
+        parsed = indexed[case["name"], None, None, "parse"]["ok"]
+        counts["parse"]["ok" if parsed else "failed"] += 1
+        for message in case["messages"]:
+            identity = (case["name"], message["file"], message.get("direction"))
+            reachable = parsed
+            for stage in ("deserialize", "serialize"):
+                row = indexed.get((*identity, stage))
+                status = ("ok" if row["ok"] else "failed") if reachable else "unreachable"
+                counts[stage][status] += 1
+                details.append({"case": identity[0], "file": identity[1], "direction": identity[2] or "request",
+                                "stage": stage, "status": status})
+                reachable = reachable and row["ok"]
+    return {"counts": counts, "stages": details}
 
 
 def main():
@@ -189,15 +262,7 @@ def main():
             if uri in cache and cache[uri] != content:
                 raise ValueError(f"catalog conflicts with corpus resource: {uri}")
             cache[uri] = content
-    with tempfile.TemporaryDirectory(prefix="qore-wsdl-survey-") as temporary:
-        manifest = Path(temporary) / "manifest.json"
-        manifest.write_text(json.dumps({"cases": cases, "cache": cache}))
-        run = subprocess.run([args.qore, "--enable-debug", str(Path(__file__).with_name("probe.qr")),
-                              str(manifest)], text=True, capture_output=True, timeout=120, check=True)
-    if run.stderr.strip():
-        raise RuntimeError(f"Qore emitted diagnostics:\n{run.stderr}")
-    rows = [json.loads(line) for line in run.stdout.splitlines()]
-    check_rows(cases, rows)
+    rows = run_worker(cases, cache, args.qore)
     result = examine(corpus, cases, rows, catalog)
     result["catalog_sha256"] = dict(catalog.sha256) if catalog is not None else {}
     sources = sorted({Path(c["wsdl"]) for c in cases}
