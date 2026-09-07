@@ -4,9 +4,9 @@ Copyright (C) 2026 Qore Technologies, s.r.o.
 
 Execution started 2026-09-07 on `develop` at `c81b2db`, with a clean working tree.
 The authoritative scope and acceptance criteria remain in [PLAN.md](PLAN.md).
-No phase is complete yet. No scope reductions or workarounds are approved.
+P1 corpus/adjudication acceptance is complete; P2 is next. No scope reductions or workarounds are approved.
 
-## P1: corpus provenance and adjudication (in progress)
+## P1: corpus provenance and adjudication (complete)
 
 - Read the execution prompt, plan, README, historical findings, survey worker/driver,
   regression tests, and applicable instructions. The required audit skill is
@@ -71,8 +71,8 @@ No phase is complete yet. No scope reductions or workarounds are approved.
   oracle uses pinned Xerces and separate normative assertions for its limitations.
 - Additional original aggregate-source defect: `examples.xsd` and `examples.wsdl`
   resolve `../static/RelativeIncluded.xsd` to `examples/6/static/RelativeIncluded.xsd`,
-  which returns HTTP 404. This is outside the 293 echo contracts and remains an
-  explicit P1 aggregate-source adjudication item; no original file was changed.
+  which returns HTTP 404. This is outside the 293 echo contracts and is adjudicated
+  in P1-04 as an invalid source location; no original file was changed or URI remapped.
 
 - P1-03 implements `coverage.py` and `strict-selection.json`: all 293 echo WSDLs,
   1,136 originals and 2,272 independent request/response executions. Each direction
@@ -94,8 +94,41 @@ No phase is complete yet. No scope reductions or workarounds are approved.
   manifests, stale source hashes and complete stage accounting. A pinned CXF SOAP 1.2
   binding passes separate request/response checks with distinct body QNames and response text.
 
-Outstanding P1 criteria: finish aggregate-source/import and whole-archive role accounting;
-complete the final classification/requirement register review and phase acceptance checks.
+- P1-04 accounts for all 4,191 archive artifacts and all 48 import edges. The 293
+  duplicate standalone schemas are byte-identical; all 568 bare echo payloads and 568
+  raw fragments match their corresponding SOAP source content. Unknown dependencies,
+  stale evidence, extra files and duplicate IDs are fatal. Full report: `archive-report.json`.
+- All 18 additional historical/aggregate XSD/WSDL artifacts receive independent schema
+  and Qore parse diagnostics. Four are invalid sources because imports follow declarations;
+  the aggregate pair also embeds foreign schema content and references the empty import
+  and unavailable relative URL. These are explicit source defects, not missing test setup.
+- All 1,136 aggregate SOAP entries contain unqualified wrappers, independently checked
+  against their required expanded message-part roots and linked to the original echo files.
+  Nine additional valid historical contracts reproduce local default-XSD-namespace loss:
+  `Namespaces::doType()` uses shared `default_ns`, then `resolveType()` falls back to an
+  unqualified custom `string` lookup (WSDL.qm:7952 and :8595). They are assigned to P2.
+- Invalid historical descriptions rejected because of that namespace defect do not gain
+  credit for import-order validation. Production grammar rejection remains unassessed in P6.
+  Empty-import rejections are recorded as `PARSE-XML-EXCEPTION`; invalid grammar has the
+  expected `WSDL-ERROR` category. Full errors and requirement expectations remain visible.
+- The 32 output-oracle disagreements are now adjudicated: 16 exact large integers beyond
+  libxml2's precision and 16 unchanged invalid IDREF/IDREFS payloads. The latter retain their
+  input-rejection failures in P5. This adds no production acceptance or validation exceptions.
+
+### P1 acceptance evidence
+
+| Criterion | Evidence |
+| --- | --- |
+| Every original file and both SOAP versions accounted for | `corpus/inventory.json`, `archive-report.json`; original hashes unchanged |
+| Offline imports, all transitive edges, no unclassified dependencies | `corpus/catalog.json`, `corpus/source-defects.json`, 48 edges in `archive-report.json`; malformed upstream resources classified without substitution |
+| Actual inline schemas, wrappers, parts and both direction identities | `adjudication-report.json`, `coverage-report.json`, `contract.py` and tests |
+| Historical 52 rejected / 6 unassessed inputs and 3 unassessed outputs adjudicated | `adjudications.json`; pinned Xerces, libxml2 and specification assertions; zero unclassified source disagreements |
+| Valid failures remain failures with phase and reproducer | All 449 echo failures belong to P2–P5 (57/208/76/108); nine historical namespace failures belong to P2; file IDs, full bodies/errors and commands retained |
+| Source-invalid and oracle-defect coverage | Explicit negative selection with error categories; exact numeric and unchanged-IDREF predicates; aggregate source grammar and QName regressions |
+| Strict selected Qore gate plus complete broad diagnostics | 23 descriptions / 68 message-direction combinations pass; all 2,272 combinations retained, missing/skipped zero, unassessed values explicit |
+| Worker failure/cancellation and deterministic cleanup | Unit failure/deadline tests plus real readiness-event cancellation/reaping test; no sleeps/polling |
+| Pinned CXF contracts and imports; actual SOAP 1.2 operation check | `cxf/catalog.json`; all eight contracts/import graph verified; distinct request/response body and text assertions |
+| Tests and commit audit | 58 Python tests; 209 Qore cases; both-version diagnostic surveys unchanged; complete 62-item `audits/P1-04.md` |
 
 P2–P9 have not started. Later-phase failures remain recorded in the historical
 findings and current diagnostic reports.
@@ -112,7 +145,11 @@ findings and current diagnostic reports.
   catalog survey is exactly unchanged from P1-01. Full 62-item audit:
   [audits/P1-02.md](audits/P1-02.md); all applicable checks pass.
 
-- P1-03 — strict Qore selection, independent directions and complete reporting:
+- `150dc80` — P1-03, strict Qore selection, independent directions and complete reporting:
   54 Python tests and 209 Qore cases pass. Both original/catalog request surveys
   are exactly unchanged from P1-02. Full 62-item audit:
   [audits/P1-03.md](audits/P1-03.md); all applicable checks pass.
+
+- P1-04 — whole-archive accounting, supplemental source/parse evidence and P1
+  acceptance: 58 Python tests and 209 Qore cases pass; original/catalog surveys
+  unchanged. Full 62-item audit [audits/P1-04.md](audits/P1-04.md); all applicable checks pass.

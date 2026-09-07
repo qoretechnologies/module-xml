@@ -171,9 +171,9 @@ The adjudication explicitly distinguishes:
   by executable normative assertions rather than counted as valid source inputs.
 
 Source defects do not remove the corresponding feature from the implementation plan. The aggregate
-`examples.xsd`/`examples.wsdl` sources also contain a relative import resolving to a W3C URL that returns
-404 (`examples/6/static/RelativeIncluded.xsd`); these aggregate artifacts remain separately tracked
-from the 293 echo contracts. Their bytes remain pinned and verified.
+`examples.xsd`/`examples.wsdl` sources contain a relative import resolving to a W3C URL that returns
+404 (`examples/6/static/RelativeIncluded.xsd`). This invalid source location is adjudicated separately
+in `corpus/source-defects.json`; no replacement is mapped to that URI. Their bytes remain pinned and verified.
 
 ## Pinned CXF contracts
 
@@ -219,6 +219,36 @@ response body elements, a real SOAP 1.2 binding and independently asserted respo
 operation coverage; HTTP peer interoperability remains assigned to P6–P8. Worker tests cover real process
 termination/reaping on cancellation, deterministic readiness, temporary-file cleanup, missing stages,
 and a schema-valid changed boolean that the strict value gate rejects.
+
+## Whole-archive source accounting
+
+```sh
+python3 test/wsdl-interop/archive_roles.py /tmp/wsdl-corpus --output /tmp/wsdl-archive.json
+```
+
+[archive-report.json](archive-report.json) assigns a role and provenance to all 4,191 original files.
+It checks that all 293 standalone pattern schemas are exact duplicates of their echo schemas, and
+compares all 568 bare echo payloads and 568 raw fragments with their corresponding SOAP source content.
+The 293 WSDL 2.0 descriptions remain explicitly outside this plan. Historical toolkit scripts, logs
+and configuration are retained as data; the scripts are never executed.
+
+The 48 schema/import edges resolve to pinned resources, optional location-less imports, or adjudicated
+invalid sources (the empty `Imported.xsd` and two aggregate references to the URL returning 404).
+Unknown dependencies, extra source files, duplicate identities and changed source copies fail the run.
+
+Eighteen additional schema/WSDL artifacts receive schema-oracle and Qore parse results. Two historical
+toolkit WSDLs and the aggregate schema/WSDL violate the XSD schema grammar by placing imports after
+declarations. All 1,136 entries in the aggregate SOAP lists use unqualified echo wrappers; each entry is
+linked to the corresponding qualified per-case fixture and its required expanded root name. These are
+source defects, supported by the [schema grammar](https://www.w3.org/TR/xmlschema-1/#element-schema) and
+[element validity rules](https://www.w3.org/TR/xmlschema-1/#cvc-elt).
+
+Nine valid historical descriptions reproduce the local default-namespace type-resolution defect
+assigned to P2. Their source lines and expanded type identities are retained. A rejection caused by
+this namespace bug or an empty import does not prove that import ordering is validated; that grammar
+requirement remains explicitly unassessed in production and assigned to P6. The 16 output-oracle
+disagreements for unchanged invalid IDREF/IDREFS content are separately adjudicated using expanded
+names and token values, preserving their existing P5 rejection failures.
 
 ## Results, 2026-09-07
 

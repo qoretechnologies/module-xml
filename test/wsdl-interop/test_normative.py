@@ -65,6 +65,15 @@ class NormativeTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "exactly one"):
             normative.check_assertions(duplicate, [assertion])
 
+    def test_idref_source_copy_preserves_names_and_tokens(self):
+        source = etree.fromstring(b'<a:r xmlns:a="urn:a"><a:v refs="foo  bar"/></a:r>')
+        same = etree.fromstring(b'<r xmlns="urn:a">\n<v refs="foo bar"/>\n</r>')
+        self.assertTrue(normative.same_token_content(source, same))
+        for data in (b'<r xmlns="urn:b"><v refs="foo bar"/></r>',
+                     b'<r xmlns="urn:a"><v refs="bar foo"/></r>',
+                     b'<r xmlns="urn:a"><v refs="foo bar" id="foo"/></r>'):
+            self.assertFalse(normative.same_token_content(source, etree.fromstring(data)))
+
 
 if __name__ == "__main__":
     unittest.main()

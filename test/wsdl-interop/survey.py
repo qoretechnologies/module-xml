@@ -184,6 +184,9 @@ def validate_cases(cases):
         if case["name"] in names or not isinstance(case.get("messages"), list):
             raise ValueError("duplicate case or invalid messages")
         names.add(case["name"])
+        for key in ("schema_only", "parse_only"):
+            if key in case and (type(case[key]) is not bool or case[key] and case["messages"]):
+                raise ValueError(f"invalid worker {key} or unreachable messages")
         for key in ("binding", "operation"):
             if key in case and (not isinstance(case[key], str) or not case[key]):
                 raise ValueError(f"invalid worker {key}")

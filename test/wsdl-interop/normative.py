@@ -78,3 +78,16 @@ def check_assertions(payload: etree._Element, assertions: list[dict]) -> list[di
         result.append({"datatype": assertion["datatype"], "lexical": value, "valid": valid,
                        **({"value": assertion["value"]} if "value" in assertion else {})})
     return result
+
+
+def same_token_content(expected: etree._Element, actual: etree._Element) -> bool:
+    """Compare the adjudicated IDREF/IDREFS trees with XSD token whitespace normalization.
+
+    This is deliberately limited to token-content fixtures; it must not be used
+    to compare arbitrary strings, QName values or mixed content.
+    """
+    def signature(node: etree._Element) -> tuple:
+        return (node.tag, tuple(sorted((name, tuple(value.split())) for name, value in node.attrib.items())),
+                tuple((node.text or "").split()), tuple((signature(child), tuple((child.tail or "").split()))
+                    for child in node if isinstance(child.tag, str)))
+    return signature(expected) == signature(actual)

@@ -220,6 +220,7 @@ def assess(root: Path, source: dict, selection: dict, catalog: corpus.Catalog, q
                 assertions = selected.get("messages", {}).get(file)
                 if assertions is None:
                     assertions = [a for a in decision.get("assertions", []) if a["valid"] and a["datatype"] != "gMonth"]
+                expected = actual = None
                 try:
                     expected = survey.payload(Path(message["path"]).read_bytes(), survey.parser(root, catalog))
                     actual = survey.payload(encode["body"].encode(), survey.parser(root, catalog))
@@ -238,9 +239,15 @@ def assess(root: Path, source: dict, selection: dict, catalog: corpus.Catalog, q
                     # can be settled here. Every new disagreement stays a failure.
                     known_precision = (decision["valid"] and result["output_xerces"]["ok"] is True
                         and result["values"]["ok"] is True and "XSD10-arbitrary-number" in decision["requirements"])
+                    unchanged_invalid_idrefs = (not decision["valid"] and result["output_lxml"]["ok"] is True
+                        and result["output_xerces"]["ok"] is False and "XSD10-IDREF" in decision["requirements"]
+                        and "cvc-id.1" in result["output_xerces"]["desc"]
+                        and expected is not None and actual is not None
+                        and normative.same_token_content(expected, actual))
                     result["output_oracle_disagreement"] = {
-                        "adjudicated": known_precision, "requirements": decision["requirements"]}
-                    if decision["valid"] and not known_precision:
+                        "adjudicated": known_precision or unchanged_invalid_idrefs,
+                        "requirements": decision["requirements"]}
+                    if not known_precision and not unchanged_invalid_idrefs:
                         result["failures"].append("output_oracle_disagreement")
                 if decision["valid"] and not result["binding_version_passed"]:
                     result["failures"].append("binding_version")

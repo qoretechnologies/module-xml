@@ -2,8 +2,8 @@
 
 Copyright (C) 2026 Qore Technologies, s.r.o.
 
-Status: implementation in progress; P1 components are being implemented on `develop`.
-See [EXECUTION.md](EXECUTION.md) for completed checks and remaining criteria. No phase is complete yet.
+Status: P1 corpus/adjudication acceptance is complete on `develop`; P2 is next.
+See [EXECUTION.md](EXECUTION.md) for acceptance evidence and remaining implementation criteria.
 Prepared 2026-09-07 after `cc13171` on `develop`.
 Keep proposals here; put durable implementation details in `design/` only after implementation.
 

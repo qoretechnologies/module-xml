@@ -138,6 +138,10 @@ class CoverageTest(unittest.TestCase):
         self.assertEqual("WSDL-ERROR", by_name["BlockDefault"]["expected_parse"])
         invalid = [m for m in by_name["GlobalAttribute"]["messages"] if m["source_valid"] is False]
         self.assertTrue(all("wrong_error_category" in m["failures"] for m in invalid))
+        disagreements = [m["output_oracle_disagreement"] for c in report["cases"] for m in c["messages"]
+                         if "output_oracle_disagreement" in m]
+        self.assertEqual(32, len(disagreements))
+        self.assertTrue(all(d["adjudicated"] for d in disagreements))
 
 
 if __name__ == "__main__":

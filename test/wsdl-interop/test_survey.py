@@ -152,7 +152,8 @@ class SurveyTest(unittest.TestCase):
 
     def test_worker_rejects_malformed_manifests(self):
         cases = survey.inventory(FIXTURES, "11")
-        for key, value in (("name", ""), ("binding", None), ("operation", 42), ("messages", {})):
+        for key, value in (("name", ""), ("binding", None), ("operation", 42), ("messages", {}),
+                           ("parse_only", True), ("schema_only", "true")):
             invalid = deepcopy(cases)
             invalid[0][key] = value
             with self.subTest(key=key), self.assertRaises(ValueError):
