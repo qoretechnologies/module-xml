@@ -1831,3 +1831,97 @@ validation, IEEE semantics, dates/durations/partial dates and XSD regex semantic
 Existing native return types are preserved by this first lexical gate; it does
 not claim that those remaining conversions, providers or generated examples are
 correct. P3 remains active with its original scope unchanged.
+
+## P3-02: exact integer ranges and provider values (2026-09-08)
+
+P3-01 was committed as 16b3fe3. Native prerequisites are committed in Qore as
+860603291 (develop, not pushed); its full audit is
+examples/test/qore/vars/audits/exact-numeric-conversion.md. The regex NUL
+prerequisite is ea9ddfc51. No astparser edits or installation were made.
+Concurrent core CMake/Mistral/OpenApi3/RestSchema edits and the unrelated
+release-note hunk were preserved outside our commit.
+
+All thirteen integer builtins now compare canonical decimal strings by sign,
+length and lexical order before bounded conversion. Values beyond signed 64-bit
+range remain strings; xs:integer retains its existing noncanonical-string
+behavior. Native finite integral float/number values produce exact integer text;
+fractional/nonfinite values fail. XsdIntegerDataType validates before provider
+conversion, including lists, optional/mandatory and Serializable copies. Its
+absent native input type prevents ListDataType from coercing lexical strings
+first. Bounded output retains NT_INT metadata; int/string output reports NT_ALL.
+Negative/nonpositive generated examples now satisfy their builtin bounds.
+
+The core fixes address three root causes. MPFR's automatic significant-digit
+count only preserves source precision; raw integral output now requests enough
+digits for the complete integer. Default/scientific/fractional formatting and
+float-to-number precision policy are unchanged. The SOAP matrix then exposed
+LValueRemoveHelper's incorrect assumption that generic assignInitial() cannot
+return a redundant numeric box. Twelve paths now release that storage; the
+parent explicit AST regression aborts. Valgrind subsequently found typed foreach
+creating unowned integer/float boxes. Those instructions now use the existing
+owned-slot setter and cleanup ledger; the parent leaks 264 bytes in 11 blocks.
+Return/break/continue, exceptions, deterministic queue-event cancellation, empty
+lists, 48/64-bit transitions and negative NaNs are tested.
+
+The final Debug /usr native build passes 116 IR/AST cases / 1664 assertions.
+All three new suites pass Valgrind (13 cases / 153 assertions): zero errors and
+zero definite/indirect/possible loss, no suppressions. The independently
+reproduced DW_AT_abstract_origin tool warning remains an explicit P9 finding.
+An AOT constant retains exact raw digits; documentation templates regenerate.
+
+XML verification against the final implementation:
+
+- wsdl-integer-range.qtest passes 16 cases / 980 assertions. The initial parent
+  failed seven of fourteen cases: long overflow, unsignedLong/unbounded clamping
+  and invalid output for native integral floats. All 36 affected Qore suites
+  pass 479 cases, with --enable-debug and explicit local module paths.
+- Invalid serialized datatype/requiredness fields are rejected; a valid original
+  reconstructs after those failures. The first test draft used binary serialize()
+  where a SerializationInfo hash was required; serializeToData() fixes the test.
+  Its final targeted rerun passes after the other 35 affected suites passed.
+- Existing array/soap metadata keeps NT_INT for bounded output. Attribute list
+  metadata becomes xsd:int and adds malformed item rejection; original strings
+  reach validation before conversion. Optional/provider reconstruction is tested.
+- test_integer_range.py passes two tests with 1200 documents: 576 inputs and
+  416 outputs in 26 actual SOAP bindings, plus 208 provider/generated-example
+  documents in both directions through original/reconstructed services. Exact
+  Python integers and mandatory Xerces validation check every value. Ninety-six
+  libxml2 rejections of valid large input integers are explicitly asserted as
+  the retained P1 precision disagreement.
+- Final Python discovery runs 96 tests with exactly seven existing later-phase
+  failures (four P4 nested choices, two P6 binding selections, one P5 wildcard
+  example matrix), zero errors and no skips. The initial run also used the old
+  harness expectation that large integers lose values; test_coverage now
+  requires preservation and records all 64 adjudicated output disagreements.
+- WSDL Qdx/Doxygen and the documented provider .qr example pass without warnings
+  or errors. The first inline example invocation used literal newline escapes;
+  extracting and executing the actual documented script passes.
+
+The both-version survey has 293 descriptions / 1136 messages, 279 parsed /
+14 invalid sources, 974 decoded / 142 failures, 972 serialized / two failures,
+and eight valid-input-invalid-output rows. Its libxml2-only output counts are
+924 valid / 48 rejected. Exactly sixteen output verdicts change to the same
+known precision rejection as the original input: the formerly clamped values
+are now exact. Every other survey row is identical. Input counts remain
+1028 valid / 108 rejected / zero unassessed. The adjudicated both-direction
+report uses Xerces and exact values: 32 value-loss failures resolve, 264 broad
+failures remain, and no new failure appears.
+
+Strict selection includes all thirteen integer element/attribute families and
+original invalid inputs: 60 descriptions / 536 message-direction combinations,
+zero selected failures. Signed bounded fixtures use the exact integer comparator;
+authored boundary tests enforce each builtin range. No stage is missing/skipped;
+1492 broad infoset checks remain explicitly unassessed, and eight decimal value
+checks remain failing. Original corpus/source hashes and historical findings
+are unchanged. P3 remains active; this is not whole-phase acceptance.
+
+Logs: /tmp/wsdl-p3-02-{affected-final-audit,python-final,docs,doc-example,survey,
+coverage-final,independent-consumers}.log, /tmp/wsdl-p3-core-native-checks.log,
+/tmp/wsdl-p3-core-valgrind-checks.log, /tmp/wsdl-p3-native-{ir,ast,valgrind}-*.log,
+and /tmp/wsdl-p3-native-docs.log. The original assertion matrix/backtrace remain
+under /tmp/wsdl-p3-02-crash and /tmp/wsdl-p3-02-crash-gdb.log.
+Audit: [audits/P3-02-integer-range.md](audits/P3-02-integer-range.md).
+
+Next P3 criteria: exact decimals and boolean/binary lexical spaces, IEEE32/64
+semantics, lexical/value facets and enumerations, retained patterns, dates,
+durations/partial dates, lists/unions and XSD regex validation/generation.

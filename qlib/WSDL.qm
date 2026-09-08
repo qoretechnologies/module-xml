@@ -80,6 +80,10 @@ module WSDL {
     @section wsdlrelnotes WSDL Module Release Notes
 
     @subsection wsdl_0_5_8 WSDL v0.5.8
+    - integer builtins enforce exact ranges before conversion and retain values beyond signed 64-bit
+      range as strings; native integral float/number values produce exact integer text
+    - added \c XsdIntegerDataType for integer provider validation, including lists, optional values and
+      Serializable reconstruction; generated negative-integer examples satisfy the builtin bounds
     - integer values reject invalid XML lexical forms before native conversion, including empty text,
       fractional/exponent spellings, trailing data and signed unsigned values; XML whitespace normalization
       replaces only TAB, LF and CR and collapses SPACE where required
@@ -2119,6 +2123,75 @@ class XsdIntegerLexicalHelper {
         "nonNegativeInteger": True,
     };
 
+    const Bounds = {
+        "byte": ("-128", "127"), "short": ("-32768", "32767"),
+        "int": ("-2147483648", "2147483647"),
+        "long": ("-9223372036854775808", "9223372036854775807"),
+        "unsignedByte": ("0", "255"), "unsignedShort": ("0", "65535"),
+        "unsignedInt": ("0", "4294967295"), "unsignedLong": ("0", "18446744073709551615"),
+        "negativeInteger": (NOTHING, "-1"), "nonPositiveInteger": (NOTHING, "0"),
+        "positiveInteger": ("1", NOTHING), "nonNegativeInteger": ("0", NOTHING),
+    };
+
+    static string canonical(string lexical) {
+        bool negative = lexical[0] == "-";
+        lexical =~ s/\A[+-]?0*//;
+        return lexical.empty() ? "0" : (negative ? "-" : "") + lexical;
+    }
+
+    # Both operands are canonical integer strings; compare without a bounded numeric conversion.
+    static int compare(string left, string right) {
+        bool ln = left[0] == "-";
+        bool rn = right[0] == "-";
+        if (ln != rn) {
+            return ln ? -1 : 1;
+        }
+        int result = left.size() <=> right.size();
+        if (!result) {
+            result = left <=> right;
+        }
+        return ln ? -result : result;
+    }
+
+    static string lexical(string type, auto value, string error) {
+        if (value.typeCode() == NT_STRING) {
+            value = XsdSimpleType::normalizeWhiteSpace(value, "collapse");
+        }
+        validate(type, value, error);
+        string result;
+        if (value.typeCode() == NT_FLOAT || value.typeCode() == NT_NUMBER) {
+            if (value.nanp() || value.infp() || value != floor(value)) {
+                throw error, sprintf("type %Y requires a finite integral value; got %Y", type, value);
+            }
+            # Fixed float output retains its stored binary value; raw number output retains
+            # every integer digit even when its exponent exceeds its binary precision.
+            result = value.typeCode() == NT_FLOAT ? value.format(0, ".", "") : value.toString(NF_Raw);
+        } else {
+            result = string(value);
+        }
+        string normalized = canonical(result);
+        if (value.typeCode() != NT_STRING && normalized == "0") {
+            result = "0";
+        }
+        *list<*string> bounds = Bounds{type};
+        if (bounds && ((exists bounds[0] && compare(normalized, bounds[0]) < 0)
+                || (exists bounds[1] && compare(normalized, bounds[1]) > 0))) {
+            throw error, sprintf("value %Y is out of range for type %Y", result, type);
+        }
+        return result;
+    }
+
+    static auto decode(string type, string lexical) {
+        string normalized = canonical(lexical);
+        if (compare(normalized, "-9223372036854775808") < 0
+                || compare(normalized, "9223372036854775807") > 0) {
+            return lexical;
+        }
+        int value = int(normalized);
+        # xs:integer has historically retained noncanonical spellings as strings.
+        return type == "integer" && string(value) != lexical ? lexical : value;
+    }
+
     static validate(string type, auto value, string error) {
         if (!Types{type}) {
             return;
@@ -2136,6 +2209,167 @@ class XsdIntegerLexicalHelper {
                 throw error, sprintf("value %Y is not in the XML lexical space of type %Y", value, type);
             }
         }
+    }
+}
+
+#! provider type for exact XSD integer values
+/** Numeric strings are validated before conversion. Values within Qore's signed 64-bit range
+    use native integers; larger values use strings, including unsignedLong above 2^63-1.
+    Noncanonical xs:integer strings retain their existing string representation.
+
+    @par Example
+    An unsignedLong invoice identifier of 18446744073709551615 remains an exact string
+    instead of being clamped during provider conversion.
+
+    @since %WSDL 0.5.8
+*/
+public class XsdIntegerDataType inherits AbstractDataProviderType {
+    private {
+        string datatype;
+        bool optional;
+    }
+
+    #! constructs an integer type with explicit requiredness
+    /** @param datatype the XSD integer builtin local name
+        @param optional whether NOTHING is accepted
+        @throw WSDL-ERROR the name is not an integer builtin
+    */
+    constructor(string datatype, bool optional = False) {
+        if (!XsdIntegerLexicalHelper::Types{datatype}) {
+            throw WSDL_ERROR, sprintf("unknown integer builtin %Y", datatype);
+        }
+        self.datatype = datatype;
+        self.optional = optional;
+    }
+
+    private:internal deserializeMembers(hash<auto> members) {
+        if (members.datatype.typeCode() != NT_STRING || !XsdIntegerLexicalHelper::Types{members.datatype}
+                || members.optional.typeCode() != NT_BOOLEAN) {
+            throw "DESERIALIZATION-ERROR", "integer provider requires a builtin name and boolean requiredness";
+        }
+        datatype = members.datatype;
+        optional = members.optional;
+    }
+
+    #! returns the provider type name
+    /** @return XSD builtin name with an optionality prefix */
+    string getName() {
+        return (optional ? "*" : "") + "xsd:" + datatype;
+    }
+
+    #! keeps input conversion in the XML integer validator
+    /** @return NOTHING; a native soft type would convert strings before lexical/range validation */
+    *Type getValueType() {
+    }
+
+    private bool canReturnString() {
+        return datatype == "integer" || datatype == "unsignedLong" || datatype =~ /Integer\z/;
+    }
+
+    #! returns the native output category when one category is sufficient
+    /** @return NT_INT for bounded integer output, otherwise NT_ALL for int/string output */
+    int getBaseTypeCode() {
+        return canReturnString() ? NT_ALL : NT_INT;
+    }
+
+    #! returns the native output category name
+    /** @return int for bounded integer output, otherwise all for int/string output */
+    string getBaseTypeName() {
+        return canReturnString() ? "all" : "int";
+    }
+
+    #! returns NOTHING because an integer has no element type
+    /** @return NOTHING */
+    *AbstractDataProviderType getElementType() {
+    }
+
+    #! returns NOTHING because an integer has no fields
+    /** @return NOTHING */
+    *hash<string, AbstractDataField> getFields() {
+    }
+
+    #! requires validation even for native integers
+    /** @return an empty map; range checks must not be bypassed */
+    *hash<string, bool> getDirectTypeHash() {
+        return {};
+    }
+
+    #! returns accepted scalar type names
+    /** @param simple request simplified names
+        @return string/int/float/number, plus nothing for optional types
+    */
+    hash<string, bool> getAcceptTypeHash(*bool simple) {
+        hash<string, bool> rv = {"string": True, "int": True, "float": True, "number": True};
+        if (optional) {
+            rv.nothing = True;
+        }
+        return rv;
+    }
+
+    #! returns the exact output alternatives
+    /** @param simple request simplified names
+        @return int, string when necessary, and nothing for optional types
+    */
+    hash<string, bool> getReturnTypeHash(*bool simple) {
+        hash<string, bool> rv = {"int": True};
+        if (canReturnString()) {
+            rv.string = True;
+        }
+        if (optional) {
+            rv.nothing = True;
+        }
+        return rv;
+    }
+
+    #! validates integer syntax and bounds before conversion
+    /** @param value a numeric scalar or XML integer lexical string
+        @return an exact integer or string; NOTHING for an omitted optional value
+        @throw MISSING-VALUE-ERROR a mandatory value is absent
+        @throw RUNTIME-TYPE-ERROR invalid syntax, range, nonintegral or nonfinite numeric input
+    */
+    auto acceptsValue(auto value) {
+        if (!exists value) {
+            if (optional) {
+                return;
+            }
+            throw "MISSING-VALUE-ERROR", sprintf("integer value %Y must be supplied", datatype);
+        }
+        return XsdIntegerLexicalHelper::decode(datatype,
+            XsdIntegerLexicalHelper::lexical(datatype, value, "RUNTIME-TYPE-ERROR"));
+    }
+
+    #! returns whether a value is required
+    /** @return True for mandatory types */
+    bool isMandatory() {
+        return !optional;
+    }
+
+    #! returns whether a value can be omitted
+    /** @return True for optional types */
+    bool isOrNothingType() {
+        return optional;
+    }
+
+    #! returns the optional equivalent
+    /** @return an optional integer provider with the same builtin constraints */
+    AbstractDataProviderType getOrNothingType() {
+        if (optional) {
+            return self;
+        }
+        XsdIntegerDataType rv = self.copy();
+        rv.optional = True;
+        return rv;
+    }
+
+    #! returns the mandatory equivalent
+    /** @return a mandatory integer provider with the same builtin constraints */
+    AbstractDataProviderType getMandatoryType() {
+        if (!optional) {
+            return self;
+        }
+        XsdIntegerDataType rv = self.copy();
+        rv.optional = False;
+        return rv;
     }
 }
 
@@ -2221,7 +2455,12 @@ public class XsdBaseType inherits WSDL::XsdAbstractType {
         } else {
             type = name;
         }
-        XsdIntegerLexicalHelper::validate(type, val, SOAP_SERIALIZATION_ERROR);
+        if (XsdIntegerLexicalHelper::Types{type}) {
+            string lexical = XsdIntegerLexicalHelper::lexical(type, val, SOAP_SERIALIZATION_ERROR);
+            if (val.typeCode() != NT_INT) {
+                val = lexical;
+            }
+        }
         switch (type) {
             case "anySimpleType": {
                 if (exists val && !val.strp()) {
@@ -2231,87 +2470,6 @@ public class XsdBaseType inherits WSDL::XsdAbstractType {
                 val = string(val);
                 break;
             }
-            case "byte": {
-                int v = int(val);
-                if (v < RANGE_BYTE[0] || v > RANGE_BYTE[1])
-                    throw SOAP_SERIALIZATION_ERROR, sprintf("value %d is out of range for type %y", v, type);
-                break;
-            }
-
-            case "short": {
-                int v = int(val);
-                if (v < RANGE_SHORT[0] || v > RANGE_SHORT[1])
-                    throw SOAP_SERIALIZATION_ERROR, sprintf("value %d is out of range for type %y", v, type);
-                break;
-            }
-
-            case "int": {
-                int v = int(val);
-                if (v < RANGE_INT[0] || v > RANGE_INT[1])
-                    throw SOAP_SERIALIZATION_ERROR, sprintf("value %d is out of range for type %y", v, type);
-                break;
-            }
-
-            case "unsignedByte": {
-                int v = int(val);
-                if ((v & 0xff) != v)
-                    throw SOAP_SERIALIZATION_ERROR, sprintf("value %d is out of range for type %y", v, type);
-                if (v < 0)
-                    throw SOAP_SERIALIZATION_ERROR, sprintf("type %y does not accept negative values (value supplied: %d)", type, v);
-                break;
-            }
-
-            case "unsignedShort": {
-                int v = int(val);
-                if (v < 0 || v > 65535) {
-                    throw SOAP_SERIALIZATION_ERROR, sprintf("value %d is out of range for type %y", v, type);
-                }
-                break;
-            }
-
-            case "unsignedInt": {
-                int v = int(val);
-                if (v < 0 || v > 4294967295) {
-                    throw SOAP_SERIALIZATION_ERROR, sprintf("value %d is out of range for type %y", v, type);
-                }
-                break;
-            }
-
-            case "unsignedLong": {
-                int v = int(val);
-                if (v < 0)
-                    throw SOAP_SERIALIZATION_ERROR, sprintf("type %y does not accept negative values (value supplied: %d)", type, v);
-                break;
-            }
-
-            case "negativeInteger": {
-                int v = int(val);
-                if (v >= 0)
-                    throw SOAP_SERIALIZATION_ERROR, sprintf("type %y only accepts negative values (value supplied: %d)", name, v);
-                break;
-            }
-
-            case "nonNegativeInteger": {
-                int v = int(val);
-                if (v < 0)
-                    throw SOAP_SERIALIZATION_ERROR, sprintf("type %y only accepts non-negative values (value supplied: %d)", name, v);
-                break;
-            }
-
-            case "nonPositiveInteger": {
-                int v = int(val);
-                if (v > 0)
-                    throw SOAP_SERIALIZATION_ERROR, sprintf("type %y only accepts non-positive values (value supplied: %d)", name, v);
-                break;
-            }
-
-            case "positiveInteger": {
-                int v = int(val);
-                if (v <= 0)
-                    throw SOAP_SERIALIZATION_ERROR, sprintf("type %y only accepts positive values (value supplied: %d)", type, v);
-                break;
-            }
-
             case "date":
                 val = format_date("YYYY-MM-DD", date(val));
                 break;
@@ -2372,6 +2530,17 @@ public class XsdBaseType inherits WSDL::XsdAbstractType {
             case "ENTITIES":
             case "integer":
             case "long":
+            case "int":
+            case "short":
+            case "byte":
+            case "unsignedLong":
+            case "unsignedInt":
+            case "unsignedShort":
+            case "unsignedByte":
+            case "positiveInteger":
+            case "negativeInteger":
+            case "nonPositiveInteger":
+            case "nonNegativeInteger":
             case "decimal":
                 # pass through without transformation
                 break;
@@ -2584,7 +2753,10 @@ public class XsdBaseType inherits WSDL::XsdAbstractType {
         if (val.typeCode() == NT_STRING) {
             val = XsdSimpleType::normalizeWhiteSpace(val, XsdBaseType::WhiteSpaceMap{type} ?? "collapse");
         }
-        XsdIntegerLexicalHelper::validate(type, val, SOAP_DESERIALIZATION_ERROR);
+        if (XsdIntegerLexicalHelper::Types{type}) {
+            return XsdIntegerLexicalHelper::decode(type,
+                XsdIntegerLexicalHelper::lexical(type, val, SOAP_DESERIALIZATION_ERROR));
+        }
 
         switch (type) {
             case "anySimpleType":
@@ -2607,82 +2779,6 @@ public class XsdBaseType inherits WSDL::XsdAbstractType {
                     throw SOAP_DESERIALIZATION_ERROR, sprintf("type %y does not accept values of type %y (val: %y)", type, val.type(), val);
                 }
                 return nsc.opt_empty_string_is_nothing ? val : string(val);
-
-            case "integer": {
-                # note that we do not convert xsd:integer to a qore integer if we would lose precision
-                int v = int(val);
-                return v == val ? v : val;
-            }
-
-            case "byte":
-                val = int(val);
-                if (val < RANGE_BYTE[0] || val > RANGE_BYTE[1])
-                    throw SOAP_DESERIALIZATION_ERROR, sprintf("value %d is out of range for type %y", val, name);
-                return val;
-
-            case "short":
-                val = int(val);
-                if (val < RANGE_SHORT[0] || val > RANGE_SHORT[1])
-                    throw SOAP_DESERIALIZATION_ERROR, sprintf("value %d is out of range for type %y", val, name);
-                return val;
-
-            case "int":
-                val = int(val);
-                if (val < RANGE_INT[0] || val > RANGE_INT[1])
-                    throw SOAP_DESERIALIZATION_ERROR, sprintf("value %d is out of range for type %y", val, name);
-                return val;
-
-            case "long":
-                return int(val);
-
-            case "unsignedByte":
-                val = int(val);
-                if ((val & 0xff) != val)
-                    throw SOAP_DESERIALIZATION_ERROR, sprintf("value %d is out of range for type %y", val, name);
-                if (val < 0)
-                    throw SOAP_DESERIALIZATION_ERROR, sprintf("type %y does not accept negative values (value supplied: %d)", name, val);
-                return val;
-
-            case "unsignedShort":
-                val = int(val);
-                if ((val & 0xffff) != val)
-                    throw SOAP_DESERIALIZATION_ERROR, sprintf("value %d is out of range for type %y", val, name);
-                if (val < 0)
-                    throw SOAP_DESERIALIZATION_ERROR, sprintf("type %y does not accept negative values (value supplied: %d)", name, val);
-                return val;
-
-            case "unsignedInt":
-                val = int(val);
-                if ((val & 0xffffffff) != val)
-                    throw SOAP_DESERIALIZATION_ERROR, sprintf("value %d is out of range for type %y", val, name);
-                if (val < 0)
-                    throw SOAP_DESERIALIZATION_ERROR, sprintf("type %y does not accept negative values (value supplied: %d)", name, val);
-                return val;
-
-            case "unsignedLong":
-                if (val < 0)
-                    throw SOAP_DESERIALIZATION_ERROR, sprintf("type %y does not accept negative values (value supplied: %d)", name, val);
-                return int(val);
-
-            case "negativeInteger":
-                if (val >= 0)
-                    throw SOAP_DESERIALIZATION_ERROR, sprintf("type %y only accepts negative values (value supplied: %d)", name, val);
-                return int(val);
-
-            case "nonNegativeInteger":
-                if (val < 0)
-                    throw SOAP_DESERIALIZATION_ERROR, sprintf("type %y only accepts non-negative values (value supplied: %d)", name, val);
-                return int(val);
-
-            case "nonPositiveInteger":
-                if (val > 0)
-                    throw SOAP_DESERIALIZATION_ERROR, sprintf("type %y only accepts non-positive values (value supplied: %d)", name, val);
-                return int(val);
-
-            case "positiveInteger":
-                if (val <= 0)
-                    throw SOAP_DESERIALIZATION_ERROR, sprintf("type %y only accepts positive values (value supplied: %d)", name, val);
-                return int(val);
 
             case "date":
                 return date(val);
@@ -2821,9 +2917,9 @@ public class XsdBaseType inherits WSDL::XsdAbstractType {
         }
     }
 
-    #! maps the strict scalar types to the soft equivalents used for data provider types
-    /** serialization accepts any value that can be converted to the target type, so a strict type would reject
-        values that @ref WSDL::XsdBaseType::serializeValue() "XsdBaseType::serializeValue()" handles
+    #! maps scalar types without dedicated validators to their soft provider equivalents
+    /** Integer and boolean providers validate their XML lexical spaces before conversion.
+        Other scalar providers use soft equivalents to accept convertible input values.
     */
     const SoftTypeMap = {
         "int": SoftIntType,
@@ -2833,11 +2929,17 @@ public class XsdBaseType inherits WSDL::XsdAbstractType {
     };
 
     #! returns the data provider type used to accept values for this XSD type
+    /** @return a validating integer/boolean provider or the scalar's soft provider equivalent
+        @note Integer providers preserve exact values outside signed 64-bit range as strings.
+    */
     AbstractDataProviderType getDataProviderType() {
         # XSD booleans need a type that parses string values according to the XSD boolean lexical space; a plain
         # "softbool" would convert the string "false" to True
         if (name == "boolean") {
             return XsdBooleanType;
+        }
+        if (XsdIntegerLexicalHelper::Types{name}) {
+            return new XsdIntegerDataType(name);
         }
         Type type = getDataProviderBaseType();
         return AbstractDataProviderType::get(SoftTypeMap{type.getName()} ?? type);
@@ -12906,7 +13008,7 @@ public class WSMessageHelper {
             case "unsignedByte":
                 res += {
                     "type": "int",
-                    "value": 123,
+                    "value": t.name == "negativeInteger" || t.name == "nonPositiveInteger" ? -123 : 123,
                 };
                 break;
             case "boolean":

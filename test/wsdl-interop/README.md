@@ -246,19 +246,21 @@ each direction. The worker explicitly selects that binding and operation. Every 
 retained and independently checked with libxml2 and Xerces. Output envelope versions are checked against
 the selected binding; the W3C SOAP 1.2 inputs still exercise a SOAP 1.1 contract.
 
-`--strict` requires the explicit [strict-selection.json](strict-selection.json) to pass: 38 WSDLs,
-including all 14 source-invalid descriptions, and 140 selected message/direction combinations. Positive
+`--strict` requires the explicit [strict-selection.json](strict-selection.json) to pass: 60 WSDLs,
+including all 14 source-invalid descriptions, and 536 selected message/direction combinations. Positive
 cases require independent exact-value assertions; negative cases require the intended exception category.
 Missing, duplicate, stale, malformed or unclassified entries fail. This selection is deliberately named
 and bounded; it does not turn known implementation failures elsewhere into passing conformance tests.
 
-[coverage-report.json](coverage-report.json) preserves the complete current ledger, including 449 failed
+[coverage-report.json](coverage-report.json) preserves the complete current ledger, including 264 failed
 requirements assigned to later phases. Its stage accounting includes unreachable, missing, skipped and
-unassessed work. In this run 1,860 value/infoset assessments remain unimplemented, explicitly counted as
+unassessed work. In this run 1,492 value/infoset assessments remain unimplemented, explicitly counted as
 unassessed. Successful schema validation is insufficient to close them. Exact numeric checks already
-detect 40 failed value-preservation cases, including large integer derivatives clamped to 64-bit limits
-and decimal values emitted with exponent notation. The report retains each expected and actual value.
-Valid large `integer` values that preserve their exact number override only the documented libxml2
+detect eight failed value-preservation cases for decimal output. The report retains each expected and
+actual value. All thirteen integer builtin families now belong to the strict gate, including original
+invalid inputs and exact values in both directions. Signed bounded types use the independent integer
+value comparator; their builtin range rejection is also covered by the authored boundary matrix.
+Valid large integer values that preserve their exact number override only the documented libxml2
 precision limitation; new oracle disagreements remain failures.
 
 The tests also exercise the unmodified CXF `hello_world_soap12.wsdl` with distinct `sayHi` request and
@@ -562,5 +564,14 @@ Run `qore --enable-debug test/wsdl-integer-lexical.qtest` and
 `python3 test/wsdl-interop/test_integer_lexical.py -v` with the local core/module
 paths described above. The native core prerequisite is ea9ddfc51, which preserves
 embedded NUL bytes during regex substitutions. P3-01 covers lexical rejection;
-precision, ranges, facets, providers and scalar example generation remain part
-of the active P3 work.
+precision, ranges, facets, providers and scalar example generation are developed
+as separate increments of the active P3 work.
+
+The exact integer range increment adds `wsdl-integer-range.qtest` and
+`test_integer_range.py`: all thirteen builtins, boundaries and adjacent invalid
+values, large exact strings, native integral float/number values, attributes,
+simple content, providers, reconstruction and generated examples. The independent
+matrix checks 1,200 documents across actual SOAP 1.1/1.2 bindings and both
+directions. Xerces and Python exact integers verify values where libxml2 has its
+recorded arbitrary-integer precision limitation. The core prerequisites for exact
+raw number text and numeric temporary ownership are described in EXECUTION.md.
