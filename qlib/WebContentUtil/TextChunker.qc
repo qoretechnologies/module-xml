@@ -143,7 +143,7 @@ public class TextChunker {
         the overlap budget.  Each chunk inherits its starting paragraph's source-block
         metadata.
 
-        Used by callers like @ref QorusAiDocumentIngester that need:
+        Used by callers like \c QorusAiDocumentIngester that need:
         - real tokenizer accuracy (bge-m3) instead of the 4-chars/token heuristic
         - per-block metadata threading (so chunk N knows which source it came from)
         - token_count in the output for downstream consumers
@@ -160,7 +160,7 @@ public class TextChunker {
         @return list of chunk hashes, each containing:
           - \c content (string): the chunk text
           - \c token_count (int): token count via the supplied counter
-          - \c metadata (\c *hash<auto>): metadata from the chunk's starting block
+          - \c metadata (\c *hash&lt;auto&gt;): metadata from the chunk's starting block
           - \c chunk_index (int): sequential chunk number (0-indexed)
 
         @par Example

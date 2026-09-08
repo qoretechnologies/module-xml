@@ -584,9 +584,9 @@ return c.run();
           - \c delay_ms (int, default 0): delay between batches in milliseconds
           - \c progress (\c *code<nothing(int, int)>): progress callback (pages, queued)
           - \c url_filter (\c *code<bool(string)>): return True to accept a URL
-          - \c skip_extensions (\c *list<string>): URL extensions to skip pre-fetch
+          - \c skip_extensions (\c *list&lt;string&gt;): URL extensions to skip pre-fetch
           - \c allow_private_ips (bool, default False): allow private/internal targets
-          - \c blocked_hostnames (\c *list<string>): additional blocked hostnames
+          - \c blocked_hostnames (\c *list&lt;string&gt;): additional blocked hostnames
           - \c user_agent (\c *string): User-Agent header
           - \c max_response_bytes (int, default 10485760): skip pages larger than this
           - \c min_text_length (int, default 50): drop pages whose extracted text is
@@ -610,7 +610,7 @@ return c.run();
             this is a *pre*-fetch hook; for *post*-fetch decisions (e.g.
             content-hash change detection where the body is needed) use
             \c page_callback instead
-          - \c page_callback (\c *code<*hash<auto>(hash<auto>)>): post-fetch
+          - \c page_callback (\c *code<*hash&lt;auto&gt;(hash&lt;auto&gt;)>): post-fetch
             hook called with a rich page hash containing \c url, \c title,
             \c content, \c raw_body, \c response_headers, \c depth.  Return
             either a (possibly modified) page hash to include in the result
@@ -645,10 +645,10 @@ return c.run();
           - \c start_thread (\c *code<int(code<nothing()>)>): thread launcher; REQUIRED
             when imported into a context with @ref Qore::PO_NO_THREAD_CONTROL set
         @return list of page hashes
-        @throw WEBCRAWLER-UNSUPPORTED-SCHEME if @ref seed_url is not an
+        @throw WEBCRAWLER-UNSUPPORTED-SCHEME if \a seed_url is not an
             @ref CrawlableSchemes "http:// or https:// URL"; local documentation
             belongs to @ref WebContentUtil::LocalDocReader "LocalDocReader"
-        @throw SSRF-BLOCKED if @ref seed_url targets a private/internal address
+        @throw SSRF-BLOCKED if \a seed_url targets a private/internal address
             and \c allow_private_ips is not True
     */
     static list<hash<auto>> crawl(string seed_url, *hash<auto> opts) {
@@ -663,7 +663,7 @@ return c.run();
         called inside a foreach loop.
 
         @param citem the {url, depth} hash to fetch
-        @return a 0-arg closure suitable for @ref Qore::background or a \c start_thread launcher
+        @return a 0-arg closure suitable for \c background or a \c start_thread launcher
     */
     private code<nothing()> makeFetchTask(hash<auto> citem) {
         return sub () {

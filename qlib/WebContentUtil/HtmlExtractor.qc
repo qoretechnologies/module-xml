@@ -32,13 +32,13 @@ public hashdecl LinkInfo {
     */
     list<string> hrefs = ();
 
-    #! \c <link rel="canonical" href="..."> if present
+    #! \c &lt;link rel="canonical" href="..."&gt; if present
     /** When set, this is the canonical URL for the page and the crawler should
         use it as the page's identity instead of the request URL.
     */
     *string canonical;
 
-    #! \c <link rel="sitemap" href="..."> URLs declared in the page (rare)
+    #! \c &lt;link rel="sitemap" href="..."&gt; URLs declared in the page (rare)
     list<string> sitemaps = ();
 }
 
@@ -46,7 +46,7 @@ public hashdecl LinkInfo {
 /** Uses the @ref Qore::Xml::parse_html() "parse_html()" function from the \c xml
     module (which wraps libxml2's lenient HTML parser \c htmlReadMemory).  This
     handles real-world malformed HTML5, supports proper CSS-selector content
-    stripping via XPath translation, and reliably extracts \c <link rel="canonical">
+    stripping via XPath translation, and reliably extracts \c &lt;link rel="canonical"&gt;
     and \c rel="nofollow" semantics — none of which are reliable with regex.
 
     All methods are static.
@@ -100,7 +100,7 @@ public class HtmlExtractor {
         @param html raw HTML string
         @param strip_selectors optional list of CSS selectors to strip; appended
             to @ref DefaultStripSelectors.  Supported selector forms: \c element,
-            \c .class, \c #id, \c [attr='value'], and combinations (e.g.
+            \c .class, \c \#id, \c [attr='value'], and combinations (e.g.
             \c div.sidebar).  Compound and pseudo-class selectors are not
             supported and will be silently skipped.
         @return the cleaned HTML — body subtree if present, otherwise the
@@ -145,7 +145,7 @@ public class HtmlExtractor {
         @param html raw HTML string
         @param strip_selectors optional list of additional CSS selectors to strip;
             these are appended to @ref DefaultStripSelectors.  Supported selector
-            forms: \c element, \c .class, \c #id, \c [attr='value'], and combinations
+            forms: \c element, \c .class, \c \#id, \c [attr='value'], and combinations
             (e.g. \c div.sidebar).  Compound and pseudo-class selectors are not
             supported and will be ignored with a warning.
         @return extracted plain text content with whitespace normalized
@@ -211,7 +211,7 @@ public class HtmlExtractor {
 
     #! Extract the page title from HTML
     /** @param html raw HTML string
-        @return title text, or @ref nothing if no \c <title> tag found
+        @return title text, or @ref nothing if no \c &lt;title&gt; tag found
     */
     static *string extractTitle(string html) {
         XmlDoc doc;
@@ -232,7 +232,7 @@ public class HtmlExtractor {
     /** Walks the parsed DOM, extracts \c href from \c <a> elements, skips
         anchors with \c rel="nofollow", excludes non-HTTP schemes, and resolves
         relative URLs against the supplied base URL.  Also extracts
-        \c <link rel="canonical"> and \c <link rel="sitemap"> if present.
+        \c &lt;link rel="canonical"&gt; and \c &lt;link rel="sitemap"&gt; if present.
 
         @param html raw HTML string
         @param base_url base URL for resolving relative links
@@ -292,7 +292,7 @@ public class HtmlExtractor {
     /** Supported selector forms (matching the design's strip list):
         - \c element — all elements with that tag name
         - \c .class — all elements with that class
-        - \c #id — element with that ID
+        - \c \#id — element with that ID
         - \c [attr] — elements that have the attribute
         - \c [attr='value'] — elements with that attribute value
         - \c element.class, \c element[attr='value'] — combinations

@@ -22,14 +22,16 @@ include_directories( ${CMAKE_SOURCE_DIR}/src )
 include_directories( ${OPENSSL_INCLUDE_DIR} )
 include_directories( ${QORE_INCLUDE_DIR} )
 
-# Check for C++11.
-include(CheckCXXCompilerFlag)
-CHECK_CXX_COMPILER_FLAG("-std=c++11" COMPILER_SUPPORTS_CXX11)
-if(COMPILER_SUPPORTS_CXX11)
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11")
-else()
-    message(FATAL_ERROR "The compiler ${CMAKE_CXX_COMPILER} has no C++11 support. Please use a different C++ compiler.")
+# Match Qore's public headers and let CMake select the compiler-specific flag.
+set(_xml_cxx_minimum 11)
+if (Qore_VERSION VERSION_GREATER_EQUAL "3.0")
+    set(_xml_cxx_minimum 17)
 endif()
+if (NOT CMAKE_CXX_STANDARD OR CMAKE_CXX_STANDARD LESS _xml_cxx_minimum)
+    set(CMAKE_CXX_STANDARD ${_xml_cxx_minimum})
+endif()
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
     SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DLIBXML_STATIC=1")
@@ -115,6 +117,14 @@ set(SCRIPTS
 
 qore_wrap_qpp_value(QPP_SOURCES METALIST QPP_META_SOURCES ${QPP_SRC})
 
+# Doxygen consumes generated public declarations, not the C++ implementation
+# files that share the build directory with them.
+set(MODULE_DOX_INPUT "${CMAKE_BINARY_DIR}/mainpage.dox")
+foreach(_xml_qpp_source IN LISTS QPP_SRC)
+    get_filename_component(_xml_qpp_name "${_xml_qpp_source}" NAME_WE)
+    list(APPEND MODULE_DOX_INPUT "${CMAKE_BINARY_DIR}/${_xml_qpp_name}.dox.h")
+endforeach()
+
 SET (module_name "xml")
 
 set(QORE_DOX_TMPL_SRC
@@ -126,6 +136,9 @@ add_library(${module_name} MODULE ${QPP_SOURCES} ${CPP_SRC})
 if (DEFINED ENV{DOXYGEN_EXECUTABLE})
     set(DOXYGEN_EXECUTABLE $ENV{DOXYGEN_EXECUTABLE})
 endif()
+
+# Preserve caller-supplied core/dependency documentation tags across module macros.
+set(_xml_external_doc_tags "${TAGFILES}")
 
 qore_external_binary_module(${module_name} "${VERSION_MAJOR}.${VERSION_MINOR}.${VERSION_PATCH}" ${QORE_XML_LIBXML2_TARGET})
 add_executable(qore-xml-namespace-probe EXCLUDE_FROM_ALL cmake/libxml2-namespace-probe.c)
@@ -181,4 +194,17 @@ if (DOXYGEN_FOUND)
   qore_wrap_dox(QORE_DOX_SRC ${QORE_DOX_TMPL_SRC})
   add_custom_target(QORE_MOD_DOX_FILES DEPENDS ${QORE_DOX_SRC})
   add_dependencies(docs-module QORE_MOD_DOX_FILES)
+  # The shared Qore template defaults to a doxygen/ image directory. XML keeps
+  # its documentation assets in docs/ instead.
+  file(APPEND "${CMAKE_BINARY_DIR}/Doxyfile" "\nIMAGE_PATH = ${CMAKE_SOURCE_DIR}/docs\n")
+  string(REPLACE ";" " " _xml_external_doc_tags "${_xml_external_doc_tags}")
+  file(GLOB _xml_user_doxyfiles "${CMAKE_BINARY_DIR}/doxygen/Doxyfile.*")
+  foreach(_xml_user_doxyfile IN LISTS _xml_user_doxyfiles)
+    file(APPEND "${_xml_user_doxyfile}"
+      "\nIMAGE_PATH = ${CMAKE_SOURCE_DIR}/docs\nTAGFILES += ${_xml_external_doc_tags}\n")
+  endforeach()
+  if (COMMAND qore_binary_module_two_phase_docs)
+    qore_binary_module_two_phase_docs(xml "WSDL;WebContentUtil")
+    file(APPEND "${CMAKE_BINARY_DIR}/Doxyfile.final" "\nTAGFILES += ${_xml_external_doc_tags}\n")
+  endif()
 endif()

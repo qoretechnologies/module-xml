@@ -53,7 +53,7 @@ public class UrlNormalizer {
 
     #! Normalize a URL for deduplication
     /** Implements the full set of rules from design/web-crawler.md §5.2:
-        1. Strip fragment (\c #section)
+        1. Strip fragment (\c \#section)
         2. Resolve \c /../ and \c /./ in path
         3. Lowercase scheme and host (path case is preserved)
         4. Strip default ports (\c :80 for http, \c :443 for https, etc.)

@@ -26,8 +26,8 @@ public namespace WebContentUtil {
 
 #! Parses sitemap.xml and sitemap-index.xml files per the sitemaps.org protocol
 /** Implements the [sitemaps.org protocol](https://www.sitemaps.org/protocol.html)
-    for both regular sitemap files (containing \c <urlset><url><loc>) and sitemap
-    index files (containing \c <sitemapindex><sitemap><loc>).  Uses libxml2 (via
+    for both regular sitemap files (containing \c &lt;urlset&gt;&lt;url&gt;&lt;loc&gt;) and sitemap
+    index files (containing \c &lt;sitemapindex&gt;&lt;sitemap&gt;&lt;loc&gt;).  Uses libxml2 (via
     @ref Qore::Xml::parse_xml() and the underlying @ref Qore::Xml::XmlDoc) for
     namespace-aware parsing — robust to whitespace, attribute ordering, and
     encoding declarations that the regex approach in older crawlers would miss.
@@ -69,8 +69,8 @@ public class SitemapParser {
     const DefaultMaxUrls = 100000;
 
     #! Parse a sitemap or sitemap-index XML document and return all discovered URLs
-    /** Detects whether the document is a regular sitemap (\c <urlset>) or an
-        index (\c <sitemapindex>) by inspecting the root element.  For regular
+    /** Detects whether the document is a regular sitemap (\c &lt;urlset&gt;) or an
+        index (\c &lt;sitemapindex&gt;) by inspecting the root element.  For regular
         sitemaps the returned list contains the page URLs.  For index files
         the returned list contains the sub-sitemap URLs (the caller must fetch
         and recursively parse each one — use @ref fetchAndParse() for that).
@@ -108,12 +108,12 @@ public class SitemapParser {
     }
 
     #! Returns True if the parsed sitemap document is a sitemap-index
-    /** A sitemap-index has \c <sitemapindex> as its root element and contains
-        \c <sitemap><loc> entries pointing to sub-sitemaps.  A regular sitemap
-        has \c <urlset> as its root and contains \c <url><loc> entries.
+    /** A sitemap-index has \c &lt;sitemapindex&gt; as its root element and contains
+        \c &lt;sitemap&gt;&lt;loc&gt; entries pointing to sub-sitemaps.  A regular sitemap
+        has \c &lt;urlset&gt; as its root and contains \c &lt;url&gt;&lt;loc&gt; entries.
 
         @param xml the sitemap XML body
-        @return True if the root element is \c <sitemapindex>, False otherwise
+        @return True if the root element is \c &lt;sitemapindex&gt;, False otherwise
             (including parse failures)
     */
     static bool isIndex(string xml) {

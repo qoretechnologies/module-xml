@@ -65,7 +65,8 @@ ElementFormUnqualified. Qualified-attribute checks add four source-invalid famil
 to mandatory rejection coverage. AttributeFormQualified, AttributeReference and
 AttributeReferenceUnqualified retain exact attribute and child values in the strict gate:
 38 descriptions and 140 message-direction combinations.
-The other broad failures remain visible; P2 is not yet complete.
+Other broad failures remain visible with their later-phase ownership. P2 acceptance
+and evidence are recorded in EXECUTION.md.
 See [the implemented design](../../design/wsdl-schema-identity.md) and [execution record](EXECUTION.md).
 
 The current full Python suite reports a P6 binding-version failure in the authored
@@ -244,8 +245,8 @@ each direction. The worker explicitly selects that binding and operation. Every 
 retained and independently checked with libxml2 and Xerces. Output envelope versions are checked against
 the selected binding; the W3C SOAP 1.2 inputs still exercise a SOAP 1.1 contract.
 
-`--strict` requires the explicit [strict-selection.json](strict-selection.json) to pass: 23 WSDLs,
-including all 14 source-invalid descriptions, and 68 selected message/direction combinations. Positive
+`--strict` requires the explicit [strict-selection.json](strict-selection.json) to pass: 38 WSDLs,
+including all 14 source-invalid descriptions, and 140 selected message/direction combinations. Positive
 cases require independent exact-value assertions; negative cases require the intended exception category.
 Missing, duplicate, stale, malformed or unclassified entries fail. This selection is deliberately named
 and bounded; it does not turn known implementation failures elsewhere into passing conformance tests.
@@ -516,3 +517,41 @@ The independent consumer test completes 192 documents and remains failing for
 16 required-wildcard examples generated empty by the native helper (P5). Other
 retained input/output documents preserve their exact values, names and context;
 no rejected example is counted as passing.
+
+## Local verification and documentation
+
+Tests load this repository's modules and the tested core DataProvider prerequisite:
+
+```sh
+export PATH=/home/david/src/qore/git/qore/build-debug:$PATH
+export LD_LIBRARY_PATH=/home/david/src/qore/git/qore/build-debug
+export QORE_MODULE_DIR="$PWD/build-debug:$PWD/qlib:/home/david/src/qore/git/qore/build/qlib-qmod/DataProvider:/home/david/src/qore/git/qore/qlib"
+/home/david/src/qore/git/qore/build-debug/qore --enable-debug test/wsdl-interop.qtest
+python3 test/wsdl-interop/test_survey.py -v
+```
+
+For native memory checks use `QORE_PCRE2_NO_JIT=1 valgrind ... qore -b --enable-debug`.
+The switch disables regex JIT programmatically for testing; normal execution keeps
+JIT enabled. Native XML fragment and SOAP consumer memory checks are recorded in
+EXECUTION.md with zero errors/lost memory after the committed dependency/runtime fixes.
+Independent host glibc thread-creation-failure and Valgrind DWARF diagnostics remain
+assigned to P9 and are not suppressed.
+
+Configure `build-debug` with `-DCMAKE_BUILD_TYPE=Debug` and the installed prefix
+(`which qore` is `/usr/bin/qore` here, so `-DCMAKE_INSTALL_PREFIX=/usr`). Documentation
+uses `cmake --build build-debug --target docs-module-final docs-SoapClient docs-SoapHandler`.
+CMake's `TAGFILES` parameter supplies generated core/dependency tags with their doc
+URLs. The native pass uses generated public QPP declarations, preserves dependency
+tags, reads assets from `docs/`, and builds a final pass after WSDL/WebContentUtil tags.
+The XML generation option page is included in that public documentation input.
+For this checkout, documentation also prepends the existing local JNI and astparser
+builds to `QORE_MODULE_DIR`:
+
+```sh
+export QORE_MODULE_DIR="/home/david/src/qore/git/module-jni/build-debug:/home/david/src/qore/git/qore/build-debug/modules/astparser:$QORE_MODULE_DIR"
+```
+
+The installed JNI module has the stack-frame assertion described in EXECUTION.md;
+the local JNI build contains the tested source fix. Existing astparser artifacts
+are sufficient for Qdx. Use `-DQore_DIR=/home/david/src/qore/git/qore/build-debug/cmake`
+to consume the local exported CMake helpers without installation.

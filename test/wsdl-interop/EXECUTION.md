@@ -4,7 +4,7 @@ Copyright (C) 2026 Qore Technologies, s.r.o.
 
 Execution started 2026-09-07 on `develop` at `c81b2db`, with a clean working tree.
 The authoritative scope and acceptance criteria remain in [PLAN.md](PLAN.md).
-P1 corpus/adjudication acceptance is complete; P2 namespace/type work is in progress. No scope reductions or workarounds are approved.
+P1 corpus/adjudication and P2 schema/representation acceptance are complete; P3 scalar work is next. No scope reductions or workarounds are approved.
 
 ## P1: corpus provenance and adjudication (complete)
 
@@ -646,17 +646,658 @@ findings and current diagnostic reports.
   broad coverage: 384 failures, zero missing/skipped cases. Full incremental audit:
   [audits/P2-09.md](audits/P2-09.md). P2 acceptance remains open.
 
+The P2-10 through P2-23 entries below are historical intermediate states. Their
+open-gate language is retained as evidence; P2-24 through P2-31 record the fixes
+and committed acceptance that supersede them.
+
+### P2-10 — explicit XML values and native element fragments (uncommitted)
+
+- Added `XsdXmlValue`: authoritative XML string, immutable ordered data/reader
+  views, root expanded name and scoped QName resolution. Serializable stores
+  only XML and revalidates/rebuilds transient views. `getXmlSerializationData()`
+  supplies validated native `^xml^` element fragments. Existing SOAP/provider
+  values are unchanged; their consumer integration remains required P2 work.
+- Native XML generation parses each fragment to EOF, retains and owns its
+  element document, isolates default namespace scopes, preserves node order and
+  lexical text, rejects malformed values/DOCTYPEs/NULs and supports cancellation.
+  XML generation and root checks now preserve the first exception and stop work.
+- Root-caused and fixed string-reader encoding corruption: Qore converts strings
+  to UTF-8 but libxml2 decoded them again from their original declaration.
+  Readers now receive explicit UTF-8 and byte length. UTF-8, Latin-1 and both
+  UTF-16 byte orders, NUL truncation and recovery are regression-tested.
+- Native Debug configuration uses `/usr` (installed qore `/usr/bin/qore`), CMake
+  4.3.0, normal libxml2 parser limits and no installation. CMake policies through
+  3.31 remove configuration warnings; build-debug is ignored. An import callback
+  exception no longer emits a misleading secondary skipped-import warning.
+- Latest focused tests: `xml-literal` 8/44, `wsdl-xml-value` 10/59, XML 25/189,
+  stream SAX 5/15, all passing without warnings. The 21 prior WSDL/SOAP suites
+  also pass. `test_xml_values.py` checks six original/reconstructed XML outputs
+  with exact names, lexical values, QName scope, mixed text, PI/comment/CDATA;
+  libxml2 and pinned Xerces agree on all four valid and two invalid XSD cases.
+- Full Python: 72 tests, retaining only the six routed P4/P6 subtest failures in
+  two tests. Corpus surveys currently retain 384 broad diagnostic failures,
+  zero strict selection failures and no missing/skipped cases. Final reports
+  were regenerated after the final WSDL documentation edits: only the WSDL
+  module digest changes in a recursive comparison of every report field.
+- Valgrind found no leaks but reports an uninitialized conditional in PCRE2 JIT
+  used by QUnit's call-stack regex. A standalone C reproduction linked only to
+  PCRE2 10.47 reproduces it (51 contexts, zero leaks), independently of Qore/XML.
+  `--expensive-definedness-checks=yes` does not remove it. See the Valgrind FAQ
+  section 5.4: https://valgrind.org/docs/manual/faq.html . Logs and C reproduction:
+  `/tmp/wsdl-p2-10-pcre-repro.c`, `...-pcre-repro.log`,
+  `/tmp/wsdl-p2-10-literal-valgrind.log`. The required memory-check gate is not
+  claimed passing. An asynchronous request asks approval to use a local same-
+  version PCRE2 build without JIT solely for valgrind; **no reply yet** and no
+  workaround/configuration has been applied.
+- Documentation validation exposed an astparser grammar gap: valid Qore brace
+  regex operations could not be parsed by Qdx. The bounded core prerequisite now
+  uses a stateless C external scanner, compiles/installs it with the generated
+  grammar, and preserves existing syntax-node kinds. Node 24/tree-sitter 0.26.8
+  regeneration and direct CLI parsing of the complete WSDL source pass. Full
+  astparser tests pass 111 cases / 893 assertions; brace/boundary tests pass
+  four cases / 101 assertions, including invalid modifiers, form-feed/vertical-
+  tab separators, 1,024 nested braces and a 64 KiB replacement body. The initial grammar-only approach accepted inter-part
+  comments and shifted unrelated token ranges; the scanner fixes both causes.
+  No unrelated core work, source module symlink or installation was changed.
+- The astparser valgrind run passed its four cases / 101 assertions with zero
+  definitely, indirectly or possibly lost bytes, but the same PCRE2 JIT issue
+  reported two contexts. The native memory-check gate remains open.
+- XML/WSDL/WebContentUtil documentation now builds without warnings, including
+  the final pass with all cross-reference tags. CMake uses explicit public QPP
+  declarations and the actual docs/ asset path, preserves caller-supplied core
+  tags and builds user-module tags before the final native documentation pass.
+  XML generation options were moved from an unexported implementation comment
+  to a public page. Stale parameter/link markup, duplicated language flag anchors
+  and WebService's detached class comment were corrected. WebContentUtil edits
+  affect documentation only; its 85 cases / 346 assertions pass.
+- Core documentation's Java-wrapper step exposed a separate JNI exception bug:
+  `JniCallStack` passed Java's native-frame line `-2` to Qore, which permits only
+  `-1` as an unknown location. GDB identifies `defs.cpp` via the installed JNI
+  module; a focused System.arraycopy(null,...) regression aborts before the fix.
+  The local module-jni prerequisite normalizes lines below -1, preserving positive
+  lines, Java exception identity and frame type. New tests pass 2 cases / 20
+  assertions; eight selected existing exception/stack/callback/lifecycle cases
+  pass 58 assertions (49 unrelated cases excluded by the explicit filter).
+  The complete astparser docs commands, including Qjar, pass without warnings
+  with this local JNI module prepended. No installation or core build-file change
+  was needed. JNI valgrind completes all 20 assertions, but reports 54,041
+  definitely lost bytes plus JVM stack-probing/GC diagnostics. Standalone
+  OpenJDK 25.0.4.1 `java -version` reproduces JVM stack diagnostics (109 contexts)
+  and its own shutdown allocations. Those are separate from a real JNI leak:
+  64-byte Class wrappers allocated by findCreateQoreClass are not owned on early
+  duplicate/recursive returns from createClassInNamespace. A SimpleRefHolder now
+  guards the wrapper until setManagedUserData takes it. An import-only variant
+  with test execution commented out isolates this leak from exception handling;
+  the import-only baseline reproduces exactly the same 843 leaked wrappers /
+  53,952 bytes as the complete test, proving the leak occurs before either test
+  case runs. The final Debug rebuild and tests pass: 2 new cases / 20 assertions,
+  plus 10 selected existing cases / 62 assertions including recursive code
+  generation (47 unrelated cases explicitly excluded). Final valgrind eliminates
+  all 843 leaked wrappers. Its remaining direct losses are 33 bytes in JVM
+  PerfMemory initialization and 56 bytes in WatcherThread startup; 3,795 bytes
+  are indirectly lost and 611,384 possibly lost. All remaining loss allocation
+  stacks originate in JVM allocation or JVM-created thread TLS. An independent
+  C JNI invocation/lifecycle reproduction links only libjvm and reproduces the
+  identical 33-byte PerfMemory, 56-byte WatcherThread and 3,795-byte indirect
+  losses after DestroyJavaVM. Its smaller workload reports 215,712 possibly
+  lost bytes and 211 contexts; the larger module workload is not claimed
+  byte-identical. Source and log: `/tmp/wsdl-p2-10-jvm-invocation.c` and
+  `/tmp/wsdl-p2-10-jvm-invocation-valgrind.log`; hashes are recorded in the JNI
+  audit. No leak suppression or JVM configuration workaround has been applied.
+- User handoff: the user is taking the astparser audit/commit in parallel. Its
+  implementation is stable (115 cases / 994 assertions, warning-free docs using
+  local JNI). modules/astparser/ and design/astparser-brace-regex.md are frozen
+  for that review, including the existing 62-item audit with its open PCRE2 gate.
+  This task continues XML/JNI work and will not stage or commit astparser paths
+  while the user owns that review.
+- Logs: `/tmp/wsdl-p2-10-final-<suite>.log`, `...-python.log`,
+  `...-independent.log`, `...-cmake.log`, `...-build.log`, `...-docs.log`.
+  API/release documentation and durable `design/wsdl-xml-values.md` are drafted.
+  Full final-diff audit and a commit remain pending the required checks.
+  Current source SHA-256 is `15eb3f9f0fcd5f3bc0335efbd51ae4914d098c14f7ed08bb30ae470467534bbc`;
+  native Debug artifact is `dc1fadc47062c8d809cd8e04ffb8611edd2ffe03baf08b26f284b5cedbd98372`.
+  `get_module_hash().xml.filename` confirms the local build-debug binary is loaded.
+  Final reports were compared recursively and copied to current-report.json and
+  coverage-report.json: only the WSDL digest changes. All 387 Qore cases in 25
+  suites pass; the added negative native assertions do not change the case count.
+- Final affected XML memory runs pass all 48 cases / 307 assertions with zero
+  definitely, indirectly or possibly lost allocations in every suite. Memcheck
+  still reports conditional branches on uninitialized values in generated code:
+  xml-literal 1 context, xml 137, InputStreamSaxIterator 128, wsdl-xml-value 120.
+  These remain visible pending PCRE2 diagnostic adjudication; no suppression or
+  disabled JIT has been applied. Logs: `/tmp/wsdl-p2-10-valgrind-<suite>.log`.
+
+### P2-11 — incoming element namespace identity (in progress, uncommitted)
+
+- Document body and header elements are matched by expanded name before schema
+  decoding. Local qualification defaults/overrides, default namespace resets,
+  aliases and per-element rebinding are checked in their actual XML scope.
+  Malformed names, unbound prefixes, invalid bindings and duplicate expanded
+  attributes fail with `SOAP-DESERIALIZATION-ERROR`; caller data is unchanged.
+- The generic `expandElementNamespaces()` helper retains distinct namespace
+  identities, occurrence order and false/zero/empty values. Scope restoration
+  uses one traversal map rather than copying ancestor bindings to descendants.
+  Review found growing repeated-list copies; accumulation now promotes once
+  and appends in place. A 4,096-value alias regression checks exact order/content.
+- `restoreElementNamespaces()` prepares expanded wildcard names for XML output,
+  reserving retained namespace prefixes and lexical `qorexmlN:` references so
+  allocation cannot overwrite or accidentally create a QName binding. Empty
+  namespaces explicitly reset defaults; the XML namespace uses `xml`.
+- SoapHandler now inspects a copy for operation routing. Its former namespace
+  removal injected a synthetic `ns` member into the message passed to decoding.
+  A real HTTP SOAP 1.2 test rejects a wrong payload namespace and then accepts a
+  valid request on the same server; 17 cases / 106 assertions pass.
+- Latest full Python run: 74 tests, with only the six already-routed P4/P6
+  subtest failures. New independent element tests assess 56 documents using
+  lxml and pinned Xerces, checking exact expanded names, lexical values, order
+  and QName bindings in requests/responses through actual SOAP 1.1/1.2 bindings.
+- Latest diagnostic reports: `/tmp/wsdl-survey-p2-11-restored.json` and
+  `/tmp/wsdl-coverage-p2-11-restored.json`. Request survey: 293 descriptions,
+  1,136 messages, 279/14 description parses, 1,006/110 decodes, 1,004/2
+  serializations, 972/32 output verdicts; valid-input/invalid-output decreases
+  from 20 to 8. Full broad failures decrease from 384 to 360; strict selection
+  still has zero failures. No new corpus failures; repository reports remain
+  at P2-10 pending final review. Earlier transient Clark-name XML generation
+  failures were root-caused and fixed by the inverse namespace conversion.
+- Still open: schema maps overwrite same-local-name declarations from different
+  namespaces; this increment does not yet repair declaration indexing. A
+  wildcard-only top-level type is treated as empty by the existing unwrapped
+  argument inference; explicit root wrappers work and are exercised here.
+  Track and fix bare wildcard consumption in the remaining P2 consumer work.
+  Full wildcard validation/mixed-content semantics remain assigned to P5.
+- Final affected run passes 361 cases across 23 Qore suites, including 11
+  namespace cases / 271 assertions. Final survey/coverage results differ from
+  the previous improved run only in the WSDL digest and have been copied to
+  the repository. WSDL SHA-256:
+  `d49373f3a9d3414f88a857ff825f147debb83c1528140d7c390bb6d61cbb866d`.
+  WSDL and SoapHandler API docs pass without warnings after correcting the
+  latter's logging parameter markup. Full 62-item incremental review:
+  [audits/P2-11.md](audits/P2-11.md). No C++ edits in this increment.
+  The separate P2-10 PCRE2
+  memory-check decision remains open; no workaround has been applied. Astparser
+  paths remain owned by the user's parallel audit and have not been touched.
+
+### P2-12 — colliding element declaration fields (in progress, uncommitted)
+
+- Five initial regressions fail before the fix because parseElements and group
+  maps overwrite same-local-name fields. Internal construction now retains
+  expanded identities, including deferred imported/no-namespace references.
+  Final field mapping considers the whole type and its choices: unique local
+  names remain compatible, while colliding names use expanded keys.
+- Base and group maps are reindexed during composition without renaming their
+  source fields. All complex types enter the finalization queue, including
+  nested anonymous types that were previously omitted. The resolver only
+  attempts simple-type resolution when that metadata exists.
+- XML serialization uses declaration names separately from public field keys.
+  Provider fields already consume the finalized maps; WSMessageHelper now uses
+  those field keys when assembling nested/choice examples. The first example
+  regression failed from the previous local-name overwrite before its fix.
+- New Qore suite currently passes six cases / 76 assertions. The first 24-suite
+  affected run passed with no warnings; a final rerun is pending the example
+  change. Independent tests pass two cases covering 136 documents against both
+  lxml and pinned Xerces: 124 original/emitted namespace/content variants plus
+  12 generated/provider/reconstructed examples, actual SOAP 1.1/1.2 bindings and
+  both directions. Exact XML names/order/text and boolean/integer types are
+  checked, as are SOAP-DESERIALIZATION-ERROR rejections.
+- Normative basis: XSD 1.0 element declaration target namespace/form and
+  declaration validity; distinct namespace/local pairs identify distinct
+  declarations. This increment does not implement P4's repeated-particle model,
+  or resolve the remaining same-local-name multipart WSDL message restriction.
+- Logs: `/tmp/wsdl-p2-12-collisions-red.log`, `...-examples-red.log`,
+  `...-collisions.log`, `...-independent.log`, `...-affected.log`.
+  Final 24-suite affected run passes 367 cases, including the six new cases /
+  76 assertions. Full Python discovery runs 76 tests with only the same six
+  P4/P6 subtest failures. WSDL docs build without warnings. Final corpus reports
+  are recursively identical to P2-11 apart from the WSDL source digest and have
+  been copied to the repository. Source SHA-256:
+  `1cb087938843d8b6909e8f6382e45b1ae428a2740edbcf2c42606680e2a80995`.
+  Full 62-item incremental audit: [audits/P2-12.md](audits/P2-12.md).
+  P2-10's native memory decision remains open; no native changes, astparser
+  edits, installation, commits or push have been performed in this increment.
+
+### P2-13 — WSDL message part identities (in progress, uncommitted)
+
+- Four initial message regressions fail with WSDL-ERROR for ambiguous local
+  element name `item`, despite three distinct namespaces. WSMessage now resolves
+  parts in their message/part XML scope, counts local aliases after resolution,
+  and uses expanded argument keys where element names collide. Distinct part
+  names remain the provider/message data keys.
+- An unprefixed `part.element` formerly used the WSDL target namespace through
+  getNamespaceUri(); it now resolves the actual XML default namespace, including
+  explicit resets. Malformed/unbound QNames and wrong referenced identities
+  reject; scoped rebinding restores the outer namespace context.
+- Element wire names are independent of internal argument keys, including
+  no-namespace document roots. WSMessageHelper generates all parts for messages
+  with multiple parts while retaining its existing single-part return shape.
+- New Qore suite currently passes four cases / 65 assertions, covering actual
+  SOAP 1.1/1.2 body/header parts, both directions, ambiguous/wrong inputs,
+  providers, generated samples and Serializable reconstruction. Logs:
+  `/tmp/wsdl-p2-13-message-red.log`, `...-message.log`, `...-affected.log`.
+- Remaining duplicate references to the identical expanded element and complete
+  RPC part/protocol semantics are still tracked under P6. This increment fixes
+  distinct element identities; it does not claim the existing identical-element
+  restriction is required by WSDL. Normative reference is the pinned WSDL 1.1
+  Note, sections 2.3, 3.5 and 3.7:
+  https://www.w3.org/TR/2001/NOTE-wsdl-20010315 (the generic /TR/wsdl URL now
+  redirects to WSDL 2.0, which is outside this plan).
+- The independent multipart matrix additionally exposes P3 integer lexical
+  rejection: `xs:int` text `invalid` becomes integer zero through the existing
+  scalar conversion. Eight explicit failing subtests (body/header placement,
+  requests/responses, both SOAP versions) retain the required
+  SOAP-DESERIALIZATION-ERROR assertion under `P3-integer-lexical-rejection`.
+  This is a separately routed scalar defect, not a passing namespace test.
+- Final focused suite passes five cases / 80 assertions, adding message-level
+  scope and type/element part alias collisions. All 24 other affected suites
+  pass (372 combined Qore cases). The independent test completes all 160
+  element-document checks with both validators and exact values/types/placement;
+  only its eight explicitly routed P3 subtests fail. Full discovery runs 77
+  tests with 14 subtest failures: eight P3, four existing P4 and two existing P6.
+  WSDL docs build without warnings. Survey and coverage compare recursively
+  identical to P2-12 except source digest and have been copied to the repository.
+  WSDL SHA-256:
+  `11c598aec866cbcf6d31babc80f84961f668cd7cb8a80635e7f37b718e235252`.
+  Full 62-item incremental audit: [audits/P2-13.md](audits/P2-13.md).
+  No native or astparser edits; P2-10's memory-check decision remains open.
+
+### P2-14 — inherited attribute constraints (implemented, uncommitted)
+
+- Root cause: complex-type finalization replaced inherited attributes without
+  checking requiredness, fixed constraints or simple-type ancestry. The same
+  override merge also hid duplicate extension uses. Inline simple-content types
+  were accepted without checking their relation to the effective base content.
+- Restriction replacements now use expanded attribute identities and preserve
+  required/fixed constraints. Type ancestry follows declared/builtin restriction
+  links and list/union rules, with a per-check type-pair memo. Extensions reject
+  duplicate expanded uses; omitted restriction attributes remain inherited per
+  the XSD 1.0 complex-type property mapping. Base fields remain unchanged.
+- New `test/wsdl-attribute-derivation.qtest`: seven cases / 69 assertions,
+  including negative declarations, builtin/named/list/union ancestry, qualified
+  collisions, inline content, provider values, Serializable restoration and
+  failed-addition recovery. Six cases failed before the fix for missing WSDL-ERROR.
+- New `test_attribute_derivation.py`: 44 schemas through 88 actual SOAP binding
+  parses and 40 independent request/response payload checks with exact zero/false
+  values. Both tests pass with lxml and pinned Xerces. Six fixed-constraint cases
+  explicitly record libxml2's erroneous acceptance; Xerces and Qore reject in
+  accordance with derivation-ok-restriction.2.1.3. No skipped disagreement.
+- All 25 other affected suites pass (379 combined Qore cases). Full Python runs
+  79 tests with only the 14 already tracked P3/P4/P6 subtest failures. WSDL docs
+  build warning-free. Logs `/tmp/wsdl-p2-14-{focused,affected,independent,python,docs}.log`.
+  Both-version survey and coverage are recursively unchanged apart from the
+  verified source digest: `f8e6bbc1158b4cbd57a00e07da79a5b5f060a3948cb4c474d6970a3e906d7c78`.
+  Current reports refreshed; strict failures zero, broad failures 360.
+- References: https://www.w3.org/TR/xmlschema-1/#derivation-ok-restriction,
+  #cos-st-derived-ok, #ct-props-correct and complex-type property mapping;
+  second-edition errata checked. Full 62-item audit [audits/P2-14.md](audits/P2-14.md).
+  Native P2-10 gate remains open; no astparser changes or commit.
+- Remaining constraints: attribute wildcard composition/admission for newly
+  introduced restriction uses, named mixed emptiable simple-content bases,
+  contradictory element declarations and import-reference permissions. Scalar
+  facet/value validation stays in P3; full final/block behavior in P5.
+
+### P2-15 — named mixed emptiable bases (implemented, uncommitted)
+
+- Root cause: simple-content finalization rejected every named base without
+  simple content; construction had discarded effective mixed flags and nested
+  emptiability information. Named groups also resolved only direct references,
+  leaving missing/cyclic references inside compositors unchecked.
+- Retains an internal typed tree for the XSD Particle Emptiable predicate, with
+  captured expanded group identities and per-group result caches. Every nested
+  reference is checked, including optional branches. Mixed flags follow
+  complexContent/complexType precedence; genuinely empty effective content in an
+  extension inherits the base's properties, including the anyType ur-type.
+  Empty effective content is distinct from a nonempty but emptiable particle.
+- Named mixed emptiable bases now allow simple-content restriction with an
+  inline simple type, outer facets and inherited attribute constraints. Existing
+  scalar/hash return shapes are preserved. Full ordered instance matching and
+  general mixed-content preservation retain P4/P5 ownership.
+- New `test/wsdl-mixed-base.qtest`: final six cases / 61 assertions, including
+  provider/native values, group scope/cycles, required/optional particles,
+  declaration flags, failed-addition recovery and a shared 32-level group graph
+  before/after reconstruction. Four of the five initial cases failed before the
+  fix. All 26 other affected suites pass: 385 combined Qore cases.
+- New `test_mixed_base.py` and `mixed-base.qr`: 35 independent schemas and 28
+  SOAP documents, actual 1.1/1.2 bindings, both directions, reconstructed
+  WebService providers/examples and exact integer zero/attribute/name checks.
+  Both Python tests pass. lxml's dropped outer facets (four negative documents)
+  and incorrect mixed=false/0 override (two invalid schemas) are explicitly
+  recorded oracle defects; Xerces and Qore enforce the XSD 1.0 mappings.
+- Full final Python run: 81 tests with only 14 tracked P3/P4/P6 subtest failures,
+  no new failures/skips. WSDL docs are warning-free. Logs:
+  `/tmp/wsdl-p2-15-{focused,affected,independent,python-final,docs}.log`.
+  Both-version request survey/full coverage compare unchanged except digest;
+  current reports refreshed, strict failures zero, broad failures 360.
+  WSDL SHA-256:
+  `dfe994b06eaaee51bbf9576ed038c2bb951ccc69b74ce7bae70540b5128acaf9`.
+- Full 62-item audit [audits/P2-15.md](audits/P2-15.md); references are XSD 1.0
+  complex-type property mapping, src-ct, cos-group-emptiable and
+  derivation-ok-restriction. Snapshot `/tmp/wsdl-p2-15-pre-reference-permissions-WSDL.qm`.
+  P2-10 native decision remains open; no astparser changes or commit.
+
+### P2-16 — source-local reference permissions (implemented, uncommitted)
+
+- References now require imports in the referencing schema document, even when
+  another source already loaded the components. Construction scopes restore the
+  permission map on every exit; includes/imports receive their own scopes.
+- Import checks and reference cache keys distinguish absent namespace attributes
+  from explicit empty values. Empty/whitespace targetNamespace declarations fail
+  with WSDL-ERROR; malformed/unbound QNames retain WSDL-NAMESPACE-ERROR.
+- New `wsdl-reference-permissions.qtest` passes five cases / 53 assertions,
+  covering nine reference kinds, transitive/include scopes, cached imports,
+  reconstruction and recovery after failure. The corrected baseline reproducer
+  fails four of five cases for missing WSDL-ERROR. All 28 affected suites pass:
+  390 Qore cases (`/tmp/wsdl-p2-16-affected.log`).
+- Independent tests pass 29 schema graphs and 24 SOAP documents through actual
+  1.1/1.2 bindings in both directions, with provider/example/reconstructed-service
+  consumers and exact expanded names, integer zero and boolean false values.
+  Seven libxml2 and two Xerces schema verdict discrepancies are separately
+  asserted against the normative src-resolve/src-import rules; no skipped cases.
+- Three Qore-authored SOAP fixtures add their missing encoding namespace imports.
+  Pinned upstream files are unchanged. Full Python: 83 tests, only 14 tracked
+  P3/P4/P6 subtest failures. WSDL docs build without warnings/errors. Logs:
+  `/tmp/wsdl-p2-16-{independent,python,docs}.log`.
+- Survey/coverage retain all counters, stages and classifications: zero strict
+  failures, 360 broad failures. The already-invalid SOAPEncodedArray source now
+  fails earlier on an unimported WSDL-namespace QName, still WSDL-ERROR. Reports
+  record the externally changed installed Qore revision `0817c849f2db`; this
+  execution did not modify or install Qore. Local Debug XML artifact is unchanged.
+  WSDL SHA-256:
+  `4faccd75b554d33c005383726a86ab072aabc2e6f91fa29e3749c8da38aa5e80`.
+- Full 62-item audit: [audits/P2-16.md](audits/P2-16.md). P2-10's native memory
+  verification decision remains open. No astparser edits, commit or push.
+
+### P2-17 — element declaration consistency (implemented, uncommitted)
+
+- Root cause: field maps overwrote same-name declarations before their type
+  identities could be compared. Named groups omitted nested compositors.
+  Construction now retains declarations, resolves their types and checks expanded
+  element identities before field/occurrence merges. Nested group fields reach
+  existing provider/example consumers.
+- Distinct declarations with one expanded name require the same named type.
+  Repeated references to one declaration retain its anonymous type identity;
+  separate but textually identical anonymous declarations conflict. Extensions
+  combine base declarations; restrictions use replacement content. Ordinary
+  optional particles contribute declarations; zero/zero particles do not.
+- New `wsdl-element-consistency.qtest`: seven cases / 49 assertions pass, including
+  nested/unused groups, namespace/scope separation, forward references, inherited
+  content, failed-addition state restoration and a shared 32-level group graph
+  before/after reconstruction. Isolated P2-16 baseline fails five of seven cases.
+- New `test_element_consistency.py`: 30 schema graphs through 60 actual 1.1/1.2
+  binding parses and 20 SOAP documents in both directions, with exact names,
+  order, integer zero/boolean false and reconstructed provider/example consumers.
+  Both tests pass. libxml2's 13 accepted conflicts and two rejected valid +00
+  occurrence spellings, and Xerces's two unchecked unused groups, are recorded
+  explicitly against XSD 1.0 cos-element-consistent/property mappings.
+- All 29 affected Qore suites pass: 397 cases. Full Python: 85 tests with only
+  14 already tracked P3/P4/P6 subtest failures, no new failure/skip. WSDL docs build
+  without warnings/errors. Logs `/tmp/wsdl-p2-17-{affected,independent,python,docs}.log`.
+  Both corpus reports are recursively unchanged except module digest, with zero
+  strict failures and 360 broad failures. Current reports refreshed.
+- WSDL SHA-256:
+  `ed4e9532cfa12e67c8a1798a48a2c49bdec8e7288217e6aad0c18fe458bffe26`.
+  Full 62-item audit: [audits/P2-17.md](audits/P2-17.md). P4 ordered matching and
+  P5 substitution-group implicit declarations retain their phase ownership.
+  P2-10 native memory decision remains open. No astparser edits or commit.
+
+### P2-18 — attribute wildcard construction (implemented, uncommitted)
+
+- Root cause: wildcard namespace/processing constraints were discarded; the
+  anyAttribute boolean also represented element wildcards. Restrictions could
+  introduce attributes without base namespace permission and accept invalid
+  wildcard changes. Typed metadata now preserves source-local namespace tests,
+  group intersections, extension unions and restriction subsets/strength.
+- New public enums/hashdecl and group/type metadata getters retain native field
+  shapes and copy-on-write views. Empty sets differ from absent wildcards;
+  non-expressible XSD 1.0 combinations reject. xs:anyType's ur-type processing
+  exception is retained. Runtime wildcard value behavior remains P5 work.
+- New `wsdl-attribute-wildcards.qtest`: final eight cases / 67 assertions pass.
+  Initial baseline failed all six original cases. Coverage includes imported and
+  no-target namespaces, nested groups, processing precedence, immutable views,
+  reconstruction, failed-addition recovery and native/provider consumers.
+- New `test_attribute_wildcards.py` and `attribute-wildcards.qr`: 82 schema graphs
+  through 164 actual 1.1/1.2 binding parses and 112 original/emitted documents,
+  simple/complex content, qualified/unqualified attributes, both directions,
+  providers, generated examples and reconstructed services. Both tests pass.
+  Xerces matches all normative verdicts; libxml2's ##other/##local and empty-set
+  subset disagreements are explicit assertions against cos-ns-subset.3.2.2.
+- All 30 affected Qore suites pass: 405 cases. Full Python: 87 tests with only
+  14 tracked P3/P4/P6 subtest failures, no new failure/skip. WSDL docs build without
+  warnings/errors. Logs `/tmp/wsdl-p2-18-{affected,independent,python,docs}.log`.
+  Both corpus reports are recursively unchanged except module digest: zero strict
+  failures, 360 broad failures, no missing/skipped stages. Reports refreshed.
+- WSDL SHA-256:
+  `bb4758d5edf341accd03814fd4d077c886713f097e5470e96706a8e9ac36d08c`.
+  Full 62-item audit: [audits/P2-18.md](audits/P2-18.md).
+  Baseline `/tmp/wsdl-p2-17-pre-attribute-wildcards-WSDL.qm`.
+  P2-10 native memory decision remains open. No native/astparser edits or commit.
+
+### P2-19 — declaration constraints (implemented, uncommitted)
+
+- Root cause: element constructors selected one of contradictory type declarations
+  and did not distinguish local/global/reference properties. ID-derived value
+  constraints and merged ID attribute-use limits were not checked after resolution.
+- Construction now rejects contradictory declarations, invalid context properties,
+  named/duplicate inline types and empty declarations in nested compositors/groups.
+  Empty QName attributes report namespace errors. Legal boolean spellings retain
+  correct nillability metadata.
+- ID-derived attribute/element value constraints are checked after simple/complex
+  type resolution. Combined local/group/inherited attributes allow at most one ID
+  use. Prohibition removes a use; IDREF remains distinct. A new detached-schema
+  regression fixes an expired borrowed namespace reference found in the first full
+  Python run; ID checks now use only the resolved type chain.
+- Focused test: eight cases / 97 assertions. All 31 affected Qore suites pass:
+  413 cases, no warnings. Independent tests: 94 schemas / 188 actual 1.1/1.2 binding
+  parses and 24 documents, both directions, reconstructed providers/examples and
+  exact typed zero/false. Fourteen libxml2 and two Xerces disagreements are
+  explicit assertions against the XSD 1.0 requirements.
+- Documentation builds without warnings/errors. Both reports retain identical
+  results (zero strict failures, 360 broad failures, no missing/skipped stages),
+  differing only by WSDL digest and externally updated Qore revision
+  b46682ff4d02341350b02cd55621a0a540c032a4. Local Debug XML is unchanged.
+- WSDL SHA-256: `42512cfc525dd1bf506f228a9d3d1b4e3e104cc53065744be9810b11fdea9fba`.
+  Baseline `/tmp/wsdl-p2-18-pre-declaration-constraints-WSDL.qm`.
+  Logs `/tmp/wsdl-p2-19-{affected,reference-recheck,python-final,docs}.log`.
+  Full 62-item audit: [audits/P2-19.md](audits/P2-19.md). Final Python: 89 tests
+  in 110.904s with only the 14 tracked P3/P4/P6 subtest failures; no new error/skip.
+  P2-10 native memory decision remains open; no new native/astparser edits or commit.
+
+### P2-20 — unwrapped document values (implemented, uncommitted)
+
+- Root cause: unwrapped selection inspected only the flat element map and treated
+  wildcard-only/nested-choice-only content as empty. Selection now includes
+  explicit element wildcard and choice fields for one selected part, preserving
+  other part/header wrappers and WSDL message-name containers.
+- Attribute wildcards and absent zero/zero particles do not claim child values.
+  Multiple selected document parts require explicit wrappers. This closes the
+  direct bare wildcard consumer finding from P2-11; full group/mixed/wildcard
+  runtime semantics retain P4/P5 ownership.
+- New qtest: six cases / 116 assertions. Independent test and worker validate
+  60 emitted payload/header documents across four schemas, eight actual SOAP
+  bindings, both directions, reconstructed services and bare/part/message forms.
+  Exact names, zero/false/empty values, order and header ownership are asserted.
+- All 32 affected Qore suites pass: 419 cases, no warnings. Full Python:
+  Ran 90 tests in 118.806s; only the 14 tracked P3/P4/P6 subtest failures, no new error/skip.
+  Docs build without warnings/errors. Both reports are recursively unchanged
+  except WSDL digest: zero strict failures, 360 broad failures, no missing/skips.
+- WSDL SHA-256: `cb7c2e6a3471a6c78f237fa9c8ffca5bb4d5540b9333d2767318674d6d40ba11`.
+  Baseline `/tmp/wsdl-p2-19-pre-bare-values-WSDL.qm`. Full 62-item audit:
+  [audits/P2-20.md](audits/P2-20.md). Logs:
+  `/tmp/wsdl-p2-20-{affected-final,independent,python,docs}.log`.
+  P2-10 native memory decision remains open; no new native/astparser edits or commit.
+
+### P2-21 — retained XML consumers (in progress, commit gate not clear)
+
+- Baseline `/tmp/wsdl-p2-20-pre-xml-consumers-WSDL.qm`; reviewed incremental diff
+  `/tmp/wsdl-p2-21-WSDL.diff`. WSDL SHA-256:
+  `2db90a28aee577555fb7a514d621a34fbe198eef6de3642298b0bff62955e2cb`.
+- XsdXmlValue is final, keeping its XML source and cached identities/views
+  consistent. New root URI/local getters and getChildValues() retain immediate
+  children, namespace declarations (including QName-only bindings), local/default
+  rebinding, lexical text, whitespace, CDATA and comments. Source between-child
+  nodes stay accessible on the parent. Extraction handles 4,096 siblings and depth
+  128, and interrupted extraction permits subsequent use.
+- XsdElement.validateXmlValue checks exact root and DTDs and applies both existing
+  decode and encode validation. Comments are absent from the validation projection
+  because they do not participate in XSD content models; the authoritative XML
+  retains them. Namespace allocation uses a private registry copy. Both validation
+  wrappers rethrow PROGRAM-INTERRUPTED and THREAD-CANCELLED unchanged; an injected
+  copy interruption checks sender/provider and receiver error paths.
+- Literal document parts accept carriers keyed by part/element name, or bare when
+  one part is selected. Fragment keys contain length-prefixed message identity and
+  part name to prevent merged header fragments overwriting each other.
+- XsdSchema.getXmlValue/validateXmlValue/getXmlDataProviderType expose explicit XML
+  validation and providers. The provider keeps its source-backed schema owner;
+  component/type/namespace state is transient. Direct graph serialization failed
+  on internal XsdEmptiabilityInfo and was replaced by reconstruction from sources.
+  Optional/mandatory copies now honor base type conversion while retaining the XML
+  validator. Wrong serialized state, root and native input types reject explicitly.
+  Providers remain usable after explicit deletion of the original schema.
+- WSMessageHelper.getXmlMessage produces per-part XML examples using the native
+  example helper, checks them with existing validators, and preserves namespace
+  allocation state. Its inherited required-wildcard example defect is recorded
+  below as a failing P5 diagnostic, not an accepted output.
+- WSOperation.deserializeXmlRequest/Response return SoapXmlMessageInfo with `body`
+  part-name maps, `headers` message/part maps, ordered `unbound_headers`, and SOAP
+  1.1 `extensions` after Body. Root/container order, duplicate/missing/unknown body
+  parts, duplicate declared headers, and unqualified header blocks reject. Existing
+  schema and fault handling runs before results are published.
+- SoapClient.callOperation(..., {"xml_values": True}) opts into this return type;
+  SoapHandler.addMethod(..., xml_values) has an optional final bool selecting this
+  callback argument type. Native defaults stay available. Real HTTP tests cover
+  both versions, native/XML callbacks and results, body/header ownership, lexical
+  009/007 and boolean 0/1, invalid option types and one-way operations.
+- One-way coverage exposed a native decoder requirement for an absent output
+  BindingMessageDescription. Making that reference optional and guarding header
+  access fixes native and XML-mode one-way calls. Explicit XML response decoding
+  for an operation without output rejects SOAP-DESERIALIZATION-ERROR.
+- SOAP positive fixtures now use comments/CDATA, not processing instructions.
+  SOAP 1.1 section 3 and SOAP 1.2 section 5 prohibit initial senders from emitting
+  PIs. Retained SOAP sends and receives reject them and DTDs; pure XML carriers
+  still retain PIs. This is required integration validation, not a full P7 claim.
+- Focused consumer suite: 13 cases / 319 assertions pass. Carrier suite: 14 cases,
+  13 pass / 211 assertions reached, with the namespace dependency error below.
+  Initial checkpoints and current logs are `/tmp/wsdl-p2-21-{before,receive-before,
+  http-before,optional-before,one-way-before,cancel-before,focused-final,children-final}.log`.
+- `test_xml_consumers.py` and `xml-consumers.qr` check 192 documents across two
+  schemas, actual 1.1/1.2 bindings, both directions, body/header part placement,
+  source-backed service/provider reconstruction and generated examples. Exact
+  expanded names, QName scope, lexical text, mixed text/tails, comments, CDATA and
+  child order are checked independently of prefix choice.
+- **Open dependency decision (P2):** libxml2 2.12.10 returns namespace URI
+  `urn:quoted&#38;more` for source `xmlns:p="urn:quoted&amp;more"`, so namespace
+  reconstruction escapes it again. The carrier regression remains failing.
+  A standalone C reproducer `/tmp/wsdl-p2-21-libxml-namespace.c` confirms the root
+  independently of Qore; its diagnostic comparison with XML_PARSE_NOENT returns
+  the correct URI. Production parsing flags are unchanged. The C reproduction's
+  valgrind log has zero errors/leaks (`/tmp/wsdl-p2-21-libxml-namespace.log`).
+  Upstream parser.c adds namespace-specific entity expansion between v2.12.10
+  and v2.13.9. An async question requests approval for a compatibility adaptation
+  on older libxml2, or a required fixed dependency version. No answer or workaround
+  has been applied; the user instruction forbids unapproved workarounds.
+- **Additional native helper finding (P5):** WSMessageHelper.getTypeInfo(XsdComplexType)
+  exposes a record only when elementmap is nonempty, and getMessage has no wildcard
+  example generation. A required `xs:any` therefore gets an empty example. Both
+  libxml2 and pinned Xerces reject 16 of the 192 documents (required-wildcard
+  example payloads only); all retained values, emitted original payloads/headers,
+  record examples and header examples validate. The Python test completes both
+  validator passes and then fails with both exact rejection lists. Fix alongside
+  complete wildcard content/example generation, not by making the fixture optional
+  or calling empty invalid examples passing.
+- Inherited xml:lang/xml:space/xml:base semantics still need consumer integration;
+  child extraction currently copies namespace declarations only. The distinction
+  is explicit in the design. The probe `/tmp/wsdl-p2-21-context-probe.qr` shows
+  inherited language and effective relative/absolute base URIs available from the
+  native reader. Preserve this context without injecting new schema-invalid
+  attributes into payload roots. This criterion remains open under P2/P5.
+- Final verification: 33 affected Qore suites / 436 cases, 435 pass with only the
+  namespace dependency error; no warnings. Full Python: 91 tests in 119.848s,
+  15 failures (14 existing P3/P4/P6 subtests plus the P5 wildcard example test),
+  no error/skip. All three module docs targets build without warnings/errors.
+  Both-version survey and strict coverage are recursively unchanged except the
+  final WSDL digest: zero strict failures, 360 broad failures, no missing/skips.
+  Current reports are refreshed from that digest. Final logs use the `-final`
+  suffix in `/tmp/wsdl-p2-21-{affected,python,docs,survey,coverage}-final.log`.
+  Full 62-item audit has explicit error-handling/correctness failures and does not
+  clear the commit gate; no passing conformance claim is made.
+- Release notes/design now describe the implemented APIs. SoapClient is 1.0.4 and
+  its Version/User-Agent are synchronized; SoapHandler's Version now matches 0.3.4.
+  Its new docs build exposed and fixed duplicate SoapClient release anchors,
+  incorrect Xml namespace/constructor references and an obsolete method reference.
+  The existing ConnectionProvider tag file is now supplied in the local docs cache.
+- No new C++/astparser/JNI edit, build, installation, commit or push. Docs use the
+  existing astparser artifact. Debug XML SHA remains
+  `dc1fadc47062c8d809cd8e04ffb8611edd2ffe03baf08b26f284b5cedbd98372`.
+  P2-10's earlier PCRE2 JIT/valgrind decision still blocks the native commit gate.
+  Full audit status is recorded in [audits/P2-21.md](audits/P2-21.md).
+
+### P2-22 — inherited XML context (implemented, uncommitted; gates open)
+
+- WSDL baseline `/tmp/wsdl-p2-21-pre-xml-context-WSDL.qm`; final SHA
+  `8a929d64f4e58443e0164e944a3f568d4ddc75a360c9d4c0629d7a13caae657e`. Full 62-item audit: [audits/P2-22.md](audits/P2-22.md), with explicit
+  memory/error-handling/correctness failures; no commit or phase-boundary pass.
+- Carriers serialize parent xml:lang/xml:space/xml:base separately from authored
+  root attributes. getInheritedXmlAttributes()/getXmlContext(), child extraction,
+  old/new Serializable state, direct generation and SOAP consumers preserve it.
+  Body/Header contexts are independent; incompatible retained siblings and
+  compatibility-header overrides reject without mutating caller values.
+- XML Base resolves LEIRIs by component merging and linear dot-segment removal.
+  The initial native reader choice lost Unicode bases (`rosé`); final code
+  preserves Unicode, spaces, percent escapes and unresolved relative parents.
+  Native XmlReader.baseUri() still has the dependency limitation; the carrier's
+  explicit context API does not depend on it.
+- A native generator root cause was fixed: literal attribute whitespace was
+  normalized to spaces on parsing. concat_attribute_value emits character
+  references, handles source/output encodings, checks cancellation every 100
+  bytes and propagates conversion/interruption errors. Debug XML only rebuilt
+  with verified prefix `/usr`; artifact SHA
+  `bcf5425bd6b86cdb3b678fbde39687e2ca3968079c723c204b91b4dba1a1441d`. No core/JNI/astparser edit or build,
+  installation, commit or push.
+- Focused tests: context **9/167**, consumers **15/479**, native **10/122** pass.
+  All **36 Qore suites / 482 cases: 481 pass**, only namespace dependency error,
+  no warnings. New independent **80 documents / two schemas** pass both validators
+  with exact authored attributes/whitespace/context across both bindings/directions,
+  reconstructed schemas/providers and direct XML generation. RFC resolution cases
+  and Unicode bases have separate normative/independent assertions.
+- Full Python **92 tests, 15 failures, no errors/skips** (135.165s), same explicitly
+  tracked P3/P4/P6 failures and P5 required-wildcard example failure. Final focused
+  URI boundary checks also pass. Survey/coverage unchanged except WSDL digest:
+  zero strict failures, 360 broad failures, no missing/skipped stages. Reports
+  refreshed. Logs `/tmp/wsdl-p2-22-{affected,python,docs,survey,coverage}-final.log`.
+- Affected native/WSDL/client/handler docs build without warnings. Broader docs
+  exposed 38 independent P9 packaging/reference warnings; installed QoreMacros
+  mistakenly includes SVG `.dox.h` inputs, and other modules have missing tags,
+  obsolete/private-class refs and a missing WebDAV parameter description.
+  Exact list: `/tmp/wsdl-p2-22-broad-doc-warnings.log`.
+- Valgrind does **not** pass: conditional reads remain (context 175 contexts;
+  consumer 7766 errors/7736 contexts), and the HTTP consumer run reports 384 bytes
+  possibly lost in glibc TLS from core AsyncIoController's thread pool. Definite/
+  indirect loss is zero; non-HTTP context/native runs also have zero possible loss.
+  A bounded 30-second test I/O deadline fixes instrumentation-only timeout; all
+  consumer functional cases now finish under valgrind. Final logs retain all
+  reports with --error-limit=no. Minimal async-task and async-XML runs are clean.
+  A plain-HTTP reproduction without XML/WSDL also reports 352 bytes possibly lost
+  from the same core pool TLS allocation, with zero valgrind errors; see
+  `/tmp/wsdl-p2-22-http-pool-repro.{qr,log}`. The pool's stopped notification precedes
+  final native-thread cleanup; completion versus glibc TLS-cache classification
+  still needs adjudication. This is isolated to the core HTTP/runtime lifecycle,
+  not proven to be leaked XML storage. Final literal valgrind: 10 cases/122
+  assertions pass, one conditional-read context, no lost memory.
+- Prior namespace-URI compatibility/fixed-version decision and PCRE2 JIT test
+  configuration decision are still pending; no workaround is authorized/applied.
+  Remaining P3–P9 functionality and P2 boundary gates are not declared complete.
+
 ### Remaining P2 acceptance work
 
-- Incoming element namespace identity and same-local-name element collisions; the
-  current element-prefix removal is still lossy. The remaining broad P2 decode
+- Namespace/part identity and lossless carrier consumers are implemented through
+  P2-22, including source context and actual HTTP. Clear the namespace-URI
+  dependency regression and required native memory gate, then complete P2's
+  acceptance review against the declaration and consumer tests.
+  The remaining broad P2 decode
   failures are GlobalElementComplexTypeSequenceExtension and MixedComplexContent
   (four directions each); mixed runtime behavior is coordinated with P5.
-- Complete and test the additive public lossless contract beyond attribute keys:
-  lexical forms, QName values, selected dynamic types, ordered particles, mixed
-  text and wildcard nodes, including client/handler/provider/example consumers.
-- Remaining inherited constraint/derivation checks, named mixed emptiable simple-content restrictions,
-  and imported-reference permissions.
+- Keep the public representation's lexical/QName/ordered/mixed/context guarantees
+  distinct from later scalar, particle and dynamic validation. Implicit substitution
+  declarations, complete runtime wildcard enforcement/preservation and required
+  wildcard examples remain P5 work; encoded/type/attachment consumers remain P6/P8.
 - P2 phase-boundary acceptance must pass before P3 starts. P3–P9 remain unstarted;
   no push or external publication is authorized or performed.
 
@@ -718,6 +1359,107 @@ findings and current diagnostic reports.
   failures. Full 62-item audit [audits/P2-07.md](audits/P2-07.md). No push.
 - `b67d61c` — P2-08 — compositor namespace scopes; 330 Qore cases pass, with six
   routed P4/P6 subtest failures. Full audit [audits/P2-08.md](audits/P2-08.md). No push.
+- `4879ed6` — P2-09 — array item identity and reserved schema output prefixes;
+  339 Qore cases pass, with six routed P4/P6 subtest failures. Full audit
+  [audits/P2-09.md](audits/P2-09.md). No push.
+
+
+## P2-23: behavioral libxml2 selection and PCRE2 test switch (2026-09-08)
+
+The user selected a programmatic PCRE2 JIT test control and CMake behavioral
+libxml2 detection with FetchContent fallback. The earlier dependency approval
+questions are superseded. Qore now supports `QORE_PCRE2_NO_JIT=1` using the
+installed PCRE2 library; XML CMake probes the installed dependency and falls back
+to pinned private static libxml2 2.15.4. Details and the full 62-item audit are in
+[audits/P2-23.md](audits/P2-23.md).
+
+All 482 affected XML/SOAP cases pass, including namespace ampersands. The 10
+CMake integration tests and 137 regex cases pass; production JIT remains the
+default. Final survey and strict coverage reports are exactly unchanged. The
+full Python suite retains its same 15 later-phase failures. Final valgrind
+runs for the switch, literal XML, retained values and XML context have zero
+errors/lost allocations. HTTP passes all 15 cases/479 assertions with no regex
+conditional-read reports, but retains one 384-byte possibly-lost glibc TLS
+allocation from core AsyncIoController/ThreadPool (exit 99; no definite/indirect
+loss). A valgrind Debug-info warning is also recorded. Qore switch/tests/docs
+and its independent full audit are committed as `6efa18fc5` on develop at the
+user's explicit request; no push. XML changes remain uncommitted; astparser
+sources/tests remain untouched. P2 acceptance and P3-P9 remain open.
+
+The minimal plain-HTTP reproduction still reports possible TLS loss with glibc
+stack caching disabled (diagnostic only), so cache tuning is not a solution.
+Core thread cleanup detaches threads and decrements tp_thread_counter before
+pthread's final TLS destruction; actual native termination must be distinguished
+from the counter notification. No thread-lifetime code change was made after
+Qore commit `6efa18fc5`. The valgrind Debug-info warning also occurs for
+`qore --version`, independently of XML/regex test execution.
+
+## P2-24: native HTTP thread termination prerequisite (in progress)
+
+The remaining HTTP TLS finding is now root-caused. A Valgrind/vgdb breakpoint
+at the actual libc `exit` function shows the main thread exiting while a Qore
+pool worker is still in `start_thread -> madvise`, after returning from
+`q_run_thread`. The same run reports one 352-byte possibly-lost TLS allocation.
+Logs: `/tmp/wsdl-p2-24-http-{gdb,vg-debug}.log`; reproducible debugger driver:
+`/tmp/wsdl-p2-24-http-exit-debug.py`. The first diagnostic breakpoint matched a
+C++ `exit` method and timed out; the corrected run uses `break *exit`.
+
+A deterministic native regression in the core repository holds a pthread TLS
+destructor at a condition-variable barrier. The existing runtime fails its
+assertion that `tp_thread_counter` must remain nonzero while that destructor is
+running. Core changes under review add one lazy native cleanup worker, an
+allocation-free intrusive completion queue, and native joins before releasing
+the external counter; runtime shutdown joins the cleanup worker before unloading
+native modules. ThreadPool public stop/cancellation behavior is unchanged.
+Tests cover concurrent creation, default/custom stack overloads, repeated native
+TLS destructor passes, failed creation/recovery and empty shutdown. Build and
+validation are in progress; no new commit or push yet.
+
+P2-24 verification update: the native TLS barrier regression passes with the
+join implementation, including simultaneous first creation, repeated destructor
+passes, invalid stacks, and real pthread_create failures/retry. The ordinary
+native test, ThreadPool qtest, plain HTTP reproduction, and XML SOAP consumer
+suite all have **zero Valgrind errors and zero definite/indirect/possible loss**.
+The SOAP consumer suite is **15 cases / 479 assertions**. All **482 XML/SOAP
+functional cases** pass with the new Debug runtime. Core regressions total
+**78 cases / 555 assertions** after correcting a pre-existing HTTP test fixture
+that greedily included a MIME boundary parameter's closing quote. That isolated
+fixture correction and its full audit are committed to core develop as
+`4f43e60f7`; it passes all 63 HTTP cases on both installed and Debug Qore.
+
+The P2-24 survey and strict coverage differ from the prior reports only in build
+version metadata: all counts, per-case results, failure owners and strict gates
+are unchanged. Full Python: **92 tests / the same 15 later-phase failures**,
+150.477 seconds. Final native audit found helper symbols accidentally exported;
+they are now marked DLLLOCAL and the affected final binary is being rebuilt.
+Core source/flags/test/docs remain uncommitted pending that validation. Other
+active core AOT namespace work is excluded from our changes and commits.
+
+### P9 independent environment findings from P2-24
+
+- Fedora glibc **2.43-8.fc44** leaks TLS storage on actual kernel pthread_create
+  failure. Qore's explicit resource-failure test passes all behavior/counter
+  checks but Valgrind reports **704 bytes / two possible-loss records** inside
+  libc. A standalone C program with no Qore/XML/OpenSSL reproduces two losses
+  (**544 bytes**), with every successful thread joined. A native, non-Valgrind
+  allocator measurement over 1,000 failed creations retains **287,712 extra
+  bytes**, both with the default stack cache and with caching disabled. This is
+  independent of the fixed Qore termination race. Reproduction is preserved at
+  `qore/examples/test/qore/classes/ThreadPool/pthread_creation_failure.c` and
+  in its README. Logs `/tmp/wsdl-p2-24-pthread-failure*-vg.log`; Qore fault log
+  `/tmp/wsdl-p2-24-native-vg.log`. P9 must verify/fix the supported libc failure
+  path; no suppressions, cache workaround, host library replacement or external
+  bug-report submission has been applied.
+- Valgrind **3.27.1-1.fc44** still reports the independently reproduced Qore
+  DWARF reader warning; HTTP runs also print `invalid file descriptor -1 in
+  syscall fstat()` as a tool warning. Their memory-error summary is zero.
+  Keep these diagnostics visible for P9 environment/tool adjudication. Do not
+  describe the instrumented runs as warning-free.
+
+An isolated libxml2-provider checkout under `/tmp/wsdl-libxml-provider-review`
+is being built against the committed XML parent plus only the build-provider
+change. This verifies that its FetchContent/probe commit can stand independently
+of the remaining XML value implementation and documentation changes.
 
 
 ## P2-24 committed provider prerequisite (2026-09-08)
@@ -931,3 +1673,87 @@ Logs: /tmp/wsdl-p2-30-{affected,independent,python,survey,coverage,docs}.log.
 Reports: /tmp/wsdl-survey-p2-30.json and /tmp/wsdl-coverage-p2-30.json.
 Full 62-item audit: [audits/P2-30-xml-values.md](audits/P2-30-xml-values.md).
 No native or astparser changes, installation or push in this increment.
+
+## P2-31 documentation/build and phase acceptance (2026-09-08)
+
+Retained XML consumers were committed as d5cfc96. This increment completes public
+QPP documentation inputs, native/user tag dependencies, option documentation,
+qualified references and literal WebContentUtil markup. The six WebContentUtil
+comment fixes were originally recorded under P2-10 and contain no runtime edits.
+P2-10 through P2-23 audits are preserved as explicitly historical evidence.
+
+The final local core package exposed two build requirements:
+
+- Core's two-pass docs helper used file(COPY_FILE), unavailable before CMake 3.21.
+  The parent fails with that diagnostic on actual CMake 3.18.4; core f23e5307a
+  uses configure_file(COPYONLY). Three tests pass on 3.18.4 and 4.3.0, covering
+  literal bytes, reconfiguration, target dependencies, disabled docs and errors.
+- Qore 3.0 public headers require C++17; XML's forced C++11 flag generated
+  extension warnings. CMake now selects the required standard by Qore version,
+  preserves higher caller-selected standards and keeps C++11 for older Qore.
+  Final compilation uses -std=c++17 without warnings. The independent legacy
+  Autotools path still forces C++11 and its old AX macro cannot select C++17;
+  this build-environment finding is explicitly assigned to P9, before acceptance
+  of supported build configurations. No runtime parsing behavior is relaxed.
+
+All native/user documentation builds with final warnings enabled and no warnings
+or errors, using Debug /usr, local Qore package, fixed JNI and existing astparser
+artifacts. The installed JNI assertion is resolved by the previously tested local
+source fix described under P2-10; committing that prerequisite and adjudicating
+standalone JVM diagnostics remain part of P9. Nothing was installed or pushed.
+
+Final checks: 34 affected SOAP/WSDL suites pass 447 cases; xml, xml-literal,
+xml-schema-callbacks and WebContentUtil add 125 cases, for 572 cases total.
+The focused five-suite run includes 135 cases / 1,031 assertions (its ten
+wsdl-interop cases are also in the 447). Boundary test_survey.py passes 14 tests.
+The required full Python discovery from P2-30 retains exactly 15 known failures
+among 93 tests, no errors/skips: eight P3 integer lexical subtests, four P4 nested
+choice subtests, two P6 binding-version subtests and one P5 wildcard-example test.
+No runtime Python/Qore implementation changed in this increment.
+
+The final C++17 request survey equals P2-30 recursively except versions:
+293 descriptions / 1,136 messages; 279 parse / 14 invalid-source rejections,
+1,006 decode / 110 failures, 1,004 serialize / two failures, 972 valid / 32 invalid
+outputs, eight valid-input-invalid-output rows. Nothing is unassessed by the input
+oracle. Full both-direction coverage retains 360 broad failures, zero selected
+failures, no missing/skipped stages; strict selection covers 38 descriptions and
+140 message/direction combinations. Diagnostic completion is not conformance.
+
+The C++17 native literal memory check passes 11 cases / 256 assertions with zero
+invalid accesses and no definitely, indirectly or possibly lost allocations.
+The checked run uses errors-for-leak-kinds=definite,indirect,possible. An initial
+run used all, which also counts 826 still-reachable records as errors; all its
+records were reachable (mostly retained process/library caches), with zero lost
+memory and no invalid accesses. That invocation and its log are retained. The
+previously reproduced Valgrind DW_AT_abstract_origin warning remains assigned to
+P9's tool/environment checks and is not suppressed.
+
+### P2 acceptance matrix
+
+| Criterion | Result and executable evidence |
+| --- | --- |
+| Declaration-local QName/type identity | Pass: namespace-context, compositor-context, array-context and message-identity suites cover rebinding/default/no namespace, actual SOAP bindings, reconstruction and recovery. |
+| Imports/includes/chameleons/cycles | Pass: schema-composition, reference-permissions and independent composition/reference tests cover real WSDL imports, source-local permission and namespace-specific caches. The empty pinned Imported.xsd is an adjudicated invalid source. |
+| Attributes, simple content and inheritance | Pass: attribute, attribute-derivation, attribute-wildcards and declaration-constraints suites cover refs, anonymous/default types, use/default/fixed, builtin/complex bases and contradictory declarations. |
+| Element/attribute qualification and collisions | Pass: element-namespaces, element-collisions, element-consistency and local-form tests validate expanded output names, provider metadata, inherited declarations and precise errors. |
+| Additive lossless public representation | Pass: xml-value, xml-context, xml-consumers and native xml-literal suites plus independent XML/encoding checks cover lexical/context/order retention, Serializable, providers, examples, client/handler and actual HTTP in both directions. |
+| Failure isolation and cancellation | Pass: namespace rollback, malformed reconstruction, detached provider ownership, injected cancellation and native callback/literal cleanup tests; committed native/core fixes clear the earlier ownership gates. |
+
+All P2 schema-construction and representation criteria are complete. The original
+primary P2 family labels for GlobalElementComplexTypeSequenceExtension and
+MixedComplexContent retain eight runtime anyType/mixed-content failures; those
+were explicitly routed to P5 earlier and remain failures. This acceptance does
+not claim P3 scalar, P4 particle, P5 content or P6-P8 binding/protocol behavior.
+The next implementation phase is P3, with its full original scope unchanged.
+
+Core prerequisite IDs after the parallel developer's history rewrite are
+b75db5d82 (PCRE2 control; formerly 6efa18fc5), 4060414dc (quoted MIME test;
+formerly 4f43e60f7), and 06eb33d38 (native joins; formerly 1e52a0a44).
+Their scoped blobs match the tested originals. Core f23e5307a is the additional
+CMake helper fix committed here. Core is clean; astparser is untouched.
+
+Final logs: /tmp/wsdl-p2-31-{docs-final,affected,test-survey,final-survey}.log,
+/tmp/wsdl-p2-31-final-{xml,xml-literal,xml-schema-callbacks,wsdl-interop,WebContentUtil}.log,
+/tmp/wsdl-p2-31-final-literal-vg-checked.log. Reports:
+/tmp/wsdl-survey-p2-31-final.json and /tmp/wsdl-coverage-p2-31.json.
+Full 62-item audit: [audits/P2-31-docs.md](audits/P2-31-docs.md).

@@ -39,7 +39,7 @@ public namespace WebContentUtil {
     - **IPv6 loopback**: ::1
     - **IPv6 unique local**: fc00::/7
     - **IPv6 link-local**: fe80::/10
-    - **IPv6 IPv4-mapped**: ::ffff:0:0/96 (so a mapped IPv4 still goes through IPv4 checks)
+    - **IPv6 IPv4-mapped**: \c &#58;&#58;ffff:0:0/96 (so a mapped IPv4 still goes through IPv4 checks)
     - **Hostnames**: localhost, *.local, *.svc.cluster.local, *.cluster.local,
       kubernetes.default*, metadata.google.internal, metadata.azure.com
     - **Local-only schemes**: a \c file:// URL addresses the machine running the
@@ -185,7 +185,7 @@ if (pinned_ip) {
         @param url the URL to validate
         @param opts validation options:
           - \c allow_private (bool, default \c False): allow private/internal targets
-          - \c blocked_hostnames (\c *list<string>): additional hostnames to reject
+          - \c blocked_hostnames (\c *list&lt;string&gt;): additional hostnames to reject
         @return the first validated public IP from DNS resolution, suitable for
             DNS pinning; or @ref nothing if the host is already an IP literal
             (no pinning needed) or DNS resolution failed
@@ -284,7 +284,7 @@ if (pinned_ip) {
     /** @param url the URL to validate
         @param opts validation options:
           - \c allow_private (bool, default \c False): allow private/internal targets
-          - \c blocked_hostnames (\c *list<string>): additional hostnames to reject
+          - \c blocked_hostnames (\c *list&lt;string&gt;): additional hostnames to reject
             (e.g., the host's own hostname/IP, the Qorus instance hostname)
 
         @throw SSRF-BLOCKED if the URL targets a blocked address and allow_private is not True
@@ -467,7 +467,7 @@ if (pinned_ip) {
 
     #! IPv6-specific blocked range check
     /** Blocked: ::1 (loopback), fc00::/7 (ULA), fe80::/10 (link-local),
-        ::ffff:0:0/96 (IPv4-mapped — recursively check the embedded IPv4).
+        \c &#58;&#58;ffff:0:0/96 (IPv4-mapped — recursively check the embedded IPv4).
 
         @param ip valid IPv6 textual address
         @return True if blocked
