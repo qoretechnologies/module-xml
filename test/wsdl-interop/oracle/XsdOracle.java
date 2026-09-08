@@ -7,7 +7,9 @@ import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.Base64;
+import java.util.List;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Map;
@@ -26,9 +28,11 @@ import org.xml.sax.SAXException;
 import org.xml.sax.SAXParseException;
 
 public final class XsdOracle {
-    private static final ErrorHandler ERRORS = new ErrorHandler() {
-        public void warning(SAXParseException error) throws SAXException {
-            throw error;
+    private static final class Diagnostics implements ErrorHandler {
+        private final List<String> warnings = new ArrayList<>();
+
+        public void warning(SAXParseException error) {
+            warnings.add(encoded(error.toString()));
         }
         public void error(SAXParseException error) throws SAXException {
             throw error;
@@ -36,9 +40,9 @@ public final class XsdOracle {
         public void fatalError(SAXParseException error) throws SAXException {
             throw error;
         }
-    };
+    }
 
-    private static SAXSource source(byte[] data, String uri) throws SAXException {
+    private static SAXSource source(byte[] data, String uri, Diagnostics diagnostics) throws SAXException {
         SAXParser parser = new SAXParser();
         parser.setFeature("http://xml.org/sax/features/namespaces", true);
         parser.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);
@@ -47,7 +51,7 @@ public final class XsdOracle {
         parser.setEntityResolver((publicId, systemId) -> {
             throw new SAXException("external entity unavailable offline: " + systemId);
         });
-        parser.setErrorHandler(ERRORS);
+        parser.setErrorHandler(diagnostics);
         InputSource input = new InputSource(new ByteArrayInputStream(data));
         input.setSystemId(uri);
         return new SAXSource(parser, input);
@@ -57,8 +61,9 @@ public final class XsdOracle {
         return Base64.getEncoder().encodeToString(value.getBytes(StandardCharsets.UTF_8));
     }
 
-    private static void result(String stage, String id, String status, String error) {
-        System.out.println(stage + "\t" + id + "\t" + status + "\t" + encoded(error));
+    private static void result(String stage, String id, String status, String error, Diagnostics diagnostics) {
+        System.out.println(stage + "\t" + id + "\t" + status + "\t" + encoded(error)
+                           + "\t" + String.join(",", diagnostics.warnings));
     }
 
     public static void main(String[] args) throws Exception {
@@ -108,6 +113,7 @@ public final class XsdOracle {
                     throw new IllegalArgumentException("malformed oracle manifest row");
                 }
                 byte[] data = Base64.getDecoder().decode(fields[3]);
+                Diagnostics diagnostics = new Diagnostics();
                 if (fields[0].equals("S")) {
                     if (schemas.containsKey(fields[1])) {
                         throw new IllegalArgumentException("duplicate schema: " + fields[1]);
@@ -117,12 +123,12 @@ public final class XsdOracle {
                     factory.setFeature(XMLConstants.FEATURE_SECURE_PROCESSING, true);
                     factory.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);
                     factory.setResourceResolver(resolver);
-                    factory.setErrorHandler(ERRORS);
+                    factory.setErrorHandler(diagnostics);
                     try {
-                        schemas.put(fields[1], factory.newSchema(source(data, fields[2])));
-                        result("S", fields[1], "valid", "");
+                        schemas.put(fields[1], factory.newSchema(source(data, fields[2], diagnostics)));
+                        result("S", fields[1], "valid", "", diagnostics);
                     } catch (SAXException | IllegalArgumentException error) {
-                        result("S", fields[1], "invalid", error.toString());
+                        result("S", fields[1], "invalid", error.toString(), diagnostics);
                     }
                 } else if (fields[0].equals("V")) {
                     if (!schemas.containsKey(fields[1]) || !documents.add(fields[2])) {
@@ -130,17 +136,17 @@ public final class XsdOracle {
                     }
                     Schema schema = schemas.get(fields[1]);
                     if (schema == null) {
-                        result("V", fields[2], "unreachable", "schema compilation failed: " + fields[1]);
+                        result("V", fields[2], "unreachable", "schema compilation failed: " + fields[1], diagnostics);
                         continue;
                     }
                     Validator validator = schema.newValidator();
                     validator.setResourceResolver(resolver);
-                    validator.setErrorHandler(ERRORS);
+                    validator.setErrorHandler(diagnostics);
                     try {
-                        validator.validate(source(data, "urn:wsdl-interop:payload"));
-                        result("V", fields[2], "valid", "");
+                        validator.validate(source(data, "urn:wsdl-interop:payload", diagnostics));
+                        result("V", fields[2], "valid", "", diagnostics);
                     } catch (SAXException | IllegalArgumentException error) {
-                        result("V", fields[2], "invalid", error.toString());
+                        result("V", fields[2], "invalid", error.toString(), diagnostics);
                     }
                 } else {
                     throw new IllegalArgumentException("unknown oracle operation: " + fields[0]);

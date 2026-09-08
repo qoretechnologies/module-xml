@@ -316,3 +316,51 @@ newline is part of a preserved string and cannot be ignored by a `$` end anchor.
 Sample verification uses the same absolute boundaries. Native scalar inputs to
 list serialization count as one item, following its existing singleton conversion.
 NOTHING used as an empty list must satisfy the same zero-item constraints.
+
+## Ordered list values and retained lexical tokens
+
+For lists whose atomic items use string, boolean, decimal or integer conversion,
+`XsdListItemInfo` retains the builtin, item provider and effective whitespace rule.
+It has no weak schema/namespace references. `XsdListDataType` validates every item
+and rejects empty or XML-whitespace-bearing tokens before returning a native list.
+The empty native list is distinct from a list containing an empty string.
+
+List restrictions normalize XML whitespace before locating item boundaries. Their
+patterns apply to the joined whole-list lexical form. A pattern-bearing restriction
+returns each original token as a string, preserving lexical forms such as
+`("001", "002")` or `("1", "0")` through reconstruction and serialization.
+The tokens still pass the complete item type. Ancestor patterns remain enforced.
+Without a whole-list pattern, existing atomic item representations are retained.
+
+Enumerations parse through the base list. Ordered keys use exact canonical decimal
+values for decimal/integer items, boolean truth values for boolean items, and exact
+strings for text items. Keys encode token lengths so concatenation cannot collapse
+distinct item sequences. Equivalent facet spellings are deduplicated in order;
+an empty enumeration value has a distinct empty-list key. Same-step lexical patterns
+are independent of enumeration declaration spellings.
+
+`XsdListRestrictionDataType` retains counts, patterns, ordered enumeration values
+and inherited validation. Reconstruction checks metadata before publishing it and
+rebuilds transient count/membership state. Optional variants construct new providers.
+Both list provider classes return `NOTHING` from `getValueType()` and an empty direct
+conversion map, requiring validation inside ordinary repeated-list providers.
+
+`XsdListDataField` compares complete choices and repeated-element choices using the
+same ordered value keys. Replacement metadata is fully resolved before publication;
+a failed update leaves choices and membership maps unchanged. Field providers always
+enforce their own restrictions, including lexical patterns. These finite choices
+represent values; callers must still supply spellings accepted by the type. Message
+provider fields retain their public WSDL **part names**; message serialization uses
+the existing element argument mapping. Configure schema/field metadata before sharing
+it with concurrent consumers; runtime acceptance does not mutate restriction state.
+
+For example, an invoice list enumerated as `01 +2` with pattern `001 002` accepts
+`("001", "002")`, rejects `(1, 2)` for the pattern, and rejects `("002", "001")`
+for item order. A string list accepts `("A\u00a0B", "C")` but rejects `("A B", "C")`
+because a SPACE inside the first item would introduce an additional item on the wire.
+
+Generated examples try declared list spellings, bounded pattern candidates and
+bounded length adjustment, validating every candidate against the complete type.
+An empty facet intersection or unsupported bounded search reports `XSD-SAMPLE-ERROR`.
+No invalid placeholder is emitted. The test matrices and oracle diagnostic decisions
+are documented in `test/wsdl-interop/list-values-adjudication.md`.

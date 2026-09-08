@@ -162,7 +162,17 @@ class ReferencePermissionsTest(unittest.TestCase):
         for name, result in oracle["schemas"].items():
             # Xerces conflates absent and explicitly empty namespace attributes. src-resolve.4.1
             # requires an absent attribute; src-import.3.1 requires a matching target attribute.
-            self.assertEqual(expected[name] or name in ("empty-namespace", "empty-target"), result["ok"], (name, result))
+            warned_targets = {"declared-target-empty", "declared-target-whitespace"}
+            self.assertEqual(expected[name] or name in {"empty-namespace", "empty-target", *warned_targets},
+                             result["ok"], (name, result))
+            if name in warned_targets:
+                # Xerces diagnoses the forbidden target but reports a warning, not a validity error.
+                # Qore's mandatory rejection above remains unchanged.
+                self.assertEqual(1, len(result["warnings"]), (name, result))
+                self.assertIn("EmptyTargetNamespace", result["warnings"][0])
+                self.assertIn("cannot be an empty string", result["warnings"][0])
+            else:
+                self.assertEqual([], result["warnings"], (name, result))
 
     def test_imported_components_in_real_bindings_and_consumers(self):
         source = schema(f'<xs:import namespace="{FOREIGN}" schemaLocation="{FOREIGN_URI}"/>'

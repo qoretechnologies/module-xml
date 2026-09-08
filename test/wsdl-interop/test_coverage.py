@@ -93,6 +93,33 @@ class CoverageTest(unittest.TestCase):
                 result = coverage.value_checks(left, right, [{"elements": ["value"], "datatype": datatype}])
                 self.assertEqual(valid, result["ok"], result)
 
+    def test_list_value_assertions_detect_item_and_order_changes(self):
+        for item_type, before, after, valid in (
+                ("string", " A\tB ", "A B", True),
+                ("string", "A B", "B A", False),
+                ("string", "A\u00a0B", "A B", False),
+                ("string", "", " \t", True),
+                ("string", "A", "A A", False),
+                ("boolean", "1 0", "true false", True),
+                ("boolean", "yes", "yes", False),
+                ("integer", "01 +2", "1 2", True),
+                ("integer", "18446744073709551616", "18446744073709551617", False),
+                ("decimal", "1.00000000000000000001", "1.00000000000000000002", False),
+                ("decimal", "1.0e0", "1", False)):
+            with self.subTest(item_type=item_type, before=before, after=after):
+                left, right = etree.Element("value"), etree.Element("value")
+                left.text, right.text = before, after
+                result = coverage.value_checks(left, right, [{"elements": ["value"], "datatype": "list",
+                                                              "item_datatype": item_type}])
+                self.assertEqual(valid, result["ok"], result)
+        _, records = coverage.prepare(self.root, self.source)
+        name = next(iter(records["BooleanElement"]["messages"]))
+        for item_type in (None, "list", "float", "unknown"):
+            selection = {"format": 1, "cases": {"BooleanElement": {"messages": {name: [
+                {"elements": ["value"], "datatype": "list", "item_datatype": item_type}]}}}}
+            with self.subTest(item_type=item_type), self.assertRaises(ValueError):
+                coverage.validate_selection(selection, records)
+
     def test_missing_worker_stage_cannot_pass(self):
         cases, _ = coverage.prepare(self.root, self.source)
         rows = survey.run_worker(cases, {})
@@ -258,7 +285,7 @@ class CoverageTest(unittest.TestCase):
         self.assertEqual("", process.stderr)
         report = json.loads(output.read_text())
         self.assertEqual([], report["selected_failures"])
-        self.assertEqual({"wsdls": 88, "message_directions": 752}, report["selected_scope"])
+        self.assertEqual({"wsdls": 89, "message_directions": 756}, report["selected_scope"])
         self.assertEqual(293, len(report["cases"]))
         self.assertEqual(2272, sum(len(c["messages"]) for c in report["cases"]))
         for stage, counts in report["stage_accounting"]["counts"].items():

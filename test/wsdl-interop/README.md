@@ -647,3 +647,25 @@ with 1,400 independently checked input/output documents across parsing, value
 conversion, providers, reconstruction and examples. The selected corpus gate
 covers 88 descriptions / 752 directions; the broad diagnostic ledger remains
 separate from passing conformance assertions.
+
+### Ordered list values and whole-list patterns
+
+`wsdl-list-values.qtest` and `test_list_values.py` cover ordered string, boolean,
+integer and decimal list choices; equivalent spellings; exact large values; empty
+lists; XML-only item boundaries; item restrictions; inherited and alternative
+patterns; detached/reconstructed providers; atomic and repeated field choices;
+message providers; failed metadata updates; cancellation and generated examples.
+The authored contracts use actual SOAP 1.1/1.2 bindings in both directions.
+
+The independent oracle now distinguishes validity errors from warnings. Results
+include an ordered `warnings` list even when validation fails; diagnostics do not
+leak to subsequent schemas/documents. Error and fatal-error callbacks still reject
+invalid input. [List adjudication](list-values-adjudication.md) records the named
+Xerces list-length warnings and libxml2's empty-list enumeration compiler defect.
+Both schema verdicts and exact ordered values remain independently checked.
+
+Strict value assertions now support `datatype: "list"` with an explicit scalar
+`item_datatype`. They detect item loss, changed order, precision loss and changed
+boolean values, and split only XML whitespace. The W3C `List` family expands the
+mandatory selection to 89 descriptions / 756 message directions. The broad report
+also retains Xerces schema diagnostics, including warnings.

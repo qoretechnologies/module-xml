@@ -100,6 +100,12 @@ module WSDL {
       wrapping; repeated list-valued elements preserve their separate occurrence and item lists
     - string, list-length and binary-length examples are validated against all inherited restrictions;
       bounded generation reports XSD-SAMPLE-ERROR when it cannot construct a valid example
+    - lists of string, boolean, decimal and integer items compare enumeration choices as ordered values;
+      whole-list patterns preserve item spellings through binding and provider reconstruction
+    - native list items reject empty or XML-whitespace-containing lexical forms that cannot retain one item;
+      list provider fields validate replacement choices before publishing them
+    - generated list examples satisfy item constraints and inherited length, pattern and enumeration facets,
+      or report XSD-SAMPLE-ERROR when bounded generation cannot find a valid value
     - boolean values accept only the four XML spellings after XML whitespace collapse, native booleans,
       and numeric zero/one; provider lists validate before conversion and reject null or invalid spellings
     - integer builtins enforce exact ranges before conversion and retain values beyond signed 64-bit
@@ -2836,6 +2842,276 @@ public hashdecl XsdNumericFacetInfo {
     *XsdFacetCount fraction_digits;
 }
 
+#! resolved atomic item conversion for an XSD list
+/** The provider retains item restrictions without schema namespace references.
+    @since %WSDL 0.5.8
+*/
+public hashdecl XsdListItemInfo {
+    #! underlying atomic builtin used to produce XML lexical values
+    string builtin;
+    #! provider validating the complete item restriction
+    AbstractDataProviderType provider;
+    #! the most-derived item whitespace rule
+    string white_space;
+}
+
+hashdecl XsdListConversionInfo {
+    list<auto> values();
+    list<string> tokens();
+}
+
+class XsdListValueHelper {
+    const TextTypes = {"string": True, "normalizedString": True, "token": True, "language": True,
+        "Name": True, "NCName": True, "NMTOKEN": True, "ID": True, "IDREF": True, "ENTITY": True,
+        "anyURI": True};
+
+    static bool supports(string builtin) {
+        return builtin == "boolean" || builtin == "decimal" || XsdIntegerLexicalHelper::Types{builtin}
+            || TextTypes{builtin};
+    }
+
+    static *hash<XsdListItemInfo> describe(XsdAbstractType item) {
+        XsdAbstractType base = item;
+        while (base instanceof XsdSimpleType && cast<XsdSimpleType>(base).type) {
+            base = cast<XsdSimpleType>(base).type;
+        }
+        if (!(base instanceof XsdBaseType) || !supports(base.name)) {
+            return;
+        }
+        return <XsdListItemInfo>{"builtin": base.name, "provider": item.getDataProviderType(),
+            "white_space": item.getWhiteSpace()};
+    }
+
+    static *hash<XsdListItemInfo> describeList(XsdAbstractType schema) {
+        while (schema instanceof XsdSimpleType) {
+            XsdSimpleType simple = cast<XsdSimpleType>(schema);
+            if (simple.listItemType) {
+                return describe(simple.listItemType);
+            }
+            if (!simple.type) {
+                return;
+            }
+            schema = simple.type;
+        }
+    }
+
+    static check(hash<XsdListItemInfo> item, string error) {
+        if (!supports(item.builtin)) {
+            throw error, sprintf("invalid atomic list item metadata %Y", item.builtin);
+        }
+        if (item.white_space != "preserve" && item.white_space != "replace" && item.white_space != "collapse") {
+            throw error, "invalid list item whitespace metadata";
+        }
+        hash<string, bool> categories = item.provider.getReturnTypeHash(True);
+        if (!item.provider.isMandatory() || !categories) {
+            throw error, "an atomic list item requires a mandatory scalar provider";
+        }
+        foreach string category in (keys categories) {
+            if (category != "string" && category != "int" && category != "number"
+                    && category != "float" && category != "bool") {
+                throw error, sprintf("invalid atomic list item output category %Y", category);
+            }
+        }
+        if ((item.builtin != "string" && item.builtin != "normalizedString" && item.white_space != "collapse")
+                || (item.builtin == "normalizedString" && item.white_space == "preserve")) {
+            throw error, "list item whitespace metadata weakens its builtin rule";
+        }
+    }
+
+    static list<string> tokens(string lexical) {
+        lexical = XsdSimpleType::normalizeWhiteSpace(lexical, "collapse");
+        return lexical.empty() ? () : lexical.split(" ");
+    }
+
+    static hash<XsdListConversionInfo> convert(hash<XsdListItemInfo> item, auto value, string error) {
+        if (value.typeCode() != NT_LIST) {
+            throw error, sprintf("an XSD list requires a native item list; got %Y", value.type());
+        }
+        hash<XsdListConversionInfo> result();
+        Namespaces namespaces({});
+        XsdBaseType builtin = namespaces.getBaseType(item.builtin);
+        foreach auto input in (value) {
+            if (!exists input) {
+                throw error, "an XSD list cannot contain an omitted item";
+            }
+            auto converted;
+            string lexical;
+            try {
+                converted = item.provider.acceptsValue(input);
+                if (input.typeCode() == NT_STRING) {
+                    lexical = XsdSimpleType::normalizeWhiteSpace(input, item.white_space);
+                    builtin.deserializeValue("item", new hash<string, XsdAbstractType>(), NOTHING, lexical);
+                } else {
+                    lexical = string(builtin.serializeValue(namespaces, converted, True));
+                }
+            } catch (hash<ExceptionInfo> ex) {
+                if (ex.err != "RUNTIME-TYPE-ERROR" && ex.err != "MISSING-VALUE-ERROR"
+                        && ex.err != SOAP_SERIALIZATION_ERROR && ex.err != SOAP_DESERIALIZATION_ERROR) {
+                    rethrow;
+                }
+                throw error, sprintf("invalid list item: %s", ex.desc);
+            }
+            checkToken(lexical, error);
+            push result.values, converted;
+            push result.tokens, lexical;
+        }
+        return result;
+    }
+
+    static checkToken(string lexical, string error) {
+        if (lexical.empty() || regex(lexical, "[ \\t\\r\\n]")) {
+            throw error, "a native XSD list item cannot serialize as empty text or contain XML whitespace";
+        }
+    }
+
+    static string key(hash<XsdListItemInfo> item, list<auto> values, string error) {
+        hash<XsdListConversionInfo> converted = convert(item, values, error);
+        string key = "";
+        foreach string token in (converted.tokens) {
+            if (item.builtin == "decimal" || XsdIntegerLexicalHelper::Types{item.builtin}) {
+                token = XsdDecimalLexicalHelper::canonical(token);
+            } else if (item.builtin == "boolean") {
+                token = XsdBooleanLexicalHelper::decode(token, error) ? "true" : "false";
+            }
+            key += sprintf("%d:%s", token.length(), token);
+        }
+        return key;
+    }
+}
+
+#! provider for native XSD lists with validated item boundaries
+/** Each item is converted and checked before the list is returned. An empty list
+    is valid; an empty string item or an item containing XML whitespace cannot be
+    represented without changing the list and is rejected.
+    @par Example
+    A list of invoice labels accepts two separate strings and rejects a single
+    string containing two SPACE-separated labels.
+    @since %WSDL 0.5.8
+*/
+public class XsdListDataType inherits AbstractDataProviderType {
+    private {
+        hash<XsdListItemInfo> item;
+        bool optional;
+    }
+
+    #! constructs a list provider from resolved item conversion
+    /** @param item the item's builtin and validating provider
+        @param optional whether the list may be omitted
+        @throw XSD-SIMPLETYPE-ERROR invalid item metadata
+    */
+    constructor(hash<XsdListItemInfo> item, bool optional = False) {
+        XsdListValueHelper::check(item, "XSD-SIMPLETYPE-ERROR");
+        self.item = item;
+        self.optional = optional;
+    }
+
+    private:internal deserializeMembers(hash<auto> members) {
+        if (members.optional.typeCode() != NT_BOOLEAN) {
+            throw "DESERIALIZATION-ERROR", "list provider requires boolean requiredness";
+        }
+        hash<XsdListItemInfo> resolved = new hash<XsdListItemInfo>(members.item);
+        XsdListValueHelper::check(resolved, "DESERIALIZATION-ERROR");
+        item = resolved;
+        optional = members.optional;
+    }
+
+    #! returns the list name including item restrictions
+    /** @return the optionality prefix and item provider name */
+    string getName() {
+        return sprintf("%slist<%s>", optional ? "*" : "", item.provider.getName());
+    }
+
+    #! returns the atomic item provider
+    /** @return the provider validating each item */
+    *AbstractDataProviderType getElementType() {
+        return item.provider;
+    }
+
+    #! returns no record fields
+    /** @return NOTHING */
+    *hash<string, AbstractDataField> getFields() {
+    }
+
+    #! returns accepted native categories
+    /** @param simple request simplified names
+        @return list, and nothing for optional lists
+    */
+    hash<string, bool> getAcceptTypeHash(*bool simple) {
+        return optional ? {"list": True, "nothing": True} : {"list": True};
+    }
+
+    #! returns converted native categories
+    /** @param simple request simplified names
+        @return list, and nothing for optional lists
+    */
+    hash<string, bool> getReturnTypeHash(*bool simple) {
+        return getAcceptTypeHash(simple);
+    }
+
+    #! requires validation in enclosing list providers
+    /** @return NOTHING */
+    *Type getValueType() {
+    }
+
+    #! returns the list value category
+    /** @return NT_LIST */
+    int getBaseTypeCode() {
+        return NT_LIST;
+    }
+
+    #! returns the list value category name
+    /** @return list */
+    string getBaseTypeName() {
+        return "list";
+    }
+
+    #! requires validation for all values
+    /** @return an empty map */
+    *hash<string, bool> getDirectTypeHash() {
+        return {};
+    }
+
+    #! converts the items and verifies their lexical boundaries
+    /** @param value the native list
+        @return the converted list, or NOTHING for optional omission
+        @throw MISSING-VALUE-ERROR a required list was omitted
+        @throw RUNTIME-TYPE-ERROR invalid items or item boundaries
+    */
+    auto acceptsValue(auto value) {
+        if (!exists value) {
+            if (optional) {
+                return;
+            }
+            throw "MISSING-VALUE-ERROR", "an XSD list must be supplied";
+        }
+        return XsdListValueHelper::convert(item, value, "RUNTIME-TYPE-ERROR").values;
+    }
+
+    #! returns whether omission is allowed
+    /** @return True for optional lists */
+    bool isOrNothingType() {
+        return optional;
+    }
+
+    #! returns whether a list is required
+    /** @return True for mandatory lists */
+    bool isMandatory() {
+        return !optional;
+    }
+
+    #! creates an optional list preserving item checks
+    /** @return the optional list provider */
+    AbstractDataProviderType getOrNothingType() {
+        return new XsdListDataType(item, True);
+    }
+
+    #! creates a mandatory list preserving item checks
+    /** @return the mandatory list provider */
+    AbstractDataProviderType getMandatoryType() {
+        return new XsdListDataType(item);
+    }
+}
+
 #! scalar metadata for character, octet, and item counts and string restrictions
 /** Providers retain resolved values rather than schema namespace references.
     @since %WSDL 0.5.8
@@ -3111,6 +3387,208 @@ public class XsdSizedRestrictionDataType inherits AbstractDataProviderType {
     /** @return the mandatory provider */
     AbstractDataProviderType getMandatoryType() {
         return new XsdSizedRestrictionDataType(facets, base.getMandatoryType());
+    }
+}
+
+#! resolved whole-list facets in lexical and ordered item value spaces
+/** @since %WSDL 0.5.8 */
+public hashdecl XsdListFacetInfo {
+    #! schema type name
+    string name;
+    #! exact item count
+    *XsdFacetCount length;
+    #! minimum item count
+    *XsdFacetCount min_length;
+    #! maximum item count
+    *XsdFacetCount max_length;
+    #! compiled whole-list pattern alternatives
+    *list<string> patterns;
+    #! ordered item values of enumeration literals parsed by the base type
+    *list<list<auto>> enumeration;
+}
+
+#! provider retaining list facets and whole-list lexical spellings
+/** Item conversion and inherited list constraints are validated before return.
+    When a whole-list pattern applies, lexical tokens remain strings so later
+    serialization can satisfy that pattern without changing their values.
+    @par Example
+    An integer list with pattern \c "00[0-9] 00[0-9]" accepts \c ["001", "002"]
+    and retains both spellings after provider reconstruction.
+    @since %WSDL 0.5.8
+*/
+public class XsdListRestrictionDataType inherits AbstractDataProviderType {
+    private {
+        hash<XsdListFacetInfo> facets;
+        hash<XsdListItemInfo> item;
+        AbstractDataProviderType base;
+        transient XsdSizedRestrictionDataType length_type;
+        transient hash<string, bool> enumeration();
+    }
+
+    #! constructs a provider from resolved list restrictions
+    /** @param facets the list's own facets
+        @param item atomic item conversion and validation
+        @param base inherited list validation
+        @throw XSD-SIMPLETYPE-ERROR invalid facet or item metadata
+    */
+    constructor(hash<XsdListFacetInfo> facets, hash<XsdListItemInfo> item, AbstractDataProviderType base) {
+        initialize(facets, item, base, "XSD-SIMPLETYPE-ERROR");
+    }
+
+    private initialize(hash<XsdListFacetInfo> facets, hash<XsdListItemInfo> item,
+            AbstractDataProviderType base, string error) {
+        XsdListValueHelper::check(item, error);
+        hash<XsdSizedFacetInfo> lengths = <XsdSizedFacetInfo>{"name": facets.name, "kind": "list",
+            "length": facets.length, "min_length": facets.min_length, "max_length": facets.max_length};
+        XsdSizedFacetHelper::checkDefinition(lengths, error);
+        XsdSizedFacetHelper::checkBase(lengths, base, error);
+        foreach string pattern in (facets.patterns) {
+            try {
+                bool matches_empty = regex("", pattern);
+            } catch (hash<ExceptionInfo> ex) {
+                if (ex.err != "REGEX-ERROR" && ex.err != "REGEX-COMPILATION-ERROR") {
+                    rethrow;
+                }
+                throw error, sprintf("invalid whole-list pattern: %s", ex.desc);
+            }
+        }
+        hash<string, bool> keys_by_value();
+        foreach list<auto> value in (facets.enumeration) {
+            try {
+                list<auto> checked = base.acceptsValue(value);
+                keys_by_value{XsdListValueHelper::key(item, checked, error)} = True;
+            } catch (hash<ExceptionInfo> ex) {
+                if (ex.err != "RUNTIME-TYPE-ERROR" && ex.err != "MISSING-VALUE-ERROR") {
+                    rethrow;
+                }
+                throw error, sprintf("invalid base value in list enumeration: %s", ex.desc);
+            }
+        }
+        XsdSizedRestrictionDataType checked_lengths(lengths, base);
+        self.facets = facets;
+        self.item = item;
+        self.base = base;
+        length_type = checked_lengths;
+        enumeration = keys_by_value;
+    }
+
+    private:internal deserializeMembers(hash<auto> members) {
+        if (!(members.base instanceof AbstractDataProviderType)) {
+            throw "DESERIALIZATION-ERROR", "list restriction requires a base provider";
+        }
+        initialize(new hash<XsdListFacetInfo>(members.facets), new hash<XsdListItemInfo>(members.item),
+            members.base, "DESERIALIZATION-ERROR");
+    }
+
+    #! returns the restricted list name
+    /** @return the schema name with optionality */
+    string getName() {
+        return (isOrNothingType() ? "*" : "") + "xsd:" + facets.name;
+    }
+
+    #! requires validation in enclosing lists
+    /** @return NOTHING */
+    *Type getValueType() {
+    }
+
+    #! returns the native list category
+    /** @return NT_LIST */
+    int getBaseTypeCode() {
+        return NT_LIST;
+    }
+
+    #! returns the native list category name
+    /** @return list */
+    string getBaseTypeName() {
+        return "list";
+    }
+
+    #! returns the provider of each atomic item
+    /** @return the item provider */
+    *AbstractDataProviderType getElementType() {
+        return item.provider;
+    }
+
+    #! returns no outer record fields
+    /** @return NOTHING */
+    *hash<string, AbstractDataField> getFields() {
+    }
+
+    #! requires validation before conversion
+    /** @return an empty map */
+    *hash<string, bool> getDirectTypeHash() {
+        return {};
+    }
+
+    #! returns the accepted native categories
+    /** @param simple request simplified names
+        @return the inherited categories
+    */
+    hash<string, bool> getAcceptTypeHash(*bool simple) {
+        return base.getAcceptTypeHash(simple);
+    }
+
+    #! returns the output categories
+    /** @param simple request simplified names
+        @return the inherited list categories
+    */
+    hash<string, bool> getReturnTypeHash(*bool simple) {
+        return base.getReturnTypeHash(simple);
+    }
+
+    #! converts a list while preserving lexical tokens required by patterns
+    /** @param value the native item list
+        @return the validated item values, lexical tokens for a pattern, or optional NOTHING
+        @throw MISSING-VALUE-ERROR a required list was omitted
+        @throw RUNTIME-TYPE-ERROR an item or list facet is invalid
+    */
+    auto acceptsValue(auto value) {
+        if (!exists value) {
+            return length_type.acceptsValue(value);
+        }
+        hash<XsdListConversionInfo> lexical = XsdListValueHelper::convert(item, value, "RUNTIME-TYPE-ERROR");
+        list<auto> converted = length_type.acceptsValue(value);
+        if (facets.patterns) {
+            string text = lexical.tokens.join(" ");
+            bool matched = False;
+            foreach string pattern in (facets.patterns) {
+                if (regex(text, pattern)) {
+                    matched = True;
+                    break;
+                }
+            }
+            if (!matched) {
+                throw "RUNTIME-TYPE-ERROR", sprintf("list value for %Y does not match its whole-list patterns", facets.name);
+            }
+        }
+        if (exists facets.enumeration && !enumeration{XsdListValueHelper::key(item, converted, "RUNTIME-TYPE-ERROR")}) {
+            throw "RUNTIME-TYPE-ERROR", sprintf("list value for %Y is outside its enumeration", facets.name);
+        }
+        return facets.patterns ? lexical.tokens : converted;
+    }
+
+    #! returns whether omission is allowed
+    /** @return the base optionality */
+    bool isOrNothingType() {
+        return base.isOrNothingType();
+    }
+
+    #! returns whether a list must be supplied
+    /** @return the base requiredness */
+    bool isMandatory() {
+        return base.isMandatory();
+    }
+
+    #! creates an optional equivalent preserving every constraint
+    /** @return the optional provider */
+    AbstractDataProviderType getOrNothingType() {
+        return new XsdListRestrictionDataType(facets, item, base.getOrNothingType());
+    }
+
+    #! creates a mandatory equivalent preserving every constraint
+    /** @return the mandatory provider */
+    AbstractDataProviderType getMandatoryType() {
+        return new XsdListRestrictionDataType(facets, item, base.getMandatoryType());
     }
 }
 
@@ -3505,7 +3983,125 @@ public class XsdNumericDataField inherits QoreDataField {
     }
 }
 
+#! a list field whose finite choices use ordered atomic value equality
+/** Choices represent list values independently of the lexical patterns enforced by the field's type.
+    @par Example
+    The choice \c ["01", "+2"] accepts equivalent item values while the list provider
+    separately enforces any whole-list pattern.
+    @since %WSDL 0.5.8
+*/
+public class XsdListDataField inherits QoreDataField {
+    private {
+        hash<XsdListItemInfo> item;
+    }
+
+    private static hash<auto> withoutChoices(hash<auto> info) {
+        remove info.allowed_values;
+        remove info.element_allowed_values;
+        return info;
+    }
+
+    #! constructs a list field with exact finite choices
+    /** @param info the ordinary QoreDataField field properties
+        @param item atomic item conversion for ordered value comparison
+        @throw XSD-SIMPLETYPE-ERROR invalid list choice text
+    */
+    constructor(hash<auto> info, hash<XsdListItemInfo> item) : QoreDataField(XsdListDataField::withoutChoices(info)) {
+        XsdListValueHelper::check(item, "XSD-SIMPLETYPE-ERROR");
+        self.item = item;
+        if (exists info.allowed_values) {
+            setAllowedValues(info.allowed_values, info.allowed_values_creatable);
+        }
+        if (exists info.element_allowed_values) {
+            setElementAllowedValues(info.element_allowed_values, info.element_allowed_values_creatable);
+        }
+    }
+
+    #! sets list choices without applying this restriction's lexical patterns to facet declarations
+    /** @param choices list values or AllowedValueInfo entries
+        @param creatable whether this field permits values outside its finite choices
+        @return this field
+        @throw XSD-SIMPLETYPE-ERROR invalid list choice text
+        @note The provider still enforces its own schema enumeration, even if creatable is True.
+    */
+    AbstractDataField setAllowedValues(list<auto> choices, *bool creatable) {
+        list<hash<AllowedValueInfo>> resolved = resolveChoices(choices);
+        hash<string, bool> value_map = map {valueKey($1.value): True}, resolved;
+        allowed_values = resolved;
+        allowed_values_map = value_map;
+        allowed_values_creatable = creatable ?? False;
+        return self;
+    }
+
+    #! sets exact list choices for repeated elements
+    /** @param choices list values or AllowedValueInfo entries for each element
+        @param creatable whether element values outside these choices are permitted
+        @return this field
+        @throw XSD-SIMPLETYPE-ERROR invalid list choice text
+    */
+    AbstractDataField setElementAllowedValues(list<auto> choices, *bool creatable) {
+        list<hash<AllowedValueInfo>> resolved = resolveChoices(choices);
+        hash<string, bool> value_map = map {valueKey($1.value): True}, resolved;
+        element_allowed_values = resolved;
+        element_allowed_values_map = value_map;
+        element_allowed_values_creatable = creatable ?? False;
+        return self;
+    }
+
+    private static list<hash<AllowedValueInfo>> resolveChoices(list<auto> choices) {
+        list<hash<AllowedValueInfo>> resolved();
+        foreach auto choice in (choices) {
+            hash<AllowedValueInfo> entry = choice.typeCode() == NT_HASH
+                ? new hash<AllowedValueInfo>(choice)
+                : <AllowedValueInfo>{"value": choice, "display_name": XsdDataFieldHelper::display(choice)};
+            resolved += entry;
+        }
+        return resolved;
+    }
+
+    private string valueKey(auto value) {
+        if (value.typeCode() != NT_LIST) {
+            throw "XSD-SIMPLETYPE-ERROR", "a list field choice must be an item list";
+        }
+        return XsdListValueHelper::key(item, value, "XSD-SIMPLETYPE-ERROR");
+    }
+
+    #! validates the type and compares finite choices in the list value space
+    /** @param value a native list value or XML lexical spelling
+        @return the provider's validated value with retained lexical information
+        @throw FIELD-VALUE-ERROR the list value is outside the field's finite choices
+        @throw RUNTIME-TYPE-ERROR the underlying type rejects the value
+        @throw MISSING-VALUE-ERROR a required value is omitted
+    */
+    auto acceptsValue(auto value) {
+        if (!exists value && exists (auto default_value = getDefaultValue())) {
+            value = default_value;
+        }
+        on_error rethrow $1.err, sprintf("%s (while setting field %Y)", $1.desc, getName()), $1.arg;
+        value = getType().acceptsValue(value);
+        if (exists value && allowed_values && !allowed_values_creatable) {
+            if (!allowed_values_map{valueKey(value)}) {
+                throw "FIELD-VALUE-ERROR", sprintf("field %Y does not accept list value %Y; allowed values: %Y",
+                    getName(), value, map $1.value, allowed_values);
+            }
+        }
+        if (exists value && element_allowed_values && !element_allowed_values_creatable) {
+            foreach auto item in (value) {
+                if (!element_allowed_values_map{valueKey(item)}) {
+                    throw "FIELD-VALUE-ERROR", sprintf("field %Y does not accept list element value %Y",
+                        getName(), item);
+                }
+            }
+        }
+        return value;
+    }
+}
+
 class XsdDataFieldHelper {
+    static string display(auto value) {
+        return value.typeCode() == NT_LIST ? (map string($1), value).join(" ") : string(value);
+    }
+
     static QoreDataField create(XsdElement element, hash<auto> info) {
         if (element.maxOccurs != 1 && exists info.allowed_values) {
             info.element_allowed_values = remove info.allowed_values;
@@ -3519,6 +4115,10 @@ class XsdDataFieldHelper {
             if (!complex.attrs && complex.simpleType) {
                 schema = complex.simpleType;
             }
+        }
+        *hash<XsdListItemInfo> list_item = XsdListValueHelper::describeList(schema);
+        if (list_item) {
+            return new XsdListDataField(info, list_item);
         }
         while (schema instanceof XsdSimpleType && cast<XsdSimpleType>(schema).type) {
             schema = cast<XsdSimpleType>(schema).type;
@@ -6671,6 +7271,9 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
     private {
         hash<string, bool> fixedFacets;
         *hash<string, bool> stringEnumValues;
+        *hash<XsdListItemInfo> listItemValueInfo;
+        *list<list<auto>> listEnumValues;
+        *hash<string, bool> listEnumKeys;
         const StringKinds = {"string": True, "normalizedString": True, "token": True, "language": True,
             "Name": True, "NCName": True, "NMTOKEN": True, "ID": True, "IDREF": True, "ENTITY": True,
             "anyURI": True};
@@ -6899,6 +7502,30 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
         string kind = getFacetKind();
         validateLengthDeclaration(kind);
         validateWhitespaceDeclaration(kind);
+        listItemValueInfo = listItemType ? XsdListValueHelper::describe(listItemType)
+            : type instanceof XsdSimpleType ? cast<XsdSimpleType>(type).listItemValueInfo : NOTHING;
+        if (listItemValueInfo && type && enumValues) {
+            list<list<auto>> values();
+            hash<string, bool> value_keys();
+            foreach string lexical in (keys enumValues) {
+                try {
+                    list<auto> value = type.deserializeValue(name, new hash<string, XsdAbstractType>(), NOTHING, lexical);
+                    string key = XsdListValueHelper::key(listItemValueInfo, value, "XSD-SIMPLETYPE-ERROR");
+                    if (!value_keys{key}) {
+                        push values, value;
+                        value_keys{key} = True;
+                    }
+                } catch (hash<ExceptionInfo> ex) {
+                    if (ex.err != SOAP_DESERIALIZATION_ERROR) {
+                        rethrow;
+                    }
+                    throw "XSD-SIMPLETYPE-ERROR", sprintf("list enumeration value %Y is not valid for the base of %Y: %s",
+                        lexical, name, ex.desc);
+                }
+            }
+            listEnumValues = values;
+            listEnumKeys = value_keys;
+        }
         if (type && StringKinds{kind} && enumValues) {
             hash<string, bool> values();
             foreach string lexical in (keys enumValues) {
@@ -7109,7 +7736,17 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
 
     AbstractDataProviderType getDataProviderType() {
         if (listItemType) {
+            *hash<XsdListItemInfo> item = XsdListValueHelper::describe(listItemType);
+            if (item) {
+                return new XsdListDataType(item);
+            }
             return new ListDataType(listItemType.getDataProviderType());
+        }
+        if (listItemValueInfo) {
+            return new XsdListRestrictionDataType(<XsdListFacetInfo>{"name": name,
+                "length": length, "min_length": minLength, "max_length": maxLength,
+                "patterns": pcre_patterns, "enumeration": listEnumValues}, listItemValueInfo,
+                type.getDataProviderType());
         }
         if (getNumericBaseName()) {
             return new XsdNumericRestrictionDataType(getNumericFacets(), type.getDataProviderType());
@@ -7158,6 +7795,10 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
     }
 
     private bool enumerationAccepts(auto value) {
+        if (exists listEnumKeys) {
+            return boolean(listEnumKeys{XsdListValueHelper::key(listItemValueInfo, value,
+                "XSD-SIMPLETYPE-ERROR")});
+        }
         if (exists stringEnumValues) {
             return boolean(stringEnumValues{value});
         }
@@ -7166,6 +7807,16 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
     }
 
     *list<auto> getAllowedValues() {
+        if (listItemValueInfo) {
+            *XsdSimpleType ancestor = self;
+            while (ancestor) {
+                if (exists ancestor.listEnumValues) {
+                    return ancestor.listEnumValues;
+                }
+                ancestor = ancestor.type instanceof XsdSimpleType ? cast<XsdSimpleType>(ancestor.type) : NOTHING;
+            }
+            return;
+        }
         if (StringKinds{getFacetKind()}) {
             *XsdSimpleType ancestor = self;
             while (ancestor) {
@@ -7215,6 +7866,20 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
             return serializeList(nsc, val, omitType, rh);
         }
 
+        if (listItemValueInfo) {
+            string lexical = string(type.serializeValue(nsc, val, omitType));
+            list<string> items = XsdListValueHelper::tokens(lexical);
+            validateFacets(items, "serialize", lexical);
+            if (!enumerationAccepts(items)) {
+                throw SOAP_SERIALIZATION_ERROR, sprintf("list value for %Y is outside its enumeration", name);
+            }
+            if (rh) {
+                rh."^value^" = lexical;
+                return rh;
+            }
+            return lexical;
+        }
+
         if (!exists val && getFacetKind() == "list" && hasNativeListValue()) {
             val = ();
         }
@@ -7262,12 +7927,24 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
         # Serialize each item and join with spaces
         list<string> serializedItems = ();
         foreach auto item in (items) {
-            auto serialized = listItemType.serializeValue(nsc, item, True);
-            if (serialized.typeCode() == NT_HASH && serialized.hasKey("^value^")) {
-                serializedItems += string(serialized."^value^");
+            string lexical;
+            if (item.typeCode() == NT_STRING) {
+                lexical = normalizeWhiteSpace(item, listItemType.getWhiteSpace());
+                try {
+                    listItemType.deserializeValue(name, new hash<string, XsdAbstractType>(), NOTHING, lexical);
+                } catch (hash<ExceptionInfo> ex) {
+                    if (ex.err != SOAP_DESERIALIZATION_ERROR) {
+                        rethrow;
+                    }
+                    throw SOAP_SERIALIZATION_ERROR, ex.desc;
+                }
             } else {
-                serializedItems += string(serialized);
+                auto serialized = listItemType.serializeValue(nsc, item, True);
+                lexical = string(serialized.typeCode() == NT_HASH && serialized.hasKey("^value^")
+                    ? serialized."^value^" : serialized);
             }
+            XsdListValueHelper::checkToken(lexical, SOAP_SERIALIZATION_ERROR);
+            serializedItems += lexical;
         }
 
         string result = serializedItems.join(" ");
@@ -7560,6 +8237,28 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
     }
 
     private auto getSizedSample(auto default_value) {
+        if (listItemValueInfo) {
+            if (default_value.typeCode() == NT_STRING) {
+                default_value = XsdListValueHelper::tokens(default_value);
+            }
+            *XsdSimpleType ancestor = self;
+            while (ancestor) {
+                foreach string choice in (keys ancestor.enumValues) {
+                    list<string> candidate = XsdListValueHelper::tokens(choice);
+                    if (acceptsSample(candidate)) {
+                        return candidate;
+                    }
+                }
+                ancestor = ancestor.type instanceof XsdSimpleType ? cast<XsdSimpleType>(ancestor.type) : NOTHING;
+            }
+            *string patterned = getPatternSample();
+            if (exists patterned) {
+                list<string> candidate = XsdListValueHelper::tokens(patterned);
+                if (acceptsSample(candidate)) {
+                    return candidate;
+                }
+            }
+        }
         if (acceptsSample(default_value)) {
             return default_value;
         }
@@ -7734,8 +8433,9 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
     #! Validate restriction facets for serialization/deserialization
     /** @param val the value to validate
         @param operation "serialize" or "deserialize" for error context
+        @param lexical the normalized whole-list lexical form when validating native item lists
     */
-    private validateFacets(auto val, string operation) {
+    private validateFacets(auto val, string operation, *string lexical) {
         # Skip validation for NOTHING values
         if (!exists val) {
             return;
@@ -7754,7 +8454,7 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
         # one of them is valid.  Patterns declared in different derivation steps are intersected, which happens
         # automatically, as each step validates the value in serializeValue() / deserializeValue()
         if (patterns) {
-            string strVal = string(val);
+            string strVal = lexical ?? string(val);
             if (!matchesAnyPattern(strVal)) {
                 throw errType, sprintf("value %y for simpleType %y does not match %s during %s", val, name,
                     patterns.size() == 1
@@ -7888,6 +8588,20 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
             return patterns ? lexical : converted;
         }
 
+        if (listItemValueInfo) {
+            auto text = XsdScalarTextHelper::value(val, SOAP_DESERIALIZATION_ERROR);
+            if (exists text && !text.strp()) {
+                throw SOAP_DESERIALIZATION_ERROR, "an XML list requires scalar lexical text";
+            }
+            string lexical = normalizeWhiteSpace(string(text), "collapse");
+            list<auto> value = type.deserializeValue(en, tmap, mrh, lexical);
+            validateFacets(value, "deserialize", lexical);
+            if (!enumerationAccepts(value)) {
+                throw SOAP_DESERIALIZATION_ERROR, sprintf("list value for %Y is outside its enumeration", name);
+            }
+            return patterns ? XsdListValueHelper::tokens(lexical) : value;
+        }
+
         if (StringKinds{getFacetKind()}) {
             val = applyWhiteSpace(XsdScalarTextHelper::value(val, SOAP_DESERIALIZATION_ERROR));
         }
@@ -7909,6 +8623,9 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
     #! Deserialize a list type value from space-separated string
     private auto deserializeList(string en, hash<string, XsdAbstractType> tmap, *hash<auto> mrh, auto val) {
         val = XsdScalarTextHelper::value(val, SOAP_DESERIALIZATION_ERROR);
+        if (exists val && !val.strp()) {
+            throw SOAP_DESERIALIZATION_ERROR, "an XML list requires scalar lexical text";
+        }
 
         # Handle empty or null values
         if (!exists val || val == "") {
@@ -9594,7 +10311,7 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
             *list<auto> allowed = exists attr.fixedLexical ? (attr.getDefaultValue(),)
                 : attr.type.getAllowedValues();
             if (exists allowed) {
-                info.allowed_values = map ("value": $1, "display_name": string($1)), allowed;
+                info.allowed_values = map ("value": $1, "display_name": XsdDataFieldHelper::display($1)), allowed;
             }
             if (attr.hasValueConstraint()) {
                 info.example_value = attr.getDefaultValue();
@@ -9633,7 +10350,7 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
                         "short_desc": "Simple content value",
                         "desc": "The element's scalar value; XML attributes are supplied separately",
                         "type": simpleType.getDataProviderType(),
-                        "allowed_values": map ("value": $1, "display_name": string($1)), simpleType.getAllowedValues(),
+                        "allowed_values": map ("value": $1, "display_name": XsdDataFieldHelper::display($1)), simpleType.getAllowedValues(),
                     });
                     HashDataType structured_type(name);
                     structured_type.addField(value_field);
@@ -9662,9 +10379,9 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
             case XET_CHOICE: {
                 HashDataType rv(name);
                 # at most one member of a choice may be present, therefore all members must be optional
-                map rv.addField(new QoreDataField($1.key, NOTHING,
-                    $1.value.getDataProviderType().getOrNothingType(), NOTHING, $1.value.getDataProviderAllowedValues())),
-                    elementmap.pairIterator();
+                map rv.addField(XsdDataFieldHelper::create($1.value, {"name": $1.key,
+                    "type": $1.value.getDataProviderType().getOrNothingType(),
+                    "allowed_values": $1.value.getDataProviderAllowedValues()})), elementmap.pairIterator();
                 return addAttributeFields(rv);
             }
 
@@ -10519,15 +11236,14 @@ public class WSMessage inherits WSDL::XsdNamedData {
     #! Returns the data provider type for this message
     AbstractDataProviderType getDataProviderType() {
         HashDataType rv(name);
-        map rv.addField(
-            new QoreDataField(
-                $1.name,
-                NOTHING,
-                $1.type ? $1.type.getDataProviderType() : $1.element.getDataProviderType(),
-                NOTHING,
-                $1.type ? $1.type.getDataProviderAllowedValues() : $1.element.getDataProviderAllowedValues()
-            )),
-            args.iterator();
+        foreach hash<ArgInfo> arg in (args.iterator()) {
+            hash<auto> info = {"name": arg.name,
+                "type": arg.type ? arg.type.getDataProviderType() : arg.element.getDataProviderType(),
+                "allowed_values": arg.type ? arg.type.getDataProviderAllowedValues()
+                    : arg.element.getDataProviderAllowedValues()};
+            rv.addField(arg.type ? XsdDataFieldHelper::create(arg.type, info)
+                : XsdDataFieldHelper::create(arg.element, info));
+        }
         return rv;
     }
 

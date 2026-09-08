@@ -98,6 +98,7 @@ class IndependentTest(unittest.TestCase):
                  "S\ta\tvalid\t", "V\ta/good\tvalid\t", f'V\ta/bad\tinvalid\t{enc(b"bad int")}',
                  f'S\tbroken\tinvalid\t{enc(b"empty schema")}',
                  f'V\tunreachable\tunreachable\t{enc(b"schema failed")}']
+        lines = [lines[0], *(line + "\t" for line in lines[1:])]
         result = independent.check_results(jobs, "\n".join(lines))
         self.assertEqual(2, len(result["schemas"]))
         self.assertEqual(3, len(result["documents"]))
@@ -106,11 +107,37 @@ class IndependentTest(unittest.TestCase):
                              (1, "S\ta\tunreachable\t"), (2, "V\twrong\tvalid\t"),
                              (3, "V\ta/bad\tinvalid\t"), (5, "V\tunreachable\tvalid\t")):
             variant = lines.copy()
-            variant[index] = text
+            variant[index] = text + ("\t" if index else "")
             variants.append(variant)
         for variant in variants:
             with self.subTest(variant=variant), self.assertRaises(RuntimeError):
                 independent.check_results(jobs, "\n".join(variant))
+
+    def test_warnings_are_retained_without_changing_validation(self):
+        schema = f'''<xs:schema xmlns:xs="{XSD}"><xs:simpleType name="Base"><xs:list itemType="xs:int"/>
+            </xs:simpleType><xs:element name="v"><xs:simpleType><xs:restriction base="Base">
+            <xs:length value="2"/><xs:enumeration value="1 2"/></xs:restriction></xs:simpleType>
+            </xs:element></xs:schema>'''.encode()
+        report = independent.run([SchemaJob("warn", "urn:warn", schema,
+            {"good": b"<v>1 2</v>", "bad": b"<v>1 3</v>"}), scalar("clean", "int", {"clean": "1"})])
+        self.assertTrue(report["schemas"]["warn"]["ok"])
+        warnings = report["schemas"]["warn"]["warnings"]
+        self.assertEqual(1, len(warnings))
+        self.assertIn("FacetsContradict", warnings[0])
+        self.assertTrue(report["documents"]["good"]["ok"])
+        self.assertFalse(report["documents"]["bad"]["ok"])
+        self.assertIn("enumeration", report["documents"]["bad"]["desc"])
+        self.assertEqual([], report["schemas"]["clean"]["warnings"])
+        self.assertTrue(all(not row["warnings"] for row in report["documents"].values()))
+        # Diagnostic records retain ordered warning text and reject malformed encodings.
+        job = scalar("a", "int", {})
+        enc = independent._encode
+        prefix = f'version\t{enc(b"Xerces-J 2.12.2")}\t{enc(b"JDK")}\nS\ta\tvalid\t\t'
+        result = independent.check_results([job], prefix + enc(b"first") + "," + enc(b"second"))
+        self.assertEqual(["first", "second"], result["schemas"]["a"]["warnings"])
+        for invalid in ("%%%", enc(b"first") + ",", "," + enc(b"last")):
+            with self.subTest(invalid=invalid), self.assertRaises(RuntimeError):
+                independent.check_results([job], prefix + invalid)
 
     def test_invalid_jobs(self):
         a = scalar("a", "int", {"good": "1"})

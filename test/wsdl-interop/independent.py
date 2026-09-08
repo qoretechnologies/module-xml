@@ -58,15 +58,18 @@ def check_results(jobs: list[SchemaJob], output: str) -> dict:
 
     def take(stage: str, name: str, schema_ok: bool = True) -> dict:
         row = next(lines, "").split("\t")
-        if (len(row) != 4 or row[:2] != [stage, name]
+        if (len(row) != 5 or row[:2] != [stage, name]
                 or row[2] not in ("valid", "invalid", "unreachable")
                 or (row[2] == "unreachable") != (not schema_ok)):
             raise RuntimeError(f"incomplete or unexpected oracle result: {stage}/{name}")
         desc = _decode(row[3])
         if (row[2] == "valid") != (desc == ""):
             raise RuntimeError(f"inconsistent oracle diagnostic: {stage}/{name}")
+        warnings = [_decode(item) for item in row[4].split(",")] if row[4] else []
+        if any(not warning for warning in warnings) or (row[2] == "unreachable" and warnings):
+            raise RuntimeError(f"inconsistent oracle warnings: {stage}/{name}")
         return {"ok": True if row[2] == "valid" else False if row[2] == "invalid" else None,
-                "status": row[2], "desc": desc}
+                "status": row[2], "desc": desc, "warnings": warnings}
 
     for job in jobs:
         schema = report["schemas"][job.name] = take("S", job.name)

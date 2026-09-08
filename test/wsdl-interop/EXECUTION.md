@@ -2395,3 +2395,88 @@ increment. Native float/double parsing remains permissive and shares binary64;
 parsing decimal as binary64 then narrowing to binary32 would double-round and
 cannot implement correct target-format conversion. P3 remains active; P4–P9
 are still required after its acceptance gate passes.
+
+## P3-08 — List lexical forms and value equality (in progress)
+
+P3-07 is committed as 335672b without pushing. Initial preflight in
+/tmp/wsdl-p3-08-preflight.py and /tmp/wsdl-p3-08-preflight.json uses three schemas
+with real SOAP 1.1/1.2 requests and responses. Pinned Xerces accepts all schemas
+and agrees with all 24 positive/negative document verdicts. Qore rejects all twelve
+valid inputs: integer/boolean list enumerations compare native lists with raw
+lexical hash keys, and whole-list patterns attempt string(list) and raise
+RUNTIME-OVERLOAD-ERROR rather than checking the normalized XML list lexical form.
+
+The next implementation builds on completed boolean, decimal/integer and string
+scalar conversion. List-item lexical boundary validation must reject native
+empty/whitespace-containing items that would silently change the list on output.
+Whole-list patterns must retain each token's valid lexical spelling through
+conversion/reconstruction and serialization. List choices must compare ordered
+item values using their atomic value spaces, and providers must enforce the same
+rules after detachment/reconstruction. Union, float/double, dates/partial dates,
+binary and QName/entity families retain their complete P3 acceptance requirements;
+this ordering of small commits does not remove any phase deliverable.
+
+Implemented list conversion now keeps ordered atomic values separate from whole
+list lexical tokens. String/boolean/decimal/integer list enumerations use exact,
+unambiguous length-prefixed value keys, deduplicate equivalent declarations and
+handle empty lists. Whole-list patterns retain accepted token spellings through
+binding/provider reconstruction. Native empty or XML-whitespace-bearing items
+are rejected before they can introduce value loss on serialization. Invalid
+native list input reports the serialization/deserialization error category.
+
+XsdListDataType and XsdListRestrictionDataType retain strong item providers,
+validate metadata before reconstruction/publication and preserve constraints in
+optional/nested providers. XsdListDataField uses ordered value equality for
+whole/repeated choices; failed replacements leave prior metadata untouched.
+Atomic/attribute/simple-content/choice/message field construction uses the right
+field class while preserving public WSDL part names. Generated list examples
+must satisfy all item and list facets or report XSD-SAMPLE-ERROR.
+
+The independent matrices cover 18 authored cases as 54 schemas and 108 actual
+SOAP contracts each. Binding tests assess 576 input and 276 emitted documents.
+Consumer tests check 4176 results for original/reconstructed contracts and detached
+element/message providers, with 2288 emitted/provider/example documents. Together
+these are 3140 independently checked documents, including exact decimals/large
+integers, boolean values, item order, XML-only whitespace and actual SOAP 1.1/1.2
+request/response envelopes.
+
+Oracle investigation found a harness root cause: its ErrorHandler promoted all
+Xerces warnings to schema rejection. The protocol now retains ordered warnings
+separately; actual error/fatal-error events still reject validation. The list
+matrix checks the exact FacetsContradict warning for empty intersections and
+Xerces's character-count warning on an otherwise valid two-item enumeration.
+The reference-permission matrix explicitly retains Xerces's EmptyTargetNamespace
+warnings and Qore's mandatory rejection. Libxml2's empty-list enumeration null
+value defect is adjudicated; Xerces validates all documents for that case, and
+no Qore verdict or exact-value assertion is waived. Details and primary source
+references are in list-values-adjudication.md.
+
+The W3C List family adds exact ordered string-list assertions to the strict gate:
+89 descriptions / 756 message directions, 664 successful value checks, no failed
+or missing value checks, and no selected failures. The broad failure list has
+exactly the same 220 rows. Every original survey row, input result and corpus
+source hash is unchanged. Both refreshed reports identify final WSDL SHA-256
+4fb454d9a3b93d41b8a075667a6dca064ffa39974c668ab3dcfdbb04035b936e.
+
+42 affected Qore suites pass 533 cases without warnings; the focused list suite
+passes 12 cases / 165 assertions. Qdx/Doxygen is clean after adding the missing
+lexical parameter documentation. No C++ changed, so no new Valgrind run applies.
+The final Python rerun passes its expectations: 110 tests run with exactly the
+seven previously tracked P4/P5/P6 failures, zero new failures, errors, skips or
+warnings. Their exact failure identities match the prior P3-07 run. Logs are
+/tmp/wsdl-p3-08-final-affected.log and /tmp/wsdl-p3-08-completed-*; the latter
+reports/focused/docs/Python results include the final documentation correction.
+Those seven later-phase failures remain required P4/P5/P6 implementation work.
+The full 62-item audit is recorded in audits/P3-08-list-values.md.
+
+The next P3 reproducer is /tmp/wsdl-p3-09-preflight.py with evidence in
+/tmp/wsdl-p3-09-preflight.json. XSD 1.0 boolean permits only pattern and whiteSpace
+facets; Qore currently accepts invalid enumeration/ordered-bound declarations.
+A valid boolean input 1 constrained by pattern 1 is serialized as true, producing
+invalid output. Pinned Xerces independently rejects both invalid schemas, accepts
+all four original request/response inputs and rejects all four emitted outputs.
+This is an existing scalar-restriction gap, separate from the completed whole-list
+pattern/value increment. Boolean restrictions, union selection/value semantics,
+IEEE binary32/binary64 conversion, dates/durations/partial dates, strict binary
+rules, names/entity context and remaining regex requirements are still required
+for P3 acceptance; P4–P9 remain in scope afterward.

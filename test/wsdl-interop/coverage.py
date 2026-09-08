@@ -10,6 +10,7 @@ import argparse
 from collections import Counter
 import hashlib
 import json
+import re
 from pathlib import Path
 import subprocess
 
@@ -83,6 +84,19 @@ def value_checks(expected: etree._Element, actual: etree._Element, assertions: l
                 values = {"true": True, "1": True, "false": False, "0": False}
                 before, after = before.strip(" \t\r\n"), after.strip(" \t\r\n")
                 valid = before in values and after in values and values[before] == values[after]
+            elif datatype == "list":
+                left, right = re.findall(r"[^ \t\r\n]+", before), re.findall(r"[^ \t\r\n]+", after)
+                item_type = assertion["item_datatype"]
+                valid = len(left) == len(right)
+                if valid:
+                    if item_type in {"string", "normalizedString", "token"}:
+                        valid = left == right
+                    elif item_type == "boolean":
+                        booleans = {"true": True, "1": True, "false": False, "0": False}
+                        valid = all(a in booleans and b in booleans and booleans[a] == booleans[b]
+                                    for a, b in zip(left, right))
+                    else:
+                        valid = all(normative.same_number(item_type, a, b) for a, b in zip(left, right))
             elif datatype == "string":
                 valid = before == after
             elif datatype in ("normalizedString", "token"):
@@ -128,10 +142,14 @@ def validate_selection(selection: dict, records: dict) -> None:
             for assertion in assertions:
                 if (not isinstance(assertion, dict) or not isinstance(assertion.get("elements"), list)
                         or not assertion["elements"] or any(not isinstance(s, str) for s in assertion["elements"])
-                        or assertion.get("datatype") not in {"boolean", "string", "normalizedString", "token", "decimal",
+                        or assertion.get("datatype") not in {"list", "boolean", "string", "normalizedString", "token", "decimal",
                             *normative.UNSIGNED_MAX, *normative.INTEGER_BOUNDS}
                         or ("attribute" in assertion and not isinstance(assertion["attribute"], str))):
                     raise ValueError("malformed strict value assertion")
+                if assertion["datatype"] == "list" and assertion.get("item_datatype") not in {
+                        "boolean", "string", "normalizedString", "token", "decimal",
+                        *normative.UNSIGNED_MAX, *normative.INTEGER_BOUNDS}:
+                    raise ValueError("malformed strict list item assertion")
 
 
 def assess(root: Path, source: dict, selection: dict, catalog: corpus.Catalog, qore: str = "qore") -> dict:
@@ -180,7 +198,7 @@ def assess(root: Path, source: dict, selection: dict, catalog: corpus.Catalog, q
         expected_error = "PARSE-XML-EXCEPTION" if "XML10-empty-document" in record["source_decision"]["requirements"] else "WSDL-ERROR"
         parse_ok = parsed["ok"] if valid_schema else not parsed["ok"] and parsed["err"] == expected_error
         item = {"case": name, "implementation_phase": record["implementation_phase"], "identity": case["identity"],
-                "source_valid": valid_schema, "parse": parsed,
+                "source_valid": valid_schema, "parse": parsed, "schema_xerces": oracle["schemas"][name],
                 "expected_parse": "success" if valid_schema else expected_error,
                 "parse_requirement_passed": parse_ok, "messages": []}
         if not parse_ok:
