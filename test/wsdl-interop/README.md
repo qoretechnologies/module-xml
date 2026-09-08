@@ -722,3 +722,14 @@ compiler defect as unassessed schemas/documents; Xerces assesses all documents a
 exact Qore value checks remain mandatory. The matrix also counts libxml2's
 base64 punctuation false positives; Qore, Xerces and a strict base64 decoder reject
 those inputs. Both oracle defects are explained in the list adjudication document.
+
+Union-valued list items are checked by `../wsdl-union-list-items.qtest` and
+`test_union_list_items.py`. For a boolean/int item union, `01 2` contains decimal
+values and can equal the decimal-list spelling `1.0 2.00`; `1 2` contains a boolean
+and remains distinct. Captured item conversions retain order and family through
+enumeration, patterns, finite choices, restriction wrappers and reconstruction.
+Tests include empty/native item boundaries, text/binary values, reentrant calls,
+shared graphs, cycle rejection and cleanup after a second-item failure. The
+independent matrix uses both actual SOAP bindings and directions and records
+Xerces's precise list-kind enumeration false negatives alongside mandatory
+libxml2 and exact ordered-value checks. See [list adjudication](list-values-adjudication.md).

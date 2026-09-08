@@ -65,6 +65,33 @@ Python's strict base64 decoder. Consumer/output cases have no such disagreement.
 Other mismatches still fail; these false positives are explicitly counted and
 never used to relax Qore validation.
 
+P3-15 exposes a Xerces-J 2.12.2 false negative when an enclosing union compares
+a list of union-valued items to an atomic-item list. The item union is boolean/int;
+`01 2` selects two decimal-derived values, as does `1.0 2.00` through the decimal
+list alternative. XSD 1.0 [list values](https://www.w3.org/TR/xmlschema-2/#dt-list)
+are ordered sequences of atomic values; integer and decimal share their primitive
+value space. The two lists are therefore equal for enumeration. The single-item
+case `01` versus `1.0` has the same issue. `1` selects a boolean and remains distinct.
+
+The unmodified [2.12.2 source artifact](https://repo.maven.apache.org/maven2/xerces/xercesImpl/2.12.2/xercesImpl-2.12.2-sources.jar)
+has SHA-256 `3c531edfc074e3e0885e5d4a777a9e7317e108028be50ef6e893a5a9cf3e12c2`
+(2,150,056 bytes). In `XSSimpleTypeDecl.java`, lines 1675–1708 require matching
+primitive kinds before testing enumeration values. Lines 1882–1909 assign distinct
+`LISTOFUNION_DT` and `LIST_DT` kinds, and `convertToPrimitiveKind()` at lines
+3463–3479 leaves those kinds distinct. Even merging the kinds would leave another
+representation issue: the type list contains one type per union item but only one
+type for a homogeneous atomic-item list. Neither storage detail changes the XSD
+list value space. `ValidatedInfo.isComparable()` contains the same distinction.
+
+The new matrix records exactly 48 binding-document and 128 consumer/output false
+negatives, all with `cvc-enumeration-valid` for the two exact lexical forms above.
+libxml2 accepts these documents, and separate Python primitive-family/Decimal
+assertions verify equal ordered values. All other Xerces verdicts remain mandatory,
+including boolean distinctions, changed item order/value and malformed items.
+The existing libxml2 empty-list compiler defect remains separately counted, with
+Xerces and exact empty-value checks for those documents. No schema, pinned JAR or
+production validation result is changed to accommodate either oracle defect.
+
 The matrices retain original and reconstructed schemas/providers, atomic elements,
 attributed simple content, attributes, repeated elements and generated examples.
 They use actual SOAP 1.1/1.2 bindings and both request/response directions. Separate

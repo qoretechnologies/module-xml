@@ -1,0 +1,355 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires xml
+%requires ../qlib/WSDL.qm
+%exec-class UnionListItemsTest
+
+class UnionListItemsTest inherits QUnit::Test {
+    constructor() : Test("XSD list members with union items", "1.0") {
+        addTestCase("Union-item lists share ordered decimal values with decimal lists", \numericValues());
+        addTestCase("Each item retains its selected primitive family", \mixedValues());
+        addTestCase("Whole union patterns preserve list lexical form", \patterns());
+        addTestCase("Empty lists and invalid native item boundaries", \boundaries());
+        addTestCase("Union-item metadata is validated and follows reordered members", \metadata());
+        addTestCase("Finite choices retain mixed item identities and update atomically", \fields());
+        addTestCase("Failure after a converted item does not leak capture state", \captureErrors());
+        addTestCase("Shared item union graphs remain bounded and reject cycles", \graphs());
+        addTestCase("Restrictions on item unions and list members retain value identity", \restrictedMembers());
+        addTestCase("String and binary union items retain their primitive family", \binaryAndStrings());
+        addTestCase("Reentrant item conversions do not add extra captured items", \reentrantItems());
+        set_return_value(main());
+    }
+
+    private static XsdSchema schema(string members, string facets = "", string item_members = "xs:boolean xs:int") {
+        return new XsdSchema('<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"
+            xmlns:t="urn:union-items" targetNamespace="urn:union-items">
+            <xs:simpleType name="Atomic"><xs:union memberTypes="' + item_members + '"/></xs:simpleType>
+            <xs:simpleType name="Items"><xs:list itemType="t:Atomic"/></xs:simpleType>
+            <xs:simpleType name="Decimals"><xs:list itemType="xs:decimal"/></xs:simpleType>
+            <xs:simpleType name="Base"><xs:union memberTypes="' + members + '"/></xs:simpleType>
+            <xs:simpleType name="Value"><xs:restriction base="t:Base">' + facets
+            + '</xs:restriction></xs:simpleType></xs:schema>', {"async_only": True});
+    }
+
+    private numericValues() {
+        XsdSchema original = schema("t:Items t:Decimals", '<xs:enumeration value="01 2"/>');
+        foreach XsdSchema definition in (original, Serializable::deserialize(original.serialize())) {
+            XsdAbstractType type = definition.findType(make_qname("urn:union-items", "Value"));
+            AbstractDataProviderType source_provider = type.getDataProviderType();
+            foreach string lexical in ("01 2", "+1 +2", "1.0 2.00") {
+                auto decoded = type.deserializeValue("value", definition.getTypeMap(), NOTHING, lexical);
+                assertEq(("01", 2), type.deserializeValue("value", definition.getTypeMap(), NOTHING,
+                    type.serializeValue(definition.nsc, ("01", "2"), True)));
+                assertEq((number(1), number(2)), map number($1), decoded);
+                foreach AbstractDataProviderType provider in (source_provider,
+                        Serializable::deserialize(source_provider.serialize())) {
+                    auto value = provider.acceptsValue(lexical);
+                    assertEq((number(1), number(2)), map number($1), value);
+                    assertEq(provider.acceptsValue(lexical.split(" ")), value);
+                }
+            }
+            foreach string lexical in ("1 2", "true 2", "01 3", "2 01", "01", "") {
+                assertThrows("SOAP-DESERIALIZATION-ERROR", \type.deserializeValue(),
+                    ("value", definition.getTypeMap(), NOTHING, lexical));
+                assertThrows("SOAP-SERIALIZATION-ERROR", \type.serializeValue(), (definition.nsc, lexical, True));
+                assertThrows("RUNTIME-TYPE-ERROR", \source_provider.acceptsValue(), (lexical,));
+            }
+        }
+    }
+
+    private mixedValues() {
+        XsdSchema original = schema("t:Items t:Decimals", '<xs:enumeration value="1 01 2"/>');
+        foreach XsdSchema definition in (original, Serializable::deserialize(original.serialize())) {
+            XsdAbstractType type = definition.findType(make_qname("urn:union-items", "Value"));
+            AbstractDataProviderType provider = Serializable::deserialize(type.getDataProviderType().serialize());
+            assertEq((True, "01", 2), type.deserializeValue("value", definition.getTypeMap(), NOTHING, "1 01 2"));
+            assertEq((True, "+1", 2), provider.acceptsValue(("true", "+1", "2")));
+            foreach string lexical in ("1 1 2", "01 01 2", "1.0 1.0 2.0", "01 1 2") {
+                assertThrows("SOAP-DESERIALIZATION-ERROR", \type.deserializeValue(),
+                    ("value", definition.getTypeMap(), NOTHING, lexical));
+                assertThrows("RUNTIME-TYPE-ERROR", \provider.acceptsValue(), (lexical,));
+            }
+        }
+    }
+
+    private patterns() {
+        XsdSchema definition = schema("t:Items t:Decimals", '<xs:pattern value="1  01  2"/>');
+        XsdAbstractType type = definition.findType(make_qname("urn:union-items", "Value"));
+        AbstractDataProviderType provider = Serializable::deserialize(type.getDataProviderType().serialize());
+        assertEq("1  01  2", type.deserializeValue("value", definition.getTypeMap(), NOTHING, "1  01  2"));
+        assertEq("1  01  2", type.serializeValue(definition.nsc, "1  01  2", True));
+        assertEq("1  01  2", provider.acceptsValue("1  01  2"));
+        assertThrows("RUNTIME-TYPE-ERROR", \provider.acceptsValue(), (("1", "01", "2"),));
+    }
+
+    private boundaries() {
+        XsdSchema definition = schema("t:Items t:Decimals");
+        XsdAbstractType type = definition.findType(make_qname("urn:union-items", "Value"));
+        AbstractDataProviderType provider = Serializable::deserialize(type.getDataProviderType().serialize());
+        foreach auto input in ((), "", " \t\n ") {
+            assertEq((), provider.acceptsValue(input));
+        }
+        assertEq((), type.deserializeValue("value", definition.getTypeMap(), NOTHING, ""));
+        assertEq("", type.serializeValue(definition.nsc, (), True));
+        foreach auto invalid in (("",), (NOTHING,), ("1 2",), (("1", "2"),)) {
+            assertThrows("RUNTIME-TYPE-ERROR", \provider.acceptsValue(), (invalid,));
+            assertThrows("SOAP-SERIALIZATION-ERROR", \type.serializeValue(), (definition.nsc, invalid, True));
+        }
+    }
+
+    private metadata() {
+        XsdSchema definition = schema("t:Items t:Decimals");
+        UnionDataType original = definition.findType(make_qname("urn:union-items", "Base")).getDataProviderType();
+        hash<SerializationInfo> saved = original.serializeToData();
+        *string index;
+        foreach string key in (keys saved._index) {
+            if (saved._index{key}.hasKey("_hash") && saved._index{key}._hash == "WSDL::XsdUnionListInfo"
+                    && saved._index{key}._members.union_items) {
+                index = key;
+                break;
+            }
+        }
+        assertTrue(exists index);
+        foreach hash<auto> invalid in ({"union_items": False}, {"union_items": "yes"}, {"provider": NOTHING}) {
+            hash<SerializationInfo> state = saved;
+            state._index{index}._members += invalid;
+            assertThrows(invalid.union_items.typeCode() == NT_STRING ? "RUNTIME-TYPE-ERROR" : "DESERIALIZATION-ERROR",
+                \Serializable::deserialize(), (state,));
+            assertEq((True, "01", 2), Serializable::deserialize(saved).acceptsValue(("1", "01", "2")));
+        }
+        assertFalse(original.valueKey("1 2") == original.valueKey("01 2"));
+        original.types = (original.types[1], original.types[0]);
+        foreach UnionDataType provider in (original, Serializable::deserialize(original.serialize())) {
+            assertEq(provider.valueKey("1 2"), provider.valueKey("01 2"));
+            assertEq((True, 2), provider.acceptsValue("true 2"));
+        }
+        original.types = (original.types[1],);
+        UnionDataType reduced = Serializable::deserialize(original.serialize());
+        assertEq((True, "01", 2), reduced.acceptsValue("1 01 2"));
+        assertThrows("RUNTIME-TYPE-ERROR", \reduced.acceptsValue(), ("1.0 2.0",));
+    }
+
+    private fields() {
+        XsdSchema definition = schema("t:Items t:Decimals");
+        UnionDataType provider = definition.findType(make_qname("urn:union-items", "Value")).getDataProviderType();
+        XsdUnionDataField original({"name": "mixed", "type": provider,
+            "allowed_values": (("1", "01", "2"),)}, provider);
+        foreach XsdUnionDataField field in (original, Serializable::deserialize(original.serialize())) {
+            assertEq((True, "+1", 2), field.acceptsValue(("true", "+1", "2")));
+            assertThrows("FIELD-VALUE-ERROR", \field.acceptsValue(), (("1", "1", "2"),));
+            assertThrows("FIELD-VALUE-ERROR", \field.acceptsValue(), (("01", "1", "2"),));
+            assertThrows("RUNTIME-TYPE-ERROR", \field.setAllowedValues(), ((("12",), ("bad",)),));
+            assertEq((True, "01", 2), field.acceptsValue(("1", "01", "2")));
+        }
+        XsdUnionDataField repeated({"name": "records", "type": new ListDataType(provider),
+            "element_allowed_values": (("1", "01", "2"),)}, provider);
+        assertEq(((True, "01", 2),), Serializable::deserialize(repeated.serialize())
+            .acceptsValue((("1", "01", "2"),)));
+    }
+
+    private captureErrors() {
+        XsdSchema definition = schema("t:Items t:Decimals");
+        XsdSimpleType atomic = definition.findType(make_qname("urn:union-items", "Atomic"));
+        XsdAbstractType type = definition.findType(make_qname("urn:union-items", "Value"));
+        UnionItemSchemaFailure schema_failure(definition.nsc);
+        atomic.unionTypes = (schema_failure,) + atomic.unionTypes;
+        foreach string error in ("THREAD-CANCELLED", "TEST-ITEM-ERROR", "PARSE-HEX-ERROR") {
+            schema_failure.error = error;
+            assertThrows(error, \type.deserializeValue(), ("value", definition.getTypeMap(), NOTHING, "12 13"));
+            assertThrows(error, \type.serializeValue(), (definition.nsc, ("12", "13"), True));
+            schema_failure.error = NOTHING;
+            assertEq((12, 13), type.deserializeValue("value", definition.getTypeMap(), NOTHING, "12 13"));
+        }
+        UnionDataType base = definition.findType(make_qname("urn:union-items", "Base")).getDataProviderType();
+        UnionDataType item = base.types[0].getElementType();
+        UnionItemProviderFailure failure();
+        item.types = (failure,) + item.types;
+        foreach string error in ("THREAD-CANCELLED", "TEST-ITEM-ERROR", "PARSE-HEX-ERROR") {
+            failure.error = error;
+            assertThrows(error, \base.acceptsValue(), (("12", "13"),));
+            failure.error = NOTHING;
+            assertEq((12, 13), base.acceptsValue(("12", "13")));
+        }
+    }
+
+    private graphs() {
+        XsdSchema definition = schema("t:Items t:Decimals");
+        XsdSimpleType atomic = definition.findType(make_qname("urn:union-items", "Atomic"));
+        XsdSimpleType list = definition.findType(make_qname("urn:union-items", "Items"));
+        XsdAbstractType type = definition.findType(make_qname("urn:union-items", "Value"));
+        UnionItemSchemaFailure terminal(definition.nsc);
+        atomic.unionTypes = (terminal,) + atomic.unionTypes;
+        XsdSimpleType top = atomic;
+        for (int depth = 0; depth < 28; ++depth) {
+            XsdSimpleType parent = atomic.copy();
+            parent.unionTypes = (top, top);
+            top = parent;
+        }
+        list.listItemType = top;
+        assertEq((12, 13), type.deserializeValue("value", definition.getTypeMap(), NOTHING, "12 13"));
+        assertTrue(terminal.calls > 0 && terminal.calls < 64, "shared item unions must not expand exponentially");
+        list<XsdAbstractType> saved = top.unionTypes;
+        top.unionTypes = (top,);
+        assertThrows("XSD-SIMPLETYPE-ERROR", \type.deserializeValue(),
+            ("value", definition.getTypeMap(), NOTHING, "12 13"));
+        top.unionTypes = saved;
+        assertEq((12, 13), type.deserializeValue("value", definition.getTypeMap(), NOTHING, "12 13"));
+
+        UnionDataType base = definition.findType(make_qname("urn:union-items", "Base")).getDataProviderType();
+        ListDataType provider_list = base.types[0];
+        UnionDataType provider_top = provider_list.getElementType();
+        UnionItemProviderFailure failure();
+        provider_top.types = (failure,) + provider_top.types;
+        for (int depth = 0; depth < 28; ++depth) {
+            UnionDataType parent((definition.nsc.getBaseType("boolean"), definition.nsc.getBaseType("int")));
+            parent.types = (provider_top, provider_top);
+            provider_top = parent;
+        }
+        provider_list.updateElementType(provider_top);
+        assertEq((12, 13), base.acceptsValue(("12", "13")));
+        assertTrue(failure.calls > 0 && failure.calls < 64, "provider item unions must remain bounded");
+        list<AbstractDataProviderType> provider_saved = provider_top.types;
+        provider_top.types = (provider_top,);
+        assertThrows("XSD-SIMPLETYPE-ERROR", \base.acceptsValue(), (("12", "13"),));
+        provider_top.types = provider_saved;
+        assertEq((12, 13), base.acceptsValue(("12", "13")));
+    }
+
+    private restrictedMembers() {
+        XsdSchema original('<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"
+            xmlns:t="urn:union-items" targetNamespace="urn:union-items">
+            <xs:simpleType name="Atomic"><xs:union memberTypes="xs:boolean xs:int"/></xs:simpleType>
+            <xs:simpleType name="Item"><xs:restriction base="t:Atomic">
+                <xs:enumeration value="01"/><xs:enumeration value="12"/>
+            </xs:restriction></xs:simpleType>
+            <xs:simpleType name="Items"><xs:list itemType="t:Item"/></xs:simpleType>
+            <xs:simpleType name="Pair"><xs:restriction base="t:Items"><xs:length value="2"/></xs:restriction></xs:simpleType>
+            <xs:simpleType name="Decimals"><xs:list itemType="xs:decimal"/></xs:simpleType>
+            <xs:simpleType name="Base"><xs:union memberTypes="t:Pair t:Decimals"/></xs:simpleType>
+            <xs:simpleType name="Value"><xs:restriction base="t:Base">
+                <xs:enumeration value="01 12"/>
+            </xs:restriction></xs:simpleType></xs:schema>', {"async_only": True});
+        foreach XsdSchema definition in (original, Serializable::deserialize(original.serialize())) {
+            XsdAbstractType type = definition.findType(make_qname("urn:union-items", "Value"));
+            foreach AbstractDataProviderType provider in (type.getDataProviderType(),
+                    Serializable::deserialize(type.getDataProviderType().serialize())) {
+                foreach string lexical in ("01 12", "1.0 12.00") {
+                    assertEq((1n, 12n), map number($1), provider.acceptsValue(lexical));
+                    auto value = type.deserializeValue("value", definition.getTypeMap(), NOTHING, lexical);
+                    assertEq((1n, 12n), map number($1), value);
+                    assertEq(value, type.deserializeValue("value", definition.getTypeMap(), NOTHING,
+                        type.serializeValue(definition.nsc, value, True)));
+                }
+                foreach string lexical in ("true 12", "01 13", "01", "01 12 12") {
+                    assertThrows("RUNTIME-TYPE-ERROR", \provider.acceptsValue(), (lexical,));
+                    assertThrows("SOAP-DESERIALIZATION-ERROR", \type.deserializeValue(),
+                        ("value", definition.getTypeMap(), NOTHING, lexical));
+                }
+            }
+        }
+    }
+
+    private binaryAndStrings() {
+        foreach string item_members in ("xs:hexBinary xs:base64Binary", "xs:token xs:boolean") {
+            XsdSchema original = schema("t:Items", "", item_members);
+            foreach XsdSchema definition in (original, Serializable::deserialize(original.serialize())) {
+                XsdAbstractType type = definition.findType(make_qname("urn:union-items", "Value"));
+                UnionDataType provider = Serializable::deserialize(type.getDataProviderType().serialize());
+                string lexical = item_members.startsWith("xs:hex") ? "QQ== 4142" : "1 false";
+                auto value = type.deserializeValue("value", definition.getTypeMap(), NOTHING, lexical);
+                assertEq(value, provider.acceptsValue(lexical));
+                string encoded = type.serializeValue(definition.nsc, value, True);
+                assertEq(provider.valueKey(lexical), provider.valueKey(encoded));
+                if (item_members.startsWith("xs:hex")) {
+                    assertEq("QQ==", value[0]);
+                    assertEq(parse_hex_string("4142"), value[1]);
+                    assertFalse(provider.valueKey("QQ== 4142") == provider.valueKey("41 QUI="));
+                    foreach auto invalid in ("!? ???", (parse_hex_string(""),), ("",)) {
+                        assertThrows("RUNTIME-TYPE-ERROR", \provider.acceptsValue(), (invalid,));
+                        assertThrows("SOAP-SERIALIZATION-ERROR", \type.serializeValue(), (definition.nsc, invalid, True));
+                    }
+                } else {
+                    assertEq(("1", "false"), value);
+                    assertEq(("hello", "world"), provider.acceptsValue((" hello ", "world")));
+                    assertThrows("RUNTIME-TYPE-ERROR", \provider.acceptsValue(), (("hello world",),));
+                }
+            }
+        }
+    }
+
+    private reentrantItems() {
+        XsdSchema definition = schema("t:Items t:Decimals");
+        XsdAbstractType type = definition.findType(make_qname("urn:union-items", "Value"));
+        XsdSimpleType item = definition.findType(make_qname("urn:union-items", "Atomic"));
+        UnionItemSchemaFailure schema_probe(definition.nsc);
+        schema_probe.peer = item;
+        on_exit remove schema_probe.peer;
+        item.unionTypes = (schema_probe,) + item.unionTypes;
+        assertEq((12, 14), type.deserializeValue("value", definition.getTypeMap(), NOTHING, "12 14"));
+        # Value-preservation probes can finish with either serialization direction.
+        assertEq(13, int(schema_probe.nested));
+        assertEq("12 14", type.serializeValue(definition.nsc, (12, 14), True));
+        assertEq(13, int(schema_probe.nested));
+        UnionDataType base = definition.findType(make_qname("urn:union-items", "Base")).getDataProviderType();
+        UnionDataType provider_item = base.types[0].getElementType();
+        UnionItemProviderFailure provider_probe();
+        provider_probe.peer = provider_item;
+        on_exit remove provider_probe.peer;
+        provider_item.types = (provider_probe,) + provider_item.types;
+        assertEq((12, 14), base.acceptsValue("12 14"));
+        assertEq(13, provider_probe.nested);
+    }
+}
+
+class UnionItemSchemaFailure inherits XsdBaseType {
+    public {
+        *string error;
+        int calls = 0;
+        *XsdAbstractType peer;
+        *auto nested;
+    }
+    constructor(Namespaces namespaces) : XsdBaseType("int", namespaces) {
+    }
+    auto serializeValue(Namespaces namespaces, auto value, *softbool omitType) {
+        ++calls;
+        if (peer && (value === "12" || value === 12)) {
+            nested = peer.serializeValue(namespaces, "13", omitType);
+        }
+        if (error && (value === "13" || value === 13)) {
+            throw error, "controlled second-item serialization failure";
+        }
+        throw "SOAP-SERIALIZATION-ERROR", "controlled item rejection";
+    }
+    auto deserializeValue(string en, hash<string, XsdAbstractType> tmap, *hash<auto> mrh, auto value) {
+        ++calls;
+        if (peer && value === "12") {
+            nested = peer.deserializeValue(en, tmap, mrh, "13");
+        }
+        if (error && value === "13") {
+            throw error, "controlled second-item deserialization failure";
+        }
+        throw "SOAP-DESERIALIZATION-ERROR", "controlled item rejection";
+    }
+}
+
+class UnionItemProviderFailure inherits XsdBooleanDataType {
+    public {
+        *string error;
+        int calls = 0;
+        *UnionDataType peer;
+        *auto nested;
+    }
+    auto acceptsValue(auto value) {
+        ++calls;
+        if (peer && (value === "12" || value === 12)) {
+            nested = peer.acceptsValue("13");
+        }
+        if (error && (value === "13" || value === 13)) {
+            throw error, "controlled second-item provider failure";
+        }
+        throw "RUNTIME-TYPE-ERROR", "controlled item rejection";
+    }
+}

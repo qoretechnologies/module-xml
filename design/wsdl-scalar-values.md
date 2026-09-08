@@ -541,6 +541,31 @@ consumers and examples, using independent ordered primitive values and validator
 The previously adjudicated libxml2 empty-list enumeration compiler defect is counted
 explicitly; Xerces assesses every document, with no waiver of Qore value checks.
 
+For list members whose items are atomic unions, `XsdUnionListInfo.union_items`
+selects per-item conversion capture instead of a single atomic descriptor.
+The actual schema/provider item conversion publishes its selected primitive identity
+after any native-value preservation probes. List comparison collects these identities
+in order. It does not replay item validation to infer which member accepted a value.
+Restriction wrappers retain the underlying list identity, while each item union
+still enforces its own facets. For a boolean/int item union, `1 01 2` has boolean,
+decimal and decimal items; it is distinct from the all-decimal `1.0 1.0 2.0`.
+The all-decimal `01 2` does compare equal to `1.0 2.00` in an enclosing union
+that also permits a decimal list.
+
+Capture state is local to a thread and restored on every exit, including a failure
+after earlier items converted successfully. A target and provider call depth isolate
+reentrant conversions. Shared item unions reuse the existing bounded traversal
+contexts. Detached metadata requires a mandatory union item provider and excludes
+simultaneous atomic item metadata. Older atomic-list metadata defaults the new flag
+to false. Public member graphs must be configured before concurrent use.
+
+`wsdl-union-list-items.qtest` covers these comparisons, restrictions, native item
+boundaries, binary/text values, metadata restoration, choices, error cleanup and
+shared/cyclic graphs. `test_union_list_items.py` checks both SOAP bindings,
+directions and reconstructed consumers. The Xerces list-kind comparison defect is
+counted separately with exact diagnostics, libxml2 validation and independent
+ordered values; see `test/wsdl-interop/list-values-adjudication.md`.
+
 Union whitespace is governed by the successfully validating member (XSD 1.0
 Part 2 section 4.3.6). The union itself does not introduce collapse: a leading
 `xs:string` member retains whitespace; `xs:token` collapses it. Ordered bounds

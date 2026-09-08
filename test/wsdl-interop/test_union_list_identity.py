@@ -89,12 +89,20 @@ class UnionListIdentityTest(unions.UnionProvidersTest):
     def provider_value(case, lexical):
         return lexical if case.facets else unions.matrices.tokens(lexical)
 
+    def check_xerces_document(self, key, document, expected, result):
+        self.assertEqual(expected, result["ok"], result)
+        return False
+
+    def check_xerces_disagreements(self, documents):
+        self.assertEqual(set(), documents)
+
     def check_oracles(self, jobs, expected):
         oracle = run_independent(list(jobs.values()))
         self.assertEqual(set(jobs), set(oracle["schemas"]))
         self.assertEqual(set(expected), set(oracle["documents"]))
         unassessed_schemas, unassessed_documents = set(), 0
         binary_false_positives = set()
+        xerces_false_negatives = set()
         for key, job in jobs.items():
             self.assertTrue(oracle["schemas"][key]["ok"], oracle["schemas"][key])
             self.assertEqual([], oracle["schemas"][key]["warnings"])
@@ -112,8 +120,10 @@ class UnionListIdentityTest(unions.UnionProvidersTest):
                 validator = None
             for name, document in job.documents.items():
                 with self.subTest(oracle_document=name):
-                    self.assertEqual(expected[name], oracle["documents"][name]["ok"], oracle["documents"][name])
-                    self.assertEqual([], oracle["documents"][name]["warnings"])
+                    result = oracle["documents"][name]
+                    self.assertEqual([], result["warnings"])
+                    if self.check_xerces_document(key, document, expected[name], result):
+                        xerces_false_negatives.add(name)
                     if validator is not None:
                         element = etree.fromstring(document)
                         valid = validator.validate(element)
@@ -134,9 +144,10 @@ class UnionListIdentityTest(unions.UnionProvidersTest):
                             self.assertEqual(expected[name], valid, str(validator.error_log))
         self.assertIn(len(unassessed_schemas), (0, 3))
         self.assertIn(len(binary_false_positives), (0, 12))
+        self.check_xerces_disagreements(xerces_false_negatives)
         print(f"libxml2 {etree.LIBXML_VERSION}: {len(unassessed_schemas)} known empty-list enumeration schemas, "
               f"{unassessed_documents} documents unassessed, {len(binary_false_positives)} binary false positives; "
-              f"Xerces assessed all {len(expected)} documents")
+              f"Xerces assessed all {len(expected)} documents, {len(xerces_false_negatives)} false negatives")
 
 
 if __name__ == "__main__":

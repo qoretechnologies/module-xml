@@ -122,6 +122,8 @@ module WSDL {
       decimal spellings and distinct boolean/integer values; detached providers retain these constraints
     - union members containing atomic lists retain item order and primitive families, accept lexical lists,
       preserve ambiguous item spellings, and compare list enumerations and field choices by exact item values
+    - lists whose items select atomic union members retain each selected primitive value for enclosing union
+      enumeration and field choices, including reconstructed providers and restricted item unions
     - builtin date and binary parse failures use SOAP validation errors so union selection can try later members
     - boolean restrictions retain lexical spellings for patterns across serialization and reconstructed providers;
       fixed attribute and field choices compare boolean values, and schema declarations reject inapplicable facets
@@ -6519,11 +6521,39 @@ public hashdecl XsdUnionAtomicInfo {
     @since %WSDL 0.5.8
 */
 public hashdecl XsdUnionListInfo {
-    #! Primitive conversion and restrictions of each item
-    hash<XsdUnionAtomicInfo> item;
+    #! Primitive conversion and restrictions when the item type is atomic
+    *hash<XsdUnionAtomicInfo> item;
+    #! Whether each item selects a member of an atomic union; excludes \c item metadata
+    bool union_items = False;
     #! Member provider identity, absent for schema-only value comparisons
     *AbstractDataProviderType provider;
 }
+
+# Retain the actual item's selected value; a second conversion could call custom
+# validators again or choose a different member after native conversion.
+class XsdSchemaUnionItemCapture {
+    public {
+        XsdAbstractType target;
+        *hash<XsdUnionValueIdentity> identity;
+    }
+    constructor(XsdAbstractType target) {
+        self.target = target;
+    }
+}
+
+class XsdProviderUnionItemCapture {
+    public {
+        AbstractDataProviderType target;
+        list<hash<XsdUnionTrialResult>> items();
+        int depth = 0;
+    }
+    constructor(AbstractDataProviderType target) {
+        self.target = target;
+    }
+}
+
+thread_local *XsdSchemaUnionItemCapture SchemaUnionItemCapture;
+thread_local *XsdProviderUnionItemCapture ProviderUnionItemCapture;
 
 # Value comparison is separate from native input identity. Integer and decimal
 # members share a value space; boolean and string values remain distinct from it.
@@ -6544,7 +6574,7 @@ class XsdUnionValueHelper {
         return info ? atomicIdentity(info, input, converted, error) : NOTHING;
     }
 
-    static *hash<XsdUnionListInfo> describeList(XsdAbstractType member, *AbstractDataProviderType provider) {
+    static *XsdSimpleType listType(XsdAbstractType member) {
         hash<string, bool> visited();
         while (member instanceof XsdSimpleType) {
             if (Class::getClass(member).getPathName() != "WSDL::XsdSimpleType") {
@@ -6557,15 +6587,49 @@ class XsdUnionValueHelper {
             visited{key} = True;
             XsdSimpleType simple = cast<XsdSimpleType>(member);
             if (simple.listItemType) {
-                *hash<XsdUnionAtomicInfo> item = describeAtomic(simple.listItemType,
-                    provider ? provider.getElementType() : NOTHING);
-                return item ? <XsdUnionListInfo>{"item": item, "provider": provider} : NOTHING;
+                return simple;
             }
             if (!simple.type) {
                 return;
             }
             member = simple.type;
         }
+    }
+
+    static *hash<XsdUnionListInfo> describeList(XsdAbstractType member, *AbstractDataProviderType provider) {
+        *XsdSimpleType list = listType(member);
+        if (!list) {
+            return;
+        }
+        if (schemaUnionItem(list.listItemType)) {
+            return <XsdUnionListInfo>{"union_items": True, "provider": provider};
+        }
+        *hash<XsdUnionAtomicInfo> item = describeAtomic(list.listItemType,
+            provider ? provider.getElementType() : NOTHING);
+        return item ? <XsdUnionListInfo>{"item": item, "provider": provider} : NOTHING;
+    }
+
+    static bool schemaUnionItem(XsdAbstractType item) {
+        hash<string, bool> visited();
+        while (item instanceof XsdSimpleType) {
+            if (Class::getClass(item).getPathName() != "WSDL::XsdSimpleType") {
+                return False;
+            }
+            string key = item.uniqueHash();
+            if (visited{key}) {
+                throw "XSD-SIMPLETYPE-ERROR", "cyclic list item union metadata";
+            }
+            visited{key} = True;
+            XsdSimpleType simple = cast<XsdSimpleType>(item);
+            if (simple.unionTypes) {
+                return True;
+            }
+            if (!simple.type) {
+                return False;
+            }
+            item = simple.type;
+        }
+        return False;
     }
 
     static auto listInput(auto value, string error, *hash<XsdUnionListInfo> info) {
@@ -6575,7 +6639,7 @@ class XsdUnionValueHelper {
                 if (!exists item) {
                     throw error, "an XSD list cannot contain an omitted item";
                 }
-                if (item.typeCode() == NT_STRING) {
+                if (info.item && item.typeCode() == NT_STRING) {
                     XsdListValueHelper::checkToken(XsdSimpleType::normalizeWhiteSpace(item, info.item.white_space),
                         error);
                 }
@@ -6600,6 +6664,16 @@ class XsdUnionValueHelper {
         return <XsdUnionValueIdentity>{"family": "list", "value": values};
     }
 
+    static *hash<XsdUnionValueIdentity> schemaListIdentity(hash<XsdUnionListInfo> info, XsdAbstractType member,
+            auto input, auto converted, string error, hash<string, hash<XsdUnionValueIdentity>> identities) {
+        if (info.union_items) {
+            *XsdSimpleType list = listType(member);
+            @assert(list);
+            return identities{list.uniqueHash()};
+        }
+        return listIdentity(info, input, converted, error);
+    }
+
     static string listLexical(hash<XsdUnionListInfo> info, list<auto> converted) {
         list<string> tokens();
         foreach auto item in (converted) {
@@ -6609,6 +6683,40 @@ class XsdUnionValueHelper {
             push tokens, token;
         }
         return tokens.join(" ");
+    }
+
+    static *hash<XsdUnionValueIdentity> capturedIdentity(list<*hash<XsdUnionValueIdentity>> identities) {
+        list<string> values();
+        foreach *hash<XsdUnionValueIdentity> identity in (identities) {
+            if (!identity) {
+                return;
+            }
+            push values, key(identity);
+        }
+        return <XsdUnionValueIdentity>{"family": "list", "value": values};
+    }
+
+    static hash<XsdUnionTrialResult> capturedList(list<hash<XsdUnionTrialResult>> items, auto converted) {
+        if (converted.typeCode() != NT_LIST || items.size() != converted.size()) {
+            throw "RUNTIME-TYPE-ERROR", "a union list must produce one atomic conversion per item";
+        }
+        list<string> tokens();
+        bool known_lexical = True;
+        foreach hash<XsdUnionTrialResult> item in (items) {
+            if (!exists item.value || (!item.value.strp() && item.value.typeCode() != NT_BINARY)) {
+                throw "RUNTIME-TYPE-ERROR", "a list item union must produce an atomic value";
+            }
+            *string token = item.value.typeCode() == NT_STRING ? item.value : item.lexical;
+            if (exists token) {
+                XsdListValueHelper::checkToken(token, "RUNTIME-TYPE-ERROR");
+                push tokens, token;
+            } else {
+                known_lexical = False;
+            }
+        }
+        return <XsdUnionTrialResult>{"accepted": True, "value": converted,
+            "identity": capturedIdentity(map $1.identity, items),
+            "lexical": known_lexical ? tokens.join(" ") : NOTHING};
     }
 
     static string key(hash<XsdUnionValueIdentity> identity) {
@@ -6901,13 +7009,22 @@ public class UnionDataType inherits AbstractDataProviderType {
                     continue;
                 }
                 if (info.typeCode() != NT_HASH || info.provider !== types[$#]
-                        || atomic_members[$#] || info.item.typeCode() != NT_HASH
-                        || types[$#].getBaseTypeCode() != NT_LIST
-                        || info.item.provider !== types[$#].getElementType()) {
+                        || atomic_members[$#] || types[$#].getBaseTypeCode() != NT_LIST
+                        || (exists info.union_items && info.union_items.typeCode() != NT_BOOLEAN)) {
                     throw "DESERIALIZATION-ERROR", "invalid union list value metadata";
                 }
-                checkAtomicInfo(info.item);
-                if (!info.item.provider.isMandatory()) {
+                *AbstractDataProviderType item_provider = types[$#].getElementType();
+                if (info.union_items) {
+                    if (exists info.item || !(item_provider instanceof UnionDataType)) {
+                        throw "DESERIALIZATION-ERROR", "union list metadata requires a union item provider";
+                    }
+                } else {
+                    checkAtomicInfo(info.item);
+                    if (info.item.provider !== item_provider) {
+                        throw "DESERIALIZATION-ERROR", "union list metadata references the wrong atomic provider";
+                    }
+                }
+                if (!item_provider || !item_provider.isMandatory()) {
                     throw "DESERIALIZATION-ERROR", "a union list requires mandatory atomic items";
                 }
                 list_types{info.provider.uniqueHash()} = new hash<XsdUnionListInfo>(info);
@@ -7108,8 +7225,22 @@ public class UnionDataType inherits AbstractDataProviderType {
             }
             throw "MISSING-VALUE-ERROR", "a union value must be supplied";
         }
+        *XsdProviderUnionItemCapture capture = ProviderUnionItemCapture;
+        bool captured = capture && capture.target === self;
+        bool capture_owner = captured && !capture.depth;
+        if (captured) {
+            ++capture.depth;
+        }
+        on_exit if (captured) {
+            --capture.depth;
+        }
         hash<XsdUnionTrialResult> result = trialValue(value);
-        return result.owner ? preserveValue(value, result) : result.value;
+        auto converted = result.owner ? preserveValue(value, result) : result.value;
+        if (capture_owner) {
+            result.value = converted;
+            push capture.items, result;
+        }
+        return converted;
     }
 
     private hash<XsdUnionTrialResult> trialValue(auto value) {
@@ -7140,6 +7271,14 @@ public class UnionDataType inherits AbstractDataProviderType {
             *hash<XsdUnionAtomicInfo> info = atomic_types{t.uniqueHash()};
             *hash<XsdUnionListInfo> list_info = list_types{t.uniqueHash()};
             try {
+                *XsdProviderUnionItemCapture caller_capture = ProviderUnionItemCapture;
+                bool capture = list_info && list_info.union_items;
+                on_exit if (capture) {
+                    ProviderUnionItemCapture = caller_capture;
+                }
+                if (capture) {
+                    ProviderUnionItemCapture = new XsdProviderUnionItemCapture(t.getElementType());
+                }
                 auto converted = t.acceptsValue(list_info
                     ? XsdUnionValueHelper::listInput(value, "RUNTIME-TYPE-ERROR", list_info) : value);
                 result = UnionTrialContext.results{t.uniqueHash()};
@@ -7151,6 +7290,8 @@ public class UnionDataType inherits AbstractDataProviderType {
                         if (result.identity) {
                             result.lexical = XsdUnionValueHelper::lexical(info, converted);
                         }
+                    } else if (capture) {
+                        result = XsdUnionValueHelper::capturedList(ProviderUnionItemCapture.items, converted);
                     } else if (list_info) {
                         result.identity = XsdUnionValueHelper::listIdentity(list_info, value, converted,
                             "RUNTIME-TYPE-ERROR");
@@ -7160,7 +7301,7 @@ public class UnionDataType inherits AbstractDataProviderType {
             } catch (hash<ExceptionInfo> ex) {
                 # Qore's binary providers expose their native lexical parser errors directly.
                 # Only the matching builtin's input rejection permits trying another XSD member.
-                *string builtin = info ? info.builtin : list_info ? list_info.item.builtin : NOTHING;
+                *string builtin = info ? info.builtin : list_info && list_info.item ? list_info.item.builtin : NOTHING;
                 if ((builtin == "hexBinary" && ex.err == "PARSE-HEX-ERROR")
                         || (builtin == "base64Binary" && ex.err == "BASE64-PARSE-ERROR")) {
                     continue;
@@ -9277,8 +9418,11 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
 
         if (getFacetKind() == "union") {
             hash<XsdSchemaUnionTrialResult> result = serializeUnion(nsc, val, omitType);
-            return XsdScalarTextHelper::withComments(rh,
-                result.owner && !SchemaUnionValueProbe ? preserveUnionLexical(nsc, val, result) : result.value);
+            auto converted = result.owner && !SchemaUnionValueProbe ? preserveUnionLexical(nsc, val, result) : result.value;
+            if (SchemaUnionItemCapture && SchemaUnionItemCapture.target === self) {
+                SchemaUnionItemCapture.identity = result.identity;
+            }
+            return XsdScalarTextHelper::withComments(rh, converted);
         }
 
         if (!exists val && getFacetKind() == "list" && hasNativeListValue()) {
@@ -9328,7 +9472,8 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
                     auto value = member.serializeValue(nsc, list_info
                         ? XsdUnionValueHelper::listInput(val, SOAP_SERIALIZATION_ERROR, list_info) : val, omitType);
                     *hash<XsdUnionValueIdentity> member_identity = trial.identities{key}
-                        ?? (list_info ? XsdUnionValueHelper::listIdentity(list_info, val, value, SOAP_SERIALIZATION_ERROR)
+                        ?? (list_info ? XsdUnionValueHelper::schemaListIdentity(list_info, member, val, value,
+                                SOAP_SERIALIZATION_ERROR, trial.identities)
                             : XsdUnionValueHelper::atomicIdentity(member, val, value, SOAP_SERIALIZATION_ERROR));
                     trial.results{key} = <XsdSchemaUnionTrialResult>{"accepted": True, "value": value,
                         "identity": member_identity};
@@ -9421,7 +9566,8 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
                     auto value = member.deserializeValue(en, tmap, mrh, val);
                     *hash<XsdUnionListInfo> list_info = XsdUnionValueHelper::describeList(member);
                     *hash<XsdUnionValueIdentity> member_identity = trial.identities{key}
-                        ?? (list_info ? XsdUnionValueHelper::listIdentity(list_info, val, value, SOAP_DESERIALIZATION_ERROR)
+                        ?? (list_info ? XsdUnionValueHelper::schemaListIdentity(list_info, member, val, value,
+                                SOAP_DESERIALIZATION_ERROR, trial.identities)
                             : XsdUnionValueHelper::atomicIdentity(member, val, value, SOAP_DESERIALIZATION_ERROR));
                     trial.results{key} = <XsdSchemaUnionTrialResult>{"accepted": True, "value": value,
                         "identity": member_identity};
@@ -9521,6 +9667,12 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
 
     #! Serialize a list type value as space-separated string
     private auto serializeList(Namespaces nsc, auto val, *softbool omitType, *hash<auto> rh) {
+        bool capture = exists SchemaUnionSerializeContext && XsdUnionValueHelper::schemaUnionItem(listItemType);
+        *XsdSchemaUnionItemCapture caller_capture = SchemaUnionItemCapture;
+        on_exit if (capture) {
+            SchemaUnionItemCapture = caller_capture;
+        }
+        list<*hash<XsdUnionValueIdentity>> identities();
         list<auto> items;
         if (val.typeCode() == NT_LIST) {
             items = val;
@@ -9534,6 +9686,9 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
         # Serialize each item and join with spaces
         list<string> serializedItems = ();
         foreach auto item in (items) {
+            if (capture) {
+                SchemaUnionItemCapture = new XsdSchemaUnionItemCapture(listItemType);
+            }
             string lexical;
             if (item.typeCode() == NT_STRING) {
                 lexical = normalizeWhiteSpace(item, listItemType.getWhiteSpace());
@@ -9552,9 +9707,18 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
             }
             XsdListValueHelper::checkToken(lexical, SOAP_SERIALIZATION_ERROR);
             serializedItems += lexical;
+            if (capture) {
+                push identities, SchemaUnionItemCapture.identity;
+            }
         }
 
         string result = serializedItems.join(" ");
+        if (capture) {
+            *hash<XsdUnionValueIdentity> identity = XsdUnionValueHelper::capturedIdentity(identities);
+            if (identity) {
+                SchemaUnionSerializeContext.identities{self.uniqueHash()} = identity;
+            }
+        }
         if (rh) {
             rh."^value^" = result;
             return rh;
@@ -10183,7 +10347,11 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
 
         if (getFacetKind() == "union") {
             hash<XsdSchemaUnionTrialResult> result = deserializeUnion(en, tmap, mrh, val);
-            return result.owner && !SchemaUnionValueProbe ? preserveUnionValue(en, tmap, mrh, val, result) : result.value;
+            auto converted = result.owner && !SchemaUnionValueProbe ? preserveUnionValue(en, tmap, mrh, val, result) : result.value;
+            if (SchemaUnionItemCapture && SchemaUnionItemCapture.target === self) {
+                SchemaUnionItemCapture.identity = result.identity;
+            }
+            return converted;
         }
 
         if (getNumericBaseName()) {
@@ -10235,14 +10403,15 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
 
     #! Deserialize a list type value from space-separated string
     private auto deserializeList(string en, hash<string, XsdAbstractType> tmap, *hash<auto> mrh, auto val) {
+        bool capture = exists SchemaUnionDeserializeContext && XsdUnionValueHelper::schemaUnionItem(listItemType);
+        *XsdSchemaUnionItemCapture caller_capture = SchemaUnionItemCapture;
+        on_exit if (capture) {
+            SchemaUnionItemCapture = caller_capture;
+        }
+        list<*hash<XsdUnionValueIdentity>> identities();
         val = XsdScalarTextHelper::value(val, SOAP_DESERIALIZATION_ERROR);
         if (exists val && !val.strp()) {
             throw SOAP_DESERIALIZATION_ERROR, "an XML list requires scalar lexical text";
-        }
-
-        # Handle empty or null values
-        if (!exists val || val == "") {
-            return ();
         }
 
         # XSD list whitespace is fixed to collapse, before item boundaries are found.
@@ -10254,10 +10423,22 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
         list<auto> result = ();
         foreach string item in (items) {
             if (item != "") {  # Skip empty strings from multiple spaces
+                if (capture) {
+                    SchemaUnionItemCapture = new XsdSchemaUnionItemCapture(listItemType);
+                }
                 result += listItemType.deserializeValue(en, tmap, mrh, item);
+                if (capture) {
+                    push identities, SchemaUnionItemCapture.identity;
+                }
             }
         }
 
+        if (capture) {
+            *hash<XsdUnionValueIdentity> identity = XsdUnionValueHelper::capturedIdentity(identities);
+            if (identity) {
+                SchemaUnionDeserializeContext.identities{self.uniqueHash()} = identity;
+            }
+        }
         return result;
     }
 }

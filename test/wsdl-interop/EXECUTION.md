@@ -2874,3 +2874,61 @@ metadata; atomic-item lists are fixed here. This is retained as required P3-15
 work, along with the remaining primitive families and native-input ambiguity.
 All earlier remaining date/IEEE/binary/QName/entity/regex/XML-RPC requirements and
 all P4-P9 requirements remain in scope. P3 acceptance is not yet complete.
+
+
+### P3-15: union-valued list items
+
+The implementation captures the primitive identity chosen during actual item
+conversion, including restriction wrappers. List members retain ordered values
+for enclosing union enumeration and finite field choices. Captures do not replay
+custom validators, and thread-local scope/depth restores state after reentry,
+second-item errors or cancellation. Detached metadata validates union item
+providers and excludes simultaneous atomic descriptors; old atomic metadata remains
+compatible. Tests cover mixed boolean/decimal identity, text/binary items, empty
+and invalid native boundaries, patterns, restrictions, metadata corruption and
+reorder/pruning, finite choices, shared diamonds, cycles, reentry and cleanup.
+
+Eleven source and compiled AOT cases pass 251 assertions. All 59 affected suites
+pass 691 cases / 12497 recorded assertions. Full Python discovery runs 131 methods
+with exactly the same 33 tracked P4/P5/P6 failure signatures, including after the
+final Qore runtime fix. Survey and strict coverage are unchanged outside versions:
+89 selected WSDLs / 756 directions, zero selected failures, 220 broad failures.
+The new independent matrix covers 18 schemas, 36 real SOAP contracts, 408 input
+and 180 emitted binding documents, and 1248 consumer/output/example documents.
+Xerces assesses all 1836 documents. Exactly 48 binding and 128 consumer verdicts
+are the source-adjudicated LISTOFUNION_DT/LIST_DT enumeration false negative;
+libxml2 and exact ordered primitive values validate those documents. The libxml2
+empty-list enumeration compiler defect remains separately counted: three schemas,
+72 binding and 176 consumer documents unassessed there, assessed by Xerces and
+exact values. See list-values-adjudication.md; no production verdict is waived.
+
+AOT integration exposed two Qore root causes: generic hash-field map specialization
+built list<auto> without the AST's actual value type inference, and common-type
+folding erased optional types when followed by either their non-optional type or
+repeated NOTHING. IR now calls the same typed, cancellation-aware map helper as
+JIT/AOT. The Qore fix is committed on develop as 3e2f47be0, with no push and a clean
+main checkout afterward. Its regression passes three cases / 28 assertions across
+AST/IR/JIT/source-stripped AOT, both append paths and deterministic native
+cancellation. Eleven affected existing core suites pass. Core, cancellation and
+compiled XML Valgrind runs report zero errors and zero definite/indirect/possible
+loss, without suppressions. The known DWARF reader warning remains tracked for P9.
+
+WSDL/SoapClient/SoapDataProvider AOT and WSDL docs/qjar builds pass without warnings
+or errors. Final WSDL SHA-256 is
+c0bc371468726c34941e844ba9e951848fbd469358e21ce7a851c7e40e53e581;
+native XML remains 8ec5487ebe937450478fc856e5c02114e5cf9ffaf9201cf70d052907b40f2e12.
+Final runtime library SHA-256 is
+67f2c22aaaac71cec3a75b19b5417e0231d6d999fca55125fe36c87bd29057df.
+Full 62-item audits: audits/P3-15-union-list-items.md and
+audits/P3-15-qore-map-types.md. Evidence is retained under /tmp/wsdl-p3-15-, with
+final-core checks/survey/coverage, python-core-final and comparison reports,
+source/AOT/native regression, build, docs and Valgrind logs identified in the audits.
+
+The next required P3 increment is independently reproduced by
+/tmp/wsdl-p3-16-list-own-facets-{probe.qr,baseline.log}: enumeration declared on a
+list whose items are boolean/int unions rejects valid 01 2 in schema conversion
+and accepts invalid 01 3 through a detached provider. Atomic-only list facet
+metadata does not describe union-valued items. P3-15 handles enclosing union
+facets; list-own enumeration/pattern/provider semantics remain required work.
+All earlier remaining date/IEEE/binary/QName/entity/regex/XML-RPC requirements and
+all P4-P9 requirements remain in scope. P3 acceptance is not yet complete.
