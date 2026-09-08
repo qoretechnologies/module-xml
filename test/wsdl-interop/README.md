@@ -246,8 +246,8 @@ each direction. The worker explicitly selects that binding and operation. Every 
 retained and independently checked with libxml2 and Xerces. Output envelope versions are checked against
 the selected binding; the W3C SOAP 1.2 inputs still exercise a SOAP 1.1 contract.
 
-`--strict` requires the explicit [strict-selection.json](strict-selection.json) to pass: 60 WSDLs,
-including all 14 source-invalid descriptions, and 536 selected message/direction combinations. Positive
+`--strict` requires the explicit [strict-selection.json](strict-selection.json) to pass: 63 WSDLs,
+including all 14 source-invalid descriptions, and 576 selected message/direction combinations. Positive
 cases require independent exact-value assertions; negative cases require the intended exception category.
 Missing, duplicate, stale, malformed or unclassified entries fail. This selection is deliberately named
 and bounded; it does not turn known implementation failures elsewhere into passing conformance tests.
@@ -261,12 +261,21 @@ and verify that provider lists retain `false` through Serializable reconstructio
 List item boundaries use all four XML whitespace characters. This extends the
 existing strict boolean families without changing their scope or original bytes.
 
-[coverage-report.json](coverage-report.json) preserves the complete current ledger, including 264 failed
+`test_decimal_lexical.py` adds 784 independently validated documents: 432 lexical
+inputs, 160 serialized outputs and 192 native provider/example outputs. Real SOAP
+1.1/1.2 bindings exercise both directions, attributes, simple content, lists,
+unions, CDATA and Serializable reconstruction. Python Decimal verifies exact
+values and Xerces checks every document. The already adjudicated old-libxml2
+24-digit limitation remains explicit; newer libxml2 versions may accept all valid
+decimals. Qore 3.0 supplies shortest round-trip native float/number formatting,
+while XML decimal text retains its precision and noncanonical spellings.
+
+[coverage-report.json](coverage-report.json) preserves the complete current ledger, including 252 failed
 requirements assigned to later phases. Its stage accounting includes unreachable, missing, skipped and
-unassessed work. In this run 1,492 value/infoset assessments remain unimplemented, explicitly counted as
-unassessed. Successful schema validation is insufficient to close them. Exact numeric checks already
-detect eight failed value-preservation cases for decimal output. The report retains each expected and
-actual value. All thirteen integer builtin families now belong to the strict gate, including original
+unassessed work. In this run 1,464 value/infoset assessments remain unimplemented, explicitly counted as
+unassessed. Successful schema validation is insufficient to close them. Exact numeric checks now pass
+all eight formerly failing decimal output cases. Decimal attributes, elements and retained decimal
+patterns belong to the strict gate, alongside all thirteen integer builtin families, including original
 invalid inputs and exact values in both directions. Signed bounded types use the independent integer
 value comparator; their builtin range rejection is also covered by the authored boundary matrix.
 Valid large integer values that preserve their exact number override only the documented libxml2

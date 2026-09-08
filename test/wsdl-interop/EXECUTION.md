@@ -2045,3 +2045,98 @@ Audit: [audits/P3-03-boolean-lexical.md](audits/P3-03-boolean-lexical.md).
 P3 remains active; decimal conversion, other scalar lexical/value facets and
 enumerations, retained patterns, dates/durations, binary values and IEEE32/64
 semantics still require implementation before the P4 boundary.
+
+
+## P3-04 — Exact decimal lexical values and native round-trip formatting
+
+The decimal binding now validates XSD syntax before numeric conversion. XML
+text keeps every authored digit and normalized lexical spelling. Native finite
+int/float/number input is supported; native float/number formatting uses the
+explicit Qore 3.0 toStringRoundTrip() API. Compatible canonical inputs still
+return floats when their round-trip spelling reproduces the input exactly;
+other inputs return exact strings. XsdDecimalDataType validates before enclosing
+provider/list conversion, supports optionality and survives Serializable
+reconstruction. WSDL now requires Qore 3.0.
+
+The root cause was two independent lossy conversions: blind float() on XML
+input and general display formatting for native output. The existing MPFR
+applyRoundingHeuristic() can remove meaningful zero/nine runs. The selected
+binding uses exact source decimal strings and shortest source-precision binary
+round-trip spelling instead. Its basis is XSD 1.0 decimal's exact i*10^-n value
+space and non-exponent lexical space. Java BigDecimal.valueOf(double) supplies
+a comparable canonical-spelling policy; this does not claim that MPFR is a
+decimal storage type or that this is XPath's float-to-decimal cast contract.
+See the implemented design in design/wsdl-scalar-values.md and the primary
+references linked there.
+
+Core dependency **20422dedf** adds Float/Number.toStringRoundTrip() and its C++
+API without changing existing display/rounding/precision policy. The MPFR
+formatter searches the minimum significand length, including directed decimal
+neighbors around asymmetric binary rounding intervals. The native formatter
+has an independent exact rational oracle (320 signed values at 128–8192 bits),
+a Python binary64 oracle (1050 values), 84 IR/AST Qore cases / 1152 assertions,
+and zero-error/zero-lost-memory Valgrind runs. Its full audit is in core
+examples/test/qore/vars/audits/round-trip-formatting.md. The existing
+DW_AT_abstract_origin reader warning remains the tracked P9 environment issue.
+The tested binary's version banner retains its configure-time 9b3a235d7 hash;
+the compiled formatter is the source subsequently committed as 20422dedf.
+
+Focused XML tests pass **5 cases / 380 assertions**, including 2000-digit
+strings, subnormal/overflow boundaries, nonfinite rejection, original decimal
+spellings, list conversion, optionality, reconstruction and ordered CDATA.
+The independent matrix validates **784 documents**: 432 lexical inputs, 160
+serialized outputs and 192 provider/example outputs. Six actual SOAP 1.1/1.2
+contracts and both request/response directions cover attributes, decimal simple
+content, lists, decimal/boolean unions, expanded root names and exact Decimal
+values. Every document is checked by Xerces. The old libxml2 2.12.10 decimal
+pre-parser uses a 24-digit buffer before fractional trailing-zero trimming;
+its 24 input, 24 output and 32 native-provider rejections are explicit oracle
+disagreements, not accepted Qore errors. The tests also accept zero such
+rejections on newer libxml2, while still checking every document and its exact
+value. Source: GNOME/libxml2 v2.12.10 xmlschemastypes.c decimal parsing.
+
+All **38 affected Qore suites / 489 cases** pass without warnings with local
+Debug Qore and the committed DataProvider dependency export described above.
+Qdx/Doxygen passes without warnings. The XML decimal suite also passes under
+Valgrind with zero errors or definite/indirect/possible loss, using qore -b
+--enable-debug; the already tracked P9 reader warning is not suppressed.
+
+The both-version survey now has 279 parsed / 14 source-invalid descriptions,
+976 successful / 140 failed deserializations, and 974 successful / 2 failed
+serializations. Its unadjudicated libxml2 output-rejection metric remains 48;
+8 valid-input/output-schema disagreements are old validator limitations,
+not remaining decimal value losses. The adjudicated full coverage has
+**252 failure rows**, down from 264, with no new failure rows. The resolved rows
+are DecimalAttribute01 and DecimalElement05 output/value failures (eight), plus
+DecimalSimpleTypePattern02 deserialization failures (four). Strict selection
+adds all DecimalAttribute, DecimalElement and DecimalSimpleTypePattern messages:
+**63 descriptions / 576 directions**, zero selected failures. Exact value
+checks: 484 pass, zero fail, 324 unreachable, 1464 still unassessed. Source
+fixtures, their hashes and the original findings/adjudication reports are
+unchanged. Current reports identify the exact final WSDL source hash.
+
+Full Python discovery runs 100 tests with exactly the seven retained P4/P5/P6
+failures (four nested-choice checks, two binding-version checks, one wildcard
+example check), zero errors/skips/warnings. These remain visible failures.
+
+During this increment the user requested a core commit checkpoint. Existing
+core foreign-key and REST routing fixes landed as a29e8a63e and eef86281d via
+parallel work. Our expanded audit caught encoded Swagger path values and the
+resource name "0" being treated as empty; **ed8e8b709** fixes those plus related
+documentation findings, with 81 cases / 1246 assertions and a full 62-item audit.
+No push was made. Active Fireworks work that appeared afterward remains with
+its owner. The XML affected suites and corpus were rerun after this core work.
+
+Final logs: /tmp/wsdl-p3-04-final-affected.log (and per-suite logs),
+/tmp/wsdl-p3-04-final-docs.log, /tmp/wsdl-p3-04-final-survey.json/.log,
+/tmp/wsdl-p3-04-final-coverage.json/.log, /tmp/wsdl-p3-04-independent.log,
+/tmp/wsdl-p3-04-python-reviewed.log, /tmp/wsdl-p3-04-valgrind.log and
+/tmp/wsdl-p3-04-valgrind-tests.log. Native logs and commands are recorded in
+core's round-trip formatting audit. The full XML audit is
+[audits/P3-04-decimal-lexical.md](audits/P3-04-decimal-lexical.md).
+
+P3 remains active. Exact numeric bounds/digit facets and value enumerations,
+non-decimal retained patterns, IEEE32/64, dates/durations/partial dates, binary
+lexical validation and the remaining regex/list/union requirements must pass
+before starting P4. This commit closes the base decimal conversion increment,
+not the entire scalar phase or SOAP/WSDL compatibility plan.

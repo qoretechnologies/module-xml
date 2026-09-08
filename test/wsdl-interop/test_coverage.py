@@ -245,7 +245,7 @@ class CoverageTest(unittest.TestCase):
         self.assertEqual("", process.stderr)
         report = json.loads(output.read_text())
         self.assertEqual([], report["selected_failures"])
-        self.assertEqual({"wsdls": 60, "message_directions": 536}, report["selected_scope"])
+        self.assertEqual({"wsdls": 63, "message_directions": 576}, report["selected_scope"])
         self.assertEqual(293, len(report["cases"]))
         self.assertEqual(2272, sum(len(c["messages"]) for c in report["cases"]))
         for stage, counts in report["stage_accounting"]["counts"].items():
@@ -255,7 +255,8 @@ class CoverageTest(unittest.TestCase):
         # Harness assertions verify retained failures, not conformance passes for broken functionality.
         self.assertGreater(len(report["failures"]), 0)
         by_name = {c["case"]: c for c in report["cases"]}
-        for name in ("NegativeIntegerElement", "NonNegativeIntegerElement"):
+        for name in ("NegativeIntegerElement", "NonNegativeIntegerElement", "DecimalAttribute",
+                     "DecimalElement", "DecimalSimpleTypePattern"):
             for message in by_name[name]["messages"]:
                 self.assertEqual([], message["failures"], message)
                 self.assertTrue(message["values"]["ok"], message)
@@ -272,7 +273,9 @@ class CoverageTest(unittest.TestCase):
             self.assertEqual([], message["failures"])
         disagreements = [m["output_oracle_disagreement"] for c in report["cases"] for m in c["messages"]
                          if "output_oracle_disagreement" in m]
-        self.assertEqual(64, len(disagreements))
+        # Eight formerly rounded/exponential decimal outputs now preserve their exact values;
+        # Xerces accepts them while the retained libxml2 precision limitation remains visible.
+        self.assertEqual(72, len(disagreements))
         self.assertTrue(all(d["adjudicated"] for d in disagreements))
 
 

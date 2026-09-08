@@ -99,3 +99,59 @@ provider lists/optionality, reconstruction, attributes, simple content and union
 `test_boolean_lexical.py` independently validates both directions of actual SOAP
 1.1/1.2 bindings, boolean lists/unions, native provider values and generated examples
 with libxml2 and Xerces, and compares the resulting boolean values.
+
+Decimal strings use the XSD 1.0 decimal lexical space: an optional sign, ASCII
+digits with an optional decimal point, and at least one digit. XML whitespace
+is collapsed before validation. Exponents, nonfinite values, trailing data,
+non-ASCII digits and other native value categories are rejected with the
+corresponding SOAP or provider error. Native finite integers, floats and numbers
+are accepted; boolean/null/binary/container values are not decimals.
+
+Serialization preserves validated decimal text. Native float/number input uses
+Qore 3.0 `toStringRoundTrip()`, which selects the shortest significand that
+reconstructs the source binary value at its original precision and expands its
+exponent into plain decimal notation. For example, `123.45n` emits `123.45`,
+while `number("1.00000000000000000001")` retains its meaningful final digits.
+This is a numeric binding policy; it does not apply the display heuristic or
+round a value merely to satisfy a schema facet.
+
+Deserialization retains the familiar native float result only when that float's
+round-trip spelling reproduces the normalized input text exactly. Otherwise the
+result is a string. Thus `"123.45"` returns a float, but `"+001.2300"`,
+`"12345678901234567890.123456789"`, values beyond binary64's range and nonzero
+values below its range remain exact strings. This prevents both precision loss
+and loss of authored spellings needed by patterns. In particular, `9898.00` stays
+valid through decoding and reserialization. Signed zero is retained on the wire;
+all decimal zero spellings still denote the same XSD value.
+
+`XsdDecimalDataType` applies the same rules before provider/list conversion and
+reports float/string output alternatives (`NT_ALL`). Its conversion type is
+`NOTHING`, so enclosing lists cannot coerce strings first. Optional providers
+also accept/return `NOTHING`, while mandatory omission raises
+`MISSING-VALUE-ERROR`. Null and invalid decimal input raise `RUNTIME-TYPE-ERROR`.
+Serializable reconstruction and optional/mandatory copies retain these rules.
+
+```qore
+%modern
+%requires WSDL
+WSDL::XsdDecimalDataType amount();
+auto exact = amount.acceptsValue("12345678901234567890.123456789");
+@assert(exact == "12345678901234567890.123456789");
+```
+
+`test/wsdl-decimal-lexical.qtest` covers lexical boundaries, precision/range,
+native inputs, provider lists/optionality, reconstruction and attributed simple
+content. `test_decimal_lexical.py` checks 784 documents across real SOAP 1.1/1.2
+bindings, both directions, lists/unions, CDATA, providers and examples. Xerces
+and Python Decimal comparisons remain mandatory for all valid documents. Older
+libxml2 versions have the already adjudicated 24-digit decimal pre-parser limit;
+those rejections are recorded explicitly, including fractional leading/trailing
+zeros, while newer libxml2 versions may accept every valid case.
+
+The binding follows [XSD decimal](https://www.w3.org/TR/xmlschema-2/#decimal).
+Its native-number policy is consistent with the canonical-spelling approach of
+[BigDecimal.valueOf(double)](https://docs.oracle.com/en/java/javase/24/docs/api/java.base/java/math/BigDecimal.html#valueOf(double));
+it is separate from XPath's float-to-decimal casting contract. Qore's MPFR-backed
+number type is binary floating point, so original decimal text remains the
+representation for exact decimal source values. WSDL requires Qore 3.0 for the
+new formatter.
