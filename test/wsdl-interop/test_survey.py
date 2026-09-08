@@ -93,9 +93,17 @@ class SurveyTest(unittest.TestCase):
             self.assertEqual("", run.stderr)
             result = json.loads(output.read_text())
             self.assertEqual(8, result["counts"]["parse_ok"])
-            self.assertEqual(64, result["counts"]["serialize_ok"])
+            self.assertEqual(48, result["counts"]["serialize_ok"])
             self.assertEqual(0, result["counts"].get("valid_input_invalid_output", 0))
-            self.assertEqual(0, result["counts"].get("deserialize_failed", 0))
+            self.assertEqual(16, result["counts"]["deserialize_failed"])
+            rejected = [row for row in result["rows"] if row["stage"] == "deserialize" and not row["ok"]]
+            expected = {f"Unsigned{size}{kind}/echoUnsigned{size}{kind}-Unsigned{size}{kind}{case}-soap{version}.xml"
+                        for size in ("Short", "Int") for kind in ("Element", "Attribute")
+                        for case in ("02", "03") for version in ("11", "12")}
+            self.assertEqual(expected, {row["file"] for row in rejected})
+            for row in rejected:
+                self.assertEqual("SOAP-DESERIALIZATION-ERROR", row["err"], row)
+                self.assertFalse(row["input_validation"]["ok"], row)
             self.assertEqual(80, len(result["source_sha256"]))
             self.assertEqual(False, result["scope"]["network"])
 

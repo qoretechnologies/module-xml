@@ -46,7 +46,8 @@ The archive's unsigned cases numbered 02 (`-0`) and 03 (`+42`) are invalid under
 unsigned lexical rules, which allow digits without a sign. They remain in the survey and the source
 adjudication's negative cases. Xerces accepts these spellings; `normative.py` independently checks the
 XSD 1.0 rule. The Qore numeric regression subset uses ordinary positive values and maxima; production
-rejection of the invalid signed inputs is assigned to P3.
+rejection of the invalid signed inputs is implemented in P3-01. The small survey now serializes
+48 valid inputs and rejects all 16 signed unsigned inputs with `SOAP-DESERIALIZATION-ERROR`.
 
 The Python tests require Python 3.10+, `lxml`, and Qore's `json` module in addition to `xml`. They test the
 real Qore subprocess, version selection, fixture checksums, empty input, namespace preservation,
@@ -408,9 +409,9 @@ fields keep their local names; colliding fields use expanded names in every
 public record consumer. `test/wsdl-message-identity.qtest` and
 `test_message_identity.py` cover multipart WSDL argument identities, part-scope
 QNames and body/header separation. Their independent matrix checks 160 element
-documents and provider/example reconstruction. Eight explicit P3 scalar
-subtests currently fail because invalid integer text decodes as zero; these
-remain failures alongside the existing P4/P6 subtests. Retained XML consumer integration is described below; wildcard validation
+documents and provider/example reconstruction. The eight integer lexical
+subtests now pass; the existing P4/P6 subtests remain visible failures.
+Retained XML consumer integration is described below; wildcard validation
 semantics remain assigned to P5.
 
 `test/wsdl-attribute-derivation.qtest` checks inherited required/fixed constraints,
@@ -555,3 +556,11 @@ The installed JNI module has the stack-frame assertion described in EXECUTION.md
 the local JNI build contains the tested source fix. Existing astparser artifacts
 are sufficient for Qdx. Use `-DQore_DIR=/home/david/src/qore/git/qore/build-debug/cmake`
 to consume the local exported CMake helpers without installation.
+
+Integer lexical validation is documented in [the scalar design](../../design/wsdl-scalar-values.md).
+Run `qore --enable-debug test/wsdl-integer-lexical.qtest` and
+`python3 test/wsdl-interop/test_integer_lexical.py -v` with the local core/module
+paths described above. The native core prerequisite is ea9ddfc51, which preserves
+embedded NUL bytes during regex substitutions. P3-01 covers lexical rejection;
+precision, ranges, facets, providers and scalar example generation remain part
+of the active P3 work.

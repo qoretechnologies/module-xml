@@ -4,7 +4,7 @@ Copyright (C) 2026 Qore Technologies, s.r.o.
 
 Execution started 2026-09-07 on `develop` at `c81b2db`, with a clean working tree.
 The authoritative scope and acceptance criteria remain in [PLAN.md](PLAN.md).
-P1 corpus/adjudication and P2 schema/representation acceptance are complete; P3 scalar work is next. No scope reductions or workarounds are approved.
+P1 corpus/adjudication and P2 schema/representation acceptance are complete; P3 scalar work is in progress. No scope reductions or workarounds are approved.
 
 ## P1: corpus provenance and adjudication (complete)
 
@@ -1757,3 +1757,77 @@ Final logs: /tmp/wsdl-p2-31-{docs-final,affected,test-survey,final-survey}.log,
 /tmp/wsdl-p2-31-final-literal-vg-checked.log. Reports:
 /tmp/wsdl-survey-p2-31-final.json and /tmp/wsdl-coverage-p2-31.json.
 Full 62-item audit: [audits/P2-31-docs.md](audits/P2-31-docs.md).
+
+## P3-01: integer lexical validation (2026-09-08)
+
+P2 was committed as 1fedcf5. This increment validates all thirteen integer XML
+lexical spaces before the existing native numeric conversions. Empty text,
+malformed signs, fractional/exponent/hex spellings, trailing text and non-ASCII
+digits fail with the corresponding SOAP serialization/deserialization error.
+XSD 1.0 unsigned builtins require digit strings without a sign. XML whitespace
+normalization replaces/collapses only TAB, LF, CR and SPACE; Qore trim() also
+removed vertical tabs, incorrectly turning malformed input into valid integers.
+Normalized-string and token output now use the same XML whitespace rules.
+
+The root cause of embedded-NUL acceptance was QoreRegexSubst's zero-terminated
+unmatched-tail append: even a no-match substitution changed "1\x00trailing" to
+"1". Core ea9ddfc51 fixes full-length pattern compilation, replacement-template
+scanning, case-converted captures, callback copies and unmatched tails. It is
+committed on core develop, without push or astparser changes. Its six new cases
+fail on the parent and pass 89 assertions after the fix; 143 affected cases pass
+across applicable PCRE2 JIT/interpreter runs. Native Valgrind reports zero errors
+and zero definite/indirect/possible loss. The full 62-row core audit is committed
+at examples/test/qore/classes/RegexSubst/audits/embedded-nul.md.
+
+Final XML validation:
+
+- test/wsdl-integer-lexical.qtest: 16 cases / 983 assertions, including every
+  integer builtin, both conversion directions, invalid types, whitespace,
+  attributes/simple content, reconstruction and list/union alternatives.
+- test_integer_lexical.py: 26 actual SOAP 1.1/1.2 bindings, 728 request/response
+  inputs and 208 outputs; all 936 documents independently validated by libxml2
+  and Xerces, with exact integer values and expanded-name assertions.
+- All 35 affected SOAP/WSDL Qore suites pass 463 cases, including actual HTTP
+  client/server consumers. WSDL Qdx/Doxygen completes without warnings/errors.
+- Full Python discovery: 94 tests, seven known later-phase failures, zero
+  errors/skips. Four P4 nested-choice and two P6 binding-version subtests plus
+  one P5 wildcard-example test remain failures. All eight integer lexical
+  subtests that previously failed now pass. test_survey's fourteen tests pass;
+  its small corpus now requires rejection of the exact sixteen signed unsigned
+  inputs instead of expecting their successful conversion. An initial update
+  listed the wrong fixture families; the final expected set matches the pinned
+  Short/Int element/attribute subset and checks error and oracle categories.
+
+Both-version survey: 293 descriptions / 1,136 messages, 279 parsed / 14 invalid
+sources, 974 decoded / 142 failures, 972 serialized / two failures, 940 valid /
+32 invalid outputs, eight valid-input-invalid-output rows. Input oracle counts
+remain 1,028 valid / 108 invalid / zero unassessed. Compared row by row with P2,
+only 32 already-adjudicated invalid signed unsigned inputs change: decoding now
+rejects them and the corresponding serialization rows disappear. Every other
+row is identical, including every valid-input result. Source and catalog hashes
+and original findings are unchanged. Full both-direction coverage removes
+exactly 64 invalid-input-accepted failures: 296 broad failures remain, selected
+failures are empty, and no stage is missing/skipped. Strict coverage remains
+38 descriptions and 140 message/direction combinations. Current reports retain
+all remaining failures; diagnostic completion is not phase acceptance.
+
+Additional P9 environment evidence: a full PCRE2-interpreter operator run timed
+out at 240 seconds. A verbose reproduction locates the first 5.5 MB no-match
+scan, after the 4.9 MB checks passed, before substitution is called. The existing
+operator test and upstream pcre2_match.c document the REQ_CU_MAX * 1000 required-
+code-unit optimization cutoff in the interpreter. Production JIT passes the
+full suite. This forced-interpreter performance failure and the previously
+reproduced Valgrind DW_AT_abstract_origin warning remain explicit P9 findings;
+neither is suppressed or counted as passing. No scope change is implied.
+
+Logs: /tmp/wsdl-p3-01-{affected,independent,python-final,docs,survey,coverage}.log,
+/tmp/wsdl-p3-01-affected-wsdl-integer-lexical.log, and the core audit's native logs.
+The two current reports carry the final WSDL source hash after its comment-only
+release-note addition. Audit: [audits/P3-01-integer-lexical.md](audits/P3-01-integer-lexical.md).
+
+Remaining P3 work includes exact integer bounds/large-value provider conversion,
+decimal precision, lexical versus value facets/enumerations, binary/list/union
+validation, IEEE semantics, dates/durations/partial dates and XSD regex semantics.
+Existing native return types are preserved by this first lexical gate; it does
+not claim that those remaining conversions, providers or generated examples are
+correct. P3 remains active with its original scope unchanged.
