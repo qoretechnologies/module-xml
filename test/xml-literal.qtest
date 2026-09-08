@@ -1,0 +1,244 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires xml
+%disable-warning deprecated
+%exec-class XmlLiteralTest
+
+class XmlLiteralTest inherits QUnit::Test {
+    constructor() : QUnit::Test("Validated XML element fragments", "1.0") {
+        addTestCase("Literal element content retains lexical text and ordered nodes", \orderedNodes());
+        addTestCase("Fragment namespace scopes are independent of their new parent", \namespaces());
+        addTestCase("Invalid fragment values fail before a document is returned", \invalidValues());
+        addTestCase("Multiple fragment keys preserve insertion order", \multipleFragments());
+        addTestCase("Fragment documents have exactly one root", \documentRoots());
+        addTestCase("Encodings and formatting preserve fragment content", \encodings());
+        addTestCase("Complete XML and fragment APIs support wide output encodings", \wideOutput());
+        addTestCase("Cancellation retains its error and permits subsequent use", \cancellation());
+        addTestCase("String readers honor the Qore encoding and complete input length", \readerEncoding());
+        addTestCase("Attribute whitespace remains character data across encodings", \attributeWhitespace());
+        addTestCase("Attribute encoding preserves interruption and cleanup", \attributeCancellation());
+        set_return_value(main());
+    }
+
+    attributeCancellation() {
+        SandboxManager manager();
+        on_exit manager.clearInterrupt();
+        Program program(PO_NEW_STYLE | PO_STRICT_ARGS | PO_REQUIRE_TYPES);
+        program.setSandboxManager(manager);
+        # The named-root overload enters attribute generation directly, so the helper's own
+        # cancellation check must propagate this interrupt without relying on hash traversal.
+        program.parse("%modern\n%requires xml\n"
+            "string sub renderAttributes(SandboxManager manager) {\n"
+            "    manager.requestInterrupt();\n"
+            "    return make_xml(\"record\", {\"^attributes^\": {\"label\": \"before\\tafter\"}});\n"
+            "}\n", "xml_attribute_cancel");
+        *hash<ExceptionInfo> error;
+        try {
+            program.callFunction("renderAttributes", manager);
+        } catch (hash<ExceptionInfo> ex) {
+            error = ex;
+        }
+        manager.clearInterrupt();
+        assertEq("PROGRAM-INTERRUPTED", error.err);
+        assertTrue(index(error.desc, "XML attribute serialization") >= 0, error.desc);
+        assertEq("safe\tvalue", parse_xml(make_xml("record", {"^attributes^": {"label": "safe\tvalue"}}))
+            .record."^attributes^".label);
+    }
+
+    attributeWhitespace() {
+        string value = "before\tčeský & \"quoted\" <middle>\nafter\rend";
+        foreach int flags in (0, XGF_ADD_FORMATTING, XGF_USE_NUMERIC_REFS) {
+            foreach string encoding in ("UTF-8", "ISO-8859-2", "UTF-16LE", "UTF-16BE") {
+                foreach string source_encoding in ("UTF-8", "ISO-8859-2", "UTF-16LE") {
+                    string source = convert_encoding(value, source_encoding);
+                    string xml = make_xml({"record": {"^attributes^": {"label": source, "empty": "", "number": 9}}},
+                        flags, encoding);
+                    assertEq({"label": value, "empty": "", "number": "9"}, parse_xml(xml).record."^attributes^");
+                    assertTrue(index(xml, "&#9;") >= 0);
+                    assertTrue(index(xml, "&#10;") >= 0);
+                    assertTrue(index(xml, "&#13;") >= 0);
+                }
+            }
+        }
+        string large = (map "x\ty\nz\r", (1..4096)).join("");
+        assertEq(large, parse_xml(make_xml({"record": {"^attributes^": {"large": large}}}))
+            .record."^attributes^".large);
+        hash<auto> record();
+        record."^attributes^" = {"bad": "č"};
+        assertThrows("ENCODING-CONVERSION-ERROR", \make_xml(), ({"record": record}, 0, "ISO-8859-1"));
+        assertEq("safe\tvalue", parse_xml(make_xml({"record": {"^attributes^": {"label": "safe\tvalue"}}}))
+            .record."^attributes^".label);
+    }
+
+    orderedNodes() {
+        string xml = make_xml({"outer": {"^xml^": '<record amount="009.00">before<?route next?>'
+            '<![CDATA[009]]><!--note--><item>0</item> <item>7</item>after</record>'}});
+        XmlReader reader(xml);
+        list<string> events();
+        while (reader.read()) {
+            switch (reader.nodeType()) {
+                case XML_NODE_TYPE_ELEMENT:
+                    events += "element:" + reader.localName();
+                    if (reader.localName() == "record") {
+                        assertEq("009.00", reader.getAttribute("amount"));
+                    }
+                    break;
+                case XML_NODE_TYPE_PROCESSING_INSTRUCTION:
+                    events += "pi:" + reader.name() + ":" + reader.value();
+                    break;
+                case XML_NODE_TYPE_CDATA:
+                    events += "cdata:" + reader.value();
+                    break;
+                case XML_NODE_TYPE_COMMENT:
+                    events += "comment:" + reader.value();
+                    break;
+                case XML_NODE_TYPE_TEXT:
+                case XML_NODE_TYPE_WHITESPACE:
+                case XML_NODE_TYPE_SIGNIFICANT_WHITESPACE:
+                    events += "text:" + reader.value();
+                    break;
+            }
+        }
+        assertEq(("element:outer", "element:record", "text:before", "pi:route:next", "cdata:009", "comment:note",
+            "element:item", "text:0", "text: ", "element:item", "text:7", "text:after"), events);
+    }
+
+    namespaces() {
+        string xml = make_xml({"outer": {"^attributes^": {"xmlns": "urn:parent", "xmlns:p": "urn:parent"},
+            "^xml^": '<p:record xmlns:p="urn:record"><plain/><p:item/></p:record>'}});
+        XmlReader reader(xml);
+        list<string> names();
+        while (reader.read()) {
+            if (reader.nodeType() == XML_NODE_TYPE_ELEMENT) {
+                names += sprintf("{%s}%s", reader.namespaceUri() ?? "", reader.localName());
+            }
+        }
+        assertEq(("{urn:parent}outer", "{urn:record}record", "{}plain", "{urn:record}item"), names);
+    }
+
+    private string render(auto value) {
+        return make_xml({"outer": {"^xml^": value}});
+    }
+
+    invalidValues() {
+        foreach auto value in (NOTHING, 7, True, {"nested": "value"}, ("<a/>", "<b/>"), "<a/>\0ignored",
+                '<!DOCTYPE a [<!ENTITY x "value">]><a>&x;</a>') {
+            assertThrows("MAKE-XML-ERROR", \render(), (value,));
+        }
+        foreach string value in ("", "<broken>", "<a/><b/>", "<p:missing/>", '<a p:missing="x"/>',
+                '<a xmlns:p="urn:p" xmlns:q="urn:p" p:id="1" q:id="2"/>', "<a>\x01</a>") {
+            assertThrows("PARSE-XML-EXCEPTION", \render(), (value,));
+        }
+        # Force parsing past the initial input buffer before failing, exercising cleanup
+        # after the element document has been preserved by the native reader.
+        string late_error = "<record>" + sprintf("%20000s", "text") + "</wrong>";
+        assertThrows("PARSE-XML-EXCEPTION", \render(), (late_error,));
+        assertEq("safe", parse_xml(make_xml({"outer": {"^xml^": "<good>safe</good>"}})).outer.good."^value^");
+        assertEq("<!DOCTYPE literal>", parse_xml(render("<record><![CDATA[<!DOCTYPE literal>]]></record>"))
+            .outer.record."^cdata^");
+    }
+
+    multipleFragments() {
+        string xml = make_xml({"outer": {"^xml^1": "<first>0</first>", "between": "text",
+            "^xml^2": "<second>false</second>"}});
+        assertEq(("first", "between", "second"), keys parse_xml(xml).outer);
+        assertEq("0", parse_xml(xml).outer.first."^value^");
+        assertEq("false", parse_xml(xml).outer.second."^value^");
+    }
+
+    documentRoots() {
+        assertTrue(has_key(parse_xml(make_xml({"^xml^": "<root/>"})), "root"));
+        assertThrows("MAKE-XML-STRING-PARAMETER-EXCEPTION", \make_xml(),
+            ({"other": NOTHING, "^xml^": "<root/>"},));
+        assertThrows("MAKE-XML-STRING-PARAMETER-EXCEPTION", \make_xml(),
+            ({"^xml^1": "<first/>", "^xml^2": "<second/>"},));
+    }
+
+    encodings() {
+        string fragment = "<?xml version='1.0' encoding='ISO-8859-1'?><record>café</record>";
+        fragment = convert_encoding(fragment, "ISO-8859-1");
+        foreach string encoding in ("UTF-8", "ISO-8859-1", "UTF-16LE", "UTF-16BE") {
+            string xml = make_xml({"outer": {"^xml^": fragment}}, {"encoding": encoding,
+                "formatWithWhitespaces": True});
+            assertEq("café", parse_xml(xml).outer.record."^value^");
+        }
+        string xml = make_xml({"outer": {"^xml^": '<record xmlns="urn:r"> <a/> <b/> </record>'}},
+            {"formatWithWhitespaces": True});
+        XmlReader reader(xml);
+        list<string> spaces();
+        while (reader.read()) {
+            if (reader.depth() == 2 && (reader.nodeType() == XML_NODE_TYPE_WHITESPACE
+                    || reader.nodeType() == XML_NODE_TYPE_SIGNIFICANT_WHITESPACE)) {
+                spaces += reader.value();
+            }
+        }
+        assertEq((" ", " ", " "), spaces);
+    }
+
+    wideOutput() {
+        hash<auto> value = {"^attributes^": {"label": "a\tb"}, "^xml^": "<value>café</value>"};
+        foreach string encoding in ("UTF-16LE", "UTF-16BE") {
+            list<string> documents = (
+                make_xml("root", value, 0, encoding),
+                make_xml({"root": value}, 0, encoding),
+                make_xml({"root": value}, {"encoding": encoding}),
+                makeXMLString("root", value, encoding),
+                makeXMLString({"root": value}, encoding),
+                makeFormattedXMLString("root", value, encoding),
+                makeFormattedXMLString({"root": value}, encoding),
+                make_xml_fragment({"root": value}, 0, encoding),
+                makeXMLFragment({"root": value}, encoding),
+                makeFormattedXMLFragment({"root": value}, encoding)
+            );
+            foreach string document in (documents) {
+                assertEq(encoding, get_encoding(document));
+                hash<auto> parsed = parse_xml(document).root;
+                assertEq("a\tb", parsed."^attributes^".label);
+                assertEq("café", parsed.value."^value^");
+            }
+        }
+    }
+
+    cancellation() {
+        SandboxManager sm();
+        Program program(PO_NEW_STYLE | PO_STRICT_ARGS | PO_REQUIRE_TYPES);
+        program.setSandboxManager(sm);
+        program.parse("%modern\n%requires xml\n"
+            "string sub render(SandboxManager sm) {\n"
+            "    sm.requestInterrupt();\n"
+            "    return make_xml({\"outer\": {\"^xml^\": \"<record>0</record>\"}});\n"
+            "}\n", "xml_fragment_cancel");
+        *hash<ExceptionInfo> error;
+        try {
+            program.callFunction("render", sm);
+        } catch (hash<ExceptionInfo> ex) {
+            error = ex;
+        }
+        sm.clearInterrupt();
+        assertEq("PROGRAM-INTERRUPTED", error.err);
+        assertTrue(error.desc =~ /XML/, error.desc);
+        assertEq("0", parse_xml(render("<record>0</record>")).outer.record."^value^");
+    }
+
+    private hash<auto> readDocument(string xml) {
+        XmlReader reader(xml);
+        return reader.toQore();
+    }
+
+    readerEncoding() {
+        foreach string encoding in ("UTF-8", "ISO-8859-1", "UTF-16LE", "UTF-16BE") {
+            string xml = convert_encoding(sprintf("<?xml version='1.0' encoding='%s'?><record>café</record>",
+                encoding), encoding);
+            assertEq("café", parse_xml(xml).record);
+            assertEq("café", readDocument(xml).record);
+        }
+        foreach string xml in ("<record/>\0ignored", "<record>\0</record>") {
+            assertThrows("PARSE-XML-EXCEPTION", \parse_xml(), (xml,));
+            assertThrows("PARSE-XML-EXCEPTION", \readDocument(), (xml,));
+        }
+    }
+}

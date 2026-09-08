@@ -759,3 +759,30 @@ Qore rollback checks pass), and Valgrind 3.27.1 emits existing DWARF/fstat tool
 warnings. These do not recur as memory errors in the repaired normal native,
 HTTP, SOAP or catalog paths. No diagnostic suppression or host library change
 was applied. System-provider catalog cleanup needs supported-environment checks.
+
+
+## P2-25 native XML fragment acceptance (2026-09-08)
+
+The independently validated native increment builds on provider commit `5477680`.
+It supports validated ^xml^ element fragments with namespace isolation, retained
+lexical text and ordered content; attribute tab/LF/CR preservation; explicit UTF-8
+reader byte lengths; exception-safe cleanup and cooperative cancellation. Final
+review found and fixed wide output encoding: markup must be generated in an
+ASCII-compatible buffer before converting the complete result to UTF-16. Modern
+and deprecated XML document/fragment APIs share this behavior. Native helper
+symbols have internal linkage through an anonymous namespace.
+
+An isolated checkout on `5477680` passes 249 affected Qore cases. The native suite
+passes 11 cases / 256 assertions, including cancellation/recovery and all ten
+output variants. Expat and lxml independently validate 40 raw output byte sequences
+across four encodings, with exact attributes, lexical text, comments and order.
+The final native suite under Valgrind has zero errors or lost allocations, with
+existing tool diagnostics retained. The isolated both-version corpus exactly
+matches its parent except version metadata. All 483 working P2 XML/SOAP cases
+pass; the separate callback suite adds four cases. Native documentation generation
+passes with no warnings/errors. No install or push.
+
+Full final 62-item audit: [audits/P2-25-native.md](audits/P2-25-native.md).
+Durable implementation contract: [../../design/xml-element-fragments.md](../../design/xml-element-fragments.md).
+P2 WSDL/value/consumer increments and documentation build hygiene remain
+uncommitted; phase acceptance and P3-P9 remain open.

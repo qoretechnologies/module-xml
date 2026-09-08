@@ -34,6 +34,7 @@
 #include "QC_AbstractXmlIoInputCallback.h"
 
 #include <errno.h>
+#include <limits>
 
 // FIXME: need to make error reporting consistent and set ExceptionSink for each call, not in constructor and then fix ql_xml.cc and adjust QC_XmlReader.cc
 
@@ -140,7 +141,14 @@ protected:
         xml = n_xml;
 
         assert(xml->getEncoding() == QCS_UTF8);
-        reader = xmlReaderForDoc((xmlChar*)xml->getBuffer(), 0, 0, options);
+        if (xml->size() > static_cast<size_t>(std::numeric_limits<int>::max())) {
+            xsink->raiseException("XML-READER-ERROR", "XML string exceeds the parser's input size limit");
+            return;
+        }
+        // The caller has already converted the Qore string to UTF-8. Its XML
+        // declaration may still name the original encoding and must not decode it again.
+        // Use the explicit length so embedded NULs are rejected instead of truncating input.
+        reader = xmlReaderForMemory(xml->getBuffer(), static_cast<int>(xml->size()), nullptr, "UTF-8", options);
         if (!reader) {
             xsink->raiseException("XML-READER-ERROR", "could not create XML reader");
             return;
