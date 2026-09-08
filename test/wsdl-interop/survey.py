@@ -201,6 +201,19 @@ def validate_cases(cases):
             identities.add(identity)
 
 
+class WorkerProcessError(subprocess.CalledProcessError):
+    """Retain process-exit compatibility while including bounded worker diagnostics."""
+
+    def __str__(self) -> str:
+        message = super().__str__()
+        if self.stderr:
+            diagnostic = self.stderr[:4096]
+            if len(self.stderr) > 4096:
+                diagnostic += "\n[worker stderr truncated; full text retained in stderr]"
+            message += "\nQore worker stderr:\n" + diagnostic
+        return message
+
+
 def run_worker(cases, cache, qore="qore"):
     """Run one bounded offline worker; cleanup happens on success, failure and cancellation."""
     validate_cases(cases)
@@ -209,8 +222,11 @@ def run_worker(cases, cache, qore="qore"):
     with tempfile.TemporaryDirectory(prefix="qore-wsdl-survey-") as temporary:
         manifest = Path(temporary) / "manifest.json"
         manifest.write_text(json.dumps({"cases": cases, "cache": cache}))
-        run = subprocess.run([qore, "--enable-debug", str(Path(__file__).with_name("probe.qr")),
-                              str(manifest)], text=True, capture_output=True, timeout=60, check=True)
+        try:
+            run = subprocess.run([qore, "--enable-debug", str(Path(__file__).with_name("probe.qr")),
+                                  str(manifest)], text=True, capture_output=True, timeout=60, check=True)
+        except subprocess.CalledProcessError as error:
+            raise WorkerProcessError(error.returncode, error.cmd, error.output, error.stderr) from error
     if run.stderr.strip():
         raise RuntimeError(f"Qore emitted diagnostics:\n{run.stderr}")
     rows = [json.loads(line) for line in run.stdout.splitlines()]

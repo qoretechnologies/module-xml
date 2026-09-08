@@ -603,3 +603,35 @@ and keeps element/attribute identities. Nonmixed complex types and SOAP
 Body/Header/RPC containers use this view even when inherited `xml:space` retained
 formatting in the input. Scalar types continue to consume the complete lexical
 text. Retained XML carriers are not modified by validation.
+
+## Builtin name values and builtin lists
+
+`Name`, `NCName`, `NMTOKEN`, `ID`, `IDREF` and `ENTITY` apply XML whitespace
+collapse and validate the datatype's character grammar before conversion.
+`XsdNameLexicalHelper` defines the XML 1.0 Second Edition productions referenced
+by XSD 1.0, including Unicode BaseChar, Ideographic, Digit, CombiningChar and
+Extender ranges. The same classes implement regex `\i` and `\c` escapes.
+XML parser component-name rules remain independent of these datatype rules.
+
+`NMTOKENS`, `IDREFS` and `ENTITIES` retain the compatible public string form.
+Each collapsed token must satisfy its item grammar, and the list must contain
+at least one token. For example, `" Αλφα\t中文 "` becomes `"Αλφα 中文"`;
+`"A !"` is invalid for every builtin name list. `XsdSizedFacetInfo.name_type`
+retains the builtin grammar in detached providers and requires a matching text
+category and collapse rule. Omission remains controlled by provider optionality.
+Document-level ID uniqueness/references and declared unparsed entities require
+schema/document context; token grammar does not establish those constraints.
+
+Restrictions normalize enumeration values through the base type. Ordered tokens
+determine builtin-list equality; inherited pattern and item-count facets apply
+to schema conversion, reconstructed providers, choices and bounded examples.
+A list enumeration `" A  B "` accepts `"A\tB"` and rejects `"B A"`.
+Union identity records one string-family key per item: a single-item list `A`
+is distinct from atomic string `A`, while compatible user-defined lists share
+ordered item identity. The public `XsdUnionAtomicInfo` descriptor also carries
+these builtins because their public value remains scalar text.
+
+See `test/wsdl-builtin-list-values.qtest`, `test_builtin_list_values.py` and
+[builtin name/list evidence](../test/wsdl-interop/builtin-list-values-evidence.md).
+The independent boundary matrix checks every start/end and adjacent code point
+of all 326 normative character ranges against both pinned validators.

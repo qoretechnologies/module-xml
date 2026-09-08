@@ -742,3 +742,20 @@ reconstructed consumers and examples. Qore regressions additionally cover exact
 error categories, metadata validation, field choice updates and scoped capture
 cleanup. The known libxml2 empty-list enumeration compiler defect remains
 adjudicated separately; Xerces and exact empty-value checks remain mandatory.
+
+Builtin name/list rules are checked by `../wsdl-builtin-list-values.qtest` and
+`test_builtin_list_values.py`: Unicode name grammar, token boundaries, builtin
+list enumeration and union identity, inherited patterns/counts, detached choices,
+metadata and examples in both actual SOAP bindings/directions. An additional
+6,054-case boundary matrix checks all normative name-character range boundaries
+through schema serialization/deserialization, providers, libxml2 and Xerces.
+The pinned numeric ranges cite the XML 1.0 Second Edition required by XSD 1.0.
+[Name/list evidence](builtin-list-values-evidence.md) records libxml2's missing
+builtin-list minimum-length check; the precise empty-input false positives are
+counted separately, and Qore and Xerces must reject them. Document-level identity
+and unparsed-entity validation remain assigned to P5/P7.
+
+A failed survey worker now includes bounded stderr in its exception message,
+while retaining its full captured output and CalledProcessError compatibility.
+`test_survey.py` verifies real child failure, cleanup, bounded rendering and
+unchanged timeout/cancellation behavior. Worker errors remain hard failures.

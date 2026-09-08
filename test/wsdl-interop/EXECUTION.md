@@ -2982,3 +2982,64 @@ union helper does not describe builtin list identities. Builtin token validation
 and their own restriction/provider semantics also need review against the XML
 name rules. Remaining primitive/date/IEEE/binary/QName/entity/regex/XML-RPC work
 and all P4-P9 requirements remain in scope. P3 acceptance is not complete.
+
+
+### P3-17: builtin name grammar and list values
+
+P3-16 is committed as 42893c8. Builtin NMTOKENS/IDREFS/ENTITIES now retain
+ordered string-item identity in unions, including equivalent native user-defined
+lists and distinct atomic strings. Own and inherited enumeration/pattern/count
+facets survive provider reconstruction, optionality, field choices and bounded
+example generation. Builtin name types and list items validate the XML 1.0
+Second Edition productions explicitly referenced by XSD 1.0. The shared Unicode
+classes also replace ASCII-only regex name escapes. Detached metadata rejects
+contradictory name rules and a builtin list substituted for an atomic list item.
+
+All four initial regression cases fail on P3-16. Final source and compiled AOT
+pass nine cases / 765 assertions. All 61 affected XML suites pass 710 cases /
+13507 assertions (the SOAP suite intentionally tests three failed assertions
+inside passing cases). AOT and docs builds are clean. No C++ changes and no
+additional Valgrind required. Main Qore develop remains clean at 3e2f47be0,
+with no push, installation or rebuild there.
+
+The independent matrix covers 45 schemas and 90 actual SOAP contracts, 1584
+input and 828 emitted binding documents, 9168 consumer results and 5136
+provider/example documents. Three further schemas assess 6054 name-character
+boundary documents. All 13602 documents are checked by Xerces-J 2.12.2;
+libxml2 agrees except for exactly 24 empty builtin-list false positives.
+Both 2.12.10 and private 2.15.4 omit the builtin minimum-length constraint in
+the schema-validation list path. Qore and Xerces must reject those inputs;
+no production verdict is waived. Token grammar does not establish document-level
+ID/reference/entity validity; that remains assigned to P5/P7. Numeric ranges,
+source SHA and the oracle root cause are documented in
+builtin-list-values-evidence.md.
+
+A preliminary full Python run recorded the same 33 tracked failures plus a
+worker exit 2 whose captured stderr was omitted from the exception rendering.
+The standalone two-method list suite passes with diagnostic capture. The exact
+reason for the earlier exit cannot be recovered from that log; it is not used
+as final verification. WorkerProcessError now preserves CalledProcessError
+compatibility and displays up to 4096 stderr characters, retaining full output
+in the exception. A real child-process regression verifies exit status, diagnostic
+text, truncation and manifest cleanup; timeout/cancellation behavior is unchanged.
+The implementation and tests are kept unchanged during the final full rerun.
+
+Final stable Python discovery runs 139 methods in 495.285 seconds with exactly
+33 tracked P4/P5/P6 failure signatures, identical to P3-16, and no worker errors.
+Both-version survey and strict coverage match P3-16 outside versions: 89 selected
+WSDLs / 756 directions, zero selected failures and 220 broad tracked failures.
+No implementation or test file changed during this final full run.
+
+WSDL SHA-256: 6288ad0427058ef8c16776e78428408761caf9faba6edac973d749c9e5e3ec68.
+Native XML remains 8ec5487ebe937450478fc856e5c02114e5cf9ffaf9201cf70d052907b40f2e12.
+The full 62-item audit is audits/P3-17-builtin-list-values.md. Evidence is retained
+under /tmp/wsdl-p3-17-, including exact-checks, exact-survey/coverage, final-aot-unit,
+aot-final, docs-final, independent-final, stable-python and worker-reporting logs.
+
+The next P3 requirement is already reproduced by
+/tmp/wsdl-p3-18-class-escapes-{probe.qr,baseline.log} and schema-probe/Xerces reports:
+class-contained name/block complements fail compilation; class-contained digit
+and word complements use PCRE's ASCII semantics; malformed classes and
+non-XSD PCRE constructs are accepted. XSD Appendix F gives the required grammar
+and set semantics. These existing regex gaps, remaining date/IEEE/binary/QName/
+entity/XML-RPC work and all P4-P9 criteria remain in scope. P3 is not complete.

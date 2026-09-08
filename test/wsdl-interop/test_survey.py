@@ -194,6 +194,28 @@ class SurveyTest(unittest.TestCase):
             self.assertEqual(1, len(manifests))
             self.assertFalse(manifests[0].parent.exists())
 
+    def test_failed_worker_retains_diagnostics_and_cleanup(self):
+        cases = survey.inventory(FIXTURES, "11")
+        with tempfile.TemporaryDirectory(prefix="wsdl-failed-worker-") as directory:
+            worker = Path(directory) / "worker"
+            worker.write_text("#!/usr/bin/env python3\nimport sys\nprint(sys.argv[-1])\n"
+                              "print('PARSE-ERROR: controlled worker failure', file=sys.stderr)\n"
+                              "sys.exit(2)\n")
+            worker.chmod(0o755)
+            with self.assertRaises(subprocess.CalledProcessError) as caught:
+                survey.run_worker(cases, {}, str(worker))
+        self.assertEqual(2, caught.exception.returncode)
+        self.assertIn("PARSE-ERROR: controlled worker failure", str(caught.exception))
+        self.assertEqual("PARSE-ERROR: controlled worker failure\n", caught.exception.stderr)
+        self.assertFalse(Path(caught.exception.output.strip()).parent.exists())
+        long_error = survey.WorkerProcessError(2, "qore", "retained output", "X" * 5000)
+        self.assertIn("truncated", str(long_error))
+        self.assertLess(len(str(long_error)), 4300)
+        self.assertEqual(5000, len(long_error.stderr))
+        self.assertEqual("retained output", long_error.output)
+        self.assertEqual(str(subprocess.CalledProcessError(2, "qore")),
+                         str(survey.WorkerProcessError(2, "qore")))
+
     def test_cancelled_worker_is_terminated_and_reaped(self):
         cases = survey.inventory(FIXTURES, "11")
         processes, manifests = [], []
