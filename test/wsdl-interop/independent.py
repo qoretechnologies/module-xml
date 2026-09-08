@@ -123,7 +123,11 @@ def run(jobs: list[SchemaJob], resources: dict[str, bytes] | None = None) -> dic
                                         capture_output=True, text=True, check=True, timeout=30)
         if compile_result.stdout or compile_result.stderr:
             raise RuntimeError(f"oracle compilation diagnostics: {compile_result.stdout}{compile_result.stderr}")
-        process = subprocess.run(["java", "-Xmx256m", "-cp", classpath, "XsdOracle", str(input_file)],
+        # XSD 1.0 length counts Unicode characters, not Java UTF-16 storage units.
+        # Xerces exposes the conforming count as a JVM property read during type initialization.
+        process = subprocess.run(["java", "-Xmx256m",
+                                 "-Dorg.apache.xerces.impl.dv.xs.useCodePointCountForStringLength=true",
+                                 "-cp", classpath, "XsdOracle", str(input_file)],
                                  capture_output=True, text=True, check=True, timeout=60)
         if process.stderr:
             raise RuntimeError(f"oracle worker diagnostics: {process.stderr}")

@@ -85,6 +85,14 @@ def value_checks(expected: etree._Element, actual: etree._Element, assertions: l
                 valid = before in values and after in values and values[before] == values[after]
             elif datatype == "string":
                 valid = before == after
+            elif datatype in ("normalizedString", "token"):
+                # Only XML whitespace is replaced/collapsed; NBSP and other Unicode spaces retain their values.
+                before = before.translate(str.maketrans({"\t": " ", "\r": " ", "\n": " "}))
+                after = after.translate(str.maketrans({"\t": " ", "\r": " ", "\n": " "}))
+                if datatype == "token":
+                    before = " ".join(part for part in before.split(" ") if part)
+                    after = " ".join(part for part in after.split(" ") if part)
+                valid = before == after
             else:
                 valid = normative.same_number(datatype, before, after)
             results.append({"datatype": datatype, "expected": before, "actual": after, "ok": valid})
@@ -120,7 +128,7 @@ def validate_selection(selection: dict, records: dict) -> None:
             for assertion in assertions:
                 if (not isinstance(assertion, dict) or not isinstance(assertion.get("elements"), list)
                         or not assertion["elements"] or any(not isinstance(s, str) for s in assertion["elements"])
-                        or assertion.get("datatype") not in {"boolean", "string", "decimal",
+                        or assertion.get("datatype") not in {"boolean", "string", "normalizedString", "token", "decimal",
                             *normative.UNSIGNED_MAX, *normative.INTEGER_BOUNDS}
                         or ("attribute" in assertion and not isinstance(assertion["attribute"], str))):
                     raise ValueError("malformed strict value assertion")

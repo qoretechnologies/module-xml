@@ -80,6 +80,19 @@ class CoverageTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "provisional"):
             coverage.prepare(self.root, source)
 
+    def test_string_value_assertions_preserve_xml_whitespace_semantics(self):
+        for datatype, before, after, valid in (
+                ("string", "A\tB", "A B", False),
+                ("normalizedString", "A\tB", "A B", True),
+                ("normalizedString", "A\tB", "A  B", False),
+                ("token", " A\t  B ", "A B", True),
+                ("token", "A\u00a0B", "A B", False)):
+            with self.subTest(datatype=datatype, before=before, after=after):
+                left, right = etree.Element("value"), etree.Element("value")
+                left.text, right.text = before, after
+                result = coverage.value_checks(left, right, [{"elements": ["value"], "datatype": datatype}])
+                self.assertEqual(valid, result["ok"], result)
+
     def test_missing_worker_stage_cannot_pass(self):
         cases, _ = coverage.prepare(self.root, self.source)
         rows = survey.run_worker(cases, {})
@@ -245,7 +258,7 @@ class CoverageTest(unittest.TestCase):
         self.assertEqual("", process.stderr)
         report = json.loads(output.read_text())
         self.assertEqual([], report["selected_failures"])
-        self.assertEqual({"wsdls": 72, "message_directions": 648}, report["selected_scope"])
+        self.assertEqual({"wsdls": 88, "message_directions": 752}, report["selected_scope"])
         self.assertEqual(293, len(report["cases"]))
         self.assertEqual(2272, sum(len(c["messages"]) for c in report["cases"]))
         for stage, counts in report["stage_accounting"]["counts"].items():

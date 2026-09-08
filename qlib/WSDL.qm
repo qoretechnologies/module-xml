@@ -92,6 +92,14 @@ module WSDL {
       facets before use; XML namespace and annotation order checks preserve the schema grammar
     - totalDigits and fractionDigits retain exact arbitrary-size counts as XsdFacetCount, including provider
       reconstruction and generated examples
+    - string restrictions normalize whitespace before inherited checks and compare enumeration values in the
+      base value space; provider fields offer only choices that satisfy the complete restriction
+    - length facets count Unicode characters, binary octets, or list items and validate exact arbitrary-size
+      bounds, narrowing, applicability and fixed declarations; builtin token lists require at least one item
+    - XsdSizedRestrictionDataType retains string and length constraints after reconstruction and optional/list
+      wrapping; repeated list-valued elements preserve their separate occurrence and item lists
+    - string, list-length and binary-length examples are validated against all inherited restrictions;
+      bounded generation reports XSD-SAMPLE-ERROR when it cannot construct a valid example
     - boolean values accept only the four XML spellings after XML whitespace collapse, native booleans,
       and numeric zero/one; provider lists validate before conversion and reject null or invalid spellings
     - integer builtins enforce exact ranges before conversion and retain values beyond signed 64-bit
@@ -2091,6 +2099,14 @@ public class XsdAbstractType inherits WSDL::XsdNamedData {
     abstract auto deserializeValue(string en, hash<string, XsdAbstractType> tmap, *hash<auto> mrh, auto val);
     abstract AbstractDataProviderType getDataProviderType();
 
+    #! returns whether a native list can represent one value of this type
+    /** @return True for XSD list values, including restrictions and simple content
+        @since %WSDL 0.5.8
+    */
+    bool hasNativeListValue() {
+        return False;
+    }
+
     #! returns the \c whiteSpace processing that applies to this type
     /** @return one of \c "preserve", \c "replace", or \c "collapse"
 
@@ -2768,6 +2784,23 @@ public class XsdDecimalDataType inherits AbstractDataProviderType {
 */
 public typedef XsdFacetCount = union<int, string>;
 
+class XsdBuiltinListHelper {
+    static bool isType(string name) {
+        return name == "NMTOKENS" || name == "IDREFS" || name == "ENTITIES";
+    }
+
+    static string lexical(string name, auto value, string error) {
+        if (exists value && !value.strp()) {
+            throw error, sprintf("builtin list %Y requires a value convertible to text", name);
+        }
+        string text = XsdSimpleType::normalizeWhiteSpace(string(value), "collapse");
+        if (text.empty()) {
+            throw error, sprintf("builtin list %Y requires at least one item", name);
+        }
+        return text;
+    }
+}
+
 class XsdFacetCountHelper {
     static XsdFacetCount parse(string name, auto value, string error = "XSD-SIMPLETYPE-ERROR") {
         string lexical = XsdIntegerLexicalHelper::lexical(name == "totalDigits" ? "positiveInteger"
@@ -2801,6 +2834,284 @@ public hashdecl XsdNumericFacetInfo {
     *XsdFacetCount total_digits;
     #! maximum fractional decimal digits in the value
     *XsdFacetCount fraction_digits;
+}
+
+#! scalar metadata for character, octet, and item counts and string restrictions
+/** Providers retain resolved values rather than schema namespace references.
+    @since %WSDL 0.5.8
+*/
+public hashdecl XsdSizedFacetInfo {
+    #! diagnostic name of the restricted type
+    string name;
+    #! category whose length is measured: string, binary, list, or tokens (a builtin list kept as text)
+    string kind;
+    #! whitespace processing applied before inherited string restrictions
+    string white_space = "preserve";
+    #! compiled pattern alternatives for a string restriction
+    *list<string> patterns;
+    #! enumeration values in the base string value space
+    *list<string> enumeration;
+    #! exact number of characters, octets, or items
+    *XsdFacetCount length;
+    #! minimum number of characters, octets, or items
+    *XsdFacetCount min_length;
+    #! maximum number of characters, octets, or items
+    *XsdFacetCount max_length;
+}
+
+class XsdSizedFacetHelper {
+    static checkBase(hash<XsdSizedFacetInfo> facets, AbstractDataProviderType base, string error) {
+        int expected = facets.kind == "binary" ? NT_BINARY : facets.kind == "list" ? NT_LIST : NT_STRING;
+        if (base.getBaseTypeCode() != expected) {
+            throw error, sprintf("restriction category %Y is incompatible with base provider %Y",
+                facets.kind, base.getName());
+        }
+    }
+
+    static checkDefinition(hash<XsdSizedFacetInfo> facets, string error) {
+        if (facets.kind != "string" && facets.kind != "binary" && facets.kind != "list" && facets.kind != "tokens") {
+            throw error, sprintf("invalid sized restriction category %Y", facets.kind);
+        }
+        if (facets.white_space != "preserve" && facets.white_space != "replace"
+                && facets.white_space != "collapse") {
+            throw error, sprintf("invalid whitespace processing %Y", facets.white_space);
+        }
+        if (facets.kind != "string" && facets.kind != "tokens"
+                && (exists facets.patterns || exists facets.enumeration)) {
+            throw error, "text patterns and string choices require a text-valued restriction";
+        }
+        if (facets.kind == "tokens" && facets.white_space != "collapse") {
+            throw error, "builtin token lists require collapse whitespace processing";
+        }
+        foreach string key in ("length", "min_length", "max_length") {
+            if (exists facets{key}) {
+                XsdFacetCount checked = XsdFacetCountHelper::parse(key, facets{key}, error);
+            }
+        }
+        if (exists facets.min_length && exists facets.max_length
+                && XsdFacetCountHelper::compare(facets.min_length, facets.max_length) > 0) {
+            throw error, "minimum length exceeds maximum length";
+        }
+        if (exists facets.length && ((exists facets.min_length
+                && XsdFacetCountHelper::compare(facets.length, facets.min_length) < 0)
+                || (exists facets.max_length
+                && XsdFacetCountHelper::compare(facets.length, facets.max_length) > 0))) {
+            throw error, "exact length is outside the permitted interval";
+        }
+        foreach string pattern in (facets.patterns) {
+            try {
+                bool accepts_empty = regex("", pattern);
+            } catch (hash<ExceptionInfo> ex) {
+                if (ex.err != "REGEX-ERROR" && ex.err != "REGEX-COMPILATION-ERROR") {
+                    rethrow;
+                }
+                throw error, sprintf("invalid compiled string pattern: %s", ex.desc);
+            }
+        }
+    }
+
+    static validate(hash<XsdSizedFacetInfo> facets, auto value, hash<string, bool> enumeration, string error) {
+        int size;
+        switch (facets.kind) {
+            case "tokens": {
+                if (value.typeCode() != NT_STRING) {
+                    throw error, "a builtin token list requires a string value";
+                }
+                string normalized = XsdSimpleType::normalizeWhiteSpace(value, "collapse");
+                size = normalized.empty() ? 0 : normalized.split(" ").size();
+                break;
+            }
+            case "string":
+                if (value.typeCode() != NT_STRING) {
+                    throw error, "a string restriction requires a string value";
+                }
+                size = value.length();
+                break;
+            case "binary":
+                if (value.typeCode() != NT_BINARY) {
+                    throw error, "an octet restriction requires a binary value";
+                }
+                size = value.size();
+                break;
+            case "list":
+                if (value.typeCode() != NT_LIST) {
+                    throw error, "an item-count restriction requires a list value";
+                }
+                size = value.size();
+                break;
+        }
+        if ((exists facets.length && XsdFacetCountHelper::compare(size, facets.length))
+                || (exists facets.min_length && XsdFacetCountHelper::compare(size, facets.min_length) < 0)
+                || (exists facets.max_length && XsdFacetCountHelper::compare(size, facets.max_length) > 0)) {
+            throw error, sprintf("value for simpleType %Y has length %d outside its declared restrictions",
+                facets.name, size);
+        }
+        if (facets.kind == "string" || facets.kind == "tokens") {
+            if (facets.patterns) {
+                bool matched = False;
+                foreach string pattern in (facets.patterns) {
+                    if (regex(value, pattern)) {
+                        matched = True;
+                        break;
+                    }
+                }
+                if (!matched) {
+                    throw error, sprintf("value %Y for simpleType %Y does not match its pattern facets",
+                        value, facets.name);
+                }
+            }
+            if (exists facets.enumeration && !enumeration{value}) {
+                throw error, sprintf("value %Y is outside the enumeration for simpleType %Y", value, facets.name);
+            }
+        }
+    }
+}
+
+#! provider enforcing exact lengths and string whitespace, patterns, and value choices
+/** The base provider validates each ancestor after the most derived whitespace processing.
+    Serialized providers hold scalar metadata and preserve restrictions in optional and list types.
+    @par Example
+    A token limited to three characters accepts \c " A  B " as \c "A B" and rejects \c "ABCD".
+    @since %WSDL 0.5.8
+*/
+public class XsdSizedRestrictionDataType inherits AbstractDataProviderType {
+    private {
+        hash<XsdSizedFacetInfo> facets;
+        AbstractDataProviderType base;
+        transient hash<string, bool> enumeration();
+    }
+
+    #! constructs a provider using resolved facets
+    /** @param facets resolved length and string constraints
+        @param base provider supplying the value category and ancestor restrictions
+        @throw XSD-SIMPLETYPE-ERROR invalid facet metadata
+    */
+    constructor(hash<XsdSizedFacetInfo> facets, AbstractDataProviderType base) {
+        XsdSizedFacetHelper::checkDefinition(facets, "XSD-SIMPLETYPE-ERROR");
+        XsdSizedFacetHelper::checkBase(facets, base, "XSD-SIMPLETYPE-ERROR");
+        self.facets = facets;
+        self.base = base;
+        enumeration = (map {$1: True}, facets.enumeration) ?? {};
+    }
+
+    private:internal deserializeMembers(hash<auto> members) {
+        if (!(members.base instanceof AbstractDataProviderType)) {
+            throw "DESERIALIZATION-ERROR", "sized restriction requires a base provider";
+        }
+        hash<XsdSizedFacetInfo> resolved = new hash<XsdSizedFacetInfo>(members.facets);
+        XsdSizedFacetHelper::checkDefinition(resolved, "DESERIALIZATION-ERROR");
+        XsdSizedFacetHelper::checkBase(resolved, members.base, "DESERIALIZATION-ERROR");
+        hash<string, bool> resolved_enumeration = (map {$1: True}, resolved.enumeration) ?? {};
+        facets = resolved;
+        base = members.base;
+        enumeration = resolved_enumeration;
+    }
+
+    #! returns the restricted type name
+    /** @return the XSD type name with its optionality prefix */
+    string getName() {
+        return (base.isOrNothingType() ? "*" : "") + "xsd:" + facets.name;
+    }
+
+    #! requires provider validation before conversion by an enclosing list
+    /** @return NOTHING */
+    *Type getValueType() {
+    }
+
+    #! returns the converted value category
+    /** @return the base provider category */
+    int getBaseTypeCode() {
+        return base.getBaseTypeCode();
+    }
+
+    #! returns the converted value category name
+    /** @return the base provider category name */
+    string getBaseTypeName() {
+        return base.getBaseTypeName();
+    }
+
+    #! returns the item provider for a restricted list
+    /** @return the base item type or NOTHING for atomic values */
+    *AbstractDataProviderType getElementType() {
+        return base.getElementType();
+    }
+
+    #! returns the fields supplied by the base provider
+    /** @return the base fields */
+    *hash<string, AbstractDataField> getFields() {
+        return base.getFields();
+    }
+
+    #! requires facet validation for every supplied value
+    /** @return an empty map */
+    *hash<string, bool> getDirectTypeHash() {
+        return {};
+    }
+
+    #! returns accepted native categories
+    /** @param simple request simplified names
+        @return the base accepted categories
+    */
+    hash<string, bool> getAcceptTypeHash(*bool simple) {
+        return base.getAcceptTypeHash(simple);
+    }
+
+    #! returns converted native categories
+    /** @param simple request simplified names
+        @return the base returned categories
+    */
+    hash<string, bool> getReturnTypeHash(*bool simple) {
+        return base.getReturnTypeHash(simple);
+    }
+
+    #! validates and converts a supplied value
+    /** @param value the supplied string, binary value, or list
+        @return the converted value
+        @throw MISSING-VALUE-ERROR a required value is omitted
+        @throw RUNTIME-TYPE-ERROR the value violates a restriction
+    */
+    auto acceptsValue(auto value) {
+        if (!exists value) {
+            if (isMandatory()) {
+                throw "MISSING-VALUE-ERROR", "a restricted XML value must be supplied";
+            }
+            return;
+        }
+        if (facets.kind == "string" || facets.kind == "tokens") {
+            if (!value.strp()) {
+                throw "RUNTIME-TYPE-ERROR", sprintf("text restriction %Y requires a string-convertible scalar; got %Y",
+                    facets.name, value.type());
+            }
+            value = XsdSimpleType::normalizeWhiteSpace(string(value), facets.white_space);
+        }
+        auto converted = base.acceptsValue(value);
+        XsdSizedFacetHelper::validate(facets, converted, enumeration, "RUNTIME-TYPE-ERROR");
+        return converted;
+    }
+
+    #! returns whether a value is required
+    /** @return the base requiredness */
+    bool isMandatory() {
+        return base.isMandatory();
+    }
+
+    #! returns whether omission is accepted
+    /** @return the base optionality */
+    bool isOrNothingType() {
+        return base.isOrNothingType();
+    }
+
+    #! creates an optional equivalent retaining the same restrictions
+    /** @return the optional provider */
+    AbstractDataProviderType getOrNothingType() {
+        return new XsdSizedRestrictionDataType(facets, base.getOrNothingType());
+    }
+
+    #! creates a mandatory equivalent retaining the same restrictions
+    /** @return the mandatory provider */
+    AbstractDataProviderType getMandatoryType() {
+        return new XsdSizedRestrictionDataType(facets, base.getMandatoryType());
+    }
 }
 
 class XsdNumericFacetHelper {
@@ -3307,6 +3618,9 @@ public class XsdBaseType inherits WSDL::XsdAbstractType {
                 val = lexical;
             }
         }
+        if (XsdBuiltinListHelper::isType(type)) {
+            val = XsdBuiltinListHelper::lexical(type, val, SOAP_SERIALIZATION_ERROR);
+        }
         switch (type) {
             case "anySimpleType": {
                 if (exists val && !val.strp()) {
@@ -3600,6 +3914,9 @@ public class XsdBaseType inherits WSDL::XsdAbstractType {
             return XsdIntegerLexicalHelper::decode(type,
                 XsdIntegerLexicalHelper::lexical(type, val, SOAP_DESERIALIZATION_ERROR));
         }
+        if (XsdBuiltinListHelper::isType(type)) {
+            return XsdBuiltinListHelper::lexical(type, val, SOAP_DESERIALIZATION_ERROR);
+        }
 
         switch (type) {
             case "anySimpleType":
@@ -3769,9 +4086,10 @@ public class XsdBaseType inherits WSDL::XsdAbstractType {
     };
 
     #! returns the data provider type used to accept values for this XSD type
-    /** @return a validating integer/boolean/decimal provider or the scalar's soft provider equivalent
+    /** @return a validating scalar provider or the scalar's soft provider equivalent
         @note Integer providers preserve exact values outside signed 64-bit range as strings.
         Decimal providers preserve high precision and noncanonical lexical forms as strings.
+        Text providers apply the builtin whitespace rule; builtin token lists require at least one item.
     */
     AbstractDataProviderType getDataProviderType() {
         # XSD booleans need a type that parses string values according to the XSD boolean lexical space; a plain
@@ -3785,7 +4103,17 @@ public class XsdBaseType inherits WSDL::XsdAbstractType {
         if (XsdIntegerLexicalHelper::Types{name}) {
             return new XsdIntegerDataType(name);
         }
+        if (XsdBuiltinListHelper::isType(name)) {
+            return new XsdSizedRestrictionDataType(<XsdSizedFacetInfo>{
+                "name": name, "kind": "tokens", "white_space": "collapse", "min_length": 1,
+            }, AbstractDataProviderType::get(SoftStringType));
+        }
         Type type = getDataProviderBaseType();
+        if (type == StringType && name != "anySimpleType") {
+            return new XsdSizedRestrictionDataType(<XsdSizedFacetInfo>{
+                "name": name, "kind": "string", "white_space": getWhiteSpace(),
+            }, AbstractDataProviderType::get(SoftStringType));
+        }
         return AbstractDataProviderType::get(SoftTypeMap{type.getName()} ?? type);
     }
 
@@ -4489,7 +4817,7 @@ public class XsdElement inherits WSDL::XsdTypedData {
 
     AbstractDataProviderType getDataProviderType() {
         AbstractDataProviderType rv = type.getDataProviderType();
-        if (maxOccurs != 1 && !(rv instanceof ListDataType) && !rv.isList()) {
+        if (maxOccurs != 1 && (type.hasNativeListValue() || (!(rv instanceof ListDataType) && !rv.isList()))) {
            rv = new SoftListDataType(rv.getName(), rv, False, NOTHING, rv.getTags());
         }
         if (!minOccurs || nillable) {
@@ -4597,9 +4925,10 @@ public class XsdElement inherits WSDL::XsdTypedData {
 
         int tc = h.typeCode();
         # Don't unwrap single-element lists for XSD list types (they need the list value)
-        bool is_list_type = (type instanceof XsdSimpleType && cast<XsdSimpleType>(type).listItemType);
-        if (tc == NT_LIST && h.size() == 1 && !is_list_type) {
+        bool is_list_type = type.hasNativeListValue() && maxOccurs == 1;
+        if (tc == NT_LIST && h.size() == 1 && !type.hasNativeListValue()) {
             h = h[0];
+            tc = h.typeCode();
         }
 
         # For list types, empty lists are valid values (serialize to empty element content)
@@ -5770,12 +6099,18 @@ public class XsdRegexHelper {
                 return;
             }
         } catch (hash<ExceptionInfo> ex) {
+            if (ex.err != "XSD-REGEX-SAMPLE-ERROR") {
+                rethrow;
+            }
             return;
         }
         # never return a value that does not match the pattern it was generated from
         try {
-            return regex(rv, "^(?:" + XsdRegexHelper::toPcre(xsd) + ")$") ? rv : NOTHING;
+            return regex(rv, "\\A(?:" + XsdRegexHelper::toPcre(xsd) + ")\\z") ? rv : NOTHING;
         } catch (hash<ExceptionInfo> ex) {
+            if (ex.err != "XSD-REGEX-ERROR" && ex.err != "REGEX-ERROR" && ex.err != "REGEX-COMPILATION-ERROR") {
+                rethrow;
+            }
             return;
         }
     }
@@ -6335,6 +6670,10 @@ class XsdFacetGrammarHelper {
 public class XsdSimpleType inherits WSDL::XsdAbstractType {
     private {
         hash<string, bool> fixedFacets;
+        *hash<string, bool> stringEnumValues;
+        const StringKinds = {"string": True, "normalizedString": True, "token": True, "language": True,
+            "Name": True, "NCName": True, "NMTOKEN": True, "ID": True, "IDREF": True, "ENTITY": True,
+            "anyURI": True};
     }
 
     public {
@@ -6359,9 +6698,9 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
         */
         *list<string> pcre_patterns;
         #! String length facets
-        *softint minLength;
-        *softint maxLength;
-        *softint length;
+        *XsdFacetCount minLength;
+        *XsdFacetCount maxLength;
+        *XsdFacetCount length;
         #! Numeric range facets
         *auto minInclusive;
         *auto maxInclusive;
@@ -6451,7 +6790,7 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
                 # issue #5411: translate the patterns from the XSD regular expression language to PCRE once
                 if (patterns) {
                     try {
-                        pcre_patterns = map "^(?:" + XsdRegexHelper::toPcre($1) + ")$", patterns;
+                        pcre_patterns = map "\\A(?:" + XsdRegexHelper::toPcre($1) + ")\\z", patterns;
                         foreach string pattern in (pcre_patterns) {
                             bool accepts_empty = regex("", pattern);
                         }
@@ -6467,13 +6806,13 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
 
             # Parse length facets
             if (r.length) {
-                length = int(r.length."^attributes^".value);
+                length = XsdFacetCountHelper::parse("length", r.length."^attributes^".value);
             }
             if (r.minLength) {
-                minLength = int(r.minLength."^attributes^".value);
+                minLength = XsdFacetCountHelper::parse("minLength", r.minLength."^attributes^".value);
             }
             if (r.maxLength) {
-                maxLength = int(r.maxLength."^attributes^".value);
+                maxLength = XsdFacetCountHelper::parse("maxLength", r.maxLength."^attributes^".value);
             }
 
             # Parse numeric range facets
@@ -6556,6 +6895,136 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
             validateNumericDeclaration(numeric);
         } else if (exists totalDigits || exists fractionDigits) {
             throw "XSD-SIMPLETYPE-ERROR", "totalDigits and fractionDigits apply only to decimal-derived types";
+        }
+        string kind = getFacetKind();
+        validateLengthDeclaration(kind);
+        validateWhitespaceDeclaration(kind);
+        if (type && StringKinds{kind} && enumValues) {
+            hash<string, bool> values();
+            foreach string lexical in (keys enumValues) {
+                try {
+                    string value = type.deserializeValue(name, new hash<string, XsdAbstractType>(), NOTHING, lexical);
+                    values{value} = True;
+                } catch (hash<ExceptionInfo> ex) {
+                    if (ex.err != SOAP_DESERIALIZATION_ERROR) {
+                        rethrow;
+                    }
+                    throw "XSD-SIMPLETYPE-ERROR", sprintf("enumeration value %Y is not valid for the base of %Y: %s",
+                        lexical, name, ex.desc);
+                }
+            }
+            stringEnumValues = values;
+        }
+    }
+
+    #! identifies list values through restriction and union derivation
+    /** @return True when a native list can represent one member value */
+    bool hasNativeListValue() {
+        if (listItemType || (type && type.hasNativeListValue())) {
+            return True;
+        }
+        foreach XsdAbstractType member in (unionTypes) {
+            if (member.hasNativeListValue()) {
+                return True;
+            }
+        }
+        return False;
+    }
+
+    private string getFacetKind() {
+        if (listItemType) {
+            return "list";
+        }
+        if (unionTypes) {
+            return "union";
+        }
+        if (type instanceof XsdSimpleType) {
+            return cast<XsdSimpleType>(type).getFacetKind();
+        }
+        @assert(type instanceof XsdBaseType);
+        return type.name == "NMTOKENS" || type.name == "IDREFS" || type.name == "ENTITIES" ? "list" : type.name;
+    }
+
+    private validateLengthDeclaration(string kind) {
+        bool sized = StringKinds{kind} || kind == "list" || kind == "hexBinary" || kind == "base64Binary"
+            || kind == "QName" || kind == "NOTATION";
+        if (!sized && (exists length || exists minLength || exists maxLength)) {
+            throw "XSD-SIMPLETYPE-ERROR", sprintf("length facets do not apply to %Y", kind);
+        }
+        if (sized && (exists minInclusive || exists minExclusive || exists maxInclusive || exists maxExclusive)) {
+            throw "XSD-SIMPLETYPE-ERROR", sprintf("ordered bounds do not apply to %Y", kind);
+        }
+        *XsdFacetCount exact = getEffectiveFacet("length");
+        *XsdFacetCount minimum = getEffectiveFacet("minLength");
+        *XsdFacetCount maximum = getEffectiveFacet("maxLength");
+        bool builtin_list = kind == "list" && !hasNativeListValue();
+        if (builtin_list && exists minLength && XsdFacetCountHelper::compare(minLength, 1) < 0) {
+            throw "XSD-SIMPLETYPE-ERROR", "builtin token lists have an inherited minimum length of one";
+        }
+        if (exists minimum && exists maximum && XsdFacetCountHelper::compare(minimum, maximum) > 0) {
+            throw "XSD-SIMPLETYPE-ERROR", "minLength must not exceed maxLength";
+        }
+        *XsdSimpleType ancestor = type instanceof XsdSimpleType ? cast<XsdSimpleType>(type) : NOTHING;
+        while (ancestor) {
+            foreach string facet in ("length", "minLength", "maxLength") {
+                if (!exists self{facet} || !exists ancestor{facet}) {
+                    continue;
+                }
+                int comparison = XsdFacetCountHelper::compare(self{facet}, ancestor{facet});
+                if ((comparison && (facet == "length" || ancestor.fixedFacets{facet}))
+                        || (facet == "minLength" && comparison < 0) || (facet == "maxLength" && comparison > 0)) {
+                    throw "XSD-SIMPLETYPE-ERROR", sprintf("%s in %Y is not a valid base restriction", facet, name);
+                }
+            }
+            ancestor = ancestor.type instanceof XsdSimpleType ? cast<XsdSimpleType>(ancestor.type) : NOTHING;
+        }
+        if (exists exact) {
+            foreach string facet in ("minLength", "maxLength") {
+                *XsdFacetCount bound = facet == "minLength" ? minimum : maximum;
+                if (!exists bound) {
+                    continue;
+                }
+                int comparison = XsdFacetCountHelper::compare(bound, exact);
+                if ((facet == "minLength" && comparison > 0) || (facet == "maxLength" && comparison < 0)) {
+                    throw "XSD-SIMPLETYPE-ERROR", sprintf("%s contradicts length in %Y", facet, name);
+                }
+                bool inherited = builtin_list && facet == "minLength" && !XsdFacetCountHelper::compare(bound, 1);
+                ancestor = type instanceof XsdSimpleType ? cast<XsdSimpleType>(type) : NOTHING;
+                while (ancestor) {
+                    if (!exists ancestor.getEffectiveFacet("length") && exists ancestor{facet}
+                            && !XsdFacetCountHelper::compare(bound, ancestor{facet})) {
+                        inherited = True;
+                        break;
+                    }
+                    ancestor = ancestor.type instanceof XsdSimpleType ? cast<XsdSimpleType>(ancestor.type) : NOTHING;
+                }
+                if (!inherited) {
+                    throw "XSD-SIMPLETYPE-ERROR", sprintf("%s accompanying length must repeat an inherited value", facet);
+                }
+            }
+        }
+    }
+
+    private validateWhitespaceDeclaration(string kind) {
+        if (!exists whiteSpace) {
+            return;
+        }
+        if (kind == "union") {
+            throw "XSD-SIMPLETYPE-ERROR", "whiteSpace does not apply to union restrictions";
+        }
+        if ((!StringKinds{kind} || kind == "anyURI") && whiteSpace != "collapse") {
+            throw "XSD-SIMPLETYPE-ERROR", sprintf("whiteSpace is fixed to collapse for %Y", kind);
+        }
+        const hash<string, int> rank = {"preserve": 0, "replace": 1, "collapse": 2};
+        if (type && rank{whiteSpace} < rank{type.getWhiteSpace()}) {
+            throw "XSD-SIMPLETYPE-ERROR", "whiteSpace must not weaken its base normalization";
+        }
+        *XsdSimpleType ancestor = type instanceof XsdSimpleType ? cast<XsdSimpleType>(type) : NOTHING;
+        while (ancestor) {
+            if (ancestor.fixedFacets.whiteSpace && whiteSpace != ancestor.whiteSpace) {
+                throw "XSD-SIMPLETYPE-ERROR", "whiteSpace changes a fixed base facet";
+            }
+            ancestor = ancestor.type instanceof XsdSimpleType ? cast<XsdSimpleType>(ancestor.type) : NOTHING;
         }
     }
 
@@ -6645,6 +7114,17 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
         if (getNumericBaseName()) {
             return new XsdNumericRestrictionDataType(getNumericFacets(), type.getDataProviderType());
         }
+        string kind = getFacetKind();
+        if (StringKinds{kind} || ((kind == "list" || kind == "hexBinary" || kind == "base64Binary")
+                && (exists length || exists minLength || exists maxLength))) {
+            return new XsdSizedRestrictionDataType(<XsdSizedFacetInfo>{
+                "name": name, "kind": StringKinds{kind} ? "string"
+                    : kind == "list" ? (hasNativeListValue() ? "list" : "tokens") : "binary",
+                "white_space": getWhiteSpace(), "length": length, "min_length": minLength,
+                "max_length": maxLength, "patterns": StringKinds{kind} ? pcre_patterns : NOTHING,
+                "enumeration": exists stringEnumValues ? keys stringEnumValues : NOTHING,
+            }, type.getDataProviderType());
+        }
         return dataType ?? type.getDataProviderType();
     }
 
@@ -6678,11 +7158,24 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
     }
 
     private bool enumerationAccepts(auto value) {
+        if (exists stringEnumValues) {
+            return boolean(stringEnumValues{value});
+        }
         # Numeric enumeration is checked together with the other value facets.
         return getNumericBaseName() || !enumValues || boolean(enumValues{value});
     }
 
     *list<auto> getAllowedValues() {
+        if (StringKinds{getFacetKind()}) {
+            *XsdSimpleType ancestor = self;
+            while (ancestor) {
+                if (exists ancestor.stringEnumValues) {
+                    return select keys ancestor.stringEnumValues, acceptsSample($1);
+                }
+                ancestor = ancestor.type instanceof XsdSimpleType ? cast<XsdSimpleType>(ancestor.type) : NOTHING;
+            }
+            return;
+        }
         if (!enumValues) {
             return;
         }
@@ -6720,6 +7213,10 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
         # Handle list type serialization
         if (listItemType) {
             return serializeList(nsc, val, omitType, rh);
+        }
+
+        if (!exists val && getFacetKind() == "list" && hasNativeListValue()) {
+            val = ();
         }
 
         # issue #5411: "whiteSpace" processing is applied to the lexical value before it is validated
@@ -6891,6 +7388,9 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
         if (exists v) {
             return v;
         }
+        if (facet == "minLength" && type instanceof XsdBaseType && XsdBuiltinListHelper::isType(type.name)) {
+            return 1;
+        }
         return type instanceof XsdSimpleType ? cast<XsdSimpleType>(type).getEffectiveFacet(facet) : NOTHING;
     }
 
@@ -6903,6 +7403,9 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
         @since %WSDL 0.5.8
     */
     *string getPatternSample(*softint min_length) {
+        if (exists min_length && min_length > XsdRegexHelper::MaxSampleLength) {
+            return;
+        }
         *string sample = getPatternSampleIntern(0);
         # the shortest matching value can be too short for the length facets; try longer values if so
         if (exists sample && exists min_length && sample.length() < min_length) {
@@ -6935,7 +7438,7 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
     /** @param default_value the value to use as a starting point, normally the sample value for the base type
 
         @return a value satisfying the type's constraining facets, derived from \a default_value where possible
-        @throw XSD-SAMPLE-ERROR a numeric example satisfying all restrictions cannot be constructed
+        @throw XSD-SAMPLE-ERROR an example satisfying all restrictions cannot be constructed
 
         Used to generate example messages that can actually be serialized; the placeholder value for a base type
         does not normally satisfy the facets declared by a restriction of it.
@@ -6943,10 +7446,19 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
         @since %WSDL 0.5.8
     */
     auto getSampleValue(auto default_value) {
+        if (StringKinds{getFacetKind()}) {
+            return getStringSample(string(default_value));
+        }
+        if (getFacetKind() == "list" || getFacetKind() == "hexBinary" || getFacetKind() == "base64Binary") {
+            return getSizedSample(default_value);
+        }
         # a "pattern" facet is the most specific constraint; generate a value from it if one is declared
-        *softint min_length = getEffectiveFacet("length") ?? getEffectiveFacet("minLength");
+        *XsdFacetCount required_length = getEffectiveFacet("length") ?? getEffectiveFacet("minLength");
+        *int min_length = exists required_length
+            && XsdFacetCountHelper::compare(required_length, XsdRegexHelper::MaxSampleLength) <= 0
+            ? int(required_length) : NOTHING;
         *string sample = getPatternSample(min_length);
-        if (exists sample && (!getNumericBaseName() || acceptsNumericSample(sample))) {
+        if (exists sample && (!getNumericBaseName() || acceptsSample(sample))) {
             return sample;
         }
 
@@ -7012,7 +7524,81 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
         return rv;
     }
 
-    private bool acceptsNumericSample(auto value) {
+    private string getStringSample(string default_value) {
+        string normalized = normalizeWhiteSpace(default_value, getWhiteSpace());
+        if (acceptsSample(normalized)) {
+            return normalized;
+        }
+        *XsdSimpleType ancestor = self;
+        while (ancestor) {
+            foreach string choice in (keys ancestor.stringEnumValues) {
+                if (acceptsSample(choice)) {
+                    return normalizeWhiteSpace(choice, getWhiteSpace());
+                }
+            }
+            ancestor = ancestor.type instanceof XsdSimpleType ? cast<XsdSimpleType>(ancestor.type) : NOTHING;
+        }
+        *XsdFacetCount minimum = getEffectiveFacet("length") ?? getEffectiveFacet("minLength");
+        *XsdFacetCount maximum = getEffectiveFacet("length") ?? getEffectiveFacet("maxLength");
+        if (!exists minimum || XsdFacetCountHelper::compare(minimum, XsdRegexHelper::MaxSampleLength) <= 0) {
+            int min_size = exists minimum ? int(minimum) : 0;
+            int max_size = exists maximum
+                && XsdFacetCountHelper::compare(maximum, XsdRegexHelper::MaxSampleLength) < 0
+                ? int(maximum) : XsdRegexHelper::MaxSampleLength;
+            *string patterned = getPatternSample(min_size);
+            if (exists patterned && acceptsSample(patterned)) {
+                return normalizeWhiteSpace(patterned, getWhiteSpace());
+            }
+            string fitted = fitString(normalized, min_size, max_size);
+            if (acceptsSample(fitted)) {
+                return normalizeWhiteSpace(fitted, getWhiteSpace());
+            }
+        }
+        throw "XSD-SAMPLE-ERROR", sprintf("cannot construct a string example satisfying all facets of %Y "
+            "within the %d-character generated-example limit; supply a valid example", name,
+            XsdRegexHelper::MaxSampleLength);
+    }
+
+    private auto getSizedSample(auto default_value) {
+        if (acceptsSample(default_value)) {
+            return default_value;
+        }
+        *XsdFacetCount minimum = getEffectiveFacet("length") ?? getEffectiveFacet("minLength");
+        *XsdFacetCount maximum = getEffectiveFacet("length") ?? getEffectiveFacet("maxLength");
+        if (!exists minimum || XsdFacetCountHelper::compare(minimum, XsdRegexHelper::MaxSampleLength) <= 0) {
+            int min_size = exists minimum ? int(minimum) : 0;
+            int max_size = exists maximum
+                && XsdFacetCountHelper::compare(maximum, XsdRegexHelper::MaxSampleLength) < 0
+                ? int(maximum) : XsdRegexHelper::MaxSampleLength;
+            auto candidate;
+            if (getFacetKind() == "list") {
+                bool native_list = hasNativeListValue();
+                list<auto> items = native_list
+                    ? (default_value.typeCode() == NT_LIST ? default_value : (default_value,))
+                    : split(" ", normalizeWhiteSpace(string(default_value), "collapse"));
+                if (items.size() > max_size) {
+                    splice items, max_size;
+                }
+                if (items.size()) {
+                    while (items.size() < min_size) {
+                        items += items[0];
+                    }
+                }
+                candidate = native_list ? items : items.join(" ");
+            } else {
+                # Octet counts are bounded before allocating generated binary content.
+                candidate = parse_hex_string(strmul("00", min_size));
+            }
+            if (acceptsSample(candidate)) {
+                return candidate;
+            }
+        }
+        throw "XSD-SAMPLE-ERROR", sprintf("cannot construct an example satisfying all facets of %Y "
+            "within the %d-item/octet generated-example limit; supply a valid example", name,
+            XsdRegexHelper::MaxSampleLength);
+    }
+
+    private bool acceptsSample(auto value) {
         try {
             serializeValue(new Namespaces({}), value, True);
             return True;
@@ -7026,20 +7612,20 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
 
     private auto getNumericSample(auto default_value) {
         string base = getNumericBaseName();
-        if (acceptsNumericSample(default_value)) {
+        if (acceptsSample(default_value)) {
             return default_value;
         }
         # Inherited enumerations are finite; test their exact values before constructing a grid value.
         *XsdSimpleType ancestor = self;
         while (ancestor) {
             foreach string choice in (keys ancestor.enumValues) {
-                if (acceptsNumericSample(choice)) {
+                if (acceptsSample(choice)) {
                     return choice;
                 }
             }
             ancestor = ancestor.type instanceof XsdSimpleType ? cast<XsdSimpleType>(ancestor.type) : NOTHING;
         }
-        if (acceptsNumericSample("0")) {
+        if (acceptsSample("0")) {
             return "0";
         }
 
@@ -7119,7 +7705,7 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
             }
             string magnitude = XsdDecimalLexicalHelper::ceilingMagnitude(boundary, scale, exclusive);
             string candidate = (negative ? "-" : "") + magnitude;
-            if (acceptsNumericSample(candidate)) {
+            if (acceptsSample(candidate)) {
                 return candidate;
             }
         }
@@ -7178,11 +7764,20 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
             }
         }
 
-        # Length validation
-        if (exists length || exists minLength || exists maxLength) {
+        # XSD 1.0 4.3.1-3: length facets on QName/NOTATION are deprecated and always satisfied.
+        string kind = getFacetKind();
+        if (kind != "QName" && kind != "NOTATION" && (exists length || exists minLength || exists maxLength)) {
             int len;
-            if (val.typeCode() == NT_STRING) {
-                len = val.length();
+            if (kind == "list" && hasNativeListValue()) {
+                # Native list serialization also accepts a scalar as one item and NOTHING as an empty list.
+                len = val.typeCode() == NT_LIST ? val.size() : exists val ? 1 : 0;
+            } else if (val.typeCode() == NT_STRING) {
+                if (kind == "list") {
+                    string tokens = normalizeWhiteSpace(val, "collapse");
+                    len = tokens.empty() ? 0 : tokens.split(" ").size();
+                } else {
+                    len = val.length();
+                }
             } else if (val.typeCode() == NT_BINARY) {
                 len = val.size();
             } else if (val.typeCode() == NT_LIST) {
@@ -7191,17 +7786,17 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
                 len = string(val).length();
             }
 
-            if (exists length && len != length) {
+            if (exists length && XsdFacetCountHelper::compare(len, length)) {
                 throw errType, sprintf("value %y for simpleType %y has length %d, "
-                    "but exact length %d is required during %s", val, name, len, length, operation);
+                    "but exact length %Y is required during %s", val, name, len, length, operation);
             }
-            if (exists minLength && len < minLength) {
+            if (exists minLength && XsdFacetCountHelper::compare(len, minLength) < 0) {
                 throw errType, sprintf("value %y for simpleType %y has length %d, "
-                    "but minimum length is %d during %s", val, name, len, minLength, operation);
+                    "but minimum length is %Y during %s", val, name, len, minLength, operation);
             }
-            if (exists maxLength && len > maxLength) {
+            if (exists maxLength && XsdFacetCountHelper::compare(len, maxLength) > 0) {
                 throw errType, sprintf("value %y for simpleType %y has length %d, "
-                    "but maximum length is %d during %s", val, name, len, maxLength, operation);
+                    "but maximum length is %Y during %s", val, name, len, maxLength, operation);
             }
         }
 
@@ -7293,6 +7888,9 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
             return patterns ? lexical : converted;
         }
 
+        if (StringKinds{getFacetKind()}) {
+            val = applyWhiteSpace(XsdScalarTextHelper::value(val, SOAP_DESERIALIZATION_ERROR));
+        }
         auto v = type.deserializeValue(en, tmap, mrh, val);
 
         # issue #5411: "whiteSpace" processing is applied to the lexical value before it is validated
@@ -8747,6 +9345,12 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
             }
         }
         return rv;
+    }
+
+    #! identifies a list-valued simple-content type
+    /** @return True when one simple-content value is represented by a native list */
+    bool hasNativeListValue() {
+        return simpleType ? simpleType.hasNativeListValue() : False;
     }
 
     #! returns all elements declared in a model group, including any nested model groups
@@ -14290,6 +14894,16 @@ public class WSMessageHelper {
             case "string":
             case "normalizedString":
             case "token":
+            case "language":
+            case "Name":
+            case "NCName":
+            case "NMTOKEN":
+            case "NMTOKENS":
+            case "ID":
+            case "IDREF":
+            case "IDREFS":
+            case "ENTITY":
+            case "ENTITIES":
                 res += {
                     "type": "string",
                     "value": "abc",
@@ -14338,7 +14952,7 @@ public class WSMessageHelper {
             case "hexBinary":
                 res += {
                     "type": "binary",
-                    "value": "<0feba023ffdca62910>",   # TODO: how assign binary const ?
+                    "value": <0feba023ffdca62910>,
                 };
                 break;
             case "decimal":
@@ -14404,7 +15018,8 @@ public class WSMessageHelper {
                     res.value = sprintf("%s", (keys t.enumValues)[0]);
                 }
                 res.comment = sprintf("Enum: %s",  (keys t.enumValues).join(','));
-                if (res.type == "int" || res.type == "number") {
+                if (res.type == "int" || res.type == "number" || res.type == "string"
+                        || res.type == "list" || res.type == "binary") {
                     res.value = t.getSampleValue(res.value);
                 }
             } else {

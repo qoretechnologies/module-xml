@@ -256,3 +256,63 @@ through both actual SOAP bindings and both directions, comparing exact Decimal
 values and expanded names. Its specification adjudication records compiler
 disagreements separately from production acceptance. Other scalar families retain
 their remaining P3 acceptance work.
+
+## Strings and length restrictions
+
+String enumeration literals are interpreted in the base datatype's value space.
+The most derived `whiteSpace` rule normalizes incoming text before ancestor
+patterns, enumeration and length constraints run. XML whitespace means SPACE,
+TAB, CR and LF; a nonbreaking space is preserved. This distinction matters when
+a restriction introduces collapse alongside an enumeration containing surrounding
+spaces: the enumeration does not acquire the new whitespace rule, and the
+intersection can be empty. Provider field choices include only values accepted
+by the complete derived restriction. Inherited choices are filtered as well.
+
+`length`, `minLength` and `maxLength` use exact `XsdFacetCount` values and validate
+applicability, narrowing, fixed ancestors and consistent intervals before use.
+An exact length and a minimum/maximum at one step must satisfy the ancestor
+conditions in XSD 1.0 part 2 section 4.3.1.4. Strings count Unicode code points,
+including one for a supplementary character and two for a base plus combining
+mark. Binary values count octets; XSD lists count items. QName and NOTATION
+length facets are always satisfied as specified by XSD 1.0. The existing text
+representation of NMTOKENS, IDREFS and ENTITIES is preserved; XML whitespace
+collapse supplies item boundaries and their builtin minimum is one item.
+
+`XsdSizedRestrictionDataType` holds `XsdSizedFacetInfo` plus its base provider.
+Constructors and reconstruction validate metadata and its value category before
+publication. The wrapper normalizes text before base conversion, then checks its
+own constraints. String enumeration membership is built once and rebuilt from
+validated metadata on restoration. Optional and nested list wrappers keep validation; no weak schema
+reference or direct-conversion shortcut is used. Builtin text providers apply
+whitespace processing and reject nonscalar input. A repeated list-valued element
+uses an outer occurrence list whose entries are item lists, including a single
+occurrence and an empty item list. Restricted lists and complex simple content
+retain this distinction during serialization.
+
+Example generation validates candidates through the complete schema type. It
+tries viable string choices and bounded pattern/length candidates. List-length
+examples resize the supplied item sample; binary-length examples use bounded
+zero octets. Existing valid samples are retained. Generation is bounded to 256
+characters, items or octets and raises `XSD-SAMPLE-ERROR` when no valid candidate
+is constructed; this resource bound does not limit accepted application values
+or schema facet counts. Generated string enumerations use this same validation.
+
+For example, a token restricted to three characters accepts `" A  B "` as `"A B"`;
+a provider and its reconstructed copy return the same value. A two-item integer
+list accepts `["01", "+2"]` with both integer values preserved. A repeated element
+can carry `[["01", "+2"], ["3", "4"]]`, producing two elements with two items each.
+
+`wsdl-string-list-facets.qtest` covers declarations, values, providers, optionality,
+metadata rejection, examples and failed schema additions. `test_sized_facets.py`
+checks both SOAP bindings and directions, reconstructed contracts/providers,
+attributes, repeated values and generated messages against libxml2 and Xerces,
+with explicit typed-value, binary and expanded-name assertions. Named validator
+defects and the Xerces code-point-count setting are documented in
+`test/wsdl-interop/sized-facets-adjudication.md`. The element-choice setter requires
+the core DataProvider fix in commit `cbb8aceb2`.
+
+Compiled XSD patterns use PCRE's absolute `\A` and `\z` assertions. A trailing
+newline is part of a preserved string and cannot be ignored by a `$` end anchor.
+Sample verification uses the same absolute boundaries. Native scalar inputs to
+list serialization count as one item, following its existing singleton conversion.
+NOTHING used as an empty list must satisfy the same zero-item constraints.

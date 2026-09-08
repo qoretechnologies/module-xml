@@ -606,7 +606,8 @@ libxml2 and Xerces validate every document; exact Decimal values and expanded na
 are asserted separately. Negative provider cases must raise `RUNTIME-TYPE-ERROR`.
 
 All nine integer pattern families now have exact value assertions in the strict
-gate: 72 descriptions / 648 message directions, zero selected failures. The broad
+gate, now expanded with string families: 88 descriptions / 752 message directions,
+zero selected failures. The broad
 report retains 220 failure rows assigned to the remaining work, versus 252 before
 this increment. The 32 resolved rows are eight integer pattern families' formerly
 rejected second examples in both versions/directions. Full Python discovery still
@@ -627,3 +628,22 @@ and 608 input/output documents with exact values and expanded names. See the
 libxml2/Xerces compiler disagreements. Counts above signed 64-bit range remain
 exact strings; no display rounding or machine-width clamp is applied. P3 remains
 active for the other scalar datatype and facet requirements.
+
+`qore --enable-debug test/wsdl-string-list-facets.qtest` verifies string whitespace
+and enumeration, exact character/octet/item counts, valid restriction derivation,
+provider reconstruction, metadata rejection, bounded examples and rollback.
+`python3 test/wsdl-interop/test_sized_facets.py -v` tests actual SOAP 1.1/1.2 inputs
+and outputs, original/reconstructed providers and contracts, attributes, repeated
+list-valued elements and generated examples. It checks preserved values and
+expanded names in addition to schema validity. The independent Xerces worker
+selects code-point counting before datatype initialization; supplementary and
+combining characters test that configuration. Named compiler disagreements are
+recorded in [the string/length adjudication](sized-facets-adjudication.md), with
+normative references. No Qore verdict is waived. Repeated string choice fields
+require the core DataProvider setter correction in `cbb8aceb2`.
+
+The current string/length matrix covers 163 schemas and 326 actual contracts,
+with 1,400 independently checked input/output documents across parsing, value
+conversion, providers, reconstruction and examples. The selected corpus gate
+covers 88 descriptions / 752 directions; the broad diagnostic ledger remains
+separate from passing conformance assertions.

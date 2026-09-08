@@ -2302,3 +2302,96 @@ All 62 items are recorded as Pass or N/A with final validation evidence; no audi
 failures remain.
 P3 remains active for nonnumeric facets, IEEE float/double, dates/durations/partial
 dates/binary lexical and value semantics, and remaining regex/list/union criteria.
+
+## P3-07 — String and length facets
+
+P3-06 was committed as 753f17b without pushing. This increment applies the
+most-derived whitespace normalization before inherited string constraints,
+interprets string enumeration in the base value space, and checks exact character,
+octet and item counts. Length/whitespace declarations enforce applicability,
+narrowing, fixed ancestors, consistent bounds and the XSD 1.0 exact-length
+ancestor rules. QName/NOTATION length facets remain always satisfied.
+
+XsdSizedRestrictionDataType retains scalar facet metadata, validates its base
+category, and rebuilds its private string-membership map on reconstruction.
+Optional and nested-list providers retain restrictions. String field choices
+contain only values satisfying the complete restriction; empty intersections do
+not prevent provider construction. String and length-based examples validate
+complete restrictions or raise XSD-SAMPLE-ERROR with bounded generation.
+
+List detection follows restrictions, unions and complex simple content. Repeated
+list-valued elements keep an occurrence list around item lists, including a single
+occurrence and empty item lists. Existing scalar singleton serialization counts
+one item; NOTHING used as an empty list must satisfy zero-item constraints.
+Builtin token-list strings keep their public representation and require at least
+one item. Name/token examples use valid lexical seeds. XSD patterns now use
+absolute PCRE anchors, so a trailing newline cannot escape the pattern check.
+
+The repeated string-choice tests exposed a core DataProvider defect: the element
+membership map used raw rather than resolved metadata, structural fallback
+compared native values to metadata records, and replacements could retain stale
+state or publish partial choices. Core commit cbb8aceb2 (originally 559317b00 before the concurrent session rebased
+develop) fixes those paths. Eight
+core suites passed 87 cases / 2432 assertions; focused tests also passed in AST
+mode, Qdx passed, and all 62 audit items are recorded in
+examples/test/qlib/DataProvider/ElementAllowedValues.audit.md. No push was made.
+
+The Together/OpenAPI owner completed that change as bb64c1a98 and rebased both
+local commits over the latest develop. The Qore checkout is now clean, develop is
+ahead by two commits, and no push was made here. The DataProvider implementation,
+regression suite and audit have identical content before and after that rebase.
+The user's request to commit remaining core work is therefore complete.
+
+Current XML verification uses /tmp/wsdl-p3-07-env.sh, the immutable runtime in
+/tmp/wsdl-core-deps/runtime, and the DataProvider module snapshot with the same DataProvider code
+in /tmp/wsdl-core-choices/build/qlib-qmod/DataProvider (manifest.json records hashes).
+No native code changed, so this increment does not require a new Valgrind run.
+
+The independent matrix covers 56 authored cases as 112 atomic/simple-content
+schemas and 224 SOAP contracts, with 328 input and 176 serialized output documents.
+A second matrix covers 17 consumer cases as 51 schemas and 102 contracts, checking
+1464 original/reconstructed provider and example results with 896 emitted
+documents. Together they independently assess 1400 input/output documents, exact
+strings/integer-list values/binary octets, expanded names and actual SOAP 1.1/1.2
+request/response bindings. Named libxml2/Xerces compiler disagreements are
+adjudicated in sized-facets-adjudication.md. Xerces code-point counting is selected
+before type initialization and verified by supplementary/combining-character cases.
+No production verdict or independent Unicode-length check is waived.
+
+Strict selection adds sixteen string/whitespace/enumeration/pattern/length families:
+88 descriptions / 752 directions. Its value assertions distinguish preserve,
+replace and collapse using XML whitespace only and independently detect value loss.
+Historical findings and original corpus sources remain unchanged.
+
+Final verification completed with the /tmp/wsdl-p3-07-completed-* log/report
+prefix against WSDL SHA-256
+47f82ce4865fb0861003b95c88b9144696ddb25e26023d89ed3c231eb374e456:
+
+- All 41 affected Qore suites pass 521 cases without warnings; focused string and
+  length tests pass 12 cases / 313 assertions.
+- Full Python discovery runs 106 tests with exactly the seven tracked P4/P5/P6
+  failures, zero new failures, errors, skips or warnings. The exact failure
+  identities match the preceding complete run.
+- The 1400-document independent string/length matrices pass their schema, value,
+  rejection, reconstruction, provider and example expectations.
+- WSDL Qdx/Doxygen completes without warnings. No new Valgrind run is required
+  because this increment changes no C++.
+- Both-version survey counts, every row, and original corpus source hashes are
+  unchanged. Strict coverage passes 88 descriptions / 752 directions with zero
+  selected failures; all 220 broad failure rows are unchanged. Value checks record
+  660 assessed successes and no failures or missing stages. Both committed
+  current reports identify the final source SHA-256 above.
+- All 62 audit checklist items are Pass or N/A in
+  audits/P3-07-string-length-facets.md; no audit failures remain.
+
+Remaining P3 work includes list-item lexical validation (including empty or
+whitespace-containing native items), list/union value enumeration and retained
+patterns, IEEE binary32/binary64 semantics, dates/durations/partial dates, binary
+lexical/value rules, names/entity context and remaining regex requirements.
+Current list patterns still inspect a Qore list's formatted text rather than the
+whole XML list lexical form; list enumeration still uses raw hash keys. These
+are the next list/union implementation criteria, not completed by this length
+increment. Native float/double parsing remains permissive and shares binary64;
+parsing decimal as binary64 then narrowing to binary32 would double-round and
+cannot implement correct target-format conversion. P3 remains active; P4–P9
+are still required after its acceptance gate passes.
