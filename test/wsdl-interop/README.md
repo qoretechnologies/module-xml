@@ -676,3 +676,12 @@ forbidden facet declarations, inherited patterns/defaults, fixed-value equality,
 list items, detached providers and generated examples in both SOAP versions and
 directions. See [boolean-facets-evidence.md](boolean-facets-evidence.md) for the
 normative basis and independent schema/value accounting.
+
+Union provider regression checks are in `../wsdl-union-providers.qtest` and
+`test_union_providers.py`. They cover ordered member conversion, requiredness,
+reconstructed metadata, repeated-list validation, shared nested providers, cycles,
+cancellation and reentrant numeric inputs. The independent matrix checks both
+actual SOAP bindings and directions, detached consumers and generated examples.
+[Union provider evidence](union-providers-evidence.md) records exact value
+assertions, the existing libxml2 decimal precision limitation and remaining P3
+schema-union criteria.

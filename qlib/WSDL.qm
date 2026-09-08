@@ -106,6 +106,11 @@ module WSDL {
       list provider fields validate replacement choices before publishing them
     - generated list examples satisfy item constraints and inherited length, pattern and enumeration facets,
       or report XSD-SAMPLE-ERROR when bounded generation cannot find a valid value
+    - union providers validate each value inside repeated lists and preserve explicit requiredness after
+      reconstruction; member trials propagate cancellation and unexpected errors in providers and XML conversion
+    - union provider operations cache shared nested alternatives for each call and reject cyclic metadata;
+      reentrant inputs and concurrent threads retain independent traversal state
+    - builtin date and binary parse failures use SOAP validation errors so union selection can try later members
     - boolean restrictions retain lexical spellings for patterns across serialization and reconstructed providers;
       fixed attribute and field choices compare boolean values, and schema declarations reject inapplicable facets
     - boolean examples validate all inherited patterns against the four legal spellings and report
@@ -4492,6 +4497,12 @@ public class XsdBaseType inherits WSDL::XsdAbstractType {
     }
 
     #! serializes a value using the lexical representation of this built-in XSD type
+    /** @param nsc the output namespace registry
+        @param val the native or lexical input
+        @param omitType omit the explicit XML type attribute
+        @return the serialized scalar or its XML value/attribute hash
+        @throw SOAP-SERIALIZATION-ERROR the value cannot be converted to this builtin
+    */
     auto serializeValue(Namespaces nsc, auto val, *softbool omitType) {
         *hash<auto> comments;
         if (val.typeCode() == NT_HASH) {
@@ -4539,11 +4550,11 @@ public class XsdBaseType inherits WSDL::XsdAbstractType {
                 break;
             }
             case "date":
-                val = format_date("YYYY-MM-DD", date(val));
+                val = format_date("YYYY-MM-DD", convertDate(val, SOAP_SERIALIZATION_ERROR));
                 break;
 
             case "dateTime":
-                val = date(val).format("IF");
+                val = convertDate(val, SOAP_SERIALIZATION_ERROR).format("IF");
                 break;
 
             case "boolean":
@@ -4551,7 +4562,7 @@ public class XsdBaseType inherits WSDL::XsdAbstractType {
                 break;
 
             case "time":
-                val = format_date("HH:mm:SS.ms", date(val));
+                val = format_date("HH:mm:SS.ms", convertDate(val, SOAP_SERIALIZATION_ERROR));
                 break;
 
             case "base64Binary":
@@ -4790,6 +4801,14 @@ public class XsdBaseType inherits WSDL::XsdAbstractType {
         }
     }
 
+    #! converts a builtin lexical value to its public native representation
+    /** @param en the containing element name
+        @param tmap the resolved type map
+        @param mrh the multireference value map
+        @param val the scalar input or its XML value/attribute hash
+        @return the converted builtin value
+        @throw SOAP-DESERIALIZATION-ERROR the value cannot be converted to this builtin
+    */
     auto deserializeValue(string en, hash<string, XsdAbstractType> tmap, *hash<auto> mrh, auto val) {
         string type;
         if (val.typeCode() == NT_HASH) {
@@ -4849,13 +4868,11 @@ public class XsdBaseType inherits WSDL::XsdAbstractType {
                 return nsc.opt_empty_string_is_nothing ? val : string(val);
 
             case "date":
-                return date(val);
-
             case "dateTime":
-                return date(val);
+                return convertDate(val, SOAP_DESERIALIZATION_ERROR);
 
             case "time":
-                return date("1970-01-01T" + val);
+                return convertDate("1970-01-01T" + val, SOAP_DESERIALIZATION_ERROR);
 
             case "boolean":
                 return XsdBooleanLexicalHelper::decode(val, SOAP_DESERIALIZATION_ERROR);
@@ -4868,14 +4885,14 @@ public class XsdBaseType inherits WSDL::XsdAbstractType {
                 if (val.typeCode() == NT_BINARY) {
                     return val;
                 } else {
-                    return val.empty() ? binary() : parse_base64_string(val);
+                    return val.empty() ? binary() : decodeBinary(type, val);
                 }
 
             case "hexBinary":
                 if (val.typeCode() == NT_BINARY) {
                     return val;
                 } else {
-                    return val.empty() ? binary() : parse_hex_string(val);
+                    return val.empty() ? binary() : decodeBinary(type, val);
                 }
 
             case "binary":
@@ -4979,6 +4996,28 @@ public class XsdBaseType inherits WSDL::XsdAbstractType {
                 }
                 throw SOAP_DESERIALIZATION_ERROR, sprintf("don't know how to handle type %y", name);
             }
+        }
+    }
+
+    private static date convertDate(auto value, string error) {
+        try {
+            return date(value);
+        } catch (hash<ExceptionInfo> ex) {
+            if (ex.err == "INVALID-DATE") {
+                rethrow error, ex.desc, ex.arg;
+            }
+            rethrow;
+        }
+    }
+
+    private static binary decodeBinary(string type, string value) {
+        try {
+            return type == "base64Binary" ? parse_base64_string(value) : parse_hex_string(value);
+        } catch (hash<ExceptionInfo> ex) {
+            if (ex.err == "BASE64-PARSE-ERROR" || ex.err == "PARSE-HEX-ERROR") {
+                rethrow SOAP_DESERIALIZATION_ERROR, ex.desc, ex.arg;
+            }
+            rethrow;
         }
     }
 
@@ -6244,61 +6283,340 @@ public class XsdSimpleContentDataType inherits AbstractDataProviderType {
     }
 }
 
-public class UnionDataType inherits AbstractDataProviderType {
+# Per-thread traversal state exists only for the dynamic extent of one union operation.
+# Nested calls with different values use independent state and restore their caller's context.
+hashdecl XsdUnionTrialResult {
+    bool accepted;
+    auto value;
+}
+
+class XsdUnionTrialContext {
     public {
+        auto input;
+        hash<string, bool> active();
+        hash<string, hash<XsdUnionTrialResult>> results();
+    }
+    constructor(auto input) {
+        self.input = input;
+    }
+}
+
+class XsdUnionMetadataContext {
+    public {
+        hash<string, bool> active();
+        hash<string, hash<string, bool>> categories();
+        hash<string, *hash<string, AbstractDataField>> fields();
+        hash<string, bool> assignable();
+    }
+}
+
+thread_local *XsdUnionTrialContext UnionTrialContext;
+thread_local *XsdUnionMetadataContext UnionMetadataContext;
+
+#! provider validating XSD union alternatives in their declared order
+/** Values are returned by the first member that accepts them. Ordinary type rejection
+    permits the next alternative; cancellation and unexpected errors propagate unchanged.
+    Shared nested unions are evaluated once per input and operation. Traversal state is local
+    to the current thread and cleared on completion or error; cyclic member metadata is rejected.
+    @par Example
+    A boolean/integer union accepts \c "false" as a boolean and \c "12" as an integer.
+    A repeated union field rejects \c "yes" when neither member permits it.
+    @note Configure member providers before sharing the union with concurrent consumers.
+    @since %WSDL 0.5.8 validates nested-list input and explicit requiredness
+*/
+public class UnionDataType inherits AbstractDataProviderType {
+    private {
+        bool optional = False;
+    }
+
+    public {
+        #! member providers in schema declaration order
         list<AbstractDataProviderType> types;
     }
 
+    #! constructs a mandatory provider from resolved union member types
+    /** @param unionTypes the ordered resolved schema members
+        @throw XSD-SIMPLETYPE-ERROR the union has no members
+    */
     constructor(list<XsdAbstractType> unionTypes) {
+        if (!unionTypes) {
+            throw "XSD-SIMPLETYPE-ERROR", "a union requires at least one member";
+        }
         types = map $1.getDataProviderType(), unionTypes;
     }
 
-    string getName() {
-        return "XsdUnionType";
+    private:internal deserializeMembers(hash<auto> members) {
+        if (members.types.typeCode() != NT_LIST || !members.types) {
+            throw "DESERIALIZATION-ERROR", "a union requires an ordered member provider list";
+        }
+        list<AbstractDataProviderType> resolved();
+        foreach auto member in (members.types) {
+            if (!(member instanceof AbstractDataProviderType)) {
+                throw "DESERIALIZATION-ERROR", "a union member must be a data provider type";
+            }
+            resolved += member;
+        }
+        # Older serialized providers have no explicit optionality and represent a required XSD value.
+        if (exists members.optional && members.optional.typeCode() != NT_BOOLEAN) {
+            throw "DESERIALIZATION-ERROR", "union optionality must be a boolean";
+        }
+        types = resolved;
+        optional = members.optional ?? False;
     }
 
+    #! returns the union provider name
+    /** @return XsdUnionType with an optionality prefix when appropriate */
+    string getName() {
+        return (optional ? "*" : "") + "XsdUnionType";
+    }
+
+    #! reports whether a member can accept the supplied provider type
+    /** @param t the source provider type
+        @return True when a member accepts that provider
+        @throw XSD-SIMPLETYPE-ERROR member metadata contains a cycle
+    */
     bool isAssignableFrom(AbstractDataProviderType t) {
+        bool owner = !exists UnionMetadataContext;
+        if (owner) {
+            UnionMetadataContext = new XsdUnionMetadataContext();
+        }
+        on_exit if (owner) {
+            remove UnionMetadataContext;
+        }
+        string key = "assignable:" + self.uniqueHash() + ":" + t.uniqueHash();
+        if (UnionMetadataContext.assignable.hasKey(key)) {
+            return UnionMetadataContext.assignable{key};
+        }
+        if (UnionMetadataContext.active{key}) {
+            throw "XSD-SIMPLETYPE-ERROR", "cyclic union provider metadata";
+        }
+        UnionMetadataContext.active{key} = True;
+        on_exit remove UnionMetadataContext.active{key};
         foreach AbstractDataProviderType t0 in (types) {
             if (t0.isAssignableFrom(t)) {
+                UnionMetadataContext.assignable{key} = True;
                 return True;
             }
         }
+        UnionMetadataContext.assignable{key} = False;
         return False;
     }
 
+    #! prevents enclosing lists from bypassing union validation
+    /** @return NOTHING */
     *Type getValueType() {
-        return AutoType;
     }
 
+    #! requires validation of every supplied value
+    /** @return an empty map */
+    *hash<string, bool> getDirectTypeHash() {
+        return {};
+    }
+
+    #! returns no single item type for heterogeneous union values
+    /** @return NOTHING */
     *AbstractDataProviderType getElementType() {
     }
 
+    #! returns fields advertised by the member providers
+    /** @return the combined member fields, or NOTHING
+        @throw XSD-SIMPLETYPE-ERROR member metadata contains a cycle
+    */
     *hash<string, AbstractDataField> getFields() {
-        hash<string, AbstractDataField> rv;
-        map rv += $1.getFields(), types;
-        return rv;
+        bool owner = !exists UnionMetadataContext;
+        if (owner) {
+            UnionMetadataContext = new XsdUnionMetadataContext();
+        }
+        on_exit if (owner) {
+            remove UnionMetadataContext;
+        }
+        string key = "fields:" + self.uniqueHash();
+        if (UnionMetadataContext.fields.hasKey(key)) {
+            return UnionMetadataContext.fields{key};
+        }
+        if (UnionMetadataContext.active{key}) {
+            throw "XSD-SIMPLETYPE-ERROR", "cyclic union provider metadata";
+        }
+        UnionMetadataContext.active{key} = True;
+        on_exit remove UnionMetadataContext.active{key};
+        *hash<string, AbstractDataField> result;
+        foreach AbstractDataProviderType member in (types) {
+            result += member.getFields();
+        }
+        UnionMetadataContext.fields{key} = result;
+        return result;
     }
 
+    #! returns accepted native categories
+    /** @param simple request simplified names
+        @return the union of accepted member categories with this provider's optionality
+        @throw XSD-SIMPLETYPE-ERROR member metadata contains a cycle
+    */
     hash<string, bool> getAcceptTypeHash(*bool simple) {
-        hash<string, bool> rv;
-        map rv += $1.getAcceptTypeHash(simple), types;
-        return rv;
+        return categories(False, simple);
     }
 
+    #! returns converted native categories
+    /** @param simple request simplified names
+        @return the union of returned member categories with this provider's optionality
+        @throw XSD-SIMPLETYPE-ERROR member metadata contains a cycle
+    */
     hash<string, bool> getReturnTypeHash(*bool simple) {
-        hash<string, bool> rv;
-        map rv += $1.getReturnTypeHash(simple), types;
-        return rv;
+        return categories(True, simple);
     }
 
+    private hash<string, bool> categories(bool output, *bool simple) {
+        bool owner = !exists UnionMetadataContext;
+        if (owner) {
+            UnionMetadataContext = new XsdUnionMetadataContext();
+        }
+        on_exit if (owner) {
+            remove UnionMetadataContext;
+        }
+        string key = sprintf("categories:%y:%y:%s", output, simple, self.uniqueHash());
+        if (UnionMetadataContext.categories.hasKey(key)) {
+            return UnionMetadataContext.categories{key};
+        }
+        if (UnionMetadataContext.active{key}) {
+            throw "XSD-SIMPLETYPE-ERROR", "cyclic union provider metadata";
+        }
+        UnionMetadataContext.active{key} = True;
+        on_exit remove UnionMetadataContext.active{key};
+        hash<string, bool> result();
+        foreach AbstractDataProviderType member in (types) {
+            result += output ? member.getReturnTypeHash(simple) : member.getAcceptTypeHash(simple);
+        }
+        if (optional) {
+            result.nothing = True;
+        } else {
+            remove result.nothing;
+        }
+        UnionMetadataContext.categories{key} = result;
+        return result;
+    }
+
+    #! validates members in declaration order and returns the first accepted conversion
+    /** @param value the supplied native or XML lexical value
+        @return the accepted member value, or NOTHING for an optional omission
+        @throw MISSING-VALUE-ERROR a required union value is omitted
+        @throw RUNTIME-TYPE-ERROR no member accepts the value
+        @throw XSD-SIMPLETYPE-ERROR member metadata contains a cycle
+    */
     auto acceptsValue(auto value) {
+        if (!exists value) {
+            if (optional) {
+                return;
+            }
+            throw "MISSING-VALUE-ERROR", "a union value must be supplied";
+        }
+        *XsdUnionTrialContext caller = UnionTrialContext;
+        bool owner = !exists caller || !sameInput(caller.input, value);
+        if (owner) {
+            UnionTrialContext = new XsdUnionTrialContext(value);
+        }
+        on_exit if (owner) {
+            UnionTrialContext = caller;
+        }
+        string key = self.uniqueHash();
+        if (UnionTrialContext.results.hasKey(key)) {
+            hash<XsdUnionTrialResult> result = UnionTrialContext.results{key};
+            if (result.accepted) {
+                return result.value;
+            }
+            rejectValue(value);
+        }
+        if (UnionTrialContext.active{key}) {
+            throw "XSD-SIMPLETYPE-ERROR", "cyclic union provider metadata";
+        }
+        UnionTrialContext.active{key} = True;
+        on_exit remove UnionTrialContext.active{key};
         foreach AbstractDataProviderType t in (types) {
             try {
-                return t.acceptsValue(value);
-            } catch () {
+                auto converted = t.acceptsValue(value);
+                UnionTrialContext.results{key} = <XsdUnionTrialResult>{"accepted": True, "value": converted};
+                return converted;
+            } catch (hash<ExceptionInfo> ex) {
+                if (ex.err != "RUNTIME-TYPE-ERROR" && ex.err != "MISSING-VALUE-ERROR"
+                        && ex.err != "FIELD-VALUE-ERROR") {
+                    rethrow;
+                }
             }
         }
-        throw "RUNTIME-TYPE-ERROR", sprintf("no union type member accepts values of type %y", value.type());
+        UnionTrialContext.results{key} = <XsdUnionTrialResult>{"accepted": False};
+        rejectValue(value);
+    }
+
+    private static bool sameInput(auto left, auto right) {
+        if (left.typeCode() != right.typeCode()) {
+            return False;
+        }
+        switch (left.typeCode()) {
+            case NT_NUMBER:
+                if (left.prec() != right.prec()) {
+                    return False;
+                }
+                # fall through: NaN is a stable input, and signed zero retains its lexical distinction
+            case NT_FLOAT:
+                if (left.nanp() || right.nanp()) {
+                    return left.nanp() && right.nanp();
+                }
+                return left === right && (left != 0 || left.toStringRoundTrip() == right.toStringRoundTrip());
+            case NT_LIST:
+                if (left.size() != right.size()) {
+                    return False;
+                }
+                foreach auto item in (left) {
+                    if (!sameInput(item, right[$#])) {
+                        return False;
+                    }
+                }
+                return True;
+            case NT_HASH:
+                if (left.size() != right.size()) {
+                    return False;
+                }
+                foreach string key in (keys left) {
+                    if (!right.hasKey(key) || !sameInput(left{key}, right{key})) {
+                        return False;
+                    }
+                }
+                return True;
+            case NT_DATE:
+                return left === right && left.toString() == right.toString();
+        }
+        return left === right;
+    }
+
+    private static rejectValue(auto value) {
+        throw "RUNTIME-TYPE-ERROR", sprintf("no union type member accepts value %Y of type %Y", value, value.type());
+    }
+
+    #! returns whether a value must be supplied
+    /** @return True for mandatory providers */
+    bool isMandatory() {
+        return !optional;
+    }
+
+    #! returns whether omission is accepted
+    /** @return True for optional providers */
+    bool isOrNothingType() {
+        return optional;
+    }
+
+    #! creates an optional variant retaining all member constraints
+    /** @return the optional provider */
+    AbstractDataProviderType getOrNothingType() {
+        UnionDataType result = self.copy();
+        result.optional = True;
+        return result;
+    }
+
+    #! creates a mandatory variant retaining all member constraints
+    /** @return the mandatory provider */
+    AbstractDataProviderType getMandatoryType() {
+        UnionDataType result = self.copy();
+        result.optional = False;
+        return result;
     }
 }
 
@@ -8240,6 +8558,9 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
                 try {
                     return rh + t.serializeValue(nsc, val, omitType);
                 } catch (hash<ExceptionInfo> ex) {
+                    if (ex.err != SOAP_SERIALIZATION_ERROR) {
+                        rethrow;
+                    }
                     exl += ex;
                 }
             }
@@ -8920,6 +9241,9 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
                 try {
                     return t.deserializeValue(en, tmap, mrh, val);
                 } catch (hash<ExceptionInfo> ex) {
+                    if (ex.err != SOAP_DESERIALIZATION_ERROR) {
+                        rethrow;
+                    }
                     exl += ex;
                 }
             }

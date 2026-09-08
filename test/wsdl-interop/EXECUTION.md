@@ -2527,3 +2527,66 @@ The concurrent Qore Groq/DataProvider checkout is still receiving its owner's
 changes; no additional core edits or commits belong to P3-09. The earlier core
 commit request was completed with cbb8aceb2, bb64c1a98 and f6373c759; the user has
 been asked whether the newer active changes are ready for a commit handoff.
+
+
+## P3-10 — Union provider validation and traversal (complete)
+
+P3-09 is committed as 715ee2f without pushing. Union providers now preserve
+explicit mandatory/optional behavior through reconstruction and require enclosing
+occurrence lists to validate each item. Ordered member conversion and inherited
+member constraints remain intact. Metadata reconstruction rejects empty/nonprovider
+members and nonboolean optionality before publishing state; older metadata retains
+mandatory semantics.
+
+Shared provider graphs now use typed caches for each runtime/metadata call.
+Object contexts avoid repeated copy-on-write map cloning. Active entries reject
+cycles; on_exit clears/restores state after success, rejection and cancellation.
+Reentrant inputs distinguish native types, signed zero, number precision and date
+timezone representation; nested list/hash NaNs can reuse failed trials. A 28-level
+shared graph verifies one terminal visit per operation and fresh state on retry.
+
+Union schema trials propagate unexpected errors. The corpus review exposed two
+date/string families that had relied on swallowing raw native date rejection.
+Builtin date/binary converters now translate only input parse rejection to the
+directional SOAP error, retaining the native diagnostic. Focused schema tests cover
+date, dateTime, time, base64Binary and hexBinary fallback through reconstruction.
+The initial eight date/string corpus regressions were fixed before this commit.
+
+All 44 affected Qore suites pass 557 cases without warnings; the union suite passes
+11 cases/197 assertions. Six independent cases cover 2580 validated documents and
+2784 consumer rows through atomic elements, simple content/attributes, repeated
+elements, reconstructed contracts/providers, examples and actual SOAP 1.1/1.2
+bindings in both directions. Xerces checks all verdicts without warnings. Libxml2's
+previously adjudicated 24-digit decimal limit is retained as a precisely checked
+reference limitation; no Qore or exact-value assertion is waived.
+
+Final Python discovery runs 115 tests with exactly the seven existing P4/P5/P6
+failures, no new failures/errors/skips/warnings and identical failure identities.
+Qdx/Doxygen is clean. Strict coverage remains 89 descriptions/756 directions,
+664 successful value checks, zero failed/missing value checks and no selected
+failures. All 220 broad failure rows, corpus verdicts, counts and source hashes
+are unchanged. Eight diagnostic survey rows (and their corresponding directional
+coverage entries) now use SOAP-DESERIALIZATION-ERROR for the existing five-digit
+date failures, with their original descriptions retained. These remain P3 failures.
+Final WSDL SHA-256: 42cac931187e15f537d92ecea08e9dd291ff13f6ff27a756d627088a63910967.
+Logs: /tmp/wsdl-p3-10-audited-*. Full 62-item audit:
+audits/P3-10-union-providers.md. No C++ or core Qore edit belongs to this increment.
+
+Qore develop is clean at d70ed3718: its owner committed the concurrent Groq work.
+The user's latest core commit request therefore has no remaining uncommitted work;
+nothing was pushed. The immutable XML test runtime/provider snapshot is unchanged.
+
+P3 remains active. Next union criteria are normalized lexical patterns, primitive
+value identity and enumeration, declaration applicability, examples, lists of
+unions and bounded schema graph processing. The independent preflight records
+24 mismatched input verdicts, eight invalid outputs and two accepted invalid
+contracts; union-providers-evidence.md retains the cases and normative references.
+
+The separate date preflight additionally confirms that TimeZone's single-string
+parser suppresses malformed input errors, allowing soft date providers to return
+the epoch for arbitrary text. Valid date strings work with or without the optional
+format argument, ruling out numeric overload selection. Prefixing malformed time
+text can also admit midnight. These core/parser findings remain required P3 date
+work, alongside five-digit/negative years, timezones and fractional precision.
+IEEE conversion, durations/partial dates, strict binary semantics, QName/entity
+context and remaining regex work also remain required. P4-P9 follow P3 acceptance.

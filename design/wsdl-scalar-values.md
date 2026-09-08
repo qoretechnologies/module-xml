@@ -396,3 +396,47 @@ normalized spellings. This exhausts the boolean lexical space; an empty intersec
 of patterns reports `XSD-SAMPLE-ERROR`. See `wsdl-boolean-facets.qtest` and
 `test_boolean_facets.py` for schema, serialization, field/provider reconstruction,
 default/fixed, list-item, cancellation and independent SOAP regression coverage.
+
+## Union provider traversal
+
+`UnionDataType` tries member providers in declaration order and returns the first
+accepted conversion. For example, boolean/integer members map `"1"` to `True`,
+while integer/boolean members map it to integer `1`. Member restrictions remain
+active in detached and reconstructed providers. Only ordinary type, missing-value
+and field-value rejection permits another trial; cancellation and unexpected
+errors propagate. Schema union conversion likewise catches only its directional
+SOAP validation error. Builtin date and binary decoding translates only the
+native parser's input-rejection category to that SOAP error, retaining its
+diagnostic and allowing a later union member to accept the value.
+
+Union providers explicitly track requiredness. Mandatory providers reject an
+omitted value; optional variants accept omission while retaining every constraint
+on supplied values. Serialized metadata validates a nonempty ordered provider
+list and boolean optionality before publication. Older metadata without optionality
+is interpreted as mandatory. `getValueType()` returns `NOTHING` and the direct
+conversion map is empty, requiring enclosing occurrence lists to validate each
+union item instead of accepting arbitrary values through `AutoType`.
+
+Each runtime or metadata operation caches shared nested union results for its
+duration. Object contexts hold typed maps without repeated copy-on-write cloning;
+the cache contains both accepted conversions and ordinary rejections. Metadata
+keys distinguish input/output categories, simplified names, fields and assignability
+targets. Active entries detect cyclic member metadata and raise
+`XSD-SIMPLETYPE-ERROR`. Shared subgraphs therefore take work proportional to their
+edges and scalar comparisons, rather than their exponentially expanded trees.
+
+Contexts are thread-local and cleared or restored with `on_exit`. A reentrant call
+with a different input gets independent state, including different scalar native
+types, signed zeros and number precision. NaN inputs can reuse failed trials;
+list/hash comparison applies the same rules to each item. Date comparisons also
+retain their timezone spelling. No cache survives the root
+call, so later operations see the configured member providers afresh. Configure
+public member lists before sharing providers between threads and keep member
+validation stable for the duration of an operation.
+
+`wsdl-union-providers.qtest` verifies declaration order, reconstruction, nested
+lists, requiredness, invalid metadata, 28-level shared graphs, cycles, cancellation
+cleanup and numeric reentrancy. `test_union_providers.py` checks real SOAP 1.1/1.2
+requests/responses, simple content/attributes, repeated values, detached consumers
+and examples; its reference results are documented in
+`test/wsdl-interop/union-providers-evidence.md`.

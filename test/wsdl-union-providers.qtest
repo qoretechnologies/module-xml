@@ -1,0 +1,360 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires xml
+%requires ../qlib/WSDL.qm
+%exec-class UnionProviderTest
+
+class UnionProviderTest inherits QUnit::Test {
+    constructor() : Test("XSD union provider validation", "1.0") {
+        addTestCase("Declaration order selects the first accepting member", \order());
+        addTestCase("Mandatory and optional union variants have consistent metadata", \optionality());
+        addTestCase("Enclosing lists validate every union member value", \lists());
+        addTestCase("Member restrictions survive detached provider reconstruction", \restrictions());
+        addTestCase("Invalid serialized provider metadata is rejected", \metadata());
+        addTestCase("Provider cancellation and unexpected errors stop member selection", \providerCancellation());
+        addTestCase("Schema cancellation propagates in both conversion directions", \schemaCancellation());
+        addTestCase("Shared union graphs visit each subtree once per operation", \sharedGraph());
+        addTestCase("Cyclic provider metadata fails without recursion or stale state", \cycles());
+        addTestCase("Reentrant values retain independent traversal state", \reentrant());
+        addTestCase("Native date and binary rejection permits later members", \nativeRejection());
+        set_return_value(main());
+    }
+
+    private static UnionDataType provider(bool reverse = False) {
+        Namespaces ns({});
+        return new UnionDataType(reverse ? (ns.getBaseType("int"), ns.getBaseType("boolean"))
+            : (ns.getBaseType("boolean"), ns.getBaseType("int")));
+    }
+
+    private order() {
+        foreach bool reverse in (False, True) {
+            UnionDataType original = provider(reverse);
+            foreach UnionDataType type in (original, Serializable::deserialize(original.serialize())) {
+                auto value = type.acceptsValue("1");
+                assertEq(reverse ? NT_INT : NT_BOOLEAN, value.typeCode());
+                assertEq(reverse ? 1 : True, value);
+                assertEq(False, type.acceptsValue("false"));
+                assertEq(12, type.acceptsValue("12"));
+                assertThrows("RUNTIME-TYPE-ERROR", \type.acceptsValue(), ("yes",));
+            }
+        }
+    }
+
+    private optionality() {
+        UnionDataType original = provider();
+        foreach AbstractDataProviderType type in (original, Serializable::deserialize(original.serialize())) {
+            assertTrue(type.isMandatory());
+            assertFalse(type.isOrNothingType());
+            assertEq("XsdUnionType", type.getName());
+            assertEq(NOTHING, type.getValueType());
+            assertEq({}, type.getDirectTypeHash());
+            assertFalse(type.getAcceptTypeHash(True).nothing ?? False);
+            assertFalse(type.getReturnTypeHash(True).nothing ?? False);
+            assertThrows("MISSING-VALUE-ERROR", \type.acceptsValue(), (NOTHING,));
+            AbstractDataProviderType optional = Serializable::deserialize(type.getOrNothingType().serialize());
+            assertFalse(optional.isMandatory());
+            assertTrue(optional.isOrNothingType());
+            assertEq("*XsdUnionType", optional.getName());
+            assertTrue(optional.getAcceptTypeHash(True).nothing);
+            assertTrue(optional.getReturnTypeHash(True).nothing);
+            assertEq(NOTHING, optional.acceptsValue(NOTHING));
+            assertEq(False, optional.acceptsValue("0"));
+            assertThrows("RUNTIME-TYPE-ERROR", \optional.acceptsValue(), ("no",));
+            AbstractDataProviderType mandatory = optional.getMandatoryType();
+            assertThrows("MISSING-VALUE-ERROR", \mandatory.acceptsValue(), (NOTHING,));
+            assertTrue(type.isMandatory());
+        }
+    }
+
+    private lists() {
+        UnionDataType type = provider();
+        ListDataType original(type);
+        foreach AbstractDataProviderType list in (original, Serializable::deserialize(original.serialize())) {
+            assertEq((False, 12, True), list.acceptsValue(("false", "12", "1")));
+            foreach list<auto> invalid in (("yes",), ("false", "junk"), (NOTHING,), (NULL,)) {
+                assertThrows(exists invalid[0] ? "RUNTIME-TYPE-ERROR" : "MISSING-VALUE-ERROR",
+                    \list.acceptsValue(), (invalid,));
+            }
+        }
+        ListDataType optionalItems(type.getOrNothingType());
+        assertEq((NOTHING, False, 12), optionalItems.acceptsValue((NOTHING, "0", "12")));
+        assertThrows("RUNTIME-TYPE-ERROR", \optionalItems.acceptsValue(), ((NOTHING, "invalid"),));
+    }
+
+    private static UnionDataType restricted() {
+        XsdSchema schema('<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:t="urn:union-provider"
+            targetNamespace="urn:union-provider"><xs:simpleType name="Small"><xs:restriction base="xs:int">
+            <xs:minInclusive value="10"/><xs:maxInclusive value="20"/></xs:restriction></xs:simpleType>
+            <xs:simpleType name="Flag"><xs:restriction base="xs:boolean"><xs:pattern value="false"/>
+            </xs:restriction></xs:simpleType><xs:simpleType name="Value"><xs:union memberTypes="t:Small t:Flag"/>
+            </xs:simpleType></xs:schema>', {"async_only": True});
+        return cast<UnionDataType>(schema.findType(make_qname("urn:union-provider", "Value")).getDataProviderType());
+    }
+
+    private restrictions() {
+        UnionDataType original = restricted();
+        foreach UnionDataType type in (original, Serializable::deserialize(original.serialize())) {
+            assertEq(12, type.acceptsValue("12"));
+            assertEq("false", type.acceptsValue("false"));
+            foreach auto invalid in ("true", "0", "9", "21", "12x") {
+                assertThrows("RUNTIME-TYPE-ERROR", \type.acceptsValue(), (invalid,));
+            }
+            ListDataType repeated(type);
+            assertEq((12, "false"), repeated.acceptsValue(("12", "false")));
+            assertThrows("RUNTIME-TYPE-ERROR", \repeated.acceptsValue(), (("12", "true"),));
+        }
+    }
+
+    private metadata() {
+        UnionDataType type = provider();
+        hash<SerializationInfo> original = type.serializeToData();
+        foreach auto invalid in ("true", 1, NULL) {
+            hash<SerializationInfo> state = original;
+            state._index."0"._class_data."WSDL::UnionDataType".optional = invalid;
+            assertThrows("DESERIALIZATION-ERROR", \Serializable::deserialize(), (state,));
+        }
+        foreach auto invalid in ((), "boolean", ("boolean",), NULL) {
+            hash<SerializationInfo> state = original;
+            state._index."0"._class_data."WSDL::UnionDataType".types = invalid;
+            assertThrows("DESERIALIZATION-ERROR", \Serializable::deserialize(), (state,));
+        }
+        hash<SerializationInfo> state = original;
+        remove state._index."0"._class_data."WSDL::UnionDataType".optional;
+        UnionDataType legacy = Serializable::deserialize(state);
+        assertTrue(legacy.isMandatory());
+        assertEq(False, legacy.acceptsValue("false"));
+        assertThrows("MISSING-VALUE-ERROR", \legacy.acceptsValue(), (NOTHING,));
+        assertThrows("XSD-SIMPLETYPE-ERROR", \empty(), ());
+    }
+
+    private static UnionDataType empty() {
+        return new UnionDataType(());
+    }
+
+    private providerCancellation() {
+        CancelUnionMember member();
+        UnionDataType type = provider();
+        type.types = (member,) + type.types;
+        foreach string error in ("TEST-CANCELLED", "OBJECT-ALREADY-DELETED") {
+            member.error = error;
+            assertThrows(error, \type.acceptsValue(), ("12",));
+            ListDataType list(type);
+            assertThrows(error, \list.acceptsValue(), (("12",),));
+        }
+        foreach string rejection in ("RUNTIME-TYPE-ERROR", "MISSING-VALUE-ERROR", "FIELD-VALUE-ERROR") {
+            member.error = rejection;
+            assertEq(12, type.acceptsValue("12"));
+            assertEq(False, type.acceptsValue("false"));
+        }
+    }
+
+    private sharedGraph() {
+        CountUnionMember terminal();
+        UnionDataType type = provider();
+        type.types = (terminal,);
+        for (int i = 0; i < 28; ++i) {
+            UnionDataType parent = provider();
+            parent.types = (type, type);
+            type = parent;
+        }
+        foreach int attempt in (1, 2) {
+            assertThrows("RUNTIME-TYPE-ERROR", \type.acceptsValue(), ("invalid",));
+            assertEq(attempt, terminal.values);
+            assertTrue(type.getAcceptTypeHash(True).bool);
+            assertEq(attempt, terminal.accepts);
+            assertTrue(type.getReturnTypeHash(True).bool);
+            assertEq(attempt, terminal.return_calls);
+            assertEq(NOTHING, type.getFields());
+            assertEq(attempt, terminal.fields);
+            assertFalse(type.isAssignableFrom(XsdBooleanType));
+            assertEq(attempt, terminal.assigns);
+        }
+        int calls = terminal.values;
+        foreach auto invalid in (@nan@, number(@nan@), (@nan@,), (number(@nan@),),
+                {"value": @nan@}, {"value": (number(@nan@),)}) {
+            assertThrows("RUNTIME-TYPE-ERROR", \type.acceptsValue(), (invalid,));
+            assertEq(++calls, terminal.values);
+        }
+        terminal.error = "TEST-CANCELLED";
+        assertThrows("TEST-CANCELLED", \type.getAcceptTypeHash(), (True,));
+        terminal.error = NOTHING;
+        assertTrue(type.getAcceptTypeHash(True).bool);
+        assertEq(4, terminal.accepts);
+    }
+
+    private cycles() {
+        UnionDataType type = provider();
+        list<AbstractDataProviderType> original = type.types;
+        on_exit type.types = original;
+        type.types = (type,);
+        assertThrows("XSD-SIMPLETYPE-ERROR", \type.acceptsValue(), ("false",));
+        assertThrows("XSD-SIMPLETYPE-ERROR", \type.getAcceptTypeHash(), (True,));
+        assertThrows("XSD-SIMPLETYPE-ERROR", \type.getReturnTypeHash(), (True,));
+        assertThrows("XSD-SIMPLETYPE-ERROR", \type.getFields(), ());
+        assertThrows("XSD-SIMPLETYPE-ERROR", \type.isAssignableFrom(), (XsdBooleanType,));
+        type.types = original;
+        assertEq(False, type.acceptsValue("false"));
+        assertTrue(type.getReturnTypeHash(True).bool);
+    }
+
+    private reentrant() {
+        UnionDataType nested = provider();
+        ReentrantUnionMember member(nested);
+        UnionDataType outer = provider();
+        outer.types = (member,);
+        assertEq(12, outer.acceptsValue("outer"));
+        # Equal numeric values with different lexical identity need independent calls.
+        NumericReentrantUnionMember numeric();
+        UnionDataType same = provider();
+        same.types = (numeric,);
+        numeric.peer = same;
+        on_exit remove numeric.peer;
+        numeric.replacement = 0.0;
+        assertEq("0", same.acceptsValue(-0.0));
+        numeric.replacement = number("0");
+        assertEq("0", same.acceptsValue(number("-0")));
+        number precise = number("1.000000000000000000000000000000000000000000000000000000000000");
+        number ordinary = number("1");
+        assertTrue(ordinary.prec() != precise.prec());
+        numeric.replacement = precise;
+        numeric.report_precision = True;
+        assertEq(precise.prec(), same.acceptsValue(ordinary));
+        numeric.report_precision = False;
+        date local = date("2026-01-31T01:00:00+01:00");
+        numeric.replacement = local;
+        assertEq(local.format("IF"), same.acceptsValue(date("2026-01-31T00:00:00Z")));
+        assertEq(False, outer.acceptsValue("false"));
+        assertEq(12, outer.acceptsValue("outer"));
+    }
+
+    private schemaCancellation() {
+        XsdSchema schema('<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:t="urn:union-provider"
+            targetNamespace="urn:union-provider"><xs:simpleType name="Value"><xs:union memberTypes="xs:boolean xs:int"/>
+            </xs:simpleType></xs:schema>', {"async_only": True});
+        XsdSimpleType type = cast<XsdSimpleType>(schema.findType(make_qname("urn:union-provider", "Value")));
+        CancelUnionSchema member(schema.nsc);
+        type.unionTypes = (member,) + type.unionTypes;
+        foreach string error in ("TEST-CANCELLED", "OBJECT-ALREADY-DELETED", "RUNTIME-TYPE-ERROR") {
+            member.error = error;
+            assertThrows(error, \type.deserializeValue(), ("flag", schema.getTypeMap(), NOTHING, "12"));
+            assertThrows(error, \type.serializeValue(), (schema.nsc, "12", True));
+        }
+        member.error = "SOAP-DESERIALIZATION-ERROR";
+        assertEq(12, type.deserializeValue("flag", schema.getTypeMap(), NOTHING, "12"));
+        member.error = "SOAP-SERIALIZATION-ERROR";
+        assertEq("12", type.serializeValue(schema.nsc, "12", True));
+    }
+
+    private nativeRejection() {
+        foreach string name in ("date", "dateTime", "time", "base64Binary", "hexBinary") {
+            string rejected = name == "time" ? "25:00:00" : "!";
+            XsdSchema schema(sprintf('<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:t="urn:union-provider"
+                targetNamespace="urn:union-provider"><xs:simpleType name="Value"><xs:union memberTypes="xs:%s xs:string"/>
+                </xs:simpleType></xs:schema>', name), {"async_only": True});
+            foreach XsdSchema definition in (schema, Serializable::deserialize(schema.serialize())) {
+                XsdAbstractType type = definition.findType(make_qname("urn:union-provider", "Value"));
+                assertEq(rejected, type.deserializeValue("value", definition.getTypeMap(), NOTHING, rejected));
+                XsdBaseType scalar = definition.nsc.getBaseType(name);
+                assertThrows("SOAP-DESERIALIZATION-ERROR", \scalar.deserializeValue(),
+                    ("value", definition.getTypeMap(), NOTHING, rejected));
+                if (name == "date" || name == "dateTime" || name == "time") {
+                    assertEq(rejected, type.serializeValue(definition.nsc, rejected, True));
+                    assertThrows("SOAP-SERIALIZATION-ERROR", \scalar.serializeValue(), (definition.nsc, rejected, True));
+                }
+            }
+        }
+    }
+}
+
+class CancelUnionMember inherits XsdBooleanDataType {
+    public {
+        string error = "TEST-CANCELLED";
+    }
+    auto acceptsValue(auto value) {
+        throw error, "controlled member rejection or cancellation";
+    }
+}
+
+class CancelUnionSchema inherits XsdBaseType {
+    public {
+        string error = "TEST-CANCELLED";
+    }
+    constructor(Namespaces ns) : XsdBaseType("int", ns) {
+    }
+    auto serializeValue(Namespaces ns, auto value, *softbool omitType) {
+        throw error, "controlled schema member rejection or cancellation";
+    }
+    auto deserializeValue(string en, hash<string, XsdAbstractType> tmap, *hash<auto> mrh, auto value) {
+        throw error, "controlled schema member rejection or cancellation";
+    }
+}
+
+class CountUnionMember inherits XsdBooleanDataType {
+    public {
+        int values;
+        int accepts;
+        int return_calls;
+        int fields;
+        int assigns;
+        *string error;
+    }
+    auto acceptsValue(auto value) {
+        ++values;
+        throw "RUNTIME-TYPE-ERROR", "controlled terminal rejection";
+    }
+    hash<string, bool> getAcceptTypeHash(*bool simple) {
+        ++accepts;
+        if (error) {
+            throw error, "controlled metadata cancellation";
+        }
+        return XsdBooleanDataType::getAcceptTypeHash(simple);
+    }
+    hash<string, bool> getReturnTypeHash(*bool simple) {
+        ++return_calls;
+        return XsdBooleanDataType::getReturnTypeHash(simple);
+    }
+    *hash<string, AbstractDataField> getFields() {
+        ++fields;
+    }
+    bool isAssignableFrom(AbstractDataProviderType type) {
+        ++assigns;
+        return False;
+    }
+}
+
+class ReentrantUnionMember inherits XsdBooleanDataType {
+    private {
+        UnionDataType nested;
+    }
+    constructor(UnionDataType nested) {
+        self.nested = nested;
+    }
+    auto acceptsValue(auto value) {
+        return nested.acceptsValue(value == "outer" ? "12" : value);
+    }
+}
+
+class NumericReentrantUnionMember inherits XsdBooleanDataType {
+    public {
+        *UnionDataType peer;
+        auto replacement;
+        bool report_precision;
+    }
+    private {
+        bool entered;
+    }
+    auto acceptsValue(auto value) {
+        if (entered) {
+            if (value.typeCode() == NT_DATE) {
+                return value.format("IF");
+            }
+            return report_precision ? value.prec() : value.toStringRoundTrip();
+        }
+        entered = True;
+        on_exit entered = False;
+        return peer.acceptsValue(replacement);
+    }
+}
