@@ -718,3 +718,44 @@ findings and current diagnostic reports.
   failures. Full 62-item audit [audits/P2-07.md](audits/P2-07.md). No push.
 - `b67d61c` — P2-08 — compositor namespace scopes; 330 Qore cases pass, with six
   routed P4/P6 subtest failures. Full audit [audits/P2-08.md](audits/P2-08.md). No push.
+
+
+## P2-24 committed provider prerequisite (2026-09-08)
+
+Core external native worker cleanup is committed to develop as `1e52a0a44`;
+its full audit and native barrier/failure tests are in the core ThreadPool test
+directory. ThreadPool/async/HTTP regressions pass 78 cases / 555 assertions and
+normal native/HTTP/SOAP memory checks have zero errors/lost allocations. The
+independent HTTP quoted-boundary fixture correction is commit `4f43e60f7`.
+Nothing was pushed and concurrent AOT/Jina/astparser work was excluded.
+
+The XML provider increment is independently validated on parent `4879ed6`:
+AUTO probes actual installed namespace identity and falls back to a pinned,
+private static libxml2 2.15.4. SYSTEM/BUNDLED, backports, offline/cross builds,
+install isolation and source immutability are tested. Its full 62-item final
+review is [audits/P2-24-provider.md](audits/P2-24-provider.md), superseding the
+provider and callback gates in earlier provisional audits.
+
+The new callback negative tests exposed a libxml2 catalog error ownership leak:
+xmlResolveFromCatalog overwrote temporary error strings while restoring a saved
+error. Standalone C/GDB reproductions identify the exact overwrite without Qore.
+A checksum-verified build-tree copy adds the missing xmlResetError; supplied
+source trees remain unchanged and unsupported source changes fail configure.
+The C allocation regression fails against pristine upstream (three retained
+allocations) and passes against the correction, including prior-error state.
+Valgrind reports zero errors/loss (873 allocations/frees). The Qore schema
+callback suite also has zero errors/loss and retains original exception kinds.
+
+All 13 CMake integration tests and 238 isolated Qore cases pass. The isolated
+both-version corpus is recursively identical to its committed parent apart from
+version metadata. All 482 working P2 XML/SOAP cases pass after the final native
+change; the native documentation target has no warnings/errors. The wider P2
+implementation still has uncommitted increments; P2 acceptance and P3-P9 remain
+open. Existing later-phase corpus/Python failures remain visible.
+
+Independent P9 environment findings remain explicit: host glibc 2.43-8.fc44 leaks
+TLS storage on actual pthread_create kernel failure (standalone C reproduces it;
+Qore rollback checks pass), and Valgrind 3.27.1 emits existing DWARF/fstat tool
+warnings. These do not recur as memory errors in the repaired normal native,
+HTTP, SOAP or catalog paths. No diagnostic suppression or host library change
+was applied. System-provider catalog cleanup needs supported-environment checks.

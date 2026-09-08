@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.5)
+cmake_minimum_required(VERSION 3.18...3.31)
 
 project(qore-xml-module)
 
@@ -12,14 +12,13 @@ if (DEFINED ENV{LIBXML2_LIBRARY})
   set(LIBXML2_LIBRARY $ENV{LIBXML2_LIBRARY})
 endif()
 
-find_package(LibXml2 REQUIRED)
+include(cmake/QoreXmlLibXml2.cmake)
 find_package(OpenSSL REQUIRED)
 
-list(APPEND CMAKE_REQUIRED_LIBRARIES ${LIBXML2_LIBRARIES})
-list(APPEND CMAKE_REQUIRED_INCLUDES ${LIBXML2_INCLUDE_DIR})
+set(CMAKE_REQUIRED_LIBRARIES ${QORE_XML_CHECK_LIBRARIES})
+set(CMAKE_REQUIRED_INCLUDES ${QORE_XML_CHECK_INCLUDES})
 
 include_directories( ${CMAKE_SOURCE_DIR}/src )
-include_directories( ${LIBXML2_INCLUDE_DIR} )
 include_directories( ${OPENSSL_INCLUDE_DIR} )
 include_directories( ${QORE_INCLUDE_DIR} )
 
@@ -40,15 +39,24 @@ set (CMAKE_POSITION_INDEPENDENT_CODE TRUE)
 
 #include(CheckSymbolExists)
 include(CheckFunctionExists)
+include(CheckSymbolExists)
 
-macro(qore_check_symbol _symbol _define)
-#    check_symbol_exists(${_symbol} ${_includes} ${_define})
-    check_function_exists(${_symbol} ${_define})
+function(qore_check_symbol _symbol _define)
+    # Do not reuse results when switching dependency providers in the same build.
+    unset(${_define} CACHE)
+    if(QORE_XML_BUNDLED_LIBXML2)
+        # FetchContent targets have not been built during configure. Check the
+        # selected headers without linking; the pinned build supplies these APIs.
+        set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
+        check_symbol_exists(${_symbol} "libxml/xmlreader.h" ${_define})
+    else()
+        check_function_exists(${_symbol} ${_define})
+    endif()
     if (${_define})
 #        message(STATUS "    adding define: -D${_define}")
         add_definitions(-D${_define})
     endif(${_define})
-endmacro(qore_check_symbol)
+endfunction()
 
 qore_check_symbol(xmlTextReaderSetSchema HAVE_XMLTEXTREADERSETSCHEMA)
 qore_check_symbol(xmlTextReaderRelaxNGSetSchema HAVE_XMLTEXTREADERRELAXNGSETSCHEMA)
@@ -119,7 +127,9 @@ if (DEFINED ENV{DOXYGEN_EXECUTABLE})
     set(DOXYGEN_EXECUTABLE $ENV{DOXYGEN_EXECUTABLE})
 endif()
 
-qore_external_binary_module(${module_name} "${VERSION_MAJOR}.${VERSION_MINOR}.${VERSION_PATCH}" ${LIBXML2_LIBRARIES})
+qore_external_binary_module(${module_name} "${VERSION_MAJOR}.${VERSION_MINOR}.${VERSION_PATCH}" ${QORE_XML_LIBXML2_TARGET})
+add_executable(qore-xml-namespace-probe EXCLUDE_FROM_ALL cmake/libxml2-namespace-probe.c)
+target_link_libraries(qore-xml-namespace-probe PRIVATE ${QORE_XML_LIBXML2_TARGET})
 qore_user_modules("${QMOD}")
 install(PROGRAMS ${SCRIPTS} DESTINATION bin)
 
