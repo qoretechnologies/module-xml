@@ -701,3 +701,12 @@ and native-list metadata traversal, positive and negative atomic/list graphs,
 cycle rejection, error cleanup, reentrant namespace/type/reference contexts,
 actual SOAP 1.1/1.2 bindings and reconstructed consumers. The schema caches are
 scoped to one conversion; later calls observe current member configuration.
+
+Union primitive value checks are in `../wsdl-union-value-identity.qtest` and
+`test_union_value_identity.py`. They cover boolean/integer and string/boolean
+ambiguity, exact decimal enumerations, lexical patterns, distinct binary families,
+detached metadata validation, list items and finite field choices. The independent
+matrix checks primitive family and value across real SOAP 1.1/1.2 bindings in both
+directions, attributed/repeated values, reconstructed consumers and examples.
+These checks cover the implemented scalar families; the remaining P3 union and
+datatype requirements stay tracked in [EXECUTION.md](EXECUTION.md).

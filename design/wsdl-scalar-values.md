@@ -457,6 +457,54 @@ checks bounded diagnostics, cycles, error recovery and all reentrant conversion
 contexts. `test_union_schema_graphs.py` uses independently validated atomic/list
 graphs through real SOAP bindings, reconstructed schemas/providers and examples.
 
+For boolean, decimal/integer, text and binary members, union conversion carries a
+primitive-family/value identity separately from the native result. Integer and
+decimal share an exact decimal value space; boolean, string, hexBinary and
+base64Binary remain distinct primitive families. A lexical value is retained as
+a string when converting it to a native value would change its family or value
+on serialization. For example, `"01"` in a boolean/integer union remains a string:
+native integer `1` would select the earlier boolean member. In a union containing
+a string restricted to `true|false` followed by boolean, `"1"` stays `"1"`, because
+canonical `true` would select the string member. Unambiguous values retain their
+existing native representations.
+
+The conversion checks run once at the owner of each contextual union operation.
+Serialization checks the emitted XML text, including type-attribute namespace
+context. Deserialization checks whether serialization and reselection preserve the
+original identity. An unchanged emitted spelling needs no further read. Nested
+unions reuse traversal state; probes restore per-thread state on errors and
+cancellation. Custom member subclasses retain their own conversion semantics;
+an inherited builtin name alone does not establish an atomic identity.
+
+Union restriction patterns inspect the lexical spelling, before native conversion
+can turn XML `false` into Qore string `"0"`. Their accepted spelling is retained.
+Enumeration declarations must be valid in the base union and compare in that
+base's value space. Thus an integer/decimal enumeration `01` accepts `1.0`, while
+a boolean/integer enumeration `1` rejects `01`. Restrictions are checked after
+the base has selected its member; a failed restriction does not select a different
+member of that same base.
+
+`XsdUnionAtomicInfo` retains only builtin spelling rules, effective whitespace,
+pattern retention and the corresponding provider object. It retains no source
+schema, namespace registry or transport options. Provider serialization follows
+the current ordered member list; reordering keeps metadata associated with its
+member object, and replacement members retain their own validation behavior.
+Restoration validates metadata, checks every enumeration against the base union,
+and rebuilds transient lookup maps. Older metadata
+without atomic descriptions retains its former conversion behavior.
+
+`XsdUnionDataField` uses primitive value keys for scalar and repeated choices.
+The field's provider enforces its schema facets independently of field choices
+and the `creatable` flag. Choice setters build replacement maps before publishing
+them, so a failed update preserves the previous constraints. Optional variants,
+list items, defaults and reconstructed fields use the same comparisons.
+
+`wsdl-union-value-identity.qtest` covers ambiguity, enumeration, patterns, nested
+restrictions, list items, binary families, metadata changes, declarations and
+field choices. `test_union_value_identity.py` checks actual SOAP 1.1/1.2 bindings
+in both directions with independent primitive-value assertions and validators,
+including attributed/repeated values, detached providers and generated examples.
+
 Union whitespace is governed by the successfully validating member (XSD 1.0
 Part 2 section 4.3.6). The union itself does not introduce collapse: a leading
 `xs:string` member retains whitespace; `xs:token` collapses it. Ordered bounds

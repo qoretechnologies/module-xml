@@ -2693,3 +2693,122 @@ lexical restrictions through providers/lists/examples, then date, IEEE, binary,
 QName/entity and remaining regex requirements. TimeZone's nonthrowing date constructor
 and XML-RPC escaping/whitespace remain required boundary reviews. P4-P9 follow P3
 acceptance; the authorized phase scope is unchanged.
+
+## P3-13 — Union value identity and checked date prerequisite (in progress)
+
+The independent core prerequisite is committed on Qore develop as 512b4e298 (originally 7f161ec1b before parallel history maintenance):
+TimeZone::date(string) now passes both its zone and ExceptionSink to the existing
+absolute-date parser through an additive DateTimeNode constructor. ReferenceHolder
+retains the result until parsing succeeds; the QPP method now uses RET_VALUE_ONLY.
+Malformed/calendar/time/offset input detected by the parser raises INVALID-DATE.
+Unzoned values retain the object's zone and daylight saving rules; explicit ISO
+offsets and HTTP/email date behavior remain intact. XSD lexical validation still
+belongs to P3; this flexible core parser is not an XSD date validator.
+
+Validation used the isolated /tmp/wsdl-core-date checkout and its build-debug
+directory, Debug with /usr matching /usr/bin/qore. New regression: 5 cases / 59
+assertions in all four execution modes under UTC and Europe/Prague. Sixteen core
+runs report 66 cases / 1446 assertions; existing Windows-only checks remain
+inapplicable on Linux. New and existing date suites pass Valgrind with no errors
+or definite/indirect/possible leaks, using -b --enable-debug and PCRE2's supported
+JIT opt-out. Focused native/QPP Doxygen and executed examples pass. All 62 audit
+items are resolved in Qore's examples/test/qore/vars/audits/timezone-date-errors.md.
+
+All 56 affected XML/SOAP suites pass with the final runtime: 658 cases without
+runtime diagnostics. Both-version survey and strict coverage are identical to
+P3-12 outside versions: 89 selected WSDLs / 756 directions, no selected failures.
+Logs and JSON: /tmp/wsdl-core-date-final-*. Runtime SHA-256:
+cd01f8657d66b37f858a86f492a861ef216e28006cfabb10dc94f920e6d42476.
+For subsequent work, /tmp/wsdl-core-date-env.sh selects this runtime and the
+matching isolated DataProvider AOT build. The initial downstream runs diagnosed
+a stale DataProvider source hash after concurrent main-repository edits; rebuilding
+the isolated module and its dependencies removed the diagnostic without suppression.
+The main Qore checkout was clean after commit; this task did not push.
+
+The fresh dependency build also exposes separate P9 compiler/tooling findings:
+GCC 16.2.1 ngtcp2 -Winline under -Og; jsoncons bigint allocator-temporary
+-Wmaybe-uninitialized; DataFrame's raw QoreValue bit copy -Wclass-memaccess and
+unused qdfCallObjectMethod overload. Their exact locations and diagnostics are in
+/tmp/wsdl-core-date-{build,aot-build}.log and the core audit. The existing Valgrind
+DW_AT_abstract_origin reader warning remains open for P9. No warning-free whole
+dependency build is claimed, and none of these diagnostics is hidden or counted
+as a passing compatibility requirement.
+
+Next: preserve ordered union primitive-family/value identity, then enforce union
+enumeration and lexical restrictions through schema, providers, lists and examples.
+The remaining P3 and P4-P9 scope recorded above is unchanged.
+
+
+### P3-13 core error-cleanup prerequisite
+
+Malformed union provider metadata exposed a core deserialization use-after-free:
+indexed hash/list initialization helpers adopted the index owner's reference and
+released it on member failure. Qore develop commit bac32354a acquires independent
+helper references and owns the returned values in the indexed caller. The fix,
+regression, release notes, ownership design and full 62-item audit are committed;
+nothing was pushed. Parallel DeepSeek work was independently committed as
+b93680164, and the main checkout is clean after this task's core commit.
+
+The final isolated Debug runtime SHA-256 is
+fc3a60454896701c17913c4ed768678959f9788c059be20c334d72a43ab2ac80.
+The baseline core regression exits 139; the fixed new/existing Serializable suites
+pass in AST, IR, JIT and tiered modes (48 cases / 596 assertions), and the existing
+hashdecl suite passes 10 cases / 220 assertions. Both Serializable suites and the
+expanded XML union suite pass Valgrind with no errors or definite/indirect/possible
+loss. The previously recorded debug-information reader warning remains visible.
+The core audit is examples/test/qore/classes/Serializable/audits/indexed-container-errors.md.
+
+Before the subsequent enum-metadata audit refinement, all 57 affected XML suites
+pass: 668 cases / 10983 assertions. The union regression passes 10 cases / 293
+assertions; both independent union value matrices pass. SOAP 1.1/1.2 survey and
+strict coverage are identical outside version metadata to the pre-core-fix P3-13
+reports (89 selected WSDLs / 756 directions, zero selected failures, 220 broad
+failures). Logs and JSON: /tmp/wsdl-indexed-errors-*.
+
+The current union implementation covers exact decimal/integer, boolean, string
+and distinct hex/base64 primitive identities, lexical retention on changed member
+selection, union patterns/enumerations, detached providers and finite field choices.
+Final XML audit/build/testing is still pending. Full list-valued union identities,
+remaining primitive families and native-input ambiguity remain required P3 work,
+alongside the date/IEEE/binary/QName/entity/regex and XML-RPC boundaries already
+listed above. No P3 or final-acceptance claim is made for this increment.
+
+
+The final P3-13 docs configuration must retain the previously verified JNI module
+at /home/david/src/qore/git/module-jni/build-debug. The first isolated-runtime
+configuration omitted that path and rediscovered the installed JNI native-frame
+line -2 assertion already recorded in P2-10. GDB again identifies JniCallStack in
+the installed module. Existing JNI develop commit 0576b97 contains the normalization;
+qjar succeeds with that Debug module and matching isolated reflection/astparser
+artifacts selected. QORE_MODULE_DIR_FOR_DOCS now records these paths explicitly.
+No additional JNI or core code change is needed, and the failed diagnostics remain
+in /tmp/wsdl-p3-13-{final-docs,final-docs-sequential,qjar-assert-gdb}.log.
+
+
+### P3-13 final audit and verification
+
+The final enumeration audit adds rejection of invalid restored enum values and
+propagates unexpected conversion errors while reporting choices; both regressions
+fail before their fixes. Final wsdl-union-value-identity.qtest passes 12 cases /
+311 assertions from source and from the rebuilt AOT module. All 57 affected XML
+suites pass, 670 cases / 11001 recorded assertions; 11 independent union methods
+pass. Full Python discovery before the last error-reporting guard runs 127 tests
+with exactly the same 33 tracked P4/P5/P6 failure signatures; the final guard is
+then covered by the complete affected Qore and independent union suites.
+
+Final SOAP 1.1/1.2 survey and strict coverage are unchanged outside versions:
+89 selected WSDLs / 756 directions, zero selected failures, 220 broad failures.
+WSDL/SoapClient/SoapDataProvider AOT and native/WSDL documentation including qjar
+pass without warnings or errors with the fixed local JNI path. Post-relink
+Valgrind for the then 11-case union suite passes 305 assertions, zero errors and
+zero definite/indirect/possible loss; the known DWARF reader diagnostic remains.
+No native XML source changed in this increment.
+
+Final WSDL SHA-256: a481f15526cf54cf4b284679c6e41b57cba8500c1fc1088550475fbc0faff37c.
+Native XML SHA-256: 8ec5487ebe937450478fc856e5c02114e5cf9ffaf9201cf70d052907b40f2e12.
+Evidence: /tmp/wsdl-p3-13-reviewed-*, final-python.log, final-valgrind.log, and
+all baseline/fixed logs. A matrix stdout/per-suite filename collision is preserved
+in reviewed-matrix-combined.log; xml.qtest was rerun separately and all 57 per-suite
+summaries were verified in reviewed-checks.json. Full 62-item audit:
+audits/P3-13-union-value-identity.md. Remaining P3 and all P4-P9 requirements above
+are unchanged; the phase is still in progress.

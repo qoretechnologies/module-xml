@@ -116,6 +116,10 @@ module WSDL {
       per conversion context, reject cycles, and keep nested rejection diagnostics bounded
     - union provider operations cache shared nested alternatives for each call and reject cyclic metadata;
       reentrant inputs and concurrent threads retain independent traversal state
+    - boolean, integer/decimal, text and binary union members retain lexical input when native conversion
+      would change the selected primitive value; union patterns validate the XML spelling
+    - union enumerations and provider field choices compare primitive values, including equivalent
+      decimal spellings and distinct boolean/integer values; detached providers retain these constraints
     - builtin date and binary parse failures use SOAP validation errors so union selection can try later members
     - boolean restrictions retain lexical spellings for patterns across serialization and reconstructed providers;
       fixed attribute and field choices compare boolean values, and schema declarations reject inapplicable facets
@@ -4447,6 +4451,103 @@ public class XsdListDataField inherits QoreDataField {
     }
 }
 
+#! A union field whose finite choices retain primitive value identity
+/** The union provider validates lexical restrictions before this field compares values.
+    @par Example
+    An integer/decimal choice declared as \c "01" accepts \c "1.0". A boolean/integer
+    choice declared as \c "1" rejects \c "01", because those select different primitive types.
+    @since %WSDL 0.5.8
+*/
+public class XsdUnionDataField inherits QoreDataField {
+    private {
+        UnionDataType comparison;
+    }
+
+    private static hash<auto> withoutChoices(hash<auto> info) {
+        remove info.allowed_values;
+        remove info.element_allowed_values;
+        return info;
+    }
+
+    #! constructs a field with union-aware choices
+    /** @param info ordinary QoreDataField properties
+        @param comparison the union provider supplying primitive value comparison
+        @throw RUNTIME-TYPE-ERROR a choice is outside the base union's value space
+    */
+    constructor(hash<auto> info, UnionDataType comparison) : QoreDataField(XsdUnionDataField::withoutChoices(info)) {
+        self.comparison = comparison;
+        if (exists info.allowed_values) {
+            setAllowedValues(info.allowed_values, info.allowed_values_creatable);
+        }
+        if (exists info.element_allowed_values) {
+            setElementAllowedValues(info.element_allowed_values, info.element_allowed_values_creatable);
+        }
+    }
+
+    #! sets finite union choices independently of lexical restrictions
+    /** @param choices native values or AllowedValueInfo entries
+        @param creatable whether choices outside this field's finite list are permitted
+        @return this field
+        @throw RUNTIME-TYPE-ERROR a choice is outside the base union
+        @note The provider's schema enumeration remains enforced when creatable is True.
+    */
+    AbstractDataField setAllowedValues(list<auto> choices, *bool creatable) {
+        list<hash<AllowedValueInfo>> resolved = resolveChoices(choices);
+        hash<string, bool> values = map {comparison.valueKey($1.value): True}, resolved;
+        allowed_values = resolved;
+        allowed_values_map = values;
+        allowed_values_creatable = creatable ?? False;
+        return self;
+    }
+
+    #! sets finite choices for repeated union elements
+    /** @param choices native values or AllowedValueInfo entries for individual elements
+        @param creatable whether element values outside these choices are permitted
+        @return this field
+        @throw RUNTIME-TYPE-ERROR a choice is outside the base union
+    */
+    AbstractDataField setElementAllowedValues(list<auto> choices, *bool creatable) {
+        list<hash<AllowedValueInfo>> resolved = resolveChoices(choices);
+        hash<string, bool> values = map {comparison.valueKey($1.value): True}, resolved;
+        element_allowed_values = resolved;
+        element_allowed_values_map = values;
+        element_allowed_values_creatable = creatable ?? False;
+        return self;
+    }
+
+    private static list<hash<AllowedValueInfo>> resolveChoices(list<auto> choices) {
+        return map $1.typeCode() == NT_HASH ? new hash<AllowedValueInfo>($1)
+            : <AllowedValueInfo>{"value": $1, "display_name": XsdDataFieldHelper::display($1)}, choices;
+    }
+
+    #! validates the union and compares finite choices in its value space
+    /** @param value a native value or XML lexical spelling
+        @return the validated value, retaining its spelling when required
+        @throw FIELD-VALUE-ERROR the value is outside the finite choices
+        @throw RUNTIME-TYPE-ERROR the underlying type rejects the value
+        @throw MISSING-VALUE-ERROR a required value is absent
+    */
+    auto acceptsValue(auto value) {
+        if (!exists value && exists (auto default_value = getDefaultValue())) {
+            value = default_value;
+        }
+        on_error rethrow $1.err, sprintf("%s (while setting field %Y)", $1.desc, getName()), $1.arg;
+        value = getType().acceptsValue(value);
+        if (exists value && allowed_values && !allowed_values_creatable
+                && !allowed_values_map{comparison.valueKey(value)}) {
+            throw "FIELD-VALUE-ERROR", sprintf("field %Y does not accept union value %Y", getName(), value);
+        }
+        if (exists value && element_allowed_values && !element_allowed_values_creatable) {
+            foreach auto item in (value) {
+                if (!element_allowed_values_map{comparison.valueKey(item)}) {
+                    throw "FIELD-VALUE-ERROR", sprintf("field %Y does not accept union element %Y", getName(), item);
+                }
+            }
+        }
+        return value;
+    }
+}
+
 class XsdDataFieldHelper {
     static string display(auto value) {
         return value.typeCode() == NT_LIST ? (map string($1), value).join(" ") : string(value);
@@ -4470,8 +4571,12 @@ class XsdDataFieldHelper {
         if (list_item) {
             return new XsdListDataField(info, list_item);
         }
+        XsdAbstractType original = schema;
         while (schema instanceof XsdSimpleType && cast<XsdSimpleType>(schema).type) {
             schema = cast<XsdSimpleType>(schema).type;
+        }
+        if (schema instanceof XsdSimpleType && cast<XsdSimpleType>(schema).unionTypes) {
+            return new XsdUnionDataField(info, cast<UnionDataType>(original.getDataProviderType()));
         }
         if (schema instanceof XsdBaseType && (schema.name == "decimal" || XsdIntegerLexicalHelper::Types{schema.name})) {
             return new XsdNumericDataField(info, schema.name);
@@ -6328,6 +6433,9 @@ public class XsdSimpleContentDataType inherits AbstractDataProviderType {
 hashdecl XsdUnionTrialResult {
     bool accepted;
     auto value;
+    *hash<XsdUnionValueIdentity> identity;
+    *string lexical;
+    bool owner = False;
 }
 
 class XsdUnionTrialContext {
@@ -6384,6 +6492,142 @@ class XsdUnionInputHelper {
     }
 }
 
+hashdecl XsdUnionValueIdentity {
+    string family;
+    auto value;
+}
+
+#! Atomic value metadata retained by a union provider
+/** Contains the primitive spelling rules and corresponding provider without retaining the source schema.
+    @since %WSDL 0.5.8
+*/
+public hashdecl XsdUnionAtomicInfo {
+    #! Builtin local name
+    string builtin;
+    #! Effective XML whitespace rule
+    string white_space;
+    #! Whether an inherited pattern requires the accepted spelling
+    bool preserve_lexical;
+    #! Member provider identity, absent for schema-only value comparisons
+    *AbstractDataProviderType provider;
+}
+
+# Value comparison is separate from native input identity. Integer and decimal
+# members share a value space; boolean and string values remain distinct from it.
+class XsdUnionValueHelper {
+    const StringFamily = {"string": True, "normalizedString": True, "token": True, "language": True,
+        "Name": True, "NCName": True, "NMTOKEN": True, "ID": True, "IDREF": True, "ENTITY": True};
+
+    static bool supports(string builtin) {
+        return builtin == "decimal" || builtin == "boolean" || builtin == "hexBinary" || builtin == "base64Binary"
+            || XsdIntegerLexicalHelper::Types{builtin} || StringFamily{builtin};
+    }
+
+    # Returns exact identities for the scalar families with completed value rules.
+    # Other kinds are described by their own datatype conversion paths.
+    static *hash<XsdUnionValueIdentity> atomicIdentity(XsdAbstractType member, auto input, auto converted,
+            string error) {
+        *hash<XsdUnionAtomicInfo> info = describeAtomic(member);
+        return info ? atomicIdentity(info, input, converted, error) : NOTHING;
+    }
+
+    static *hash<XsdUnionAtomicInfo> describeAtomic(XsdAbstractType member, *AbstractDataProviderType provider) {
+        XsdAbstractType base = member;
+        bool preserve_lexical = False;
+        hash<string, bool> visited();
+        while (base instanceof XsdSimpleType && cast<XsdSimpleType>(base).type) {
+            if (Class::getClass(base).getPathName() != "WSDL::XsdSimpleType") {
+                return;
+            }
+            string key = base.uniqueHash();
+            if (visited{key}) {
+                throw "XSD-SIMPLETYPE-ERROR", "cyclic atomic union member metadata";
+            }
+            visited{key} = True;
+            preserve_lexical = preserve_lexical || boolean(cast<XsdSimpleType>(base).patterns);
+            base = cast<XsdSimpleType>(base).type;
+        }
+        # Extensions can override conversion even when they inherit a builtin name.
+        if (!(base instanceof XsdBaseType) || Class::getClass(base).getPathName() != "WSDL::XsdBaseType"
+                || !supports(base.name)) {
+            return;
+        }
+        return <XsdUnionAtomicInfo>{"builtin": base.name, "white_space": member.getWhiteSpace(),
+            "preserve_lexical": preserve_lexical, "provider": provider};
+    }
+
+    static *hash<XsdUnionValueIdentity> atomicIdentity(hash<XsdUnionAtomicInfo> info, auto input, auto converted,
+            string error) {
+        string builtin = info.builtin;
+        if (builtin == "decimal" || XsdIntegerLexicalHelper::Types{builtin}) {
+            return <XsdUnionValueIdentity>{"family": "decimal", "value": XsdDecimalLexicalHelper::canonical(
+                XsdDecimalLexicalHelper::lexical(XsdScalarTextHelper::value(input, error), error))};
+        }
+        if (builtin == "boolean") {
+            return <XsdUnionValueIdentity>{"family": "boolean", "value": XsdBooleanLexicalHelper::decode(
+                XsdScalarTextHelper::value(input, error), error)};
+        }
+        if (StringFamily{builtin}) {
+            return <XsdUnionValueIdentity>{"family": "string", "value": XsdSimpleType::normalizeWhiteSpace(
+                string(XsdScalarTextHelper::value(input, error)), info.white_space)};
+        }
+        if (builtin == "hexBinary" || builtin == "base64Binary") {
+            auto value;
+            try {
+                Namespaces ns({});
+                value = input.typeCode() == NT_BINARY ? input : converted.typeCode() == NT_BINARY ? converted
+                    : ns.getBaseType(builtin).deserializeValue("value", new hash<string, XsdAbstractType>(), NOTHING,
+                        XsdScalarTextHelper::value(input, error));
+            } catch (hash<ExceptionInfo> ex) {
+                if (ex.err == SOAP_DESERIALIZATION_ERROR) {
+                    rethrow error, ex.desc, ex.arg;
+                }
+                rethrow;
+            }
+            @assert(value.typeCode() == NT_BINARY);
+            return <XsdUnionValueIdentity>{"family": builtin, "value": value};
+        }
+    }
+
+    static string lexical(hash<XsdUnionAtomicInfo> info, auto converted) {
+        if (info.preserve_lexical && converted.typeCode() == NT_STRING) {
+            return converted;
+        }
+        Namespaces ns({});
+        auto value = ns.getBaseType(info.builtin).serializeValue(ns, converted, True);
+        return text(value, SOAP_SERIALIZATION_ERROR);
+    }
+
+    static string text(auto value, string error) {
+        value = XsdScalarTextHelper::value(value, error);
+        return value.typeCode() == NT_FLOAT || value.typeCode() == NT_NUMBER
+            ? value.toStringRoundTrip() : string(value);
+    }
+
+    static auto xmlValue(auto value, *Namespaces namespaces) {
+        string lexical = text(value, SOAP_SERIALIZATION_ERROR);
+        if (value.typeCode() == NT_HASH) {
+            value."^value^" = lexical;
+            if (namespaces) {
+                foreach string key in (keys value."^attributes^") {
+                    *string prefix = (key =~ x/^([^:]+):[^:]+$/)[0];
+                    if (prefix && prefix != "xmlns" && !value."^attributes^".hasKey("xmlns:" + prefix)) {
+                        # Builtin serializers use the envelope's fixed xsi prefix for type annotations.
+                        value."^attributes^"{"xmlns:" + prefix} = prefix == "xsi" ? XSI_NS
+                            : namespaces.getOutputNamespaceUri(prefix);
+                    }
+                }
+            }
+            return value;
+        }
+        return lexical;
+    }
+
+    static bool same(hash<XsdUnionValueIdentity> left, hash<XsdUnionValueIdentity> right) {
+        return left.family == right.family && XsdUnionInputHelper::sameInput(left.value, right.value);
+    }
+}
+
 hashdecl XsdSchemaUnionTrialResult inherits XsdUnionTrialResult {
     *string rejection;
 }
@@ -6398,6 +6642,7 @@ class XsdSchemaUnionTrialContext {
         *hash<auto> references;
         hash<string, bool> active();
         hash<string, hash<XsdSchemaUnionTrialResult>> results();
+        hash<string, hash<XsdUnionValueIdentity>> identities();
     }
     constructor(auto input) {
         self.input = input;
@@ -6406,6 +6651,7 @@ class XsdSchemaUnionTrialContext {
 
 thread_local *XsdSchemaUnionTrialContext SchemaUnionSerializeContext;
 thread_local *XsdSchemaUnionTrialContext SchemaUnionDeserializeContext;
+thread_local *bool SchemaUnionValueProbe;
 
 class XsdUnionMetadataContext {
     public {
@@ -6421,7 +6667,9 @@ thread_local *XsdUnionTrialContext UnionTrialContext;
 thread_local *XsdUnionMetadataContext UnionMetadataContext;
 
 #! provider validating XSD union alternatives in their declared order
-/** Values are returned by the first member that accepts them. Ordinary type rejection
+/** Member selection uses the first member that accepts the supplied value. Scalar lexical input is retained
+    when its native conversion would change the primitive family or value during serialization.
+    Union patterns and enumerations remain active in detached providers. Ordinary type rejection
     permits the next alternative; cancellation and unexpected errors propagate unchanged.
     Shared nested unions are evaluated once per input and operation. Traversal state is local
     to the current thread and cleared on completion or error; cyclic member metadata is rejected.
@@ -6434,6 +6682,10 @@ thread_local *XsdUnionMetadataContext UnionMetadataContext;
 public class UnionDataType inherits AbstractDataProviderType {
     private {
         bool optional = False;
+        transient list<*hash<XsdUnionAtomicInfo>> atomic_members;
+        transient hash<string, hash<XsdUnionAtomicInfo>> atomic_types();
+        *list<string> patterns;
+        *list<string> enumeration;
     }
 
     public {
@@ -6450,6 +6702,41 @@ public class UnionDataType inherits AbstractDataProviderType {
             throw "XSD-SIMPLETYPE-ERROR", "a union requires at least one member";
         }
         types = map $1.getDataProviderType(), unionTypes;
+        atomic_members = map XsdUnionValueHelper::describeAtomic($1, types[$#]), unionTypes;
+        indexAtomicMembers();
+    }
+
+    #! constructs a restriction retaining its base union's value and lexical constraints
+    /** @param restriction a resolved restriction of a union
+        @throw XSD-SIMPLETYPE-ERROR the supplied type does not restrict a union
+    */
+    constructor(XsdSimpleType restriction) {
+        if (!(restriction.type instanceof XsdSimpleType)) {
+            throw "XSD-SIMPLETYPE-ERROR", "a union restriction requires a union base";
+        }
+        AbstractDataProviderType base = restriction.type.getDataProviderType();
+        if (!(base instanceof UnionDataType)) {
+            throw "XSD-SIMPLETYPE-ERROR", "a union restriction requires a union base provider";
+        }
+        types = (base,);
+        atomic_members = (NOTHING,);
+        patterns = restriction.pcre_patterns;
+        enumeration = restriction.enumValues ? keys restriction.enumValues : NOTHING;
+    }
+
+    private indexAtomicMembers() {
+        atomic_types = {};
+        foreach *hash<XsdUnionAtomicInfo> info in (atomic_members) {
+            if (info) {
+                atomic_types{info.provider.uniqueHash()} = info;
+            }
+        }
+    }
+
+    private:internal hash<auto> serializeMembers(*hash<auto> members) {
+        # Public member lists can be reordered or replaced. Retain metadata only for the corresponding objects.
+        return {"types": types, "optional": optional, "patterns": patterns, "enumeration": enumeration,
+            "atomic_members": map atomic_types{$1.uniqueHash()}, types};
     }
 
     private:internal deserializeMembers(hash<auto> members) {
@@ -6469,6 +6756,75 @@ public class UnionDataType inherits AbstractDataProviderType {
         }
         types = resolved;
         optional = members.optional ?? False;
+        atomic_members = ();
+        if (exists members.atomic_members) {
+            if (members.atomic_members.typeCode() != NT_LIST || members.atomic_members.size() != types.size()) {
+                throw "DESERIALIZATION-ERROR", "union atomic metadata must correspond to its ordered members";
+            }
+            foreach auto info in (members.atomic_members) {
+                if (!exists info) {
+                    push atomic_members, NOTHING;
+                    continue;
+                }
+                if (info.typeCode() != NT_HASH || info.builtin.typeCode() != NT_STRING
+                        || !XsdUnionValueHelper::supports(info.builtin)
+                        || info.white_space.typeCode() != NT_STRING
+                        || (info.white_space != "preserve" && info.white_space != "replace"
+                            && info.white_space != "collapse")
+                        || info.preserve_lexical.typeCode() != NT_BOOLEAN
+                        || info.provider !== types[$#]) {
+                    throw "DESERIALIZATION-ERROR", "invalid union atomic value metadata";
+                }
+                if ((info.builtin != "string" && info.builtin != "normalizedString" && info.white_space != "collapse")
+                        || (info.builtin == "normalizedString" && info.white_space == "preserve")) {
+                    throw "DESERIALIZATION-ERROR", "union atomic whitespace metadata weakens its builtin rule";
+                }
+                push atomic_members, new hash<XsdUnionAtomicInfo>(info);
+            }
+        } else {
+            atomic_members = map NOTHING, types;
+        }
+        foreach string key in ("patterns", "enumeration") {
+            if (!exists members{key}) {
+                continue;
+            }
+            if (members{key}.typeCode() != NT_LIST || !members{key}) {
+                throw "DESERIALIZATION-ERROR", sprintf("union %s metadata requires a non-empty string list", key);
+            }
+            foreach auto value in (members{key}) {
+                if (value.typeCode() != NT_STRING) {
+                    throw "DESERIALIZATION-ERROR", sprintf("union %s values must be strings", key);
+                }
+                if (key == "patterns") {
+                    try {
+                        bool empty_match = regex("", value);
+                    } catch (hash<ExceptionInfo> ex) {
+                        if (ex.err == "REGEX-ERROR" || ex.err == "REGEX-COMPILATION-ERROR") {
+                            rethrow "DESERIALIZATION-ERROR", ex.desc, ex.arg;
+                        }
+                        rethrow;
+                    }
+                }
+            }
+        }
+        patterns = members.patterns;
+        enumeration = members.enumeration;
+        if ((patterns || enumeration) && (types.size() != 1 || !(types[0] instanceof UnionDataType))) {
+            throw "DESERIALIZATION-ERROR", "union restriction facets require one union base provider";
+        }
+        indexAtomicMembers();
+        foreach string allowed in (enumeration) {
+            try {
+                cast<UnionDataType>(types[0]).trialValue(allowed);
+            } catch (hash<ExceptionInfo> ex) {
+                if (ex.err != "RUNTIME-TYPE-ERROR" && ex.err != "MISSING-VALUE-ERROR"
+                        && ex.err != "FIELD-VALUE-ERROR") {
+                    rethrow;
+                }
+                throw "DESERIALIZATION-ERROR", sprintf("enumeration value %Y is outside the union base: %s",
+                    allowed, ex.desc);
+            }
+        }
     }
 
     #! returns the union provider name
@@ -6593,6 +6949,10 @@ public class UnionDataType inherits AbstractDataProviderType {
         foreach AbstractDataProviderType member in (types) {
             result += output ? member.getReturnTypeHash(simple) : member.getAcceptTypeHash(simple);
         }
+        if (output) {
+            # A native conversion can change member selection when serialized; retain lexical text in that case.
+            result.string = True;
+        }
         if (optional) {
             result.nothing = True;
         } else {
@@ -6604,7 +6964,7 @@ public class UnionDataType inherits AbstractDataProviderType {
 
     #! validates members in declaration order and returns the first accepted conversion
     /** @param value the supplied native or XML lexical value
-        @return the accepted member value, or NOTHING for an optional omission
+        @return the accepted member value or retained lexical spelling, or NOTHING for an optional omission
         @throw MISSING-VALUE-ERROR a required union value is omitted
         @throw RUNTIME-TYPE-ERROR no member accepts the value
         @throw XSD-SIMPLETYPE-ERROR member metadata contains a cycle
@@ -6616,19 +6976,25 @@ public class UnionDataType inherits AbstractDataProviderType {
             }
             throw "MISSING-VALUE-ERROR", "a union value must be supplied";
         }
+        hash<XsdUnionTrialResult> result = trialValue(value);
+        return result.owner ? preserveValue(value, result) : result.value;
+    }
+
+    private hash<XsdUnionTrialResult> trialValue(auto value) {
         *XsdUnionTrialContext caller = UnionTrialContext;
         bool owner = !exists caller || !XsdUnionInputHelper::sameInput(caller.input, value);
-        if (owner) {
-            UnionTrialContext = new XsdUnionTrialContext(value);
-        }
         on_exit if (owner) {
             UnionTrialContext = caller;
+        }
+        if (owner) {
+            UnionTrialContext = new XsdUnionTrialContext(value);
         }
         string key = self.uniqueHash();
         if (UnionTrialContext.results.hasKey(key)) {
             hash<XsdUnionTrialResult> result = UnionTrialContext.results{key};
             if (result.accepted) {
-                return result.value;
+                result.owner = owner;
+                return result;
             }
             rejectValue(value);
         }
@@ -6638,19 +7004,130 @@ public class UnionDataType inherits AbstractDataProviderType {
         UnionTrialContext.active{key} = True;
         on_exit remove UnionTrialContext.active{key};
         foreach AbstractDataProviderType t in (types) {
+            *hash<XsdUnionTrialResult> result;
+            *hash<XsdUnionAtomicInfo> info = atomic_types{t.uniqueHash()};
             try {
                 auto converted = t.acceptsValue(value);
-                UnionTrialContext.results{key} = <XsdUnionTrialResult>{"accepted": True, "value": converted};
-                return converted;
+                result = UnionTrialContext.results{t.uniqueHash()};
+                if (!result) {
+                    result = <XsdUnionTrialResult>{"accepted": True, "value": converted};
+                    if (info) {
+                        result.identity = XsdUnionValueHelper::atomicIdentity(info, value, converted,
+                            "RUNTIME-TYPE-ERROR");
+                        if (result.identity) {
+                            result.lexical = XsdUnionValueHelper::lexical(info, converted);
+                        }
+                    }
+                }
             } catch (hash<ExceptionInfo> ex) {
+                # Qore's binary providers expose their native lexical parser errors directly.
+                # Only the matching builtin's input rejection permits trying another XSD member.
+                if (info && ((info.builtin == "hexBinary" && ex.err == "PARSE-HEX-ERROR")
+                        || (info.builtin == "base64Binary" && ex.err == "BASE64-PARSE-ERROR"))) {
+                    continue;
+                }
                 if (ex.err != "RUNTIME-TYPE-ERROR" && ex.err != "MISSING-VALUE-ERROR"
                         && ex.err != "FIELD-VALUE-ERROR") {
                     rethrow;
                 }
+                continue;
             }
+            @assert(result);
+            hash<XsdUnionTrialResult> checked = result;
+            try {
+                validateFacets(value, \checked);
+            } catch (hash<ExceptionInfo> ex) {
+                if (ex.err == "RUNTIME-TYPE-ERROR" || ex.err == "MISSING-VALUE-ERROR"
+                        || ex.err == "FIELD-VALUE-ERROR") {
+                    UnionTrialContext.results{key} = <XsdUnionTrialResult>{"accepted": False};
+                }
+                rethrow;
+            }
+            checked.owner = owner;
+            UnionTrialContext.results{key} = checked;
+            return checked;
         }
         UnionTrialContext.results{key} = <XsdUnionTrialResult>{"accepted": False};
         rejectValue(value);
+    }
+
+    private validateFacets(auto value, reference<hash<XsdUnionTrialResult>> result) {
+        string lexical = value.typeCode() == NT_STRING ? value : result.lexical ?? string(value);
+        if (patterns) {
+            bool matched = False;
+            foreach string pattern in (patterns) {
+                if (regex(lexical, pattern)) {
+                    matched = True;
+                    break;
+                }
+            }
+            if (!matched) {
+                rejectValue(value);
+            }
+            result.value = lexical;
+            result.lexical = lexical;
+        }
+        if (enumeration) {
+            foreach string allowed in (enumeration) {
+                @assert(types.size() == 1 && types[0] instanceof UnionDataType);
+                hash<XsdUnionTrialResult> candidate = cast<UnionDataType>(types[0]).trialValue(allowed);
+                if (result.identity && candidate.identity
+                        ? XsdUnionValueHelper::same(result.identity, candidate.identity) : lexical === allowed) {
+                    return;
+                }
+            }
+            rejectValue(value);
+        }
+    }
+
+    private auto preserveValue(auto input, hash<XsdUnionTrialResult> result) {
+        if (!result.identity || input.typeCode() != NT_STRING
+                || (result.value.typeCode() == NT_STRING && result.value === input)) {
+            return result.value;
+        }
+        try {
+            hash<XsdUnionTrialResult> encoded = trialValue(result.value);
+            if (exists encoded.lexical) {
+                hash<XsdUnionTrialResult> observed = trialValue(encoded.lexical);
+                if (observed.identity && XsdUnionValueHelper::same(result.identity, observed.identity)) {
+                    return result.value;
+                }
+            }
+        } catch (hash<ExceptionInfo> ex) {
+            if (ex.err != "RUNTIME-TYPE-ERROR" && ex.err != "MISSING-VALUE-ERROR" && ex.err != "FIELD-VALUE-ERROR") {
+                rethrow;
+            }
+        }
+        return input;
+    }
+
+    #! returns a comparison key for a finite choice in the underlying union value space
+    /** @param value a native or lexical choice
+        @return a key retaining primitive family and exact value
+        @throw RUNTIME-TYPE-ERROR no underlying union member accepts the choice
+        @throw XSD-SIMPLETYPE-ERROR cyclic union metadata
+        @note This union's outer pattern and enumeration restrictions are checked by acceptsValue().
+    */
+    string valueKey(auto value) {
+        UnionDataType base = self;
+        hash<string, bool> visited();
+        while (base.patterns || base.enumeration) {
+            string key = base.uniqueHash();
+            if (visited{key}) {
+                throw "XSD-SIMPLETYPE-ERROR", "cyclic union restriction metadata";
+            }
+            visited{key} = True;
+            if (base.types.size() != 1 || !(base.types[0] instanceof UnionDataType)) {
+                throw "XSD-SIMPLETYPE-ERROR", "union restriction requires a union base";
+            }
+            base = cast<UnionDataType>(base.types[0]);
+        }
+        hash<XsdUnionTrialResult> result = base.trialValue(value);
+        if (result.identity) {
+            return result.identity.family + ":" + (result.identity.value.typeCode() == NT_BINARY
+                ? make_hex_string(result.identity.value) : string(result.identity.value));
+        }
+        return result.value.type() + ":" + string(result.value);
     }
 
     private static rejectValue(auto value) {
@@ -8197,6 +8674,20 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
                 || exists maxInclusive || exists maxExclusive)) {
             throw "XSD-SIMPLETYPE-ERROR", "union restrictions permit only pattern and enumeration facets";
         }
+        if (kind == "union" && type && enumValues) {
+            foreach string lexical in (keys enumValues) {
+                try {
+                    cast<XsdSimpleType>(type).deserializeUnion("enumeration", new hash<string, XsdAbstractType>(),
+                        NOTHING, lexical);
+                } catch (hash<ExceptionInfo> ex) {
+                    if (ex.err != SOAP_DESERIALIZATION_ERROR) {
+                        rethrow;
+                    }
+                    throw "XSD-SIMPLETYPE-ERROR", sprintf("enumeration value %Y is not valid for union base of %Y: %s",
+                        lexical, name, ex.desc);
+                }
+            }
+        }
         if (kind == "boolean" && (enumValues || exists minInclusive || exists minExclusive
                 || exists maxInclusive || exists maxExclusive)) {
             throw "XSD-SIMPLETYPE-ERROR", "boolean permits only pattern and whiteSpace facets";
@@ -8482,6 +8973,9 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
             return new XsdNumericRestrictionDataType(getNumericFacets(), type.getDataProviderType());
         }
         string kind = getFacetKind();
+        if (kind == "union" && type) {
+            return new UnionDataType(self);
+        }
         if (kind == "boolean") {
             return new XsdBooleanRestrictionDataType(<XsdBooleanFacetInfo>{"name": name,
                 "patterns": pcre_patterns}, type.getDataProviderType());
@@ -8577,6 +9071,9 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
         try {
             return type.deserializeValue(name, new hash<string, XsdAbstractType>(), NOTHING, val);
         } catch (hash<ExceptionInfo> ex) {
+            if (ex.err != SOAP_DESERIALIZATION_ERROR || getFacetKind() == "union") {
+                rethrow;
+            }
             # if the enumeration value cannot be converted, then report it as declared in the schema
             return val;
         }
@@ -8636,6 +9133,12 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
             return serialized;
         }
 
+        if (getFacetKind() == "union") {
+            hash<XsdSchemaUnionTrialResult> result = serializeUnion(nsc, val, omitType);
+            return XsdScalarTextHelper::withComments(rh,
+                result.owner && !SchemaUnionValueProbe ? preserveUnionLexical(nsc, val, result) : result.value);
+        }
+
         if (!exists val && getFacetKind() == "list" && hasNativeListValue()) {
             val = ();
         }
@@ -8650,16 +9153,12 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
                 "list<auto> (%y)", val, name, enumValues.keys());
         }
 
-        if (unionTypes) {
-            return XsdScalarTextHelper::withComments(rh, serializeUnion(nsc, val, omitType));
-        }
-
         return XsdScalarTextHelper::withComments(rh, type.serializeValue(nsc, val, omitType));
     }
 
     # A cached ordinary rejection is local to one value and its complete conversion
     # context. Unexpected failures and cancellation always unwind to the caller.
-    private auto serializeUnion(Namespaces nsc, auto val, *softbool omitType) {
+    private hash<XsdSchemaUnionTrialResult> serializeUnion(Namespaces nsc, auto val, *softbool omitType) {
         *XsdSchemaUnionTrialContext caller = SchemaUnionSerializeContext;
         bool owner = !caller || caller.namespaces !== nsc || caller.omit_type !== omitType
             || !XsdUnionInputHelper::sameInput(caller.input, val);
@@ -8679,12 +9178,15 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
         trial.active{identity} = True;
         on_exit remove trial.active{identity};
         list<string> rejected();
-        foreach XsdAbstractType member in (unionTypes) {
+        foreach XsdAbstractType member in (unionTypes ? unionTypes : (type,)) {
             string key = member.uniqueHash();
             if (!trial.results.hasKey(key)) {
                 try {
                     auto value = member.serializeValue(nsc, val, omitType);
-                    trial.results{key} = <XsdSchemaUnionTrialResult>{"accepted": True, "value": value};
+                    *hash<XsdUnionValueIdentity> member_identity = trial.identities{key}
+                        ?? XsdUnionValueHelper::atomicIdentity(member, val, value, SOAP_SERIALIZATION_ERROR);
+                    trial.results{key} = <XsdSchemaUnionTrialResult>{"accepted": True, "value": value,
+                        "identity": member_identity};
                 } catch (hash<ExceptionInfo> ex) {
                     if (ex.err != SOAP_SERIALIZATION_ERROR) {
                         rethrow;
@@ -8695,14 +9197,57 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
             }
             hash<XsdSchemaUnionTrialResult> result = trial.results{key};
             if (result.accepted) {
-                return result.value;
+                auto lexical = XsdScalarTextHelper::value(val, SOAP_SERIALIZATION_ERROR);
+                if (lexical.typeCode() != NT_STRING) {
+                    lexical = string(XsdScalarTextHelper::value(result.value, SOAP_SERIALIZATION_ERROR));
+                }
+                validateUnionFacets(lexical, result.identity, "serialize");
+                if (patterns) {
+                    result.value = withUnionLexical(result.value, lexical);
+                }
+                if (result.identity) {
+                    trial.identities{identity} = result.identity;
+                }
+                result.owner = owner;
+                return result;
             }
             rejected += result.rejection;
         }
         throw SOAP_SERIALIZATION_ERROR, sprintf("value %Y cannot be serialized with union types for %Y: %Y", val, name, rejected);
     }
 
-    private auto deserializeUnion(string en, hash<string, XsdAbstractType> tmap, *hash<auto> mrh, auto val) {
+    private auto preserveUnionLexical(Namespaces namespaces, auto input, hash<XsdSchemaUnionTrialResult> result) {
+        if (!result.identity || input.typeCode() != NT_STRING
+                || (result.value.typeCode() == NT_STRING && result.value === input)) {
+            return result.value;
+        }
+        *bool caller = SchemaUnionValueProbe;
+        on_exit SchemaUnionValueProbe = caller;
+        SchemaUnionValueProbe = True;
+        try {
+            hash<XsdSchemaUnionTrialResult> observed = deserializeUnion("value",
+                new hash<string, XsdAbstractType>(), NOTHING, XsdUnionValueHelper::xmlValue(result.value, namespaces));
+            if (observed.identity && XsdUnionValueHelper::same(result.identity, observed.identity)) {
+                return result.value;
+            }
+        } catch (hash<ExceptionInfo> ex) {
+            if (ex.err != SOAP_DESERIALIZATION_ERROR) {
+                rethrow;
+            }
+        }
+        return withUnionLexical(result.value, input);
+    }
+
+    private static auto withUnionLexical(auto value, string lexical) {
+        if (value.typeCode() == NT_HASH) {
+            value."^value^" = lexical;
+            return value;
+        }
+        return lexical;
+    }
+
+    private hash<XsdSchemaUnionTrialResult> deserializeUnion(string en, hash<string, XsdAbstractType> tmap,
+            *hash<auto> mrh, auto val) {
         *XsdSchemaUnionTrialContext caller = SchemaUnionDeserializeContext;
         bool owner = !caller || caller.element_name !== en || caller.type_map !== tmap
             || !XsdUnionInputHelper::sameInput(caller.references, mrh)
@@ -8724,12 +9269,15 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
         trial.active{identity} = True;
         on_exit remove trial.active{identity};
         list<string> rejected();
-        foreach XsdAbstractType member in (unionTypes) {
+        foreach XsdAbstractType member in (unionTypes ? unionTypes : (type,)) {
             string key = member.uniqueHash();
             if (!trial.results.hasKey(key)) {
                 try {
                     auto value = member.deserializeValue(en, tmap, mrh, val);
-                    trial.results{key} = <XsdSchemaUnionTrialResult>{"accepted": True, "value": value};
+                    *hash<XsdUnionValueIdentity> member_identity = trial.identities{key}
+                        ?? XsdUnionValueHelper::atomicIdentity(member, val, value, SOAP_DESERIALIZATION_ERROR);
+                    trial.results{key} = <XsdSchemaUnionTrialResult>{"accepted": True, "value": value,
+                        "identity": member_identity};
                 } catch (hash<ExceptionInfo> ex) {
                     if (ex.err != SOAP_DESERIALIZATION_ERROR) {
                         rethrow;
@@ -8740,12 +9288,78 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
             }
             hash<XsdSchemaUnionTrialResult> result = trial.results{key};
             if (result.accepted) {
-                return result.value;
+                string lexical = string(XsdScalarTextHelper::value(val, SOAP_DESERIALIZATION_ERROR));
+                validateUnionFacets(lexical, result.identity, "deserialize");
+                if (patterns) {
+                    result.value = lexical;
+                }
+                if (result.identity) {
+                    trial.identities{identity} = result.identity;
+                }
+                result.owner = owner;
+                return result;
             }
             rejected += result.rejection;
         }
         throw SOAP_DESERIALIZATION_ERROR, sprintf("value %Y cannot be deserialized with union types for %Y in element %Y: %Y",
             val, name, en, rejected);
+    }
+
+    private validateUnionFacets(string lexical, *hash<XsdUnionValueIdentity> identity, string operation) {
+        validateFacets(lexical, operation, lexical);
+        if (!enumValues) {
+            return;
+        }
+        string error = operation == "serialize" ? SOAP_SERIALIZATION_ERROR : SOAP_DESERIALIZATION_ERROR;
+        foreach string allowed in (keys enumValues) {
+            hash<XsdSchemaUnionTrialResult> candidate = cast<XsdSimpleType>(type).deserializeUnion("enumeration",
+                new hash<string, XsdAbstractType>(), NOTHING, allowed);
+            if (identity && candidate.identity ? XsdUnionValueHelper::same(identity, candidate.identity)
+                    : lexical === allowed) {
+                return;
+            }
+        }
+        throw error, sprintf("union value %Y for %Y is outside its enumeration", lexical, name);
+    }
+
+    private auto preserveUnionValue(string en, hash<string, XsdAbstractType> tmap, *hash<auto> mrh, auto input,
+            hash<XsdSchemaUnionTrialResult> result) {
+        if (!result.identity) {
+            return result.value;
+        }
+        auto lexical = XsdScalarTextHelper::value(input, SOAP_DESERIALIZATION_ERROR);
+        if (lexical.typeCode() != NT_STRING || (result.value.typeCode() == NT_STRING && result.value === lexical)) {
+            return result.value;
+        }
+        *bool caller = SchemaUnionValueProbe;
+        on_exit SchemaUnionValueProbe = caller;
+        SchemaUnionValueProbe = True;
+        auto encoded;
+        try {
+            # Finalized schema types release their construction namespace registry.
+            # Scalar value probes omit type annotations and use an independent registry.
+            Namespaces probe_namespaces({});
+            encoded = XsdUnionValueHelper::xmlValue(serializeValue(probe_namespaces, result.value, True));
+        } catch (hash<ExceptionInfo> ex) {
+            if (ex.err != SOAP_SERIALIZATION_ERROR) {
+                rethrow;
+            }
+            return lexical;
+        }
+        if (encoded.typeCode() == NT_STRING && encoded === lexical) {
+            return result.value;
+        }
+        try {
+            hash<XsdSchemaUnionTrialResult> observed = deserializeUnion(en, tmap, mrh, encoded);
+            if (observed.identity && XsdUnionValueHelper::same(result.identity, observed.identity)) {
+                return result.value;
+            }
+        } catch (hash<ExceptionInfo> ex) {
+            if (ex.err != SOAP_DESERIALIZATION_ERROR) {
+                rethrow;
+            }
+        }
+        return lexical;
     }
 
     private static string unionRejection(XsdAbstractType member, hash<ExceptionInfo> ex) {
@@ -9418,8 +10032,9 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
             return deserializeList(en, tmap, mrh, val);
         }
 
-        if (unionTypes) {
-            return deserializeUnion(en, tmap, mrh, val);
+        if (getFacetKind() == "union") {
+            hash<XsdSchemaUnionTrialResult> result = deserializeUnion(en, tmap, mrh, val);
+            return result.owner && !SchemaUnionValueProbe ? preserveUnionValue(en, tmap, mrh, val, result) : result.value;
         }
 
         if (getNumericBaseName()) {
