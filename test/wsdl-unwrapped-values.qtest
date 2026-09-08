@@ -1,0 +1,170 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires xml
+%requires ../qlib/WSDL.qm
+%exec-class UnwrappedValuesTest
+
+class UnwrappedValuesTest inherits QUnit::Test {
+    private {
+        const Ns = "urn:unwrapped-values";
+        const Wild = '<xs:sequence><xs:any processContents="skip" maxOccurs="unbounded"/></xs:sequence>';
+        const Choice = '<xs:sequence><xs:choice><xs:element name="count" type="xs:int"/>
+            <xs:element name="flag" type="xs:boolean"/></xs:choice></xs:sequence>';
+    }
+
+    constructor() : Test("Unwrapped SOAP document values", "1.0") {
+        addTestCase("Unwrapped wildcard records retain expanded names and values", \wildcards());
+        addTestCase("Nested choice fields are selected from unwrapped records", \choices());
+        addTestCase("Message-name containers retain legacy unwrapped field lookup", \messageScopes());
+        addTestCase("Body wildcard selection preserves declared header values", \headers());
+        addTestCase("Multiple body parts require unambiguous wrappers", \multipleParts());
+        addTestCase("Attribute wildcards do not claim arbitrary child values", \attributeOnly());
+        set_return_value(main());
+    }
+
+    private WebService service(string version, string model, bool header = False, bool multiple = False) {
+        string soap_ns = "http://schemas.xmlsoap.org/wsdl/soap" + (version == "12" ? "12" : "") + "/";
+        string extra = (header || multiple) ? '<w:part name="context" element="t:Context"/>' : "";
+        string binding = header ? '<s:body use="literal" parts="body"/><s:header use="literal" message="t:In" part="context"/>'
+            : '<s:body use="literal"/>';
+        string output_binding = replace(binding, 'message="t:In"', 'message="t:Out"');
+        return new WebService(sprintf('<w:definitions xmlns:w="http://schemas.xmlsoap.org/wsdl/"
+            xmlns:t="%s" xmlns:s="%s" targetNamespace="%s"><w:types>
+            <xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" targetNamespace="%s">
+            <xs:complexType name="Record">%s</xs:complexType>
+            <xs:element name="Request" type="t:Record"/><xs:element name="Response" type="t:Record"/>
+            <xs:element name="Context" type="xs:string"/></xs:schema></w:types>
+            <w:message name="In"><w:part name="body" element="t:Request"/>%s</w:message>
+            <w:message name="Out"><w:part name="body" element="t:Response"/>%s</w:message>
+            <w:portType name="Port"><w:operation name="submit"><w:input message="t:In"/>
+            <w:output message="t:Out"/></w:operation></w:portType><w:binding name="Soap" type="t:Port">
+            <s:binding style="document" transport="http://schemas.xmlsoap.org/soap/http"/>
+            <w:operation name="submit"><s:operation soapAction="urn:submit"/>
+            <w:input>%s</w:input><w:output>%s</w:output></w:operation></w:binding>
+            <w:service name="Service"><w:port name="Port" binding="t:Soap">
+            <s:address location="http://example.invalid/"/></w:port></w:service></w:definitions>',
+            Ns, soap_ns, Ns, Ns, model, extra, extra, binding, output_binding), {"async_only": True});
+    }
+
+    private hash<auto> wire(WSOperation op, bool response, hash<auto> value) {
+        hash<auto> result = response
+            ? op.serializeResponse(value, NOTHING, NOTHING, NOTHING, NOTHING, NOTHING, "Soap")
+            : op.serializeRequest(value, NOTHING, NOTHING, NOTHING, NOTHING, NOTHING, "Soap");
+        return parse_xml(result.body);
+    }
+
+    private hash<auto> payload(hash<auto> envelope, bool response) {
+        envelope = XsdBase::expandElementNamespaces(envelope);
+        auto root = envelope.firstValue();
+        string env_ns = envelope.firstKey() =~ /2003/ ? "http://www.w3.org/2003/05/soap-envelope"
+            : "http://schemas.xmlsoap.org/soap/envelope/";
+        return root{make_qname(env_ns, "Body")}{make_qname(Ns, response ? "Response" : "Request")};
+    }
+
+    wildcards() {
+        foreach string version in ("11", "12") {
+            WebService original = service(version, Wild);
+            foreach WebService ws in (original, Serializable::deserialize(original.serialize())) {
+                WSOperation op = ws.getBindingOperation("Soap", "submit");
+                foreach bool response in (False, True) {
+                    hash<auto> value = {"{urn:first}item": "0", "{urn:second}item": "false", "{}empty": ""};
+                    hash<auto> before = value;
+                    hash<auto> bare = payload(wire(op, response, value), response);
+                    hash<auto> wrapped = payload(wire(op, response, {response ? "Response" : "Request": value}), response);
+                    assertEq(wrapped, bare);
+                    assertEq(before, value);
+                    assertEq(("{urn:first}item", "{urn:second}item", "{}empty"),
+                        select keys bare, $1 !~ /^\^/);
+                    assertEq("0", bare."{urn:first}item"."^value^");
+                    assertEq("false", bare."{urn:second}item"."^value^");
+                }
+            }
+        }
+    }
+
+    choices() {
+        foreach string version in ("11", "12") {
+            WebService ws = service(version, Choice);
+            WSOperation op = ws.getBindingOperation("Soap", "submit");
+            foreach bool response in (False, True) {
+                foreach hash<auto> value in ({"count": 0}, {"flag": False}) {
+                    hash<auto> xml = wire(op, response, value);
+                    assertEq(value, response ? op.deserializeResponse(xml, "Soap") : op.deserializeRequest(xml, "Soap"));
+                }
+                assertThrows("SOAP-SERIALIZATION-ERROR", \wire(), (op, response, {"count": 0, "flag": False}));
+            }
+        }
+    }
+
+    headers() {
+        foreach string version in ("11", "12") {
+            WebService ws = service(version, Wild, True);
+            WSOperation op = ws.getBindingOperation("Soap", "submit");
+            foreach bool response in (False, True) {
+                foreach string key in ("context", "Context") {
+                    hash<auto> value = {"{urn:item}entry": "payload", key: "account1"};
+                    hash<auto> xml = wire(op, response, value);
+                    hash<auto> expanded = XsdBase::expandElementNamespaces(xml);
+                    auto root = expanded.firstValue();
+                    string ns = version == "12" ? "http://www.w3.org/2003/05/soap-envelope"
+                        : "http://schemas.xmlsoap.org/soap/envelope/";
+                    assertEq("account1", root{make_qname(ns, "Header")}{make_qname(Ns, "Context")});
+                    hash<auto> body = payload(xml, response);
+                    assertEq(("{urn:item}entry",), select keys body, $1 !~ /^\^/);
+                    assertEq("payload", body."{urn:item}entry"."^value^");
+                }
+            }
+        }
+    }
+
+    messageScopes() {
+        foreach string version in ("11", "12") {
+            foreach string model in (Choice, Wild,
+                    '<xs:sequence><xs:element name="count" type="xs:int"/></xs:sequence>') {
+                WebService ws = service(version, model);
+                WSOperation op = ws.getBindingOperation("Soap", "submit");
+                foreach bool response in (False, True) {
+                    hash<auto> value = model == Wild ? {"{urn:item}entry": "payload"} : {"count": 0};
+                    assertEq(payload(wire(op, response, {"body": value}), response),
+                        payload(wire(op, response, {response ? "Out" : "In": value}), response));
+                }
+            }
+        }
+    }
+
+    multipleParts() {
+        foreach string version in ("11", "12") {
+            WebService ws = service(version, Wild, False, True);
+            WSOperation op = ws.getBindingOperation("Soap", "submit");
+            foreach bool response in (False, True) {
+                assertThrows("SOAP-SERIALIZATION-ERROR", \wire(), (op, response,
+                    {"{urn:item}entry": "payload", "context": "account1"}));
+                hash<auto> xml = XsdBase::expandElementNamespaces(wire(op, response,
+                    {"body": {"{urn:item}entry": "payload"}, "context": "account1"}));
+                string env_ns = version == "12" ? "http://www.w3.org/2003/05/soap-envelope"
+                    : "http://schemas.xmlsoap.org/soap/envelope/";
+                hash<auto> body = xml.firstValue(){make_qname(env_ns, "Body")};
+                string key = make_qname(Ns, response ? "Response" : "Request");
+                assertEq((key, make_qname(Ns, "Context")), select keys body, $1 !~ /^\^/);
+                assertEq("account1", body{make_qname(Ns, "Context")});
+                assertEq("payload", body{key}."{urn:item}entry"."^value^");
+            }
+        }
+    }
+
+    attributeOnly() {
+        foreach string version in ("11", "12") {
+            foreach string model in ('<xs:anyAttribute processContents="skip"/>',
+                    '<xs:sequence><xs:any minOccurs="0" maxOccurs="0" processContents="skip"/></xs:sequence>',
+                    '<xs:sequence minOccurs="0" maxOccurs="0"><xs:any processContents="skip"/></xs:sequence>') {
+                WebService ws = service(version, model);
+                WSOperation op = ws.getBindingOperation("Soap", "submit");
+                assertFalse(cast<XsdComplexType>(op.input.args.firstValue().element.type).hasElementWildcard());
+                assertThrows("SOAP-SERIALIZATION-ERROR", \wire(), (op, False, {"{urn:item}entry": "invalid"}));
+            }
+        }
+    }
+}

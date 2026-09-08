@@ -80,6 +80,10 @@ module WSDL {
     @section wsdlrelnotes WSDL Module Release Notes
 
     @subsection wsdl_0_5_8 WSDL v0.5.8
+    - unwrapped document arguments include nested choice fields and explicit element wildcard values;
+      message-name containers remain supported, and selection preserves other parts and declared headers
+    - ambiguous multipart document values require explicit part/element wrappers; attribute wildcards and
+      absent zero/zero element particles do not claim unwrapped child values
     - element declarations reject contradictory type/default/fixed specifications and invalid local/global
       properties; declaration booleans accept all XSD spellings, and empty type names report namespace errors
     - resolved ID-derived attributes and element content cannot have value constraints; complex types reject
@@ -6092,6 +6096,7 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
         bool mixed = False;
         bool content_emptiable = True;
         bool content_empty = True;
+        bool has_element_wildcard = False;
         hash<XsdEmptiabilityInfo> emptiability();
         list<XsdElement> declared_elements();
         list<string> element_group_refs();
@@ -6657,6 +6662,11 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
                 }
 
                 case "any": {
+                    foreach auto wildcard in (mg.any.typeCode() == NT_LIST ? mg.any : (mg.any,)) {
+                        if (declarations_present && !XsdElementConsistencyHelper::isAbsent(wildcard)) {
+                            has_element_wildcard = True;
+                        }
+                    }
                     anyAttribute = True;
                     break;
                 }
@@ -6893,8 +6903,22 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
         return requires_value;
     }
 
+    #! returns whether the currently parsed content has an explicit element wildcard
+    /** @return True for an element wildcard in the parsed sequence/all content
+        @note Attribute wildcards do not make this true. Group particle expansion and wildcard runtime
+        constraints are handled separately from unwrapped message argument selection.
+        @since %WSDL 0.5.8
+    */
+    bool hasElementWildcard() {
+        return has_element_wildcard;
+    }
+
+    #! returns whether this type has no parsed element, choice, simple-content or element-wildcard slot
+    /** @return True for an empty parsed content model; attributes do not count as content
+        @note This query does not replace full ordered-particle or mixed-content validation.
+    */
     bool isEmpty() {
-        return !elementmap && !simpleType;
+        return !elementmap && !choices && !simpleType && !has_element_wildcard;
     }
 
     private hash<string, XsdElement> parseElements(softlist<auto> el, XsdLateResolverHelper unresolved,
@@ -7956,6 +7980,9 @@ public class WSMessage inherits WSDL::XsdNamedData {
         @param encoded if the encoded use module should be used (or the literal use model)
         @param h data to be serialized, keys are wsdl element names (optionally part name is also possible) and part names for simple types
         @param fault @ref True if serializing a fault response
+        @note A single selected part accepts unwrapped record fields, including nested choices and
+        explicit element wildcards. Explicit values for other parts and declared headers remain available.
+        Multiple selected parts require part or element wrappers to identify ownership.
      */
     *hash<auto> serializeDocument(*softlist<auto> parts, *WSDL::BindingMessageDescription msginfo, *MultiPartRelatedMessage mpm, bool encoded, reference<auto> h, bool fault) {
         hash<auto> rh;
@@ -7980,8 +8007,29 @@ public class WSMessage inherits WSDL::XsdNamedData {
             string k = pmap{p};
             auto val = getValueFromHash(k, \h, True);
             if (!exists val) {
-                if (parts || args.size() == 1) {
-                    val = getValueFromHash(args{k}.element, \h, True);
+                if ((parts ? parts.lsize() : args.size()) == 1) {
+                    # A bare record belongs to one selected part. Preserve explicit values for other
+                    # parts and headers so a wildcard cannot consume their wrappers as child elements.
+                    hash<string, bool> reserved = {name: True};
+                    foreach string other in (keys pmap) {
+                        if (other != p) {
+                            reserved{other} = reserved{pmap{other}} = True;
+                        }
+                    }
+                    if (msginfo) {
+                        foreach BindingMessageHeaderDescription hdr in (msginfo.getHeaders()) {
+                            reserved{hdr.msg.name} = reserved{hdr.part} = reserved{hdr.msg.pmap{hdr.part}} = True;
+                        }
+                    }
+                    if (h.typeCode() == NT_HASH && h.hasKey(name)) {
+                        val = getValueFromHash(args{k}.element, \h{name}, True, reserved);
+                        if (exists val && !h{name}) {
+                            remove h{name};
+                        }
+                    }
+                    if (!exists val) {
+                        val = getValueFromHash(args{k}.element, \h, True, reserved);
+                    }
                 }
                 if (!exists val) continue;
             }
@@ -8218,7 +8266,8 @@ public class WSMessage inherits WSDL::XsdNamedData {
     }
 
     #! when only one arg then try to get values based on element keys
-    private:internal auto getValueFromHash(*WSDL::XsdElement element, reference<auto> v, bool removeFound) {
+    private:internal auto getValueFromHash(*WSDL::XsdElement element, reference<auto> v, bool removeFound,
+            *hash<string, bool> reserved) {
         if (!element) {
             return;
         }
@@ -8252,13 +8301,22 @@ public class WSMessage inherits WSDL::XsdNamedData {
             if (type.isEmpty()) {
                 # An empty content model can still carry attributes.
                 return rv ?? NULL;
-            } else {
-                foreach string ename in (keys type.elementmap) {
-                    auto val = getValueFromHash(ename, \v, removeFound);
-                    if (exists val) {
-                        if (val.typeCode() == NT_NULL)
-                            val = NOTHING;
-                        rv{ename} = val;
+            }
+            if (v.typeCode() == NT_HASH) {
+                hash<string, bool> fields = map {$1: True}, keys type.elementmap;
+                foreach hash<ChoiceInfo> choice in (type.choices) {
+                    map fields{$1} = True, keys choice.elementmap;
+                }
+                foreach string key in (keys v) {
+                    if (reserved{key} && !(key == name && fields{key})) {
+                        continue;
+                    }
+                    if (fields{key} || key =~ /^\^comment/ || key =~ /^\^choices/
+                            || (type.hasElementWildcard() && key !~ /^\^/)) {
+                        rv{key} = v{key}.typeCode() == NT_NULL ? NOTHING : v{key};
+                        if (removeFound) {
+                            remove v{key};
+                        }
                     }
                 }
             }

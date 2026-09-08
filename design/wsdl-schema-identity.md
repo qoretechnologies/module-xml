@@ -524,3 +524,38 @@ ID ancestry follows the resolved type objects directly. It does not dereference
 the type's borrowed namespace context, which can have expired after an imported
 source context or an owning schema was destroyed. This also keeps detached
 attribute constraints usable without extending namespace-object lifetimes.
+
+## Unwrapped document arguments
+
+A document message with one selected part accepts its existing unwrapped record
+form, including fields from nested choice blocks. The field set is the union of
+the resolved element map and choice maps; declaration order is still enforced
+by the existing serializer. Explicit element wildcards in parsed sequence/all
+content permit the remaining element keys to travel with that record. An
+attribute wildcard does not grant that permission, and a zero/zero element
+particle or enclosing group is absent. `hasElementWildcard()` reports this
+explicit parsed-content flag; `isEmpty()` accounts for choices and that flag.
+These checks do not implement the remaining group particle or wildcard runtime
+validation requirements.
+
+Selection preserves supplied values addressed by another part's name or element
+key, or by a declared header's part/element/message name. It also accepts the
+legacy WSDL message-name container and removes that container only when all of
+its selected values have been consumed. Known fields whose name equals the
+message name remain eligible as ordinary fields. Caller hashes retain their
+values through copy-on-write behavior.
+
+For example, an account request may supply `{"{urn:partner}account": "AC-42",
+"context": "tenant-7"}` when one document body part has an element wildcard and
+`context` is explicitly bound to a header. The account element belongs to the
+Body payload; `tenant-7` belongs to the declared Header element. Wrapping the
+body value as `{"body": {"{urn:partner}account": "AC-42"}}` is equivalent. When
+multiple body parts are selected, each value must identify its part or element
+explicitly, because a bare record does not identify which part owns its fields.
+
+The public wrappers and native scalar types are unchanged. Tests cover real
+SOAP 1.1/1.2 bindings, request/response paths, reconstructed services, bare/part/
+message-container forms, exact namespace identity and header separation.
+Independent validators check every emitted payload and header. The wire
+separation follows [WSDL SOAP body](https://www.w3.org/TR/2001/NOTE-wsdl-20010315#_soap:body) and
+[SOAP header](https://www.w3.org/TR/2001/NOTE-wsdl-20010315#_soap:header) part definitions.

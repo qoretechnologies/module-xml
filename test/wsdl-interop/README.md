@@ -479,3 +479,11 @@ namespace property mapping; Qore enforces these even when a validator misses the
 The Qore-authored `test.wsdl`, `soap-comprehensive.wsdl` and inline SOAP-feature
 contract declare their SOAP encoding imports explicitly. Pinned upstream corpus
 bytes are unchanged.
+
+`test/wsdl-unwrapped-values.qtest` and `test_unwrapped_values.py` cover bare
+document records with explicit wildcards and nested choices, WSDL message-name
+containers, explicit multipart wrappers and header separation. The independent
+test validates 60 emitted payload/header documents across both SOAP bindings,
+directions and reconstructed services, checking exact names, values and order.
+Attribute wildcards and absent particles cannot claim child values. Full group
+matching and wildcard runtime validation retain their P4/P5 ownership.

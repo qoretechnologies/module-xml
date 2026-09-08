@@ -870,3 +870,22 @@ Logs: /tmp/wsdl-p2-28-{affected,references,elements,wildcards,declarations,surve
 Report: /tmp/wsdl-survey-p2-28.json. Full 62-item audit:
 [audits/P2-28-validation.md](audits/P2-28-validation.md).
 No native or astparser changes, installation or push.
+
+## P2-29 bare document argument acceptance (2026-09-08)
+
+Schema validation was committed as 7771dde. The isolated P2-20 increment
+recognizes bare nested-choice and explicit element-wildcard records while keeping
+other part/header wrappers intact. Multipart values require unambiguous wrappers;
+attribute wildcards and absent particles do not claim child fields.
+
+31 affected Qore suites pass 409 cases, including six new cases / 116 assertions.
+The independent test validates 60 payload/header documents across actual SOAP
+1.1/1.2 bindings and both directions, with reconstructed services and exact names,
+order, false/zero/empty values and header ownership. Candidate docs are warning-free.
+The both-version survey is recursively identical to 7771dde excluding versions;
+no missing cases, regressions or concealed later-phase failures.
+
+Logs: /tmp/wsdl-p2-29-{affected,independent,survey,docs}.log.
+Report: /tmp/wsdl-survey-p2-29.json. Full 62-item audit:
+[audits/P2-29-unwrapped.md](audits/P2-29-unwrapped.md).
+No native or astparser changes, installation or push.
