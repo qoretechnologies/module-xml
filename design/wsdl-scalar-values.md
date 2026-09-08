@@ -441,6 +441,22 @@ requests/responses, simple content/attributes, repeated values, detached consume
 and examples; its reference results are documented in
 `test/wsdl-interop/union-providers-evidence.md`.
 
+Schema serialization and deserialization also cache each shared member result for
+one conversion. Their caches are separate: serialization includes namespace state
+and type-attribute policy, while deserialization includes the element name, type
+map and multireference map, including signed zero, NaN and number precision in
+referenced values. A reentrant call changing any input receives a new context and restores the outer one afterward. Ordinary SOAP rejections can be
+reused; cancellation and unexpected errors unwind without publication. Rejection
+diagnostics summarize immediate nested union failures instead of duplicating
+entire shared graphs. Atomic rejection messages retain their specific cause.
+The native-list metadata query caches shared schema members with cycle detection
+as well, so element and provider shape checks do not expand shared unions.
+
+`wsdl-union-schema-graphs.qtest` counts terminal visits in 32-level shared graphs,
+checks bounded diagnostics, cycles, error recovery and all reentrant conversion
+contexts. `test_union_schema_graphs.py` uses independently validated atomic/list
+graphs through real SOAP bindings, reconstructed schemas/providers and examples.
+
 Union whitespace is governed by the successfully validating member (XSD 1.0
 Part 2 section 4.3.6). The union itself does not introduce collapse: a leading
 `xs:string` member retains whitespace; `xs:token` collapses it. Ordered bounds

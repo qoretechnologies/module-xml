@@ -694,3 +694,10 @@ string-member preservation from token-member collapse. Native tests cover XML
 CR/CDATA generation, formatting, scalar/mixed parsing, inherited `xml:space`,
 encoding, repeated-child grouping and interruption. The precise Xerces own-union
 pattern discrepancy is documented in [union-whitespace-evidence.md](union-whitespace-evidence.md).
+
+Shared schema union checks are in `../wsdl-union-schema-graphs.qtest` and
+`test_union_schema_graphs.py`. They cover bounded serialization/deserialization
+and native-list metadata traversal, positive and negative atomic/list graphs,
+cycle rejection, error cleanup, reentrant namespace/type/reference contexts,
+actual SOAP 1.1/1.2 bindings and reconstructed consumers. The schema caches are
+scoped to one conversion; later calls observe current member configuration.

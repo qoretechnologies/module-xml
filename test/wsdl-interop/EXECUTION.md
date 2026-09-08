@@ -2649,3 +2649,47 @@ sites still need the same CR/scalar-whitespace boundary review in P3. P4-P9 foll
 P3 acceptance; no phase scope is reduced. Core develop was clean when the user's
 commit request was checked. The subsequently discovered CMake documentation fix was
 tested, fully audited and committed there as afded8c83; nothing is pushed.
+
+
+## P3-12 — bounded schema union traversal (complete)
+
+P3-11 is committed as a28bfa6; core documentation prerequisite afded8c83 is on
+core develop without pushing. Schema serialization/deserialization and native-list
+shape queries now memoize shared members for one contextual operation. Active
+entries reject cycles and on_exit restores caller state on completion, cancellation
+or unexpected errors. Only ordinary SOAP rejection is cached. Nested diagnostics
+summarize immediate failures without duplicating shared descendants; atomic causes
+and the legacy "union types" wording remain.
+
+The provider input comparator is shared unchanged. Serialization keys include
+namespace context and type-attribute policy; deserialization keys include element
+name, type and reference maps. Reference comparisons preserve signed zero, NaN and
+number precision. The audit reproduced and fixed a false cycle when a reentrant
+reference map changed -0.0 to 0.0. Per-call metadata caches also observe configuration
+changes between queries. No data result or accepted member order is changed here.
+
+Validation: 56 affected Qore suites / 658 cases pass. New
+wsdl-union-schema-graphs.qtest passes 5 cases / 143 assertions; the existing provider
+suite passes 11 cases / 197 assertions. A 7-level pre-fix graph made 256 terminal
+calls; 32-level graphs now visit each terminal once per operation, with bounded
+error messages. Tests cover success, typed/comment wrappers, metadata, cycles,
+ordinary/unexpected failures, cleanup and all reentrant contexts. Independent
+atomic/list graphs pass real SOAP 1.1/1.2 requests/responses, reconstructed contracts,
+providers, attributes, repeated values and examples.
+
+Full Python discovery: 125 tests, exactly the same 33 tracked P4/P5/P6 failures,
+no new failure/error/skip. Both corpus reports are identical outside version
+metadata: strict 89 descriptions / 756 directions, 664 value checks, no selected
+failures, 220 broad failures. The initial survey omitted the pinned import catalog;
+its missing-resource diagnostics are preserved separately, and final surveys use
+the catalog. WSDL/SoapClient/SoapDataProvider AOT and WSDL Qdx/Doxygen builds are
+clean. No C++ changes or Valgrind requirement for this increment. WSDL SHA-256:
+6a7392fb7c50bfb65ea31f474dbef8e975c5ab9a55d5a8f105e75c84846e0c97. Full audit: audits/P3-12-union-schema-graphs.md.
+Logs: /tmp/wsdl-p3-12-final-*, /tmp/wsdl-p3-12-reviewed-*; baseline and intermediate
+failures are retained. Nothing is pushed.
+
+Next P3: ordered union primitive-family/value identity, enumeration and retained
+lexical restrictions through providers/lists/examples, then date, IEEE, binary,
+QName/entity and remaining regex requirements. TimeZone's nonthrowing date constructor
+and XML-RPC escaping/whitespace remain required boundary reviews. P4-P9 follow P3
+acceptance; the authorized phase scope is unchanged.

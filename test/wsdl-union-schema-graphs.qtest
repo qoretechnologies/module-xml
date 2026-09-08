@@ -1,0 +1,239 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires xml
+%requires ../qlib/WSDL.qm
+%exec-class SchemaUnionGraphTest
+
+class SchemaUnionGraphTest inherits QUnit::Test {
+    constructor() : Test("Bounded XSD union schema conversion", "1.0") {
+        addTestCase("Shared rejected members run once and diagnostics remain bounded", \shared());
+        addTestCase("Successful alternatives retain declaration order and wrappers", \success());
+        addTestCase("Unexpected failures unwind without caching or stale traversal state", \failures());
+        addTestCase("Cycles fail deterministically and the repaired graph is reusable", \cycles());
+        addTestCase("Reentrant conversion isolates every contextual input", \reentrant());
+        set_return_value(main());
+    }
+
+    private static XsdSchema schema() {
+        return new XsdSchema('<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:t="urn:union-graph"
+            targetNamespace="urn:union-graph"><xs:simpleType name="Value"><xs:union memberTypes="xs:boolean xs:int"/>
+            </xs:simpleType></xs:schema>', {"async_only": True});
+    }
+
+    private static XsdSimpleType root(XsdSchema definition) {
+        return cast<XsdSimpleType>(definition.findType(make_qname("urn:union-graph", "Value")));
+    }
+
+    private static XsdSimpleType graph(XsdSchema definition, XsdAbstractType terminal, int depth) {
+        XsdSimpleType base = root(definition).copy();
+        base.unionTypes = (terminal, terminal);
+        for (int i = 0; i < depth; ++i) {
+            XsdSimpleType parent = root(definition).copy();
+            parent.name = "level" + i;
+            parent.unionTypes = (base, base);
+            base = parent;
+        }
+        return base;
+    }
+
+    private shared() {
+        XsdSchema definition = schema();
+        GraphUnionTerminal terminal(definition.nsc);
+        foreach int depth in (7, 32) {
+            XsdSimpleType union_type = graph(definition, terminal, depth);
+            int queries = terminal.list_queries;
+            assertFalse(union_type.hasNativeListValue());
+            assertEq(queries + 1, terminal.list_queries);
+            terminal.native_list = True;
+            assertTrue(union_type.hasNativeListValue());
+            assertEq(queries + 2, terminal.list_queries);
+            terminal.native_list = False;
+            foreach auto value in ("bad", @nan@, number(@nan@), (@nan@,), {"value": (number(@nan@),)}) {
+                int calls = terminal.serializations;
+                string desc = rejection(definition, union_type, value, True);
+                assertEq(calls + 1, terminal.serializations);
+                assertTrue(desc.length() < 1500);
+                calls = terminal.deserializations;
+                desc = rejection(definition, union_type, value, False);
+                assertEq(calls + 1, terminal.deserializations);
+                assertTrue(desc.length() < 1500);
+            }
+            foreach hash<auto> references in ({"id": @nan@}, {"id": (number(@nan@),)}) {
+                int calls = terminal.deserializations;
+                string desc = rejection(definition, union_type, "bad", False, references);
+                assertEq(calls + 1, terminal.deserializations);
+                assertTrue(desc.length() < 1500);
+            }
+        }
+    }
+
+    private string rejection(XsdSchema definition, XsdSimpleType union_type, auto value, bool serialize,
+            *hash<auto> references) {
+        try {
+            if (serialize) {
+                union_type.serializeValue(definition.nsc, value, True);
+            } else {
+                union_type.deserializeValue("value", definition.getTypeMap(), references, value);
+            }
+        } catch (hash<ExceptionInfo> ex) {
+            assertEq(serialize ? "SOAP-SERIALIZATION-ERROR" : "SOAP-DESERIALIZATION-ERROR", ex.err);
+            return ex.desc;
+        }
+        fail("a union containing only rejecting members accepted the value");
+        return "";
+    }
+
+    private success() {
+        XsdSchema original = schema();
+        foreach XsdSchema definition in (original, Serializable::deserialize(original.serialize())) {
+            GraphUnionTerminal terminal(definition.nsc);
+            XsdSimpleType union_type = graph(definition, terminal, 20);
+            union_type.unionTypes += (definition.nsc.getBaseType("boolean"), definition.nsc.getBaseType("int"));
+            assertEq(True, union_type.deserializeValue("value", definition.getTypeMap(), NOTHING, "1"));
+            assertEq(1, terminal.deserializations);
+            assertEq(12, union_type.deserializeValue("value", definition.getTypeMap(), NOTHING, "12"));
+            assertEq(2, terminal.deserializations);
+            assertEq("true", union_type.serializeValue(definition.nsc, "1", True));
+            assertEq(1, terminal.serializations);
+            assertEq({"^comment^": "note", "^value^": "true"},
+                union_type.serializeValue(definition.nsc, {"^value^": "1", "^comment^": "note"}, True));
+            hash<auto> typed = union_type.serializeValue(definition.nsc, "1", False);
+            assertEq("true", typed."^value^");
+            assertTrue(typed."^attributes^"."xsi:type".endsWith(":boolean"));
+        }
+    }
+
+    private failures() {
+        XsdSchema definition = schema();
+        GraphUnionTerminal terminal(definition.nsc);
+        XsdSimpleType union_type = graph(definition, terminal, 16);
+        foreach string error in ("TEST-CANCELLED", "OBJECT-ALREADY-DELETED", "RUNTIME-TYPE-ERROR") {
+            terminal.error = error;
+            assertThrows(error, \union_type.hasNativeListValue(), ());
+            assertThrows(error, \union_type.serializeValue(), (definition.nsc, "bad", True));
+            assertThrows(error, \union_type.deserializeValue(), ("value", definition.getTypeMap(), NOTHING, "bad"));
+            terminal.error = NOTHING;
+            assertFalse(union_type.hasNativeListValue());
+            assertThrows("SOAP-SERIALIZATION-ERROR", \union_type.serializeValue(), (definition.nsc, "bad", True));
+            assertThrows("SOAP-DESERIALIZATION-ERROR", \union_type.deserializeValue(),
+                ("value", definition.getTypeMap(), NOTHING, "bad"));
+        }
+        assertEq(6, terminal.serializations);
+        assertEq(6, terminal.deserializations);
+    }
+
+    private cycles() {
+        XsdSchema definition = schema();
+        XsdSimpleType union_type = root(definition);
+        list<XsdAbstractType> members = union_type.unionTypes;
+        on_exit union_type.unionTypes = members;
+        union_type.unionTypes = (union_type,);
+        assertThrows("XSD-SIMPLETYPE-ERROR", \union_type.hasNativeListValue(), ());
+        assertThrows("XSD-SIMPLETYPE-ERROR", \union_type.serializeValue(), (definition.nsc, "12", True));
+        assertThrows("XSD-SIMPLETYPE-ERROR", \union_type.deserializeValue(),
+            ("value", definition.getTypeMap(), NOTHING, "12"));
+        union_type.unionTypes = members;
+        assertFalse(union_type.hasNativeListValue());
+        assertEq("12", union_type.serializeValue(definition.nsc, "12", True));
+        assertEq(12, union_type.deserializeValue("value", definition.getTypeMap(), NOTHING, "12"));
+    }
+
+    private reentrant() {
+        XsdSchema definition = schema();
+        XsdSimpleType union_type = root(definition);
+        ReentrantGraphUnion bridge(definition.nsc, union_type);
+        GraphUnionTerminal terminal(definition.nsc);
+        terminal.bridge = bridge;
+        union_type.unionTypes = (terminal, bridge);
+        on_exit union_type.unionTypes = ();
+        foreach string mode in ("value", "namespaces", "omit-type") {
+            bridge.mode = mode;
+            int calls = terminal.serializations;
+            assertEq("nested", union_type.serializeValue(definition.nsc, "outer", True));
+            assertEq(calls + 2, terminal.serializations);
+        }
+        foreach string mode in ("value", "element", "type-map", "references") {
+            bridge.mode = mode;
+            int calls = terminal.deserializations;
+            assertEq("nested", union_type.deserializeValue("outer", definition.getTypeMap(), NOTHING, "outer"));
+            assertEq(calls + 2, terminal.deserializations);
+        }
+        bridge.mode = "reference-zero";
+        int calls = terminal.deserializations;
+        assertEq("nested", union_type.deserializeValue("outer", definition.getTypeMap(), {"id": -0.0}, "outer"));
+        assertEq(calls + 2, terminal.deserializations);
+        bridge.mode = "reference-precision";
+        number precise = number("1.000000000000000000000000000000000000000000000000000000000000");
+        assertTrue(precise.prec() != number("1").prec());
+        calls = terminal.deserializations;
+        assertEq("nested", union_type.deserializeValue("outer", definition.getTypeMap(), {"id": precise}, "outer"));
+        assertEq(calls + 2, terminal.deserializations);
+    }
+}
+
+class GraphUnionTerminal inherits XsdBaseType {
+    public {
+        bool native_list = False;
+        int list_queries = 0;
+        int serializations = 0;
+        int deserializations = 0;
+        *string error;
+        *ReentrantGraphUnion bridge;
+    }
+    constructor(Namespaces ns) : XsdBaseType("int", ns) {
+    }
+    bool hasNativeListValue() {
+        ++list_queries;
+        if (error) {
+            throw error, "controlled metadata failure";
+        }
+        return native_list;
+    }
+    auto serializeValue(Namespaces ns, auto value, *softbool omitType) {
+        ++serializations;
+        if (bridge && bridge.nested) {
+            return "nested";
+        }
+        throw error ?? "SOAP-SERIALIZATION-ERROR", "controlled terminal rejection";
+    }
+    auto deserializeValue(string en, hash<string, XsdAbstractType> tmap, *hash<auto> mrh, auto value) {
+        ++deserializations;
+        if (bridge && bridge.nested) {
+            return "nested";
+        }
+        throw error ?? "SOAP-DESERIALIZATION-ERROR", "controlled terminal rejection";
+    }
+}
+
+class ReentrantGraphUnion inherits XsdBaseType {
+    public {
+        XsdSimpleType peer;
+        string mode;
+        bool nested = False;
+    }
+    constructor(Namespaces ns, XsdSimpleType peer) : XsdBaseType("int", ns) {
+        self.peer = peer;
+    }
+    auto serializeValue(Namespaces ns, auto value, *softbool omitType) {
+        @assert(!nested);
+        nested = True;
+        on_exit nested = False;
+        return peer.serializeValue(mode == "namespaces" ? new Namespaces({}) : ns,
+            mode == "value" ? "inner" : value, mode == "omit-type" ? !omitType : omitType);
+    }
+    auto deserializeValue(string en, hash<string, XsdAbstractType> tmap, *hash<auto> mrh, auto value) {
+        @assert(!nested);
+        nested = True;
+        on_exit nested = False;
+        if (mode == "type-map") {
+            Namespaces ns({});
+            tmap."other" = ns.getBaseType("string");
+        }
+        return peer.deserializeValue(mode == "element" ? "inner" : en, tmap,
+            mode == "references" ? {"id": "inner"} : mode == "reference-zero" ? {"id": 0.0}
+                : mode == "reference-precision" ? {"id": number("1")} : mrh, mode == "value" ? "inner" : value);
+    }
+}
