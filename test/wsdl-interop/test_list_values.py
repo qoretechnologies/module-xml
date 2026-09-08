@@ -121,6 +121,14 @@ def payload(model, local, lexical, count=2):
 
 
 class ListValuesTest(unittest.TestCase):
+    case_definitions = staticmethod(definitions)
+    case_schema = staticmethod(schema)
+    parse_value = staticmethod(value)
+
+    @staticmethod
+    def provider_value(case, lexical):
+        return tokens(lexical)
+
     def check_output(self, body, case, model, version, direction, lexical=None, count=2):
         root = etree.fromstring(body.encode())
         self.assertEqual(f"{{{survey.SOAP_NAMESPACES[int(version == '12')]}}}Envelope", root.tag)
@@ -132,9 +140,9 @@ class ListValuesTest(unittest.TestCase):
                 self.assertEqual(count, len(parts))
                 self.assertTrue(all(part.tag == "item" for part in parts))
             for part in parts:
-                self.assertEqual(value(case.base, lexical), value(case.base, part.text or ""))
+                self.assertEqual(self.parse_value(case.base, lexical), self.parse_value(case.base, part.text or ""))
             if model == "record":
-                self.assertEqual(value(case.base, lexical), value(case.base, element.get("choice")))
+                self.assertEqual(self.parse_value(case.base, lexical), self.parse_value(case.base, element.get("choice")))
         return element
 
     def check_oracles(self, jobs, expected):
@@ -168,10 +176,10 @@ class ListValuesTest(unittest.TestCase):
         jobs, contracts, expected, lookup = {}, [], {}, {}
         with tempfile.TemporaryDirectory(prefix="wsdl-list-values-") as temporary:
             root = Path(temporary)
-            for case in definitions():
+            for case in self.case_definitions():
                 for model in ("atomic", "record", "repeated"):
                     key = case.name + "/" + model
-                    source = schema(case, model)
+                    source = self.case_schema(case, model)
                     jobs[key] = SchemaJob(key, f"http://example.invalid/{key}.xsd", source)
                     for version, namespace in zip(("11", "12"), survey.SOAP_NAMESPACES):
                         name = key + "/" + version
@@ -224,15 +232,15 @@ class ListValuesTest(unittest.TestCase):
         jobs, expected, manifest_rows, lookup = {}, {}, [], {}
         with tempfile.TemporaryDirectory(prefix="wsdl-list-consumers-") as temporary:
             root = Path(temporary)
-            for case in definitions():
+            for case in self.case_definitions():
                 for model in ("atomic", "record", "repeated"):
                     key = case.name + "/" + model
-                    source = schema(case, model)
+                    source = self.case_schema(case, model)
                     jobs[key] = SchemaJob(key, f"http://example.invalid/{key}.xsd", source)
                     variants = []
                     for lexical, valid in case.values:
                         for count in ((1, 2) if model == "repeated" else (1,)):
-                            variants.append({"value": tokens(lexical), "lexical": lexical, "expected": valid, "count": count})
+                            variants.append({"value": self.provider_value(case, lexical), "lexical": lexical, "expected": valid, "count": count})
                     # Native boundaries cannot encode a single empty/SPACE/TAB/LF/CR-containing item.
                     if case.name == "plain-list":
                         variants += [{"value": [item], "expected": False, "count": 1}

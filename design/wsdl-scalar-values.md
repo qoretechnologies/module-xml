@@ -364,3 +364,35 @@ bounded length adjustment, validating every candidate against the complete type.
 An empty facet intersection or unsupported bounded search reports `XSD-SAMPLE-ERROR`.
 No invalid placeholder is emitted. The test matrices and oracle diagnostic decisions
 are documented in `test/wsdl-interop/list-values-adjudication.md`.
+
+## Boolean restrictions and value constraints
+
+Boolean-derived types allow only `pattern` and `whiteSpace` facets; whitespace is
+fixed to XML `collapse`. Enumeration, bounds, length and digit facets are rejected
+at schema construction. This follows XSD 1.0 Part 2 §3.2.2.3.
+
+Patterns inspect the normalized lexical spelling before native boolean conversion.
+A restriction with a pattern retains its accepted spelling as a string; an ancestor
+pattern has the same effect through further derivation. Without a pattern, the
+existing native boolean representation remains. Native booleans and numeric zero/one
+use `false`/`true` as their candidate lexical forms and must pass the same patterns.
+For example, a flag with pattern `0|1` accepts `"0"`, retains that text on output and
+rejects native `False`; callers needing that pattern supply an explicit XML spelling.
+
+`XsdBooleanRestrictionDataType` retains a strong base provider and typed pattern
+metadata. Reconstruction validates the base family and compiled patterns before
+publication. Optional and repeated providers perform the same validation, including
+when a base provider supplies a default value. Acceptance does not mutate metadata;
+configuration and field choice updates must finish before sharing with consumers.
+
+Fixed attributes compare boolean truth values after type validation, including
+references and complex-type restrictions. `XsdBooleanDataField` applies the same
+value equality to finite whole/repeated field choices while its provider separately
+checks lexical patterns. Failed choice replacements preserve prior metadata. Thus a
+fixed `false` flag accepts `"0"` if the type permits that spelling, and rejects `"1"`.
+
+Example generation validates the supplied starting value, then the four legal
+normalized spellings. This exhausts the boolean lexical space; an empty intersection
+of patterns reports `XSD-SAMPLE-ERROR`. See `wsdl-boolean-facets.qtest` and
+`test_boolean_facets.py` for schema, serialization, field/provider reconstruction,
+default/fixed, list-item, cancellation and independent SOAP regression coverage.

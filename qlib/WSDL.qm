@@ -106,6 +106,10 @@ module WSDL {
       list provider fields validate replacement choices before publishing them
     - generated list examples satisfy item constraints and inherited length, pattern and enumeration facets,
       or report XSD-SAMPLE-ERROR when bounded generation cannot find a valid value
+    - boolean restrictions retain lexical spellings for patterns across serialization and reconstructed providers;
+      fixed attribute and field choices compare boolean values, and schema declarations reject inapplicable facets
+    - boolean examples validate all inherited patterns against the four legal spellings and report
+      XSD-SAMPLE-ERROR when no valid value exists
     - boolean values accept only the four XML spellings after XML whitespace collapse, native booleans,
       and numeric zero/one; provider lists validate before conversion and reject null or invalid spellings
     - integer builtins enforce exact ranges before conversion and retain values beyond signed 64-bit
@@ -2159,6 +2163,24 @@ class XsdScalarTextHelper {
 
 #! validates boolean lexical input before native conversion
 class XsdBooleanLexicalHelper {
+    static string lexical(auto value, string error) {
+        bool decoded = decode(value, error);
+        return value.typeCode() == NT_STRING ? XsdSimpleType::normalizeWhiteSpace(value, "collapse")
+            : decoded ? "true" : "false";
+    }
+
+    static bool applies(XsdAbstractType type) {
+        while (type instanceof XsdSimpleType && cast<XsdSimpleType>(type).type) {
+            type = cast<XsdSimpleType>(type).type;
+        }
+        return type instanceof XsdBaseType && type.name == "boolean";
+    }
+
+    static bool equal(XsdAbstractType type, auto left, auto right) {
+        return applies(type) ? decode(left, "XSD-SIMPLETYPE-ERROR") == decode(right, "XSD-SIMPLETYPE-ERROR")
+            : left == right;
+    }
+
     static bool decode(auto value, string error) {
         switch (value.typeCode()) {
             case NT_STRING:
@@ -2273,6 +2295,186 @@ public class XsdBooleanDataType inherits QoreDataType {
 /** @since %WSDL 0.5.8
 */
 public const XsdBooleanType = new WSDL::XsdBooleanDataType();
+
+#! resolved boolean lexical constraints
+/** @since %WSDL 0.5.8 */
+public hashdecl XsdBooleanFacetInfo {
+    #! schema type name
+    string name;
+    #! compiled pattern alternatives for one restriction step
+    *list<string> patterns;
+}
+
+class XsdBooleanFacetHelper {
+    static checkDefinition(hash<XsdBooleanFacetInfo> facets, AbstractDataProviderType base, string error) {
+        if (!(base instanceof XsdBooleanDataType) && !(base instanceof XsdBooleanRestrictionDataType)) {
+            throw error, "boolean restrictions require a boolean base provider";
+        }
+        foreach string pattern in (facets.patterns) {
+            try {
+                bool accepts_empty = regex("", pattern);
+            } catch (hash<ExceptionInfo> ex) {
+                if (ex.err != "REGEX-ERROR" && ex.err != "REGEX-COMPILATION-ERROR") {
+                    rethrow;
+                }
+                throw error, sprintf("invalid compiled boolean pattern: %s", ex.desc);
+            }
+        }
+    }
+
+    static string validate(hash<XsdBooleanFacetInfo> facets, auto value, string error) {
+        string lexical = XsdBooleanLexicalHelper::lexical(value, error);
+        if (facets.patterns) {
+            foreach string pattern in (facets.patterns) {
+                if (regex(lexical, pattern)) {
+                    return lexical;
+                }
+            }
+            throw error, sprintf("boolean spelling %Y does not match a pattern of %Y", lexical, facets.name);
+        }
+        return lexical;
+    }
+}
+
+#! a boolean provider retaining accepted lexical spellings for pattern facets
+/** Same-step patterns are alternatives; inherited restrictions are also required.
+    Patterned values remain strings so later XML serialization retains a valid spelling.
+    @par Example
+    A flag constrained by pattern \c "0|1" accepts \c "0" and retains that spelling.
+    Native booleans use \c "true" or \c "false" and must satisfy the same patterns.
+    @since %WSDL 0.5.8
+*/
+public class XsdBooleanRestrictionDataType inherits AbstractDataProviderType {
+    private {
+        hash<XsdBooleanFacetInfo> facets;
+        AbstractDataProviderType base;
+    }
+
+    #! constructs a provider for a boolean restriction
+    /** @param facets the resolved scalar facet data
+        @param base the base provider supplying native categories and requiredness
+        @throw XSD-SIMPLETYPE-ERROR invalid boolean facet metadata
+    */
+    constructor(hash<XsdBooleanFacetInfo> facets, AbstractDataProviderType base) {
+        XsdBooleanFacetHelper::checkDefinition(facets, base, "XSD-SIMPLETYPE-ERROR");
+        self.facets = facets;
+        self.base = base;
+    }
+
+    private:internal deserializeMembers(hash<auto> members) {
+        if (!(members.base instanceof AbstractDataProviderType)) {
+            throw "DESERIALIZATION-ERROR", "boolean restriction provider requires a base provider";
+        }
+        hash<XsdBooleanFacetInfo> resolved = new hash<XsdBooleanFacetInfo>(members.facets);
+        XsdBooleanFacetHelper::checkDefinition(resolved, members.base, "DESERIALIZATION-ERROR");
+        facets = resolved;
+        base = members.base;
+    }
+
+    #! returns the restricted type name
+    /** @return the XSD type name with its optionality prefix */
+    string getName() {
+        return (base.isOrNothingType() ? "*" : "") + "xsd:" + facets.name;
+    }
+
+    #! prevents list providers from converting values before facet validation
+    /** @return NOTHING */
+    *Type getValueType() {
+    }
+
+    #! returns the output category, retaining patterned values as strings
+    /** @return string for this step's pattern, otherwise the base provider category */
+    int getBaseTypeCode() {
+        return facets.patterns ? NT_STRING : base.getBaseTypeCode();
+    }
+
+    #! returns the output category name, including retained patterned strings
+    /** @return string for this step's pattern, otherwise the base provider category name */
+    string getBaseTypeName() {
+        return facets.patterns ? "string" : base.getBaseTypeName();
+    }
+
+    #! returns no item type for this atomic value
+    /** @return NOTHING */
+    *AbstractDataProviderType getElementType() {
+    }
+
+    #! returns no record fields for this atomic value
+    /** @return NOTHING */
+    *hash<string, AbstractDataField> getFields() {
+    }
+
+    #! requires facet validation for all values
+    /** @return an empty map */
+    *hash<string, bool> getDirectTypeHash() {
+        return {};
+    }
+
+    #! returns accepted native categories
+    /** @param simple request simplified names
+        @return the base provider's accepted categories
+    */
+    hash<string, bool> getAcceptTypeHash(*bool simple) {
+        return base.getAcceptTypeHash(simple);
+    }
+
+    #! returns converted native categories
+    /** @param simple request simplified names
+        @return string and optional nothing for this step's pattern, otherwise the base provider's categories
+    */
+    hash<string, bool> getReturnTypeHash(*bool simple) {
+        if (facets.patterns) {
+            hash<string, bool> result = {"string": True};
+            if (base.isOrNothingType()) {
+                result.nothing = True;
+            }
+            return result;
+        }
+        return base.getReturnTypeHash(simple);
+    }
+
+    #! validates the declared restriction and converts the accepted value
+    /** @param value the native value or XML boolean text
+        @return the validated boolean value, or NOTHING for optional omission
+        @throw MISSING-VALUE-ERROR a required value is omitted
+        @throw RUNTIME-TYPE-ERROR lexical input or a restriction facet is invalid
+    */
+    auto acceptsValue(auto value) {
+        if (!exists value) {
+            value = base.acceptsValue(value);
+            if (!exists value) {
+                return;
+            }
+        }
+        string lexical = XsdBooleanFacetHelper::validate(facets, value, "RUNTIME-TYPE-ERROR");
+        auto converted = base.acceptsValue(lexical);
+        return facets.patterns ? lexical : converted;
+    }
+
+    #! returns the requiredness of the value
+    /** @return True for mandatory values */
+    bool isMandatory() {
+        return base.isMandatory();
+    }
+
+    #! returns whether omission is accepted
+    /** @return True for optional values */
+    bool isOrNothingType() {
+        return base.isOrNothingType();
+    }
+
+    #! returns an optional equivalent retaining the same restriction
+    /** @return the optional provider */
+    AbstractDataProviderType getOrNothingType() {
+        return new XsdBooleanRestrictionDataType(facets, base.getOrNothingType());
+    }
+
+    #! returns a mandatory equivalent retaining the same restriction
+    /** @return the mandatory provider */
+    AbstractDataProviderType getMandatoryType() {
+        return new XsdBooleanRestrictionDataType(facets, base.getMandatoryType());
+    }
+}
 
 #! validates the XML lexical space shared by the integer family before native conversion
 class XsdIntegerLexicalHelper {
@@ -3983,6 +4185,109 @@ public class XsdNumericDataField inherits QoreDataField {
     }
 }
 
+#! a boolean field comparing finite choices by boolean value
+/** The provider checks lexical patterns before this field checks fixed-value choices.
+    @par Example
+    A fixed flag declared as \c "false" also accepts \c "0" when its lexical pattern permits both.
+    @since %WSDL 0.5.8
+*/
+public class XsdBooleanDataField inherits QoreDataField {
+    private static hash<auto> withoutChoices(hash<auto> info) {
+        remove info.allowed_values;
+        remove info.element_allowed_values;
+        return info;
+    }
+
+    #! constructs a boolean field with exact finite choices
+    /** @param info the ordinary QoreDataField field properties
+        @throw XSD-SIMPLETYPE-ERROR invalid boolean choice text
+    */
+    constructor(hash<auto> info) : QoreDataField(XsdBooleanDataField::withoutChoices(info)) {
+        if (exists info.allowed_values) {
+            setAllowedValues(info.allowed_values, info.allowed_values_creatable);
+        }
+        if (exists info.element_allowed_values) {
+            setElementAllowedValues(info.element_allowed_values, info.element_allowed_values_creatable);
+        }
+    }
+
+    #! sets boolean choices independently of the lexical patterns checked by the provider
+    /** @param choices boolean values or AllowedValueInfo entries
+        @param creatable whether this field permits values outside its finite choices
+        @return this field
+        @throw XSD-SIMPLETYPE-ERROR invalid boolean choice text
+        @note The provider still enforces its lexical patterns, even if creatable is True.
+    */
+    AbstractDataField setAllowedValues(list<auto> choices, *bool creatable) {
+        list<hash<AllowedValueInfo>> resolved = resolveChoices(choices);
+        hash<string, bool> value_map = map {valueKey($1.value): True}, resolved;
+        allowed_values = resolved;
+        allowed_values_map = value_map;
+        allowed_values_creatable = creatable ?? False;
+        return self;
+    }
+
+    #! sets exact boolean choices for repeated elements
+    /** @param choices boolean values or AllowedValueInfo entries for each element
+        @param creatable whether element values outside these choices are permitted
+        @return this field
+        @throw XSD-SIMPLETYPE-ERROR invalid boolean choice text
+    */
+    AbstractDataField setElementAllowedValues(list<auto> choices, *bool creatable) {
+        list<hash<AllowedValueInfo>> resolved = resolveChoices(choices);
+        hash<string, bool> value_map = map {valueKey($1.value): True}, resolved;
+        element_allowed_values = resolved;
+        element_allowed_values_map = value_map;
+        element_allowed_values_creatable = creatable ?? False;
+        return self;
+    }
+
+    private static list<hash<AllowedValueInfo>> resolveChoices(list<auto> choices) {
+        list<hash<AllowedValueInfo>> resolved();
+        foreach auto choice in (choices) {
+            hash<AllowedValueInfo> entry = choice.typeCode() == NT_HASH
+                ? new hash<AllowedValueInfo>(choice)
+                : <AllowedValueInfo>{"value": choice, "display_name": string(choice)};
+            resolved += entry;
+        }
+        return resolved;
+    }
+
+    private string valueKey(auto value) {
+        return XsdBooleanLexicalHelper::decode(value, "XSD-SIMPLETYPE-ERROR") ? "true" : "false";
+    }
+
+    #! validates the type and compares finite choices in the boolean value space
+    /** @param value a native boolean value or XML lexical spelling
+        @return the provider's validated value with retained lexical information
+        @throw FIELD-VALUE-ERROR the boolean value is outside the field's finite choices
+        @throw RUNTIME-TYPE-ERROR the underlying type rejects the value
+        @throw MISSING-VALUE-ERROR a required value is omitted
+    */
+    auto acceptsValue(auto value) {
+        if (!exists value && exists (auto default_value = getDefaultValue())) {
+            value = default_value;
+        }
+        on_error rethrow $1.err, sprintf("%s (while setting field %Y)", $1.desc, getName()), $1.arg;
+        value = getType().acceptsValue(value);
+        if (exists value && allowed_values && !allowed_values_creatable) {
+            if (!allowed_values_map{valueKey(value)}) {
+                throw "FIELD-VALUE-ERROR", sprintf("field %Y does not accept boolean value %Y; allowed values: %Y",
+                    getName(), value, map $1.value, allowed_values);
+            }
+        }
+        if (exists value && element_allowed_values && !element_allowed_values_creatable) {
+            foreach auto item in (value) {
+                if (!element_allowed_values_map{valueKey(item)}) {
+                    throw "FIELD-VALUE-ERROR", sprintf("field %Y does not accept boolean element value %Y",
+                        getName(), item);
+                }
+            }
+        }
+        return value;
+    }
+}
+
 #! a list field whose finite choices use ordered atomic value equality
 /** Choices represent list values independently of the lexical patterns enforced by the field's type.
     @par Example
@@ -4125,6 +4430,9 @@ class XsdDataFieldHelper {
         }
         if (schema instanceof XsdBaseType && (schema.name == "decimal" || XsdIntegerLexicalHelper::Types{schema.name})) {
             return new XsdNumericDataField(info, schema.name);
+        }
+        if (schema instanceof XsdBaseType && schema.name == "boolean") {
+            return new XsdBooleanDataField(info);
         }
         return new QoreDataField(info);
     }
@@ -5108,7 +5416,8 @@ public class XsdAttribute inherits WSDL::XsdTypedData {
             }
         }
         if (declaration && exists declaration.fixedLexical
-                && (exists own_default || (exists own_fixed && constraintValue != declaration.getDefaultValue()))) {
+                && (exists own_default || (exists own_fixed
+                    && !XsdBooleanLexicalHelper::equal(type, constraintValue, declaration.getDefaultValue())))) {
             throw WSDL_ERROR, sprintf("attribute %Y cannot override its declaration's fixed value", name);
         }
         constraints_resolved = True;
@@ -5188,7 +5497,7 @@ public class XsdAttribute inherits WSDL::XsdTypedData {
     }
 
     private checkFixedValue(auto value, string error) {
-        if (exists fixedLexical && value != constraintValue) {
+        if (exists fixedLexical && !XsdBooleanLexicalHelper::equal(type, value, constraintValue)) {
             throw error, sprintf("attribute %Y must have fixed value %Y, got %Y", name, constraintValue, value);
         }
     }
@@ -7500,6 +7809,10 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
             throw "XSD-SIMPLETYPE-ERROR", "totalDigits and fractionDigits apply only to decimal-derived types";
         }
         string kind = getFacetKind();
+        if (kind == "boolean" && (enumValues || exists minInclusive || exists minExclusive
+                || exists maxInclusive || exists maxExclusive)) {
+            throw "XSD-SIMPLETYPE-ERROR", "boolean permits only pattern and whiteSpace facets";
+        }
         validateLengthDeclaration(kind);
         validateWhitespaceDeclaration(kind);
         listItemValueInfo = listItemType ? XsdListValueHelper::describe(listItemType)
@@ -7752,6 +8065,10 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
             return new XsdNumericRestrictionDataType(getNumericFacets(), type.getDataProviderType());
         }
         string kind = getFacetKind();
+        if (kind == "boolean") {
+            return new XsdBooleanRestrictionDataType(<XsdBooleanFacetInfo>{"name": name,
+                "patterns": pcre_patterns}, type.getDataProviderType());
+        }
         if (StringKinds{kind} || ((kind == "list" || kind == "hexBinary" || kind == "base64Binary")
                 && (exists length || exists minLength || exists maxLength))) {
             return new XsdSizedRestrictionDataType(<XsdSizedFacetInfo>{
@@ -7878,6 +8195,28 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
                 return rh;
             }
             return lexical;
+        }
+
+        if (getFacetKind() == "boolean") {
+            string lexical = XsdBooleanLexicalHelper::lexical(
+                XsdScalarTextHelper::value(val, SOAP_SERIALIZATION_ERROR), SOAP_SERIALIZATION_ERROR);
+            validateFacets(lexical, "serialize", lexical);
+            auto serialized = type.serializeValue(nsc, val, omitType);
+            if (patterns) {
+                if (serialized.typeCode() == NT_HASH) {
+                    serialized."^value^" = lexical;
+                } else {
+                    serialized = lexical;
+                }
+            }
+            if (rh) {
+                if (serialized.typeCode() == NT_HASH) {
+                    return rh + serialized;
+                }
+                rh."^value^" = serialized;
+                return rh;
+            }
+            return serialized;
         }
 
         if (!exists val && getFacetKind() == "list" && hasNativeListValue()) {
@@ -8123,6 +8462,14 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
         @since %WSDL 0.5.8
     */
     auto getSampleValue(auto default_value) {
+        if (getFacetKind() == "boolean") {
+            foreach auto candidate in (default_value, "true", "false", "1", "0") {
+                if (acceptsSample(candidate)) {
+                    return deserializeValue(name, new hash<string, XsdAbstractType>(), NOTHING, candidate);
+                }
+            }
+            throw "XSD-SAMPLE-ERROR", sprintf("no boolean spelling satisfies all patterns of %Y", name);
+        }
         if (StringKinds{getFacetKind()}) {
             return getStringSample(string(default_value));
         }
@@ -8600,6 +8947,14 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
                 throw SOAP_DESERIALIZATION_ERROR, sprintf("list value for %Y is outside its enumeration", name);
             }
             return patterns ? XsdListValueHelper::tokens(lexical) : value;
+        }
+
+        if (getFacetKind() == "boolean") {
+            string lexical = XsdBooleanLexicalHelper::lexical(
+                XsdScalarTextHelper::value(val, SOAP_DESERIALIZATION_ERROR), SOAP_DESERIALIZATION_ERROR);
+            validateFacets(lexical, "deserialize", lexical);
+            auto converted = type.deserializeValue(en, tmap, mrh, val);
+            return patterns ? lexical : converted;
         }
 
         if (StringKinds{getFacetKind()}) {
@@ -9828,7 +10183,7 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
                             name, identity, own.type.name, attr.type.name);
                     }
                     if (exists attr.fixedLexical && (!exists own.fixedLexical
-                            || own.getDefaultValue() != attr.getDefaultValue())) {
+                            || !XsdBooleanLexicalHelper::equal(attr.type, own.getDefaultValue(), attr.getDefaultValue()))) {
                         throw WSDL_ERROR, sprintf("type %Y attribute %Y must preserve its base fixed constraint",
                             name, identity);
                     }

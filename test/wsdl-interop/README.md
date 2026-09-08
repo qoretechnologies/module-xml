@@ -669,3 +669,10 @@ Strict value assertions now support `datatype: "list"` with an explicit scalar
 boolean values, and split only XML whitespace. The W3C `List` family expands the
 mandatory selection to 89 descriptions / 756 message directions. The broad report
 also retains Xerces schema diagnostics, including warnings.
+
+Boolean restriction checks are in `test_boolean_facets.py` and
+`../wsdl-boolean-facets.qtest`. They cover valid retained pattern spellings,
+forbidden facet declarations, inherited patterns/defaults, fixed-value equality,
+list items, detached providers and generated examples in both SOAP versions and
+directions. See [boolean-facets-evidence.md](boolean-facets-evidence.md) for the
+normative basis and independent schema/value accounting.

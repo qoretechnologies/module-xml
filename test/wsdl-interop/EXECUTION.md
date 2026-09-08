@@ -2396,7 +2396,7 @@ parsing decimal as binary64 then narrowing to binary32 would double-round and
 cannot implement correct target-format conversion. P3 remains active; P4–P9
 are still required after its acceptance gate passes.
 
-## P3-08 — List lexical forms and value equality (in progress)
+## P3-08 — List lexical forms and value equality (complete)
 
 P3-07 is committed as 335672b without pushing. Initial preflight in
 /tmp/wsdl-p3-08-preflight.py and /tmp/wsdl-p3-08-preflight.json uses three schemas
@@ -2480,3 +2480,50 @@ pattern/value increment. Boolean restrictions, union selection/value semantics,
 IEEE binary32/binary64 conversion, dates/durations/partial dates, strict binary
 rules, names/entity context and remaining regex requirements are still required
 for P3 acceptance; P4–P9 remain in scope afterward.
+
+
+## P3-09 — Boolean lexical restrictions (complete)
+
+P3-08 is committed as 64e4d23 without pushing. Boolean restrictions now reject
+facets that XSD 1.0 does not permit, apply patterns to normalized lexical spellings
+before conversion, and retain accepted patterned strings through serialization and
+provider reconstruction. Unpatterned boolean types retain their native boolean
+representation. Native booleans/numeric zero-one use canonical true/false spellings
+and must satisfy the same pattern checks.
+
+XsdBooleanRestrictionDataType validates typed metadata and base-provider identity
+before reconstruction; optional/repeated providers retain restrictions. The audit
+found and fixed an inherited-default path that could return before checking the
+restriction's patterns. XsdBooleanDataField and fixed attributes compare truth
+values independently of lexical patterns, including global references and complex
+type restrictions. Choice setters resolve complete replacement state before
+publication. Examples exhaust the four legal spellings and report XSD-SAMPLE-ERROR
+for an empty pattern intersection.
+
+13 focused Qore cases pass 184 assertions. All 43 affected suites pass 546 cases
+without warnings. The independent matrices assess 2320 documents and 3104 consumer
+rows across atomic values, simple content/attributes, repeated values, fixed flags,
+patterned list items, actual SOAP 1.1/1.2 bindings, both directions and reconstructed
+contracts/providers. Twenty forbidden-facet schemas reject in libxml2/Xerces and
+all 40 corresponding Qore SOAP contracts. No reference verdict is waived.
+
+Full Python discovery runs 113 tests with exactly the same seven P4/P5/P6 failures,
+zero new failures, errors, skips or warnings. Final affected/matrix/docs checks
+include the default-path audit correction. Qdx/Doxygen is clean. No C++ changed.
+Strict coverage remains 89 descriptions/756 directions, 664 successful value checks,
+zero failed/missing value checks and no selected failures. Every previous survey
+and coverage case record, source hash, count and all 220 broad failure rows are
+unchanged. Final WSDL SHA-256 is
+e04a9cc66988dce2898b29e020905075e4432c5f9c4f5f9710ec11d04b8d1427.
+Logs: /tmp/wsdl-p3-09-final-python.log and /tmp/wsdl-p3-09-completed-*.
+All 62 audit items are Pass/N/A in audits/P3-09-boolean-facets.md; normative and
+matrix details are in boolean-facets-evidence.md.
+
+P3 remains active: union member selection/value equality and retained patterns,
+IEEE binary32/binary64 conversion, dates/durations/partial dates, strict binary
+lexical/value rules, QName/entity context and remaining regex requirements are
+still required before its acceptance gate. P4–P9 remain required afterward.
+The concurrent Qore Groq/DataProvider checkout is still receiving its owner's
+changes; no additional core edits or commits belong to P3-09. The earlier core
+commit request was completed with cbb8aceb2, bb64c1a98 and f6373c759; the user has
+been asked whether the newer active changes are ready for a commit handoff.
