@@ -69,3 +69,33 @@ both directions, attributes/simple content, provider conversion and generated
 examples. Exact Python integers and Xerces acceptance govern value fidelity;
 96 libxml2 rejections of valid arbitrary-size input integers are explicitly
 recorded as the retained P1 oracle disagreement.
+
+Boolean strings accept exactly `true`, `false`, `1` and `0` after XML whitespace
+collapse. Native booleans and numeric zero/one are accepted, including negative
+zero. Other numbers, missing text, null, binary/structured values and invalid
+spellings are rejected before conversion. Serialization emits `true` or `false`;
+deserialization returns native booleans. This is an XML binding input contract;
+it does not use the wider numeric truth conversion defined for XPath casts.
+List decoding collapses XML whitespace before splitting items, so TAB, LF and CR
+are separators just as SPACE is. Empty and whitespace-only lexical lists are empty
+lists; non-XML separators remain part of the item for its validator to reject.
+Scalar decoding joins ordered `^value^` and `^cdata^` fragments before lexical
+validation, ignoring comments and rejecting child elements. Splitting `false`
+between text and CDATA must still return `False`; appending `tail` must fail.
+A single native `^value^` wrapper retains its native type. Retained XML carriers
+keep the original XML nodes; this text projection is used only for validation.
+
+`XsdBooleanDataType` shares this validation and returns `NOTHING` from
+`getValueType()` so enclosing list providers cannot first turn every nonempty
+string into `True`. Its native base category remains `NT_BOOLEAN`/`bool`.
+Optional and mandatory copies retain validation after Serializable reconstruction;
+only optional providers accept `NOTHING`, while null is always invalid. Invalid
+provider values raise `RUNTIME-TYPE-ERROR`; required omissions raise
+`MISSING-VALUE-ERROR`. For example, a list `("false", "1")` produces `(False, True)`,
+whereas `("false", "yes")` is rejected.
+
+`test/wsdl-boolean-lexical.qtest` checks lexical boundaries, native numeric values,
+provider lists/optionality, reconstruction, attributes, simple content and unions.
+`test_boolean_lexical.py` independently validates both directions of actual SOAP
+1.1/1.2 bindings, boolean lists/unions, native provider values and generated examples
+with libxml2 and Xerces, and compares the resulting boolean values.

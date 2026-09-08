@@ -252,6 +252,15 @@ cases require independent exact-value assertions; negative cases require the int
 Missing, duplicate, stale, malformed or unclassified entries fail. This selection is deliberately named
 and bounded; it does not turn known implementation failures elsewhere into passing conformance tests.
 
+`test_boolean_lexical.py` adds 616 independently validated input/output documents:
+356 lexical inputs and 132 outputs across simple content, attributes, lists and
+boolean/integer unions, plus 128 native provider/example outputs. Both actual SOAP
+bindings and both directions are exercised with libxml2 and pinned Xerces. Tests
+compare boolean values, reject malformed spellings with the intended exception,
+and verify that provider lists retain `false` through Serializable reconstruction.
+List item boundaries use all four XML whitespace characters. This extends the
+existing strict boolean families without changing their scope or original bytes.
+
 [coverage-report.json](coverage-report.json) preserves the complete current ledger, including 264 failed
 requirements assigned to later phases. Its stage accounting includes unreachable, missing, skipped and
 unassessed work. In this run 1,492 value/infoset assessments remain unimplemented, explicitly counted as

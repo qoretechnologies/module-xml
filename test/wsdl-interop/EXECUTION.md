@@ -1925,3 +1925,123 @@ Audit: [audits/P3-02-integer-range.md](audits/P3-02-integer-range.md).
 Next P3 criteria: exact decimals and boolean/binary lexical spaces, IEEE32/64
 semantics, lexical/value facets and enumerations, retained patterns, dates,
 durations/partial dates, lists/unions and XSD regex validation/generation.
+
+### Decimal conversion policy investigation (2026-09-08)
+
+The user asked to consider `qore_number_private::applyRoundingHeuristic()` and
+established standards/best practice. XSD 1.0 decimal has exact decimal values
+and no exponent notation; JAXB maps it to BigDecimal. Java's preferred native
+double-to-BigDecimal conversion uses Double.toString's short decimal that rounds
+back to the supplied binary value. XPath 3.1 casts instead require the closest
+representable decimal to the binary value; this is a separate casting contract,
+not a requirement on a Qore SOAP binding's native input policy.
+
+The recommended policy communicated to the user is to preserve exact incoming
+XML decimal digits, and use round-trip-preserving decimal spelling for native
+float/number inputs. A heuristic candidate is safe only if parsing at the source
+number's precision reconstructs that value. Schema restrictions must not cause
+additional rounding. Existing native 123.45/fractionDigits=2 behavior motivates
+the short spelling; exact XML strings must retain meaningful trailing digits.
+
+`/tmp/wsdl-decimal-heuristic.qr` verifies default Qore formatting changes native
+`number("1.00000000000000000001")` to `"1"` and
+`number("0.123450000000000000000006")` to `"0.12345"`, changing their values.
+It preserves 123.45n and 0.1n. The heuristic alone is therefore insufficient for
+lossless wire output. No global Qore rounding or float-to-number policy was changed
+by this investigation. Decimal implementation is still pending.
+
+Sources: [XSD decimal](https://www.w3.org/TR/xmlschema-2/#decimal),
+[JAXB 4.0 mappings](https://jakarta.ee/specifications/xml-binding/4.0/jakarta-xml-binding-spec-4.0),
+[BigDecimal.valueOf](https://docs.oracle.com/en/java/javase/24/docs/api/java.base/java/math/BigDecimal.html#valueOf(double)),
+[Double.toString](https://docs.oracle.com/en/java/javase/24/docs/api/java.base/java/lang/Double.html#toString(double)),
+[XPath 3.1 casts](https://www.w3.org/TR/xpath-functions-31/#casting-to-decimal).
+
+## P3-03: boolean lexical space and list whitespace (2026-09-08)
+
+Root causes: boolean serialization/provider conversion used permissive
+`parse_boolean()`, decoding used case-insensitive substring matches and generic
+truth conversion, and enclosing list providers converted strings through softbool
+before the XML validator. Strict item validation also exposed list tokenization
+splitting on SPACE before normalizing TAB/LF/CR.
+
+The common boolean helper now accepts only the four XSD spellings after XML
+whitespace collapse, native booleans, and numeric zero/one. Both wire directions
+and providers use it; invalid input gets the corresponding SOAP or provider error.
+The provider retains its native boolean output category and inherited Serializable
+and optional/mandatory copying, but returns NOTHING for its conversion type so
+list items reach validation first. Optional omission differs from null. List
+decoding now applies its fixed collapse whitespace rule before finding items.
+
+The first complete regression run exposed CDATA fragments reaching the scalar
+validator as hashes; permissive boolean conversion previously hid this. Scalar
+conversion now joins ordered text/CDATA fragments before lexical validation,
+ignores comments, preserves a single native value wrapper, and rejects child
+elements or invalid mixed native fragments. List decoding uses the same text
+projection. Retained XML carriers still preserve their authored nodes. The
+independent retained-context suite again passes its 80 document checks.
+
+Normative requirements: XSD 1.0 part 2 sections
+[3.2.2](https://www.w3.org/TR/xmlschema-2/#boolean) and
+[2.5.1.2](https://www.w3.org/TR/xmlschema-2/#list-datatypes), including the four
+boolean lexical forms and list whitespace fixed to collapse. Native numeric
+zero/one acceptance is the binding's documented input policy, separate from
+XPath's wider numeric truth casts.
+
+Focused regression `test/wsdl-boolean-lexical.qtest` first failed three of four
+cases against the parent implementation for invalid lexical acceptance,
+provider preconversion and invalid attributes. The final version passes five
+cases / 281 assertions, including all XML separators, empty lists, non-XML
+separators, invalid types, optionality, reconstruction, unions and ordered scalar
+text/CDATA. The independent
+matrix adds 616 documents: 356 lexical inputs, 132 valid outputs, and 128 native
+provider/example outputs. Alternating content cases use CDATA, including records
+with attributes. Every document receives libxml2 and Xerces validation;
+valid output also requires correct expanded names and boolean values. The first
+test draft mistakenly classified a valid multi-boolean list as invalid; the
+validator caught this, and the corrected malformed item is `false0`.
+
+All 37 affected Qore suites pass (484 cases), including the seven required SOAP
+consumers, with local development modules and --enable-debug. WSDL Qdx/Doxygen
+passes without warnings/errors. No C++ code changed in this increment, so no new
+Valgrind run is required. Both-version survey and complete adjudicated coverage
+are byte-equivalent to P3-02 except runtime/source version metadata: 264 broad
+failures, 60 descriptions / 536 selected directions, zero selected failures and
+zero missing/skipped stages. Historical sources/findings remain unchanged.
+
+Concurrent core DataProvider edits caused AOT source-hash warnings and then
+qcc's input-changed error during a rebuild. Final checks use an immutable
+DataProvider source export from core commit 860603291 at /tmp/wsdl-core-deps.
+It was compiled with the existing qcc and tested Debug libqore, and its
+Qore-Q-square.svg resource was copied beside the qmod. QORE_MODULE_DIR selects
+/tmp/wsdl-core-deps/build/qlib-qmod/DataProvider. The main checkout's concurrent
+source changes were not modified or committed. An initial CMake target attempt
+was stopped while building libqore after its dependency graph was found to include
+all binary modules; astparser was not rebuilt. Direct qcc compilation of the
+snapshot avoids that unrelated dependency graph. The temporary test runner now
+checks warnings case-insensitively, including AOT WARNING diagnostics.
+
+Reproduce the dependency export with `git archive 860603291 qlib/DataProvider`
+from the core repository, extract it under /tmp/wsdl-core-deps, compile it using
+`qcc -m /tmp/wsdl-core-deps/qlib/DataProvider -o
+/tmp/wsdl-core-deps/build/qlib-qmod/DataProvider/DataProvider.qmod`, and copy
+Qore-Q-square.svg from that source directory beside the generated qmod.
+The complete command/environment and qcc outcome are retained in the session
+and /tmp/wsdl-p3-dataprovider-snapshot.log.
+
+Final Python discovery runs 98 tests with exactly the seven tracked P4/P5/P6
+failures, zero errors/skips and no warnings. The final focused rerun adds native
+MPFR NaN/infinity/nonboolean number rejections and passes 5/281.
+
+Logs: /tmp/wsdl-p3-03-boolean-before.log,
+/tmp/wsdl-p3-03-boolean-final-reviewed.log,
+/tmp/wsdl-p3-03-verified-wsdl-boolean-lexical.log,
+/tmp/wsdl-p3-03-independent-cdata.log, /tmp/wsdl-p3-03-context.log,
+/tmp/wsdl-p3-03-verified.log, /tmp/wsdl-p3-03-docs-verified.log,
+/tmp/wsdl-p3-03-survey-verified.log, /tmp/wsdl-p3-03-coverage-verified.log and
+/tmp/wsdl-p3-03-python-verified.log. Earlier python-final/complete logs retain
+CDATA regression evidence; they do not describe the final implementation.
+Audit: [audits/P3-03-boolean-lexical.md](audits/P3-03-boolean-lexical.md).
+
+P3 remains active; decimal conversion, other scalar lexical/value facets and
+enumerations, retained patterns, dates/durations, binary values and IEEE32/64
+semantics still require implementation before the P4 boundary.

@@ -80,6 +80,8 @@ module WSDL {
     @section wsdlrelnotes WSDL Module Release Notes
 
     @subsection wsdl_0_5_8 WSDL v0.5.8
+    - boolean values accept only the four XML spellings after XML whitespace collapse, native booleans,
+      and numeric zero/one; provider lists validate before conversion and reject null or invalid spellings
     - integer builtins enforce exact ranges before conversion and retain values beyond signed 64-bit
       range as strings; native integral float/number values produce exact integer text
     - added \c XsdIntegerDataType for integer provider validation, including lists, optional values and
@@ -2087,25 +2089,149 @@ public class XsdAbstractType inherits WSDL::XsdNamedData {
     }
 }
 
+#! obtains a scalar value from the parser's ordered text and CDATA fragments
+class XsdScalarTextHelper {
+    static auto value(auto data, string error) {
+        if (data.typeCode() != NT_HASH) {
+            return data;
+        }
+        list<auto> fragments();
+        foreach string key in (keys data) {
+            if (key == "^attributes^" || key == ".ns" || key.startsWith("^comment")) {
+                continue;
+            }
+            if (!key.startsWith("^value") && !key.startsWith("^cdata")) {
+                throw error, sprintf("simple content cannot contain child element or metadata %Y", key);
+            }
+            push fragments, data{key};
+        }
+        if (fragments.size() == 1) {
+            # A native ^value^ wrapper must retain its existing scalar type.
+            return fragments[0];
+        }
+        list<string> text();
+        foreach auto fragment in (fragments) {
+            if (!exists fragment) {
+                continue;
+            }
+            if (fragment.typeCode() != NT_STRING) {
+                throw error, "multiple simple-content fragments must contain XML text";
+            }
+            text += fragment;
+        }
+        return text.join("");
+    }
+}
+
+#! validates boolean lexical input before native conversion
+class XsdBooleanLexicalHelper {
+    static bool decode(auto value, string error) {
+        switch (value.typeCode()) {
+            case NT_STRING:
+                value = XsdSimpleType::normalizeWhiteSpace(value, "collapse");
+                if (value == "true" || value == "1") {
+                    return True;
+                }
+                if (value == "false" || value == "0") {
+                    return False;
+                }
+                break;
+            case NT_BOOLEAN:
+                return value;
+            case NT_INT:
+            case NT_FLOAT:
+            case NT_NUMBER:
+                if (value == 0 || value == 1) {
+                    return value == 1;
+                }
+                break;
+        }
+        throw error, sprintf("type boolean requires true, false, 1 or 0; got %Y", value);
+    }
+}
+
 #! data provider type for \c xs:boolean values
-/** accepts any value that can be converted to a boolean, but converts string values according to the XSD boolean
-    lexical space, so that \c "false" and \c "0" are converted to @ref False "False"
+/** accepts the XML spellings \c "true", \c "false", \c "1" and \c "0" after XML whitespace collapse,
+    native booleans, and numeric zero or one. Other inputs are rejected before native conversion.
 
     @note a plain \c softbool type cannot be used for XSD booleans, because %Qore's boolean conversion converts any
     non-empty string to @ref True "True", which would silently turn the XSD value \c "false" into \c "true"
 
+    @par Example
+    An enabled flag supplied as \c "false" returns @ref False "False", including in provider lists.
+    A flag supplied as \c "yes" raises \c RUNTIME-TYPE-ERROR.
+
     @since %WSDL 0.5.8
 */
 public class XsdBooleanDataType inherits QoreDataType {
+    #! constructs a required boolean provider
     constructor() : QoreDataType(SoftBoolType) {
     }
 
+    #! validates XML boolean input before conversion
+    /** @param value an XML boolean string, boolean, or numeric zero/one
+        @return a boolean, or NOTHING for an omitted optional value
+        @throw MISSING-VALUE-ERROR a mandatory value is absent
+        @throw RUNTIME-TYPE-ERROR the input is outside the boolean lexical/native value contract
+    */
     auto acceptsValue(auto value) {
-        # parse string values according to the XSD boolean lexical space before the type conversion
-        if (value.typeCode() == NT_STRING) {
-            value = parse_boolean(value);
+        if (!exists value) {
+            value = getDefaultValue();
+            if (!exists value) {
+                if (isOrNothingType()) {
+                    return;
+                }
+                throw "MISSING-VALUE-ERROR", "a boolean value must be supplied";
+            }
         }
-        return QoreDataType::acceptsValue(value);
+        return QoreDataType::acceptsValue(XsdBooleanLexicalHelper::decode(value, "RUNTIME-TYPE-ERROR"));
+    }
+
+    #! keeps enclosing list providers from coercing strings before validation
+    /** @return NOTHING */
+    *Type getValueType() {
+    }
+
+    #! returns the native output type
+    /** @return NT_BOOLEAN */
+    int getBaseTypeCode() {
+        return NT_BOOLEAN;
+    }
+
+    #! returns the native output type name
+    /** @return bool */
+    string getBaseTypeName() {
+        return "bool";
+    }
+
+    #! requires validation instead of bypassing the provider
+    /** @return an empty map */
+    *hash<string, bool> getDirectTypeHash() {
+        return {};
+    }
+
+    #! returns whether a value must be supplied
+    /** @return True for mandatory types */
+    bool isMandatory() {
+        return !isOrNothingType();
+    }
+
+    #! returns whether a value may be omitted
+    /** @return True for optional types */
+    bool isOrNothingType() {
+        return QoreDataType::getValueType().isOrNothingType();
+    }
+
+    #! reports the input categories subject to lexical/value validation
+    /** @param simple request simplified names
+        @return bool/string/int/float/number, plus nothing for optional types; null is not accepted
+    */
+    hash<string, bool> getAcceptTypeHash(*bool simple) {
+        hash<string, bool> rv = {"bool": True, "string": True, "int": True, "float": True, "number": True};
+        if (isOrNothingType()) {
+            rv.nothing = True;
+        }
+        return rv;
     }
 }
 
@@ -2430,15 +2556,15 @@ public class XsdBaseType inherits WSDL::XsdAbstractType {
     auto serializeValue(Namespaces nsc, auto val, *softbool omitType) {
         *hash<auto> comments;
         if (val.typeCode() == NT_HASH) {
-            if (name == "anySimpleType" && (select keys val, $1 != "^value^" && $1 !~ /^\^comment/)) {
-                throw SOAP_SERIALIZATION_ERROR, "anySimpleType cannot contain child elements or attributes";
+            if (name == "anySimpleType" && val.hasKey("^attributes^")) {
+                throw SOAP_SERIALIZATION_ERROR, "anySimpleType cannot contain attributes";
             }
             foreach string k in (keys val) {
                 if (k =~ /^\^comment/) {
                     comments{k} = val{k};
                 }
             }
-            val = val."^value^";
+            val = name == "anyType" ? val."^value^" : XsdScalarTextHelper::value(val, SOAP_SERIALIZATION_ERROR);
         }
         # issue #5411: apply "whiteSpace" processing to the lexical value
         if (val.typeCode() == NT_STRING) {
@@ -2479,9 +2605,7 @@ public class XsdBaseType inherits WSDL::XsdAbstractType {
                 break;
 
             case "boolean":
-                # use parse_boolean() so that string values are interpreted according to their content; a simple
-                # boolean conversion would turn the string "false" into "true", as any non-empty string is True
-                val = parse_boolean(val) ? "true" : "false";
+                val = XsdBooleanLexicalHelper::decode(val, SOAP_SERIALIZATION_ERROR) ? "true" : "false";
                 break;
 
             case "time":
@@ -2723,11 +2847,7 @@ public class XsdBaseType inherits WSDL::XsdAbstractType {
 
     auto deserializeValue(string en, hash<string, XsdAbstractType> tmap, *hash<auto> mrh, auto val) {
         string type;
-        if (name == "anySimpleType" && val.typeCode() == NT_HASH
-                && (select keys val, $1 != "^value^" && $1 != "^attributes^" && $1 != ".ns")) {
-            throw SOAP_DESERIALIZATION_ERROR, "anySimpleType cannot contain child elements";
-        }
-        if (val.typeCode() == NT_HASH && (val.hasKey("^value^") || val.hasKey("^attributes^"))) {
+        if (val.typeCode() == NT_HASH) {
             if (name != "anyType") {
                 XsdBase::validateSimpleAttributes(val."^attributes^", name);
             }
@@ -2744,7 +2864,7 @@ public class XsdBaseType inherits WSDL::XsdAbstractType {
             } else {
                 type = name;
             }
-            val = val."^value^";
+            val = type == "anyType" ? val."^value^" : XsdScalarTextHelper::value(val, SOAP_DESERIALIZATION_ERROR);
         } else {
             type = name;
         }
@@ -2790,11 +2910,7 @@ public class XsdBaseType inherits WSDL::XsdAbstractType {
                 return date("1970-01-01T" + val);
 
             case "boolean":
-                if (val =~ /true/i)
-                    return True;
-                if (val =~ /false/i)
-                    return False;
-                return boolean(val);
+                return XsdBooleanLexicalHelper::decode(val, SOAP_DESERIALIZATION_ERROR);
 
             case "decimal":
                 return float(val);
@@ -5604,6 +5720,9 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
         @since %WSDL 0.5.8
     */
     string getWhiteSpace() {
+        if (listItemType) {
+            return "collapse";
+        }
         if (exists whiteSpace) {
             return whiteSpace;
         }
@@ -5989,20 +6108,16 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
 
     #! Deserialize a list type value from space-separated string
     private auto deserializeList(string en, hash<string, XsdAbstractType> tmap, *hash<auto> mrh, auto val) {
-        # Extract value if it's in a hash
-        if (val.typeCode() == NT_HASH) {
-            if (val.hasKey("^value^")) {
-                val = val."^value^";
-            }
-        }
+        val = XsdScalarTextHelper::value(val, SOAP_DESERIALIZATION_ERROR);
 
         # Handle empty or null values
         if (!exists val || val == "") {
             return ();
         }
 
-        # Split space-separated values
-        string strVal = string(val);
+        # XSD list whitespace is fixed to collapse, before item boundaries are found.
+        # Splitting first would pass TAB/LF/CR-separated items to a single scalar validator.
+        string strVal = XsdSimpleType::normalizeWhiteSpace(string(val), getWhiteSpace());
         list<string> items = strVal.split(" ");
 
         # Deserialize each item
@@ -7822,12 +7937,7 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
         }
 
         if (cx_type == XET_SIMPLE) {
-            if (h.typeCode() == NT_HASH && (select keys h, $1 != "^value^")) {
-                throw SOAP_SERIALIZATION_ERROR, sprintf("simpleContent type %Y cannot contain child elements", name);
-            }
-            if (exists h."^value^") {
-                h = h."^value^";
-            }
+            h = XsdScalarTextHelper::value(h, SOAP_SERIALIZATION_ERROR);
             rh."^value^" = simpleType.serializeValue(nsc, h, omitType);
         } else if (cx_type != XET_NONE) {
             if (exists h && h.typeCode() != NT_HASH) {
@@ -8058,12 +8168,10 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
         }
 
         if (cx_type == XET_SIMPLE) {
-            if (val && (select keys val, $1 != "^value^" && $1 != "^attributes^" && $1 !~ /^\^comment/)) {
-                throw SOAP_DESERIALIZATION_ERROR, sprintf("simpleContent type %Y cannot contain child elements", name);
-            }
             if (!exists val && !required)
                 return;
-            auto sv = simpleType.deserializeValue(name, tmap, mrh, val);
+            auto sv = simpleType.deserializeValue(name, tmap, mrh,
+                XsdScalarTextHelper::value(val, SOAP_DESERIALIZATION_ERROR));
             if (sv.typeCode() == NT_HASH)
                 rh = sv;
             else
