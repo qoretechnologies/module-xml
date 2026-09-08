@@ -124,6 +124,8 @@ module WSDL {
       preserve ambiguous item spellings, and compare list enumerations and field choices by exact item values
     - lists whose items select atomic union members retain each selected primitive value for enclosing union
       enumeration and field choices, including reconstructed providers and restricted item unions
+    - list-owned enumeration, pattern and length facets also apply to union-valued items, preserving lexical
+      tokens, inherited restrictions, generated examples and detached field validation
     - builtin date and binary parse failures use SOAP validation errors so union selection can try later members
     - boolean restrictions retain lexical spellings for patterns across serialization and reconstructed providers;
       fixed attribute and field choices compare boolean values, and schema declarations reject inapplicable facets
@@ -3097,22 +3099,25 @@ public hashdecl XsdNumericFacetInfo {
     *XsdFacetCount fraction_digits;
 }
 
-#! resolved atomic item conversion for an XSD list
+#! resolved atomic or union item conversion for an XSD list
 /** The provider retains item restrictions without schema namespace references.
     @since %WSDL 0.5.8
 */
 public hashdecl XsdListItemInfo {
-    #! underlying atomic builtin used to produce XML lexical values
-    string builtin;
+    #! underlying atomic builtin, absent when each item selects a union member
+    *string builtin;
+    #! whether the item provider selects an atomic union member
+    bool union_item = False;
     #! provider validating the complete item restriction
     AbstractDataProviderType provider;
-    #! the most-derived item whitespace rule
+    #! the atomic item's whitespace rule, or collapse for a list of union items
     string white_space;
 }
 
 hashdecl XsdListConversionInfo {
     list<auto> values();
     list<string> tokens();
+    *hash<XsdUnionValueIdentity> identity;
 }
 
 class XsdListValueHelper {
@@ -3126,6 +3131,10 @@ class XsdListValueHelper {
     }
 
     static *hash<XsdListItemInfo> describe(XsdAbstractType item) {
+        if (XsdUnionValueHelper::schemaUnionItem(item)) {
+            return <XsdListItemInfo>{"union_item": True, "provider": item.getDataProviderType(),
+                "white_space": "collapse"};
+        }
         XsdAbstractType base = item;
         while (base instanceof XsdSimpleType && cast<XsdSimpleType>(base).type) {
             base = cast<XsdSimpleType>(base).type;
@@ -3151,7 +3160,14 @@ class XsdListValueHelper {
     }
 
     static check(hash<XsdListItemInfo> item, string error) {
-        if (!supports(item.builtin)) {
+        if (item.union_item) {
+            if (exists item.builtin || !(item.provider instanceof UnionDataType)
+                    || !item.provider.isMandatory() || item.white_space != "collapse") {
+                throw error, "a union list item requires a mandatory union provider and collapsed list whitespace";
+            }
+            return;
+        }
+        if (!exists item.builtin || !supports(item.builtin)) {
             throw error, sprintf("invalid atomic list item metadata %Y", item.builtin);
         }
         if (item.white_space != "preserve" && item.white_space != "replace" && item.white_space != "collapse") {
@@ -3181,6 +3197,9 @@ class XsdListValueHelper {
     static hash<XsdListConversionInfo> convert(hash<XsdListItemInfo> item, auto value, string error) {
         if (value.typeCode() != NT_LIST) {
             throw error, sprintf("an XSD list requires a native item list; got %Y", value.type());
+        }
+        if (item.union_item) {
+            return convertUnion(new ListDataType(item.provider), value, error);
         }
         hash<XsdListConversionInfo> result();
         Namespaces namespaces({});
@@ -3213,6 +3232,56 @@ class XsdListValueHelper {
         return result;
     }
 
+    # Capture the actual base conversion once, including inherited restrictions.
+    # Nested list wrappers reuse the same item capture and read their own interval.
+    static hash<XsdListConversionInfo> convertUnion(AbstractDataProviderType base, auto value, string error) {
+        if (value.typeCode() != NT_LIST) {
+            throw error, "an XSD list requires a native item list";
+        }
+        *XsdProviderUnionItemCapture caller = ProviderUnionItemCapture;
+        AbstractDataProviderType target = base.getElementType();
+        bool owner = !caller || caller.target !== target || caller.depth;
+        on_exit if (owner) {
+            ProviderUnionItemCapture = caller;
+        }
+        if (owner) {
+            ProviderUnionItemCapture = new XsdProviderUnionItemCapture(target);
+        }
+        XsdProviderUnionItemCapture capture = ProviderUnionItemCapture;
+        int offset = capture.items.size();
+        list<auto> converted;
+        try {
+            converted = base.acceptsValue(value);
+        } catch (hash<ExceptionInfo> ex) {
+            if (ex.err != "RUNTIME-TYPE-ERROR" && ex.err != "MISSING-VALUE-ERROR") {
+                rethrow;
+            }
+            throw error, ex.desc;
+        }
+        list<hash<XsdUnionTrialResult>> selected = value.empty() ? ()
+            : capture.items[offset .. capture.items.size() - 1];
+        hash<XsdUnionTrialResult> result;
+        try {
+            result = XsdUnionValueHelper::capturedList(selected, converted);
+        } catch (hash<ExceptionInfo> ex) {
+            if (ex.err != "RUNTIME-TYPE-ERROR") {
+                rethrow;
+            }
+            throw error, ex.desc;
+        }
+        hash<XsdListConversionInfo> output = <XsdListConversionInfo>{"values": converted, "identity": result.identity};
+        foreach auto input in (value) {
+            *string token = input.typeCode() == NT_STRING
+                ? XsdSimpleType::normalizeWhiteSpace(input, "collapse") : selected[$#].lexical;
+            if (!exists input || !exists token) {
+                throw error, "a union list item must have a nonempty atomic lexical value";
+            }
+            checkToken(token, error);
+            push output.tokens, token;
+        }
+        return output;
+    }
+
     static checkToken(string lexical, string error) {
         if (lexical.empty() || regex(lexical, "[ \\t\\r\\n]")) {
             throw error, "a native XSD list item cannot serialize as empty text or contain XML whitespace";
@@ -3221,6 +3290,12 @@ class XsdListValueHelper {
 
     static string key(hash<XsdListItemInfo> item, list<auto> values, string error) {
         hash<XsdListConversionInfo> converted = convert(item, values, error);
+        if (item.union_item) {
+            if (!converted.identity) {
+                throw error, "cannot determine the selected primitive value of a union list item";
+            }
+            return XsdUnionValueHelper::key(converted.identity);
+        }
         string key = "";
         foreach string token in (converted.tokens) {
             if (item.builtin == "decimal" || XsdIntegerLexicalHelper::Types{item.builtin}) {
@@ -3693,6 +3768,12 @@ public class XsdListRestrictionDataType inherits AbstractDataProviderType {
     private initialize(hash<XsdListFacetInfo> facets, hash<XsdListItemInfo> item,
             AbstractDataProviderType base, string error) {
         XsdListValueHelper::check(item, error);
+        if (item.union_item) {
+            *AbstractDataProviderType actual_item = base.getElementType();
+            if (!(actual_item instanceof UnionDataType) || !actual_item.isMandatory()) {
+                throw error, "a union list restriction requires a mandatory union item in its base provider";
+            }
+        }
         hash<XsdSizedFacetInfo> lengths = <XsdSizedFacetInfo>{"name": facets.name, "kind": "list",
             "length": facets.length, "min_length": facets.min_length, "max_length": facets.max_length};
         XsdSizedFacetHelper::checkDefinition(lengths, error);
@@ -3710,8 +3791,16 @@ public class XsdListRestrictionDataType inherits AbstractDataProviderType {
         hash<string, bool> keys_by_value();
         foreach list<auto> value in (facets.enumeration) {
             try {
-                list<auto> checked = base.acceptsValue(value);
-                keys_by_value{XsdListValueHelper::key(item, checked, error)} = True;
+                if (item.union_item) {
+                    hash<XsdListConversionInfo> checked = XsdListValueHelper::convertUnion(base, value, error);
+                    if (!checked.identity) {
+                        throw error, "cannot determine the selected primitive value of a list enumeration item";
+                    }
+                    keys_by_value{XsdUnionValueHelper::key(checked.identity)} = True;
+                } else {
+                    list<auto> checked = base.acceptsValue(value);
+                    keys_by_value{XsdListValueHelper::key(item, checked, error)} = True;
+                }
             } catch (hash<ExceptionInfo> ex) {
                 if (ex.err != "RUNTIME-TYPE-ERROR" && ex.err != "MISSING-VALUE-ERROR") {
                     rethrow;
@@ -3761,7 +3850,7 @@ public class XsdListRestrictionDataType inherits AbstractDataProviderType {
     #! returns the provider of each atomic item
     /** @return the item provider */
     *AbstractDataProviderType getElementType() {
-        return item.provider;
+        return item.union_item ? base.getElementType() : item.provider;
     }
 
     #! returns no outer record fields
@@ -3801,8 +3890,10 @@ public class XsdListRestrictionDataType inherits AbstractDataProviderType {
         if (!exists value) {
             return length_type.acceptsValue(value);
         }
-        hash<XsdListConversionInfo> lexical = XsdListValueHelper::convert(item, value, "RUNTIME-TYPE-ERROR");
-        list<auto> converted = length_type.acceptsValue(value);
+        hash<XsdListConversionInfo> lexical = item.union_item
+            ? XsdListValueHelper::convertUnion(length_type, value, "RUNTIME-TYPE-ERROR")
+            : XsdListValueHelper::convert(item, value, "RUNTIME-TYPE-ERROR");
+        list<auto> converted = item.union_item ? lexical.values : length_type.acceptsValue(value);
         if (facets.patterns) {
             string text = lexical.tokens.join(" ");
             bool matched = False;
@@ -3816,8 +3907,12 @@ public class XsdListRestrictionDataType inherits AbstractDataProviderType {
                 throw "RUNTIME-TYPE-ERROR", sprintf("list value for %Y does not match its whole-list patterns", facets.name);
             }
         }
-        if (exists facets.enumeration && !enumeration{XsdListValueHelper::key(item, converted, "RUNTIME-TYPE-ERROR")}) {
-            throw "RUNTIME-TYPE-ERROR", sprintf("list value for %Y is outside its enumeration", facets.name);
+        if (exists facets.enumeration) {
+            *string key = item.union_item ? (lexical.identity ? XsdUnionValueHelper::key(lexical.identity) : NOTHING)
+                : XsdListValueHelper::key(item, converted, "RUNTIME-TYPE-ERROR");
+            if (!exists key || !enumeration{key}) {
+                throw "RUNTIME-TYPE-ERROR", sprintf("list value for %Y is outside its enumeration", facets.name);
+            }
         }
         return facets.patterns ? lexical.tokens : converted;
     }
@@ -4373,6 +4468,12 @@ public class XsdListDataField inherits QoreDataField {
         if (exists info.element_allowed_values) {
             setElementAllowedValues(info.element_allowed_values, info.element_allowed_values_creatable);
         }
+    }
+
+    private:internal deserializeMembers(hash<auto> members) {
+        hash<XsdListItemInfo> resolved = new hash<XsdListItemInfo>(members.item);
+        XsdListValueHelper::check(resolved, "DESERIALIZATION-ERROR");
+        item = resolved;
     }
 
     #! sets list choices without applying this restriction's lexical patterns to facet declarations
@@ -6553,6 +6654,7 @@ class XsdProviderUnionItemCapture {
 }
 
 thread_local *XsdSchemaUnionItemCapture SchemaUnionItemCapture;
+thread_local *XsdSchemaUnionItemCapture SchemaUnionListCapture;
 thread_local *XsdProviderUnionItemCapture ProviderUnionItemCapture;
 
 # Value comparison is separate from native input identity. Integer and decimal
@@ -8984,8 +9086,15 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
             hash<string, bool> value_keys();
             foreach string lexical in (keys enumValues) {
                 try {
+                    *XsdSchemaUnionItemCapture caller = SchemaUnionListCapture;
+                    on_exit SchemaUnionListCapture = caller;
+                    if (listItemValueInfo.union_item) {
+                        SchemaUnionListCapture = new XsdSchemaUnionItemCapture(XsdUnionValueHelper::listType(type));
+                    }
                     list<auto> value = type.deserializeValue(name, new hash<string, XsdAbstractType>(), NOTHING, lexical);
-                    string key = XsdListValueHelper::key(listItemValueInfo, value, "XSD-SIMPLETYPE-ERROR");
+                    string key = listItemValueInfo.union_item && SchemaUnionListCapture.identity
+                        ? XsdUnionValueHelper::key(SchemaUnionListCapture.identity)
+                        : XsdListValueHelper::key(listItemValueInfo, value, "XSD-SIMPLETYPE-ERROR");
                     if (!value_keys{key}) {
                         push values, value;
                         value_keys{key} = True;
@@ -9241,7 +9350,7 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
     AbstractDataProviderType getDataProviderType() {
         if (listItemType) {
             *hash<XsdListItemInfo> item = XsdListValueHelper::describe(listItemType);
-            if (item) {
+            if (item && !item.union_item) {
                 return new XsdListDataType(item);
             }
             return new ListDataType(listItemType.getDataProviderType());
@@ -9305,8 +9414,11 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
         return result;
     }
 
-    private bool enumerationAccepts(auto value) {
+    private bool enumerationAccepts(auto value, *hash<XsdUnionValueIdentity> identity) {
         if (exists listEnumKeys) {
+            if (listItemValueInfo.union_item && identity) {
+                return boolean(listEnumKeys{XsdUnionValueHelper::key(identity)});
+            }
             return boolean(listEnumKeys{XsdListValueHelper::key(listItemValueInfo, value,
                 "XSD-SIMPLETYPE-ERROR")});
         }
@@ -9381,10 +9493,19 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
         }
 
         if (listItemValueInfo) {
+            *XsdSchemaUnionItemCapture caller = SchemaUnionListCapture;
+            *XsdSimpleType target = listItemValueInfo.union_item ? XsdUnionValueHelper::listType(type) : NOTHING;
+            bool capture_owner = target && (!caller || caller.target !== target);
+            on_exit if (capture_owner) {
+                SchemaUnionListCapture = caller;
+            }
+            if (capture_owner) {
+                SchemaUnionListCapture = new XsdSchemaUnionItemCapture(target);
+            }
             string lexical = string(type.serializeValue(nsc, val, omitType));
             list<string> items = XsdListValueHelper::tokens(lexical);
             validateFacets(items, "serialize", lexical);
-            if (!enumerationAccepts(items)) {
+            if (!enumerationAccepts(items, listItemValueInfo.union_item ? SchemaUnionListCapture.identity : NOTHING)) {
                 throw SOAP_SERIALIZATION_ERROR, sprintf("list value for %Y is outside its enumeration", name);
             }
             if (rh) {
@@ -9667,7 +9788,8 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
 
     #! Serialize a list type value as space-separated string
     private auto serializeList(Namespaces nsc, auto val, *softbool omitType, *hash<auto> rh) {
-        bool capture = exists SchemaUnionSerializeContext && XsdUnionValueHelper::schemaUnionItem(listItemType);
+        bool capture = (exists SchemaUnionSerializeContext || exists SchemaUnionListCapture)
+            && XsdUnionValueHelper::schemaUnionItem(listItemType);
         *XsdSchemaUnionItemCapture caller_capture = SchemaUnionItemCapture;
         on_exit if (capture) {
             SchemaUnionItemCapture = caller_capture;
@@ -9715,8 +9837,11 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
         string result = serializedItems.join(" ");
         if (capture) {
             *hash<XsdUnionValueIdentity> identity = XsdUnionValueHelper::capturedIdentity(identities);
-            if (identity) {
+            if (identity && SchemaUnionSerializeContext) {
                 SchemaUnionSerializeContext.identities{self.uniqueHash()} = identity;
+            }
+            if (SchemaUnionListCapture && SchemaUnionListCapture.target === self) {
+                SchemaUnionListCapture.identity = identity;
             }
         }
         if (rh) {
@@ -10362,6 +10487,15 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
         }
 
         if (listItemValueInfo) {
+            *XsdSchemaUnionItemCapture caller = SchemaUnionListCapture;
+            *XsdSimpleType target = listItemValueInfo.union_item ? XsdUnionValueHelper::listType(type) : NOTHING;
+            bool capture_owner = target && (!caller || caller.target !== target);
+            on_exit if (capture_owner) {
+                SchemaUnionListCapture = caller;
+            }
+            if (capture_owner) {
+                SchemaUnionListCapture = new XsdSchemaUnionItemCapture(target);
+            }
             auto text = XsdScalarTextHelper::value(val, SOAP_DESERIALIZATION_ERROR);
             if (exists text && !text.strp()) {
                 throw SOAP_DESERIALIZATION_ERROR, "an XML list requires scalar lexical text";
@@ -10369,7 +10503,7 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
             string lexical = normalizeWhiteSpace(string(text), "collapse");
             list<auto> value = type.deserializeValue(en, tmap, mrh, lexical);
             validateFacets(value, "deserialize", lexical);
-            if (!enumerationAccepts(value)) {
+            if (!enumerationAccepts(value, listItemValueInfo.union_item ? SchemaUnionListCapture.identity : NOTHING)) {
                 throw SOAP_DESERIALIZATION_ERROR, sprintf("list value for %Y is outside its enumeration", name);
             }
             return patterns ? XsdListValueHelper::tokens(lexical) : value;
@@ -10403,7 +10537,8 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
 
     #! Deserialize a list type value from space-separated string
     private auto deserializeList(string en, hash<string, XsdAbstractType> tmap, *hash<auto> mrh, auto val) {
-        bool capture = exists SchemaUnionDeserializeContext && XsdUnionValueHelper::schemaUnionItem(listItemType);
+        bool capture = (exists SchemaUnionDeserializeContext || exists SchemaUnionListCapture)
+            && XsdUnionValueHelper::schemaUnionItem(listItemType);
         *XsdSchemaUnionItemCapture caller_capture = SchemaUnionItemCapture;
         on_exit if (capture) {
             SchemaUnionItemCapture = caller_capture;
@@ -10435,8 +10570,11 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
 
         if (capture) {
             *hash<XsdUnionValueIdentity> identity = XsdUnionValueHelper::capturedIdentity(identities);
-            if (identity) {
+            if (identity && SchemaUnionDeserializeContext) {
                 SchemaUnionDeserializeContext.identities{self.uniqueHash()} = identity;
+            }
+            if (SchemaUnionListCapture && SchemaUnionListCapture.target === self) {
+                SchemaUnionListCapture.identity = identity;
             }
         }
         return result;

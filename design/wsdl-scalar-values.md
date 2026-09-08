@@ -566,6 +566,28 @@ directions and reconstructed consumers. The Xerces list-kind comparison defect i
 counted separately with exact diagnostics, libxml2 validation and independent
 ordered values; see `test/wsdl-interop/list-values-adjudication.md`.
 
+List-owned restrictions use `XsdListItemInfo.union_item` when each item is a
+union, with no atomic builtin descriptor. Schema conversion captures the selected
+identities from the actual underlying list. Inherited wrappers share that capture;
+enumeration declarations are evaluated in the base type before this restriction's
+own lexical patterns. Equivalent values deduplicate without collapsing boolean
+and decimal families.
+
+Provider restrictions capture the actual base list conversion and apply their
+own count, pattern and enumeration facets to it. Nested restrictions reuse the
+item capture over their interval, so identity inference does not replay item
+validators. Original string tokens provide whole-list pattern spellings; native
+values use the selected member's lexical form. Reconstructed providers require a
+mandatory union item in their base; reconstructed fields validate the item
+metadata too. Atomic-list metadata remains compatible when the union flag is absent.
+
+For example, a boolean/int item union with list enumeration `true +1 +2` and
+list pattern `1 001 002` accepts and retains `1 001 002`. It rejects `true +1 +2`
+for its pattern, and rejects `1 1 2` because its second item is boolean.
+`wsdl-list-union-facets.qtest` and `test_list_union_facets.py` cover these rules,
+including inherited facets, empty lists, field updates, metadata corruption,
+cancellation/reentry cleanup, generated examples and both SOAP bindings.
+
 Union whitespace is governed by the successfully validating member (XSD 1.0
 Part 2 section 4.3.6). The union itself does not introduce collapse: a leading
 `xs:string` member retains whitespace; `xs:token` collapses it. Ordered bounds

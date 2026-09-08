@@ -1,0 +1,253 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires xml
+%requires ../qlib/WSDL.qm
+%exec-class ListUnionFacetsTest
+
+class ListUnionFacetsTest inherits QUnit::Test {
+    constructor() : Test("XSD list facets with union-valued items", "1.0") {
+        addTestCase("List enumeration compares selected primitive values", \enumerations());
+        addTestCase("List patterns retain lexical tokens", \patterns());
+        addTestCase("Inherited list facets intersect in their own spaces", \inherited());
+        addTestCase("Empty lists and invalid item boundaries", \boundaries());
+        addTestCase("Invalid enumeration declarations are rejected", \declarations());
+        addTestCase("Generated list examples satisfy their own facets", \samples());
+        addTestCase("List choices compare union item identities and update atomically", \fields());
+        addTestCase("Detached union item metadata rejects invalid descriptors", \metadata());
+        addTestCase("Nested list restrictions recover after item errors and reentry", \cleanup());
+        addTestCase("Enclosing unions retain list-owned restrictions and item identities", \enclosing());
+        set_return_value(main());
+    }
+    private static XsdSchema schema(string facets, string parent = "", string item = "") {
+        return new XsdSchema('<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"
+            xmlns:t="urn:list-union-facets" targetNamespace="urn:list-union-facets">
+            <xs:simpleType name="Atomic"><xs:union memberTypes="xs:boolean xs:int"/></xs:simpleType>
+            <xs:simpleType name="Item"><xs:restriction base="t:Atomic">' + item + '</xs:restriction></xs:simpleType>
+            <xs:simpleType name="Items"><xs:list itemType="t:Item"/></xs:simpleType>
+            <xs:simpleType name="Base"><xs:restriction base="t:Items">' + parent + '</xs:restriction></xs:simpleType>
+            <xs:simpleType name="Value"><xs:restriction base="t:Base">' + facets + '</xs:restriction></xs:simpleType>
+            </xs:schema>', {"async_only": True});
+    }
+    private static XsdSimpleType valueType(XsdSchema definition) {
+        return definition.findType(make_qname("urn:list-union-facets", "Value"));
+    }
+    private enumerations() {
+        XsdSchema original = schema('<xs:enumeration value="1 01 2"/><xs:enumeration value="true +1 +2"/>');
+        foreach XsdSchema definition in (original, Serializable::deserialize(original.serialize())) {
+            XsdSimpleType type = valueType(definition);
+            assertEq(((True, "01", 2),), type.getAllowedValues());
+            foreach AbstractDataProviderType provider in (type.getDataProviderType(),
+                    Serializable::deserialize(type.getDataProviderType().serialize())) {
+                foreach string lexical in ("1 01 2", "true +1 +2", " true\t01\n02 ") {
+                    auto decoded = type.deserializeValue("value", definition.getTypeMap(), NOTHING, lexical);
+                    assertTrue(decoded[0] === True && number(decoded[1]) === 1n && number(decoded[2]) === 2n);
+                    auto converted = provider.acceptsValue(XsdSimpleType::normalizeWhiteSpace(lexical, "collapse").split(" "));
+                    assertTrue(converted[0] === True && number(converted[1]) === 1n && number(converted[2]) === 2n);
+                    assertEq(decoded, type.deserializeValue("value", definition.getTypeMap(), NOTHING,
+                        type.serializeValue(definition.nsc, decoded, True)));
+                }
+                foreach string lexical in ("01 01 2", "1 1 2", "1 01 3", "1 2 01", "", "1 01") {
+                    assertThrows("SOAP-DESERIALIZATION-ERROR", \type.deserializeValue(),
+                        ("value", definition.getTypeMap(), NOTHING, lexical));
+                    assertThrows("SOAP-SERIALIZATION-ERROR", \type.serializeValue(),
+                        (definition.nsc, lexical.split(" "), True));
+                    assertThrows("RUNTIME-TYPE-ERROR", \provider.acceptsValue(), (lexical.split(" "),));
+                }
+            }
+        }
+    }
+    private patterns() {
+        XsdSchema definition = schema('<xs:enumeration value="true +1 2"/><xs:pattern value="1 001 002"/>');
+        XsdSimpleType type = valueType(definition);
+        AbstractDataProviderType provider = Serializable::deserialize(type.getDataProviderType().serialize());
+        assertEq(("1", "001", "002"), type.deserializeValue("value", definition.getTypeMap(), NOTHING, " 1\t001\n002 "));
+        assertEq(("1", "001", "002"), provider.acceptsValue(("1", "001", "002")));
+        assertEq("1 001 002", type.serializeValue(definition.nsc, ("1", "001", "002"), True));
+        assertThrows("RUNTIME-TYPE-ERROR", \provider.acceptsValue(), ((True, "01", 2),));
+        assertThrows("SOAP-DESERIALIZATION-ERROR", \type.deserializeValue(),
+            ("value", definition.getTypeMap(), NOTHING, "true +1 2"));
+    }
+    private inherited() {
+        XsdSchema definition = schema('<xs:length value="2"/><xs:enumeration value="01 12"/>',
+            '<xs:pattern value="0[0-9] 12"/>', '<xs:enumeration value="01"/><xs:enumeration value="12"/>');
+        XsdSimpleType type = valueType(definition);
+        AbstractDataProviderType provider = Serializable::deserialize(type.getDataProviderType().serialize());
+        assertEq(("01", "12"), provider.acceptsValue(("01", "12")));
+        assertEq(("01", "12"), type.deserializeValue("value", definition.getTypeMap(), NOTHING, "01 12"));
+        foreach list<auto> input in (("+1", "12"), ("1", "12"), ("01", "13"), ("01",), ("01", "12", "12")) {
+            assertThrows("RUNTIME-TYPE-ERROR", \provider.acceptsValue(), (input,));
+            assertThrows("SOAP-SERIALIZATION-ERROR", \type.serializeValue(), (definition.nsc, input, True));
+        }
+    }
+    private boundaries() {
+        XsdSchema definition = schema('<xs:enumeration value=""/>');
+        XsdSimpleType type = valueType(definition);
+        AbstractDataProviderType provider = Serializable::deserialize(type.getDataProviderType().serialize());
+        assertEq((), type.deserializeValue("value", definition.getTypeMap(), NOTHING, " \t\n "));
+        assertEq("", type.serializeValue(definition.nsc, (), True));
+        assertEq(((),), type.getAllowedValues());
+        assertEq((), provider.acceptsValue(()));
+        assertEq(NOTHING, provider.getOrNothingType().acceptsValue(NOTHING));
+        AbstractDataProviderType mandatory = provider.getOrNothingType().getMandatoryType();
+        assertThrows("MISSING-VALUE-ERROR", \mandatory.acceptsValue(), (NOTHING,));
+        foreach auto invalid in ((NOTHING,), ("",), ("1 2",), (("1",),), (True,)) {
+            assertThrows("RUNTIME-TYPE-ERROR", \provider.acceptsValue(), (invalid,));
+            assertThrows("SOAP-SERIALIZATION-ERROR", \type.serializeValue(), (definition.nsc, invalid, True));
+        }
+    }
+    private declarations() {
+        foreach string invalid in ("1 bad", "1 2147483648", "1 1.5") {
+            assertThrows("XSD-SIMPLETYPE-ERROR", \schema(), ('<xs:enumeration value="' + invalid + '"/>',));
+        }
+        assertThrows("XSD-SIMPLETYPE-ERROR", \schema(),
+            ('<xs:enumeration value="1 2"/>', '<xs:enumeration value="01 2"/>'));
+    }
+    private fields() {
+        XsdSchema definition = schema("");
+        AbstractDataProviderType provider = valueType(definition).getDataProviderType();
+        hash<XsdListItemInfo> item = <XsdListItemInfo>{"union_item": True, "provider": provider.getElementType(),
+            "white_space": "collapse"};
+        XsdListDataField original({"name": "items", "type": provider, "allowed_values": (("1", "01", "2"),)}, item);
+        foreach XsdListDataField field in (original, Serializable::deserialize(original.serialize())) {
+            assertEq((True, "+1", 2), field.acceptsValue(("true", "+1", "2")));
+            assertEq("1 01 2", field.getAllowedValues()[0].display_name);
+            assertThrows("FIELD-VALUE-ERROR", \field.acceptsValue(), (("1", "1", "2"),));
+            assertThrows("FIELD-VALUE-ERROR", \field.acceptsValue(), (("01", "1", "2"),));
+            hash<SerializationInfo> before = field.serializeToData();
+            foreach auto invalid in ((("12",), ("bad",)), (("12",), ("",)), (("12",), (NOTHING,))) {
+                assertThrows("XSD-SIMPLETYPE-ERROR", \field.setAllowedValues(), (invalid,));
+                assertEq(before, field.serializeToData());
+            }
+            hash<SerializationInfo> corrupt = before;
+            string item_index = corrupt._index."0"._class_data."WSDL::XsdListDataField".item._index;
+            corrupt._index{item_index}._members.union_item = False;
+            assertThrows("DESERIALIZATION-ERROR", \Serializable::deserialize(), (corrupt,));
+        }
+        XsdListDataField repeated({"name": "rows", "type": new ListDataType(provider),
+            "element_allowed_values": (("1", "01", "2"),)}, item);
+        assertEq(((True, "+1", 2),), Serializable::deserialize(repeated.serialize())
+            .acceptsValue((("true", "+1", "2"),)));
+    }
+    private metadata() {
+        XsdSchema definition = schema('<xs:enumeration value="01 2"/>');
+        AbstractDataProviderType provider = valueType(definition).getDataProviderType();
+        hash<SerializationInfo> original = provider.serializeToData();
+        string index = original._index."0"._class_data."WSDL::XsdListRestrictionDataType".item._index;
+        foreach hash<auto> changes in ({"union_item": False}, {"builtin": "int"},
+                {"white_space": "preserve"}, {"provider": NOTHING}) {
+            hash<SerializationInfo> invalid = original;
+            invalid._index{index}._members += changes;
+            assertThrows(changes.hasKey("provider") ? "RUNTIME-TYPE-ERROR" : "DESERIALIZATION-ERROR",
+                \Serializable::deserialize(), (invalid,));
+            assertEq(("+1", 2), Serializable::deserialize(original).acceptsValue(("+1", "2")));
+        }
+    }
+    private cleanup() {
+        XsdSchema definition = schema('<xs:enumeration value="12 13"/>', '<xs:length value="2"/>');
+        XsdSimpleType atomic = definition.findType(make_qname("urn:list-union-facets", "Atomic"));
+        XsdAbstractType restricted = valueType(definition);
+        ListFacetSchemaProbe schema_probe(definition.nsc);
+        atomic.unionTypes = (schema_probe,) + atomic.unionTypes;
+        foreach string error in ("THREAD-CANCELLED", "TEST-ITEM-ERROR", "PARSE-HEX-ERROR") {
+            schema_probe.error = error;
+            assertThrows(error, \restricted.deserializeValue(), ("value", definition.getTypeMap(), NOTHING, "12 13"));
+            assertThrows(error, \restricted.serializeValue(), (definition.nsc, ("12", "13"), True));
+            schema_probe.error = NOTHING;
+            assertEq((12, 13), restricted.deserializeValue("value", definition.getTypeMap(), NOTHING, "12 13"));
+        }
+        AbstractDataProviderType provider = valueType(definition).getDataProviderType();
+        UnionDataType item = provider.getElementType();
+        ListFacetProviderProbe probe();
+        probe.peer = item;
+        on_exit remove probe.peer;
+        item.types = (probe,) + item.types;
+        assertEq((12, 13), provider.acceptsValue(("12", "13")));
+        assertEq(14, probe.nested);
+        foreach string error in ("THREAD-CANCELLED", "TEST-ITEM-ERROR", "PARSE-HEX-ERROR") {
+            probe.error = error;
+            assertThrows(error, \provider.acceptsValue(), (("12", "13"),));
+            probe.error = NOTHING;
+            assertEq((12, 13), provider.acceptsValue(("12", "13")));
+        }
+    }
+    private enclosing() {
+        XsdSchema definition = schema('<xs:enumeration value="01 2"/><xs:pattern value="001 002"/>');
+        definition.addSchemaString('<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"
+            xmlns:t="urn:list-union-facets" targetNamespace="urn:list-union-facets">
+            <xs:simpleType name="Decimals"><xs:list itemType="xs:decimal"/></xs:simpleType>
+            <xs:simpleType name="Outer"><xs:union memberTypes="t:Value t:Decimals"/></xs:simpleType>
+            <xs:simpleType name="Choice"><xs:restriction base="t:Outer">
+                <xs:enumeration value="001 002"/>
+            </xs:restriction></xs:simpleType></xs:schema>');
+        foreach XsdSchema schema in (definition, Serializable::deserialize(definition.serialize())) {
+            XsdAbstractType type = schema.findType(make_qname("urn:list-union-facets", "Choice"));
+            foreach AbstractDataProviderType provider in (type.getDataProviderType(),
+                    Serializable::deserialize(type.getDataProviderType().serialize())) {
+                foreach string lexical in ("001 002", "1.0 2.00", "01 2") {
+                    auto converted = provider.acceptsValue(lexical);
+                    assertEq((1n, 2n), map number($1), converted);
+                    auto decoded = type.deserializeValue("value", schema.getTypeMap(), NOTHING, lexical);
+                    assertEq((1n, 2n), map number($1), decoded);
+                    auto round_trip = type.deserializeValue("value", schema.getTypeMap(), NOTHING,
+                        type.serializeValue(schema.nsc, converted, True));
+                    assertEq((1n, 2n), map number($1), round_trip);
+                }
+                assertThrows("RUNTIME-TYPE-ERROR", \provider.acceptsValue(), ("001 003",));
+                assertThrows("SOAP-DESERIALIZATION-ERROR", \type.deserializeValue(),
+                    ("value", schema.getTypeMap(), NOTHING, "001 003"));
+            }
+        }
+    }
+    private samples() {
+        foreach string facets in ('<xs:enumeration value="01 12"/>',
+                '<xs:pattern value="1 001 002"/>', '<xs:enumeration value=""/>') {
+            XsdSchema definition = schema(facets);
+            XsdSimpleType type = valueType(definition);
+            auto sample = type.getSampleValue((123,));
+            string encoded = type.serializeValue(definition.nsc, sample, True);
+            assertEq(encoded, type.serializeValue(definition.nsc, type.getDataProviderType().acceptsValue(sample), True));
+            assertEq(encoded, type.serializeValue(definition.nsc,
+                type.deserializeValue("value", definition.getTypeMap(), NOTHING, encoded), True));
+        }
+    }
+}
+
+class ListFacetProviderProbe inherits XsdBooleanDataType {
+    public {
+        *string error;
+        *UnionDataType peer;
+        *auto nested;
+    }
+    auto acceptsValue(auto value) {
+        if (peer && (value === "12" || value === 12)) {
+            nested = peer.acceptsValue("14");
+        }
+        if (error && (value === "13" || value === 13)) {
+            throw error, "controlled second-item list facet failure";
+        }
+        throw "RUNTIME-TYPE-ERROR", "controlled item rejection";
+    }
+}
+
+class ListFacetSchemaProbe inherits XsdBaseType {
+    public {
+        *string error;
+    }
+    constructor(Namespaces namespaces) : XsdBaseType("int", namespaces) {
+    }
+    auto serializeValue(Namespaces namespaces, auto value, *softbool omitType) {
+        if (error && (value === "13" || value === 13)) {
+            throw error, "controlled second-item list facet serialization failure";
+        }
+        throw "SOAP-SERIALIZATION-ERROR", "controlled item rejection";
+    }
+    auto deserializeValue(string en, hash<string, XsdAbstractType> tmap, *hash<auto> mrh, auto value) {
+        if (error && value === "13") {
+            throw error, "controlled second-item list facet deserialization failure";
+        }
+        throw "SOAP-DESERIALIZATION-ERROR", "controlled item rejection";
+    }
+}

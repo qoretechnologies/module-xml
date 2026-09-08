@@ -733,3 +733,12 @@ shared graphs, cycle rejection and cleanup after a second-item failure. The
 independent matrix uses both actual SOAP bindings and directions and records
 Xerces's precise list-kind enumeration false negatives alongside mandatory
 libxml2 and exact ordered-value checks. See [list adjudication](list-values-adjudication.md).
+
+List-owned facets for union-valued items are checked by
+`../wsdl-list-union-facets.qtest` and `test_list_union_facets.py`. The matrices
+cover ordered primitive enumeration, lexical patterns, inheritance, item
+restrictions, count boundaries, empty lists, actual SOAP 1.1/1.2 contracts,
+reconstructed consumers and examples. Qore regressions additionally cover exact
+error categories, metadata validation, field choice updates and scoped capture
+cleanup. The known libxml2 empty-list enumeration compiler defect remains
+adjudicated separately; Xerces and exact empty-value checks remain mandatory.

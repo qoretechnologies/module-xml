@@ -2932,3 +2932,53 @@ metadata does not describe union-valued items. P3-15 handles enclosing union
 facets; list-own enumeration/pattern/provider semantics remain required work.
 All earlier remaining date/IEEE/binary/QName/entity/regex/XML-RPC requirements and
 all P4-P9 requirements remain in scope. P3 acceptance is not yet complete.
+
+
+### P3-16: list-owned union-item facets
+
+P3-15 is committed as c4f3412. List item metadata now describes union-valued items
+without an atomic builtin. Schema and provider restrictions capture selected
+primitive identities from the actual base conversion, and share capture intervals
+through inherited restrictions. Enumeration compares ordered primitive values;
+patterns use collapsed original tokens, and count facets apply to item counts.
+Generated examples, detached choices and optional providers retain those rules.
+Field corruption testing also exposed missing XsdListDataField item metadata
+validation on reconstruction; the new hook rejects an inconsistent descriptor.
+No item conversion is replayed merely to infer an identity.
+
+The initial six-case regression failed all six cases on the committed baseline.
+Final source and compiled AOT regressions pass 10 cases / 245 assertions, including
+nested enclosing unions, empty and invalid native boundaries, invalid declarations,
+metadata corruption, atomic field updates, schema/provider error cleanup and
+provider reentry. All 60 affected XML suites pass: the original final run records
+700 cases / 12689 assertions, and the expanded final suite contributes one further
+case and 53 assertions, for combined final evidence of 701 cases / 12742 assertions.
+The original report remains unchanged; reviewed-checks.json records the update.
+The soap suite intentionally exercises three failed assertions internally.
+
+The nine-case independent matrix covers 27 schemas, 54 actual SOAP contracts,
+516 input and 204 emitted binding documents, 3184 consumer results and 1520
+emitted/example documents. Xerces checks all 2240 documents; libxml2 checks all
+except its existing empty-list enumeration compiler defect. Exact selected
+primitive families and Decimal values remain mandatory. No new oracle waiver or
+upstream fixture change. Final full Python discovery runs 133 methods and records
+exactly the same 33 tracked P4/P5/P6 failure signatures as P3-15. Both-version
+survey/strict coverage are unchanged outside versions: 89 selected WSDLs / 756
+directions, zero selected failures and 220 broad tracked failures.
+
+WSDL/SoapClient/SoapDataProvider AOT and WSDL docs/qjar builds pass without warnings
+or errors. No C++ changes and no new Valgrind run needed. Full 62-item audit is
+in audits/P3-16-list-union-facets.md. Evidence under /tmp/wsdl-p3-16- includes
+reviewed-unit, reviewed-aot-unit, final-checks plus reviewed-checks.json,
+final-python plus python-comparison.json, independent-first, final-survey,
+final-coverage, aot-final and docs logs/reports. WSDL SHA-256 is
+3e3fc3b3c003502c5e8f81b59476360eed49e56283dcf2d17b6eb07ede248d0d;
+native XML remains 8ec5487ebe937450478fc856e5c02114e5cf9ffaf9201cf70d052907b40f2e12.
+
+Next reproducer: /tmp/wsdl-p3-17-builtin-list-{probe.qr,baseline.log} shows that
+unions using NMTOKENS/IDREFS/ENTITIES reject whitespace-equivalent enumeration
+values A TAB B and SPACE A SPACE SPACE B SPACE while accepting A SPACE B. The
+union helper does not describe builtin list identities. Builtin token validation
+and their own restriction/provider semantics also need review against the XML
+name rules. Remaining primitive/date/IEEE/binary/QName/entity/regex/XML-RPC work
+and all P4-P9 requirements remain in scope. P3 acceptance is not complete.
