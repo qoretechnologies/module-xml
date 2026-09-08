@@ -80,6 +80,10 @@ module WSDL {
     @section wsdlrelnotes WSDL Module Release Notes
 
     @subsection wsdl_0_5_8 WSDL v0.5.8
+    - XSD patterns validate their own grammar and translate Unicode character-class unions, complements,
+      ranges and nested subtraction consistently; the wildcard excludes both carriage return and newline
+    - regex sample generation bounds repetition before native integer conversion and checks a bounded
+      character alphabet against intersecting pattern restrictions
     - decimal values validate XML syntax before conversion and retain exact precision and noncanonical
       lexical forms as strings when native floats cannot reproduce them; decimal providers validate before conversion
     - native decimal float/number inputs use Qore 3.0 round-trip formatting without exponent notation;
@@ -8351,34 +8355,37 @@ public class XsdRegexHelper {
     const SampleChars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
         + " -_.:+@!$#%&*/=?,;'<>()[]{}|~^\"\\\t\n\r";
 
-    #! returns the shortest value matching the given XSD pattern, or \c NOTHING if none can be generated
-    /** Only the constructs that appear in practice are supported; if the pattern uses anything else, or if the
-        generated value does not match the pattern, \c NOTHING is returned so that the caller can fall back to
-        its own default.
+    #! returns a bounded sample matching the given XSD pattern, or \c NOTHING if none can be generated
+    /** Generation selects the first alternation branch and searches a fixed character alphabet for classes.
+        If no candidate can be constructed within the depth and length limits, or if the pattern is invalid,
+        \c NOTHING is returned. The caller must validate any alternative default against the complete type.
 
         @param xsd the XSD regular expression to generate a value for
         @param min_reps minimum repetitions to use for optional pattern components
 
-        @return the shortest value matching \a xsd, or \c NOTHING if none could be generated
+        @return a value matching \a xsd, or \c NOTHING if none could be generated
+        @note Unexpected errors and cancellation propagate to the caller.
     */
     static *string getSampleValue(string xsd, int min_reps = 0) {
         int i = 0;
         string rv;
+        string pcre;
         try {
+            pcre = XsdRegexHelper::toPcre(xsd);
             rv = XsdRegexHelper::sampleAlternation(xsd, \i, 0, min_reps);
             # the whole pattern must have been consumed
             if (i < xsd.length()) {
                 return;
             }
         } catch (hash<ExceptionInfo> ex) {
-            if (ex.err != "XSD-REGEX-SAMPLE-ERROR") {
+            if (ex.err != "XSD-REGEX-SAMPLE-ERROR" && ex.err != "XSD-REGEX-ERROR") {
                 rethrow;
             }
             return;
         }
         # never return a value that does not match the pattern it was generated from
         try {
-            return regex(rv, "\\A(?:" + XsdRegexHelper::toPcre(xsd) + ")\\z") ? rv : NOTHING;
+            return regex(rv, "\\A(?:" + pcre + ")\\z") ? rv : NOTHING;
         } catch (hash<ExceptionInfo> ex) {
             if (ex.err != "XSD-REGEX-ERROR" && ex.err != "REGEX-ERROR" && ex.err != "REGEX-COMPILATION-ERROR") {
                 rethrow;
@@ -8455,13 +8462,13 @@ public class XsdRegexHelper {
                     if (!exists mn) {
                         throw "XSD-REGEX-SAMPLE-ERROR", "unsupported quantifier";
                     }
-                    min = mn.toInt();
+                    min = sampleCount(mn);
                     if (body !~ /,/) {
                         max = min;
                     } else {
                         *string mx = (body =~ x/,\s*([0-9]+)$/)[0];
                         if (exists mx) {
-                            max = mx.toInt();
+                            max = sampleCount(mx);
                         } else {
                             delete max;
                         }
@@ -8476,7 +8483,10 @@ public class XsdRegexHelper {
         if (exists max && reps > max) {
             reps = max;
         }
-        if (reps * atom.length() > XsdRegexHelper::MaxSampleLength) {
+        if (!atom.length()) {
+            return "";
+        }
+        if (reps > XsdRegexHelper::MaxSampleLength / atom.length()) {
             throw "XSD-REGEX-SAMPLE-ERROR", "sample value too long";
         }
         string rv = "";
@@ -8486,15 +8496,18 @@ public class XsdRegexHelper {
         return rv;
     }
 
+    #! bounds sample work before converting an arbitrary-size repetition count to a native integer
+    private static int sampleCount(string count) {
+        string canonical = XsdIntegerLexicalHelper::canonical(count);
+        int limit = MaxSampleLength + 1;
+        return XsdIntegerLexicalHelper::compare(canonical, limit.toString()) > 0 ? limit : canonical.toInt();
+    }
+
     #! generates a sample for a single atom
     private static string sampleAtom(string xsd, reference<int> i, int depth, int min_reps) {
         switch (xsd[i]) {
             case "(": {
                 ++i;
-                # skip a non-capturing group marker
-                if (xsd.substr(i, 2) == "?:") {
-                    i += 2;
-                }
                 string rv = XsdRegexHelper::sampleAlternation(xsd, \i, depth + 1, min_reps);
                 if (i >= xsd.length() || xsd[i] != ")") {
                     throw "XSD-REGEX-SAMPLE-ERROR", "unterminated group";
@@ -8583,7 +8596,10 @@ public class XsdRegexHelper {
                     return ch;
                 }
             } catch (hash<ExceptionInfo> ex) {
-                # an expression that cannot be compiled cannot produce a sample
+                if (ex.err != "REGEX-ERROR" && ex.err != "REGEX-COMPILATION-ERROR") {
+                    rethrow;
+                }
+                # An expression that cannot be compiled cannot produce a sample.
                 return;
             }
         }
@@ -8600,85 +8616,157 @@ public class XsdRegexHelper {
     }
 
     #! converts an XSD regular expression to the equivalent PCRE expression
+    /** @param xsd an XSD 1.0 pattern
+        @return the translated expression, without implicit whole-value anchors
+        @throw XSD-REGEX-ERROR the pattern does not satisfy the XSD grammar or names an unknown Unicode block
+
+        @par Example
+        The product-code pattern \c "[a-z-[aeiou]]+" accepts lowercase consonants; the returned expression
+        implements character-class subtraction using single-character lookahead assertions.
+
+        @note The caller must add whole-value anchors and compile the expression. PCRE's compilation and
+        matching resource limits still apply independently of XSD syntax validation.
+    */
     static string toPcre(string xsd) {
-        string rv = "";
+        list<string> pieces();
         int i = 0;
+        int groups = 0;
+        bool can_quantify = False;
         while (i < xsd.length()) {
             string c = xsd[i];
             switch (c) {
                 case "\\":
-                    rv += XsdRegexHelper::escapeToPcre(xsd, \i, False);
+                    push pieces, XsdRegexHelper::escapeToPcre(xsd, \i);
+                    can_quantify = True;
                     break;
-
-                # "^" and "$" are ordinary characters in the XSD regular expression language
+                case "[":
+                    push pieces, XsdRegexHelper::classToPcre(xsd, \i);
+                    can_quantify = True;
+                    break;
+                case "(":
+                    ++groups;
+                    ++i;
+                    push pieces, "(?:";
+                    can_quantify = False;
+                    break;
+                case ")":
+                    if (!groups) {
+                        throw "XSD-REGEX-ERROR", "unmatched closing parenthesis";
+                    }
+                    --groups;
+                    ++i;
+                    push pieces, ")";
+                    can_quantify = True;
+                    break;
+                case "|":
+                    ++i;
+                    push pieces, "|";
+                    can_quantify = False;
+                    break;
+                case "?":
+                case "*":
+                case "+":
+                case "{": {
+                    if (!can_quantify) {
+                        throw "XSD-REGEX-ERROR", "a quantifier requires an unquantified atom";
+                    }
+                    if (c == "{") {
+                        int end = index(xsd, "}", i + 1);
+                        if (end < 0) {
+                            throw "XSD-REGEX-ERROR", "unterminated quantifier";
+                        }
+                        string counts = xsd.substr(i + 1, end - i - 1);
+                        if (!regex(counts, '\A[0-9]+(?:,[0-9]*)?\z')) {
+                            throw "XSD-REGEX-ERROR", "invalid XSD quantifier";
+                        }
+                        list<string> bounds = counts.split(",");
+                        if (bounds.size() == 2 && bounds[1].length()
+                                && XsdIntegerLexicalHelper::compare(XsdIntegerLexicalHelper::canonical(bounds[0]),
+                                    XsdIntegerLexicalHelper::canonical(bounds[1])) > 0) {
+                            throw "XSD-REGEX-ERROR", "quantifier minimum exceeds maximum";
+                        }
+                        push pieces, "{" + counts + "}";
+                        i = end + 1;
+                    } else {
+                        push pieces, c;
+                        ++i;
+                    }
+                    can_quantify = False;
+                    break;
+                }
+                case "]":
+                case "}":
+                    throw "XSD-REGEX-ERROR", "unescaped closing metacharacter";
+                case ".":
+                    push pieces, "[^\\n\\r]";
+                    ++i;
+                    can_quantify = True;
+                    break;
                 case "^":
                 case "$":
-                    rv += "\\" + c;
+                    push pieces, "\\" + c;
                     ++i;
+                    can_quantify = True;
                     break;
-
-                case "[":
-                    rv += XsdRegexHelper::classToPcre(xsd, \i);
-                    break;
-
                 default:
-                    rv += c;
+                    push pieces, c;
                     ++i;
+                    can_quantify = True;
                     break;
             }
         }
-        return rv;
+        if (groups) {
+            throw "XSD-REGEX-ERROR", "unterminated parenthesized expression";
+        }
+        return pieces.join("");
     }
 
-    #! converts one escape sequence; \a i is advanced past the sequence
-    private static string escapeToPcre(string xsd, reference<int> i, bool in_class) {
-        # a trailing backslash is not a valid escape; pass it through so that the regex engine reports the error
+    #! the single-character escapes allowed by XSD 1.0 Appendix F, production 24
+    const SingleEscapes = {"n": "\n", "r": "\r", "t": "\t", "\\": "\\", "|": "|", ".": ".",
+        "-": "-", "^": "^", "?": "?", "*": "*", "+": "+", "{": "{", "}": "}", "(": "(", ")": ")",
+        "[": "[", "]": "]"};
+
+    #! converts one escape to a complete single-character expression
+    private static string escapeToPcre(string xsd, reference<int> i) {
         if (i + 1 >= xsd.length()) {
-            ++i;
-            return "\\";
+            throw "XSD-REGEX-ERROR", "trailing backslash";
         }
         string e = xsd[i + 1];
         i += 2;
+        if (SingleEscapes.hasKey(e)) {
+            return sprintf("\\x{%X}", SingleEscapes{e}.getUnicode());
+        }
         switch (e) {
-            # XML name character escapes; these do not exist in PCRE
-            case "i": return in_class ? XsdRegexHelper::NameStartChars : "[" + XsdRegexHelper::NameStartChars + "]";
-            case "I": return in_class ? "\\i" : "[^" + XsdRegexHelper::NameStartChars + "]";
-            case "c": return in_class ? XsdRegexHelper::NameChars : "[" + XsdRegexHelper::NameChars + "]";
-            case "C": return in_class ? "\\c" : "[^" + XsdRegexHelper::NameChars + "]";
-
-            # XSD "\s" is exactly space, tab, newline, and carriage return
-            case "s": return in_class ? XsdRegexHelper::SpaceChars : "[" + XsdRegexHelper::SpaceChars + "]";
-            case "S": return in_class ? "\\S" : "[^" + XsdRegexHelper::SpaceChars + "]";
-
-            # XSD "\d" is any Unicode decimal digit, while PCRE "\d" is ASCII only
+            case "i": return "[" + NameStartChars + "]";
+            case "I": return "[^" + NameStartChars + "]";
+            case "c": return "[" + NameChars + "]";
+            case "C": return "[^" + NameChars + "]";
+            case "s": return "[" + SpaceChars + "]";
+            case "S": return "[^" + SpaceChars + "]";
             case "d": return "\\p{Nd}";
-            case "D": return in_class ? "\\D" : "[^\\p{Nd}]";
-
-            # XSD "\w" is every character except punctuation, separators, and other; PCRE "\w" is ASCII only
-            case "w": return in_class ? "\\w" : "[^" + XsdRegexHelper::NonWordCategories + "]";
-            case "W": return in_class ? "\\W" : "[" + XsdRegexHelper::NonWordCategories + "]";
-
-            # issue #5411: XSD "\p{IsXxx}" escapes name Unicode blocks, which PCRE does not support; they are
-            # translated to the corresponding character range
+            case "D": return "\\P{Nd}";
+            case "w": return "[^" + NonWordCategories + "]";
+            case "W": return "[" + NonWordCategories + "]";
             case "p":
             case "P": {
-                *string prop = XsdRegexHelper::readProperty(xsd, \i);
+                *string prop = readProperty(xsd, \i);
                 if (!exists prop) {
-                    return "\\" + e;
+                    throw "XSD-REGEX-ERROR", "a property escape requires a braced property name";
                 }
-                *string range = XsdRegexHelper::getBlockRange(prop);
-                if (!exists range) {
-                    # not a block name; Unicode categories and scripts are passed through unchanged
+                if (regex(prop, '\A(?:L[ultmo]?|M[nce]?|N[dlo]?|P[cdseifo]?|Z[slp]?|S[mcko]?|C[cfon]?)\z')) {
                     return sprintf("\\%s{%s}", e, prop);
                 }
-                if (e == "p") {
-                    return in_class ? range : "[" + range + "]";
+                if (!regex(prop, '\AIs[A-Za-z0-9-]+\z')) {
+                    throw "XSD-REGEX-ERROR", sprintf("invalid XSD character property %Y", prop);
                 }
-                return in_class ? "\\P{" + prop + "}" : "[^" + range + "]";
+                *string range = getBlockRange(prop);
+                if (!exists range) {
+                    throw "XSD-REGEX-ERROR", sprintf("unknown XSD Unicode block %Y", prop);
+                }
+                return "[" + (e == "P" ? "^" : "") + range + "]";
             }
-
-            default: return "\\" + e;
         }
+        throw "XSD-REGEX-ERROR", sprintf("invalid XSD escape %Y", e);
     }
 
     #! reads the \c "{...}" property name of a \c "\p" or \c "\P" escape; \a i is advanced past it
@@ -8695,47 +8783,109 @@ public class XsdRegexHelper {
         return rv;
     }
 
-    #! converts a character class, including XSD character class subtraction; \a i is advanced past the class
+    #! combines a positive or negative group of single-character expressions
+    private static string characterGroup(list<string> terms, bool negative) {
+        if (!terms) {
+            throw "XSD-REGEX-ERROR", "an XSD character group must not be empty";
+        }
+        string group = terms.size() == 1 ? terms[0] : "(?:" + terms.join("|") + ")";
+        return negative ? "(?:(?!" + group + ")[\\s\\S])" : group;
+    }
+
+    #! parses a literal character or a single-character escape used as a range endpoint
+    private static int rangeCharacter(string xsd, reference<int> i) {
+        if (i >= xsd.length()) {
+            throw "XSD-REGEX-ERROR", "missing character range endpoint";
+        }
+        string value = xsd[i];
+        if (value == "\\") {
+            if (i + 1 >= xsd.length() || !SingleEscapes.hasKey(xsd[i + 1])) {
+                throw "XSD-REGEX-ERROR", "a range endpoint must be one character";
+            }
+            value = SingleEscapes{xsd[i + 1]};
+            i += 2;
+        } else {
+            if (value == "[" || value == "]" || value == "-") {
+                throw "XSD-REGEX-ERROR", "invalid unescaped character range endpoint";
+            }
+            ++i;
+        }
+        return value.getUnicode();
+    }
+
+    #! converts XSD character classes with iterative, linear-size subtraction assembly
     private static string classToPcre(string xsd, reference<int> i) {
-        # skip the opening "["
-        ++i;
-        string cls = "";
-        # a "^" immediately after "[" negates the class in XSD as well
-        if (i < xsd.length() && xsd[i] == "^") {
-            cls += "^";
+        list<string> parents();
+        while (True) {
+            @assert(i < xsd.length() && xsd[i] == "[");
             ++i;
-        }
-        # "]" immediately after "[" or "[^" is a literal "]" in XSD
-        if (i < xsd.length() && xsd[i] == "]") {
-            cls += "\\]";
-            ++i;
-        }
-        while (i < xsd.length()) {
-            string c = xsd[i];
-            if (c == "\\") {
-                cls += XsdRegexHelper::escapeToPcre(xsd, \i, True);
+            bool negative = i < xsd.length() && xsd[i] == "^";
+            if (negative) {
+                ++i;
+            }
+            list<string> terms();
+            bool subtract = False;
+            while (i < xsd.length() && xsd[i] != "]") {
+                string c = xsd[i];
+                if (c == "-" && i + 1 < xsd.length() && xsd[i + 1] == "[") {
+                    push parents, characterGroup(terms, negative);
+                    ++i;
+                    subtract = True;
+                    break;
+                }
+                if (c == "-") {
+                    bool last = i + 1 < xsd.length() && (xsd[i + 1] == "]"
+                        || (i + 2 < xsd.length() && xsd[i + 1] == "-" && xsd[i + 2] == "["));
+                    if (terms && !last) {
+                        throw "XSD-REGEX-ERROR", "an unescaped hyphen must start or end a positive character group";
+                    }
+                    push terms, "\\x{2D}";
+                    ++i;
+                    continue;
+                }
+                if (c == "\\" && i + 1 < xsd.length() && !SingleEscapes.hasKey(xsd[i + 1])) {
+                    push terms, escapeToPcre(xsd, \i);
+                    continue;
+                }
+                int start = rangeCharacter(xsd, \i);
+                bool range = i + 1 < xsd.length() && xsd[i] == "-" && xsd[i + 1] != "["
+                    && xsd[i + 1] != "]"
+                    && !(i + 2 < xsd.length() && xsd[i + 1] == "-" && xsd[i + 2] == "[");
+                if (range) {
+                    ++i;
+                    int end = rangeCharacter(xsd, \i);
+                    if (start > end) {
+                        throw "XSD-REGEX-ERROR", "character range end precedes its start";
+                    }
+                    push terms, sprintf("[\\x{%X}-\\x{%X}]", start, end);
+                } else {
+                    push terms, sprintf("\\x{%X}", start);
+                }
+            }
+            if (subtract) {
                 continue;
             }
-            if (c == "]") {
-                ++i;
-                return "[" + cls + "]";
+            if (i >= xsd.length()) {
+                throw "XSD-REGEX-ERROR", "unterminated character class";
             }
-            # XSD character class subtraction: "[base-[sub]]" matches base except the characters in sub
-            if (c == "-" && i + 1 < xsd.length() && xsd[i + 1] == "[") {
-                ++i;
-                string sub_cls = XsdRegexHelper::classToPcre(xsd, \i);
-                # the enclosing class must still be closed
-                if (i < xsd.length() && xsd[i] == "]") {
-                    ++i;
-                }
-                return "(?:(?!" + sub_cls + ")[" + cls + "])";
-            }
-            cls += c;
             ++i;
+            string leaf = characterGroup(terms, negative);
+            list<string> pieces();
+            foreach string parent in (parents) {
+                push pieces, "(?:(?!";
+            }
+            push pieces, leaf;
+            for (int parent = parents.size() - 1; parent >= 0; --parent) {
+                if (i >= xsd.length() || xsd[i] != "]") {
+                    throw "XSD-REGEX-ERROR", "subtraction must end its enclosing character class";
+                }
+                ++i;
+                push pieces, ")" + parents[parent] + ")";
+            }
+            return pieces.join("");
         }
-        # unterminated class; pass it through so that the regex engine reports the error
-        return "[" + cls;
     }
+
 }
 
 #! Validate facet declarations before constructing their value-space constraints.
@@ -10094,6 +10244,14 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
         @since %WSDL 0.5.8
     */
     *string getPatternSample(*softint min_length) {
+        *XsdSimpleType pattern_owner = self;
+        while (pattern_owner && !pattern_owner.patterns) {
+            pattern_owner = pattern_owner.type instanceof XsdSimpleType
+                ? cast<XsdSimpleType>(pattern_owner.type) : NOTHING;
+        }
+        if (!pattern_owner) {
+            return;
+        }
         if (exists min_length && min_length > XsdRegexHelper::MaxSampleLength) {
             return;
         }
@@ -10109,7 +10267,19 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
             }
         }
         # the sample has to satisfy the pattern facets of every step in the derivation chain
-        return exists sample && patternsAccept(sample) ? sample : NOTHING;
+        if (exists sample && patternsAccept(sample)) {
+            return sample;
+        }
+        # A candidate from one restriction can fail another. Try the bounded one-character alphabet
+        # against the whole derivation chain before reporting that generation is unsupported.
+        if (!exists min_length || min_length <= 1) {
+            for (int i = 0; i < XsdRegexHelper::SampleChars.length(); ++i) {
+                string candidate = XsdRegexHelper::SampleChars[i];
+                if (patternsAccept(candidate)) {
+                    return candidate;
+                }
+            }
+        }
     }
 
     #! returns a sample value for the innermost type declaring \c pattern facets

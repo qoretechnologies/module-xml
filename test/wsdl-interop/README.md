@@ -11,6 +11,14 @@ See [PLAN.md](PLAN.md) for the phased implementation plan, acceptance checks, an
 of the recorded findings and validator disagreements to the work needed to resolve them.
 See [EXECUTION.md](EXECUTION.md) for implementation progress and commit/audit evidence.
 
+`test/wsdl-regex-classes.qtest` and `test_regex_classes.py` cover XSD regex
+grammar, Unicode class complements, ranges, nested subtraction and bounded
+example generation. The independent matrix exercises 156 real SOAP contracts
+and exact values through reconstructed providers. Original validator defects
+and separately identified equivalent schemas are documented in
+[regex-classes-evidence.md](regex-classes-evidence.md). Backend compilation
+limits remain tracked P3 work; passing this matrix does not close the phase.
+
 ## Sources and intended coverage
 
 | Source | Use |

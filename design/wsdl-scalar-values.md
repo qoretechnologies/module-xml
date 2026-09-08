@@ -633,5 +633,42 @@ these builtins because their public value remains scalar text.
 
 See `test/wsdl-builtin-list-values.qtest`, `test_builtin_list_values.py` and
 [builtin name/list evidence](../test/wsdl-interop/builtin-list-values-evidence.md).
+
+## XSD regex character sets and grammar
+
+`XsdRegexHelper::toPcre()` parses the XSD 1.0 grammar before constructing backend
+expressions. It rejects unknown escapes, PCRE-only syntax, malformed classes,
+unbalanced groups, invalid quantifier syntax and reversed bounds. `^` and `$`
+remain literal characters. The wildcard excludes both CR and LF. Category
+escapes use the XSD category list, and block escapes require the `Is` grammar
+and a recognized block. XML name escapes use the shared XML Second Edition
+classes described above.
+
+Every class term is a complete single-character expression. Combining terms
+therefore preserves Unicode complements inside positive and negative groups.
+Ranges accept literal or escaped single-character endpoints. Subtraction uses
+single-character negative lookahead and retains right-nested set semantics.
+The class parser stores parent groups explicitly; assembling the result takes
+space proportional to the pattern's translated size without recursive descent
+through subtractions or repeatedly copying the growing result.
+
+For example, a product-code restriction `[a-z-[aeiou]]+` accepts `brz` and rejects
+`bra`. `[\D]` rejects Arabic-Indic decimal digits as well as ASCII digits;
+`[\P{IsGreek}]` accepts `A` and rejects `Α`. These constraints survive schema
+and provider reconstruction and apply to both serialization directions.
+
+Generation first validates syntax, bounds repetition counts before native
+integer conversion, avoids multiplication overflow, and skips repetition of
+empty atoms. It searches a fixed character alphabet when separate pattern
+candidates do not satisfy the complete derivation chain. Types without patterns
+retain their supplied examples. Every returned sample is checked; failure to
+find a candidate remains `NOTHING` at the helper or `XSD-SAMPLE-ERROR` at the
+type/example API. Cancellation and unexpected errors propagate.
+
+PCRE compilation/matching limits remain distinct from XSD grammar. Translation
+does not establish support for arbitrary repetition counts or nesting depths;
+the remaining backend-limit work is tracked in the execution record. See
+`test/wsdl-regex-classes.qtest`, `test_regex_classes.py`, and
+[regex evidence](../test/wsdl-interop/regex-classes-evidence.md).
 The independent boundary matrix checks every start/end and adjacent code point
 of all 326 normative character ranges against both pinned validators.

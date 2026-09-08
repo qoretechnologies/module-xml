@@ -3043,3 +3043,55 @@ and word complements use PCRE's ASCII semantics; malformed classes and
 non-XSD PCRE constructs are accepted. XSD Appendix F gives the required grammar
 and set semantics. These existing regex gaps, remaining date/IEEE/binary/QName/
 entity/XML-RPC work and all P4-P9 criteria remain in scope. P3 is not complete.
+
+### P3-18: regex character sets, grammar and bounded samples
+
+P3-17 is committed as aebf117. XSD patterns now use explicit syntax validation
+and complete single-character terms for Unicode unions, complements and ranges.
+Nested subtraction is parsed and assembled iteratively. Invalid PCRE extensions,
+malformed classes and reversed quantifiers fail at schema construction; `.`
+excludes CR and LF. Sample counts are bounded before native conversion,
+empty atoms do not loop, and bounded character candidates are checked against
+intersecting restrictions. The audit found and fixed a new no-pattern sample
+regression; types without patterns retain their supplied examples.
+
+The initial six regression cases fail on P3-17. Final source and AOT pass twelve
+cases / 988 assertions, including cancellation/recovery and schema/provider
+reconstruction. All 62 affected XML suites pass 722 cases / 14495 assertions.
+The SOAP suite intentionally checks three failed assertions inside passing cases.
+Final AOT and docs builds are clean. No C++ changed and no new Valgrind run is
+required. Main Qore develop remains clean at 3e2f47be0; no push or install.
+
+The independent matrix covers 26 definitions, 78 original schemas and 156 actual
+SOAP contracts: 1872 input documents, 804 emitted binding documents, 11232
+consumer results and 5440 consumer/example documents. Eighteen separately
+identified equivalent schemas add 1788 document assessments. Original oracle
+verdicts remain visible; 172 original hyphen-subtraction documents are explicitly
+unreachable in Xerces, then mandatorily checked through their equivalent schema.
+The 32 invalid-schema cases require the precise Qore exception. libxml2 and
+Xerces grammar/set defects are source-adjudicated in regex-classes-evidence.md;
+fixed libxml2 verdicts are accepted, and no production verdict is waived.
+
+Both-version survey and strict coverage match P3-17 outside version fields:
+89 selected WSDLs / 756 directions, zero selected failures and 220 broad tracked
+failures. Two intermediate full Python runs were deliberately interrupted for
+audit fixes and portable oracle assertions. Final frozen discovery runs 142
+methods in 588.793 seconds with exactly the same 33 tracked P4/P5/P6 failure
+signatures and no errors. All three new independent methods pass. Implementation
+and test hashes remain unchanged throughout that run; the full 62-item audit
+has no failed items.
+
+WSDL SHA-256: d64c20533b0a156965bb3e9905f71462f4d00e1c07e6d6fcad40035f3c504fe2.
+Native XML remains 8ec5487ebe937450478fc856e5c02114e5cf9ffaf9201cf70d052907b40f2e12.
+Full audit: audits/P3-18-regex-classes.md. Evidence is retained under
+/tmp/wsdl-p3-18-, including final-unit-guarded, exact-checks, aot-final-unit,
+docs-final, exact-survey/coverage, frozen-hashes and frozen-python.
+
+The next backend-limit reproducer is /tmp/wsdl-p3-19-repetition-probe.qr with
+repetition-baseline.log: `a{65536}` and a very large finite maximum fail
+PCRE's count limit; `(ab){32768}` fails compiled bytecode size. These are valid
+XSD expressions. [PCRE2 limits](https://www.pcre.org/current/doc/html/pcre2limits.html)
+and [repetition behavior](https://www.pcre.org/current/doc/html/pcre2pattern.html#SEC17)
+explain the backend limits. Grammar translation alone does not close them.
+Remaining primitive/date/IEEE/binary/QName/entity/XML-RPC work and all P4-P9
+criteria remain in scope; P3 is not complete.
