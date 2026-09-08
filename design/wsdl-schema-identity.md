@@ -68,6 +68,22 @@ with an inline simple type. Anonymous declarations participate in finalization.
 The existing `^value^`/`^attributes^` representation is accepted by bare-message
 extraction. False, zero and empty scalar results use the same return shape.
 
+Named mixed bases also permit a simple-content restriction when their particle
+is emptiable and the restriction supplies an inline simple type. The effective
+mixed flag comes from `complexContent` when present, then `complexType`. An empty
+extension inherits its base's content properties according to the XSD complex-type
+mapping. Empty effective content differs from a nonempty particle that permits
+an empty instance; nested empty groups do not automatically erase a particle.
+
+Construction retains an internal tree for the emptiability predicate: elements
+and wildcards require an occurrence, zero minimum occurrences permit absence,
+sequences/all require every member to be emptiable, and choices require one.
+Named group references retain declaration scopes and cache their computed result.
+Every nested reference resolves, including optional branches, so missing and
+cyclic group graphs fail before payload processing. `XsdGroup::isEmptiable()`
+exposes this predicate to construction consumers. This metadata does not change
+the existing public scalar/hash representation or perform instance matching.
+
 Simple-type dependencies resolve in depth-first order before union provider types
 are constructed. Active dependencies detect cycles; completed dependencies are
 resolved once per construction. Named union members precede anonymous members in
@@ -127,6 +143,22 @@ Prohibited declarations contribute no attribute-use component or reported field.
 In a restriction, their expanded names suppress inherited uses. They cannot remove
 a required base use unless a required replacement is supplied. Local group uses
 resolve before inheritance, and duplicate live expanded uses are rejected.
+
+Attribute restrictions resolve replacements by expanded identity before merging.
+An omitted use remains inherited; a supplied replacement cannot weaken requiredness,
+lose or change a fixed constraint, or use a simple type outside the base type's
+ancestry. Extensions reject duplicate expanded uses, including repeated global refs.
+Types with the same local name in different namespaces remain distinct. For example,
+an invoice restriction can narrow a required `xs:int` quantity attribute to a required
+`xs:short`; it cannot change it to an optional attribute or to `xs:string`.
+
+Simple-type ancestry follows declared restriction links and the XSD builtin hierarchy.
+Lists and unions derive from `anySimpleType`; a union also admits descendants of its
+member types. Two separately declared lists with identical item types are distinct
+types. A per-check memo records visited type pairs, including reused union members.
+Inline simple-content restrictions use the same ancestry check against the effective
+simple content of their complex base. These construction checks leave scalar facet
+and value-space validation with the existing datatype layer.
 
 Low-level `serializeValue()` results are XML fragments using the supplied output
 namespace registry. A caller decoding such a fragment independently supplies its

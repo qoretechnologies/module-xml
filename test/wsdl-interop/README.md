@@ -412,3 +412,26 @@ subtests currently fail because invalid integer text decodes as zero; these
 remain failures alongside the existing P4/P6 subtests. Complete lossless consumer
 integration remains tracked under P2; wildcard validation semantics remain
 assigned to P5.
+
+`test/wsdl-attribute-derivation.qtest` checks inherited required/fixed constraints,
+builtin/named/list/union ancestry, duplicate extension uses, expanded attribute
+collisions, inline simple-content bases, provider values and reconstruction.
+`test_attribute_derivation.py` checks 44 schema variants through both actual SOAP
+bindings and 40 request/response payloads with exact attribute values. Its schema
+matrix records libxml2's acceptance of dropped/changed base fixed constraints as
+an oracle defect; XSD 1.0
+[derivation-ok-restriction.2.1.3](https://www.w3.org/TR/xmlschema-1/#derivation-ok-restriction)
+requires preservation, and pinned Xerces rejects those declarations. Omitted
+attribute uses remain inherited, as specified by the complex-type property mapping.
+Attribute wildcard composition and full derivation/facet restrictions retain
+their P2/P3/P5 ownership in the execution record.
+
+`test/wsdl-mixed-base.qtest` and `test_mixed_base.py` cover simple-content
+restriction of named mixed bases, nested sequence/choice/all/group emptiability,
+effective mixed flags, empty-extension inheritance and group graph errors.
+The independent matrix checks 35 schemas and 28 documents across actual SOAP
+1.1/1.2 bindings, both directions, reconstructed providers and generated examples.
+It records two libxml2 disagreements: outer restriction facets on a mixed base
+are ignored, and `complexContent mixed="false"` incorrectly retains an outer
+`complexType mixed="true"`. Xerces and Qore enforce the XSD 1.0 complex-type
+property mappings; the exact differing verdicts remain asserted in the test.

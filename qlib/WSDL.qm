@@ -108,6 +108,11 @@ module WSDL {
     - simple-content derivations retain namespace-local base identity, inherited attributes and restricted
       scalar facets; false, zero and empty content return the same scalar representation as other values,
       and bare document messages accept the existing \c ^value^ / \c ^attributes^ representation
+    - attribute restrictions preserve requiredness, fixed constraints and simple-type ancestry; extensions
+      reject duplicate expanded attribute uses, and inline simple-content types must restrict the base content type
+    - simple-content restrictions accept named mixed bases whose particles are emptiable, preserving inherited
+      attributes and applying inline types and outer facets; nested group references are validated even in optional
+      branches, and empty extensions preserve the effective mixed content of their base
     - schema imports/includes resolve their complete dependency graph before types are finalized; chameleon
       includes acquire distinct components in each namespace, cycles reuse loaded sources, and mismatched
       imported/included target namespaces are rejected
@@ -5231,6 +5236,105 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
     }
 }
 
+hashdecl XsdEmptiabilityInfo {
+    bool optional = False;
+    bool absent = False;
+    bool choice = False;
+    bool terminal = False;
+    *string ref;
+    list<hash<XsdEmptiabilityInfo>> children();
+}
+
+# Schema construction metadata for the Particle Emptiable predicate. This does not flatten
+# occurrences into fields or match instance content; it retains nested zero/choice/sequence logic.
+class XsdEmptiabilityHelper {
+    static hash<XsdEmptiabilityInfo> parse(*hash<auto> data, Namespaces nsc, string kind = "sequence") {
+        NamespacePrefixHelper scope(nsc, data."^attributes^");
+        WSDL::XsdBase::removeNS(\data);
+        hash<XsdEmptiabilityInfo> result = <XsdEmptiabilityInfo>{
+            "optional": zeroOccurs(data."^attributes^".minOccurs),
+            "absent": zeroOccurs(data."^attributes^".maxOccurs),
+            "choice": kind == "choice",
+            "terminal": kind == "element" || kind == "any",
+        };
+        if (kind == "group") {
+            if (!data."^attributes^".ref) {
+                throw WSDL_ERROR, "group reference requires ref";
+            }
+            hash<auto> identity = nsc.getTypeHash(data."^attributes^".ref);
+            result.ref = type_qname(identity.uri, identity.val);
+        } else if (!result.terminal) {
+            foreach string key in (keys data) {
+                if (key == "sequence" || key == "choice" || key == "all" || key == "group"
+                        || key == "element" || key == "any") {
+                    # Empty compositors are represented as NOTHING, but remain a child of a choice.
+                    foreach *hash<auto> child in (data{key} ?? (NOTHING,)) {
+                        result.children += parse(child, nsc, key);
+                    }
+                }
+            }
+        }
+        return result;
+    }
+
+    static bool evaluate(hash<XsdEmptiabilityInfo> info, hash<string, XsdGroup> groups) {
+        bool result = !info.terminal && (!info.choice || !info.children);
+        if (info.ref) {
+            *XsdGroup group = groups{info.ref};
+            if (!group) {
+                throw WSDL_ERROR, sprintf("undefined group reference %Y", info.ref);
+            }
+            result = group.isEmptiable(groups);
+        }
+        foreach hash<XsdEmptiabilityInfo> child in (info.children) {
+            # Resolve every reference, including references under optional or already-emptiable branches.
+            bool child_empty = evaluate(child, groups);
+            result = info.choice ? result || child_empty : result && child_empty;
+        }
+        return info.absent || info.optional || result;
+    }
+
+    static bool hasEmptyContent(*hash<auto> data, bool mixed) {
+        if (mixed) {
+            return False;
+        }
+        WSDL::XsdBase::removeNS(\data);
+        foreach string kind in ("group", "all", "choice", "sequence") {
+            if (!data.hasKey(kind)) {
+                continue;
+            }
+            if (kind == "group") {
+                return False;
+            }
+            *hash<auto> model = data{kind};
+            WSDL::XsdBase::removeNS(\model);
+            if (select keys model, $1 != "^attributes^" && $1 != "annotation" && $1 != "ns") {
+                return False;
+            }
+            return kind != "choice" || zeroOccurs(model."^attributes^".minOccurs);
+        }
+        return True;
+    }
+
+    private static bool zeroOccurs(*string value) {
+        return exists value && (trim(value) =~ /^[+-]?0+$/);
+    }
+
+    static bool getMixed(*hash<auto> attributes, bool inherited = False) {
+        if (!attributes.hasKey("mixed")) {
+            return inherited;
+        }
+        string value = trim(attributes.mixed);
+        if (value == "true" || value == "1") {
+            return True;
+        }
+        if (value == "false" || value == "0") {
+            return False;
+        }
+        throw WSDL_ERROR, sprintf("invalid mixed declaration %Y", value);
+    }
+}
+
 #! XSD element group class for xs:group definitions
 public class XsdGroup inherits WSDL::XsdNamedData, Qore::Serializable {
     public {
@@ -5247,6 +5351,9 @@ public class XsdGroup inherits WSDL::XsdNamedData, Qore::Serializable {
         list<string> nestedGroupRefs();
         bool resolving = False;
         bool resolved = False;
+        hash<XsdEmptiabilityInfo> emptiability;
+        *bool emptiable;
+        bool evaluating_emptiability = False;
     }
 
     #! constructs a named model group with declaration-local QName references
@@ -5261,6 +5368,7 @@ public class XsdGroup inherits WSDL::XsdNamedData, Qore::Serializable {
         NamespacePrefixHelper declaration(nsc, g."^attributes^");
         nsUri = nsc.getTargetNamespaceUri();
         WSDL::XsdBase::removeNS(\g);
+        emptiability = XsdEmptiabilityHelper::parse(g, nsc);
         int models = int(g.hasKey("sequence")) + int(g.hasKey("choice")) + int(g.hasKey("all"));
         if (models != 1) {
             throw WSDL_ERROR, sprintf("group %Y requires exactly one sequence, choice, or all", name);
@@ -5300,6 +5408,7 @@ public class XsdGroup inherits WSDL::XsdNamedData, Qore::Serializable {
         }
         resolving = True;
         on_exit resolving = False;
+        isEmptiable(groups);
         hash<string, XsdElement> merged_elements = groupElements;
         foreach string key in (nestedGroupRefs) {
             *XsdGroup group = groups{key};
@@ -5311,6 +5420,25 @@ public class XsdGroup inherits WSDL::XsdNamedData, Qore::Serializable {
         }
         groupElements = XsdElementFieldHelper::getFieldMap(merged_elements, XsdElementFieldHelper::getFieldNames(merged_elements));
         resolved = True;
+    }
+
+    #! returns whether this group's particle permits no element children
+    /** @param groups the schema's registry of named groups
+        @return True for an emptiable particle under XSD 1.0 section 3.9.6
+        @throw WSDL-ERROR an undefined or cyclic nested group reference
+        @since %WSDL 0.5.8
+    */
+    bool isEmptiable(hash<string, XsdGroup> groups) {
+        if (exists emptiable) {
+            return emptiable;
+        }
+        if (evaluating_emptiability) {
+            throw WSDL_ERROR, sprintf("cyclic group reference involving %Y", name);
+        }
+        evaluating_emptiability = True;
+        on_exit evaluating_emptiability = False;
+        emptiable = XsdEmptiabilityHelper::evaluate(emptiability, groups);
+        return emptiable;
     }
 
     #! Returns the elements in this group
@@ -5441,6 +5569,80 @@ public hashdecl ChoiceInfo {
     list<hash<string, XsdElement>> alternatives = ();
 }
 
+# Internal simple-type ancestry checks for schema construction. Scalar facet/value validation belongs
+# to the types themselves. Memoize pairs so unions that reuse members do not multiply traversal work.
+class XsdTypeDerivationHelper {
+    private {
+        hash<string, bool> results();
+        const BuiltinParents = {
+            "normalizedString": "string", "token": "normalizedString", "language": "token",
+            "Name": "token", "NCName": "Name", "ID": "NCName", "IDREF": "NCName", "ENTITY": "NCName",
+            "NMTOKEN": "token", "integer": "decimal", "nonPositiveInteger": "integer",
+            "negativeInteger": "nonPositiveInteger", "long": "integer", "int": "long", "short": "int",
+            "byte": "short", "nonNegativeInteger": "integer", "unsignedLong": "nonNegativeInteger",
+            "unsignedInt": "unsignedLong", "unsignedShort": "unsignedInt", "unsignedByte": "unsignedShort",
+            "positiveInteger": "nonNegativeInteger",
+        };
+    }
+
+    static bool isDerived(XsdAbstractType derived, XsdAbstractType base) {
+        XsdTypeDerivationHelper helper();
+        return helper.check(derived, base);
+    }
+
+    private bool check(XsdAbstractType derived, XsdAbstractType base) {
+        string key = derived.uniqueHash() + ":" + base.uniqueHash();
+        if (!results.hasKey(key)) {
+            # Simple dependency cycles are rejected before complex type finalization.
+            results{key} = False;
+            results{key} = checkIntern(derived, base);
+        }
+        return results{key};
+    }
+
+    private bool checkIntern(XsdAbstractType derived, XsdAbstractType base) {
+        if (derived == base) {
+            return True;
+        }
+        if (derived instanceof XsdBaseType && base instanceof XsdBaseType) {
+            string current = derived.name;
+            while (current != "anyType") {
+                if (current == base.name) {
+                    return True;
+                }
+                current = current == "anySimpleType" ? "anyType" : BuiltinParents{current} ?? "anySimpleType";
+            }
+            return False;
+        }
+        if (derived instanceof XsdSimpleType) {
+            XsdSimpleType simple = cast<XsdSimpleType>(derived);
+            if (simple.type && check(simple.type, base)) {
+                return True;
+            }
+            if (base instanceof XsdBaseType && base.name == "anySimpleType") {
+                return True;
+            }
+        }
+        if (base instanceof XsdSimpleType) {
+            # Restrictions of unions retain the union's member type definitions.
+            XsdAbstractType current = base;
+            while (current instanceof XsdSimpleType) {
+                XsdSimpleType simple = cast<XsdSimpleType>(current);
+                foreach XsdAbstractType member in (simple.unionTypes) {
+                    if (check(derived, member)) {
+                        return True;
+                    }
+                }
+                if (!simple.type) {
+                    break;
+                }
+                current = simple.type;
+            }
+        }
+        return False;
+    }
+}
+
 #! XSD complex type class
 public class XsdComplexType inherits WSDL::XsdAbstractType {
     public {
@@ -5505,6 +5707,10 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
         *hash<auto> simpleRestrictionNamespaces;
         *XsdSimpleType inlineSimpleType;
         hash<string, bool> prohibited_attributes();
+        bool mixed = False;
+        bool content_emptiable = True;
+        bool content_empty = True;
+        hash<XsdEmptiabilityInfo> emptiability();
 
         const XET_ALL      = "ALL";
         const XET_CHOICE   = "CHOICE";
@@ -5520,12 +5726,16 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
         usedocns = n_usedocns;
         # Anonymous nested types also need group/base resolution and final field-name selection.
         on_success unresolved.add(self);
+        mixed = XsdEmptiabilityHelper::getMixed(ct."^attributes^");
+        content_empty = !mixed;
         #any a = ct."^attributes^";
         delete ct."^attributes^";
 
         *hash<auto> d = ct.complexContent;
         if (d) {
             NamespacePrefixHelper content_scope(nsc, d."^attributes^");
+            mixed = XsdEmptiabilityHelper::getMixed(d."^attributes^", mixed);
+            content_empty = !mixed;
             WSDL::XsdBase::removeNS(\d);
             if (d.hasKey("restriction")) {
                 NamespacePrefixHelper restriction_scope(nsc, d.restriction."^attributes^");
@@ -5676,6 +5886,13 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
         on_success finalized = True;
         hash<string, XsdAttribute> original_attributes = attrs;
         on_error attrs = original_attributes;
+        bool original_mixed = mixed;
+        bool original_empty = content_empty;
+        on_error {
+            mixed = original_mixed;
+            content_empty = original_empty;
+        }
+        content_emptiable = XsdEmptiabilityHelper::evaluate(emptiability, groupMap ?? {});
 
         # Resolve local attribute-group uses before combining the derived declaration with its base.
         if (unresolved) {
@@ -5700,11 +5917,19 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
                 if (resolved_base instanceof XsdComplexType) {
                     XsdComplexType base = cast<XsdComplexType>(resolved_base);
                     base.finalize(tmap, nsc, groupMap, attrGroupMap, unresolved);
-                    if (base.cx_type != XET_SIMPLE) {
-                        throw WSDL_ERROR, sprintf("simpleContent type %Y requires a base with simple content", name);
+                    if (base.cx_type == XET_SIMPLE) {
+                        content_type = inlineSimpleType ?? base.simpleType;
+                        if (restriction && !XsdTypeDerivationHelper::isDerived(content_type, base.simpleType)) {
+                            throw WSDL_ERROR, sprintf("simpleContent type %Y does not restrict base content type %Y",
+                                name, base.simpleType.name);
+                        }
+                    } else if (restriction && inlineSimpleType && base.mixed && base.content_emptiable) {
+                        content_type = inlineSimpleType;
+                    } else {
+                        throw WSDL_ERROR, sprintf("simpleContent type %Y requires a simple-content base or a "
+                            "restriction of a mixed emptiable base with an inline simpleType", name);
                     }
-                    content_type = inlineSimpleType ?? base.simpleType;
-                    attrs = XsdAttribute::mergeMaps(getInheritedAttributes(base), attrs, True);
+                    attrs = XsdAttribute::mergeMaps(getInheritedAttributes(base), attrs, boolean(restriction));
                 } else if (restriction && inlineSimpleType && resolved_base instanceof XsdBaseType
                         && resolved_base.name == "anyType") {
                     # The ur-type has mixed, emptiable content; an explicit simpleType supplies the restriction.
@@ -5725,8 +5950,13 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
             } else if (resolved_base instanceof XsdComplexType) {
                 XsdComplexType base = cast<XsdComplexType>(resolved_base);
                 base.finalize(tmap, nsc, groupMap, attrGroupMap, unresolved);
-                attrs = XsdAttribute::mergeMaps(getInheritedAttributes(base), attrs, True);
+                attrs = XsdAttribute::mergeMaps(getInheritedAttributes(base), attrs, boolean(restriction));
                 if (extension) {
+                    content_emptiable = content_emptiable && base.content_emptiable;
+                    if (content_empty) {
+                        mixed = base.mixed;
+                        content_empty = base.content_empty;
+                    }
                     elementmap = XsdElementFieldHelper::getExpandedMap(base.elementmap) + elementmap;
                     choices = base.choices + choices;
                     if (cx_type == XET_NONE || !cx_type) {
@@ -5739,6 +5969,10 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
             } else if (!(resolved_base instanceof XsdBaseType) || resolved_base.name != "anyType") {
                 throw WSDL_ERROR, sprintf("complexContent type %Y requires a complex base, got %Y", name,
                     resolved_base.name);
+            } else if (extension && content_empty) {
+                # An empty extension inherits the ur-type's mixed, emptiable wildcard particle.
+                mixed = True;
+                content_empty = False;
             }
             # Publish the link only after validation; failed cycles must not retain cyclic base links.
             baseType = resolved_base;
@@ -5802,11 +6036,31 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
     private hash<string, XsdAttribute> getInheritedAttributes(XsdComplexType base) {
         hash<string, XsdAttribute> inherited = base.attrs;
         if (restriction) {
+            hash<string, XsdAttribute> own_attributes();
+            foreach XsdAttribute attr in (attrs.iterator()) {
+                own_attributes{type_qname(attr.namespaceUri, attr.name)} = attr;
+            }
             foreach string key in (keys inherited) {
                 XsdAttribute attr = inherited{key};
-                if (prohibited_attributes{type_qname(attr.namespaceUri, attr.name)}) {
-                    *XsdAttribute own = attrs{attr.name} ?? attrs{type_qname(attr.namespaceUri, attr.name)};
-                    if (attr.use == "required" && (!own || own.namespaceUri != attr.namespaceUri || own.use != "required")) {
+                string identity = type_qname(attr.namespaceUri, attr.name);
+                *XsdAttribute own = own_attributes{identity};
+                if (own) {
+                    if (attr.use == "required" && own.use != "required") {
+                        throw WSDL_ERROR, sprintf("type %Y cannot make required base attribute %Y optional", name,
+                            identity);
+                    }
+                    if (!XsdTypeDerivationHelper::isDerived(own.type, attr.type)) {
+                        throw WSDL_ERROR, sprintf("type %Y attribute %Y type %Y does not restrict base type %Y",
+                            name, identity, own.type.name, attr.type.name);
+                    }
+                    if (exists attr.fixedLexical && (!exists own.fixedLexical
+                            || own.getDefaultValue() != attr.getDefaultValue())) {
+                        throw WSDL_ERROR, sprintf("type %Y attribute %Y must preserve its base fixed constraint",
+                            name, identity);
+                    }
+                }
+                if (prohibited_attributes{identity}) {
+                    if (attr.use == "required" && (!own || own.use != "required")) {
                         throw WSDL_ERROR, sprintf("type %Y cannot prohibit required base attribute %Y", name, attr.name);
                     }
                     remove inherited{key};
@@ -5826,6 +6080,8 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
     }
 
     private parseData(hash<auto> d, XsdLateResolverHelper unresolved, Namespaces nsc) {
+        emptiability = XsdEmptiabilityHelper::parse(d, nsc);
+        content_empty = XsdEmptiabilityHelper::hasEmptyContent(d, mixed);
         delete d.ns;
         if (d.annotation) {
             *hash<auto> ah = remove d.annotation;

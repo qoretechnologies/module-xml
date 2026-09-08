@@ -820,3 +820,27 @@ Logs: /tmp/wsdl-p2-26-schema-tests.log, /tmp/wsdl-p2-26-independent.log,
 Reports: /tmp/wsdl-survey-p2-26.json and /tmp/wsdl-coverage-p2-26.json.
 The final full 62-item audit is [P2-26-identity](audits/P2-26-identity.md).
 No installation, push or astparser changes.
+
+## P2-27 inherited attribute and mixed base acceptance (2026-09-08)
+
+The identity increment was committed as 9ae595e. Its subsequent full Python
+run completed 77 tests with exactly 14 tracked subtest failures (eight P3 integer,
+four P4 nested-choice, two P6 binding selection), no new failure or skip.
+
+The P2-14/P2-15 construction increments are isolated together on that parent.
+Inherited required/fixed/type constraints, duplicate extension uses and inline
+simple-content ancestry now validate before attribute replacement. Mixed flags
+and nested particle emptiability resolve legal named mixed bases, with complete
+nested group graph validation and bounded shared-reference evaluation.
+
+All 26 affected Qore suites pass 375 cases, including 13 new cases / 130 assertions.
+Four independent Python tests pass 79 schemas and 68 request/response documents
+across both actual SOAP bindings, exact values, reconstructed schemas, providers
+and examples. Oracle disagreements remain explicit. Candidate WSDL documentation
+passes without warnings/errors. The full both-version request survey is recursively
+identical to 9ae595e except versions, with no missing case or regression.
+
+Logs: /tmp/wsdl-p2-27-{affected,attributes,mixed,survey,docs}.log and
+/tmp/wsdl-survey-p2-27.json. Full 62-item audit:
+[audits/P2-27-constraints.md](audits/P2-27-constraints.md).
+No native code, astparser change, installation or push.
