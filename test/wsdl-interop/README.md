@@ -409,9 +409,8 @@ public record consumer. `test/wsdl-message-identity.qtest` and
 QNames and body/header separation. Their independent matrix checks 160 element
 documents and provider/example reconstruction. Eight explicit P3 scalar
 subtests currently fail because invalid integer text decodes as zero; these
-remain failures alongside the existing P4/P6 subtests. Complete lossless consumer
-integration remains tracked under P2; wildcard validation semantics remain
-assigned to P5.
+remain failures alongside the existing P4/P6 subtests. Retained XML consumer integration is described below; wildcard validation
+semantics remain assigned to P5.
 
 `test/wsdl-attribute-derivation.qtest` checks inherited required/fixed constraints,
 builtin/named/list/union ancestry, duplicate extension uses, expanded attribute
@@ -487,3 +486,33 @@ test validates 60 emitted payload/header documents across both SOAP bindings,
 directions and reconstructed services, checking exact names, values and order.
 Attribute wildcards and absent particles cannot claim child values. Full group
 matching and wildcard runtime validation retain their P4/P5 ownership.
+
+## Retained XML values and consumers
+
+`WSDL::XsdXmlValue` explicitly retains lexical text, namespace bindings, ordered
+children/mixed text, comments, CDATA and inherited XML language/space/base context.
+Its authoritative XML and context reconstruct through Serializable; the native
+scalar/hash APIs retain their defaults. See [the implemented contract and examples](../../design/wsdl-xml-values.md).
+
+Use `WSOperation.deserializeXmlRequest()` / `deserializeXmlResponse()` for
+`SoapXmlMessageInfo` containing body part maps, bound header maps and ordered
+unbound headers/extensions. `SoapClient.callOperation(..., {"xml_values": True})`
+selects that response form. The final `xml_values` option to
+`SoapHandler.addMethod()` selects it for callbacks; callbacks return retained
+values in ordinary part-name and `^header^` maps. One-way client calls return
+`NOTHING`. These explicit XML consumers currently apply to element-based literal
+SOAP parts; native APIs continue handling their existing binding representations.
+
+`XsdSchema.getXmlValue()` and `getXmlDataProviderType()` validate global XML
+elements through the existing decode/encode rules. `WSMessageHelper.getXmlMessage()`
+returns XML examples using the existing native generator. Validation and examples
+retain the scalar/particle/wildcard limitations assigned to later plan phases.
+
+Run `wsdl-xml-value.qtest`, `wsdl-xml-context.qtest`, `wsdl-xml-consumers.qtest`
+and the corresponding `test_xml_values.py`, `test_xml_context.py`, and
+`test_xml_consumers.py` with the local module environment. The consumer suite
+covers actual HTTP, both SOAP bindings/directions, providers and reconstruction.
+The independent consumer test completes 192 documents and remains failing for
+16 required-wildcard examples generated empty by the native helper (P5). Other
+retained input/output documents preserve their exact values, names and context;
+no rejected example is counted as passing.

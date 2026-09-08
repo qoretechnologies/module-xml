@@ -80,6 +80,9 @@ module WSDL {
     @section wsdlrelnotes WSDL Module Release Notes
 
     @subsection wsdl_0_5_8 WSDL v0.5.8
+    - retained XML values preserve inherited xml:lang, xml:space and resolved xml:base context separately
+      from authored root attributes; child extraction, Serializable, XML generation and SOAP consumers
+      retain that context, and incompatible retained siblings report a serialization error
     - unwrapped document arguments include nested choice fields and explicit element wildcard values;
       message-name containers remain supported, and selection preserves other parts and declared headers
     - ambiguous multipart document values require explicit part/element wrappers; attribute wildcards and
@@ -99,6 +102,14 @@ module WSDL {
       names; wrong qualification and unbound prefixes fail before schema value conversion
     - added \c XsdBase::expandElementNamespaces() and \c XsdBase::restoreElementNamespaces() for parsed
       XML element identities and namespace-safe wildcard output, preserving repeated values and order
+    - one-way SOAP calls return NOTHING for an absent response instead of requiring an output binding description
+    - element-based literal SOAP parts accept explicit XML values after existing decode/encode checks;
+      XML request/response APIs, schema XML providers and XML examples preserve native API defaults
+    - retained SOAP XML rejects DOCTYPEs and processing instructions; comments, CDATA, lexical text and
+      inherited namespace declarations remain available in received body and header values
+    - added \c XsdXmlValue for retaining lexical text, namespace contexts and complete ordered XML;
+      provides an XML reader, a data view and XML generator integration, and reconstructs its views from
+      the authoritative XML during Serializable deserialization
     - fixed declaration-local namespace resolution for element and simple type QNames, including
       default-namespace resets and shadowed prefixes; internal type resolution uses expanded names
       without falling back to unrelated local-name aliases
@@ -1510,6 +1521,426 @@ public class XsdBase inherits Qore::Serializable {
     }
 }
 
+#! An explicit SOAP message result retaining each XML payload and header
+/** This type is returned only by the XML decoding APIs. Ordinary SOAP decoding keeps its native
+    scalar and record values. Body keys are WSDL part names; bound headers are keyed by message
+    name, then part name. Unbound headers retain their original order in a separate list.
+    @since %WSDL 0.5.8
+*/
+public hashdecl SoapXmlMessageInfo {
+    #! Body XML values keyed by WSDL part name
+    hash<string, XsdXmlValue> body = {};
+    #! Bound SOAP header values keyed by WSDL message name and part name
+    hash<string, hash<string, XsdXmlValue>> headers = {};
+    #! Headers without a matching WSDL binding declaration, in document order
+    list<XsdXmlValue> unbound_headers = ();
+    #! SOAP 1.1 extension elements following Body, in document order
+    list<XsdXmlValue> extensions = ();
+}
+
+#! An explicit XML value retaining lexical text, namespaces and ordered content
+/** Unlike a native scalar or flat record, this value retains the complete supplied XML document.
+    getXmlDataView() exposes parse_xml()'s ordered data representation for convenient access to
+    namespace declarations, attribute text, mixed text and repeated children. getReader() provides
+    a separate XmlReader for the complete XML stream, including processing instructions and whitespace.
+
+    This class represents XML; constructing it does not validate the document against an XSD type.
+    XML generator integration requires xml 2.3.0 or later.
+    Existing native WSDL values are not implicitly converted to this representation.
+
+    @par Example
+    @code{.py}
+    XsdXmlValue quantity("<quantity unit='kg'>009.00</quantity>");
+    string lexical = quantity.getElementData()."^value^";
+    @endcode
+
+    @since %WSDL 0.5.8
+*/
+public final class XsdXmlValue inherits Serializable {
+    private {
+        string xml;
+        hash<string, string> inherited_xml_attributes;
+        transient hash<auto> data;
+        transient string root_name;
+        transient string root_namespace;
+        transient string root_local_name;
+        transient hash<string, string> xml_context;
+    }
+
+    #! constructs a value from a complete XML element document
+    /** @param xml the XML document, including all required namespace declarations
+        @param inherited_xml_attributes the parent's effective \c xml:lang, \c xml:space and \c xml:base
+        attributes, when the document element was extracted from a containing document
+        @throw PARSE-XML-EXCEPTION malformed XML
+        @throw XML-CONTEXT-ERROR unknown context attributes, invalid XML characters or an invalid xml:space value
+        @note Numeric spellings, QName text and child order are retained. XML parsing still applies
+        XML's normal character-reference and line-ending normalization.
+    */
+    constructor(string xml, hash<string, string> inherited_xml_attributes = {}) {
+        initInheritedAttributes(inherited_xml_attributes, "XML-CONTEXT-ERROR");
+        init(xml);
+    }
+
+    private:internal deserializeMembers(hash<auto> members) {
+        if (members.xml.typeCode() != NT_STRING) {
+            throw "DESERIALIZATION-ERROR", "serialized XsdXmlValue requires an XML string";
+        }
+        initInheritedAttributes(members.hasKey("inherited_xml_attributes") ? members.inherited_xml_attributes : {},
+            "DESERIALIZATION-ERROR");
+        init(members.xml);
+    }
+
+    private initInheritedAttributes(auto attributes, string error) {
+        if (attributes.typeCode() != NT_HASH) {
+            throw error, "inherited XML attributes must be a hash of strings";
+        }
+        foreach string key in (keys attributes) {
+            if (attributes{key}.typeCode() != NT_STRING
+                    || (key != "xml:lang" && key != "xml:space" && key != "xml:base")) {
+                throw error, "inherited XML context accepts only xml:lang, xml:space and xml:base strings";
+            }
+        }
+        if (attributes.hasKey("xml:space") && attributes."xml:space" != "default"
+                && attributes."xml:space" != "preserve") {
+            throw error, "xml:space must be default or preserve";
+        }
+        if (attributes) {
+            # Validate XML characters as well as names/types before publishing context state.
+            try {
+                hash<auto> validated = parse_xml(make_xml({"parent": {"^attributes^": attributes}}));
+                @assert(validated.parent."^attributes^" == attributes, "inherited XML attributes must serialize exactly");
+            } catch (hash<ExceptionInfo> ex) {
+                if (ex.err == "PROGRAM-INTERRUPTED" || ex.err == "THREAD-CANCELLED") {
+                    rethrow;
+                }
+                throw error, sprintf("invalid inherited XML attributes: %s", ex.desc);
+            }
+        }
+        inherited_xml_attributes = attributes;
+    }
+
+    private init(string xml) {
+        self.xml = xml;
+        data = parse_xml(xml, XPF_PRESERVE_ORDER | XPF_ADD_COMMENTS);
+        XmlReader reader(xml);
+        while (reader.read()) {
+            if (reader.nodeType() == XML_NODE_TYPE_ELEMENT) {
+                root_name = reader.name();
+                root_local_name = reader.localName();
+                root_namespace = reader.namespaceUri() ?? "";
+                xml_context = inherited_xml_attributes;
+                hash<auto> attributes = getElementData()."^attributes^" ?? {};
+                foreach string key in ("xml:lang", "xml:space") {
+                    if (attributes.hasKey(key)) {
+                        xml_context{key} = attributes{key};
+                    }
+                }
+                if (attributes.hasKey("xml:base")) {
+                    if (inherited_xml_attributes.hasKey("xml:base")) {
+                        xml_context."xml:base" = XsdXmlBaseHelper::resolve(inherited_xml_attributes."xml:base",
+                            attributes."xml:base");
+                    } else {
+                        xml_context."xml:base" = attributes."xml:base";
+                    }
+                }
+                return;
+            }
+        }
+        throw "PARSE-XML-EXCEPTION", "an XML value requires a document element";
+    }
+
+    #! returns the XML module's ordered data view of the document
+    /** @return a copy-on-write hash; editing it does not modify this value
+        @note This data view uses XPF_PRESERVE_ORDER and XPF_ADD_COMMENTS. The XML module does not
+        represent processing instructions or whitespace-only content in hashes. Use getXml() or
+        getReader() for the complete XML.
+    */
+    hash<auto> getXmlDataView() {
+        return data;
+    }
+
+    #! returns the document element's XML data
+    /** @return its scalar or ordered hash, including attributes and mixed text when present
+    */
+    auto getElementData() {
+        return data{root_name};
+    }
+
+    #! returns the document element's expanded name
+    /** @return a string in \c {namespace-uri}local-name form, including \c {}local-name for no namespace
+    */
+    string getExpandedName() {
+        return type_qname(root_namespace, root_local_name);
+    }
+
+    #! returns the document element's namespace URI
+    /** @return its namespace URI, or an empty string for no namespace */
+    string getNamespaceUri() {
+        return root_namespace;
+    }
+
+    #! returns the document element's local name
+    /** @return the local name without a prefix */
+    string getLocalName() {
+        return root_local_name;
+    }
+
+    #! returns the effective XML attributes of the original parent
+    /** @return a copy-on-write map limited to \c xml:lang, \c xml:space and \c xml:base
+        @note Empty xml:lang is retained as an explicit language reset. These attributes are
+        separate from the root's authored attributes and are not added to getXml().
+    */
+    hash<string, string> getInheritedXmlAttributes() {
+        return inherited_xml_attributes;
+    }
+
+    #! returns the effective XML context at the document element
+    /** @return inherited attributes with root overrides applied; relative xml:base values are resolved
+        against the inherited base URI
+        @note Missing keys indicate absent context. Descendant contexts can be obtained by extracting
+        child values. getReader() reads the standalone XML without this separate inherited context.
+    */
+    hash<string, string> getXmlContext() {
+        return xml_context;
+    }
+
+    #! resolves a lexical QName using the document element's namespace declarations
+    /** @param qname the lexical QName to resolve
+        @return its expanded name, including an empty namespace when applicable
+        @throw WSDL-NAMESPACE-ERROR malformed QName or unbound prefix
+        @note This method uses the document element's scope; descendant declarations remain available
+        in getXmlDataView() and can establish different scopes.
+    */
+    string resolveQName(string qname) {
+        hash<auto> declarations = getElementData()."^attributes^" ?? {};
+        declarations."xmlns:xml" = "http://www.w3.org/XML/1998/namespace";
+        Namespaces namespaces(declarations);
+        hash<auto> identity = namespaces.getTypeHash(qname);
+        return type_qname(identity.uri, identity.val);
+    }
+
+    #! returns the immediate element children as independent XML values
+    /** @return child elements in document order, with inherited namespace declarations materialized
+        on each root; text and other nodes between those children remain available in this value
+        @throw XML-READER-ERROR if an XML subtree cannot be read
+        @throw PARSE-XML-EXCEPTION if a subtree cannot be represented as an XML document
+        @throw XML-CONTEXT-ERROR if inherited XML attributes cannot be represented
+        @note All namespace bindings are retained, including prefixes used only by QName text.
+        Local namespace declarations override inherited bindings. Inherited XML attributes are retained
+        separately in getInheritedXmlAttributes(), preserving the child's authored root attributes.
+        This method does not validate XSD.
+        @par Example
+        @code{.py}
+        XsdXmlValue batch("<batch xmlns:t='urn:types'><item>t:Stock</item></batch>");
+        XsdXmlValue item = batch.getChildValues()[0];
+        string identity = item.resolveQName("t:Stock");
+        @endcode
+    */
+    list<XsdXmlValue> getChildValues() {
+        hash<string, string> inherited();
+        XmlReader reader = getReader();
+        list<XsdXmlValue> result();
+        while (reader.read()) {
+            if (reader.nodeType() != XML_NODE_TYPE_ELEMENT || reader.depth() > 1) {
+                continue;
+            }
+            int depth = reader.depth();
+            string child_name = reader.name();
+            hash<string, string> attributes = depth ? inherited : {};
+            int count = reader.attributeCount();
+            for (int i = 0; i < count; ++i) {
+                reader.moveToAttributeOffset(i);
+                string attribute_name = reader.name();
+                if (depth || attribute_name == "xmlns" || attribute_name.startsWith("xmlns:")) {
+                    attributes{attribute_name} = reader.value();
+                }
+            }
+            if (count) {
+                reader.moveToElement();
+            }
+            if (!depth) {
+                inherited = attributes;
+                continue;
+            }
+            string inner = reader.getInnerXml() ?? "";
+            # Generate the empty root to escape attribute values, then append the original ordered
+            # inner XML. Only the known generated empty-tag suffix is changed; source XML is not scanned.
+            XmlReader root_reader(make_xml({child_name: {"^attributes^": attributes}}));
+            while (root_reader.read() && root_reader.nodeType() != XML_NODE_TYPE_ELEMENT) {
+            }
+            string root = root_reader.getOuterXml();
+            @assert(root.endsWith("/>"), "generated attribute-only root must be an empty element");
+            if (inner) {
+                root = substr(root, 0, root.length() - 2) + ">" + inner + "</" + child_name + ">";
+            }
+            result += new XsdXmlValue(root, xml_context);
+        }
+        return result;
+    }
+
+    #! returns the retained XML document
+    /** @return the supplied XML document, preserving lexical values, namespace declarations and node order
+    */
+    string getXml() {
+        return xml;
+    }
+
+    #! returns data for embedding the document element with make_xml()
+    /** @return an XML generator hash using its validated \c ^xml^ element-fragment representation
+        @note make_xml() embeds the document element and retains its namespace bindings and ordered
+        content. It omits the XML declaration and nodes outside that element, and rejects DOCTYPEs.
+        Inherited XML attributes are applied to the containing element, preserving the payload's authored
+        root attributes. Keep these attributes when adding other attributes to the generator hash.
+        This performs XML well-formedness checking, not XSD validation.
+        @code{.py}
+        XsdXmlValue item("<item>009.00</item>");
+        string message = make_xml({"collection": item.getXmlSerializationData()});
+        @endcode
+    */
+    hash<auto> getXmlSerializationData() {
+        hash<auto> result();
+        result."^xml^" = xml;
+        if (inherited_xml_attributes) {
+            result."^attributes^" = inherited_xml_attributes;
+        }
+        return result;
+    }
+
+    #! returns a separate reader for the complete XML document
+    /** @return an XmlReader positioned before the first node; reading it does not modify this value
+        @throw XML-READER-ERROR if a reader cannot be created
+    */
+    XmlReader getReader() {
+        return new XmlReader(xml);
+    }
+}
+
+hashdecl XsdXmlBaseInfo {
+    *string scheme;
+    *string authority;
+    string path;
+    *string query;
+    *string fragment;
+}
+
+# XML Base accepts LEIRIs, whereas libxml2's URI resolver rejects non-ASCII characters.
+# Resolve components without early percent encoding or decoding (XML Base 3.1; RFC 3986 5.2).
+class XsdXmlBaseHelper {
+    private static hash<XsdXmlBaseInfo> parts(string value) {
+        hash<XsdXmlBaseInfo> result = <XsdXmlBaseInfo>{"path": ""};
+        int pos = index(value, "#");
+        if (pos >= 0) {
+            result.fragment = substr(value, pos + 1);
+            value = substr(value, 0, pos);
+        }
+        pos = index(value, "?");
+        if (pos >= 0) {
+            result.query = substr(value, pos + 1);
+            value = substr(value, 0, pos);
+        }
+        *string scheme = (value =~ x/^([a-zA-Z][a-zA-Z0-9+.-]*):/)[0];
+        if (exists scheme) {
+            result.scheme = scheme;
+            value = substr(value, scheme.length() + 1);
+        }
+        if (value.startsWith("//")) {
+            pos = index(value, "/", 2);
+            result.authority = pos < 0 ? substr(value, 2) : substr(value, 2, pos - 2);
+            value = pos < 0 ? "" : substr(value, pos);
+        }
+        result.path = value;
+        return result;
+    }
+
+    private static string normalizePath(string path, bool keep_relative_parents) {
+        bool absolute = path.startsWith("/");
+        list<string> result();
+        list<string> segments = split("/", path);
+        if (path.endsWith("/")) {
+            segments += "";
+        }
+        for (int i = 0; i < segments.size(); ++i) {
+            string segment = segments[i];
+            if (segment == "." || segment == "..") {
+                if (segment == "..") {
+                    if (result && result[-1] != ".." && !(absolute && result.size() == 1)) {
+                        pop result;
+                        if (!result && !keep_relative_parents) {
+                            # RFC dot removal retains the slash after the removed segment even
+                            # for a scheme-bearing rootless path, such as g:a/../b -> g:/b.
+                            absolute = True;
+                            result += "";
+                        }
+                    } else if (!absolute && keep_relative_parents) {
+                        result += "..";
+                    }
+                }
+                if (i == segments.size() - 1 && (absolute || result)) {
+                    result += "";
+                }
+            } else {
+                result += segment;
+            }
+        }
+        return result.join("/");
+    }
+
+    static string resolve(string base, string value) {
+        if (!base) {
+            return value;
+        }
+        hash<XsdXmlBaseInfo> parent = parts(base);
+        hash<XsdXmlBaseInfo> target = parts(value);
+        if (exists target.scheme) {
+            target.path = normalizePath(target.path, False);
+        } else {
+            target.scheme = parent.scheme;
+            if (exists target.authority) {
+                target.path = normalizePath(target.path, False);
+            } else {
+                target.authority = parent.authority;
+                if (!target.path) {
+                    target.path = parent.path;
+                    if (!exists target.query) {
+                        target.query = parent.query;
+                    }
+                } else if (target.path.startsWith("/")) {
+                    target.path = normalizePath(target.path, False);
+                } else {
+                    string prefix = exists parent.authority && !parent.path ? "/"
+                        : substr(parent.path, 0, rindex(parent.path, "/") + 1);
+                    target.path = normalizePath(prefix + target.path, !exists target.scheme && !exists target.authority);
+                }
+            }
+        }
+        return (exists target.scheme ? target.scheme + ":" : "")
+            + (exists target.authority ? "//" + target.authority : "") + target.path
+            + (exists target.query ? "?" + target.query : "")
+            + (exists target.fragment ? "#" + target.fragment : "");
+    }
+}
+
+# SOAP 1.1 section 3 and SOAP 1.2 section 5 prohibit sender processing instructions and DTDs.
+class XsdSoapXmlHelper {
+    static mergeContext(reference<*hash<string, string>> target, hash<string, string> attributes) {
+        if (exists target && target != attributes) {
+            throw SOAP_SERIALIZATION_ERROR,
+                "retained sibling XML values require the same inherited XML attributes on their SOAP container";
+        }
+        target = attributes;
+    }
+
+    static validate(XsdXmlValue value, string error) {
+        XmlReader reader = value.getReader();
+        while (reader.read()) {
+            if (reader.nodeType() == XML_NODE_TYPE_DOCUMENT_TYPE
+                    || reader.nodeType() == XML_NODE_TYPE_PROCESSING_INSTRUCTION) {
+                throw error, "SOAP XML must not contain DOCTYPEs or processing instructions";
+            }
+        }
+    }
+
+}
 
 #! base class for XSD data classes
 public class XsdData inherits WSDL::XsdBase {
@@ -3133,6 +3564,48 @@ public class XsdElement inherits WSDL::XsdTypedData {
         return uri ? namespaces.getOutputNamespacePrefix(uri) + ":" + name : name;
     }
 
+    #! validates a retained XML element using the existing decode and encode constraints
+    /** @param value a complete XML element document
+        @param nsc namespace context for validating the corresponding native serialization
+        @param tmap the resolved schema type map
+        @return the validated native value; the retained XML is not modified
+        @throw SOAP-SERIALIZATION-ERROR wrong expanded root, forbidden DOCTYPE or rejected schema content
+        @note Checks both conversion paths: serialization can enforce constraints that decoding does not.
+        General scalar, particle and dynamic-type validation follows the same rules as native values.
+        @since %WSDL 0.5.8
+    */
+    auto validateXmlValue(XsdXmlValue value, Namespaces nsc, hash<string, XsdAbstractType> tmap) {
+        if (value.getExpandedName() != getExpandedName()) {
+            throw SOAP_SERIALIZATION_ERROR, sprintf("XML value root %Y does not match element %Y",
+                value.getExpandedName(), getExpandedName());
+        }
+        XmlReader reader = value.getReader();
+        while (reader.read()) {
+            if (reader.nodeType() == XML_NODE_TYPE_DOCUMENT_TYPE) {
+                throw SOAP_SERIALIZATION_ERROR, "a retained SOAP element cannot contain a DOCTYPE";
+            }
+            if (reader.nodeType() == XML_NODE_TYPE_ELEMENT) {
+                break;
+            }
+        }
+        try {
+            # Comments do not participate in XSD content-model validation. Keep them in the carrier's
+            # public view, while using the same comment-free parser projection as native SOAP decoding.
+            hash<auto> expanded = XsdBase::expandElementNamespaces(parse_xml(value.getXml(), XPF_PRESERVE_ORDER));
+            auto native_value = deserializeValue(tmap, NOTHING, expanded{getExpandedName()}, True);
+            # Validation must not publish output-prefix allocations to the shared schema registry.
+            Namespaces validation_namespaces = nsc.copy();
+            serializeValue(validation_namespaces, native_value, True, name, name);
+            return native_value;
+        } catch (hash<ExceptionInfo> ex) {
+            if (ex.err == "PROGRAM-INTERRUPTED" || ex.err == "THREAD-CANCELLED") {
+                rethrow;
+            }
+            throw SOAP_SERIALIZATION_ERROR, sprintf("XML value for element %Y failed validation: %s: %s",
+                getExpandedName(), ex.err, ex.desc);
+        }
+    }
+
     auto serializeValue(Namespaces nsc, auto h, *softbool omitType, string key, string typename) {
         if (h."^type^" && h."^type^" instanceof XsdAbstractType && h.hasKey("^val^")) {
             XsdAbstractType ntype = cast<XsdAbstractType>(h."^type^");
@@ -3258,6 +3731,88 @@ public class XsdElement inherits WSDL::XsdTypedData {
             throw SOAP_DESERIALIZATION_ERROR, sprintf("single value passed for element %y, but minOccurs: %d", name, minOccurs);
 
         return type.deserializeValue(name, tmap, mrh, getValue(mrh, val));
+    }
+}
+
+#! explicit provider type for a retained XML element
+/** Native schema/provider field types remain unchanged. This opt-in type validates and returns an
+    immutable XsdXmlValue, retaining its lexical text, namespaces and ordered XML.
+
+    @par Example
+    An invoice connector can accept a complete XML invoice without converting its retained quantity
+    spelling or namespace-qualified extension fields into flat provider fields.
+
+    @since %WSDL 0.5.8
+*/
+public class XsdXmlValueDataType inherits QoreDataType {
+    private {
+        XsdSchema schema_owner;
+        string element_namespace;
+        string element_name;
+        transient XsdElement element;
+        transient Namespaces namespaces;
+        transient hash<string, XsdAbstractType> types;
+    }
+
+    #! constructs an explicit XML provider type for a global element
+    /** @param schema the schema containing the global declaration
+        @param namespace_uri the global element namespace, or an empty string
+        @param local_name the global element's local name
+        @throw WSDL-ERROR the global element does not exist
+        @note Retains validation state strongly. Serializable reconstruction uses the schema's saved
+        source documents instead of serializing internal component metadata.
+    */
+    constructor(XsdSchema schema, string namespace_uri, string local_name)
+            : QoreDataType(ObjectType, NOTHING, NOTHING, NOTHING,
+                <NameDescInfo>{"name": "XML " + local_name, "display_name": "XML " + local_name,
+                 "short_desc": "Complete XML element with retained values and namespace context",
+                 "desc": "Accepts a complete XML element as `XsdXmlValue`, preserving lexical values, namespace "
+                    "bindings and ordered content after schema checks."}) {
+        schema_owner = schema;
+        element_namespace = namespace_uri;
+        element_name = local_name;
+        initValidation();
+    }
+
+    private:internal deserializeMembers(hash<auto> members) {
+        if (!(members.schema_owner instanceof XsdSchema) || members.element_namespace.typeCode() != NT_STRING
+                || members.element_name.typeCode() != NT_STRING) {
+            throw "DESERIALIZATION-ERROR", "an XML provider type requires a schema and an expanded element name";
+        }
+        schema_owner = members.schema_owner;
+        element_namespace = members.element_namespace;
+        element_name = members.element_name;
+        initValidation();
+    }
+
+    private initValidation() {
+        *XsdElement declaration = schema_owner.getElement(element_namespace, element_name);
+        if (!declaration) {
+            throw WSDL_ERROR, sprintf("no global element declaration %Y", type_qname(element_namespace, element_name));
+        }
+        element = declaration;
+        namespaces = schema_owner.nsc;
+        types = schema_owner.getTypeMap();
+    }
+
+    #! validates and retains an explicit XML value
+    /** @param value the retained XML element
+        @return the same immutable XsdXmlValue after validation, or NOTHING for an omitted optional value
+        @throw RUNTIME-TYPE-ERROR the supplied value is not XsdXmlValue
+        @throw SOAP-SERIALIZATION-ERROR wrong root or rejected XML/schema content
+    */
+    auto acceptsValue(auto value) {
+        # Honor optional/mandatory copies and their base metadata before checking the XML carrier.
+        value = QoreDataType::acceptsValue(value);
+        if (!exists value) {
+            return;
+        }
+        if (!(value instanceof XsdXmlValue)) {
+            throw "RUNTIME-TYPE-ERROR", sprintf("XML element %Y requires XsdXmlValue; got %s",
+                element.getExpandedName(), value.type());
+        }
+        element.validateXmlValue(value, namespaces, types);
+        return value;
     }
 }
 
@@ -7752,6 +8307,43 @@ public class WSOperation inherits WSDL::XsdNamedData {
         return getBinding(bname).deserializeMessage(self, o, False);
     }
 
+    #! decodes a SOAP request into explicitly retained XML parts
+    /** @param xml the complete SOAP envelope, before conversion to a native hash
+        @param bname the binding name, or NOTHING for the first assigned binding
+        @return body and header XML values keyed by their WSDL part and message identities
+        @throw SOAP-DESERIALIZATION-ERROR an invalid request or payload
+        @throw WSDL-BINDING-ERROR the binding does not use element-based literal SOAP parts
+        @par Example
+        @code{.py}
+        hash<SoapXmlMessageInfo> request = operation.deserializeXmlRequest(incoming_xml, "StockSoap");
+        string original_quantity = request.body.order.getElementData().quantity;
+        @endcode
+    */
+    hash<SoapXmlMessageInfo> deserializeXmlRequest(string xml, *string bname) {
+        return getXmlBinding(bname).deserializeXmlMessage(self, xml, True);
+    }
+
+    #! decodes a SOAP response into explicitly retained XML parts
+    /** @param xml the complete SOAP envelope, before conversion to a native hash
+        @param bname the binding name, or NOTHING for the first assigned binding
+        @return body and header XML values keyed by their WSDL part and message identities
+        @throw SOAP-DESERIALIZATION-ERROR an invalid response or payload
+        @throw SOAP-SERVER-FAULT-RESPONSE a SOAP fault was received
+        @throw WSDL-BINDING-ERROR the binding does not use element-based literal SOAP parts
+        @see deserializeXmlRequest()
+    */
+    hash<SoapXmlMessageInfo> deserializeXmlResponse(string xml, *string bname) {
+        return getXmlBinding(bname).deserializeXmlMessage(self, xml, False);
+    }
+
+    private SoapBinding getXmlBinding(*string bname) {
+        OperationalBinding binding = getBinding(bname);
+        if (!(binding instanceof SoapBinding)) {
+            throw "WSDL-BINDING-ERROR", "retained XML decoding requires a SOAP binding";
+        }
+        return binding;
+    }
+
     /** Operation is resolved from method and path so let's look if data are passed in URL.
         When URL replacement is defined for operation then exception is raised.
         @return NOTHING if data are not encoded in URL for operation
@@ -7986,8 +8578,17 @@ public class WSMessage inherits WSDL::XsdNamedData {
      */
     *hash<auto> serializeDocument(*softlist<auto> parts, *WSDL::BindingMessageDescription msginfo, *MultiPartRelatedMessage mpm, bool encoded, reference<auto> h, bool fault) {
         hash<auto> rh;
+        *hash<string, string> xml_attributes;
 
         #printf("DEBUG: WSMessage::serializeDocument() parts: %y h: %y args: %y, pmap: %y\n", parts, h.typeCode()==NT_HASH ?  h.keys() : h, args.keys(), pmap);
+
+        if (h instanceof XsdXmlValue) {
+            list<string> selected = map $1, (parts ?? keys pmap);
+            if (selected.size() != 1) {
+                throw SOAP_SERIALIZATION_ERROR, "a bare retained XML value requires exactly one selected message part";
+            }
+            h = {pmap{selected[0]}: h};
+        }
 
         if (args.size() == 1) {
             string fk = args.firstKey();
@@ -8039,6 +8640,19 @@ public class WSMessage inherits WSDL::XsdNamedData {
                 XsdBase::removeNS2(\val);
             #printf("DEBUG: k: %y val: %y, args: %y\n", k, val, keys args);
             hash<auto> arg = args{k};
+            if (val instanceof XsdXmlValue) {
+                if (!arg.element || encoded || (mpm && msginfo.parts{k})) {
+                    throw SOAP_SERIALIZATION_ERROR,
+                        "retained XML values require an element-based literal SOAP part";
+                }
+                XsdSoapXmlHelper::validate(val, SOAP_SERIALIZATION_ERROR);
+                arg.element.validateXmlValue(val, nsc, tmap);
+                XsdSoapXmlHelper::mergeContext(\xml_attributes, cast<XsdXmlValue>(val).getInheritedXmlAttributes());
+                # Headers are serialized in separate calls and merged, so the marker must include
+                # both message and part identity rather than a per-call numeric index.
+                rh{sprintf("^xml^%d:%s:%s", name.length(), name, p)} = cast<XsdXmlValue>(val).getXml();
+                continue;
+            }
             # Handle multipart attachments - if this part is defined as a multipart content part
             if (mpm && msginfo.parts{k}) {
                 auto partContentType = msginfo.parts{k};
@@ -8061,6 +8675,9 @@ public class WSMessage inherits WSDL::XsdNamedData {
             }
         }
 
+        if (xml_attributes) {
+            rh."^attributes^" += xml_attributes;
+        }
         if (encoded && rh) {
             rh."^attributes^" += {
                 "soapenv:encodingStyle": SOAP_ENCODING,
@@ -8596,6 +9213,7 @@ public class SoapBinding inherits WSDL::OperationalBinding {
             #printf("DEBUG: body: %N\nval: %N\n", body, val);
         }
 
+        *hash<string, string> header_xml_attributes;
         if (bmd.hasHeaders()) {
             #printf("DEBUG: %s header: %y\n", io, header);
             #printf("DEBUG: doc: %y bhdr: %N\n", docstyle, (map $1.("message", "part"), bmd.getHeaders()));
@@ -8611,6 +9229,18 @@ public class SoapBinding inherits WSDL::OperationalBinding {
                     h = hdr.msg.serializeDocument(hdr.part, NOTHING, NOTHING, hdr.encoded, \val, False);
                 }
                 if (h) {
+                    foreach string key in (keys h) {
+                        if (key.startsWith("^xml^")) {
+                            hash<string, string> attributes();
+                            foreach string attribute in ("xml:lang", "xml:space", "xml:base") {
+                                if (h."^attributes^".hasKey(attribute)) {
+                                    attributes{attribute} = h."^attributes^"{attribute};
+                                }
+                            }
+                            XsdSoapXmlHelper::mergeContext(\header_xml_attributes, attributes);
+                            break;
+                        }
+                    }
                     remove h."^attributes^".("soapenv:encodingStyle");
                     outh += h;
                 }
@@ -8620,10 +9250,24 @@ public class SoapBinding inherits WSDL::OperationalBinding {
         }
         if (header.typeCode() == NT_HASH && header) {
             if (op.nsc.opt_allow_any_header) {
+                if (exists header_xml_attributes) {
+                    foreach string attribute in ("xml:lang", "xml:space", "xml:base") {
+                        if (header."^attributes^".hasKey(attribute)
+                                && (!header_xml_attributes.hasKey(attribute)
+                                    || header."^attributes^"{attribute}.typeCode() != NT_STRING
+                                    || header."^attributes^"{attribute} != header_xml_attributes{attribute})) {
+                            throw SOAP_SERIALIZATION_ERROR,
+                                "explicit SOAP Header attributes conflict with retained XML context";
+                        }
+                    }
+                }
                 rh{soapenvEnvelope}."soapenv:Header" += header;
             } else {
                 throw SOAP_SERIALIZATION_ERROR, sprintf("%s header data provided for operation %y remains unserialized: %y", io, op.name, header);
             }
+        }
+        if (header_xml_attributes) {
+            rh{soapenvEnvelope}."soapenv:Header"."^attributes^" += header_xml_attributes;
         }
         if (val.typeCode() == NT_HASH && val)
             throw SOAP_SERIALIZATION_ERROR, sprintf("%s data provided for operation %y remains unserialized: %y", io, op.name, val);
@@ -8658,6 +9302,128 @@ public class SoapBinding inherits WSDL::OperationalBinding {
         return rh;
     }
 
+    #! decodes element-based literal SOAP parts without converting their XML scalar values
+    /** @param op the operation describing the request or response
+        @param xml the complete SOAP envelope XML
+        @param request True for input, False for output
+        @return retained body parts and headers keyed by their WSDL identities
+        @throw SOAP-DESERIALIZATION-ERROR invalid message or payload
+        @throw SOAP-SERVER-FAULT-RESPONSE a SOAP fault response was received
+        @throw WSDL-BINDING-ERROR the binding requires a nonliteral or nonelement XML representation
+        @note Existing schema decode and encode constraints apply before any XML values are returned.
+    */
+    hash<SoapXmlMessageInfo> deserializeXmlMessage(WSOperation op, string xml, bool request) {
+        string io = request ? "input" : "output";
+        *BindingMessageDescription description = self{io};
+        *WSMessage message = op{io};
+        if (!description || !message) {
+            throw SOAP_DESERIALIZATION_ERROR, sprintf("operation %y has no %s message", op.name, io);
+        }
+        if (!docstyle || description.body.encoded || description.multipart) {
+            throw "WSDL-BINDING-ERROR", "retained XML decoding requires an element-based literal SOAP binding";
+        }
+        XsdXmlValue envelope(xml);
+        if (envelope.getLocalName() != "Envelope"
+                || !inlist(envelope.getNamespaceUri(), (SOAP_11_ENV, SOAP_12_ENV))) {
+            throw SOAP_DESERIALIZATION_ERROR, "expected a SOAP Envelope element";
+        }
+        XsdSoapXmlHelper::validate(envelope, SOAP_DESERIALIZATION_ERROR);
+        list<XsdXmlValue> body_values();
+        list<XsdXmlValue> header_values();
+        bool has_body = False;
+        bool has_header = False;
+        hash<SoapXmlMessageInfo> result();
+        foreach XsdXmlValue child in (envelope.getChildValues()) {
+            if (child.getExpandedName() == type_qname(envelope.getNamespaceUri(), "Body")) {
+                if (has_body) {
+                    throw SOAP_DESERIALIZATION_ERROR, "duplicate SOAP Body";
+                }
+                has_body = True;
+                body_values = child.getChildValues();
+            } else if (child.getExpandedName() == type_qname(envelope.getNamespaceUri(), "Header")) {
+                if (has_header || has_body) {
+                    throw SOAP_DESERIALIZATION_ERROR, "SOAP Header must occur once before Body";
+                }
+                has_header = True;
+                header_values = child.getChildValues();
+            } else if (envelope.getNamespaceUri() == SOAP_11_ENV && has_body && child.getNamespaceUri()) {
+                result.extensions += child;
+            } else {
+                throw SOAP_DESERIALIZATION_ERROR, sprintf("unexpected SOAP envelope child %y", child.getExpandedName());
+            }
+        }
+        if (!has_body) {
+            throw SOAP_DESERIALIZATION_ERROR, "missing SOAP Body";
+        }
+        # Check envelope structure before passing it through a native hash projection, which cannot
+        # preserve duplicate singleton containers. Keep existing schema and fault handling after that.
+        deserializeMessage(op, parse_xml(xml, XPF_PRESERVE_ORDER), request);
+        if (message) {
+            list<string> parts = description.getBodyPartNames(message) ?? keys message.pmap;
+            hash<string, string> wire_parts();
+            foreach string part in (parts) {
+                string wire_name = message.getExpandedSerializedKey(part);
+                if (wire_parts.hasKey(wire_name)) {
+                    throw SOAP_DESERIALIZATION_ERROR, sprintf("ambiguous XML parts for element %y", wire_name);
+                }
+                wire_parts{wire_name} = part;
+            }
+            foreach XsdXmlValue value in (body_values) {
+                *string part = remove wire_parts{value.getExpandedName()};
+                if (!exists part) {
+                    throw SOAP_DESERIALIZATION_ERROR, sprintf("unexpected or duplicate SOAP body element %y",
+                        value.getExpandedName());
+                }
+                validateXmlPart(op, message, part, value);
+                result.body{part} = value;
+            }
+            if (wire_parts) {
+                throw SOAP_DESERIALIZATION_ERROR, sprintf("missing SOAP body parts: %y", keys wire_parts);
+            }
+        }
+        hash<string, BindingMessageHeaderDescription> wire_headers();
+        foreach BindingMessageHeaderDescription header in (description.getHeaders()) {
+            string wire_name = header.msg.getExpandedSerializedKey(header.part);
+            if (header.encoded || wire_headers.hasKey(wire_name)) {
+                throw "WSDL-BINDING-ERROR", sprintf("retained XML header %y must be unambiguous and literal", wire_name);
+            }
+            wire_headers{wire_name} = header;
+        }
+        hash<string, bool> seen_headers();
+        foreach XsdXmlValue value in (header_values) {
+            if (!value.getNamespaceUri()) {
+                throw SOAP_DESERIALIZATION_ERROR, "SOAP header blocks must be namespace-qualified";
+            }
+            *BindingMessageHeaderDescription header = wire_headers{value.getExpandedName()};
+            if (!header) {
+                result.unbound_headers += value;
+                continue;
+            }
+            if (seen_headers{value.getExpandedName()}) {
+                throw SOAP_DESERIALIZATION_ERROR, sprintf("duplicate SOAP header %y", value.getExpandedName());
+            }
+            seen_headers{value.getExpandedName()} = True;
+            validateXmlPart(op, header.msg, header.part, value);
+            result.headers{header.msg.name}{header.part} = value;
+        }
+        return result;
+    }
+
+    private static validateXmlPart(WSOperation op, WSMessage message, string part, XsdXmlValue value) {
+        *XsdElement element = message.args{message.pmap{part}}.element;
+        if (!element) {
+            throw "WSDL-BINDING-ERROR", sprintf("retained XML part %y must reference an element", part);
+        }
+        try {
+            element.validateXmlValue(value, op.nsc, message.tmap);
+        } catch (hash<ExceptionInfo> ex) {
+            if (ex.err == "PROGRAM-INTERRUPTED" || ex.err == "THREAD-CANCELLED") {
+                rethrow;
+            }
+            throw SOAP_DESERIALIZATION_ERROR, sprintf("invalid XML for part %y: %s: %s", part, ex.err, ex.desc);
+        }
+    }
+
     auto deserializeMessageImpl(WSOperation op, hash<auto> orig_msg, bool request) {
         #printf("DEBUG: deserializeSoapMessage(%N, %y)\n", o, request);
         string io = request ? "input" : "output";
@@ -8669,9 +9435,9 @@ public class SoapBinding inherits WSDL::OperationalBinding {
         hash<string, string> envelope_namespaces = XsdBase::getElementNamespaces(o.Envelope."^attributes^");
         hash<auto> hrv;
 
-        BindingMessageDescription bmd = self{io};
+        *BindingMessageDescription bmd = self{io};
 
-        if (bmd.hasHeaders()) {
+        if (bmd && bmd.hasHeaders()) {
             *hash<auto> header = o.Envelope.Header;
             if (header) {
                 header = XsdBase::expandElementNamespaces(header, envelope_namespaces);
@@ -10970,6 +11736,49 @@ public class XsdSchema inherits WSDL::XsdBase {
         return attributeMap{type_qname(ns, name)};
     }
 
+    #! validates a retained XML value against its global element declaration
+    /** @param value a complete XML element
+        @return the same immutable value after native decode and encode checks
+        @throw SOAP-SERIALIZATION-ERROR no matching global declaration or rejected content
+        @since %WSDL 0.5.8
+    */
+    XsdXmlValue validateXmlValue(XsdXmlValue value) {
+        *XsdElement element = getElement(value.getNamespaceUri(), value.getLocalName());
+        if (!element) {
+            throw SOAP_SERIALIZATION_ERROR, sprintf("no global element declaration for XML value %Y",
+                value.getExpandedName());
+        }
+        element.validateXmlValue(value, nsc, tmap);
+        return value;
+    }
+
+    #! creates a validated retained XML value
+    /** @param xml a complete XML element document
+        @return an immutable XML value checked against its global declaration
+        @throw PARSE-XML-EXCEPTION malformed XML
+        @throw SOAP-SERIALIZATION-ERROR no matching declaration or rejected content
+        @since %WSDL 0.5.8
+    */
+    XsdXmlValue getXmlValue(string xml) {
+        return validateXmlValue(new XsdXmlValue(xml));
+    }
+
+    #! returns an opt-in provider type for a retained XML element
+    /** @param namespace_uri the global element namespace, or an empty string
+        @param local_name the global element's local name
+        @return a provider that validates and retains XsdXmlValue instances
+        @throw WSDL-ERROR the global element does not exist
+        @note Ordinary getDataProviderType() methods continue to describe native values.
+        @since %WSDL 0.5.8
+    */
+    AbstractDataProviderType getXmlDataProviderType(string namespace_uri, string local_name) {
+        *XsdElement element = getElement(namespace_uri, local_name);
+        if (!element) {
+            throw WSDL_ERROR, sprintf("no global element declaration %Y", type_qname(namespace_uri, local_name));
+        }
+        return new XsdXmlValueDataType(self, namespace_uri, local_name);
+    }
+
     #! looks up a type by name; returns NOTHING if not found
     *XsdAbstractType findType(string name) {
         return tmap{name};
@@ -12304,6 +13113,44 @@ public class WSMessageHelper {
         if (!e)
             throw "MESSAGE-ERROR", sprintf("cannot map message %y to a known element; known elements: %y", ws.idocmap.keys());
         return getMessage(e);
+    }
+
+    #! generates validated retained XML examples keyed by WSDL part name
+    /** @param msg the message containing element-based parts
+        @return one immutable XML value for each part
+        @throw MESSAGE-ERROR a part is type-based rather than element-based
+        @throw SOAP-SERIALIZATION-ERROR generated content fails existing schema checks
+        @note Ordinary getMessage() calls keep their native representations. The returned values can
+        be used with element-based literal SOAP bindings and explicit XML provider types.
+        @since %WSDL 0.5.8
+    */
+    hash<string, XsdXmlValue> getXmlMessage(WSMessage msg) {
+        hash<string, XsdXmlValue> result();
+        Namespaces namespaces = ws.nsc.copy();
+        foreach string part in (keys msg.pmap) {
+            hash<ArgInfo> arg = msg.args{msg.pmap{part}};
+            if (!arg.element) {
+                throw "MESSAGE-ERROR", sprintf("part %Y requires an element declaration for a retained XML example", part);
+            }
+            XsdElement element = arg.element;
+            auto example = getMessage(element){element.name};
+            auto serialized = element.serializeValue(namespaces, example, True, part, msg.name);
+            hash<auto> content();
+            if (serialized.typeCode() == NT_HASH) {
+                content += serialized;
+            } else {
+                content."^value^" = serialized;
+            }
+            string root = element.getXmlName(namespaces);
+            content."^attributes^" += namespaces.getOutputNamespaceHash(NOTHING);
+            if (element.getExpandedName() == type_qname("", element.name)) {
+                content."^attributes^".xmlns = "";
+            }
+            XsdXmlValue value(make_xml({root: content}));
+            element.validateXmlValue(value, namespaces, ws.getTypeMap());
+            result{part} = value;
+        }
+        return result;
     }
 
     #! prepare sample message

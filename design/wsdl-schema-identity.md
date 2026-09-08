@@ -315,8 +315,8 @@ False, zero, empty and null values are retained. Traversal restores one mutable
 scope map on every exit, and repeated lists are promoted once before appending.
 Only declarations used by attribute names are materialized when their scope
 would otherwise be detached. Metadata and existing local declarations remain
-in the hash; this helper does not retain every unused ancestor binding or replace an ordered XML
-representation for typed QName and mixed-content processing.
+in the hash; this helper does not replace the complete namespace context held
+by `XsdXmlValue` for typed QName or mixed-content processing.
 
 Known element identities map back to the declared public record fields, so
 ordinary callers retain their native scalar and record types. Wildcard elements

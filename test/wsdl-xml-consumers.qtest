@@ -1,0 +1,558 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires xml
+%requires ../qlib/WSDL.qm
+%requires ../qlib/SoapClient.qm
+%requires ../qlib/SoapHandler.qm
+%requires HttpServer
+%exec-class XmlConsumersTest
+
+class InterruptXmlNamespaces inherits Namespaces {
+    constructor() : Namespaces({"xmlns:xs": "http://www.w3.org/2001/XMLSchema"}) {
+    }
+
+    copy() {
+        throw "PROGRAM-INTERRUPTED", "validation interrupted while copying namespace state";
+    }
+}
+
+class XmlConsumerCallback {
+    public {
+        Queue observed();
+    }
+    private {
+        hash<auto> response;
+    }
+
+    constructor(hash<auto> response) {
+        self.response = response;
+    }
+
+    hash<auto> call(hash<auto> cx, hash<auto> input_value) {
+        observed.push(input_value);
+        return response;
+    }
+}
+
+class XmlConsumersTest inherits QUnit::Test {
+    private {
+        # Keep HTTP/queue deadlines bounded while allowing instrumented runs.
+        const IoTimeoutMs = 30000;
+        const Ns = "urn:xml-consumers";
+        const Record = '<xs:sequence><xs:element name="count" type="xs:int"/>
+            <xs:element name="flag" type="xs:boolean"/></xs:sequence>';
+        const Wild = '<xs:sequence><xs:any processContents="skip" maxOccurs="unbounded"/></xs:sequence>';
+    }
+
+    constructor() : Test("Retained XML schema and SOAP consumers", "1.0") {
+        addTestCase("Literal parts retain XML lexical values after validation", \literalValues());
+        addTestCase("Retained XML cannot bypass root or content checks", \invalidValues());
+        addTestCase("Decode and encode checks both protect retained values", \choiceChecks());
+        addTestCase("Explicit XML provider types retain native defaults", \providerValues());
+        addTestCase("Generated XML examples use the same retained-value consumers", \xmlExamples());
+        addTestCase("Multiple retained parts and headers keep every element", \partsAndHeaders());
+        addTestCase("Received XML parts retain namespace scope and lexical text", \receiveValues());
+        addTestCase("Received XML rejects missing, duplicate and invalid parts", \receiveErrors());
+        addTestCase("SoapClient and SoapHandler opt in to XML values over HTTP", \httpValues());
+        addTestCase("XML envelope boundaries, unbound headers and faults stay explicit", \envelopeValues());
+        addTestCase("Optional XML providers preserve their validators after copying", \optionalProviders());
+        addTestCase("One-way calls retain their absent response in XML mode", \oneWayValues());
+        addTestCase("Validation preserves cancellation exceptions", \validationCancellation());
+        addTestCase("SOAP containers require compatible inherited XML contexts", \contextConflicts());
+        addTestCase("Explicit compatibility headers cannot replace retained context", \compatibilityContext());
+        set_return_value(main());
+    }
+
+    compatibilityContext() {
+        foreach string version in ("11", "12") {
+            WebService ws = service(version, Record, True);
+            ws.nsc.opt_allow_any_header = True;
+            WSOperation op = ws.getBindingOperation("Soap", "submit");
+            foreach bool response in (False, True) {
+                hash<auto> body = {"body": value(response, '<count>009</count><flag>0</flag>')};
+                foreach hash<string, string> inherited in ({}, {"xml:lang": "en", "xml:space": "preserve"}) {
+                    XsdXmlValue header_value(sprintf('<r:Context xmlns:r="%s">account1</r:Context>', Ns), inherited);
+                    hash<auto> headers();
+                    headers{response ? "Out" : "In"} = {"context": header_value};
+                    hash<auto> attributes();
+                    attributes.tracking = "account1";
+                    headers."^attributes^" = attributes;
+                    string xml = (response ? op.serializeResponse(body, headers, NOTHING, NOTHING, NOTHING,
+                        NOTHING, "Soap") : op.serializeRequest(body, headers, NOTHING, NOTHING, NOTHING,
+                        NOTHING, "Soap")).body;
+                    assertEq(inherited, receive(op, response, xml).headers{response ? "Out" : "In"}.context
+                        .getXmlContext());
+                    foreach auto bad in ("cs", NOTHING, 1) {
+                        headers."^attributes^"."xml:lang" = bad;
+                        if (response) {
+                            assertThrows("SOAP-SERIALIZATION-ERROR", \op.serializeResponse(),
+                                (body, headers, NOTHING, NOTHING, NOTHING, NOTHING, "Soap"));
+                        } else {
+                            assertThrows("SOAP-SERIALIZATION-ERROR", \op.serializeRequest(),
+                                (body, headers, NOTHING, NOTHING, NOTHING, NOTHING, "Soap"));
+                        }
+                    }
+                    assertEq(inherited, header_value.getInheritedXmlAttributes());
+                }
+            }
+        }
+    }
+
+    private WebService service(string version, string model, bool header = False, bool multiple = False,
+            bool one_way = False) {
+        string soap_ns = "http://schemas.xmlsoap.org/wsdl/soap" + (version == "12" ? "12" : "") + "/";
+        string extra = (header || multiple) ? '<w:part name="context" element="t:Context"/>' : "";
+        string binding = header ? '<s:body use="literal" parts="body"/><s:header use="literal" message="t:In" part="context"/>'
+            : '<s:body use="literal"/>';
+        string output_binding = replace(binding, 'message="t:In"', 'message="t:Out"');
+        if (header && multiple) {
+            extra += '<w:part name="context2" element="t:Context2"/>';
+            binding += '<s:header use="literal" message="t:In" part="context2"/>';
+            output_binding += '<s:header use="literal" message="t:Out" part="context2"/>';
+        }
+        string source = sprintf('<w:definitions xmlns:w="http://schemas.xmlsoap.org/wsdl/"
+            xmlns:t="%s" xmlns:s="%s" targetNamespace="%s"><w:types>
+            <xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" targetNamespace="%s">
+            <xs:complexType name="Record">%s</xs:complexType>
+            <xs:element name="Request" type="t:Record"/><xs:element name="Response" type="t:Record"/>
+            <xs:element name="Context" type="xs:string"/><xs:element name="Context2" type="xs:string"/>
+            </xs:schema></w:types>
+            <w:message name="In"><w:part name="body" element="t:Request"/>%s</w:message>
+            <w:message name="Out"><w:part name="body" element="t:Response"/>%s</w:message>
+            <w:portType name="Port"><w:operation name="submit"><w:input message="t:In"/>
+            <w:output message="t:Out"/></w:operation></w:portType><w:binding name="Soap" type="t:Port">
+            <s:binding style="document" transport="http://schemas.xmlsoap.org/soap/http"/>
+            <w:operation name="submit"><s:operation soapAction="urn:submit"/>
+            <w:input>%s</w:input><w:output>%s</w:output></w:operation></w:binding>
+            <w:service name="Service"><w:port name="Port" binding="t:Soap">
+            <s:address location="http://example.invalid/"/></w:port></w:service></w:definitions>',
+            Ns, soap_ns, Ns, Ns, model, extra, extra, binding, output_binding);
+        if (one_way) {
+            source = replace(source, '<w:output message="t:Out"/>', '');
+            source = replace(source, '<w:output>' + output_binding + '</w:output>', '');
+        }
+        return new WebService(source, {"async_only": True});
+    }
+
+    private XsdXmlValue value(bool response, string content, string attributes = "",
+            hash<string, string> inherited = {}) {
+        return new XsdXmlValue(sprintf('<r:%s xmlns:r="%s" %s>%s</r:%s>',
+            response ? "Response" : "Request", Ns, attributes, content, response ? "Response" : "Request"), inherited);
+    }
+
+    private string send(WSOperation op, bool response, auto input_value) {
+        return (response ? op.serializeResponse(input_value, NOTHING, NOTHING, NOTHING, NOTHING, NOTHING, "Soap")
+            : op.serializeRequest(input_value, NOTHING, NOTHING, NOTHING, NOTHING, NOTHING, "Soap")).body;
+    }
+
+    private list<string> textValues(string xml) {
+        XmlReader reader(xml);
+        list<string> result();
+        while (reader.read()) {
+            if (reader.nodeType() == XML_NODE_TYPE_TEXT) {
+                result += reader.value();
+            }
+        }
+        return result;
+    }
+
+    literalValues() {
+        foreach string version in ("11", "12") {
+            WebService original = service(version, Record);
+            foreach WebService ws in (original, Serializable::deserialize(original.serialize())) {
+                WSOperation op = ws.getBindingOperation("Soap", "submit");
+                foreach bool response in (False, True) {
+                    XsdXmlValue original_value = value(response, '<count>009</count><flag>0</flag>');
+                    XsdXmlValue input_value = Serializable::deserialize(original_value.serialize());
+                    string xml = send(op, response, {"body": input_value});
+                    assertEq(("009", "0"), textValues(xml));
+                    assertEq(("009", "0"), textValues(send(op, response, input_value)));
+                    assertEq(original_value.getXml(), input_value.getXml());
+                    hash<auto> parsed = parse_xml(xml);
+                    assertEq({"count": 9, "flag": False}, response
+                        ? op.deserializeResponse(parsed, "Soap") : op.deserializeRequest(parsed, "Soap"));
+                }
+            }
+        }
+    }
+
+    invalidValues() {
+        foreach string version in ("11", "12") {
+            WebService ws = service(version, Record);
+            WSOperation op = ws.getBindingOperation("Soap", "submit");
+            foreach bool response in (False, True) {
+                foreach XsdXmlValue bad in (value(!response, '<count>0</count><flag>false</flag>'),
+                        value(response, '<flag>false</flag>'),
+                        value(response, '<count>0</count><flag>false</flag><unknown/>'),
+                        value(response, '<r:count>0</r:count><flag>false</flag>'),
+                        value(response, '<count>0</count><flag>false</flag>', 'unknown="attribute"')) {
+                    assertThrows("SOAP-SERIALIZATION-ERROR", \send(), (op, response, {"body": bad}));
+                }
+                assertEq(("0", "false"), textValues(send(op, response,
+                    {"body": value(response, '<count>0</count><flag>false</flag>')})));
+                XsdXmlValue dtd_value(sprintf('<!DOCTYPE r:%s>', response ? "Response" : "Request")
+                    + value(response, '<count>0</count><flag>false</flag>').getXml());
+                assertThrows("SOAP-SERIALIZATION-ERROR", \send(), (op, response, {"body": dtd_value}));
+            }
+        }
+    }
+
+    choiceChecks() {
+        string model = '<xs:sequence><xs:choice><xs:element name="count" type="xs:int"/>
+            <xs:element name="flag" type="xs:boolean"/></xs:choice></xs:sequence>';
+        WebService ws = service("12", model);
+        WSOperation op = ws.getBindingOperation("Soap", "submit");
+        assertThrows("SOAP-SERIALIZATION-ERROR", \send(), (op, False,
+            {"body": value(False, '<count>0</count><flag>false</flag>')}));
+        assertEq(("009",), textValues(send(op, False, {"body": value(False, '<count>009</count>')})));
+    }
+
+    providerValues() {
+        WebService ws = service("12", Record);
+        WSOperation op = ws.getBindingOperation("Soap", "submit");
+        XsdXmlValue input_value = value(False, '<count>009</count><flag>0</flag>');
+        hash<auto> namespace_state = ws.nsc.getOutputNamespaceHash(NOTHING);
+        assertEq(input_value, ws.validateXmlValue(input_value));
+        assertEq(namespace_state, ws.nsc.getOutputNamespaceHash(NOTHING));
+        AbstractDataProviderType xml_type = ws.getXmlDataProviderType(Ns, "Request");
+        AbstractDataProviderType restored_type = Serializable::deserialize(xml_type.serialize());
+        assertEq(input_value, restored_type.acceptsValue(input_value));
+        assertEq(input_value, xml_type.acceptsValue(input_value));
+        assertEq(input_value.getXml(), ws.getXmlValue(input_value.getXml()).getXml());
+        assertThrows("RUNTIME-TYPE-ERROR", \xml_type.acceptsValue(), ({"count": 9, "flag": False},));
+        assertThrows("SOAP-SERIALIZATION-ERROR", \xml_type.acceptsValue(),
+            (value(True, '<count>009</count><flag>0</flag>'),));
+        assertEq({"count": 9, "flag": False}, op.input.args.firstValue().element.getDataProviderType()
+            .acceptsValue({"count": 9, "flag": False}));
+        delete ws;
+        assertEq(input_value, xml_type.acceptsValue(input_value));
+        assertEq(input_value, restored_type.acceptsValue(input_value));
+    }
+
+    validationCancellation() {
+        WebService ws = service("12", Record);
+        XsdElement element = ws.getElement(Ns, "Request");
+        XsdXmlValue input_value = value(False, '<count>009</count><flag>0</flag>');
+        assertThrows("PROGRAM-INTERRUPTED", \element.validateXmlValue(),
+            (input_value, new InterruptXmlNamespaces(), ws.getTypeMap()));
+        assertEq({"count": 9, "flag": False}, element.validateXmlValue(input_value, ws.nsc, ws.getTypeMap()));
+        WSOperation op = ws.getBindingOperation("Soap", "submit");
+        string xml = send(op, False, input_value);
+        Namespaces original_namespaces = op.nsc;
+        on_exit op.nsc = original_namespaces;
+        # Inject the same interruption into the receiver's validation step to check both wrappers.
+        op.nsc = new InterruptXmlNamespaces();
+        assertThrows("PROGRAM-INTERRUPTED", \receive(), (op, False, xml));
+        op.nsc = original_namespaces;
+        assertEq(("009", "0"), textValues(receive(op, False, xml).body.body.getXml()));
+    }
+
+    optionalProviders() {
+        WebService ws = service("12", Record);
+        AbstractDataProviderType mandatory = ws.getXmlDataProviderType(Ns, "Request");
+        AbstractDataProviderType optional = mandatory.getOrNothingType();
+        XsdXmlValue good = value(False, '<count>009</count><flag>0</flag>');
+        foreach AbstractDataProviderType provider in (optional, Serializable::deserialize(optional.serialize())) {
+            assertTrue(provider.isOrNothingType());
+            assertEq(NOTHING, provider.acceptsValue(NOTHING));
+            assertEq(good, provider.acceptsValue(good));
+            assertThrows("SOAP-SERIALIZATION-ERROR", \provider.acceptsValue(),
+                (value(True, '<count>009</count><flag>0</flag>'),));
+            AbstractDataProviderType required_type = provider.getMandatoryType();
+            assertFalse(required_type.isOrNothingType());
+            assertThrows("RUNTIME-TYPE-ERROR", \required_type.acceptsValue(), (NOTHING,));
+            assertEq(good, required_type.acceptsValue(good));
+        }
+        assertFalse(mandatory.isOrNothingType());
+        assertThrows("RUNTIME-TYPE-ERROR", \mandatory.acceptsValue(), (NOTHING,));
+        hash<SerializationInfo> state = mandatory.serializeToData();
+        state._index."0"._class_data."WSDL::XsdXmlValueDataType".element_name = 42;
+        assertThrows("DESERIALIZATION-ERROR", \Serializable::deserialize(), (state,));
+        state = mandatory.serializeToData();
+        state._index."0"._class_data."WSDL::XsdXmlValueDataType".schema_owner = NOTHING;
+        assertThrows("DESERIALIZATION-ERROR", \Serializable::deserialize(), (state,));
+    }
+
+    partsAndHeaders() {
+        foreach bool header in (False, True) {
+            foreach string version in ("11", "12") {
+                WebService ws = service(version, Wild, header, !header);
+                WSOperation op = ws.getBindingOperation("Soap", "submit");
+                foreach bool response in (False, True) {
+                    XsdXmlValue context_value(sprintf('<r:Context xmlns:r="%s">account1</r:Context>', Ns));
+                    string xml = send(op, response, {"body": value(response,
+                        '<p:item xmlns:p="urn:items">009<!--route next--><![CDATA[ mixed ]]><!--keep--></p:item>'),
+                        "context": context_value});
+                    assertEq(header ? ("account1", "009") : ("009", "account1"), select textValues(xml), trim($1));
+                    assertTrue(index(xml, '<!--route next-->') >= 0);
+                    assertTrue(index(xml, '<![CDATA[ mixed ]]>') >= 0);
+                    assertTrue(index(xml, '<!--keep-->') >= 0);
+                }
+            }
+        }
+    }
+
+    private hash<SoapXmlMessageInfo> receive(WSOperation op, bool response, string xml) {
+        return response ? op.deserializeXmlResponse(xml, "Soap") : op.deserializeXmlRequest(xml, "Soap");
+    }
+
+    receiveValues() {
+        foreach string version in ("11", "12") {
+            foreach bool header in (False, True) {
+                WebService ws = service(version, Record, header, !header);
+                WSOperation op = ws.getBindingOperation("Soap", "submit");
+                string env = version == "12" ? SOAP_12_ENV : SOAP_11_ENV;
+                foreach bool response in (False, True) {
+                    string element_name = response ? "Response" : "Request";
+                    string context_xml = '<r:Context>q:Account</r:Context>';
+                    string xml = sprintf('<s:Envelope xmlns:s="%s" xmlns:r="%s" xmlns:q="urn:accounts"'
+                        ' xml:lang="en" xml:space="preserve" xml:base="https://example.org/a/">%s'
+                        '<s:Body xml:lang="cs" xml:base="../b/"><r:%s><count>009</count><flag>0</flag>'
+                        '<!--route next--></r:%s>%s</s:Body></s:Envelope>', env, Ns,
+                        header ? '<s:Header xml:lang="" xml:space="default" xml:base="../headers/">'
+                            + context_xml + '</s:Header>' : "",
+                        element_name, element_name, header ? "" : context_xml);
+                    hash<SoapXmlMessageInfo> received = receive(op, response, xml);
+                    assertEq(header ? ("body",) : ("body", "context"), keys received.body);
+                    assertEq(("009", "0"), textValues(received.body.body.getXml()));
+                    assertTrue(index(received.body.body.getXml(), '<!--route next-->') >= 0);
+                    hash<string, string> body_context = {"xml:lang": "cs", "xml:space": "preserve",
+                        "xml:base": "https://example.org/b/"};
+                    assertEq(body_context, received.body.body.getInheritedXmlAttributes());
+                    assertEq(body_context, received.body.body.getXmlContext());
+                    assertFalse(exists received.body.body.getElementData()."^attributes^"."xml:lang");
+                    XsdXmlValue context_value = header ? received.headers{response ? "Out" : "In"}.context
+                        : received.body.context;
+                    assertEq("{urn:accounts}Account", context_value.resolveQName("q:Account"));
+                    assertEq(header ? {"xml:lang": "", "xml:space": "default",
+                        "xml:base": "https://example.org/headers/"} : body_context, context_value.getXmlContext());
+                    assertEq((), received.unbound_headers);
+                    string emitted = (response ? op.serializeResponse(received.body, received.headers, NOTHING,
+                        NOTHING, NOTHING, NOTHING, "Soap") : op.serializeRequest(received.body, received.headers,
+                        NOTHING, NOTHING, NOTHING, NOTHING, "Soap")).body;
+                    hash<SoapXmlMessageInfo> repeated = receive(op, response, emitted);
+                    assertEq(("009", "0"), textValues(repeated.body.body.getXml()));
+                    assertTrue(index(repeated.body.body.getXml(), '<!--route next-->') >= 0);
+                    assertEq(body_context, repeated.body.body.getXmlContext());
+                    assertEq(context_value.getXmlContext(), (header
+                        ? repeated.headers{response ? "Out" : "In"}.context : repeated.body.context).getXmlContext());
+                }
+            }
+        }
+    }
+
+    contextConflicts() {
+        foreach string version in ("11", "12") {
+            foreach bool header in (False, True) {
+                WebService ws = service(version, Record, header, True);
+                WSOperation op = ws.getBindingOperation("Soap", "submit");
+                foreach bool response in (False, True) {
+                    hash<auto> input_value();
+                    input_value.body = value(response, '<count>009</count><flag>0</flag>', "", {"xml:lang": "en"});
+                    string context_xml = sprintf('<r:Context xmlns:r="%s">first</r:Context>', Ns);
+                    string second_xml = sprintf('<r:Context2 xmlns:r="%s">second</r:Context2>', Ns);
+                    input_value.context = new XsdXmlValue(context_xml, {"xml:lang": "en"});
+                    if (header) {
+                        input_value.context2 = new XsdXmlValue(second_xml, {"xml:lang": "en"});
+                    }
+                    assertEq({"xml:lang": "en"}, receive(op, response, send(op, response, input_value))
+                        .body.body.getXmlContext());
+                    # An absent context also conflicts with a present one; order must not hide it.
+                    foreach hash<string, string> incompatible in ({}, {"xml:lang": ""}, {"xml:lang": "cs"},
+                            {"xml:space": "preserve"}, {"xml:base": "https://example.org/"}) {
+                        input_value{header ? "context2" : "context"} =
+                            new XsdXmlValue(header ? second_xml : context_xml, incompatible);
+                        assertThrows("SOAP-SERIALIZATION-ERROR", \send(), (op, response, input_value));
+                    }
+                    if (header) {
+                        input_value.context = new XsdXmlValue(context_xml);
+                        input_value.context2 = new XsdXmlValue(second_xml, {"xml:lang": "en"});
+                        assertThrows("SOAP-SERIALIZATION-ERROR", \send(), (op, response, input_value));
+                        # A native header does not erase context retained by its XML sibling.
+                        input_value.context = new XsdXmlValue(context_xml, {"xml:lang": "en"});
+                        input_value.context2 = "native";
+                        hash<SoapXmlMessageInfo> result = receive(op, response, send(op, response, input_value));
+                        assertEq({"xml:lang": "en"}, result.headers{response ? "Out" : "In"}.context.getXmlContext());
+                        assertEq("native", result.headers{response ? "Out" : "In"}.context2.getElementData()
+                            ."^value^");
+                    }
+                }
+            }
+        }
+    }
+
+    receiveErrors() {
+        foreach string version in ("11", "12") {
+            WebService ws = service(version, Record);
+            WSOperation op = ws.getBindingOperation("Soap", "submit");
+            foreach bool response in (False, True) {
+                string xml = send(op, response, value(response, '<count>0</count><flag>false</flag>'));
+                foreach string bad in (replace(xml, '<count>0</count>', ''),
+                        replace(xml, '<count>0</count>', '<unknown>0</unknown>'),
+                        replace(xml, Ns, 'urn:wrong'),
+                        replace(xml, '<flag>false</flag>', '<flag>false</flag><flag>true</flag>'),
+                        replace(xml, '</soapenv:Body>', value(response, '<count>0</count><flag>false</flag>').getXml()
+                            + '</soapenv:Body>')) {
+                    assertThrows("SOAP-DESERIALIZATION-ERROR", \receive(), (op, response, bad));
+                }
+                assertThrows("SOAP-DESERIALIZATION-ERROR", \receive(), (op, response,
+                    replace(xml, '<count>0</count>', '<count>0</count><?route next?>')));
+                assertThrows("SOAP-SERIALIZATION-ERROR", \send(), (op, response,
+                    value(response, '<count>0</count><flag>false</flag><?route next?>')));
+                assertEq(("0", "false"), textValues(receive(op, response, xml).body.body.getXml()));
+            }
+        }
+    }
+
+    envelopeValues() {
+        foreach string version in ("11", "12") {
+            WebService ws = service(version, Record);
+            WSOperation op = ws.getBindingOperation("Soap", "submit");
+            string env = version == "12" ? SOAP_12_ENV : SOAP_11_ENV;
+            string start = sprintf('<s:Envelope xmlns:s="%s" xmlns:r="%s" xmlns:q="urn:types">', env, Ns);
+            string payload = '<r:Request><count>009</count><flag>0</flag></r:Request>';
+            string xml = start + '<s:Header><q:Unbound>q:First</q:Unbound><q:Unbound>q:Second</q:Unbound>'
+                '</s:Header><s:Body>' + payload + '</s:Body></s:Envelope>';
+            hash<SoapXmlMessageInfo> received = receive(op, False, xml);
+            assertEq(2, received.unbound_headers.size());
+            assertEq(("q:First", "q:Second"), map $1.getElementData()."^value^", received.unbound_headers);
+            assertEq(("{urn:types}First", "{urn:types}Second"),
+                map $1.resolveQName($1.getElementData()."^value^"), received.unbound_headers);
+            assertEq({}, received.headers);
+            assertEq((), received.extensions);
+            foreach string bad in (start + '</s:Envelope>',
+                    start + '<s:Body/></s:Envelope>',
+                    start + '<s:Body>' + payload + '</s:Body><s:Body>' + payload + '</s:Body></s:Envelope>',
+                    start + '<s:Header/><s:Header/><s:Body>' + payload + '</s:Body></s:Envelope>',
+                    start + '<s:Body>' + payload + '</s:Body><s:Header/></s:Envelope>',
+                    replace(xml, 'q:Unbound', 'Unbound'),
+                    replace(xml, 's:Envelope', 's:Wrong')) {
+                assertThrows("SOAP-DESERIALIZATION-ERROR", \receive(), (op, False, bad));
+            }
+            string extension = start + '<s:Body>' + payload + '</s:Body><q:Extra>q:Value</q:Extra></s:Envelope>';
+            if (version == "11") {
+                received = receive(op, False, extension);
+                assertEq(1, received.extensions.size());
+                assertEq("{urn:types}Value", received.extensions[0].resolveQName("q:Value"));
+            } else {
+                assertThrows("SOAP-DESERIALIZATION-ERROR", \receive(), (op, False, extension));
+            }
+            string fault = version == "11" ? '<faultcode>s:Server</faultcode><faultstring>failure</faultstring>'
+                : '<s:Code><s:Value>s:Receiver</s:Value></s:Code><s:Reason><s:Text xml:lang="en">failure</s:Text></s:Reason>';
+            assertThrows("SOAP-SERVER-FAULT-RESPONSE", \receive(),
+                (op, True, start + '<s:Body><s:Fault>' + fault + '</s:Fault></s:Body></s:Envelope>'));
+        }
+    }
+
+    httpValues() {
+        foreach string version in ("11", "12") {
+            foreach bool xml_handler in (False, True) {
+                WebService ws = service(version, Record, True);
+                WSOperation op = ws.getBindingOperation("Soap", "submit");
+                HttpServer server();
+                on_exit server.stop();
+                SoapHandler handler(new PermissiveAuthenticator());
+                server.setDefaultHandler("soap", handler);
+                hash<auto> response();
+                hash<string, string> response_context = {"xml:lang": "cs", "xml:space": "preserve",
+                    "xml:base": "https://example.org/response/"};
+                hash<string, string> request_context = {"xml:lang": "en", "xml:space": "default",
+                    "xml:base": "https://example.org/request/"};
+                response.body = value(True, '<count>007</count><flag>1</flag><!--response keep-->', "",
+                    response_context);
+                response."^header^" = {"Out": {"context": new XsdXmlValue(sprintf(
+                    '<r:Context xmlns:r="%s" xmlns:q="urn:accounts">q:Account</r:Context>', Ns),
+                    {"xml:lang": "", "xml:space": "default"})}};
+                XmlConsumerCallback callback(response);
+                handler.addMethod(ws, op, \callback.call(), NOTHING, NOTHING, NOTHING, "Service", NOTHING,
+                    NOTHING, "Soap", NOTHING, xml_handler);
+                server.addListener(0);
+                string url = sprintf("http://127.0.0.1:%d/Service", server.getListenerInfo(0).port);
+                SoapClient client({"wsdl": ws, "url": url, "timeout": IoTimeoutMs, "connect_timeout": IoTimeoutMs});
+                hash<auto> request();
+                request.body = value(False, '<count>009</count><flag>0</flag><!--request keep-->', "", request_context);
+                request.context = new XsdXmlValue(sprintf('<r:Context xmlns:r="%s">account1</r:Context>', Ns),
+                    {"xml:lang": "de"});
+                assertThrows("SOAP-CLIENT-ERROR", \client.callOperation(),
+                    ("submit", request, {"xml_values": "true"}));
+                hash<SoapXmlMessageInfo> result = client.callOperation("submit", request, {"xml_values": True});
+                auto observed = callback.observed.pop(IoTimeoutMs);
+                if (xml_handler) {
+                    assertEq(("009", "0"), textValues(observed.body.body.getXml()));
+                    assertTrue(index(observed.body.body.getXml(), '<!--request keep-->') >= 0);
+                    assertEq("account1", observed.headers.In.context.getElementData()."^value^");
+                    assertEq(request_context, observed.body.body.getXmlContext());
+                    assertEq({"xml:lang": "de"}, observed.headers.In.context.getXmlContext());
+                } else {
+                    assertEq(9, observed.count);
+                    assertEq(False, observed.flag);
+                    assertEq("account1", observed.In.context);
+                }
+                assertEq(("007", "1"), textValues(result.body.body.getXml()));
+                assertTrue(index(result.body.body.getXml(), '<!--response keep-->') >= 0);
+                assertEq("{urn:accounts}Account", result.headers.Out.context.resolveQName("q:Account"));
+                assertEq(response_context, result.body.body.getXmlContext());
+                assertEq({"xml:lang": "", "xml:space": "default"}, result.headers.Out.context.getXmlContext());
+                hash<auto> native_result = client.callOperation("submit", request);
+                callback.observed.pop(IoTimeoutMs);
+                assertEq(7, native_result.count);
+                assertEq(True, native_result.flag);
+                assertEq("q:Account", native_result.Out.context);
+            }
+        }
+    }
+
+    oneWayValues() {
+        foreach string version in ("11", "12") {
+            WebService ws = service(version, Record, False, False, True);
+            WSOperation op = ws.getBindingOperation("Soap", "submit");
+            assertFalse(exists op.output);
+            HttpServer server();
+            on_exit server.stop();
+            SoapHandler handler(new PermissiveAuthenticator());
+            server.setDefaultHandler("soap", handler);
+            XmlConsumerCallback callback({});
+            handler.addMethod(ws, op, \callback.call(), NOTHING, NOTHING, NOTHING, "Service", NOTHING,
+                NOTHING, "Soap", NOTHING, True);
+            server.addListener(0);
+            SoapClient client({"wsdl": ws,
+                "url": sprintf("http://127.0.0.1:%d/Service", server.getListenerInfo(0).port),
+                "timeout": IoTimeoutMs, "connect_timeout": IoTimeoutMs});
+            assertEq(NOTHING, client.callOperation("submit", value(False, '<count>009</count><flag>0</flag>'),
+                {"xml_values": True}));
+            hash<SoapXmlMessageInfo> received = callback.observed.pop(IoTimeoutMs);
+            assertEq(("009", "0"), textValues(received.body.body.getXml()));
+            assertEq(NOTHING, client.callOperation("submit", value(False, '<count>009</count><flag>0</flag>')));
+            received = callback.observed.pop(IoTimeoutMs);
+            assertEq(("009", "0"), textValues(received.body.body.getXml()));
+            string envelope = sprintf('<s:Envelope xmlns:s="%s"><s:Body/></s:Envelope>',
+                version == "12" ? SOAP_12_ENV : SOAP_11_ENV);
+            assertThrows("SOAP-DESERIALIZATION-ERROR", \receive(), (op, True, envelope));
+        }
+    }
+
+    xmlExamples() {
+        foreach string version in ("11", "12") {
+            WebService ws = service(version, Record);
+            WSOperation op = ws.getBindingOperation("Soap", "submit");
+            WSMessageHelper helper(ws);
+            foreach bool response in (False, True) {
+                WSMessage message = response ? op.output : op.input;
+                hash<auto> namespace_state = ws.nsc.getOutputNamespaceHash(NOTHING);
+                hash<string, XsdXmlValue> examples = helper.getXmlMessage(message);
+                assertEq(namespace_state, ws.nsc.getOutputNamespaceHash(NOTHING));
+                assertEq(("body",), keys examples);
+                assertEq(make_qname(Ns, response ? "Response" : "Request"), examples.body.getExpandedName());
+                assertEq(examples.body, ws.getXmlDataProviderType(Ns, response ? "Response" : "Request")
+                    .acceptsValue(examples.body));
+                hash<auto> xml = parse_xml(send(op, response, examples));
+                auto native_value = response ? op.deserializeResponse(xml, "Soap") : op.deserializeRequest(xml, "Soap");
+                assertEq(123, native_value.count);
+                assertEq(True, native_value.flag);
+            }
+        }
+    }
+}

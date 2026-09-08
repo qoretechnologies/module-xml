@@ -1,0 +1,317 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires xml
+%requires ../qlib/WSDL.qm
+%exec-class XmlValueTest
+
+class XmlValueTest inherits QUnit::Test {
+    constructor() : QUnit::Test("WSDL explicit XML value representation", "1.0") {
+        addTestCase("Lexical scalar forms and XML attributes remain strings", \lexicalValues());
+        addTestCase("Repeated children and mixed text retain document order", \orderedContent());
+        addTestCase("QName and dynamic type identities retain namespace context", \namespaceValues());
+        addTestCase("Returned XML data can be edited without mutating its source value", \copyIsolation());
+        addTestCase("Serializable reconstruction retains the XML representation", \reconstruction());
+        addTestCase("Malformed documents and unbound QNames reject", \invalidValues());
+        addTestCase("Complete XML retains processing instructions and CDATA", \completeDocument());
+        addTestCase("Whitespace and descendant namespace scopes remain in the XML stream", \descendantScopes());
+        addTestCase("XML generator integration retains namespaces and mixed content", \xmlGeneration());
+        addTestCase("Serializable state is revalidated from its authoritative XML", \invalidSerializedValues());
+        addTestCase("Child values retain inherited namespaces and ordered XML", \childValues());
+        addTestCase("Child extraction handles wide and deeply nested documents", \largeChildren());
+        addTestCase("Interrupted child extraction permits a subsequent call", \childCancellation());
+        addTestCase("XML carrier identity cannot be replaced by subclass overrides", \finalCarrier());
+        set_return_value(main());
+    }
+
+    lexicalValues() {
+        XsdXmlValue value('<quantity unit="kg" amount="009.00">009.00</quantity>');
+        assertEq("{}quantity", value.getExpandedName());
+        assertEq({"^attributes^": {"unit": "kg", "amount": "009.00"}, "^value^": "009.00"},
+            value.getElementData());
+        assertEq("009.00", parse_xml(value.getXml()).quantity."^value^");
+        foreach string lexical in ("false", "0", "-0", "18446744073709551615", "2026-09-07+00:00") {
+            XsdXmlValue scalar("<value>" + lexical + "</value>");
+            assertEq(lexical, scalar.getElementData());
+            assertEq(NT_STRING, scalar.getElementData().typeCode());
+        }
+        XsdXmlValue empty('<value/>');
+        assertEq(NOTHING, empty.getElementData());
+        assertEq("{}value", empty.getExpandedName());
+    }
+
+    orderedContent() {
+        XsdXmlValue value('<p:box xmlns:p="urn:box">before<p:item>0</p:item>between<plain>x</plain>'
+            'after<p:item>7</p:item>tail</p:box>');
+        assertEq(("^attributes^", "^value^", "p:item", "^value1^", "plain", "^value2^", "p:item^1", "^value3^"),
+            keys value.getElementData());
+        assertEq(("before", "0", "between", "x", "after", "7", "tail"),
+            map value.getElementData(){$1}, select keys value.getElementData(), $1 != "^attributes^");
+        XmlReader reader(value.getXml());
+        list<string> text();
+        while (reader.read()) {
+            if (reader.nodeType() == XML_NODE_TYPE_TEXT) {
+                text += reader.value();
+            }
+        }
+        assertEq(("before", "0", "between", "x", "after", "7", "tail"), text);
+    }
+
+    namespaceValues() {
+        XsdXmlValue value('<r:record xmlns:r="urn:record" xmlns="urn:default" xmlns:t="urn:types"
+            xmlns:i="http://www.w3.org/2001/XMLSchema-instance" i:type="t:Special">t:Value</r:record>');
+        assertEq("{urn:record}record", value.getExpandedName());
+        assertEq("{urn:types}Special", value.resolveQName(value.getElementData()."^attributes^"."i:type"));
+        assertEq("{urn:types}Value", value.resolveQName(value.getElementData()."^value^"));
+        assertEq("{urn:default}Plain", value.resolveQName("Plain"));
+        assertEq("{http://www.w3.org/XML/1998/namespace}lang", value.resolveQName("xml:lang"));
+        XsdXmlValue plain('<record xmlns="">Value</record>');
+        assertEq("{}Value", plain.resolveQName("Value"));
+    }
+
+    copyIsolation() {
+        XsdXmlValue value('<record><item code="009">first</item><item code="010">second</item></record>');
+        hash<auto> changed = value.getXmlDataView();
+        changed.record.item[0]."^attributes^".code = "edited";
+        assertEq("009", value.getElementData().item[0]."^attributes^".code);
+        assertEq("edited", changed.record.item[0]."^attributes^".code);
+    }
+
+    reconstruction() {
+        XsdXmlValue original('<record xmlns:t="urn:types" code="009"><!--note-->before<t:item>0</t:item>'
+            'between<t:item>7</t:item>after</record>');
+        XsdXmlValue restored = Serializable::deserialize(original.serialize());
+        assertEq("{}record", restored.getExpandedName());
+        assertEq("{urn:types}Item", restored.resolveQName("t:Item"));
+        assertEq(original.getXmlDataView(), restored.getXmlDataView());
+        assertEq("009", restored.getElementData()."^attributes^".code);
+        assertEq("note", restored.getElementData()."^comment^");
+    }
+
+    private XsdXmlValue parse(string xml) {
+        return new XsdXmlValue(xml);
+    }
+
+    invalidValues() {
+        foreach string xml in ("", "<unclosed>", "<a/><b/>", "<p:unbound/>") {
+            assertThrows("PARSE-XML-EXCEPTION", \parse(), (xml,));
+        }
+        XsdXmlValue value('<record/>');
+        foreach string qname in ("missing:Name", "bad:name:extra", "", "1invalid") {
+            assertThrows("WSDL-NAMESPACE-ERROR", \value.resolveQName(), (qname,));
+        }
+    }
+
+    completeDocument() {
+        XsdXmlValue original('<record><?route next?><![CDATA[009]]><!--note--><item>0</item></record>');
+        XsdXmlValue restored = Serializable::deserialize(original.serialize());
+        foreach XsdXmlValue value in (original, restored) {
+            XmlReader reader = value.getReader();
+            list<string> events();
+            while (reader.read()) {
+                switch (reader.nodeType()) {
+                    case XML_NODE_TYPE_PROCESSING_INSTRUCTION:
+                        events += "pi:" + reader.name() + ":" + reader.value();
+                        break;
+                    case XML_NODE_TYPE_CDATA:
+                        events += "cdata:" + reader.value();
+                        break;
+                    case XML_NODE_TYPE_COMMENT:
+                        events += "comment:" + reader.value();
+                        break;
+                    case XML_NODE_TYPE_TEXT:
+                        events += "text:" + reader.value();
+                        break;
+                }
+            }
+            assertEq(("pi:route:next", "cdata:009", "comment:note", "text:0"), events);
+        }
+    }
+
+    descendantScopes() {
+        XsdXmlValue value('<root xmlns="urn:outer" xmlns:p="urn:first"> <entry p:code="009">p:Type</entry> '
+            '<entry xmlns="" xmlns:p="urn:second" p:code="010">p:Type</entry> <entry p:code="011"/> </root>');
+        XmlReader reader = value.getReader();
+        list<string> namespaces();
+        list<string> qnames();
+        list<string> spaces();
+        while (reader.read()) {
+            if (reader.nodeType() == XML_NODE_TYPE_ELEMENT && reader.localName() == "entry") {
+                namespaces += reader.namespaceUri() ?? "";
+                qnames += sprintf("{%s}Type", reader.lookupNamespace("p"));
+            } else if (reader.nodeType() == XML_NODE_TYPE_SIGNIFICANT_WHITESPACE
+                    || reader.nodeType() == XML_NODE_TYPE_WHITESPACE) {
+                spaces += reader.value();
+            }
+        }
+        assertEq(("urn:outer", "", "urn:outer"), namespaces);
+        assertEq(("{urn:first}Type", "{urn:second}Type", "{urn:first}Type"), qnames);
+        assertEq((" ", " ", " ", " "), spaces);
+        assertEq("urn:second", value.getElementData().entry[1]."^attributes^"."xmlns:p");
+        assertEq("010", value.getElementData().entry[1]."^attributes^"."p:code");
+    }
+
+    xmlGeneration() {
+        XsdXmlValue original('<p:record xmlns:p="urn:r" amount="009.00">before<?route next?>'
+            '<![CDATA[009]]><plain>0</plain>between<p:item>7</p:item>after</p:record>');
+        XsdXmlValue restored = Serializable::deserialize(original.serialize());
+        foreach XsdXmlValue value in (original, restored) {
+            hash<auto> content = value.getXmlSerializationData();
+            content."^attributes^" = {"xmlns": "urn:parent", "xmlns:p": "urn:parent"};
+            XsdXmlValue emitted(make_xml({"collection": content}));
+            XmlReader reader = emitted.getReader();
+            list<string> names();
+            list<string> text();
+            while (reader.read()) {
+                switch (reader.nodeType()) {
+                    case XML_NODE_TYPE_ELEMENT:
+                        names += sprintf("{%s}%s", reader.namespaceUri() ?? "", reader.localName());
+                        if (reader.localName() == "record") {
+                            assertEq("009.00", reader.getAttribute("amount"));
+                        }
+                        break;
+                    case XML_NODE_TYPE_TEXT:
+                    case XML_NODE_TYPE_CDATA:
+                        text += reader.value();
+                        break;
+                    case XML_NODE_TYPE_PROCESSING_INSTRUCTION:
+                        assertEq("route", reader.name());
+                        text += "pi:" + reader.value();
+                        break;
+                }
+            }
+            assertEq(("{urn:parent}collection", "{urn:r}record", "{}plain", "{urn:r}item"), names);
+            assertEq(("before", "pi:next", "009", "0", "between", "7", "after"), text);
+        }
+    }
+
+    childValues() {
+        XsdXmlValue source('<root xmlns="urn:outer" xmlns:p="urn:first" xmlns:q="urn:types">'
+            '<p:item amount="009">q:First<?route next?><![CDATA[ mixed ]]><!--keep-->'
+            '<plain xmlns="">q:Second</plain></p:item><item xmlns="" xmlns:q="urn:second"/>'
+            '<p:item>q:Third</p:item></root>');
+        list<XsdXmlValue> children = source.getChildValues();
+        assertEq(("{urn:first}item", "{}item", "{urn:first}item"), map $1.getExpandedName(), children);
+        assertEq(("{urn:types}Type", "{urn:second}Type", "{urn:types}Type"),
+            map $1.resolveQName("q:Type"), children);
+        assertEq(("{urn:outer}Type", "{}Type", "{urn:outer}Type"),
+            map $1.resolveQName("Type"), children);
+        assertEq("009", children[0].getElementData()."^attributes^".amount);
+        assertTrue(index(children[0].getXml(), '<?route next?>') >= 0);
+        assertTrue(index(children[0].getXml(), '<![CDATA[ mixed ]]>') >= 0);
+        assertTrue(index(children[0].getXml(), '<!--keep-->') >= 0);
+        assertEq("{}plain", children[0].getChildValues()[0].getExpandedName());
+        assertEq("{urn:types}Type", children[0].getChildValues()[0].resolveQName("q:Type"));
+        assertEq((), children[1].getChildValues());
+        assertEq(source.getXml(), Serializable::deserialize(source.serialize()).getXml());
+        assertEq(children[0].getXml(), Serializable::deserialize(children[0].serialize()).getXml());
+        assertEq((), (new XsdXmlValue('<empty/>')).getChildValues());
+        # Text-only parents have no element children; their text stays available on the source.
+        XsdXmlValue text_only('<text> before <![CDATA[ after ]]></text>');
+        assertEq((), text_only.getChildValues());
+        assertTrue(index(text_only.getXml(), ' before ') >= 0);
+        # Namespace declaration values are escaped by the XML generator.
+        XsdXmlValue escaped('<root xmlns:p="urn:quoted&amp;more"><p:item value="a&amp;&quot;b"/></root>');
+        XsdXmlValue child = escaped.getChildValues()[0];
+        assertEq("{urn:quoted&more}item", child.getExpandedName());
+        assertEq('a&"b', child.getElementData()."^attributes^".value);
+        # Character references normalize once; literal entity-looking text stays literal.
+        foreach string declaration in ("urn:quoted&#38;more", "urn:quoted&#x26;more") {
+            XsdXmlValue reference(sprintf('<root xmlns:p="%s"><p:item/></root>', declaration));
+            assertEq("{urn:quoted&more}item", reference.getChildValues()[0].getExpandedName());
+        }
+        XsdXmlValue literal('<root xmlns:p="urn:quoted&amp;#38;more"><p:item/></root>');
+        assertEq("{urn:quoted&#38;more}item", literal.getChildValues()[0].getExpandedName());
+    }
+
+    largeChildren() {
+        string xml = '<root xmlns:p="urn:items" xmlns:q="urn:types">';
+        list<string> expected();
+        for (int i = 0; i < 4096; ++i) {
+            string text = sprintf("%04d", i);
+            xml += '<p:item>' + text + '</p:item>';
+            expected += text;
+        }
+        xml += '</root>';
+        XsdXmlValue source(xml);
+        list<XsdXmlValue> children = source.getChildValues();
+        assertEq(4096, children.size());
+        assertEq(expected, map $1.getElementData()."^value^", children);
+        assertEq(4096, (select children, $1.getExpandedName() == "{urn:items}item"
+            && $1.resolveQName("q:Type") == "{urn:types}Type").size());
+        xml = '<root xmlns:p="urn:items">';
+        for (int i = 0; i < 128; ++i) {
+            xml += '<p:level>';
+        }
+        xml += '009';
+        for (int i = 0; i < 128; ++i) {
+            xml += '</p:level>';
+        }
+        xml += '</root>';
+        children = (new XsdXmlValue(xml)).getChildValues();
+        assertEq(1, children.size());
+        XmlReader reader = children[0].getReader();
+        int count = 0;
+        while (reader.read()) {
+            if (reader.nodeType() == XML_NODE_TYPE_ELEMENT) {
+                ++count;
+                assertEq("urn:items", reader.namespaceUri());
+            } else if (reader.nodeType() == XML_NODE_TYPE_TEXT) {
+                assertEq("009", reader.value());
+            }
+        }
+        assertEq(128, count);
+    }
+
+    childCancellation() {
+        SandboxManager manager();
+        on_exit manager.clearInterrupt();
+        Program program(PO_NEW_STYLE | PO_STRICT_ARGS | PO_REQUIRE_TYPES);
+        program.setSandboxManager(manager);
+        program.parse("%modern\n%requires xml\n%requires ../qlib/WSDL.qm\n"
+            "list<XsdXmlValue> sub gatherChildren(SandboxManager manager) {\n"
+            "    XsdXmlValue value(\"<root><item>009</item></root>\");\n"
+            "    manager.requestInterrupt();\n"
+            "    return value.getChildValues();\n"
+            "}\n", get_script_dir() + "/wsdl-child-interrupt.qr");
+        *hash<ExceptionInfo> error;
+        try {
+            program.callFunction("gatherChildren", manager);
+        } catch (hash<ExceptionInfo> ex) {
+            error = ex;
+        }
+        manager.clearInterrupt();
+        assertEq("PROGRAM-INTERRUPTED", error.err);
+        XsdXmlValue value('<root xmlns:q="urn:types"><item>q:Type</item></root>');
+        assertEq("{urn:types}Type", value.getChildValues()[0].resolveQName("q:Type"));
+    }
+
+    finalCarrier() {
+        Program program(PO_NEW_STYLE | PO_STRICT_ARGS | PO_REQUIRE_TYPES);
+        assertThrows("PARSE-EXCEPTION", \program.parse(),
+            ("%modern\n%requires ../qlib/WSDL.qm\n"
+                "class ChangedXmlValue inherits XsdXmlValue {\n"
+                "    constructor() : XsdXmlValue(\"<actual/>\") {}\n"
+                "    string getExpandedName() { return \"{}pretend\"; }\n"
+                "}\n", get_script_dir() + "/wsdl-xml-subclass.qr"));
+    }
+
+    invalidSerializedValues() {
+        XsdXmlValue value('<root>009</root>');
+        hash<SerializationInfo> state = value.serializeToData();
+        assertEq("<root>009</root>", state._index."0"._class_data."WSDL::XsdXmlValue".xml);
+        # XML-only state from earlier carriers remains supported.
+        remove state._index."0"._class_data."WSDL::XsdXmlValue".inherited_xml_attributes;
+        state._index."0"._class_data."WSDL::XsdXmlValue".xml = "<unclosed>";
+        assertThrows("PARSE-XML-EXCEPTION", \Serializable::deserialize(), (state,));
+        state._index."0"._class_data."WSDL::XsdXmlValue".xml = NOTHING;
+        assertThrows("DESERIALIZATION-ERROR", \Serializable::deserialize(), (state,));
+        state._index."0"._class_data."WSDL::XsdXmlValue".xml = "<new>0</new>";
+        XsdXmlValue restored = Serializable::deserialize(state);
+        assertEq("{}new", restored.getExpandedName());
+        assertEq("0", restored.getElementData());
+    }
+}

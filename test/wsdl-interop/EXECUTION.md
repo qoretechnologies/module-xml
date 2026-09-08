@@ -889,3 +889,45 @@ Logs: /tmp/wsdl-p2-29-{affected,independent,survey,docs}.log.
 Report: /tmp/wsdl-survey-p2-29.json. Full 62-item audit:
 [audits/P2-29-unwrapped.md](audits/P2-29-unwrapped.md).
 No native or astparser changes, installation or push.
+
+## P2-30 retained XML consumer acceptance (2026-09-08)
+
+Bare argument ownership was committed as 9fb341c. The complete P2-10/P2-21/P2-22
+XML carrier and consumer changes are now isolated on that parent. Native prerequisites
+were committed separately: verified libxml2 and catalog ownership (5477680), XML
+fragments/encoding (049cf0d), core PCRE2 test control (6efa18fc5) and native-thread
+cleanup (1e52a0a44). Their recorded tests and memory gates clear the old dependency
+and lifecycle findings; historical open-gate entries above describe earlier states.
+
+The final immutable XsdXmlValue retains authoritative XML and inherited XML
+language/space/base context. Serializable and XML providers reconstruct from sources;
+SOAP parts/headers, examples, client and handler consume the explicit representation.
+Native return types remain the default, and all validation paths retain cancellation.
+The separate XML Base resolver preserves LEIRIs and unknown relative parent segments.
+
+34 affected Qore suites pass 447 cases, including 38 carrier/context/consumer cases
+with 862 assertions. Actual local HTTP tests exercise native/XML client and handler
+options, both SOAP bindings/directions, one-way behavior and body/header contexts.
+All three user-module docs generate without warnings/errors. The independent value
+and context checks validate six and 80 documents; the existing encoding regression
+checks another 40 raw outputs. The consumer oracle completes 192 documents and
+retains the known P5 failure for 16 empty required-wildcard examples; all retained
+payload/header infoset and value assertions complete successfully.
+
+Full Python discovery: 93 tests in 133.537 seconds, 15 failures, no errors/skips.
+These are exactly eight P3 integer lexical subtests, four P4 nested-choice subtests,
+two P6 binding-version subtests and the P5 required-wildcard example test. The
+execution prompt permits these explicitly routed independent findings to remain
+failing; no passing conformance claim or reduced phase scope is introduced.
+
+The both-version request survey is recursively identical to 9fb341c except
+versions. Full strict coverage matches the earlier fully tested P2 working tree:
+zero selected failures, 360 broad failures, zero missing/skipped stages. The P2
+schema-construction acceptance review distinguishes adjudicated invalid source
+ImportSchema (its pinned Imported.xsd dependency is empty) from valid schema graphs. Remaining original
+P2-family runtime anyType/mixed-content failures retain their explicit P5 assignment.
+
+Logs: /tmp/wsdl-p2-30-{affected,independent,python,survey,coverage,docs}.log.
+Reports: /tmp/wsdl-survey-p2-30.json and /tmp/wsdl-coverage-p2-30.json.
+Full 62-item audit: [audits/P2-30-xml-values.md](audits/P2-30-xml-values.md).
+No native or astparser changes, installation or push in this increment.
