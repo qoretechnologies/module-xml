@@ -88,6 +88,10 @@ module WSDL {
       numeric providers and fields retain these constraints and equivalent lexical forms after reconstruction
     - numeric examples use exact bounded grid values, including restricted list items; impossible or unsupported
       numeric examples raise XSD-SAMPLE-ERROR instead of producing invalid sample messages
+    - numeric restriction declarations reject malformed, inapplicable, widening, contradictory and changed fixed
+      facets before use; XML namespace and annotation order checks preserve the schema grammar
+    - totalDigits and fractionDigits retain exact arbitrary-size counts as XsdFacetCount, including provider
+      reconstruction and generated examples
     - boolean values accept only the four XML spellings after XML whitespace collapse, native booleans,
       and numeric zero/one; provider lists validate before conversion and reject null or invalid spellings
     - integer builtins enforce exact ranges before conversion and retain values beyond signed 64-bit
@@ -2757,6 +2761,27 @@ public class XsdDecimalDataType inherits AbstractDataProviderType {
     }
 }
 
+#! exact nonnegative facet count, using a string beyond the native integer range
+/** Counts are canonical integers: native int when representable, otherwise a decimal string. totalDigits
+    requires a positive count; fractionDigits permits zero. No count is clamped to a machine limit.
+    @since %WSDL 0.5.8
+*/
+public typedef XsdFacetCount = union<int, string>;
+
+class XsdFacetCountHelper {
+    static XsdFacetCount parse(string name, auto value, string error = "XSD-SIMPLETYPE-ERROR") {
+        string lexical = XsdIntegerLexicalHelper::lexical(name == "totalDigits" ? "positiveInteger"
+            : "nonNegativeInteger", value, error);
+        return XsdIntegerLexicalHelper::decode("integer", XsdIntegerLexicalHelper::canonical(lexical));
+    }
+
+    static int compare(XsdFacetCount left, XsdFacetCount right) {
+        return XsdIntegerLexicalHelper::compare(
+            XsdIntegerLexicalHelper::canonical(XsdSimpleType::normalizeWhiteSpace(string(left), "collapse")),
+            XsdIntegerLexicalHelper::canonical(XsdSimpleType::normalizeWhiteSpace(string(right), "collapse")));
+    }
+}
+
 #! resolved scalar data used to reconstruct a numeric restriction provider
 /** The schema constructs this value without retaining transient namespace or component references.
     @since %WSDL 0.5.8
@@ -2773,9 +2798,9 @@ public hashdecl XsdNumericFacetInfo {
     #! inclusive/exclusive bounds as validated XML text
     hash<string, string> bounds;
     #! maximum decimal digits in the value
-    *int total_digits;
+    *XsdFacetCount total_digits;
     #! maximum fractional decimal digits in the value
-    *int fraction_digits;
+    *XsdFacetCount fraction_digits;
 }
 
 class XsdNumericFacetHelper {
@@ -2783,10 +2808,17 @@ class XsdNumericFacetHelper {
         if (facets.base_name != "decimal" && !XsdIntegerLexicalHelper::Types{facets.base_name}) {
             throw error, sprintf("invalid numeric restriction base %Y", facets.base_name);
         }
-        if ((exists facets.total_digits && facets.total_digits < 1)
-                || (exists facets.fraction_digits && facets.fraction_digits < 0)
-                || (exists facets.total_digits && exists facets.fraction_digits
-                    && facets.fraction_digits > facets.total_digits)) {
+        if (exists facets.total_digits) {
+            XsdFacetCount total = XsdFacetCountHelper::parse("totalDigits", facets.total_digits, error);
+        }
+        if (exists facets.fraction_digits) {
+            XsdFacetCount fractional = XsdFacetCountHelper::parse("fractionDigits", facets.fraction_digits, error);
+            if (facets.base_name != "decimal" && XsdFacetCountHelper::compare(fractional, 0)) {
+                throw error, "integer-derived types have fractionDigits fixed to zero";
+            }
+        }
+        if (exists facets.total_digits && exists facets.fraction_digits
+                && XsdFacetCountHelper::compare(facets.fraction_digits, facets.total_digits) > 0) {
             throw error, "numeric restriction requires positive totalDigits and nonnegative fractionDigits <= totalDigits";
         }
         foreach string facet in (keys facets.bounds) {
@@ -2796,6 +2828,12 @@ class XsdNumericFacetHelper {
             }
             lexical(facets.base_name, facets.bounds{facet}, error);
         }
+        if ((exists facets.bounds.minInclusive && exists facets.bounds.minExclusive)
+                || (exists facets.bounds.maxInclusive && exists facets.bounds.maxExclusive)) {
+            throw error, "inclusive and exclusive bounds cannot coexist in the same restriction step";
+        }
+        checkBounds(facets.bounds, error);
+        checkBounds(withBuiltinBounds(facets.base_name, facets.bounds), error);
         foreach string value in (facets.enumeration) {
             lexical(facets.base_name, value, error);
         }
@@ -2807,6 +2845,35 @@ class XsdNumericFacetHelper {
                     rethrow;
                 }
                 throw error, sprintf("invalid compiled numeric pattern: %s", ex.desc);
+            }
+        }
+    }
+
+    static hash<string, string> withBuiltinBounds(string builtin, hash<string, string> bounds) {
+        if (XsdIntegerLexicalHelper::Bounds{builtin}) {
+            *string minimum = XsdIntegerLexicalHelper::Bounds{builtin}[0];
+            *string maximum = XsdIntegerLexicalHelper::Bounds{builtin}[1];
+            if (exists minimum && !exists bounds.minInclusive) {
+                bounds.minInclusive = minimum;
+            }
+            if (exists maximum && !exists bounds.maxInclusive) {
+                bounds.maxInclusive = maximum;
+            }
+        }
+        return bounds;
+    }
+
+    static checkBounds(hash<string, string> bounds, string error) {
+        foreach string minimum in ("minInclusive", "minExclusive") {
+            foreach string maximum in ("maxInclusive", "maxExclusive") {
+                if (!exists bounds{minimum} || !exists bounds{maximum}) {
+                    continue;
+                }
+                int comparison = XsdDecimalLexicalHelper::compare(bounds{minimum}, bounds{maximum});
+                bool mixed = minimum.endsWith("Inclusive") != maximum.endsWith("Inclusive");
+                if (comparison > 0 || (!comparison && mixed)) {
+                    throw error, sprintf("contradictory %s and %s facets", minimum, maximum);
+                }
             }
         }
     }
@@ -2856,12 +2923,12 @@ class XsdNumericFacetHelper {
             if (!total) {
                 total = 1;
             }
-            if (exists facets.total_digits && total > facets.total_digits) {
-                throw error, sprintf("value %Y for simpleType %Y has %d digits, exceeding totalDigits %d",
+            if (exists facets.total_digits && XsdFacetCountHelper::compare(total, facets.total_digits) > 0) {
+                throw error, sprintf("value %Y for simpleType %Y has %d digits, exceeding totalDigits %Y",
                     text, facets.name, total, facets.total_digits);
             }
-            if (exists facets.fraction_digits && fractional > facets.fraction_digits) {
-                throw error, sprintf("value %Y for simpleType %Y has %d fractional digits, exceeding fractionDigits %d",
+            if (exists facets.fraction_digits && XsdFacetCountHelper::compare(fractional, facets.fraction_digits) > 0) {
+                throw error, sprintf("value %Y for simpleType %Y has %d fractional digits, exceeding fractionDigits %Y",
                     text, facets.name, fractional, facets.fraction_digits);
             }
         }
@@ -6064,8 +6131,212 @@ public class XsdRegexHelper {
     }
 }
 
+#! Validate facet declarations before constructing their value-space constraints.
+class XsdFacetDeclarationHelper {
+    const Names = {"minInclusive": True, "maxInclusive": True, "minExclusive": True, "maxExclusive": True,
+        "length": True, "minLength": True, "maxLength": True, "totalDigits": True, "fractionDigits": True,
+        "whiteSpace": True, "pattern": True, "enumeration": True};
+
+    static hash<string, bool> validate(hash<auto> restriction, Namespaces nsc) {
+        hash<string, bool> fixed();
+        foreach string facet in (keys restriction) {
+            if (facet == "annotation" || facet == "simpleType" || facet == "ns" || facet == "^attributes^") {
+                continue;
+            }
+            if (!Names{facet}) {
+                throw "XSD-SIMPLETYPE-ERROR", sprintf("unexpected simple restriction child %Y", facet);
+            }
+            auto raw = restriction{facet};
+            if (raw.typeCode() == NT_LIST && facet != "pattern" && facet != "enumeration") {
+                throw "XSD-SIMPLETYPE-ERROR", sprintf("facet %Y must occur at most once per restriction", facet);
+            }
+            foreach auto node in (raw ?? (NOTHING,)) {
+                if (node.typeCode() != NT_HASH || !exists node."^attributes^".value
+                        || node."^attributes^".value.typeCode() != NT_STRING) {
+                    throw "XSD-SIMPLETYPE-ERROR", sprintf("facet %Y requires a lexical value attribute", facet);
+                }
+                hash<auto> attributes = node."^attributes^";
+                NamespacePrefixHelper scope(nsc, attributes);
+                foreach string key in (keys attributes) {
+                    if (key == "value" || key == "id" || key == "xmlns" || key.startsWith("xmlns:")) {
+                        continue;
+                    }
+                    if (key == "fixed" && facet != "pattern" && facet != "enumeration") {
+                        fixed{facet} = XsdBooleanLexicalHelper::decode(attributes.fixed, "XSD-SIMPLETYPE-ERROR");
+                        continue;
+                    }
+                    if (key.find(":") >= 0) {
+                        string prefix = key.substr(0, key.find(":"));
+                        if (nsc.getInputNamespaceUri(prefix) != XSD_NS) {
+                            continue;
+                        }
+                    }
+                    throw "XSD-SIMPLETYPE-ERROR", sprintf("unexpected attribute %Y on facet %Y", key, facet);
+                }
+                hash<auto> content = node;
+                WSDL::XsdBase::removeNS(\content);
+                foreach string key in (keys content) {
+                    if (key == "^attributes^" || key == "ns") {
+                        continue;
+                    }
+                    if (key == "annotation" && content{key}.typeCode() != NT_LIST) {
+                        continue;
+                    }
+                    throw "XSD-SIMPLETYPE-ERROR", sprintf("unexpected content %Y in facet %Y", key, facet);
+                }
+                if (facet == "whiteSpace") {
+                    string value = XsdSimpleType::normalizeWhiteSpace(attributes.value, "collapse");
+                    if (value != "preserve" && value != "replace" && value != "collapse") {
+                        throw "XSD-SIMPLETYPE-ERROR", sprintf("invalid whiteSpace facet %Y", attributes.value);
+                    }
+                }
+            }
+        }
+        return fixed;
+    }
+}
+
+enum XsdFacetGrammarKind {
+    XFG_OTHER = 0,
+    XFG_SIMPLE_TYPE = 1,
+    XFG_SIMPLE_CONTENT = 2,
+    XFG_RESTRICTION = 3,
+    XFG_FACET = 4,
+}
+
+hashdecl XsdFacetGrammarFrame {
+    XsdFacetGrammarKind kind = XFG_OTHER;
+    bool ignored = False;
+    bool simple_content = False;
+    bool annotation = False;
+    bool inline_type = False;
+    bool facets = False;
+    bool attributes = False;
+    bool any_attribute = False;
+}
+
+#! Check the ordered XML representation before parseTypes merges namespace-qualified child names.
+class XsdFacetGrammarHelper {
+    private {
+        hash<string, hash<XsdFacetGrammarFrame>> frames;
+    }
+
+    consume(XmlReader reader) {
+        int depth = reader.depth();
+        string key = string(depth);
+        if (reader.nodeType() == XML_NODE_TYPE_END_ELEMENT) {
+            remove frames{key};
+            return;
+        }
+        *hash<XsdFacetGrammarFrame> parent = frames{string(depth - 1)};
+        if (reader.nodeType() != XML_NODE_TYPE_ELEMENT) {
+            if (parent && (parent.kind == XFG_RESTRICTION || parent.kind == XFG_FACET)
+                    && (reader.nodeType() == XML_NODE_TYPE_TEXT || reader.nodeType() == XML_NODE_TYPE_CDATA
+                        || reader.nodeType() == XML_NODE_TYPE_SIGNIFICANT_WHITESPACE)
+                    && XsdSimpleType::normalizeWhiteSpace(reader.value() ?? "", "collapse").val()) {
+                throw "XSD-SIMPLETYPE-ERROR", "facet and restriction declarations cannot contain character data";
+            }
+            return;
+        }
+        string local = reader.localName();
+        bool xsd = reader.namespaceUri() == XSD_NS;
+        hash<XsdFacetGrammarFrame> current();
+        current.ignored = parent.ignored || (xsd && local == "annotation");
+        if (parent && (parent.kind == XFG_SIMPLE_TYPE || parent.kind == XFG_SIMPLE_CONTENT)) {
+            string error = parent.kind == XFG_SIMPLE_CONTENT ? WSDL_ERROR : "XSD-SIMPLETYPE-ERROR";
+            if (!xsd) {
+                throw error, sprintf("unexpected simple type derivation {%s}%s",
+                    reader.namespaceUri() ?? "", local);
+            }
+            if (local == "annotation" && !parent.annotation && !parent.facets) {
+                parent.annotation = True;
+            } else if (!parent.facets && (local == "restriction"
+                    || (parent.kind == XFG_SIMPLE_TYPE && (local == "list" || local == "union"))
+                    || (parent.kind == XFG_SIMPLE_CONTENT && local == "extension"))) {
+                parent.facets = True;
+                if (local == "restriction") {
+                    current.kind = XFG_RESTRICTION;
+                    current.simple_content = parent.kind == XFG_SIMPLE_CONTENT;
+                }
+            } else {
+                throw error, "simple type content requires an optional annotation then one derivation";
+            }
+            frames{string(depth - 1)} = parent;
+        } else if (parent && (parent.kind == XFG_RESTRICTION || parent.kind == XFG_FACET)) {
+            if (!xsd) {
+                throw "XSD-SIMPLETYPE-ERROR", sprintf("unexpected restriction content {%s}%s",
+                    reader.namespaceUri() ?? "", local);
+            }
+            if (local == "annotation") {
+                if (parent.annotation || parent.inline_type || parent.facets || parent.attributes) {
+                    throw "XSD-SIMPLETYPE-ERROR", "annotation must occur once, before other restriction content";
+                }
+                parent.annotation = True;
+            } else if (parent.kind == XFG_FACET) {
+                throw "XSD-SIMPLETYPE-ERROR", sprintf("unexpected facet child %Y", local);
+            } else if (local == "simpleType") {
+                if (parent.inline_type || parent.facets || parent.attributes) {
+                    throw "XSD-SIMPLETYPE-ERROR", "inline simpleType must precede restriction facets";
+                }
+                parent.inline_type = True;
+                current.kind = XFG_SIMPLE_TYPE;
+            } else if (XsdFacetDeclarationHelper::Names{local}) {
+                if (parent.attributes) {
+                    throw "XSD-SIMPLETYPE-ERROR", "restriction facets must precede attributes";
+                }
+                parent.facets = True;
+                current.kind = XFG_FACET;
+                validateAttributes(reader, local);
+            } else if (parent.simple_content
+                    && (local == "attribute" || local == "attributeGroup" || local == "anyAttribute")) {
+                if (parent.any_attribute) {
+                    throw "XSD-SIMPLETYPE-ERROR", "anyAttribute must be the last restriction child";
+                }
+                parent.attributes = True;
+                parent.any_attribute = local == "anyAttribute";
+            } else {
+                throw "XSD-SIMPLETYPE-ERROR", sprintf("unexpected restriction child %Y", local);
+            }
+            frames{string(depth - 1)} = parent;
+        } else if (!current.ignored && xsd) {
+            if (local == "simpleType") {
+                current.kind = XFG_SIMPLE_TYPE;
+            } else if (local == "simpleContent") {
+                current.kind = XFG_SIMPLE_CONTENT;
+            }
+        }
+        if (!reader.isEmptyElement()) {
+            frames{key} = current;
+        }
+    }
+
+    private static validateAttributes(XmlReader reader, string facet) {
+        if (!reader.moveToFirstAttribute()) {
+            return;
+        }
+        on_exit reader.moveToElement();
+        do {
+            *string uri = reader.namespaceUri();
+            string name = reader.localName();
+            if (uri) {
+                if (uri != XSD_NS) {
+                    continue;
+                }
+            } else if (name == "value" || name == "id"
+                    || (name == "fixed" && facet != "pattern" && facet != "enumeration")) {
+                continue;
+            }
+            throw "XSD-SIMPLETYPE-ERROR", sprintf("unexpected attribute {%s}%s on facet %Y", uri ?? "", name, facet);
+        } while (reader.moveToNextAttribute());
+    }
+}
+
 #! XSD simple type class
 public class XsdSimpleType inherits WSDL::XsdAbstractType {
+    private {
+        hash<string, bool> fixedFacets;
+    }
+
     public {
         hash<auto> enumValues;
         hash<auto> typeinfo;
@@ -6096,9 +6367,12 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
         *auto maxInclusive;
         *auto minExclusive;
         *auto maxExclusive;
-        #! Numeric precision facets
-        *softint totalDigits;
-        *softint fractionDigits;
+        #! Numeric precision facets, retaining a decimal string beyond the native integer range
+        /** @since %WSDL 0.5.8 uses XsdFacetCount to avoid bounded conversion */
+        *XsdFacetCount totalDigits;
+        #! maximum fractional digits, with exact arbitrary-size count representation
+        /** @since %WSDL 0.5.8 uses XsdFacetCount to avoid bounded conversion */
+        *XsdFacetCount fractionDigits;
         #! WhiteSpace facet
         *string whiteSpace;
 
@@ -6159,6 +6433,8 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
 
             WSDL::XsdBase::removeNS(\r);
 
+            fixedFacets = XsdFacetDeclarationHelper::validate(r, nsc);
+
             # Parse enumeration facet
             if (r.enumeration) {
                 enumValues = map {$1."^attributes^".value: True}, r.enumeration;
@@ -6172,10 +6448,21 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
                 } else {
                     patterns = (r.pattern."^attributes^".value,);
                 }
-            # issue #5411: translate the patterns from the XSD regular expression language to PCRE once
-            if (patterns) {
-                pcre_patterns = map "^(?:" + XsdRegexHelper::toPcre($1) + ")$", patterns;
-            }
+                # issue #5411: translate the patterns from the XSD regular expression language to PCRE once
+                if (patterns) {
+                    try {
+                        pcre_patterns = map "^(?:" + XsdRegexHelper::toPcre($1) + ")$", patterns;
+                        foreach string pattern in (pcre_patterns) {
+                            bool accepts_empty = regex("", pattern);
+                        }
+                    } catch (hash<ExceptionInfo> ex) {
+                        if (ex.err != "REGEX-ERROR" && ex.err != "REGEX-COMPILATION-ERROR"
+                                && ex.err != "XSD-REGEX-ERROR") {
+                            rethrow;
+                        }
+                        throw "XSD-SIMPLETYPE-ERROR", sprintf("invalid pattern facet: %s", ex.desc);
+                    }
+                }
             }
 
             # Parse length facets
@@ -6205,15 +6492,15 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
 
             # Parse precision facets
             if (r.totalDigits) {
-                totalDigits = int(r.totalDigits."^attributes^".value);
+                totalDigits = XsdFacetCountHelper::parse("totalDigits", r.totalDigits."^attributes^".value);
             }
             if (r.fractionDigits) {
-                fractionDigits = int(r.fractionDigits."^attributes^".value);
+                fractionDigits = XsdFacetCountHelper::parse("fractionDigits", r.fractionDigits."^attributes^".value);
             }
 
             # Parse whiteSpace facet
             if (r.whiteSpace) {
-                whiteSpace = r.whiteSpace."^attributes^".value;
+                whiteSpace = normalizeWhiteSpace(r.whiteSpace."^attributes^".value, "collapse");
             }
         } else if (st.hasKey("union")) {
             hash<auto> u = st.union ?? {};
@@ -6263,6 +6550,91 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
     finalizeResolved() {
         if (!type && unionTypes) {
             dataType = new UnionDataType(unionTypes);
+        }
+        *string numeric = getNumericBaseName();
+        if (numeric) {
+            validateNumericDeclaration(numeric);
+        } else if (exists totalDigits || exists fractionDigits) {
+            throw "XSD-SIMPLETYPE-ERROR", "totalDigits and fractionDigits apply only to decimal-derived types";
+        }
+    }
+
+    private validateNumericDeclaration(string builtin) {
+        if (exists length || exists minLength || exists maxLength) {
+            throw "XSD-SIMPLETYPE-ERROR", sprintf("length facets do not apply to numeric type %Y", name);
+        }
+        if (exists whiteSpace && whiteSpace != "collapse") {
+            throw "XSD-SIMPLETYPE-ERROR", "numeric types have whiteSpace fixed to collapse";
+        }
+        hash<XsdNumericFacetInfo> facets = getNumericFacets();
+        XsdNumericFacetHelper::checkDefinition(facets, "XSD-SIMPLETYPE-ERROR");
+        foreach string facet in (keys facets.bounds) {
+            validateNumericBaseValue(facets.bounds{facet}, facet.endsWith("Exclusive") ? facet : NOTHING);
+        }
+        foreach string value in (facets.enumeration) {
+            validateNumericBaseValue(value);
+        }
+        *XsdSimpleType ancestor = type instanceof XsdSimpleType ? cast<XsdSimpleType>(type) : NOTHING;
+        hash<string, string> effective_bounds = facets.bounds;
+        while (ancestor) {
+            hash<XsdNumericFacetInfo> inherited = ancestor.getNumericFacets();
+            foreach string bound in (keys inherited.bounds) {
+                if (!exists effective_bounds{bound}) {
+                    effective_bounds{bound} = inherited.bounds{bound};
+                }
+            }
+            foreach string facet in ("totalDigits", "fractionDigits") {
+                if (exists self{facet} && exists ancestor{facet}
+                        && XsdFacetCountHelper::compare(self{facet}, ancestor{facet}) > 0) {
+                    throw "XSD-SIMPLETYPE-ERROR", sprintf("%s in %Y widens its base restriction", facet, name);
+                }
+            }
+            foreach string facet in (keys ancestor.fixedFacets) {
+                if (!ancestor.fixedFacets{facet} || !exists self{facet}) {
+                    continue;
+                }
+                bool changed = facet == "whiteSpace" ? self{facet} != ancestor{facet}
+                    : XsdDecimalLexicalHelper::compare(string(self{facet}), string(ancestor{facet})) != 0;
+                if (changed) {
+                    throw "XSD-SIMPLETYPE-ERROR", sprintf("%s in %Y changes a fixed base facet", facet, name);
+                }
+            }
+            ancestor = ancestor.type instanceof XsdSimpleType ? cast<XsdSimpleType>(ancestor.type) : NOTHING;
+        }
+        XsdNumericFacetHelper::checkBounds(XsdNumericFacetHelper::withBuiltinBounds(builtin, effective_bounds),
+            "XSD-SIMPLETYPE-ERROR");
+        *XsdFacetCount fractional = builtin == "decimal" ? getEffectiveFacet("fractionDigits") : 0;
+        *XsdFacetCount total = getEffectiveFacet("totalDigits");
+        if (exists fractional && exists total && XsdFacetCountHelper::compare(fractional, total) > 0) {
+            throw "XSD-SIMPLETYPE-ERROR", "effective fractionDigits must not exceed totalDigits";
+        }
+    }
+
+    private validateNumericBaseValue(string value, *string exclusive) {
+        *XsdSimpleType ancestor = type instanceof XsdSimpleType ? cast<XsdSimpleType>(type) : NOTHING;
+        bool repeated_endpoint = False;
+        if (exclusive) {
+            *XsdSimpleType base = ancestor;
+            while (base) {
+                if (exists base{exclusive}) {
+                    repeated_endpoint = !XsdDecimalLexicalHelper::compare(value, string(base{exclusive}));
+                    break;
+                }
+                base = base.type instanceof XsdSimpleType ? cast<XsdSimpleType>(base.type) : NOTHING;
+            }
+        }
+        while (ancestor) {
+            hash<XsdNumericFacetInfo> facets = ancestor.getNumericFacets();
+            # A repeated exclusive endpoint may be outside the base value space (XSD 1.0 4.3.8-9).
+            # Its lexical mapping, including inherited patterns, must still yield that endpoint.
+            if (repeated_endpoint) {
+                facets.bounds = {};
+                remove facets.enumeration;
+                remove facets.total_digits;
+                remove facets.fraction_digits;
+            }
+            string checked = XsdNumericFacetHelper::validate(facets, value, "XSD-SIMPLETYPE-ERROR");
+            ancestor = ancestor.type instanceof XsdSimpleType ? cast<XsdSimpleType>(ancestor.type) : NOTHING;
         }
     }
 
@@ -6729,17 +7101,19 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
                         }
                     }
                 }
-                *int fractional = getEffectiveFacet("fractionDigits");
-                if (exists fractional && fractional < scale) {
-                    scale = fractional;
+                *XsdFacetCount fractional = getEffectiveFacet("fractionDigits");
+                if (exists fractional && XsdFacetCountHelper::compare(fractional, scale) < 0) {
+                    scale = int(fractional);
                 }
-                *int total = getEffectiveFacet("totalDigits");
+                *XsdFacetCount total = getEffectiveFacet("totalDigits");
                 if (exists total) {
                     string whole = XsdDecimalLexicalHelper::canonical(boundary).split(".")[0];
                     whole =~ s/\A-//;
-                    int available = total - (whole == "0" ? 0 : whole.size());
-                    if (available < scale) {
-                        scale = available > 0 ? available : 0;
+                    int whole_digits = whole == "0" ? 0 : whole.size();
+                    if (XsdFacetCountHelper::compare(total, whole_digits) <= 0) {
+                        scale = 0;
+                    } else if (XsdFacetCountHelper::compare(total, whole_digits + scale) < 0) {
+                        scale = int(total) - whole_digits;
                     }
                 }
             }
@@ -12673,6 +13047,7 @@ public class XsdSchema inherits WSDL::XsdBase {
         @throw XSD-ERROR invalid schema document root
         @throw WSDL-NAMESPACE-ERROR unresolved namespace prefix
         @throw WSDL-ERROR unresolved or duplicate schema component
+        @throw XSD-SIMPLETYPE-ERROR malformed facet declaration or invalid numeric restriction
         @throw WSDL-ASYNC-IMPORT an external schema is absent from the asynchronous cache
         @note A failed addition does not retain declarations or dependency marks from that document.
     */
@@ -12891,6 +13266,7 @@ public class XsdSchema inherits WSDL::XsdBase {
     # Check the ordered schema grammar before parseTypes groups declarations by name.
     private validateSchemaGrammar(string xml) {
         XmlReader reader(xml);
+        XsdFacetGrammarHelper facet_grammar();
         int schema_depth = -1;
         bool declared = False;
         bool definitions = False;
@@ -12901,6 +13277,9 @@ public class XsdSchema inherits WSDL::XsdBase {
         while (reader.read()) {
             int depth = reader.depth();
             int kind = reader.nodeType();
+            if (schema_depth >= 0) {
+                facet_grammar.consume(reader);
+            }
             if (kind == XML_NODE_TYPE_END_ELEMENT) {
                 if (depth == schema_depth) {
                     schema_depth = -1;

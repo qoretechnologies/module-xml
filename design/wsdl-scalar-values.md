@@ -203,9 +203,7 @@ provider/field reconstruction, optionality, repeated choices and fixed attribute
 with libxml2 and Xerces, asserting exact Decimal values and expanded names.
 Its 864 lexical input/output documents and 576 reconstructed provider/example
 outputs form a 1,440-document independent matrix, with negative provider errors
-checked separately. Schema declaration grammar and facet derivation legality
-remain separate P3 acceptance work; these rules describe value validation for
-resolved numeric restrictions.
+checked separately.
 
 References: [numeric bounds](https://www.w3.org/TR/xmlschema-2/#rf-minInclusive),
 [enumeration](https://www.w3.org/TR/xmlschema-2/#rf-enumeration),
@@ -217,3 +215,44 @@ reconstruction. As with `QoreDataField`, callers configure numeric field choices
 before sharing a field between threads; acceptance itself does not mutate the
 field. Choice setters validate and construct replacement maps before publishing
 them, so a failed update retains the previous choices.
+
+Numeric restriction declarations are validated during dependency finalization,
+before publishing a schema or provider. A restriction cannot widen inherited
+digit counts or numeric bounds, change a fixed facet through any ancestor,
+weaken numeric whitespace collapse, or introduce length facets. Integer-derived
+types retain fractionDigits fixed at zero. Bound and enumeration literals must
+map through the base datatype, including inherited patterns. The current step's
+own pattern need not match the enumeration's declared spelling: enumeration
+constrains values, and a different spelling of that value can satisfy the pattern.
+
+XSD 1.0 permits a repeated inherited exclusive endpoint even though that endpoint
+is outside the base value space. The declaration still needs a valid lexical
+mapping; base enumeration/digit constraints do not invalidate this exception.
+Opposite bounds must satisfy the edition's explicit inclusive/exclusive ordering
+rules, including inherited and builtin endpoints. Equal exclusive endpoints in
+one restriction are permitted; their empty value space causes sample generation
+to raise `XSD-SAMPLE-ERROR`. An own-step enumeration/digit intersection may also
+be empty without making the declarations themselves invalid.
+
+`XsdFacetCount` retains `totalDigits` and `fractionDigits` as an `int`, or a
+canonical decimal `string` beyond the native integer range. For example,
+`<xs:totalDigits value="9223372036854775808"/>` is legal and retains that exact
+string in `XsdSimpleType.totalDigits` and the provider's scalar metadata.
+Comparisons use exact integer text. Example generation converts a count to an
+integer only after proving it is smaller than the bounded candidate size.
+
+The existing streaming schema grammar pass now checks simple derivation/facet
+expanded names, annotation position and multiplicity, and facet attributes and
+content before grouped XML hashes erase namespace/order information. Foreign
+namespace facet attributes remain permitted. Facet values and `fixed` attributes
+are validated before conversion; `whiteSpace`'s NMTOKEN value uses whitespace
+collapse. The grammar stack uses memory proportional to XML depth and is local
+to each parse. Annotation application content remains opaque.
+
+`wsdl-facet-declarations.qtest` verifies these rules, large-count metadata,
+provider reconstruction, examples and failed-addition rollback. The independent
+`test_facet_declarations.py` matrix checks atomic and simple-content restrictions
+through both actual SOAP bindings and both directions, comparing exact Decimal
+values and expanded names. Its specification adjudication records compiler
+disagreements separately from production acceptance. Other scalar families retain
+their remaining P3 acceptance work.

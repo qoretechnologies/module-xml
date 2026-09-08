@@ -616,4 +616,14 @@ Numeric values are compared without rounding to fit a schema. Under XSD 1.0 Seco
 Edition's `totalDigits` rule, `0.0012` requires four digits because the rule also
 constrains fractional scale. The implemented representation and provider equality
 rules are described in [the scalar design](../../design/wsdl-scalar-values.md).
-Schema facet declaration legality remains part of the active P3 work.
+
+`qore --enable-debug test/wsdl-facet-declarations.qtest` checks numeric facet
+declarations: required values, XML grammar/namespaces, exact digit counts,
+applicability, inherited and fixed bounds, reconstruction and failed-addition
+rollback. `python3 test/wsdl-interop/test_facet_declarations.py -v` covers 86
+authored cases as 172 atomic/simple-content schemas, 344 actual SOAP contracts,
+and 608 input/output documents with exact values and expanded names. See the
+[specification adjudication](facet-declarations-adjudication.md) for named
+libxml2/Xerces compiler disagreements. Counts above signed 64-bit range remain
+exact strings; no display rounding or machine-width clamp is applied. P3 remains
+active for the other scalar datatype and facet requirements.

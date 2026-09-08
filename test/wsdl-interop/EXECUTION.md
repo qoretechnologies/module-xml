@@ -2241,3 +2241,64 @@ IntegerSimpleTypePattern assertion preserves its existing P9 coverage ownership;
 its earlier mistaken P3 expectation was a test error. Final documentation wording
 was rechecked in /tmp/wsdl-p3-05-docs-reviewed.log, and reports were rerun as
 /tmp/wsdl-p3-05-reviewed-{survey,coverage}.json/.log to capture the final source hash.
+
+## P3-06 — Numeric facet declarations
+
+P3-05 was committed as e57a414 without pushing. The new declaration regressions
+initially exposed missing/duplicate malformed facets, inapplicable numeric
+facets, contradictory bounds, widening/fixed restrictions, invalid base-space
+facet values and clamped digit counts. Namespace/order tests additionally proved
+that grouping parsed children by local name accepted wrong-namespace facets and
+misplaced annotations. Original failing reproductions are retained in
+/tmp/wsdl-p3-06-{before,grammar-before,inherited-before,matrix-before}.log.
+
+The implementation validates numeric declarations before schema publication,
+checks inherited/builtin bounds and fixed constraints, and retains totalDigits
+and fractionDigits as XsdFacetCount (int or exact decimal string). A streaming
+stack in the existing schema grammar pass checks expanded names, derivation and
+annotation order, facet attributes and content before grouped hashes lose that
+information. Namespace scopes and XmlReader attribute position restore on error;
+failed additions leave the original schema and its reconstructed copies usable.
+
+The independent matrix has 86 authored cases, 172 atomic/simple-content schemas,
+344 actual SOAP 1.1/1.2 contracts and 608 input/output documents in both directions.
+Exact Decimal values and expanded names remain mandatory. Every known compiler
+disagreement is named in
+[facet-declarations-adjudication.md](facet-declarations-adjudication.md), using
+XSD 1.0 Second Edition and its errata. This includes arbitrary-size counters,
+repeated exclusive endpoints, inherited mixed bounds, and representation grammar.
+Xerces and libxml2 disagreement never changes expected Qore schema validity.
+Original W3C files, historical findings and earlier adjudications remain unchanged.
+
+Focused Qore currently passes 10 cases/176 assertions; the numeric value suite
+passes 10 cases/420 assertions with added malformed provider metadata coverage.
+The first full affected run found one error-category regression: the streaming
+simpleContent derivation check raised XSD-SIMPLETYPE-ERROR where existing complex
+schema grammar raised WSDL-ERROR. The implementation now preserves WSDL-ERROR,
+and the original simple-content suite passes 8 cases/43 assertions unchanged.
+No production validation was weakened or negative expectation changed.
+
+Final full Python discovery passes the new matrix and runs 103 tests, retaining
+exactly seven tracked P4/P5/P6 failures (zero errors/skips/warnings). All 40 affected
+Qore suites pass, totaling 509 cases without warnings. Final source checks pass in /tmp/wsdl-p3-06-python-reviewed.log,
+/tmp/wsdl-p3-06-reviewed-affected.log, /tmp/wsdl-p3-06-docs-reviewed.log and
+/tmp/wsdl-p3-06-{survey,coverage}-reviewed.json/.log. Final corpus counts, failure rows and stage accounting are identical to P3-05:
+220 broad failures and zero selected failures; strict ownership remains 72
+schema descriptions/648 directions. Both committed reports match final WSDL
+SHA-256 028eb787df869635f643f65f75f31a5168b49b71dfc8a31f5320aec5673fbe2c.
+Qdx/Doxygen also passes without warnings.
+
+Tests use /tmp/wsdl-p3-06-env.sh. A concurrent core relink caused one early run's
+loader to see a partial libqore file. The completed Debug executable/library were
+copied into /tmp/wsdl-core-deps/runtime only after unchanged fstat metadata and ELF
+checks; manifest.json records source paths and SHA-256. The immutable runtime
+and committed DataProvider export avoid interference from other developers'
+ongoing core changes. No core/astparser code, native XML code, installation or
+push is part of this increment. The user's Qore checkpoint request found core
+clean on develop at 79d06bece; later other-owner changes are still in progress.
+
+The full audit is [audits/P3-06-facet-declarations.md](audits/P3-06-facet-declarations.md).
+All 62 items are recorded as Pass or N/A with final validation evidence; no audit
+failures remain.
+P3 remains active for nonnumeric facets, IEEE float/double, dates/durations/partial
+dates/binary lexical and value semantics, and remaining regex/list/union criteria.
