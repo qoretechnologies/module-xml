@@ -1,0 +1,160 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires xml
+%requires ../qlib/WSDL.qm
+%exec-class MessageIdentityTest
+
+class MessageIdentityTest inherits QUnit::Test {
+    constructor() : QUnit::Test("WSDL message part namespace identity", "1.0") {
+        addTestCase("Distinct element namespaces coexist as document message parts", \bodyParts());
+        addTestCase("Body and header parts with colliding local names stay separate", \headerParts());
+        addTestCase("Part declaration scopes resolve exact default and rebound namespaces", \partScopes());
+        addTestCase("Multipart providers and generated samples survive reconstruction", \consumers());
+        addTestCase("Type part names cannot overwrite colliding element arguments", \typePartCollision());
+        set_return_value(main());
+    }
+
+    private string parts() {
+        return '<w:part name="first" element="a:item"/><w:part name="second" element="b:item"/>
+            <w:part name="plain" xmlns="" element="item"/>';
+    }
+
+    private string description(string version, bool header = False, *string declarations) {
+        string soap = "http://schemas.xmlsoap.org/wsdl/soap" + (version == "12" ? "12" : "") + "/";
+        string input = header ? '<s:body use="literal" parts="first plain"/>
+            <s:header use="literal" message="t:Request" part="second"/>' : '<s:body use="literal"/>';
+        string output = replace(input, "t:Request", "t:Response");
+        return sprintf('<w:definitions xmlns:w="http://schemas.xmlsoap.org/wsdl/" xmlns:s="%s"
+            xmlns:t="urn:message" xmlns:a="urn:first" xmlns:b="urn:second" targetNamespace="urn:message">
+            <w:types><xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" targetNamespace="urn:first">
+            <xs:element name="item" type="xs:boolean"/></xs:schema>
+            <xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" targetNamespace="urn:second">
+            <xs:element name="item" type="xs:int"/></xs:schema>
+            <xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"><xs:element name="item" type="xs:string"/>
+            </xs:schema></w:types><w:message name="Request">%s</w:message>
+            <w:message name="Response">%s</w:message><w:portType name="Port"><w:operation name="submit">
+            <w:input message="t:Request"/><w:output message="t:Response"/></w:operation></w:portType>
+            <w:binding name="Soap" type="t:Port"><s:binding style="document"
+            transport="http://schemas.xmlsoap.org/soap/http"/><w:operation name="submit">
+            <s:operation soapAction="urn:submit"/><w:input>%s</w:input><w:output>%s</w:output>
+            </w:operation></w:binding><w:service name="Service"><w:port name="Port" binding="t:Soap">
+            <s:address location="http://example.invalid/"/></w:port></w:service></w:definitions>',
+            soap, declarations ?? parts(), declarations ?? parts(), input, output);
+    }
+
+    private WebService service(string version, bool header = False, *string declarations) {
+        return new WebService(description(version, header, declarations), {"async_only": True});
+    }
+
+    private hash<auto> envelope(string version, bool header = False) {
+        return parse_xml(sprintf('<e:Envelope xmlns:e="%s" xmlns:a="urn:first" xmlns:b="urn:second">
+            %s<e:Body><a:item>false</a:item>%s<item></item></e:Body></e:Envelope>',
+            version == "12" ? "http://www.w3.org/2003/05/soap-envelope" : "http://schemas.xmlsoap.org/soap/envelope/",
+            header ? '<e:Header><b:item>0</b:item></e:Header>' : "", header ? "" : '<b:item>0</b:item>'));
+    }
+
+    private auto decode(WSOperation op, bool response, hash<auto> wire) {
+        return response ? op.deserializeResponse(wire, "Soap") : op.deserializeRequest(wire, "Soap");
+    }
+
+    private hash<auto> encode(WSOperation op, bool response, hash<auto> value) {
+        return response ? op.serializeResponse(value, NOTHING, NOTHING, NOTHING, NOTHING, NOTHING, "Soap")
+            : op.serializeRequest(value, NOTHING, NOTHING, NOTHING, NOTHING, NOTHING, "Soap");
+    }
+
+    bodyParts() {
+        foreach string version in ("11", "12") {
+            WebService ws = service(version);
+            WSOperation op = ws.getBindingOperation("Soap", "submit");
+            foreach bool response in (False, True) {
+                WSMessage message = response ? op.output : op.input;
+                assertEq({"first": "{urn:first}item", "second": "{urn:second}item", "plain": "{}item"}, message.pmap);
+                assertEq({"first": False, "second": 0, "plain": ""}, decode(op, response, envelope(version)));
+                hash<auto> wire = encode(op, response, {"first": False, "second": 0, "plain": ""});
+                assertEq({"first": False, "second": 0, "plain": ""}, decode(op, response, parse_xml(wire.body)));
+                wire = encode(op, response, {"{urn:first}item": False, "{urn:second}item": 0, "{}item": ""});
+                assertEq({"first": False, "second": 0, "plain": ""}, decode(op, response, parse_xml(wire.body)));
+                assertThrows("SOAP-DESERIALIZATION-ERROR", \decode(), (op, response,
+                    parse_xml(replace(wire.body, "urn:first", "urn:wrong"))));
+                assertThrows("SOAP-SERIALIZATION-ERROR", \encode(), (op, response, {"item": False}));
+            }
+        }
+    }
+
+    headerParts() {
+        foreach string version in ("11", "12") {
+            WebService ws = service(version, True);
+            WSOperation op = ws.getBindingOperation("Soap", "submit");
+            foreach bool response in (False, True) {
+                string name = response ? "Response" : "Request";
+                hash<auto> expected = {"first": False, "plain": "", name: {"second": 0}};
+                assertEq(expected, decode(op, response, envelope(version, True)));
+                hash<auto> wire = encode(op, response, {"first": False, "second": 0, "plain": ""});
+                assertEq(expected, decode(op, response, parse_xml(wire.body)));
+                hash<auto> expanded = XsdBase::expandElementNamespaces(parse_xml(wire.body)).firstValue();
+                string ns = version == "12" ? "http://www.w3.org/2003/05/soap-envelope"
+                    : "http://schemas.xmlsoap.org/soap/envelope/";
+                assertEq(("{urn:second}item",), select keys expanded{"{" + ns + "}Header"}, $1 !~ /^\^/);
+                assertEq(("{urn:first}item", "{}item"), select keys expanded{"{" + ns + "}Body"}, $1 !~ /^\^/);
+            }
+        }
+    }
+
+    partScopes() {
+        string declarations = '<w:part name="first" xmlns="urn:first" element="item"/>
+            <w:part name="second" xmlns:a="urn:second" element="a:item"/>
+            <w:part name="plain" xmlns="" element="item"/>';
+        WebService ws = service("11", False, declarations);
+        assertEq({"first": False, "second": 0, "plain": ""},
+            decode(ws.getBindingOperation("Soap", "submit"), False, envelope("11")));
+        foreach string qname in ("missing:item", "b:missing", "a:item:extra") {
+            assertThrows(qname == "b:missing" ? "WSDL-ERROR" : "WSDL-NAMESPACE-ERROR", \service(),
+                ("11", False, replace(parts(), "a:item", qname)));
+        }
+        assertEq("urn:first", ws.nsc.getInputNamespaceUri("a"));
+        string scoped = replace(description("11"), '<w:message name="Request">',
+            '<w:message name="Request" xmlns:a="urn:second" xmlns:b="urn:first">');
+        WebService message_scoped(scoped, {"async_only": True});
+        WSMessage input = message_scoped.getBindingOperation("Soap", "submit").input;
+        assertEq("int", input.args{input.pmap.first}.element.type.name);
+        assertEq("boolean", input.args{input.pmap.second}.element.type.name);
+        assertEq("urn:first", message_scoped.nsc.getInputNamespaceUri("a"));
+    }
+
+    consumers() {
+        WebService original = service("12");
+        foreach WebService ws in (original, Serializable::deserialize(original.serialize())) {
+            WSOperation op = ws.getBindingOperation("Soap", "submit");
+            foreach WSMessage message in (op.input, op.output) {
+                AbstractDataProviderType provider = message.getDataProviderType();
+                assertEq(("first", "second", "plain"), keys provider.getFields());
+                assertEq({"first": False, "second": 0, "plain": ""},
+                    provider.acceptsValue({"first": False, "second": 0, "plain": ""}));
+                hash<auto> sample = new WSMessageHelper(ws).getMessage(message);
+                assertEq(("first", "second", "plain"), keys sample);
+                assertEq(sample, provider.acceptsValue(sample));
+                hash<auto> wire = encode(op, message == op.output, sample);
+                assertEq(sample, decode(op, message == op.output, parse_xml(wire.body)));
+            }
+        }
+    }
+
+    typePartCollision() {
+        foreach string version in ("11", "12") {
+            WebService ws = service(version, False, '<w:part name="first" element="a:item"/>
+                <w:part name="item" xmlns:xs="http://www.w3.org/2001/XMLSchema" type="xs:int"/>');
+            WSOperation op = ws.getBindingOperation("Soap", "submit");
+            foreach bool response in (False, True) {
+                WSMessage message = response ? op.output : op.input;
+                assertEq({"first": "{urn:first}item", "item": "item"}, message.pmap);
+                hash<auto> wire = encode(op, response, {"first": False, "item": 0});
+                assertEq({"first": False, "item": 0}, decode(op, response, parse_xml(wire.body)));
+                assertEq(("first", "item"), keys message.getDataProviderType().getFields());
+            }
+        }
+    }
+}

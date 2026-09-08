@@ -250,3 +250,111 @@ contracts; all twelve pass through provider default insertion, including simple 
 Requiredness metadata depends on the Qore `HashDataType` insertion-order fix in
 commit `5c8899669`. The interoperability README documents loading the rebuilt local
 DataProvider during development without installing it.
+
+## Incoming document element names
+
+Document bodies and declared SOAP headers resolve XML element names before schema
+matching. Namespace declarations apply to the declaring element itself and its
+descendants, with local rebinding and default namespace resets. The root of a
+global declaration is qualified by its target namespace; local declarations use
+their effective `form`. A payload with the right local name and the wrong URI
+raises `SOAP-DESERIALIZATION-ERROR`. Prefix spelling is immaterial.
+
+`XsdBase::expandElementNamespaces()` returns a separate parsed-XML hash keyed by
+`{uri}local`, including `{}local` for no namespace. Consecutive aliases for the
+same expanded name form one list; separated occurrences retain `^N` suffixes.
+False, zero, empty and null values are retained. Traversal restores one mutable
+scope map on every exit, and repeated lists are promoted once before appending.
+Only declarations used by attribute names are materialized when their scope
+would otherwise be detached. Metadata and existing local declarations remain
+in the hash; this helper does not retain every unused ancestor binding or replace an ordered XML
+representation for typed QName and mixed-content processing.
+
+Known element identities map back to the declared public record fields, so
+ordinary callers retain their native scalar and record types. Wildcard elements
+retain expanded keys. `restoreElementNamespaces()` converts these keys for the
+XML generator, allocates unused prefixes and explicitly resets empty namespaces.
+It reserves existing declarations and lexical generated-prefix references before
+allocation, preserving both existing QName bindings and undeclared references.
+The implicit XML namespace always uses `xml`.
+
+```qore
+hash<auto> value = XsdBase::expandElementNamespaces(parse_xml(
+    "<shipment xmlns='urn:shipping'><item xmlns='urn:stock'>009</item></shipment>"));
+string xml = make_xml(XsdBase::restoreElementNamespaces(value));
+```
+
+SoapHandler performs operation routing on a separate parsed hash. The original
+message reaches schema decoding without synthetic routing fields or stripped
+payload names. The real HTTP regression rejects a wrong SOAP 1.2 payload
+namespace and verifies that the next valid request succeeds.
+
+Tests are in `wsdl-element-namespaces.qtest`, `SoapHandler.qtest`, and
+`test/wsdl-interop/test_element_namespaces.py`. Independent lxml/Xerces checks
+cover actual SOAP 1.1/1.2 bindings in both directions, exact names and values,
+local/default/rebound namespaces and invalid qualification. The applicable
+rules are [XML namespace scoping/defaulting](https://www.w3.org/TR/REC-xml-names/#scoping)
+and [XSD element validity](https://www.w3.org/TR/xmlschema-1/#cvc-elt).
+
+## Colliding element fields
+
+Schema construction indexes local and referenced elements by their expanded
+names. Deferred references capture their namespace before resolution, so an
+imported reference is never temporarily indexed using the referring schema's
+namespace. Base and group maps are reindexed when incorporated into another
+type. Every complex type, including nested anonymous types, enters the
+resolution queue and selects its final field names after composition.
+
+One local-name count covers the type's elements and all its choices. A name
+that denotes only one expanded identity retains its existing field name. If
+more than one namespace uses that local name, every such field uses an expanded
+key. For example, an unqualified boolean `item` and an integer `item` in
+`urn:inventory` are represented as:
+
+```qore
+hash<auto> value = {"{}item": False, "{urn:inventory}item": 0};
+```
+
+Both keys appear in provider fields and generated examples. Serialization uses
+the element declaration's local XML name and namespace, independently of the
+public hash key. Choices and their alternatives use the same field mapping,
+including inherited choices. Finalizing a derived type does not rename fields
+in its base. Serializable schema/WebService reconstruction reapplies these rules.
+
+`test/wsdl-element-collisions.qtest` covers local forms, imported/no-namespace
+references, choices, inheritance, nested/reused groups, provider conversion,
+ambiguous/wrong input names and generated examples with anonymous types.
+`test/wsdl-interop/test_element_collisions.py` independently validates 136
+documents with lxml and pinned Xerces across actual SOAP 1.1/1.2 bindings in
+both directions, checking exact names, order, lexical values and provider types.
+
+## WSDL message part names
+
+`WSMessage` resolves each part's element QName in the message and part XML
+namespace scope. An unprefixed QName uses that scope's default namespace,
+including an explicit empty default. It never falls back to the WSDL target
+namespace. Part names remain unique within the message and serve as the keys
+for provider values and binding selection.
+
+Argument aliases are selected after every part has been resolved. A unique
+element local name keeps its existing alias. When names collide with another
+element or a type-part name, element aliases use expanded names; type parts
+keep their part names. `pmap` maps each part name to its argument key, so
+bindings select parts independently of XML prefix spelling. Output obtains
+the actual XML name from the element declaration; no-namespace roots are
+unqualified. Body/header parts can therefore share an element local name
+while retaining different namespace identities and values.
+
+For example, two parts named `approved` and `quantity` may both reference
+an element named `value`, one in `urn:approval` and one in `urn:stock`.
+Callers can supply `{"approved": False, "quantity": 0}`. Provider fields and
+multipart examples use those part names. Namespace-aware decoding returns
+the corresponding part values, with the existing message wrapper convention
+for SOAP headers. Single-part example generation retains its previous shape.
+
+Tests: `test/wsdl-message-identity.qtest`, `test/wsdl-interop/message-identity.qr`
+and `test/wsdl-interop/test_message_identity.py`. The independent test checks
+160 element documents, including header/body placement, both SOAP versions,
+both directions and provider/example reconstruction. Its explicitly failing
+P3 lexical-rejection assertions remain visible in the execution record.
+The namespace/part rules come from [WSDL 1.1 sections 2.3, 3.5 and 3.7](https://www.w3.org/TR/2001/NOTE-wsdl-20010315).

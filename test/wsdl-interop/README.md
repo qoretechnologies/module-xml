@@ -390,3 +390,25 @@ conversion before serialization. `getFields()` exposes `^value^` and `^attribute
 scalar choices are on `^value^`. Existing callers with valid bare scalars retain
 scalar outputs when every attribute is optional. Required attributes require the
 structured representation. Serializable schema and provider objects retain this contract.
+
+Incoming document element namespace checks are covered by
+`test/wsdl-element-namespaces.qtest`, the real HTTP `SoapHandler.qtest` regression,
+and `test_element_namespaces.py`. The latter validates 56 original/emitted
+documents with both independent validators and checks exact names, order,
+lexical values and retained QName bindings across actual SOAP 1.1/1.2 bindings
+in both directions. Declared elements retain the existing native record fields;
+wildcard elements use expanded XML keys. The generic expansion/restoration API
+is described in [the schema identity design](../../design/wsdl-schema-identity.md).
+`test/wsdl-element-collisions.qtest` and `test_element_collisions.py` cover
+same-local-name declaration collisions, including providers and generated
+examples. The independent suite checks 136 documents, with positive and negative
+names/values through actual SOAP 1.1/1.2 request/response bindings. Unambiguous
+fields keep their local names; colliding fields use expanded names in every
+public record consumer. `test/wsdl-message-identity.qtest` and
+`test_message_identity.py` cover multipart WSDL argument identities, part-scope
+QNames and body/header separation. Their independent matrix checks 160 element
+documents and provider/example reconstruction. Eight explicit P3 scalar
+subtests currently fail because invalid integer text decodes as zero; these
+remain failures alongside the existing P4/P6 subtests. Complete lossless consumer
+integration remains tracked under P2; wildcard validation semantics remain
+assigned to P5.

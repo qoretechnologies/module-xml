@@ -786,3 +786,37 @@ Full final 62-item audit: [audits/P2-25-native.md](audits/P2-25-native.md).
 Durable implementation contract: [../../design/xml-element-fragments.md](../../design/xml-element-fragments.md).
 P2 WSDL/value/consumer increments and documentation build hygiene remain
 uncommitted; phase acceptance and P3-P9 remain open.
+
+## P2-26 committed identity increment (2026-09-08)
+
+The P2-11/P2-12/P2-13 namespace work is now isolated on parent 049cf0d and
+ready as one complete identity increment. Element namespaces are resolved before
+matching, colliding fields retain expanded keys, WSDL message/part scopes select
+the correct declarations, and HTTP routing preserves the original parsed input.
+Ordinary unambiguous native fields and single-part examples retain their shape.
+The incomplete historical XML carrier is excluded; its complete implementation
+and consumers remain a following P2 increment.
+
+Validation: 24 affected Qore suites pass 362 cases with debugging enabled against
+isolated candidate qlib and the committed native Debug XML module. Namespace
+restoration tests use XmlReader directly, independently of the forthcoming carrier.
+The three independent Python suites finish all 56 namespace, 136 collision and
+160 message element documents with lxml and pinned Xerces. Eight invalid integer
+subtests remain explicit P3 failures; all P2 identity assertions pass. Candidate
+WSDL and SoapHandler docs generate without warnings/errors after correcting two
+existing parameter comment tags included in this change. No C++ changes.
+
+The both-version request survey and full strict coverage are recursively identical
+to the P2-13 reports except version metadata. The request survey covers 293 WSDLs
+and 1136 messages: 279 parse successes, 1006 decodes, 1004 serializations, 972 valid
+outputs and 32 rejected outputs. Fourteen invalid source descriptions still fail.
+Strict selected failures are zero. All 360 broad failures remain visible with
+zero missing/skipped stages; P3/P4/P5 and the previously identified P2-to-P5 runtime
+cases retain their ownership. No conformance completion is claimed.
+
+Logs: /tmp/wsdl-p2-26-schema-tests.log, /tmp/wsdl-p2-26-independent.log,
+/tmp/wsdl-p2-26-docs.log (WSDL succeeds; historical handler warning corrected),
+/tmp/wsdl-p2-26-handler-docs.log, /tmp/wsdl-p2-26-{survey,coverage}.log.
+Reports: /tmp/wsdl-survey-p2-26.json and /tmp/wsdl-coverage-p2-26.json.
+The final full 62-item audit is [P2-26-identity](audits/P2-26-identity.md).
+No installation, push or astparser changes.

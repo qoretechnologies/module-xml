@@ -1,0 +1,158 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires xml
+%requires ../qlib/WSDL.qm
+%exec-class ElementCollisionsTest
+
+class ElementCollisionsTest inherits QUnit::Test {
+    private {
+        const Ns = "urn:qore:element-collisions";
+        const Xsd = "http://www.w3.org/2001/XMLSchema";
+    }
+
+    constructor() : QUnit::Test("WSDL colliding element declaration identities", "1.0") {
+        addTestCase("Local form collisions retain both types and wire names", \localForms());
+        addTestCase("Choice collisions select by expanded identity", \choices());
+        addTestCase("Imported global references retain three distinct identities", \references());
+        addTestCase("Derived and grouped fields do not overwrite inherited identities", \composedFields());
+        addTestCase("Provider fields and schema reconstruction retain collision keys", \consumers());
+        addTestCase("Generated examples retain nested anonymous and choice field keys", \examples());
+        set_return_value(main());
+    }
+
+    private string schema(string body) {
+        return sprintf('<xs:schema xmlns:xs="%s" xmlns:t="%s" targetNamespace="%s">%s</xs:schema>',
+            Xsd, Ns, Ns, body);
+    }
+
+    private XsdSchema parse(string body) {
+        return new XsdSchema(schema(body), {"async_only": True});
+    }
+
+    private XsdComplexType record(XsdSchema s, string name = "Record") {
+        return cast<XsdComplexType>(s.findType(make_qname(Ns, name)));
+    }
+
+    private string declarationElements() {
+        return '<xs:element name="item" type="xs:boolean" form="unqualified"/>
+            <xs:element name="item" type="xs:int" form="qualified"/>';
+    }
+
+    private hash<auto> input() {
+        return {"{}item": False, "{" + Ns + "}item": 0};
+    }
+
+    private hash<auto> decode(XsdSchema s, hash<auto> value, string name = "Record") {
+        return record(s, name).deserializeValue(name, s.getTypeMap(), NOTHING, value);
+    }
+
+    private checkBoth(XsdSchema s) {
+        XsdComplexType t = record(s);
+        assertEq(("{}item", "{" + Ns + "}item"), keys t.elementmap);
+        assertEq("boolean", t.elementmap."{}item".type.name);
+        assertEq("int", t.elementmap{"{" + Ns + "}item"}.type.name);
+        assertEq(input(), decode(s, {"{}item": "false", "{" + Ns + "}item": "0"}));
+        hash<auto> wire = t.serializeValue(s.nsc, input(), True);
+        assertEq(("item", s.nsc.getOutputNamespacePrefix(Ns) + ":item"), keys wire);
+        assertEq("false", wire.item);
+        assertEq(0, wire{s.nsc.getOutputNamespacePrefix(Ns) + ":item"});
+        assertThrows("SOAP-SERIALIZATION-ERROR", \t.serializeValue(), (s.nsc, {"item": 0}, True));
+        assertThrows("SOAP-DESERIALIZATION-ERROR", \decode(), (s, {"{}item": "false", "{urn:wrong}item": "0"}));
+    }
+
+    localForms() {
+        foreach string model in ("sequence", "all") {
+            XsdSchema s = parse(sprintf('<xs:complexType name="Record"><xs:%s>%s</xs:%s></xs:complexType>',
+                model, declarationElements(), model));
+            checkBoth(s);
+        }
+    }
+
+    choices() {
+        foreach bool nested in (False, True) {
+            string model = '<xs:choice>' + declarationElements() + '</xs:choice>';
+            if (nested) {
+                model = '<xs:sequence>' + model + '</xs:sequence>';
+            }
+            XsdSchema s = parse('<xs:complexType name="Record">' + model + '</xs:complexType>');
+            assertEq({"{}item": False}, decode(s, {"{}item": "false"}));
+            assertEq({"{" + Ns + "}item": 0}, decode(s, {"{" + Ns + "}item": "0"}));
+            assertThrows("SOAP-DESERIALIZATION-ERROR", \decode(), (s, {"item": "0"}));
+            assertThrows("SOAP-DESERIALIZATION-ERROR", \decode(), (s, {"{}item": "false", "{" + Ns + "}item": "0"}));
+            XsdComplexType t = record(s);
+            assertEq({"item": "false"}, t.serializeValue(s.nsc, {"{}item": False}, True));
+        }
+    }
+
+    references() {
+        XsdSchema s(sprintf('<xs:schema xmlns:xs="%s"><xs:element name="item" type="xs:boolean"/></xs:schema>', Xsd));
+        s.addSchemaString(sprintf('<xs:schema xmlns:xs="%s" targetNamespace="urn:other">
+            <xs:element name="item" type="xs:string"/></xs:schema>', Xsd));
+        s.addSchemaString(schema('<xs:import/><xs:import namespace="urn:other"/>
+            <xs:complexType name="Record"><xs:sequence><xs:element ref="item"/>
+            <xs:element ref="t:item"/><xs:element xmlns:t="urn:other" ref="t:item"/>
+            </xs:sequence></xs:complexType><xs:element name="item" type="xs:int"/>'));
+        assertEq(("{}item", "{" + Ns + "}item", "{urn:other}item"), keys record(s).elementmap);
+        assertEq({"{}item": False, "{" + Ns + "}item": 0, "{urn:other}item": ""},
+            decode(s, {"{}item": "false", "{" + Ns + "}item": "0", "{urn:other}item": ""}));
+        assertEq("", record(s).elementmap."{}item".ns);
+        assertEq("urn:other", record(s).elementmap."{urn:other}item".ns);
+        assertEq(Ns, s.nsc.getInputNamespaceUri("t"));
+    }
+
+    composedFields() {
+        XsdSchema derived = parse('<xs:complexType name="Base"><xs:sequence>
+            <xs:element name="item" type="xs:boolean"/></xs:sequence></xs:complexType>
+            <xs:complexType name="Record"><xs:complexContent><xs:extension base="t:Base"><xs:sequence>
+            <xs:element name="item" type="xs:int" form="qualified"/></xs:sequence>
+            </xs:extension></xs:complexContent></xs:complexType>');
+        checkBoth(derived);
+        assertEq(("item",), keys record(derived, "Base").elementmap);
+        assertEq({"item": False}, decode(derived, {"{}item": "false"}, "Base"));
+        XsdSchema grouped = parse('<xs:group name="Inner"><xs:sequence>' + declarationElements() + '</xs:sequence></xs:group>
+            <xs:group name="Outer"><xs:sequence><xs:group ref="t:Inner"/></xs:sequence></xs:group>
+            <xs:complexType name="Record"><xs:group ref="t:Outer"/></xs:complexType>
+            <xs:complexType name="Reused"><xs:group ref="t:Inner"/></xs:complexType>');
+        checkBoth(grouped);
+        assertEq(keys record(grouped).elementmap, keys record(grouped, "Reused").elementmap);
+    }
+
+    consumers() {
+        XsdSchema original = parse('<xs:complexType name="Record"><xs:sequence>' + declarationElements()
+            + '<xs:element name="text" type="xs:string"/></xs:sequence></xs:complexType>');
+        foreach XsdSchema s in (original, Serializable::deserialize(original.serialize())) {
+            AbstractDataProviderType provider = record(s).getDataProviderType();
+            assertEq(("{}item", "{" + Ns + "}item", "text"), keys provider.getFields());
+            assertEq(input() + {"text": ""}, provider.acceptsValue(
+                {"{}item": False, "{" + Ns + "}item": 0, "text": ""}));
+            assertThrows("MISSING-VALUE-ERROR", \provider.acceptsValue(), ({"item": 0, "text": ""},));
+        }
+    }
+
+    examples() {
+        foreach string model in ("sequence", "choice") {
+            WebService original(sprintf('<w:definitions xmlns:w="http://schemas.xmlsoap.org/wsdl/" xmlns:t="%s"
+                targetNamespace="%s"><w:types>%s</w:types></w:definitions>', Ns, Ns,
+                schema('<xs:element name="record"><xs:complexType><xs:sequence><xs:element name="payload">
+                <xs:complexType><xs:' + model + '>' + declarationElements() + '</xs:' + model
+                + '></xs:complexType></xs:element></xs:sequence></xs:complexType></xs:element>')),
+                {"async_only": True});
+            foreach WebService ws in (original, Serializable::deserialize(original.serialize())) {
+                XsdElement root = ws.getElement(Ns, "record");
+                hash<auto> sample = new WSMessageHelper(ws).getMessage(root).record;
+                assertEq(model == "sequence" ? ("{}item", "{" + Ns + "}item") : ("{}item",), keys sample.payload);
+                assertEq(sample, root.getDataProviderType().acceptsValue(sample));
+                hash<auto> wire = root.type.serializeValue(ws.nsc, sample, True);
+                assertEq(model == "sequence" ? ("item", ws.nsc.getOutputNamespacePrefix(Ns) + ":item")
+                    : ("item",), keys wire.payload);
+                hash<auto> full = new WSMessageHelper(ws, {"choices": True}).getMessage(root).record;
+                auto choices = model == "choice" ? full.payload."^choices1^" : full.payload;
+                assertEq(("{}item", "{" + Ns + "}item"), keys choices);
+            }
+        }
+    }
+}

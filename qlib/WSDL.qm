@@ -80,6 +80,17 @@ module WSDL {
     @section wsdlrelnotes WSDL Module Release Notes
 
     @subsection wsdl_0_5_8 WSDL v0.5.8
+    - message parts resolve element QNames in their actual message/part namespace scope; parts referring
+      to different element namespaces can share a local name, including body/header separation
+    - multipart message examples now include every part, using the same part names as provider fields;
+      document output uses the referenced element name, including roots in no namespace
+    - element fields with the same local name in different namespaces now use expanded-name keys;
+      inherited/grouped declarations, choices, provider fields and generated examples retain each identity,
+      while unambiguous fields keep their existing local names
+    - document message bodies and declared SOAP headers now match element namespace URIs as well as local
+      names; wrong qualification and unbound prefixes fail before schema value conversion
+    - added \c XsdBase::expandElementNamespaces() and \c XsdBase::restoreElementNamespaces() for parsed
+      XML element identities and namespace-safe wildcard output, preserving repeated values and order
     - fixed declaration-local namespace resolution for element and simple type QNames, including
       default-namespace resets and shadowed prefixes; internal type resolution uses expanded names
       without falling back to unrelated local-name aliases
@@ -258,7 +269,7 @@ module WSDL {
       (<a href="https://github.com/qorelanguage/qore/issues/2899">issue 2899</a>)
     - added support for \c token and \c normalizedString types
       (<a href="https://github.com/qorelanguage/qore/issues/2859">issue 2859</a>)
-    - fixed @ref WSDLLib::getWSDL() when passed a WSDL string with no XML preamble
+    - fixed @ref WSDL::WSDLLib::getWSDL when passed a WSDL string with no XML preamble
       (<a href="https://github.com/qorelanguage/qore/issues/2857">issue 2857</a>)
     - fixed handling of XSD attribute names with non-word characters
       (<a href="https://github.com/qorelanguage/qore/issues/2856">issue 2856</a>)
@@ -585,7 +596,7 @@ public class WSDLLib {
         is performed on the path string
 
         @note uses the \c FileLocationHandler module to retrieve file data for all schemes except \c "file://" and
-        \c "http(s)://", which uses @ref WSDL::WSDLLib::getFileFromUrl() "WSDLLib::getFileFromUrl()" and
+        \c "http(s)://", which uses @ref WSDL::WSDLLib::getFileFromURL() "WSDLLib::getFileFromURL()" and
         @ref WSDL::WSDLLib::getHTTP() "WSDLLib::getHTTP()" respectively for backwards compatibility
      */
     static data getFileFromURL(string url, string def_protocol = "file", *HTTPClient http_client,
@@ -611,7 +622,7 @@ public class WSDLLib {
         is performed on the path string
 
         @note uses the \c FileLocationHandler module to retrieve file data for all schemes except \c "file://" and
-        \c "http(s)://", which uses @ref WSDL::WSDLLib::getFileFromUrl() "WSDLLib::getFileFromUrl()" and
+        \c "http(s)://", which uses @ref WSDL::WSDLLib::getFileFromURL() "WSDLLib::getFileFromURL()" and
         @ref WSDL::WSDLLib::getHTTP() "WSDLLib::getHTTP()" respectively for backwards compatibility
      */
     static data getFileFromURL(string url, hash<auto> u, string def_protocol = "file", *HTTPClient http_client,
@@ -676,7 +687,7 @@ public class WSDLLib {
     }
 
     #! returns a WebService object from a URL and other optional arguments
-    /** @param the URL to use to retrieve the file, the \c "file://", \c "http://", \c "https://", and \c "ftp://" schemes are supported, if no scheme is present, then \c "file://" is assumed
+    /** @param url the URL to use to retrieve the file, the \c "file://", \c "http://", \c "https://", and \c "ftp://" schemes are supported, if no scheme is present, then \c "file://" is assumed
         @param http_client an optional HTTPClient object to use to retrieve external schemas, if no HTTPClient object is passed and one is needed, an HTTPClient object will be created implicitly
         @param http_headers any HTTP headers to send with requests when retrieving external XSD schemas
     */
@@ -1041,7 +1052,7 @@ public class XsdBase inherits Qore::Serializable {
     }
 
     private static validateAttributeNamespace(string prefix, auto uri) {
-        if (uri.typeCode() != NT_STRING || !uri || !prefix || prefix =~ /[:\s]/ || prefix == "xmlns"
+        if (uri.typeCode() != NT_STRING || !uri || !Namespaces::isNCName(prefix) || prefix == "xmlns"
                 || uri == "http://www.w3.org/2000/xmlns/"
                 || ((prefix == "xml") != (uri == "http://www.w3.org/XML/1998/namespace"))) {
             throw SOAP_DESERIALIZATION_ERROR, sprintf("invalid XML namespace binding %Y to %Y", prefix, uri);
@@ -1142,6 +1153,246 @@ public class XsdBase inherits Qore::Serializable {
         return expanded;
     }
 
+    #! returns in-scope XML namespaces, including the default namespace under an empty key
+    /** @param attributes namespace declarations on the current element
+        @param inherited namespace bindings from the parent
+        @return validated prefix-to-URI bindings, including the implicit xml prefix
+        @throw SOAP-DESERIALIZATION-ERROR an invalid or reserved namespace binding
+        @since %WSDL 0.5.8
+    */
+    static hash<string, string> getElementNamespaces(*hash<auto> attributes,
+            *hash<string, string> inherited) {
+        hash<string, string> prefixes = inherited ?? {};
+        *string default_ns = remove prefixes{""};
+        hash<string, string> namespaces = getAttributeNamespaces(attributes, prefixes);
+        if (attributes.hasKey("xmlns")) {
+            if (attributes.xmlns.typeCode() != NT_STRING) {
+                throw SOAP_DESERIALIZATION_ERROR, "the default XML namespace must be a string";
+            }
+            default_ns = attributes.xmlns;
+        }
+        if (exists default_ns) {
+            if (default_ns == "http://www.w3.org/XML/1998/namespace"
+                    || default_ns == "http://www.w3.org/2000/xmlns/") {
+                throw SOAP_DESERIALIZATION_ERROR, sprintf("reserved default XML namespace %Y", default_ns);
+            }
+            namespaces{""} = default_ns;
+        }
+        return namespaces;
+    }
+
+    #! resolves parsed XML element keys before schema matching
+    /** @param value a parsed XML document or element-content hash
+        @param inherited namespace bindings from its enclosing element
+        @return a separate hash keyed by expanded names; attributes and lexical values are retained
+        @note Unqualified element names use the in-scope default namespace. Namespace declarations on an
+        element apply to its own name. Repeated names retain their values and insertion order, including
+        the XML parser's occurrence suffixes. The input is not modified.
+        @throw SOAP-DESERIALIZATION-ERROR an unbound prefix, malformed name or invalid namespace declaration
+        @par Example
+        @code{.py}
+        hash<auto> elements = XsdBase::expandElementNamespaces(parse_xml("<p:price xmlns:p='urn:invoice'>009</p:price>"));
+        string lexical = elements."{urn:invoice}price"."^value^";
+        @endcode
+        @since %WSDL 0.5.8
+    */
+    static hash<auto> expandElementNamespaces(hash<auto> value, *hash<string, string> inherited) {
+        hash<string, string> namespaces = getElementNamespaces(NOTHING, inherited);
+        string unused_name;
+        return expandElementNamespacesIntern("", value, \namespaces, \unused_name);
+    }
+
+    private static auto expandElementNamespacesIntern(string name, auto value,
+            reference<hash<string, string>> namespaces, reference<string> expanded_name) {
+        if (value.typeCode() == NT_HASH && exists value."^attributes^"
+                && value."^attributes^".typeCode() != NT_HASH) {
+            throw SOAP_DESERIALIZATION_ERROR, "XML attributes must be represented by a hash";
+        }
+        hash<string, string> declared = getElementNamespaces(value."^attributes^");
+        hash<string, string> previous();
+        list<string> added();
+        on_exit {
+            foreach string prefix in (keys previous) {
+                namespaces{prefix} = previous{prefix};
+            }
+            map remove namespaces{$1}, added;
+        }
+        foreach string prefix in (keys declared) {
+            if (namespaces.hasKey(prefix)) {
+                previous{prefix} = namespaces{prefix};
+            } else {
+                added += prefix;
+            }
+            namespaces{prefix} = declared{prefix};
+        }
+        if (name) {
+            name =~ s/\^[0-9]+$//;
+            list<string> parts = name.split(":");
+            if (parts.size() > 2 || name =~ /(^:|:$)/ || (select parts, !Namespaces::isNCName($1))) {
+                throw SOAP_DESERIALIZATION_ERROR, sprintf("invalid XML element name %Y", name);
+            }
+            string uri;
+            if (parts.size() == 2) {
+                if (!namespaces{parts[0]} || parts[0] == "xmlns") {
+                    throw SOAP_DESERIALIZATION_ERROR, sprintf("unbound XML element prefix %Y", parts[0]);
+                }
+                uri = namespaces{parts[0]};
+            } else {
+                uri = namespaces{""} ?? "";
+            }
+            expanded_name = type_qname(uri, parts[-1]);
+        }
+        if (value.typeCode() != NT_HASH) {
+            return value;
+        }
+        # Keep the bindings used by attributes available after their enclosing scope is detached.
+        # Copying every inherited declaration onto every descendant would grow quadratically.
+        foreach string key in (keys value."^attributes^") {
+            *string prefix = (key =~ x/^([^:]+):[^:]+$/)[0];
+            if (prefix && prefix != "xmlns" && prefix != "xml" && namespaces{prefix}) {
+                value."^attributes^"{"xmlns:" + prefix} = namespaces{prefix};
+            }
+        }
+        getExpandedAttributes(value."^attributes^");
+        hash<auto> result();
+        hash<string, int> occurrences();
+        foreach string key in (keys value) {
+            if (key =~ /^[\^.]/) {
+                result{key} = value{key};
+                continue;
+            }
+            list<auto> children = value{key}.typeCode() == NT_LIST ? value{key} : (value{key},);
+            if (!children) {
+                throw SOAP_DESERIALIZATION_ERROR, sprintf("empty XML element occurrence list for %Y", key);
+            }
+            foreach auto child in (children) {
+                string identity;
+                auto content = expandElementNamespacesIntern(key, child, \namespaces, \identity);
+                string last_key = result.lastKey() ?? "";
+                string last_identity = last_key;
+                last_identity =~ s/\^[0-9]+$//;
+                if (last_identity == identity) {
+                    if (result{last_key}.typeCode() != NT_LIST) {
+                        list<auto> repeated();
+                        repeated += (result{last_key},);
+                        result{last_key} = repeated;
+                    }
+                    result{last_key} += (content,);
+                } else if (result.hasKey(identity)) {
+                    result{identity + "^" + (++occurrences{identity})} = content;
+                } else {
+                    result{identity} = content;
+                }
+            }
+        }
+        return result;
+    }
+
+    #! prepares expanded XML element names for the XML generator
+    /** @param value XML data with expanded element keys and retained namespace declarations
+        @return XML generator data with local, non-conflicting prefix declarations
+        @note Prefix allocation preserves retained bindings and lexical values. An empty-namespace element
+        explicitly resets a default namespace. Existing lexical element keys remain supported.
+        @throw SOAP-SERIALIZATION-ERROR a malformed expanded element name
+        @par Example
+        @code{.py}
+        string xml = make_xml(XsdBase::restoreElementNamespaces({"{urn:invoice}price": "009"}));
+        @endcode
+        @since %WSDL 0.5.8
+    */
+    static hash<auto> restoreElementNamespaces(hash<auto> value) {
+        hash<string, bool> reserved();
+        collectElementNamespacePrefixes(value, \reserved);
+        hash<string, string> prefixes();
+        int next_prefix = 0;
+        return restoreElementNamespacesIntern(value, \reserved, \prefixes, \next_prefix);
+    }
+
+    private static collectElementNamespacePrefixes(auto value, reference<hash<string, bool>> reserved) {
+        if (value.typeCode() == NT_HASH) {
+            foreach string key in (keys value) {
+                if (key =~ /^xmlns:/) {
+                    reserved{substr(key, 6)} = True;
+                }
+                collectElementNamespacePrefixes(key, \reserved);
+                collectElementNamespacePrefixes(value{key}, \reserved);
+            }
+        } else if (value.typeCode() == NT_LIST) {
+            foreach auto child in (value) {
+                collectElementNamespacePrefixes(child, \reserved);
+            }
+        } else if (value.typeCode() == NT_STRING) {
+            # Also avoid creating a new meaning for a lexical QName using an undeclared prefix.
+            foreach string prefix in (value =~ x/(qorexml[0-9]+):/g) {
+                reserved{prefix} = True;
+            }
+        }
+    }
+
+    private static auto restoreElementNamespacesIntern(auto value, reference<hash<string, bool>> reserved,
+            reference<hash<string, string>> prefixes, reference<int> next_prefix) {
+        if (value.typeCode() == NT_LIST) {
+            list<auto> result();
+            foreach auto child in (value) {
+                result += (restoreElementNamespacesIntern(child, \reserved, \prefixes, \next_prefix),);
+            }
+            return result;
+        }
+        if (value.typeCode() != NT_HASH) {
+            return value;
+        }
+        hash<auto> result();
+        foreach string key in (keys value) {
+            if (key == "^attributes^") {
+                result{key} = value{key};
+                continue;
+            }
+            auto child = restoreElementNamespacesIntern(value{key}, \reserved, \prefixes, \next_prefix);
+            if (key !~ /^\{/) {
+                result{key} = child;
+                continue;
+            }
+            (*string uri, *string local, *string suffix) = key =~ x/^\{([^}]*)\}([^\^]+)(\^[0-9]+)?$/;
+            if (!exists uri || !exists local || !Namespaces::isNCName(local)) {
+                throw SOAP_SERIALIZATION_ERROR, sprintf("invalid expanded XML element name %Y", key);
+            }
+            string prefix;
+            if (uri == "http://www.w3.org/2000/xmlns/") {
+                throw SOAP_SERIALIZATION_ERROR, "XML element names cannot use the xmlns namespace";
+            }
+            if (uri == "http://www.w3.org/XML/1998/namespace") {
+                prefix = "xml";
+            } else if (uri) {
+                if (!prefixes.hasKey(uri)) {
+                    do {
+                        prefix = "qorexml" + next_prefix++;
+                    } while (reserved{prefix});
+                    prefixes{uri} = prefix;
+                    reserved{prefix} = True;
+                }
+                prefix = prefixes{uri};
+            }
+            list<auto> children = child.typeCode() == NT_LIST ? child : (child,);
+            list<auto> prepared();
+            foreach auto content in (children) {
+                hash<auto> node();
+                if (content.typeCode() == NT_HASH) {
+                    node += content;
+                } else {
+                    node."^value^" = content;
+                }
+                node."^attributes^"{prefix ? "xmlns:" + prefix : "xmlns"} = uri;
+                prepared += (node,);
+            }
+            string name = (prefix ? prefix + ":" : "") + local + (suffix ?? "");
+            if (result.hasKey(name)) {
+                throw SOAP_SERIALIZATION_ERROR, sprintf("duplicate XML generator key %Y", name);
+            }
+            result{name} = child.typeCode() == NT_LIST ? prepared : prepared[0];
+        }
+        return result;
+    }
+
     #! returns whether an expanded attribute belongs to schema-instance or SOAP encoding metadata
     /** @param identity the expanded attribute name
         @return True for recognized infrastructure namespaces
@@ -1192,18 +1443,22 @@ public class XsdBase inherits Qore::Serializable {
     static removeNS2(reference v) {
         foreach hash<auto> h in (\v) {
             foreach string k in (keys h) {
-                (*string ns, *string name) = k =~ x/([^:]+):([^:]+)/;
+                if (k =~ /^[\^.{]/) {
+                    continue;
+                }
+                (*string ns, *string name) = k =~ x/^([^:]+):([^:]+)$/;
                 if (ns) {
                     switch (h{k}.typeCode()) {
                         case NT_HASH: h{k}.".ns" = ns; break;
                         case NT_LIST: h{k} = map $1 + (".ns": ns), h{k}; break;
                     }
-                    if (h{name}) {
+                    if (h.hasKey(name)) {
                         softlist<auto> l = h{name};
                         l += remove h{k};
                         h{name} = l;
-                    } else
+                    } else {
                         h{name} = remove h{k};
+                    }
                 }
             }
         }
@@ -1232,6 +1487,7 @@ public class XsdBase inherits Qore::Serializable {
         }
     }
 }
+
 
 #! base class for XSD data classes
 public class XsdData inherits WSDL::XsdBase {
@@ -1451,6 +1707,7 @@ public class XsdBaseType inherits WSDL::XsdAbstractType {
         return XsdBaseType::WhiteSpaceMap{name} ?? "collapse";
     }
 
+    #! serializes a value using the lexical representation of this built-in XSD type
     auto serializeValue(Namespaces nsc, auto val, *softbool omitType) {
         *hash<auto> comments;
         if (val.typeCode() == NT_HASH) {
@@ -2092,6 +2349,7 @@ public class XsdBaseType inherits WSDL::XsdAbstractType {
         "string": SoftStringType,
     };
 
+    #! returns the data provider type used to accept values for this XSD type
     AbstractDataProviderType getDataProviderType() {
         # XSD booleans need a type that parses string values according to the XSD boolean lexical space; a plain
         # "softbool" would convert the string "false" to True
@@ -2597,6 +2855,49 @@ public class XsdAttribute inherits WSDL::XsdTypedData {
     }
 }
 
+# Internal field indexing shared by element groups and complex types.
+class XsdElementFieldHelper {
+    # Reindex maps during schema construction before selecting compatible public field names.
+    static hash<string, XsdElement> getExpandedMap(hash<string, XsdElement> element_map) {
+        hash<string, XsdElement> result();
+        foreach XsdElement element in (element_map.iterator()) {
+            result{element.getExpandedName()} = element;
+        }
+        return result;
+    }
+
+    static hash<string, string> getFieldNames(softlist<hash<string, XsdElement>> maps) {
+        hash<string, string> identities();
+        hash<string, int> counts();
+        foreach hash<string, XsdElement> element_map in (maps) {
+            foreach XsdElement element in (element_map.iterator()) {
+                string identity = element.getExpandedName();
+                if (!identities.hasKey(identity)) {
+                    identities{identity} = element.name;
+                    ++counts{element.name};
+                }
+            }
+        }
+        hash<string, string> result();
+        foreach string identity in (keys identities) {
+            string name = identities{identity};
+            result{identity} = counts{name} == 1 ? name : identity;
+        }
+        return result;
+    }
+
+    static hash<string, XsdElement> getFieldMap(hash<string, XsdElement> element_map,
+            hash<string, string> fields) {
+        hash<string, XsdElement> result();
+        foreach XsdElement element in (element_map.iterator()) {
+            string identity = element.getExpandedName();
+            @assert(fields.hasKey(identity));
+            result{fields{identity}} = element;
+        }
+        return result;
+    }
+}
+
 #! XSD element class
 public class XsdElement inherits WSDL::XsdTypedData {
     public {
@@ -2714,6 +3015,24 @@ public class XsdElement inherits WSDL::XsdTypedData {
 
     bool isNillable() {
         return nillable;
+    }
+
+    #! returns the expanded XML name required by this element declaration
+    /** @return the namespace/local identity, using an empty namespace for unqualified local elements
+        @since %WSDL 0.5.8
+    */
+    string getExpandedName() {
+        return type_qname(ref ? ref_ns : (usedocns ? ns : ""), name);
+    }
+
+    #! returns the XML output name for this element declaration
+    /** @param namespaces the output namespace registry
+        @return the declared local name, qualified with an output prefix when its namespace is nonempty
+        @since %WSDL 0.5.8
+    */
+    string getXmlName(Namespaces namespaces) {
+        *string uri = ref ? ref_ns : (usedocns ? ns : "");
+        return uri ? namespaces.getOutputNamespacePrefix(uri) + ":" + name : name;
     }
 
     auto serializeValue(Namespaces nsc, auto h, *softbool omitType, string key, string typename) {
@@ -3777,7 +4096,7 @@ public class XsdRegexHelper {
     #! returns the PCRE character range for an XSD \c "\p{IsXxx}" block name, if it is known
     /** @param prop the property name from the escape, ex: \c "IsBasicLatin"
 
-        @return the corresponding character range (ex: \c "\x{0000}-\x{007F}"), or @ref nothing if \a prop does
+        @return the corresponding character range (ex: \c "\x{0000}-\x{007F}"), or \c NOTHING if \a prop does
         not name a Unicode block
 
         @since %WSDL 0.5.8
@@ -3802,14 +4121,15 @@ public class XsdRegexHelper {
     const SampleChars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
         + " -_.:+@!$#%&*/=?,;'<>()[]{}|~^\"\\\t\n\r";
 
-    #! returns the shortest value matching the given XSD pattern, or @ref nothing if none can be generated
+    #! returns the shortest value matching the given XSD pattern, or \c NOTHING if none can be generated
     /** Only the constructs that appear in practice are supported; if the pattern uses anything else, or if the
-        generated value does not match the pattern, @ref nothing is returned so that the caller can fall back to
+        generated value does not match the pattern, \c NOTHING is returned so that the caller can fall back to
         its own default.
 
         @param xsd the XSD regular expression to generate a value for
+        @param min_reps minimum repetitions to use for optional pattern components
 
-        @return the shortest value matching \a xsd, or @ref nothing if none could be generated
+        @return the shortest value matching \a xsd, or \c NOTHING if none could be generated
     */
     static *string getSampleValue(string xsd, int min_reps = 0) {
         int i = 0;
@@ -4603,7 +4923,7 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
     /** @param min_length the minimum length the value must have, if any
 
         @return a value matching the \c pattern facets declared in this type or in one of its base types, or
-        @ref nothing if none could be generated
+        \c NOTHING if none could be generated
 
         @since %WSDL 0.5.8
     */
@@ -4915,6 +5235,7 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
 public class XsdGroup inherits WSDL::XsdNamedData, Qore::Serializable {
     public {
         #! Elements in this group (from sequence, choice, or all)
+        /** After resolution, unambiguous fields use local names; colliding fields use expanded names. */
         hash<string, XsdElement> groupElements();
         #! The group content model type: "sequence", "choice", or "all"
         *string contentModel;
@@ -4950,7 +5271,7 @@ public class XsdGroup inherits WSDL::XsdNamedData, Qore::Serializable {
         WSDL::XsdBase::removeNS(\content);
         foreach hash<auto> e in (content.element) {
             XsdElement elem(e, nsc, NOTHING, unresolved, usedocns);
-            groupElements{elem.name} = elem;
+            groupElements{elem.getExpandedName()} = elem;
         }
         if (content.hasKey("group") && !content.group) {
             throw WSDL_ERROR, "group reference requires ref";
@@ -4986,13 +5307,14 @@ public class XsdGroup inherits WSDL::XsdNamedData, Qore::Serializable {
                 throw WSDL_ERROR, sprintf("undefined group reference %Y", key);
             }
             group.resolveNestedGroups(groups);
-            merged_elements += group.getElements();
+            merged_elements += XsdElementFieldHelper::getExpandedMap(group.getElements());
         }
-        groupElements = merged_elements;
+        groupElements = XsdElementFieldHelper::getFieldMap(merged_elements, XsdElementFieldHelper::getFieldNames(merged_elements));
         resolved = True;
     }
 
     #! Returns the elements in this group
+    /** @return resolved fields keyed by local name where unique, otherwise by expanded name */
     hash<string, XsdElement> getElements() {
         return groupElements;
     }
@@ -5136,6 +5458,12 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
 
         bool usedocns;
 
+        #! Resolved element fields in this complex type
+        /** Unambiguous fields keep local names. Every field sharing a local name with another namespace
+            uses its expanded \c {namespace-uri}local-name, including \c {}local-name for no namespace.
+            Choice fields follow the same naming rule across the complete type.
+            @since %WSDL 0.5.8
+        */
         hash<string, XsdElement> elementmap();
         bool anyAttribute = False;
 
@@ -5190,6 +5518,8 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
             : XsdAbstractType(\ct, nsc, desc_name) {
         NamespacePrefixHelper declaration(nsc, ct."^attributes^");
         usedocns = n_usedocns;
+        # Anonymous nested types also need group/base resolution and final field-name selection.
+        on_success unresolved.add(self);
         #any a = ct."^attributes^";
         delete ct."^attributes^";
 
@@ -5309,7 +5639,6 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
                 }
             }
 
-            unresolved.add(self);
         } else if (ct) {
             parseData(ct, unresolved, nsc);
         } else {
@@ -5398,7 +5727,7 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
                 base.finalize(tmap, nsc, groupMap, attrGroupMap, unresolved);
                 attrs = XsdAttribute::mergeMaps(getInheritedAttributes(base), attrs, True);
                 if (extension) {
-                    elementmap = base.elementmap + elementmap;
+                    elementmap = XsdElementFieldHelper::getExpandedMap(base.elementmap) + elementmap;
                     choices = base.choices + choices;
                     if (cx_type == XET_NONE || !cx_type) {
                         cx_type = base.cx_type;
@@ -5449,11 +5778,25 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
                             }
                         }
                     }
-                    elementmap += groupElements;
+                    elementmap += XsdElementFieldHelper::getExpandedMap(groupElements);
                 }
             }
         }
+        finalizeElementFields();
+    }
 
+    private finalizeElementFields() {
+        list<hash<string, XsdElement>> maps = (elementmap,);
+        foreach hash<ChoiceInfo> choice in (choices) {
+            maps += (choice.elementmap,);
+        }
+        hash<string, string> fields = XsdElementFieldHelper::getFieldNames(maps);
+        elementmap = XsdElementFieldHelper::getFieldMap(elementmap, fields);
+        alternatives = map XsdElementFieldHelper::getFieldMap($1, fields), alternatives;
+        for (int i = 0; i < choices.size(); ++i) {
+            choices[i].elementmap = XsdElementFieldHelper::getFieldMap(choices[i].elementmap, fields);
+            choices[i].alternatives = map XsdElementFieldHelper::getFieldMap($1, fields), choices[i].alternatives;
+        }
     }
 
     private hash<string, XsdAttribute> getInheritedAttributes(XsdComplexType base) {
@@ -5553,7 +5896,7 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
         @param optional if the model group itself is optional, in which case none of its members can be required
 
         Elements declared in nested model groups belong to the enclosing model group, so they are added to the
-        element map of this complexType; \c choice blocks are added to @ref choices, and \c group references are
+        element map of this complexType; \c choice blocks are added to the choice collection, and \c group references are
         registered for resolution in finalize().
 
         @note the XML parser does not preserve the relative order of elements with different names, therefore the
@@ -5604,7 +5947,7 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
         }
     }
 
-    #! adds a \c choice block declared in a model group to @ref choices
+    #! adds a \c choice block declared in a model group to the choice collection
     /** @since %WSDL 0.5.8
     */
     private addChoiceBlock(*hash<auto> ch, XsdLateResolverHelper unresolved, Namespaces nsc, bool optional) {
@@ -5831,7 +6174,7 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
         foreach hash<auto> e in (el) {
             #printf("DEBUG: XsdComplexType::parseElements() ns: %y e: %y\n", nsc.getTargetNamespaceUri(), e);
             XsdElement elem(e, nsc, NOTHING, unresolved, usedocns);
-            h.(elem.name) = elem;
+            h{elem.getExpandedName()} = elem;
 
             # issue #5410: elements declared in an optional model group can never be required
             if (for_object && !optional && !required && elem.isRequired()) {
@@ -5980,8 +6323,8 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
         }
         */
 
-        hash<auto> rv.(!element.usedocns || !element.ns ? key
-            : (nsc.getOutputNamespacePrefix(element.ns) + ":" + key)) = e;
+        hash<auto> rv.(!element.usedocns || !element.ns ? element.name
+            : (nsc.getOutputNamespacePrefix(element.ns) + ":" + element.name)) = e;
         return rv;
     }
 
@@ -6087,7 +6430,7 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
                         throw SOAP_SERIALIZATION_ERROR, sprintf("%y %s of type %y (valid elements: %y)", kl,
                             kl.lsize() == 1 ? "is an invalid member" : "are invalid members", getName(), elementmap.keys());
                     }
-                    rh += h;
+                    rh += XsdBase::restoreElementNamespaces(h);
                 }
                 if (hch) {
                     throw SOAP_SERIALIZATION_ERROR, sprintf("unknown choice members %y provided via ^choices^ in %y",
@@ -6200,7 +6543,7 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
                 oval = {"^value^": oval};
             }
         }
-        *hash<auto> val = oval;
+        *hash<auto> val = mapExpandedElementNames(oval);
         *hash<auto> attr = val."^attributes^";
 
         # attribute hash
@@ -6324,6 +6667,28 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
             return rh."^value^";
         }
         return rh;
+    }
+
+    #! matches namespace-resolved wire names to the existing public record fields
+    private *hash<auto> mapExpandedElementNames(*hash<auto> value) {
+        hash<string, string> fields();
+        foreach string field in (keys elementmap) {
+            fields{elementmap{field}.getExpandedName()} = field;
+        }
+        foreach hash<ChoiceInfo> choice in (choices) {
+            foreach string field in (keys choice.elementmap) {
+                fields{choice.elementmap{field}.getExpandedName()} = field;
+            }
+        }
+        *hash<auto> result;
+        foreach string key in (keys value) {
+            string field = fields{key} ?? key;
+            if (result.hasKey(field)) {
+                throw SOAP_DESERIALIZATION_ERROR, sprintf("duplicate XML values for field %Y in type %Y", field, name);
+            }
+            result{field} = value{key};
+        }
+        return result;
     }
 
     private *hash<auto> parseChoice(hash<auto> val, hash<string, XsdElement> emap, string en,
@@ -6494,10 +6859,7 @@ public class WSOperation inherits WSDL::XsdNamedData {
     }
 
     #! adds the given binding
-    /** @param bname binding name, must be unique in operation
-        @param opparams a hash with the following keys:
-        - \c "httpMethod"
-        - \c "soapTransport"
+    /** @param b the binding to add; its name must be unique in this operation
 
         @throw WSDL-BINDING-ERROR when binding already registered
      */
@@ -6510,6 +6872,7 @@ public class WSOperation inherits WSDL::XsdNamedData {
 
     #! serializes a fault response to an XML string or HTTP payload for the operation.
     /** @param fault an optional fault message for the operation (@see getFaultMessages())
+        @param faultmsg the fault description to include in the SOAP message
         @param h the fault data to serialize
         @param header optional soap header info to serialize if required (ex: authorization info). In the first step
         headers are matched to binding/input/header WSDL definition, remaining headers are passed as-is
@@ -6549,6 +6912,7 @@ public class WSOperation inherits WSDL::XsdNamedData {
         @param xml_opts optional XML generation options
         @param req_soapaction if present will override any SOAPAction value for the request, ignored for HTTP binding
         @param bname SOAP binding name or empty to get the first assigned binding
+        @param http_headers optional HTTP headers supplied for serialization
 
         @return a hash with keys:
         - \c body: XML string in the SOAP request format or body part of HTTP message (string or binary). Target
@@ -6606,7 +6970,7 @@ public class WSOperation inherits WSDL::XsdNamedData {
         return getBinding(bname).serializeMessage(self, output, False, soap12, h, header, enc, nsh, xml_opts, NOTHING, NOTHING, http_headers);
     }
 
-    #! parses a hash representing a parsed XML request (parsed with @ref parse_xml() "parse_xml(XPF_PRESERVE_ORDER)") for the operation and returns the corresponding Qore data structure
+    #! parses a hash representing a parsed XML request (parsed with @ref Qore::Xml::parse_xml "parse_xml(XPF_PRESERVE_ORDER)") for the operation and returns the corresponding Qore data structure
     /** @param o the parsed SOAP or HTTP request with @ref WSDLLib::parseSOAPMessage() for the operation
         @param bname SOAP binding name, leave empty to use the first assigned binding
         @return the Qore data structure corresponding to the request data. When SOAP header is deserialized according binding/input WSDL then all data are passed under subhash vales prefixed by message name
@@ -6616,7 +6980,7 @@ public class WSOperation inherits WSDL::XsdNamedData {
         return getBinding(bname).deserializeMessage(self, o, True);
     }
 
-    #! parses a hash representing a parsed XML response (parsed with @ref parse_xml() "parse_xml(XPF_PRESERVE_ORDER)") for the operation and returns the corresponding Qore data structure
+    #! parses a hash representing a parsed XML response (parsed with @ref Qore::Xml::parse_xml "parse_xml(XPF_PRESERVE_ORDER)") for the operation and returns the corresponding Qore data structure
     /** @param o the parsed SOAP or HTTP request with @ref WSDLLib::parseSOAPMessage() for the operation
         @param bname SOAP binding name, leave empty to use the first assigned binding
         @return the Qore data structure corresponding to the response data. When SOAP header is deserialized according binding/output WSDL then all data are passed under subhash vales prefixed by message name
@@ -6679,15 +7043,16 @@ public hashdecl ArgInfo {
 }
 
 #! web service message class
-/**
-Message definition consists of part definition. Part name is important for simple types to name it at both SOAP and Qore side (hash key).
-For elements is not used at the SOAP side, it implies condition the element name must be unique in message. In the other words
-it's forbidden definition of two parts with the same element. It's unclear if is legal in Wsdl and how to handle it. Class raises
-exception if detects it. The part name is also used for references from binding (header, content).
+/** Message parts retain distinct part names for binding selection and provider fields. Element-based parts
+    resolve their QNames in the enclosing XML scope. Unambiguous element arguments keep local aliases;
+    collisions use expanded names. XML output always uses the element declaration's own name and namespace.
 */
 public class WSMessage inherits WSDL::XsdNamedData {
     public {
-        #! args keys are part names for types reps. element names for element. Definition must provide unique values.
+        #! Argument keys are part names for type parts and local or expanded names for element parts
+        /** Unambiguous element names keep their local aliases; names colliding with another element or
+            type-part name use expanded names. Use pmap to look up an argument by its WSDL part name.
+        */
         hash<string, hash<WSDL::ArgInfo>> args;
 
         #! maps part names to args key, all parts are in hash
@@ -6704,44 +7069,47 @@ public class WSMessage inherits WSDL::XsdNamedData {
         self.tmap = tmap;
         self.nsc := nsc;
 
-        #printf("DEBUG: WSMessage::constructor() m: %y emap: %y\n", m, emap);
-
+        NamespacePrefixHelper message_scope(nsc, m."^attributes^");
         name = m."^attributes^".name;
+        hash<string, hash<ArgInfo>> parts();
+        hash<string, int> local_names();
+        hash<string, bool> element_names();
         foreach auto p in (m.part) {
             *hash<auto> part = p."^attributes^";
-
-            # issue #2786: make sure and capture any ns prefix definitions / overrides here
-            NamespacePrefixHelper nph(nsc, part);
-
-            if (!exists part.name)
-                throw WSDL_ERROR, sprintf("missing part name message %y", name);
-            if (pmap{part.name})
-                throw WSDL_ERROR, sprintf("duplicate part name %y in message %y", part.name, name);
-            if (part.element) {
-                (*string ns, *string ename) = part.element =~ x/([^:]+):([^:]+)/;
-                if (!ename)
-                    ename = part.element;
-                if (args{ename})
-                    throw WSDL_ERROR, sprintf("ambiguous element name %y in message %y", ename, name);
-
-                # is unique name required or not ?
-                if (!args{ename}) {
-                    args{ename} = <ArgInfo>{
-                        "name": part.name,
-                    };
-                }
-                pmap{part.name} = ename;
-                args{ename}.part = part.name;
-                args{ename}.element = emap_get(emap, nsc.getNamespaceUri(ns), ename);
-            } else {
-                if (args{part.name})
-                    throw WSDL_ERROR, sprintf("part name collides with element %y in message %y, ", part.name, name);
-                hash<auto> h;
-                args{part.name} = cast<hash<ArgInfo>>(part{"name", "part"});
-                if (!nsc.doType(part.type, \h, \args{part.name}.type, tmap))
-                    throw WSDL_ERROR, sprintf("cannot resolve type %y for element %y in message %y", part.type, part.name, name);
-                pmap{part.name} = part.name;
+            NamespacePrefixHelper part_scope(nsc, part);
+            if (!exists part.name) {
+                throw WSDL_ERROR, sprintf("missing part name in message %Y", name);
             }
+            if (parts.hasKey(part.name)) {
+                throw WSDL_ERROR, sprintf("duplicate part name %Y in message %Y", part.name, name);
+            }
+            hash<ArgInfo> arg = <ArgInfo>{"name": part.name, "part": part.name};
+            if (part.element) {
+                hash<auto> identity = nsc.getTypeHash(part.element);
+                arg.element = emap_get(emap, identity.uri, identity.val);
+                string expanded = arg.element.getExpandedName();
+                if (element_names{expanded}) {
+                    throw WSDL_ERROR, sprintf("ambiguous element %Y in message %Y", expanded, name);
+                }
+                element_names{expanded} = True;
+                ++local_names{arg.element.name};
+            } else {
+                hash<auto> type_info;
+                if (!nsc.doType(part.type, \type_info, \arg.type, tmap)) {
+                    throw WSDL_ERROR, sprintf("cannot resolve type %Y for part %Y in message %Y", part.type,
+                        part.name, name);
+                }
+                ++local_names{part.name};
+            }
+            parts{part.name} = arg;
+        }
+        foreach string part in (keys parts) {
+            hash<ArgInfo> arg = parts{part};
+            string key = arg.element ? (local_names{arg.element.name} == 1 ? arg.element.name
+                : arg.element.getExpandedName()) : part;
+            @assert(!args.hasKey(key));
+            args{key} = arg;
+            pmap{part} = key;
         }
     }
 
@@ -6761,8 +7129,11 @@ public class WSMessage inherits WSDL::XsdNamedData {
     }
 
     /**
-        Just serialize value and return namespace
-        @param ons is reference to string
+        Serializes a message part and returns its output namespace.
+        @param part the WSDL part name
+        @param encoded whether SOAP encoding is used
+        @param h input values; the serialized value is removed from this hash
+        @param ons receives the output namespace prefix
     */
     auto serializeRpcValue(string part, bool encoded, reference<hash<auto>> h, reference<string> ons) {
         string key = pmap{part};
@@ -6795,6 +7166,7 @@ public class WSMessage inherits WSDL::XsdNamedData {
     /**
         @param parts if present then serializes only particular element or part, if NOTHING then serializes all message elements
         @param msginfo a description of the message for the current binding, if available
+        @param mpm optional multipart message receiving attachments
         @param n_name name of output key
         @param encoded if the encoded use module should be used (or the literal use model)
         @param h data to be serialized, keys are wsdl element names (or optionally the part name) and part names for simple types
@@ -6819,7 +7191,7 @@ public class WSMessage inherits WSDL::XsdNamedData {
                 mpm.addPart(hv, sprintf("<%s>", k), partContentType);
                 hv = {"^attributes^": {"href": "cid:" + k}};
             }
-            rh{args{k}.element ? (ons + ":" +  k) : k} = hv;
+            rh{args{k}.element ? args{k}.element.getXmlName(nsc) : k} = hv;
         }
 
         if (rh) {
@@ -6890,15 +7262,13 @@ public class WSMessage inherits WSDL::XsdNamedData {
                 mpm.addPart(val, sprintf("<%s>", k), partContentType);
                 # For document style with element parts, use element name with namespace
                 if (arg.element) {
-                    string ons = nsc.getOutputNamespacePrefix(arg.element.ns);
-                    rh{ons + ":" + k} = {"^attributes^": {"href": "cid:" + k}};
+                    rh{arg.element.getXmlName(nsc)} = {"^attributes^": {"href": "cid:" + k}};
                 } else {
                     rh{p} = {"^attributes^": {"href": "cid:" + k}};
                 }
             } else if (arg.element) {
                 auto th = arg.element.serializeValue(nsc, val, !encoded, k, name);
-                string ons = nsc.getOutputNamespacePrefix(arg.element.ns);
-                rh{ons + ":" + k} = th;
+                rh{arg.element.getXmlName(nsc)} = th;
             } else {
                 auto th = arg.type.serializeValue(nsc, val, !encoded);
                 rh{p} = th;
@@ -6918,7 +7288,8 @@ public class WSMessage inherits WSDL::XsdNamedData {
 
     #! deserialize RPC message
     /**
-    @param val, keys are element names or part names for simple types
+    @param mrh optional SOAP multi-reference lookup hash
+    @param val keys are element names or part names for simple types
     @param part if exists then deserialize only particular part
     @return serialized data, keys are wsdl element names (optionally part name is also possible) and part names for simple types
     */
@@ -6959,16 +7330,19 @@ public class WSMessage inherits WSDL::XsdNamedData {
         @param ignore_unknown if @ref True "True", then keys in \a val that do not correspond to a part being
         deserialized are ignored; if not present, then unknown keys are ignored only if \a parts is given, for
         backwards compatibility with SOAP header deserialization
+        @param expanded_names True when element names have been resolved by XsdBase::expandElementNamespaces();
+        matching then requires the declared namespace and local name without the legacy single-argument inference
 
         @return a hash of deserialized part values keyed by part name
     */
-    *hash<auto> deserializeDocument(*hash<auto> mrh, auto val, *softlist<string> parts, *bool ignore_unknown) {
+    *hash<auto> deserializeDocument(*hash<auto> mrh, auto val, *softlist<string> parts, *bool ignore_unknown,
+            bool expanded_names = False) {
         hash<auto> rh;
 
         *hash<auto> attr = remove val."^attributes^";
 
         #printf("DBG WSMessage::deserializeDocument() pmap: %y val: %y\n", pmap, val);
-        if (args.size() == 1) {
+        if (!expanded_names && args.size() == 1) {
             string k = getSerializedKey(pmap.firstKey());
             if (val.typeCode() != NT_HASH || !val.hasKey(k)) {
                 auto v = val;
@@ -6978,7 +7352,7 @@ public class WSMessage inherits WSDL::XsdNamedData {
         }
 
         foreach string p in (parts ?? keys pmap) {
-            string k = getSerializedKey(p);
+            string k = expanded_names ? getExpandedSerializedKey(p) : getSerializedKey(p);
             bool present = val.hasKey(k);
             auto v = remove val{k};
             #printf("DBG WSMessage::deserializeDocument() part: %y, key: %y, val: %y\n", p, k, v);
@@ -7011,7 +7385,8 @@ public class WSMessage inherits WSDL::XsdNamedData {
     #! serialized value of particular type value as string or binary
     /**
         @param val value to be resolved
-        @param key member name, it is requires reference to a simple type, not compaund element
+        @param key member name referencing a simple type
+        @param nsc namespaces for the output value
 
         @return as hash with 'value' and optional 'content-type' key passed from v.content-type if exists
      */
@@ -7155,6 +7530,16 @@ public class WSMessage inherits WSDL::XsdNamedData {
 
     string getSerializedKey(string part) {
         return args{pmap{part}}.element ? pmap{part} : part;
+    }
+
+    #! returns the expanded wire name of a document message part
+    /** @param part the WSDL part name
+        @return the declared element's expanded name, or the unqualified type-part name
+        @since %WSDL 0.5.8
+    */
+    string getExpandedSerializedKey(string part) {
+        *XsdElement element = args{pmap{part}}.element;
+        return element ? element.getExpandedName() : type_qname("", part);
     }
 
     #! check if pname is defined as message part
@@ -7474,19 +7859,22 @@ public class SoapBinding inherits WSDL::OperationalBinding {
         XsdBase::inheritAttributeNamespaces(\o);
         WSDL::XsdBase::removeNS2(\o);
         WSDL::XsdBase::removeNS2(\o.Envelope);
+        hash<string, string> envelope_namespaces = XsdBase::getElementNamespaces(o.Envelope."^attributes^");
         hash<auto> hrv;
 
         BindingMessageDescription bmd = self{io};
 
         if (bmd.hasHeaders()) {
             *hash<auto> header = o.Envelope.Header;
-            WSDL::XsdBase::removeNS2(\header);
+            if (header) {
+                header = XsdBase::expandElementNamespaces(header, envelope_namespaces);
+            }
 
             #printf("DEBUG: Deserialize SOAP headers: %N\n", header);
             foreach BindingMessageHeaderDescription hdr in (bmd.getHeaders()) {
-                if (header.hasKey(hdr.msg.getSerializedKey(hdr.part))) {
+                if (header.hasKey(hdr.msg.getExpandedSerializedKey(hdr.part))) {
                     # seems it may appear part name conflict between messages when namespace is stripped
-                    hrv{hdr.msg.name} += hdr.msg.deserializeDocument(NOTHING, header, hdr.part);
+                    hrv{hdr.msg.name} += hdr.msg.deserializeDocument(NOTHING, header, hdr.part, NOTHING, True);
                 }
             }
             #printf("DEBUG: Deserialized SOAP headers: %N\n", hrv);
@@ -7505,7 +7893,8 @@ public class SoapBinding inherits WSDL::OperationalBinding {
 
         auto rv;
         if (exists body) {
-            (*hash<auto> mrh, hash<auto> msgh) = processMultiRef(body);
+            (*hash<auto> mrh, hash<auto> msgh) = processMultiRef(docstyle
+                ? XsdBase::expandElementNamespaces(body, envelope_namespaces) : body);
 
             if (!request) {
                 # check for Soap Fault, if so raise an exception immediately with the fault info
@@ -7553,7 +7942,7 @@ public class SoapBinding inherits WSDL::OperationalBinding {
             if (docstyle) {
                 # only the parts appearing in the SOAP body may be deserialized from it; parts bound to SOAP
                 # headers are deserialized above
-                rv = msg.deserializeDocument(mrh, msgh, bmd.getBodyPartNames(msg), False);
+                rv = msg.deserializeDocument(mrh, msgh, bmd.getBodyPartNames(msg), False, True);
             } else {
                 string mname = (request ? op.output_name : op.input_name) ?? (op.name + (request ? "" : "Response"));
                 if (!msgh{mname})
@@ -8165,7 +8554,7 @@ public class BindingMessageDescription inherits Serializable {
 
         @param msg the message bound to this description
 
-        @return the names of the parts appearing in the SOAP body, or @ref nothing if all parts of the message
+        @return the names of the parts appearing in the SOAP body, or \c NOTHING if all parts of the message
         appear in the body
 
         @see https://www.w3.org/TR/wsdl#_soap:body
@@ -9137,6 +9526,15 @@ public class Namespaces inherits Serializable {
         }
     }
 
+    #! returns whether a string is an XML NCName
+    /** @param name the candidate prefix or local name
+        @return True for an XML 1.0 NCName
+        @since %WSDL 0.5.8
+    */
+    static bool isNCName(string name) {
+        return regex(name, NCNameRegex);
+    }
+
     #! returns the output namespace prefix for the given input namespace prefix
     string translateOutputNamespacePrefix(*string nsa) {
         return getOutputNamespacePrefix(getInputNamespaceUri(nsa));
@@ -9236,23 +9634,6 @@ public hashdecl OperationInfo {
     WSDL::WSOperation operation;
 }
 
-#! main class representing a parsed WSDL file
-/** This is the main class for handling SOAP communication and is based on a WSDL file
-
-@par Thread Safety
-This class is designed to be thread-safe for read operations once constructed. Multiple threads
-can safely use the same WebService object for SOAP serialization and deserialization operations.
-However, the class should not be modified after construction in a multi-threaded context.
-
-@par Usage Example
-@code{.py}
-WebService ws(wsdl_string, {"def_path": "/path/to/schemas"});
-# Get all available operations
-list<string> ops = ws.listOperations();
-# Serialize a SOAP request
-hash<auto> msg = ws.serializeRequest(op_name, args);
-@endcode
-*/
 #! Poll operation for async WSDL retrieval and schema imports
 /** Uses only non-blocking I/O for WSDL and XSD retrieval
 
@@ -9994,7 +10375,9 @@ public class XsdSchema inherits WSDL::XsdBase {
             # Simple-content bases finalize after scalar references and attributes are resolved.
             return;
         }
-        ct.simpleType = resolveType(ct.simpleTypeInfo);
+        if (ct.simpleTypeInfo) {
+            ct.simpleType = resolveType(ct.simpleTypeInfo);
+        }
         #printf("resolveType(XsdComplexType), %y\n", ct.simpleTypeInfo);
     }
 
@@ -10291,6 +10674,9 @@ public class XsdSchema inherits WSDL::XsdBase {
             # make element map
             foreach hash<auto> el in (schema.element) {
                 XsdElement element(el, nsc, NOTHING, unresolved, usedocns);
+                # Global element names always belong to the target namespace; elementFormDefault
+                # was passed to the constructor for local declarations in an anonymous type.
+                element.usedocns = boolean(element.ns);
 
                 if (emap{element.ns}{element.name}) {
                     throw WSDL_ERROR, sprintf("%s: element %y declared twice in namespace %y", nph.getDesc(), element.name, element.ns);
@@ -10327,6 +10713,23 @@ public class XsdSchema inherits WSDL::XsdBase {
     }
 }
 
+#! main class representing a parsed WSDL file
+/** This is the main class for handling SOAP communication and is based on a WSDL file
+
+@par Thread Safety
+This class is designed to be thread-safe for read operations once constructed. Multiple threads
+can safely use the same WebService object for SOAP serialization and deserialization operations.
+However, the class should not be modified after construction in a multi-threaded context.
+
+@par Usage Example
+@code{.py}
+WebService ws(wsdl_string, {"def_path": "/path/to/schemas"});
+# Get all available operations
+list<string> ops = ws.listOperations();
+# Serialize a SOAP request
+hash<auto> msg = ws.serializeRequest(op_name, args);
+@endcode
+*/
 public class WebService inherits WSDL::XsdSchema {
     public {
         #! the WSDL string
@@ -10370,7 +10773,7 @@ public class WebService inherits WSDL::XsdSchema {
     /** @param str the XML string representing the WSDL
         @param opts an optional hash of options with the following possible keys:
         - \c "compat_allow_any_header": allow any SOAP header to be sent without checking the WSDL
-        - \c "compat_empty_string_is_nothing": deserialize empty strings to @ref nothing instead of an empty string
+        - \c "compat_empty_string_is_nothing": deserialize empty strings to \c NOTHING instead of an empty string
         - \c "def_path": the default path to use when retrieving referenced XSDs
         - \c "try_import": a call reference or closure to be passed a string name for XSD imports without any scheme to retrieve the data, must take a string argument (the resource name) and return a string (the resource data)
         - \c "http_client": a HTTPClient object for retrieving data from import commands
@@ -10624,7 +11027,7 @@ public class WebService inherits WSDL::XsdSchema {
     /** @param stream the output stream for the report data
         @param wsdl_name name of the WSDL, typically a file name
 
-        @return human readable text report
+        @note The human-readable report is written to the supplied stream.
     */
     getReport(StringOutputStream stream, *string wsdl_name) {
         StreamWriter w(stream);
@@ -10932,6 +11335,10 @@ public class WSMessageHelper {
         return res;
     }
 
+    private hash<auto> getFieldMessage(string field, XsdElement elem, *softlist<auto> comments) {
+        return {field: getMessage(elem, comments){elem.name}};
+    }
+
     hash<auto> getMessage(XsdElement elem, *softlist<auto> comments) {
         hash<auto> vi = getTypeInfo(elem.type);
         auto val;
@@ -10957,17 +11364,17 @@ public class WSMessageHelper {
                         if (opts.choices) {
                             hash<auto> ch;
                             foreach string name2 in (keys ct.elementmap) {
-                                ch += getMessage(ct.elementmap{name2},
+                                ch += getFieldMessage(name2, ct.elementmap{name2},
                                     opts.comments ? sprintf("choice[%d]", $# + 1) : NOTHING);
                             }
                             val."^choices1^" = ch;
                         } else if (ct.elementmap) {
-                            val += getMessage(ct.elementmap.firstValue(),
+                            val += getFieldMessage(ct.elementmap.firstKey(), ct.elementmap.firstValue(),
                                 opts.comments ? sprintf("choice[1/%d]", ct.elementmap.size()) : NOTHING);
                         }
                     } else {
                         foreach string name2 in (keys ct.elementmap) {
-                            val += getMessage(ct.elementmap{name2});
+                            val += getFieldMessage(name2, ct.elementmap{name2});
                         }
                     }
                     foreach hash<ChoiceInfo> choice in (ct.choices) {
@@ -10975,12 +11382,14 @@ public class WSMessageHelper {
                             hash<auto> ch;
                             int j = 1;
                             foreach string name2 in (keys choice.elementmap) {
-                                ch += getMessage(choice.elementmap{name2}, opts.comments ? sprintf("choice[%d]", j) : NOTHING);
+                                ch += getFieldMessage(name2, choice.elementmap{name2},
+                                    opts.comments ? sprintf("choice[%d]", j) : NOTHING);
                                 j++;
                             }
                             val{sprintf("^choices%d^", $#+1)} = ch;
                         } else {
-                            val += getMessage(choice.elementmap.firstValue(), opts.comments ? sprintf("choice[1/%d]", ct.choices.size()) : NOTHING);
+                            val += getFieldMessage(choice.elementmap.firstKey(), choice.elementmap.firstValue(),
+                                opts.comments ? sprintf("choice[1/%d]", ct.choices.size()) : NOTHING);
                         }
                     }
                 }
@@ -11056,9 +11465,17 @@ public class WSMessageHelper {
     #! prepare sample message
     /** @param msg WSMessage object
 
-        @return a hash representing message
+        @return the existing single-part sample, or a hash keyed by every part name for a multipart message
     */
     auto getMessage(WSMessage msg) {
+        if (msg.pmap.size() > 1) {
+            hash<auto> result();
+            foreach string part in (keys msg.pmap) {
+                hash<ArgInfo> arg = msg.args{msg.pmap{part}};
+                result{part} = arg.element ? getMessage(arg.element){arg.element.name} : getTypeInfo(arg.type).value;
+            }
+            return result;
+        }
         auto t = msg.args.firstValue();
         if (t.element)
             return getMessage(t.element);
