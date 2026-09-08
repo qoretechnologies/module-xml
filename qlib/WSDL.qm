@@ -84,6 +84,10 @@ module WSDL {
       lexical forms as strings when native floats cannot reproduce them; decimal providers validate before conversion
     - native decimal float/number inputs use Qore 3.0 round-trip formatting without exponent notation;
       WSDL now requires Qore 3.0
+    - decimal/integer restrictions compare bounds and enumeration exactly and count digits from the value;
+      numeric providers and fields retain these constraints and equivalent lexical forms after reconstruction
+    - numeric examples use exact bounded grid values, including restricted list items; impossible or unsupported
+      numeric examples raise XSD-SAMPLE-ERROR instead of producing invalid sample messages
     - boolean values accept only the four XML spellings after XML whitespace collapse, native booleans,
       and numeric zero/one; provider lists validate before conversion and reject null or invalid spellings
     - integer builtins enforce exact ranges before conversion and retain values beyond signed 64-bit
@@ -2505,6 +2509,83 @@ public class XsdIntegerDataType inherits AbstractDataProviderType {
 
 #! validates exact decimal text and formats native numbers for the decimal binding
 class XsdDecimalLexicalHelper {
+    # A value key for validated decimal text; lexical spelling is retained separately.
+    static string canonical(string lexical) {
+        bool negative = lexical[0] == "-";
+        lexical =~ s/\A[+-]//;
+        list<string> parts = lexical.split(".");
+        string whole = parts[0];
+        string fraction = parts[1] ?? "";
+        whole =~ s/\A0+//;
+        fraction =~ s/0+\z//;
+        if (whole.empty() && fraction.empty()) {
+            return "0";
+        }
+        return (negative ? "-" : "") + (whole.empty() ? "0" : whole)
+            + (fraction.empty() ? "" : "." + fraction);
+    }
+
+    # Both operands have already passed decimal/integer lexical validation.
+    static int compare(string left, string right) {
+        left = canonical(left);
+        right = canonical(right);
+        bool negative = left[0] == "-";
+        if (negative != (right[0] == "-")) {
+            return negative ? -1 : 1;
+        }
+        if (negative) {
+            splice left, 0, 1;
+            splice right, 0, 1;
+        }
+        list<string> lhs = left.split(".");
+        list<string> rhs = right.split(".");
+        int result = lhs[0].size() <=> rhs[0].size();
+        if (!result) {
+            result = lhs[0] <=> rhs[0];
+        }
+        if (!result) {
+            # Canonical fractions have no trailing zeros, so a shorter equal prefix is smaller.
+            string left_fraction = lhs[1] ?? "";
+            string right_fraction = rhs[1] ?? "";
+            # Qore orders empty strings after nonempty strings; numeric zero comes first here.
+            result = left_fraction.empty() || right_fraction.empty()
+                ? int(!left_fraction.empty()) <=> int(!right_fraction.empty())
+                : left_fraction <=> right_fraction;
+        }
+        return negative ? -result : result;
+    }
+
+    # Returns the smallest positive grid value at or above the magnitude of the input.
+    static string ceilingMagnitude(string value, int scale, bool exclusive) {
+        @assert(scale >= 0);
+        value = canonical(value);
+        value =~ s/\A-//;
+        list<string> parts = value.split(".");
+        string fraction = parts[1] ?? "";
+        string coefficient = parts[0] + fraction.substr(0, scale);
+        if (fraction.size() < scale) {
+            coefficient += strmul("0", scale - fraction.size());
+        }
+        coefficient = XsdIntegerLexicalHelper::canonical(coefficient);
+        if (fraction.size() > scale || exclusive) {
+            int position = coefficient.size() - 1;
+            while (position >= 0 && coefficient[position] == "9") {
+                --position;
+            }
+            coefficient = position < 0 ? "1" + strmul("0", coefficient.size())
+                : coefficient.substr(0, position) + chr(ord(coefficient[position]) + 1)
+                    + strmul("0", coefficient.size() - position - 1);
+        }
+        if (scale) {
+            if (coefficient.size() <= scale) {
+                coefficient = strmul("0", scale + 1 - coefficient.size()) + coefficient;
+            }
+            int point = coefficient.size() - scale;
+            coefficient = coefficient.substr(0, point) + "." + coefficient.substr(point);
+        }
+        return canonical(coefficient);
+    }
+
     static string lexical(auto value, string error) {
         switch (value.typeCode()) {
             case NT_STRING:
@@ -2673,6 +2754,401 @@ public class XsdDecimalDataType inherits AbstractDataProviderType {
         XsdDecimalDataType result = self.copy();
         result.optional = False;
         return result;
+    }
+}
+
+#! resolved scalar data used to reconstruct a numeric restriction provider
+/** The schema constructs this value without retaining transient namespace or component references.
+    @since %WSDL 0.5.8
+*/
+public hashdecl XsdNumericFacetInfo {
+    #! diagnostic name of the restricted type
+    string name;
+    #! decimal or the integer builtin from which the type is derived
+    string base_name;
+    #! compiled pattern alternatives for this derivation step
+    *list<string> patterns;
+    #! numeric enumeration values as validated XML text
+    *list<string> enumeration;
+    #! inclusive/exclusive bounds as validated XML text
+    hash<string, string> bounds;
+    #! maximum decimal digits in the value
+    *int total_digits;
+    #! maximum fractional decimal digits in the value
+    *int fraction_digits;
+}
+
+class XsdNumericFacetHelper {
+    static checkDefinition(hash<XsdNumericFacetInfo> facets, string error) {
+        if (facets.base_name != "decimal" && !XsdIntegerLexicalHelper::Types{facets.base_name}) {
+            throw error, sprintf("invalid numeric restriction base %Y", facets.base_name);
+        }
+        if ((exists facets.total_digits && facets.total_digits < 1)
+                || (exists facets.fraction_digits && facets.fraction_digits < 0)
+                || (exists facets.total_digits && exists facets.fraction_digits
+                    && facets.fraction_digits > facets.total_digits)) {
+            throw error, "numeric restriction requires positive totalDigits and nonnegative fractionDigits <= totalDigits";
+        }
+        foreach string facet in (keys facets.bounds) {
+            if (facet != "minInclusive" && facet != "minExclusive" && facet != "maxInclusive"
+                    && facet != "maxExclusive") {
+                throw error, sprintf("unknown numeric bound facet %Y", facet);
+            }
+            lexical(facets.base_name, facets.bounds{facet}, error);
+        }
+        foreach string value in (facets.enumeration) {
+            lexical(facets.base_name, value, error);
+        }
+        foreach string pattern in (facets.patterns) {
+            try {
+                bool accepts_empty = regex("", pattern);
+            } catch (hash<ExceptionInfo> ex) {
+                if (ex.err != "REGEX-ERROR" && ex.err != "REGEX-COMPILATION-ERROR") {
+                    rethrow;
+                }
+                throw error, sprintf("invalid compiled numeric pattern: %s", ex.desc);
+            }
+        }
+    }
+
+    static string lexical(string base, auto value, string error) {
+        if (base != "decimal" && !XsdIntegerLexicalHelper::Types{base}) {
+            throw error, sprintf("invalid numeric restriction base %Y", base);
+        }
+        return base == "decimal" ? XsdDecimalLexicalHelper::lexical(value, error)
+            : XsdIntegerLexicalHelper::lexical(base, value, error);
+    }
+
+    static string validate(hash<XsdNumericFacetInfo> facets, auto value, string error) {
+        string text = lexical(facets.base_name, value, error);
+        if (facets.patterns) {
+            bool matched = False;
+            foreach string pattern in (facets.patterns) {
+                if (regex(text, pattern)) {
+                    matched = True;
+                    break;
+                }
+            }
+            if (!matched) {
+                throw error, sprintf("value %Y for simpleType %Y does not match its pattern facets", text, facets.name);
+            }
+        }
+        foreach string facet in (keys facets.bounds) {
+            int compared = XsdDecimalLexicalHelper::compare(text, facets.bounds{facet});
+            bool invalid = False;
+            switch (facet) {
+                case "minInclusive": invalid = compared < 0; break;
+                case "minExclusive": invalid = compared <= 0; break;
+                case "maxInclusive": invalid = compared > 0; break;
+                case "maxExclusive": invalid = compared >= 0; break;
+            }
+            if (invalid) {
+                throw error, sprintf("value %Y for simpleType %Y violates %s %Y", text, facets.name,
+                    facet, facets.bounds{facet});
+            }
+        }
+        if (exists facets.total_digits || exists facets.fraction_digits) {
+            string normalized = XsdDecimalLexicalHelper::canonical(text);
+            normalized =~ s/\A-//;
+            list<string> parts = normalized.split(".");
+            int fractional = (parts[1] ?? "").size();
+            int total = (parts[0] == "0" ? 0 : parts[0].size()) + fractional;
+            if (!total) {
+                total = 1;
+            }
+            if (exists facets.total_digits && total > facets.total_digits) {
+                throw error, sprintf("value %Y for simpleType %Y has %d digits, exceeding totalDigits %d",
+                    text, facets.name, total, facets.total_digits);
+            }
+            if (exists facets.fraction_digits && fractional > facets.fraction_digits) {
+                throw error, sprintf("value %Y for simpleType %Y has %d fractional digits, exceeding fractionDigits %d",
+                    text, facets.name, fractional, facets.fraction_digits);
+            }
+        }
+        if (facets.enumeration) {
+            foreach string allowed in (facets.enumeration) {
+                if (!XsdDecimalLexicalHelper::compare(text, allowed)) {
+                    return text;
+                }
+            }
+            throw error, sprintf("value %Y for simpleType %Y is not in its numeric enumeration", text, facets.name);
+        }
+        return text;
+    }
+}
+
+#! a numeric provider that retains the constraints of its declared XSD simple type
+/** Bounds, digits and enumeration are checked before returning a converted value, including when this type is
+    nested in provider lists or copied through Serializable.
+    @par Example
+    An invoice amount restricted to at least \c 1.00000000000000000001 rejects the value \c "1".
+    @since %WSDL 0.5.8
+*/
+public class XsdNumericRestrictionDataType inherits AbstractDataProviderType {
+    private {
+        hash<XsdNumericFacetInfo> facets;
+        AbstractDataProviderType base;
+    }
+
+    #! constructs a provider for a numeric restriction
+    /** @param facets the resolved scalar facet data
+        @param base the base provider supplying native categories and requiredness
+        @throw XSD-SIMPLETYPE-ERROR invalid numeric facet metadata
+    */
+    constructor(hash<XsdNumericFacetInfo> facets, AbstractDataProviderType base) {
+        XsdNumericFacetHelper::checkDefinition(facets, "XSD-SIMPLETYPE-ERROR");
+        self.facets = facets;
+        self.base = base;
+    }
+
+    private:internal deserializeMembers(hash<auto> members) {
+        if (!(members.base instanceof AbstractDataProviderType)) {
+            throw "DESERIALIZATION-ERROR", "numeric restriction provider requires a base provider";
+        }
+        hash<XsdNumericFacetInfo> resolved = new hash<XsdNumericFacetInfo>(members.facets);
+        XsdNumericFacetHelper::checkDefinition(resolved, "DESERIALIZATION-ERROR");
+        facets = resolved;
+        base = members.base;
+    }
+
+    #! returns the restricted type name
+    /** @return the XSD type name with its optionality prefix */
+    string getName() {
+        return (base.isOrNothingType() ? "*" : "") + "xsd:" + facets.name;
+    }
+
+    #! prevents list providers from converting values before facet validation
+    /** @return NOTHING */
+    *Type getValueType() {
+    }
+
+    #! returns the output category, retaining patterned values as strings
+    /** @return string for this step's pattern, otherwise the base provider category */
+    int getBaseTypeCode() {
+        return facets.patterns ? NT_STRING : base.getBaseTypeCode();
+    }
+
+    #! returns the output category name, including retained patterned strings
+    /** @return string for this step's pattern, otherwise the base provider category name */
+    string getBaseTypeName() {
+        return facets.patterns ? "string" : base.getBaseTypeName();
+    }
+
+    #! returns no item type for this atomic value
+    /** @return NOTHING */
+    *AbstractDataProviderType getElementType() {
+    }
+
+    #! returns no record fields for this atomic value
+    /** @return NOTHING */
+    *hash<string, AbstractDataField> getFields() {
+    }
+
+    #! requires facet validation for all values
+    /** @return an empty map */
+    *hash<string, bool> getDirectTypeHash() {
+        return {};
+    }
+
+    #! returns accepted native categories
+    /** @param simple request simplified names
+        @return the base provider's accepted categories
+    */
+    hash<string, bool> getAcceptTypeHash(*bool simple) {
+        return base.getAcceptTypeHash(simple);
+    }
+
+    #! returns converted native categories
+    /** @param simple request simplified names
+        @return string and optional nothing for this step's pattern, otherwise the base provider's categories
+    */
+    hash<string, bool> getReturnTypeHash(*bool simple) {
+        if (facets.patterns) {
+            hash<string, bool> result = {"string": True};
+            if (base.isOrNothingType()) {
+                result.nothing = True;
+            }
+            return result;
+        }
+        return base.getReturnTypeHash(simple);
+    }
+
+    #! validates the declared restriction and converts the accepted value
+    /** @param value the native value or XML numeric text
+        @return the validated numeric value, or NOTHING for optional omission
+        @throw MISSING-VALUE-ERROR a required value is omitted
+        @throw RUNTIME-TYPE-ERROR lexical input or a restriction facet is invalid
+    */
+    auto acceptsValue(auto value) {
+        if (!exists value) {
+            return base.acceptsValue(value);
+        }
+        string lexical = XsdNumericFacetHelper::validate(facets, value, "RUNTIME-TYPE-ERROR");
+        auto converted = base.acceptsValue(lexical);
+        return facets.patterns ? lexical : converted;
+    }
+
+    #! returns the requiredness of the value
+    /** @return True for mandatory values */
+    bool isMandatory() {
+        return base.isMandatory();
+    }
+
+    #! returns whether omission is accepted
+    /** @return True for optional values */
+    bool isOrNothingType() {
+        return base.isOrNothingType();
+    }
+
+    #! returns an optional equivalent retaining the same restriction
+    /** @return the optional provider */
+    AbstractDataProviderType getOrNothingType() {
+        return new XsdNumericRestrictionDataType(facets, base.getOrNothingType());
+    }
+
+    #! returns a mandatory equivalent retaining the same restriction
+    /** @return the mandatory provider */
+    AbstractDataProviderType getMandatoryType() {
+        return new XsdNumericRestrictionDataType(facets, base.getMandatoryType());
+    }
+}
+
+#! a numeric field whose finite choices use XSD value equality
+/** Numeric field choices retain their schema spellings for display while accepting equivalent values.
+    The field's provider validates all type facets independently, including lexical patterns.
+    @par Example
+    An amount enumerated as \c +001.2300 accepts \c 1.23 without changing the supplied spelling.
+    @since %WSDL 0.5.8
+*/
+public class XsdNumericDataField inherits QoreDataField {
+    private {
+        string builtin;
+    }
+
+    private static hash<auto> withoutChoices(hash<auto> info) {
+        remove info.allowed_values;
+        remove info.element_allowed_values;
+        return info;
+    }
+
+    #! constructs a numeric field with exact finite choices
+    /** @param info the ordinary QoreDataField field properties
+        @param builtin the numeric XSD builtin used for value comparison
+        @throw XSD-SIMPLETYPE-ERROR invalid numeric choice text
+    */
+    constructor(hash<auto> info, string builtin) : QoreDataField(XsdNumericDataField::withoutChoices(info)) {
+        if (builtin != "decimal" && !XsdIntegerLexicalHelper::Types{builtin}) {
+            throw "XSD-SIMPLETYPE-ERROR", sprintf("invalid numeric field builtin %Y", builtin);
+        }
+        self.builtin = builtin;
+        if (exists info.allowed_values) {
+            setAllowedValues(info.allowed_values, info.allowed_values_creatable);
+        }
+        if (exists info.element_allowed_values) {
+            setElementAllowedValues(info.element_allowed_values, info.element_allowed_values_creatable);
+        }
+    }
+
+    #! sets numeric choices without applying this restriction's lexical patterns to facet declarations
+    /** @param choices numeric values or AllowedValueInfo entries
+        @param creatable whether this field permits values outside its finite choices
+        @return this field
+        @throw XSD-SIMPLETYPE-ERROR invalid numeric choice text
+        @note The provider still enforces its own schema enumeration, even if creatable is True.
+    */
+    AbstractDataField setAllowedValues(list<auto> choices, *bool creatable) {
+        list<hash<AllowedValueInfo>> resolved = resolveChoices(choices);
+        hash<string, bool> value_map = map {valueKey($1.value): True}, resolved;
+        allowed_values = resolved;
+        allowed_values_map = value_map;
+        allowed_values_creatable = creatable ?? False;
+        return self;
+    }
+
+    #! sets exact numeric choices for repeated elements
+    /** @param choices numeric values or AllowedValueInfo entries for each element
+        @param creatable whether element values outside these choices are permitted
+        @return this field
+        @throw XSD-SIMPLETYPE-ERROR invalid numeric choice text
+    */
+    AbstractDataField setElementAllowedValues(list<auto> choices, *bool creatable) {
+        list<hash<AllowedValueInfo>> resolved = resolveChoices(choices);
+        hash<string, bool> value_map = map {valueKey($1.value): True}, resolved;
+        element_allowed_values = resolved;
+        element_allowed_values_map = value_map;
+        element_allowed_values_creatable = creatable ?? False;
+        return self;
+    }
+
+    private static list<hash<AllowedValueInfo>> resolveChoices(list<auto> choices) {
+        list<hash<AllowedValueInfo>> resolved();
+        foreach auto choice in (choices) {
+            hash<AllowedValueInfo> entry = choice.typeCode() == NT_HASH
+                ? new hash<AllowedValueInfo>(choice)
+                : <AllowedValueInfo>{"value": choice, "display_name": string(choice)};
+            resolved += entry;
+        }
+        return resolved;
+    }
+
+    private string valueKey(auto value) {
+        return XsdDecimalLexicalHelper::canonical(XsdNumericFacetHelper::lexical(builtin, value,
+            "XSD-SIMPLETYPE-ERROR"));
+    }
+
+    #! validates the type and compares finite choices in the numeric value space
+    /** @param value a native numeric value or XML lexical spelling
+        @return the provider's validated value with retained lexical information
+        @throw FIELD-VALUE-ERROR the numeric value is outside the field's finite choices
+        @throw RUNTIME-TYPE-ERROR the underlying type rejects the value
+        @throw MISSING-VALUE-ERROR a required value is omitted
+    */
+    auto acceptsValue(auto value) {
+        if (!exists value && exists (auto default_value = getDefaultValue())) {
+            value = default_value;
+        }
+        on_error rethrow $1.err, sprintf("%s (while setting field %Y)", $1.desc, getName()), $1.arg;
+        value = getType().acceptsValue(value);
+        if (exists value && allowed_values && !allowed_values_creatable) {
+            if (!allowed_values_map{valueKey(value)}) {
+                throw "FIELD-VALUE-ERROR", sprintf("field %Y does not accept numeric value %Y; allowed values: %Y",
+                    getName(), value, map $1.value, allowed_values);
+            }
+        }
+        if (exists value && element_allowed_values && !element_allowed_values_creatable) {
+            foreach auto item in (value) {
+                if (!element_allowed_values_map{valueKey(item)}) {
+                    throw "FIELD-VALUE-ERROR", sprintf("field %Y does not accept numeric element value %Y",
+                        getName(), item);
+                }
+            }
+        }
+        return value;
+    }
+}
+
+class XsdDataFieldHelper {
+    static QoreDataField create(XsdElement element, hash<auto> info) {
+        if (element.maxOccurs != 1 && exists info.allowed_values) {
+            info.element_allowed_values = remove info.allowed_values;
+        }
+        return create(element.type, info);
+    }
+
+    static QoreDataField create(XsdAbstractType schema, hash<auto> info) {
+        if (schema instanceof XsdComplexType) {
+            XsdComplexType complex = cast<XsdComplexType>(schema);
+            if (!complex.attrs && complex.simpleType) {
+                schema = complex.simpleType;
+            }
+        }
+        while (schema instanceof XsdSimpleType && cast<XsdSimpleType>(schema).type) {
+            schema = cast<XsdSimpleType>(schema).type;
+        }
+        if (schema instanceof XsdBaseType && (schema.name == "decimal" || XsdIntegerLexicalHelper::Types{schema.name})) {
+            return new XsdNumericDataField(info, schema.name);
+        }
+        return new QoreDataField(info);
     }
 }
 
@@ -5794,7 +6270,44 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
         if (listItemType) {
             return new ListDataType(listItemType.getDataProviderType());
         }
+        if (getNumericBaseName()) {
+            return new XsdNumericRestrictionDataType(getNumericFacets(), type.getDataProviderType());
+        }
         return dataType ?? type.getDataProviderType();
+    }
+
+    private *string getNumericBaseName() {
+        *XsdAbstractType base = type;
+        while (base instanceof XsdSimpleType) {
+            base = cast<XsdSimpleType>(base).type;
+        }
+        if (base instanceof XsdBaseType && (base.name == "decimal" || XsdIntegerLexicalHelper::Types{base.name})) {
+            return base.name;
+        }
+    }
+
+    private hash<XsdNumericFacetInfo> getNumericFacets() {
+        *string base = getNumericBaseName();
+        @assert(base);
+        hash<XsdNumericFacetInfo> result = <XsdNumericFacetInfo>{
+            "name": name, "base_name": base, "patterns": pcre_patterns,
+            "bounds": {}, "total_digits": totalDigits, "fraction_digits": fractionDigits,
+        };
+        foreach string facet in ("minInclusive", "minExclusive", "maxInclusive", "maxExclusive") {
+            auto value = self{facet};
+            if (exists value) {
+                result.bounds{facet} = XsdNumericFacetHelper::lexical(base, value, "XSD-SIMPLETYPE-ERROR");
+            }
+        }
+        if (enumValues) {
+            result.enumeration = map XsdNumericFacetHelper::lexical(base, $1, "XSD-SIMPLETYPE-ERROR"), keys enumValues;
+        }
+        return result;
+    }
+
+    private bool enumerationAccepts(auto value) {
+        # Numeric enumeration is checked together with the other value facets.
+        return getNumericBaseName() || !enumValues || boolean(enumValues{value});
     }
 
     *list<auto> getAllowedValues() {
@@ -5842,7 +6355,7 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
         # Validate facets before serialization
         validateFacets(val, "serialize");
 
-        if (enumValues && !enumValues{val}) {
+        if (!enumerationAccepts(val)) {
             throw "SOAP-SERIALIZATION-ERROR", sprintf("value %y passed to simpleType %y is not in the enumeration "
                 "list<auto> (%y)", val, name, enumValues.keys());
         }
@@ -6050,6 +6563,7 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
     /** @param default_value the value to use as a starting point, normally the sample value for the base type
 
         @return a value satisfying the type's constraining facets, derived from \a default_value where possible
+        @throw XSD-SAMPLE-ERROR a numeric example satisfying all restrictions cannot be constructed
 
         Used to generate example messages that can actually be serialized; the placeholder value for a base type
         does not normally satisfy the facets declared by a restriction of it.
@@ -6060,8 +6574,12 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
         # a "pattern" facet is the most specific constraint; generate a value from it if one is declared
         *softint min_length = getEffectiveFacet("length") ?? getEffectiveFacet("minLength");
         *string sample = getPatternSample(min_length);
-        if (exists sample) {
+        if (exists sample && (!getNumericBaseName() || acceptsNumericSample(sample))) {
             return sample;
+        }
+
+        if (getNumericBaseName()) {
+            return getNumericSample(default_value);
         }
 
         auto rv = default_value;
@@ -6122,6 +6640,120 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
         return rv;
     }
 
+    private bool acceptsNumericSample(auto value) {
+        try {
+            serializeValue(new Namespaces({}), value, True);
+            return True;
+        } catch (hash<ExceptionInfo> ex) {
+            if (ex.err == SOAP_SERIALIZATION_ERROR) {
+                return False;
+            }
+            rethrow;
+        }
+    }
+
+    private auto getNumericSample(auto default_value) {
+        string base = getNumericBaseName();
+        if (acceptsNumericSample(default_value)) {
+            return default_value;
+        }
+        # Inherited enumerations are finite; test their exact values before constructing a grid value.
+        *XsdSimpleType ancestor = self;
+        while (ancestor) {
+            foreach string choice in (keys ancestor.enumValues) {
+                if (acceptsNumericSample(choice)) {
+                    return choice;
+                }
+            }
+            ancestor = ancestor.type instanceof XsdSimpleType ? cast<XsdSimpleType>(ancestor.type) : NOTHING;
+        }
+        if (acceptsNumericSample("0")) {
+            return "0";
+        }
+
+        *string lower;
+        *string upper;
+        bool lower_exclusive = False;
+        bool upper_exclusive = False;
+        *list<*string> builtin_bounds = XsdIntegerLexicalHelper::Bounds{base};
+        if (builtin_bounds) {
+            lower = builtin_bounds[0];
+            upper = builtin_bounds[1];
+        }
+        ancestor = self;
+        while (ancestor) {
+            foreach string facet in ("minInclusive", "minExclusive", "maxInclusive", "maxExclusive") {
+                auto bound = ancestor{facet};
+                if (!exists bound) {
+                    continue;
+                }
+                string value = XsdNumericFacetHelper::lexical(base, bound, "XSD-SAMPLE-ERROR");
+                bool exclusive = facet.endsWith("Exclusive");
+                if (facet.startsWith("min")) {
+                    int relation = exists lower ? XsdDecimalLexicalHelper::compare(value, lower) : 1;
+                    if (relation > 0 || (!relation && exclusive)) {
+                        lower = value;
+                        lower_exclusive = exclusive;
+                    }
+                } else {
+                    int relation = exists upper ? XsdDecimalLexicalHelper::compare(value, upper) : -1;
+                    if (relation < 0 || (!relation && exclusive)) {
+                        upper = value;
+                        upper_exclusive = exclusive;
+                    }
+                }
+            }
+            ancestor = ancestor.type instanceof XsdSimpleType ? cast<XsdSimpleType>(ancestor.type) : NOTHING;
+        }
+
+        *string boundary;
+        bool negative = False;
+        bool exclusive = False;
+        if (exists lower && XsdDecimalLexicalHelper::compare(lower, "0") >= 0) {
+            boundary = lower;
+            exclusive = lower_exclusive;
+        } else if (exists upper && XsdDecimalLexicalHelper::compare(upper, "0") <= 0) {
+            boundary = upper;
+            exclusive = upper_exclusive;
+            negative = True;
+        }
+        if (exists boundary) {
+            # One more fractional position than either endpoint gives an interior grid point, if one exists.
+            int scale = 0;
+            if (base == "decimal") {
+                foreach *string bound in (lower, upper) {
+                    if (exists bound) {
+                        int digits = (XsdDecimalLexicalHelper::canonical(bound).split(".")[1] ?? "").size() + 1;
+                        if (digits > scale) {
+                            scale = digits;
+                        }
+                    }
+                }
+                *int fractional = getEffectiveFacet("fractionDigits");
+                if (exists fractional && fractional < scale) {
+                    scale = fractional;
+                }
+                *int total = getEffectiveFacet("totalDigits");
+                if (exists total) {
+                    string whole = XsdDecimalLexicalHelper::canonical(boundary).split(".")[0];
+                    whole =~ s/\A-//;
+                    int available = total - (whole == "0" ? 0 : whole.size());
+                    if (available < scale) {
+                        scale = available > 0 ? available : 0;
+                    }
+                }
+            }
+            string magnitude = XsdDecimalLexicalHelper::ceilingMagnitude(boundary, scale, exclusive);
+            string candidate = (negative ? "-" : "") + magnitude;
+            if (acceptsNumericSample(candidate)) {
+                return candidate;
+            }
+        }
+        throw "XSD-SAMPLE-ERROR", sprintf("cannot construct a numeric example satisfying all facets of %Y; "
+            "the numeric grid has no valid candidate or the pattern/enumeration intersection requires a supplied "
+            "lexical example", name);
+    }
+
     #! pads or truncates a sample string so that its length lies within the given bounds
     private static string fitString(string str, *softint min_len, *softint max_len) {
         if (exists max_len && str.length() > max_len) {
@@ -6151,6 +6783,10 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
 
         # Determine error type based on operation
         string errType = operation == "deserialize" ? "SOAP-DESERIALIZATION-ERROR" : "SOAP-SERIALIZATION-ERROR";
+        if (getNumericBaseName()) {
+            XsdNumericFacetHelper::validate(getNumericFacets(), val, errType);
+            return;
+        }
 
         # Pattern validation
         # issue #5411: XSD 1.0 part 2 section 4.3.4.3: multiple "pattern" facets declared in the same restriction
@@ -6276,6 +6912,13 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
                 $1.desc), exl));
         }
 
+        if (getNumericBaseName()) {
+            string lexical = XsdNumericFacetHelper::validate(getNumericFacets(),
+                XsdScalarTextHelper::value(val, SOAP_DESERIALIZATION_ERROR), SOAP_DESERIALIZATION_ERROR);
+            auto converted = type.deserializeValue(en, tmap, mrh, val);
+            return patterns ? lexical : converted;
+        }
+
         auto v = type.deserializeValue(en, tmap, mrh, val);
 
         # issue #5411: "whiteSpace" processing is applied to the lexical value before it is validated
@@ -6283,7 +6926,7 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
         # Validate facets after deserialization
         validateFacets(v, "deserialize");
 
-        if (enumValues && !enumValues{v}) {
+        if (!enumerationAccepts(v)) {
             throw "SOAP-DESERIALIZATION-ERROR", sprintf("value %y passed to simpleType %y while deserializing "
                 "element %y is not in the enumeration list<auto> (%y)", v, name, en, enumValues.keys());
         }
@@ -7982,7 +8625,7 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
                     defaults{key} = attr.getDefaultValue();
                 }
             }
-            attributes.addField(new QoreDataField(info));
+            attributes.addField(XsdDataFieldHelper::create(attr.type, info));
         }
         if (anyAttribute) {
             attributes.setDefaultOtherFieldType(AbstractDataProviderType::get(AbstractDataProviderType::anyType));
@@ -8006,7 +8649,7 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
         switch (cx_type) {
             case XET_SIMPLE:
                 if (attrs) {
-                    QoreDataField value_field({
+                    QoreDataField value_field = XsdDataFieldHelper::create(simpleType, {
                         "name": "^value^",
                         "display_name": "Value",
                         "short_desc": "Simple content value",
@@ -8024,13 +8667,15 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
             case XET_SEQUENCE:
             case XET_ALL: {
                 HashDataType rv(name);
-                map rv.addField(new QoreDataField($1.key, NOTHING, $1.value.getDataProviderType(), NOTHING,
-                    $1.value.getDataProviderAllowedValues())), elementmap.pairIterator();
+                map rv.addField(XsdDataFieldHelper::create($1.value, {"name": $1.key,
+                    "type": $1.value.getDataProviderType(), "allowed_values": $1.value.getDataProviderAllowedValues()})),
+                    elementmap.pairIterator();
                 # issue #5410: elements declared in a choice block in the model group must be included as well; at
                 # most one alternative of a choice can be present, therefore all its members must be optional
                 foreach hash<ChoiceInfo> ch in (choices) {
-                    map rv.addField(new QoreDataField($1.key, NOTHING,
-                        $1.value.getDataProviderType().getOrNothingType(), NOTHING, $1.value.getDataProviderAllowedValues())),
+                    map rv.addField(XsdDataFieldHelper::create($1.value, {"name": $1.key,
+                        "type": $1.value.getDataProviderType().getOrNothingType(),
+                        "allowed_values": $1.value.getDataProviderAllowedValues()})),
                         ch.elementmap.pairIterator();
                 }
                 return addAttributeFields(rv);
@@ -13380,6 +14025,9 @@ public class WSMessageHelper {
                     res.value = sprintf("%s", (keys t.enumValues)[0]);
                 }
                 res.comment = sprintf("Enum: %s",  (keys t.enumValues).join(','));
+                if (res.type == "int" || res.type == "number") {
+                    res.value = t.getSampleValue(res.value);
+                }
             } else {
                 # issue #5411: generate a value satisfying the type's constraining facets; otherwise the generated
                 # example message cannot be serialized, as the placeholder value for the base type does not
@@ -13393,6 +14041,11 @@ public class WSMessageHelper {
                     }
                 }
             }
+        } else if (t.listItemType) {
+            res = getTypeInfo(t.listItemType);
+            res.xtype = t.name;
+            res.type = "list";
+            res.value = (res.value,);
         } else if (t.unionTypes) {
             # union types have no single base type; use the first member type for the example value
             res = getTypeInfo(t.unionTypes[0]);

@@ -593,3 +593,27 @@ matrix checks 1,200 documents across actual SOAP 1.1/1.2 bindings and both
 directions. Xerces and Python exact integers verify values where libxml2 has its
 recorded arbitrary-integer precision limitation. The core prerequisites for exact
 raw number text and numeric temporary ownership are described in EXECUTION.md.
+
+## Exact numeric restriction regression
+
+`qore --enable-debug test/wsdl-numeric-facets.qtest` covers exact decimal/integer
+bounds and digit facets, numeric enumeration, retained integer patterns, generated
+examples and provider/field reconstruction. `python3
+test/wsdl-interop/test_numeric_facets.py -v` independently checks 1,440 documents
+across actual SOAP 1.1/1.2 bindings and both directions: attributes/simple content,
+lists/unions, native values, reconstructed consumers and generated examples. Both
+libxml2 and Xerces validate every document; exact Decimal values and expanded names
+are asserted separately. Negative provider cases must raise `RUNTIME-TYPE-ERROR`.
+
+All nine integer pattern families now have exact value assertions in the strict
+gate: 72 descriptions / 648 message directions, zero selected failures. The broad
+report retains 220 failure rows assigned to the remaining work, versus 252 before
+this increment. The 32 resolved rows are eight integer pattern families' formerly
+rejected second examples in both versions/directions. Full Python discovery still
+exposes the seven tracked P4/P5/P6 failures; these are not passing conformance tests.
+
+Numeric values are compared without rounding to fit a schema. Under XSD 1.0 Second
+Edition's `totalDigits` rule, `0.0012` requires four digits because the rule also
+constrains fractional scale. The implemented representation and provider equality
+rules are described in [the scalar design](../../design/wsdl-scalar-values.md).
+Schema facet declaration legality remains part of the active P3 work.

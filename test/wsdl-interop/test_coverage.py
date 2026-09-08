@@ -245,7 +245,7 @@ class CoverageTest(unittest.TestCase):
         self.assertEqual("", process.stderr)
         report = json.loads(output.read_text())
         self.assertEqual([], report["selected_failures"])
-        self.assertEqual({"wsdls": 63, "message_directions": 576}, report["selected_scope"])
+        self.assertEqual({"wsdls": 72, "message_directions": 648}, report["selected_scope"])
         self.assertEqual(293, len(report["cases"]))
         self.assertEqual(2272, sum(len(c["messages"]) for c in report["cases"]))
         for stage, counts in report["stage_accounting"]["counts"].items():
@@ -256,11 +256,16 @@ class CoverageTest(unittest.TestCase):
         self.assertGreater(len(report["failures"]), 0)
         by_name = {c["case"]: c for c in report["cases"]}
         for name in ("NegativeIntegerElement", "NonNegativeIntegerElement", "DecimalAttribute",
-                     "DecimalElement", "DecimalSimpleTypePattern"):
+                     "DecimalElement", "DecimalSimpleTypePattern", "IntSimpleTypePattern",
+                     "IntegerSimpleTypePattern", "LongSimpleTypePattern", "ShortSimpleTypePattern",
+                     "NonNegativeIntegerSimpleTypePattern", "PositiveIntegerSimpleTypePattern",
+                     "UnsignedIntSimpleTypePattern", "UnsignedLongSimpleTypePattern", "UnsignedShortSimpleTypePattern"):
             for message in by_name[name]["messages"]:
                 self.assertEqual([], message["failures"], message)
                 self.assertTrue(message["values"]["ok"], message)
-            self.assertEqual("P3", by_name[name]["implementation_phase"])
+            # IntegerSimpleTypePattern already passed the original corpus and retains its P9 coverage ownership.
+            self.assertEqual("P9" if name == "IntegerSimpleTypePattern" else "P3",
+                             by_name[name]["implementation_phase"])
         self.assertTrue(by_name["ImportSchema"]["parse_requirement_passed"])
         self.assertEqual("PARSE-XML-EXCEPTION", by_name["ImportSchema"]["expected_parse"])
         self.assertEqual("WSDL-ERROR", by_name["BlockDefault"]["expected_parse"])

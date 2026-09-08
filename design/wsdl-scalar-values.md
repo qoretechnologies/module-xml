@@ -155,3 +155,65 @@ it is separate from XPath's float-to-decimal casting contract. Qore's MPFR-backe
 number type is binary floating point, so original decimal text remains the
 representation for exact decimal source values. WSDL requires Qore 3.0 for the
 new formatter.
+
+Decimal and integer restrictions validate normalized lexical input at each
+derivation step. Numeric bounds and enumeration use canonical decimal value
+keys: sign, integer length, integer digits and fractional digits determine order
+without a floating point cast. Canonical keys are used only for comparison;
+the caller's lexical spelling remains available for pattern validation and output.
+For example, `1.00000000000000000000` fails a minimum of
+`1.00000000000000000001`; `1.23` belongs to an enumeration declared as `+001.2300`.
+
+Digit facets follow XSD 1.0 Second Edition sections 4.3.11–12. Integer leading
+zeros and fractional trailing zeros do not count. Fractional leading zeros do:
+`0.0012` needs four total digits and four fractional digits under that edition's
+`i * 10^-n` rule, which bounds both the coefficient and `n`. Zero has one total
+digit and no fractional digits. Native values are checked using the same exact
+round-trip spelling used for serialization; display rounding cannot make an
+out-of-range value satisfy a bound or digit limit.
+
+`XsdNumericRestrictionDataType` carries a scalar `XsdNumericFacetInfo` snapshot
+and its base provider. It retains no transient namespace graph, and both survive
+Serializable reconstruction. Each provider in the derivation chain checks its
+own restrictions before conversion. A step with a pattern returns a string and
+reports that string output category; inherited patterned values also remain
+strings. Scalar/list inputs reach validation before any soft conversion.
+
+`XsdNumericDataField` gives fields the same numeric enumeration semantics.
+Generic DataProvider string-key equality cannot express equivalent XML numeric
+spellings. The numeric field retains declared `AllowedValueInfo` spellings and
+uses exact canonical keys for comparison, independently of its provider's type
+facets. It also checks numeric fixed attributes and choices for repeated elements.
+Omission is accepted only through the provider's optional/default rules. Declared
+numeric enumeration spellings are value-space metadata: an additional pattern
+may require the caller to use a different lexical spelling of that same value.
+
+Numeric samples first validate the proposed value and pattern/enum candidates.
+Otherwise they find the interval nearest zero, including inherited and builtin
+bounds, and construct an exact decimal grid value subject to digit limits.
+Every result passes full serialization validation. Empty integer intervals and
+pattern/enumeration intersections the generator cannot construct raise
+`XSD-SAMPLE-ERROR`; they never produce a knowingly invalid example. List example
+generation constructs a list from a valid item example.
+
+The focused numeric facet suite covers exact boundaries, 2000-digit integers,
+underflow, negative/zero values, native precision, patterns, inherited constraints,
+provider/field reconstruction, optionality, repeated choices and fixed attributes.
+`test_numeric_facets.py` checks both actual SOAP bindings and both directions
+with libxml2 and Xerces, asserting exact Decimal values and expanded names.
+Its 864 lexical input/output documents and 576 reconstructed provider/example
+outputs form a 1,440-document independent matrix, with negative provider errors
+checked separately. Schema declaration grammar and facet derivation legality
+remain separate P3 acceptance work; these rules describe value validation for
+resolved numeric restrictions.
+
+References: [numeric bounds](https://www.w3.org/TR/xmlschema-2/#rf-minInclusive),
+[enumeration](https://www.w3.org/TR/xmlschema-2/#rf-enumeration),
+[totalDigits](https://www.w3.org/TR/xmlschema-2/#rf-totalDigits),
+[fractionDigits](https://www.w3.org/TR/xmlschema-2/#rf-fractionDigits).
+
+Restriction providers keep private configuration fixed after construction or
+reconstruction. As with `QoreDataField`, callers configure numeric field choices
+before sharing a field between threads; acceptance itself does not mutate the
+field. Choice setters validate and construct replacement maps before publishing
+them, so a failed update retains the previous choices.

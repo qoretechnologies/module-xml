@@ -2140,3 +2140,104 @@ non-decimal retained patterns, IEEE32/64, dates/durations/partial dates, binary
 lexical validation and the remaining regex/list/union requirements must pass
 before starting P4. This commit closes the base decimal conversion increment,
 not the entire scalar phase or SOAP/WSDL compatibility plan.
+
+## P3-05 — Exact numeric restriction values, providers and examples
+
+Decimal/integer bounds, digit facets and enumeration now use exact XML numeric
+values. The old bound validator cast strings to binary64, collapsing nearby
+bounds and allowing values on the wrong side of them. Digit counts previously
+used native display formatting, which could remove meaningful digits. Each
+numeric restriction now validates XML lexical text and patterns before converting,
+compares canonical decimal keys, and retains patterned integer lexical forms for
+reserialization. Neither rounding nor a display heuristic changes a value to
+satisfy its schema.
+
+The digit rule was checked against XSD 1.0 Second Edition 4.3.11–12 and the
+second-edition errata. Fractional leading zeros count because totalDigits bounds
+both the coefficient and scale in i*10^-n; 0.0012 therefore requires four digits.
+Integer leading zeros and fractional trailing zeros do not count. Enumeration
+compares numeric values, so +001.2300 and 1.23 are equivalent and all decimal zero
+spellings denote zero. Bounds remain exact for 2000-digit integers and decimals
+below the native float range. References are in design/wsdl-scalar-values.md.
+
+XsdNumericRestrictionDataType stores a typed scalar facet snapshot plus the base
+provider, avoiding transient namespace/component ownership. Early reconstruction
+checks exposed a weak Namespaces lifetime error in an initial schema-object-based
+implementation; the final snapshot representation fixes that ownership problem.
+The hashdecl is public so Serializable can reconstruct it in another Program.
+Providers validate before list conversion and retain requiredness, inherited
+patterns and exact output categories.
+
+Consumer checks exposed generic field enumeration comparing raw string keys.
+XsdNumericDataField retains declared AllowedValueInfo metadata while comparing
+exact numeric keys, including fixed attributes and repeated-element choices.
+Its setters publish only fully validated replacement maps; failed updates retain
+the previous choices. Another consumer failure showed that list examples had no
+value because WSMessageHelper had no list branch. List examples now use a valid
+item example. Numeric examples use exact inherited bounds and digit grids and
+validate every candidate. Empty integer grids or unsupported pattern/enumeration
+intersections raise the precise XSD-SAMPLE-ERROR required by P3.
+
+Focused Qore tests pass **10 cases / 413 assertions**, including nearby bounds,
+negative/zero values, arbitrary precision, native values, equivalent enumeration,
+pattern retention, inherited constraints, optionality, reconstruction, repeated
+choices, fixed attributes and atomic field updates. All **39 affected Qore suites
+/ 499 cases** pass without warnings (the final focused test extends the affected
+runner's earlier nine-case numeric suite). The independent matrix checks **1,440
+documents** with both libxml2 and Xerces: 560 lexical inputs, 304 successful
+reserializations and 576 native/reconstructed provider/example outputs. There
+are 432 separately asserted provider rejections. Real SOAP 1.1/1.2 bindings, both
+directions, expanded names, exact Decimal values, attributes/simple content and
+lists/unions are covered. No case or stage is skipped.
+
+Both-version diagnostic survey: 279 parsed / 14 rejected descriptions;
+992 successful / 124 failed decodes; 990 successful / 2 failed serializations;
+1028 valid / 108 rejected inputs; 942 valid / 48 rejected outputs. The eight raw
+valid-input/output disagreements remain adjudicated old-libxml2 limitations.
+Adjudicated broad failures fall from **252 to 220**, with no new failure rows.
+The 32 resolved rows are the second examples of Int, Long, Short, NonNegativeInteger,
+PositiveInteger, UnsignedInt, UnsignedLong and UnsignedShort SimpleTypePattern,
+in both versions/directions. All nine integer pattern families, also including
+IntegerSimpleTypePattern, now have exact value assertions in strict selection:
+**72 descriptions / 648 directions**, zero selected failures. Value stages:
+556 pass, zero fail, 292 unreachable and 1424 unassessed. Original source bytes,
+hashes, historical findings and source adjudication remain unchanged.
+
+Qdx/Doxygen exposed a duplicate NAMED_ARGS anchor shared by the XML module and
+Qore's code-flags documentation. The XML subsection now has the unique
+xml_named_args identifier. Both native XML documentation and WSDL documentation
+pass without warnings, with FAIL_ON_WARNINGS used for the native documentation
+check. An initial manual Doxygen invocation used the repository root and emitted
+tags there; these temporary tags were moved to /tmp and the check was rerun from
+build-debug. The final checks use the normal Debug core tags, with no warning
+suppression or substituted dependency documentation. No C++ changed, so this
+increment does not require a new Valgrind run.
+
+Current reports identify exact WSDL SHA-256
+7c9596f35c2e17acdc37b9f81b34bb121c28eb7a78a0bfa07571684cb30e4c7a.
+The concurrently rebuilt local Debug Qore reports core 7237f17a4, including the
+committed numeric formatter. Tests continue to use the immutable DataProvider
+export documented above. This increment makes no core or astparser changes.
+
+Logs: /tmp/wsdl-p3-05-before.log, /tmp/wsdl-p3-05-sample-before.log,
+/tmp/wsdl-p3-05-consumers-{second,third,fourth,fifth}.log retain root-cause
+reproductions; /tmp/wsdl-p3-05-focused-final.log,
+/tmp/wsdl-p3-05-final-affected.log and per-suite logs,
+/tmp/wsdl-p3-05-independent-reviewed.log,
+/tmp/wsdl-p3-05-final-{survey,coverage}.json/.log,
+/tmp/wsdl-p3-05-xml-docs-final.log and /tmp/wsdl-p3-05-docs-clean.log are final
+focused/corpus/doc evidence. Full Python final status is recorded in the audit.
+
+P3 remains active. Next work includes schema facet declaration grammar and valid
+restriction/fixed-facet rules (including arbitrary-size digit counts), general
+value-space enumeration, IEEE float/double, date/duration/partial-date/binary
+lexical semantics and the remaining regex/list/union criteria. This independently
+tested increment closes numeric value facets, not the entire scalar phase.
+
+Final audit: [audits/P3-05-numeric-facets.md](audits/P3-05-numeric-facets.md), all 62 items recorded with no failures.
+Final Python discovery in /tmp/wsdl-p3-05-python-verified.log runs 102 tests with
+exactly seven tracked P4/P5/P6 failures, zero errors/skips/warnings. The added
+IntegerSimpleTypePattern assertion preserves its existing P9 coverage ownership;
+its earlier mistaken P3 expectation was a test error. Final documentation wording
+was rechecked in /tmp/wsdl-p3-05-docs-reviewed.log, and reports were rerun as
+/tmp/wsdl-p3-05-reviewed-{survey,coverage}.json/.log to capture the final source hash.
