@@ -106,6 +106,10 @@ module WSDL {
       list provider fields validate replacement choices before publishing them
     - generated list examples satisfy item constraints and inherited length, pattern and enumeration facets,
       or report XSD-SAMPLE-ERROR when bounded generation cannot find a valid value
+    - union scalar serialization retains comment wrappers; union restrictions reject ordered bounds,
+      and members retain their own string/token whitespace semantics
+    - element-only schema and SOAP container validation accepts preserved XML formatting whitespace
+      while rejecting non-whitespace text and retaining scalar values
     - union providers validate each value inside repeated lists and preserve explicit requiredness after
       reconstruction; member trials propagate cancellation and unexpected errors in providers and XML conversion
     - union provider operations cache shared nested alternatives for each call and reject cyclic metadata;
@@ -2134,6 +2138,40 @@ public class XsdAbstractType inherits WSDL::XsdNamedData {
 
 #! obtains a scalar value from the parser's ordered text and CDATA fragments
 class XsdScalarTextHelper {
+    static *hash<auto> elementContent(auto data, string description) {
+        if (!exists data) {
+            return;
+        }
+        if (data.typeCode() != NT_HASH) {
+            if (data.typeCode() == NT_STRING && XsdSimpleType::normalizeWhiteSpace(data, "collapse") == "") {
+                return {};
+            }
+            throw SOAP_DESERIALIZATION_ERROR, sprintf("%s requires element content", description);
+        }
+        foreach string key in (keys data) {
+            if (key.startsWith("^value") || key.startsWith("^cdata")) {
+                if (data{key}.typeCode() != NT_STRING
+                        || XsdSimpleType::normalizeWhiteSpace(data{key}, "collapse") != "") {
+                    throw SOAP_DESERIALIZATION_ERROR,
+                        sprintf("%s cannot contain non-whitespace text", description);
+                }
+                delete data{key};
+            }
+        }
+        return data;
+    }
+
+    static auto withComments(*hash<auto> comments, auto scalar) {
+        if (!comments) {
+            return scalar;
+        }
+        if (scalar.typeCode() == NT_HASH) {
+            return comments + scalar;
+        }
+        comments."^value^" = scalar;
+        return comments;
+    }
+
     static auto value(auto data, string error) {
         if (data.typeCode() != NT_HASH) {
             return data;
@@ -8127,6 +8165,10 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
             throw "XSD-SIMPLETYPE-ERROR", "totalDigits and fractionDigits apply only to decimal-derived types";
         }
         string kind = getFacetKind();
+        if (kind == "union" && (exists minInclusive || exists minExclusive
+                || exists maxInclusive || exists maxExclusive)) {
+            throw "XSD-SIMPLETYPE-ERROR", "union restrictions permit only pattern and enumeration facets";
+        }
         if (kind == "boolean" && (enumValues || exists minInclusive || exists minExclusive
                 || exists maxInclusive || exists maxExclusive)) {
             throw "XSD-SIMPLETYPE-ERROR", "boolean permits only pattern and whiteSpace facets";
@@ -8556,7 +8598,7 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
             list<auto> exl;
             foreach XsdAbstractType t in (unionTypes) {
                 try {
-                    return rh + t.serializeValue(nsc, val, omitType);
+                    return XsdScalarTextHelper::withComments(rh, t.serializeValue(nsc, val, omitType));
                 } catch (hash<ExceptionInfo> ex) {
                     if (ex.err != SOAP_SERIALIZATION_ERROR) {
                         rethrow;
@@ -8569,7 +8611,7 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
                 $1.desc), exl));
         }
 
-        return rh + type.serializeValue(nsc, val, omitType);
+        return XsdScalarTextHelper::withComments(rh, type.serializeValue(nsc, val, omitType));
     }
 
     #! Serialize a list type value as space-separated string
@@ -8619,7 +8661,7 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
     /** @return one of \c "preserve", \c "replace", or \c "collapse"
 
         The facet declared by this restriction is used if there is one; otherwise the value is inherited from the
-        base type.
+        base type. Unions preserve the input at this level; the selected member applies its own normalization.
 
         @since %WSDL 0.5.8
     */
@@ -11385,6 +11427,12 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
                 throw SOAP_DESERIALIZATION_ERROR, sprintf("cannot deserialize element %y type %y from qore type %y "
                     "(expecting hash)", en, getName(), val.type());
 
+            if (!mixed) {
+                # xml:space affects the XML data view, but schema element-only content
+                # permits XML whitespace between children independently of that policy.
+                val = XsdScalarTextHelper::elementContent(val, sprintf("element-only type %Y", getName()));
+            }
+
             if (cx_type == XET_SEQUENCE || cx_type == XET_ALL) {
                 #printf("XsdComplexType::deserialize() name: %y val: %y required: %y\n", getName(), val, required);
                 # if we have one element
@@ -12882,7 +12930,7 @@ public class SoapBinding inherits WSDL::OperationalBinding {
         *BindingMessageDescription bmd = self{io};
 
         if (bmd && bmd.hasHeaders()) {
-            *hash<auto> header = o.Envelope.Header;
+            *hash<auto> header = XsdScalarTextHelper::elementContent(o.Envelope.Header, "SOAP Header");
             if (header) {
                 header = XsdBase::expandElementNamespaces(header, envelope_namespaces);
             }
@@ -12897,7 +12945,7 @@ public class SoapBinding inherits WSDL::OperationalBinding {
             #printf("DEBUG: Deserialized SOAP headers: %N\n", hrv);
         }
 
-        *hash<auto> body = o.Envelope.Body;
+        *hash<auto> body = XsdScalarTextHelper::elementContent(o.Envelope.Body, "SOAP Body");
 
         if (!op{io}) {
             if (exists body) {
@@ -12964,7 +13012,7 @@ public class SoapBinding inherits WSDL::OperationalBinding {
                 string mname = (request ? op.output_name : op.input_name) ?? (op.name + (request ? "" : "Response"));
                 if (!msgh{mname})
                     throw SOAP_DESERIALIZATION_ERROR, sprintf("missing %s message name %y as top-level element; got elements: %y", io, mname, keys msgh);
-                msgh = remove msgh{mname};
+                msgh = XsdScalarTextHelper::elementContent(remove msgh{mname}, "SOAP RPC wrapper");
                 XsdBase::removeNS2(\msgh);
                 msgh -= (".ns", "ns");
 

@@ -1,0 +1,127 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires xml
+%requires ../qlib/WSDL.qm
+%exec-class UnionWhitespaceTest
+
+class UnionWhitespaceTest inherits QUnit::Test {
+    constructor() : Test("XSD union whitespace and facet applicability", "1.0") {
+        addTestCase("Union members retain their own whitespace semantics", \values());
+        addTestCase("Detached providers and occurrence lists retain string values", \providers());
+        addTestCase("Union declarations reject inapplicable restriction facets", \declarations());
+        addTestCase("String and token member patterns use distinct normalization", \memberPatterns());
+        addTestCase("Element-only validation accepts preserved XML whitespace", \elementWhitespace());
+        set_return_value(main());
+    }
+
+    private static XsdSchema schema(string facets = "", string members = "xs:string xs:int", string extra = "") {
+        return new XsdSchema('<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:t="urn:union-space"
+            targetNamespace="urn:union-space">' + extra + '<xs:simpleType name="Base"><xs:union memberTypes="'
+            + members + '"/></xs:simpleType><xs:simpleType name="Value"><xs:restriction base="t:Base">'
+            + facets + '</xs:restriction></xs:simpleType></xs:schema>', {"async_only": True});
+    }
+
+    private values() {
+        XsdSchema original = schema();
+        foreach XsdSchema definition in (original, Serializable::deserialize(original.serialize())) {
+            foreach string name in ("Base", "Value") {
+                XsdAbstractType type = definition.findType(make_qname("urn:union-space", name));
+                assertEq("preserve", type.getWhiteSpace());
+                foreach list<string> pair in ((" A\t B\r\nC ", " A\t B\r\nC "), (" \t\r\n", " \t\r\n"),
+                        (" A\u00a0B ", " A\u00a0B "), (" 1 ", " 1 ")) {
+                    assertEq(pair[1], type.deserializeValue("value", definition.getTypeMap(), NOTHING, pair[0]));
+                    assertEq(pair[1], type.serializeValue(definition.nsc, pair[0], True));
+                }
+                hash<auto> fragmented = {"^value^": " A", "^cdata^": "\t B ", "^comment^": "note"};
+                assertEq(" A\t B ", type.deserializeValue("value", definition.getTypeMap(), NOTHING, fragmented));
+                assertEq({"^comment^": "note", "^value^": " A\t B "},
+                    type.serializeValue(definition.nsc, fragmented, True));
+                assertEq(" A", fragmented."^value^");
+                assertThrows("SOAP-DESERIALIZATION-ERROR", \type.deserializeValue(),
+                    ("value", definition.getTypeMap(), NOTHING, {"child": "A"}));
+                assertThrows("SOAP-SERIALIZATION-ERROR", \type.serializeValue(),
+                    (definition.nsc, {"child": "A"}, True));
+            }
+        }
+    }
+
+    private providers() {
+        XsdSchema definition = schema();
+        AbstractDataProviderType original = definition.findType(make_qname("urn:union-space", "Value"))
+            .getDataProviderType();
+        foreach AbstractDataProviderType provider in (original, Serializable::deserialize(original.serialize())) {
+            assertEq(" A\n B ", provider.acceptsValue(" A\n B "));
+            assertEq(" \t ", provider.acceptsValue(" \t "));
+            assertEq(" A\u00a0B ", provider.acceptsValue(" A\u00a0B "));
+            ListDataType repeated(provider);
+            assertEq((" A\r B ", " C "), repeated.acceptsValue((" A\r B ", " C ")));
+            AbstractDataProviderType optional = provider.getOrNothingType();
+            assertEq(NOTHING, optional.acceptsValue(NOTHING));
+            assertEq(" A\t B ", optional.acceptsValue(" A\t B "));
+        }
+    }
+
+    private declarations() {
+        foreach string facet in ("minInclusive", "minExclusive", "maxInclusive", "maxExclusive",
+                "length", "minLength", "maxLength", "totalDigits", "fractionDigits") {
+            assertThrows("XSD-SIMPLETYPE-ERROR", \schema(), ('<xs:' + facet + ' value="1"/>',));
+        }
+        foreach string whitespace in ("preserve", "replace", "collapse") {
+            assertThrows("XSD-SIMPLETYPE-ERROR", \schema(), ('<xs:whiteSpace value="' + whitespace + '"/>',));
+        }
+        XsdSchema valid = schema('<xs:pattern value="A B"/>');
+        XsdAbstractType type = valid.findType(make_qname("urn:union-space", "Value"));
+        assertEq("A B", type.deserializeValue("value", valid.getTypeMap(), NOTHING, "A B"));
+        assertEq("A B", type.serializeValue(valid.nsc, "A B", True));
+        foreach string invalid in (" A  B ", "A\tB", " A\u00a0B ") {
+            assertThrows("SOAP-DESERIALIZATION-ERROR", \type.deserializeValue(),
+                ("value", valid.getTypeMap(), NOTHING, invalid));
+            assertThrows("SOAP-SERIALIZATION-ERROR", \type.serializeValue(), (valid.nsc, invalid, True));
+        }
+    }
+
+    private memberPatterns() {
+        foreach string base in ("string", "token") {
+            XsdSchema definition = schema("", "t:Code xs:int", '<xs:simpleType name="Code"><xs:restriction
+                base="xs:' + base + '"><xs:pattern value="A B"/></xs:restriction></xs:simpleType>');
+            XsdAbstractType type = definition.findType(make_qname("urn:union-space", "Value"));
+            AbstractDataProviderType provider = type.getDataProviderType();
+            string input = base == "token" ? " A\t B " : "A B";
+            assertEq("A B", type.deserializeValue("value", definition.getTypeMap(), NOTHING, input));
+            assertEq("A B", type.serializeValue(definition.nsc, input, True));
+            assertEq("A B", provider.acceptsValue(input));
+            list<string> invalids = ("A\u00a0B", " A C ", " ");
+            if (base == "string") {
+                invalids += " A\t B ";
+            }
+            foreach string invalid in (invalids) {
+                assertThrows("SOAP-DESERIALIZATION-ERROR", \type.deserializeValue(),
+                    ("value", definition.getTypeMap(), NOTHING, invalid));
+                assertThrows("SOAP-SERIALIZATION-ERROR", \type.serializeValue(), (definition.nsc, invalid, True));
+                assertThrows("RUNTIME-TYPE-ERROR", \provider.acceptsValue(), (invalid,));
+            }
+        }
+    }
+
+    private elementWhitespace() {
+        foreach string model in ("sequence", "choice", "all") {
+            XsdSchema original = schema("", "xs:string xs:int", '<xs:complexType name="Record"><xs:' + model
+                + '><xs:element name="flag" type="xs:boolean"/></xs:' + model + '></xs:complexType>');
+            foreach XsdSchema definition in (original, Serializable::deserialize(original.serialize())) {
+                XsdAbstractType type = definition.findType(make_qname("urn:union-space", "Record"));
+                auto parsed = parse_xml('<root xml:space="preserve"><record> <flag>false</flag>'
+                    + '<![CDATA[' + "\t\n" + ']]> </record></root>', XPF_PRESERVE_ORDER).root.record;
+                assertEq({"flag": False}, type.deserializeValue("record", definition.getTypeMap(), NOTHING, parsed));
+                assertEq(" ", parsed."^value^");
+                foreach auto invalid in ("text", "\u00a0", 0) {
+                    parsed."^value^" = invalid;
+                    assertThrows("SOAP-DESERIALIZATION-ERROR", \type.deserializeValue(),
+                        ("record", definition.getTypeMap(), NOTHING, parsed));
+                }
+            }
+        }
+    }
+}

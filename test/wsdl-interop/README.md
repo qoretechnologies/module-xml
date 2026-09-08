@@ -685,3 +685,12 @@ actual SOAP bindings and directions, detached consumers and generated examples.
 [Union provider evidence](union-providers-evidence.md) records exact value
 assertions, the existing libxml2 decimal precision limitation and remaining P3
 schema-union criteria.
+
+Union/XML whitespace checks are in `test_union_whitespace.py`,
+`../wsdl-union-whitespace.qtest` and `../xml-whitespace.qtest`. They retain exact
+string whitespace across actual SOAP 1.1/1.2 bindings, attributes, repeated values,
+providers and reconstruction; reject inapplicable union facets; and distinguish
+string-member preservation from token-member collapse. Native tests cover XML
+CR/CDATA generation, formatting, scalar/mixed parsing, inherited `xml:space`,
+encoding, repeated-child grouping and interruption. The precise Xerces own-union
+pattern discrepancy is documented in [union-whitespace-evidence.md](union-whitespace-evidence.md).

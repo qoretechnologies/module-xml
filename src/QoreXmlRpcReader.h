@@ -4,7 +4,7 @@
 
     Qore Programming Language
 
-    Copyright (C) 2003 - 2025 Qore Technologies, s.r.o.
+    Copyright (C) 2003 - 2026 Qore Technologies, s.r.o.
 
     This library is free software; you can redistribute it and/or
     modify it under the terms of the GNU Lesser General Public
@@ -25,6 +25,8 @@
 #define _QORE_QOREXMLRPCREADER_H
 
 #include "QoreXmlReader.h"
+
+#include <unordered_map>
 
 namespace Qore {
 namespace Xml {
@@ -73,9 +75,19 @@ namespace intern { // make classes local
         int vcount = 0;
         int cdcount = 0;
         int commentcount = 0;
+        bool elements = false;
+        bool character_content = false;
+        bool preserve_space = false;
+        bool preserve_order = false;
+        std::unordered_map<std::string, size_t> suffixes;
 
         DLLLOCAL xml_node(QoreValue& n, int d) : node(n), depth(d) {
         }
+
+        // Keep scalar and mixed-content whitespace. Only discard formatting in
+        // element-only content, after all children have been read.
+        DLLLOCAL int finish(ExceptionSink* xsink);
+
     };
 
     class xml_stack {
@@ -84,8 +96,9 @@ namespace intern { // make classes local
         QoreValue val;
 
     public:
-        DLLLOCAL xml_stack() {
+        DLLLOCAL xml_stack(int pflags) {
             push(val, -1);
+            tail->preserve_order = pflags & XPF_PRESERVE_ORDER;
         }
 
         DLLLOCAL ~xml_stack() {
@@ -99,30 +112,59 @@ namespace intern { // make classes local
             }
         }
 
-        DLLLOCAL void checkDepth(int depth) {
+        DLLLOCAL int checkDepth(int depth, ExceptionSink* xsink) {
+            size_t count = 0;
             while (tail && depth && tail->depth >= depth) {
+                if (!(count++ % 100) && qore_check_cancel(xsink, "XML parsing")) {
+                    return -1;
+                }
+                if (tail->finish(xsink)) {
+                    return -1;
+                }
                 //printd(5, "xml_stack::checkDepth(%d): deleting: %p (%d), new tail: %p\n", depth, tail, tail->depth, tail->next);
                 xml_node* n = tail->next;
                 delete tail;
                 tail = n;
             }
+            return 0;
         }
 
         DLLLOCAL void push(QoreValue& node, int depth) {
             xml_node* sn = new xml_node(node, depth);
             sn->next = tail;
+            sn->preserve_space = tail && tail->preserve_space;
+            sn->preserve_order = tail && tail->preserve_order;
             tail = sn;
         }
+        DLLLOCAL QoreValue* getElementSlot(QoreHashNode* h, const char* name, ExceptionSink* xsink);
         DLLLOCAL QoreValue getValue() {
             return tail->node;
         }
         DLLLOCAL void setNode(QoreValue n) {
             tail->node = n;
         }
-        DLLLOCAL QoreValue takeValue() {
+        DLLLOCAL QoreValue takeValue(ExceptionSink* xsink) {
+            size_t count = 0;
+            for (xml_node* current = tail; current; current = current->next) {
+                if (!(count++ % 100) && qore_check_cancel(xsink, "XML parsing")) {
+                    return QoreValue();
+                }
+                if (current->finish(xsink)) {
+                    return QoreValue();
+                }
+            }
             QoreValue rv = val;
             val = QoreValue();
             return rv;
+        }
+        DLLLOCAL void setElements() {
+            tail->elements = true;
+        }
+        DLLLOCAL void setCharacterContent() {
+            tail->character_content = true;
+        }
+        DLLLOCAL void setPreserveSpace(bool preserve) {
+            tail->preserve_space = preserve;
         }
         DLLLOCAL int getValueCount() const {
             return tail->vcount;

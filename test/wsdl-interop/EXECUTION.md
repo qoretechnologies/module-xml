@@ -2590,3 +2590,62 @@ text can also admit midnight. These core/parser findings remain required P3 date
 work, alongside five-digit/negative years, timezones and fractional precision.
 IEEE conversion, durations/partial dates, strict binary semantics, QName/entity
 context and remaining regex work also remain required. P4-P9 follow P3 acceptance.
+
+
+## P3-11 — XML and union whitespace (complete)
+
+Native text escapes CR, CDATA splits around CR references, and formatting avoids
+adding character data around text/CDATA or preserved-space content. Parsing
+retains scalar/mixed whitespace and inherited xml:space (including subtree readers),
+then omits child-only indentation under the default policy. Per-name counters and
+shared insertion logic preserve repeated-child grouping in expected linear time.
+Cancellation and partial-tree cleanup are tested under Valgrind.
+
+Union members retain their own whitespace semantics; ordered bounds are rejected
+on union restrictions and scalar comment wrappers survive serialization. Temporary
+element-only schema and SOAP container views accept XML formatting whitespace and
+reject non-whitespace text without changing retained XML. The local authored i4452
+fixture now declares mixed=true for its existing text/CDATA test data, with independent
+old/new validation and source hashes in union-whitespace-evidence.md. The AOT build's
+unreachable break after SOAP-SEARCH-ERROR is removed and its documented exception fixed. Provider documentation now describes operation children and the actual request/response APIs; its example passes against the local fixture. Core prerequisite afded8c83 excludes resource assets from generated documentation inputs; its five CMake tests pass on 3.18.4 and 4.3.0 and actual provider docs are clean.
+
+Validation: 55 affected Qore suites / 653 cases pass; focused native 7 cases / 1863
+assertions and union 5 cases / 145 assertions. Six final independent checks pass:
+492 union binding documents, 1264 consumer documents, 120 pattern documents, 48
+invalid union contracts, old/new mixed fixture validity, and document/multi-parameter
+RPC whitespace boundaries. WSDL/native/provider documentation and affected native/AOT
+builds are clean. Native/union/SOAP Valgrind logs have zero errors and zero definite,
+indirect/possible loss; the final relinked artifact was separately rechecked.
+The known core DWARF metadata warning remains visible; no memory suppression is used.
+The offline Salesforce connection case additionally passes two assertions.
+
+Full Python discovery ran 122 tests with 33 failures: the prior seven P4/P5/P6
+failures and two newly exposed P6 requirement groups (26 subtest/accounting failures),
+reproduced using the previous WSDL/native code. The subsequently added independent
+fixture test also passes. Strict coverage remains 89 descriptions / 756 directions,
+664 value checks and no selected failure. All 220 broad failures and source hashes
+remain; two invalid LocalElementSimpleType messages now report non-whitespace
+content directly. WSDL SHA-256: 774583b452ea79d27399426ee9f6fb4480dd6e6d69e543b7877df8d807d707b7. Final audit: audits/P3-11-union-whitespace.md.
+Logs: /tmp/wsdl-p3-11-final-*; old/intermediate failures are retained separately.
+
+The initial P3-10 preflight's 24 mismatched inputs included eight Xerces-only
+union-pattern whitespace disagreements: XSD delegates whitespace to the member,
+whereas Xerces 2.12.2 collapses a union's own pattern input. The precise 24-document
+oracle discrepancy is pinned and tested, without waiving a Qore verdict. Sixteen
+confirmed union input mismatches and eight invalid outputs remain required P3
+value/enum/retained-pattern work; the two invalid ordered-bound declarations are fixed.
+
+P6 now has explicit failures for selected single body-part round trips losing Body,
+RPC headers being required again as body parameters, and scalar RPC results failing
+the serializer's reference<hash<auto>> requirement. Their baseline rows and root
+causes are in union-whitespace-evidence.md and test_soap_container_whitespace.py.
+They remain failures until P6, not expected-success or skipped cases.
+
+P3 continues with ordered union primitive-family/value identity, enumeration and
+retained lexical restrictions through providers/lists/examples, followed by date,
+IEEE, binary, QName/entity and remaining regex criteria. TimeZone's nonthrowing date
+constructor remains a separate required core fix. The separate XML-RPC escaping
+sites still need the same CR/scalar-whitespace boundary review in P3. P4-P9 follow
+P3 acceptance; no phase scope is reduced. Core develop was clean when the user's
+commit request was checked. The subsequently discovered CMake documentation fix was
+tested, fully audited and committed there as afded8c83; nothing is pushed.

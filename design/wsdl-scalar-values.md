@@ -440,3 +440,19 @@ cleanup and numeric reentrancy. `test_union_providers.py` checks real SOAP 1.1/1
 requests/responses, simple content/attributes, repeated values, detached consumers
 and examples; its reference results are documented in
 `test/wsdl-interop/union-providers-evidence.md`.
+
+Union whitespace is governed by the successfully validating member (XSD 1.0
+Part 2 section 4.3.6). The union itself does not introduce collapse: a leading
+`xs:string` member retains whitespace; `xs:token` collapses it. Ordered bounds
+are invalid on union restrictions, which permit only pattern and enumeration.
+Scalar serialization recombines retained comments with a `^value^` wrapper when
+the selected member returns a scalar; it does not use hash-plus-scalar addition,
+which would discard the comments. Scalar text/CDATA fragments are still joined
+before member validation.
+
+`XsdScalarTextHelper::elementContent()` creates the element-only validation view:
+it removes XML whitespace fragments, rejects non-whitespace or non-string text,
+and keeps element/attribute identities. Nonmixed complex types and SOAP
+Body/Header/RPC containers use this view even when inherited `xml:space` retained
+formatting in the input. Scalar types continue to consume the complete lexical
+text. Retained XML carriers are not modified by validation.

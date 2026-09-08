@@ -47,3 +47,37 @@ contract; conversion errors return no partial document.
 encoding/formatting, attribute normalization, malformed and hostile inputs,
 reader byte lengths, cancellation/recovery and modern/legacy UTF-16 output.
 `test/cmake` separately checks the selected native dependency and error cleanup.
+
+Ordinary text generation escapes CR as `&#13;`; CDATA generation closes the
+section around each CR, emits the reference, then opens a new section. TAB/LF
+remain literal in text/CDATA, whereas attributes reference all three whitespace
+characters. The shared text/attribute helper converts input to UTF-8 before
+scanning, preserves the existing output-encoding/numeric-reference options, and
+checks cancellation. CDATA still rejects supplied `]]>` sequences. Formatting is
+disabled within text/CDATA and `xml:space="preserve"` content so added indentation
+cannot change character values; ordinary child-only records retain formatting.
+
+The XML data parser collects whitespace alongside ordinary text and CDATA. Each
+open element records whether it has child elements, non-whitespace text/CDATA,
+and inherited `xml:space`. A subtree reader also obtains the ancestor's space
+policy from the reader's current document node. After the complete element has
+been read, whitespace is discarded only for child-only content under the default
+space policy. Scalar-only whitespace and mixed character content are retained.
+With `XPF_PRESERVE_ORDER`, the remaining children are regrouped using the same
+adjacent-name/list and suffixed-name convention as unformatted XML. Preserved
+comments remain boundaries between child groups.
+
+Per-element suffix counters avoid repeated searches through previous occurrences.
+Collecting and regrouping take expected linear time in node/key input size and
+linear temporary storage; regrouping shares child values rather than copying
+subtrees. Traversal and regrouping check cancellation, own temporary hashes/lists,
+and discard the partial result on error. This remains the existing data
+projection: `XsdXmlValue` retains complete XML where a caller needs information
+outside that projection, including child-only whitespace without `xml:space`.
+
+`test/xml-whitespace.qtest` covers scalar and mixed whitespace, CR/CRLF/CDATA,
+UTF-8/Latin/wide source and output encodings, formatting, ancestor/local space
+policies, repeated child groups, comments, 3,000-child input, invalid values,
+malformed input, interruption and reuse. The SOAP union whitespace matrix checks
+schema validity and exact string values with independent parsers in both versions
+and directions, including attributed/repeated values and detached consumers.

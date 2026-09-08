@@ -109,7 +109,7 @@ public class SoapRequestDataProvider inherits SoapDataProviderBase {
 
         This will execute the request and perform a default search on any record(s) returned
 
-        @throw SWAGGER-SEARCH-ERROR the response type exists but is not list or hash and therefore does not support
+        @throw SOAP-SEARCH-ERROR the response type exists but is not list or hash and therefore does not support
         searching
     */
     private AbstractDataProviderRecordIterator requestSearchRecordsImpl(auto req, *hash<auto> where_cond,
@@ -131,7 +131,6 @@ public class SoapRequestDataProvider inherits SoapDataProviderBase {
             default:
                 throw "SOAP-SEARCH-ERROR", sprintf("the response has type %y, which does not support searching",
                     resp.type());
-                break;
         }
         return new DefaultRecordIterator(i, where_cond, search_options);
     }

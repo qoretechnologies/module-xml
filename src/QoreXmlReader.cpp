@@ -4,7 +4,7 @@
 
     Qore Programming Language
 
-    Copyright (C) 2003 - 2025 Qore Technologies, s.r.o.
+    Copyright (C) 2003 - 2026 Qore Technologies, s.r.o.
 
     This library is free software; you can redistribute it and/or
     modify it under the terms of the GNU Lesser General Public
@@ -27,23 +27,109 @@
 
 #include <memory>
 
-static bool keys_are_equal(const char* k1, const char* k2, bool &get_value) {
-    while (true) {
-        if (!(*k1)) {
-            if (!(*k2))
-                return true;
-            if ((*k2) == '^') {
-                get_value = true;
-                return true;
-            }
-            return false;
-        }
-        if ((*k1) != (*k2))
-            break;
-        k1++;
-        k2++;
+static bool keys_are_equal(const char* name, const char* key) {
+    size_t length = strlen(name);
+    return !strncmp(name, key, length) && (!key[length] || key[length] == '^');
+}
+
+// Return an owning slot for the next child, retaining the public repeated-key convention.
+static QoreValue* xml_element_slot(QoreHashNode* h, const char* name, bool preserve_order,
+        std::unordered_map<std::string, size_t>& suffixes, ExceptionSink* xsink) {
+    if (!h->existsKey(name)) {
+        return &h->getKeyValueReference(name);
     }
-    return false;
+    const char* key = name;
+    if (preserve_order) {
+        key = h->getLastKey();
+        if (!keys_are_equal(name, key)) {
+            // XML names cannot contain '^'; one counter per name assigns the
+            // next unused suffix without rescanning all previous occurrences.
+            QoreString unique;
+            unique.sprintf("%s^%zu", name, ++suffixes[name]);
+            assert(!h->existsKey(unique.c_str()));
+            return &h->getKeyValueReference(unique.c_str());
+        }
+    }
+    QoreValue& value = h->getKeyValueReference(key);
+    QoreListNode* list = value.getType() == NT_LIST ? value.get<QoreListNode>() : nullptr;
+    if (!list) {
+        ReferenceHolder<QoreListNode> holder(new QoreListNode(autoTypeInfo), xsink);
+        holder->push(value.refSelf(), xsink);
+        if (*xsink) {
+            return nullptr;
+        }
+        list = holder.release();
+        discard(value.assign(list), xsink);
+    }
+    return &list->getEntryReference(list->size());
+}
+
+QoreValue* Qore::Xml::intern::xml_stack::getElementSlot(QoreHashNode* h, const char* name, ExceptionSink* xsink) {
+    return xml_element_slot(h, name, tail->preserve_order, tail->suffixes, xsink);
+}
+
+int Qore::Xml::intern::xml_node::finish(ExceptionSink* xsink) {
+    if (!elements || character_content || preserve_space || !vcount) {
+        return 0;
+    }
+    assert(node.getType() == NT_HASH);
+    QoreHashNode* h = node.get<QoreHashNode>();
+    for (int i = 0; i < vcount; ++i) {
+        if (!(i % 100) && qore_check_cancel(xsink, "XML whitespace parsing")) {
+            return -1;
+        }
+        QoreString key;
+        if (i) {
+            key.sprintf("^value%d^", i);
+        } else {
+            key.concat("^value^");
+        }
+        h->takeKeyValue(key.c_str()).discard(nullptr);
+    }
+    if (!preserve_order) {
+        return 0;
+    }
+    // Removing indentation can make equal child names adjacent. Reapply the same
+    // grouping used during parsing, including intervening comments and attributes.
+    ReferenceHolder<QoreHashNode> result(new QoreHashNode(autoTypeInfo), xsink);
+    std::unordered_map<std::string, size_t> grouped_suffixes;
+    ConstHashIterator entry(h);
+    while (entry.next()) {
+        if (qore_check_cancel(xsink, "XML whitespace parsing")) {
+            return -1;
+        }
+        const char* key = entry.getKey();
+        if (*key == '^') {
+            result->setKeyValue(key, entry.get().refSelf(), xsink);
+            if (*xsink) {
+                return -1;
+            }
+            continue;
+        }
+        const char* suffix = strchr(key, '^');
+        QoreString name(key, suffix ? suffix - key : strlen(key), QCS_UTF8);
+        auto add = [&](QoreValue value) -> int {
+            QoreValue* slot = xml_element_slot(*result, name.c_str(), true, grouped_suffixes, xsink);
+            if (!slot) {
+                return -1;
+            }
+            *slot = value.refSelf();
+            return 0;
+        };
+        QoreValue value = entry.get();
+        if (value.getType() == NT_LIST) {
+            ConstListIterator items(value.get<QoreListNode>());
+            while (items.next()) {
+                if (qore_check_cancel(xsink, "XML whitespace parsing") || add(items.getValue())) {
+                    return -1;
+                }
+            }
+        } else if (add(value)) {
+            return -1;
+        }
+    }
+    discard(node.assign(result.release()), xsink);
+    return 0;
 }
 
 void QoreXmlReader::processOpts(const QoreHashNode* opts, ExceptionSink* xsink) {
@@ -113,14 +199,16 @@ QoreHashNode* QoreXmlReader::parseXmlData(const QoreEncoding* data_ccsid, int pf
 }
 
 QoreValue QoreXmlReader::getXmlData(ExceptionSink* xsink, const QoreEncoding* data_ccsid, int pflags, int min_depth) {
-    Qore::Xml::intern::xml_stack xstack;
+    Qore::Xml::intern::xml_stack xstack(pflags);
+    // A reader may start inside an existing document, below the declaration.
+    xstack.setPreserveSpace(xmlNodeGetSpacePreserve(xmlTextReaderCurrentNode(reader)) == 1);
 
     QORE_TRACE("getXMLData()");
     //printd(5, "QoreXmlReader::getXmlData() enc: %s flags: %d md: %d\n", data_ccsid->getCode(), pflags, min_depth);
     int rc = 1;
 
     while (rc == 1) {
-        int nt = nodeTypeSkipWhitespace();
+        int nt = nodeType();
         // get node name
         const char* name = constName();
         if (!name)
@@ -136,7 +224,10 @@ QoreValue QoreXmlReader::getXmlData(ExceptionSink* xsink, const QoreEncoding* da
 
         if (nt == XML_READER_TYPE_ELEMENT) {
             int depth = QoreXmlReader::depth();
-            xstack.checkDepth(depth);
+            if (xstack.checkDepth(depth, xsink)) {
+                return QoreValue();
+            }
+            xstack.setElements();
 
             QoreValue n = xstack.getValue();
             // if there is no node pointer, then make a hash
@@ -155,64 +246,11 @@ QoreValue QoreXmlReader::getXmlData(ExceptionSink* xsink, const QoreEncoding* da
                     xstack.push(h->getKeyValueReference(name), depth);
                 }
                 else {
-                    // see if key already exists
-                    QoreValue v;
-                    bool exists;
-                    v = h->getKeyValueExistence(name, exists);
-
-                    if (!exists)
-                        xstack.push(h->getKeyValueReference(name), depth);
-                    else {
-                        if (!(pflags & XPF_PRESERVE_ORDER)) {
-                            QoreListNode* vl = v.getType() == NT_LIST ? v.get<QoreListNode>() : nullptr;
-                            // if it's not a list, then make into a list with current value as first entry
-                            if (!vl) {
-                                QoreValue& vp = h->getKeyValueReference(name);
-                                vl = new QoreListNode(autoTypeInfo);
-                                vl->push(v, xsink);
-                                if (*xsink) {
-                                    return QoreValue();
-                                }
-                                vp = vl;
-                            }
-                            xstack.push(vl->getEntryReference(vl->size()), depth);
-                        }
-                        else {
-                            // see if last key was the same, if so make a list if it's not
-                            const char* lk = h->getLastKey();
-                            bool get_value = false;
-                            if (keys_are_equal(name, lk, get_value)) {
-                                // get actual key value if there was a suffix
-                                if (get_value)
-                                    v = h->getKeyValue(lk);
-
-                                QoreListNode* vl = v.getType() == NT_LIST ? v.get<QoreListNode>() : nullptr;
-                                // if it's not a list, then make into a list with current value as first entry
-                                if (!vl) {
-                                    QoreValue& vp = h->getKeyValueReference(lk);
-                                    vl = new QoreListNode(autoTypeInfo);
-                                    vl->push(v, xsink);
-                                    if (*xsink) {
-                                        return QoreValue();
-                                    }
-                                    vp = vl;
-                                }
-                                xstack.push(vl->getEntryReference(vl->size()), depth);
-                            }
-                            else {
-                                QoreString ns;
-                                int c = 1;
-                                while (true) {
-                                    ns.sprintf("%s^%d", name, c);
-                                    if (!h->existsKey(ns.c_str()))
-                                        break;
-                                    c++;
-                                    ns.clear();
-                                }
-                                xstack.push(h->getKeyValueReference(ns.c_str()), depth);
-                            }
-                        }
+                    QoreValue* slot = xstack.getElementSlot(h, name, xsink);
+                    if (!slot) {
+                        return QoreValue();
                     }
+                    xstack.push(*slot, depth);
                 }
             }
             // add attributes to structure if possible
@@ -223,6 +261,9 @@ QoreValue QoreXmlReader::getXmlData(ExceptionSink* xsink, const QoreEncoding* da
                     QoreStringNode* value = getValue(data_ccsid, xsink);
                     if (!value)
                         return QoreValue();
+                    if (!strcmp(aname, "xml:space")) {
+                        xstack.setPreserveSpace(!strcmp(constValue(), "preserve"));
+                    }
                     h->setKeyValue(aname, value, xsink);
                 }
                 if (*xsink)
@@ -235,9 +276,15 @@ QoreValue QoreXmlReader::getXmlData(ExceptionSink* xsink, const QoreEncoding* da
             }
             //printd(5, "%s: type: %d, hasValue: %d, empty: %d, depth: %d\n", name, nt, xmlTextReaderHasValue(reader), xmlTextReaderIsEmptyElement(reader), depth);
         }
-        else if (nt == XML_READER_TYPE_TEXT) {
+        else if (nt == XML_READER_TYPE_TEXT || ((nt == XML_READER_TYPE_SIGNIFICANT_WHITESPACE
+                || nt == XML_READER_TYPE_WHITESPACE) && QoreXmlReader::depth() > 0)) {
             int depth = QoreXmlReader::depth();
-            xstack.checkDepth(depth);
+            if (xstack.checkDepth(depth, xsink)) {
+                return QoreValue();
+            }
+            if (nt == XML_READER_TYPE_TEXT) {
+                xstack.setCharacterContent();
+            }
 
             const char* str = constValue();
             if (str) {
@@ -275,7 +322,10 @@ QoreValue QoreXmlReader::getXmlData(ExceptionSink* xsink, const QoreEncoding* da
         }
         else if (nt == XML_READER_TYPE_CDATA) {
             int depth = QoreXmlReader::depth();
-            xstack.checkDepth(depth);
+            if (xstack.checkDepth(depth, xsink)) {
+                return QoreValue();
+            }
+            xstack.setCharacterContent();
 
             const char* str = constValue();
             if (str) {
@@ -308,7 +358,9 @@ QoreValue QoreXmlReader::getXmlData(ExceptionSink* xsink, const QoreEncoding* da
             }
         } else if (nt == XML_READER_TYPE_COMMENT && (pflags & XPF_ADD_COMMENTS)) {
             int depth = QoreXmlReader::depth();
-            xstack.checkDepth(depth);
+            if (xstack.checkDepth(depth, xsink)) {
+                return QoreValue();
+            }
 
             const char* str = constValue();
             if (str) {
@@ -340,12 +392,12 @@ QoreValue QoreXmlReader::getXmlData(ExceptionSink* xsink, const QoreEncoding* da
                 xstack.incCommentCount();
             }
         }
-        rc = read();
+        rc = read(xsink);
 
         if (min_depth > 0 && QoreXmlReader::depth() < min_depth) {
             rc = 0;
             break;
         }
     }
-    return rc ? QoreValue() : xstack.takeValue();
+    return rc ? QoreValue() : xstack.takeValue(xsink);
 }

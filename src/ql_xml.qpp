@@ -304,6 +304,35 @@ QoreXmlRelaxNGContext::QoreXmlRelaxNGContext(const char* rng, int size, Exceptio
 }
 #endif
 
+// XML 1.0 sections 2.11 and 3.3.3 normalize literal CR in text and all
+// attribute whitespace. References preserve the caller's actual characters.
+static int concat_xml_string(ExceptionSink* xsink, QoreString& str, const QoreString& value,
+        const MakeXmlOpts& opts, bool attribute = false) {
+    TempEncodingHelper utf8(&value, QCS_UTF8, xsink);
+    if (!utf8) {
+        return -1;
+    }
+    size_t start = 0;
+    const unsigned flags = CE_XML | (opts.m_useNumericRefs ? CE_NONASCII : 0);
+    for (size_t i = 0; i < utf8->size(); ++i) {
+        if (!(i % 100) && qore_check_cancel(xsink, attribute ? "XML attribute serialization" : "XML text serialization")) {
+            return -1;
+        }
+        const char c = utf8->c_str()[i];
+        if (c != '\r' && (!attribute || (c != '\t' && c != '\n'))) {
+            continue;
+        }
+        QoreString part(utf8->c_str() + start, i - start, QCS_UTF8);
+        if (str.concatEncode(xsink, part, flags)) {
+            return -1;
+        }
+        str.concat(c == '\t' ? "&#9;" : (c == '\n' ? "&#10;" : "&#13;"));
+        start = i + 1;
+    }
+    QoreString part(utf8->c_str() + start, utf8->size() - start, QCS_UTF8);
+    return str.concatEncode(xsink, part, flags);
+}
+
 static int concat_simple_value(ExceptionSink* xsink, QoreString &str, const QoreValue n, const MakeXmlOpts &opts) {
     //printd(5, "concat_simple_value() n: %p (%s) %s\n", n, n->getTypeName(), n->getType() == NT_STRING ? ((QoreStringNode*)n)->c_str() : "unknown");
     if (n.isNullOrNothing())
@@ -348,53 +377,40 @@ static int concat_simple_value(ExceptionSink* xsink, QoreString &str, const Qore
 
     assert(t == NT_STRING);
     QoreStringValueHelper qstr(n);
-    if (str.concatEncode(xsink, **qstr, CE_XML | (opts.m_useNumericRefs ? CE_NONASCII : 0)))
-        return -1;
-    return 0;
+    return concat_xml_string(xsink, str, **qstr, opts);
 }
 
-// XML 1.0 section 3.3.3 normalizes literal attribute whitespace to spaces. Character
-// references preserve the caller's actual tab, line feed and carriage return values.
-static int concat_attribute_value(ExceptionSink* xsink, QoreString& str, const QoreString& value,
-        const MakeXmlOpts& opts) {
-    TempEncodingHelper utf8(&value, QCS_UTF8, xsink);
+static int concat_simple_cdata_value(QoreString& str, const QoreValue n, ExceptionSink* xsink) {
+    if (n.getType() != NT_STRING) {
+        return concat_simple_value(xsink, str, n, MakeXmlOpts());
+    }
+    TempEncodingHelper utf8(n.get<const QoreStringNode>(), QCS_UTF8, xsink);
     if (!utf8) {
         return -1;
     }
+    if (strstr(utf8->c_str(), "]]>")) {
+        xsink->raiseException("MAKE-XML-ERROR", "CDATA text contains illegal ']]>' sequence");
+        return -1;
+    }
     size_t start = 0;
-    const unsigned flags = CE_XML | (opts.m_useNumericRefs ? CE_NONASCII : 0);
     for (size_t i = 0; i < utf8->size(); ++i) {
-        if (!(i % 100) && qore_check_cancel(xsink, "XML attribute serialization")) {
+        if (!(i % 100) && qore_check_cancel(xsink, "XML CDATA serialization")) {
             return -1;
         }
-        const char c = utf8->c_str()[i];
-        if (c != '\t' && c != '\n' && c != '\r') {
+        if (utf8->c_str()[i] != '\r') {
             continue;
         }
         QoreString part(utf8->c_str() + start, i - start, QCS_UTF8);
-        if (str.concatEncode(xsink, part, flags)) {
+        str.concat(&part, xsink);
+        if (*xsink) {
             return -1;
         }
-        str.concat(c == '\t' ? "&#9;" : (c == '\n' ? "&#10;" : "&#13;"));
+        str.concat("]]>&#13;<![CDATA[");
         start = i + 1;
     }
     QoreString part(utf8->c_str() + start, utf8->size() - start, QCS_UTF8);
-    return str.concatEncode(xsink, part, flags);
-}
-
-static int concat_simple_cdata_value(QoreString &str, const QoreValue n, ExceptionSink* xsink) {
-	   //printd(5, "concat_simple_cdata_value() n: %p (%s) %s\n", n, n->getTypeName(), n->getType() == NT_STRING ? ((QoreStringNode*)n)->c_str() : "unknown");
-	   if (n.getType() == NT_STRING) {
-	      QoreStringValueHelper qsn(n);
-	      if (strstr(qsn->c_str(), "]]>")) {
-	         xsink->raiseException("MAKE-XML-ERROR", "CDATA text contains illegal ']]>' sequence");
-	         return -1;
-	      }
-	      str.concat(*qsn, xsink);
-	      return *xsink ? -1 : 0;
-	   }
-
-   return concat_simple_value(xsink, str, n, MakeXmlOpts());
+    str.concat(&part, xsink);
+    return *xsink ? -1 : 0;
 }
 
 static int concat_simple_comment(QoreString &str, const QoreValue n, ExceptionSink* xsink) {
@@ -462,51 +478,27 @@ static void add_xml_element(ExceptionSink* xsink, const char* key, QoreString &s
         const QoreHashNode* h = n.get<const QoreHashNode>();
         // inc = ignore node counter, see if special keys exists and increment counter even if they have no value
         qore_size_t inc = 0;
-        int vn = 0;
+        bool inline_content = false;
         bool exists;
         QoreValue value;
-        QoreValue v = h->getKeyValueExistence("^value^", exists);
-        if (exists) {
-            ++vn;
-            if (v.isNullOrNothing()) {
-                ++inc;
-            } else {
-                value = v;
+        ConstHashIterator content(h);
+        size_t content_count = 0;
+        while (content.next()) {
+            if (!(++content_count % 100) && qore_check_cancel(xsink, "XML content serialization")) {
+                return;
             }
-            // find all ^value*^ nodes
-            QoreString val;
-            while (true) {
-                val.sprintf("^value%d^", vn);
-                v = h->getKeyValueExistence(val.c_str(), exists);
-                if (!exists) {
-                    break;
-                } else if (v.isNullOrNothing()) { // if the node exists but there is no value, then skip
+            const char* content_key = content.getKey();
+            if (!strncmp(content_key, "^value", 6)) {
+                inline_content = true;
+                if (content.get().isNullOrNothing()) {
                     ++inc;
                 } else {
-                    value = v;
+                    value = content.get();
                 }
-                ++vn;
-            }
-        }
-
-        int cn = 0;
-        v = h->getKeyValueExistence("^comment^", exists);
-        if (exists) {
-            ++cn;
-            if (v.isNullOrNothing()) {
+            } else if (!strncmp(content_key, "^cdata", 6)) {
+                inline_content = true;
+            } else if (!strncmp(content_key, "^comment", 8) && content.get().isNullOrNothing()) {
                 ++inc;
-            }
-            // find all ^comment*^ nodes
-            QoreString val;
-            while (true) {
-                val.sprintf("^comment%d^", cn);
-                v = h->getKeyValueExistence(val.c_str(), exists);
-                if (!exists) {
-                    break;
-                } else if (v.isNullOrNothing()) { // if the node exists but there is no value, then skip
-                    ++inc;
-                }
-                ++cn;
             }
         }
         QoreValue attrib = h->getKeyValueExistence("^attributes^", exists);
@@ -516,6 +508,16 @@ static void add_xml_element(ExceptionSink* xsink, const char* key, QoreString &s
         // add attributes for objects
         if (attrib.getType() == NT_HASH) {
             const QoreHashNode* ah = attrib.get<const QoreHashNode>();
+            QoreValue space = ah->getKeyValue("xml:space");
+            if (space.getType() == NT_STRING) {
+                TempEncodingHelper utf8(space.get<const QoreStringNode>(), QCS_UTF8, xsink);
+                if (!utf8) {
+                    return;
+                }
+                if (!strcmp(utf8->c_str(), "preserve")) {
+                    inline_content = true;
+                }
+            }
             // add attributes to node
             ConstHashIterator hi(ah);
             while (hi.next()) {
@@ -524,15 +526,13 @@ static void add_xml_element(ExceptionSink* xsink, const char* key, QoreString &s
                 QoreValue v = hi.get();
                 if (!v.isNullOrNothing()) {
                     QoreStringValueHelper temp(v);
-                    if (concat_attribute_value(xsink, str, **temp, opts)) {
+                    if (concat_xml_string(xsink, str, **temp, opts, true)) {
                         return;
                     }
                 }
                 str.concat('\"');
             }
         }
-
-        //printd(5, "inc: %d vn: %d\n", inc, vn);
 
         // if there are no more elements, close node immediately
         if (h->size() == inc) {
@@ -549,16 +549,16 @@ static void add_xml_element(ExceptionSink* xsink, const char* key, QoreString &s
                 return;
             }
         } else { // add additional elements and formatting only if the additional elements exist
-            if (opts.m_formatWithWhitespaces && !vn) {
+            if (opts.m_formatWithWhitespaces && !inline_content) {
                 str.concat('\n');
             }
             auto innerOpts = opts;
-            if (vn) {
+            if (inline_content) {
                 innerOpts.m_formatWithWhitespaces = false;
             }
             make_xml(xsink, str, *h, indent + 2, innerOpts);
             // indent closing entry
-            if (opts.m_formatWithWhitespaces && !vn) {
+            if (opts.m_formatWithWhitespaces && !inline_content) {
                 str.concat('\n');
                 str.addch(' ', indent);
             }
@@ -2018,6 +2018,9 @@ nothing makeFormattedXMLFragment() [flags=RUNTIME_NOOP,DEPRECATED] {
     @throw PARSE-XML-EXCEPTION Error parsing the XML string
 
     @note the default is to parse XML as serialized data; to preserve key order in XML strings for higher fidelity to the original string when serializing back to XML, use the @ref XPF_PRESERVE_ORDER flag when parsing
+
+    @note Scalar whitespace is retained. Element-only indentation is omitted unless inherited
+    \c xml:space="preserve" applies; mixed text and CDATA retain their ordered whitespace.
 
     @note use the @ref XPF_ADD_COMMENTS to process XML comments and put them in hash as elements with '^comment^' key
 
