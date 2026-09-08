@@ -38,6 +38,33 @@ Two oracle issues are explicitly assessed:
   Exact empty-list assertions remain mandatory. Other libxml2 compiler failures
   are test failures; no production verdict is waived.
 
+The same libxml2 defect occurs when the empty list belongs to a union member.
+P3-14 reproduces it with both lxml's libxml2 2.12.10 and the private libxml2 2.15.4.
+In the latter, `xmlSchemaVCheckCVCSimpleType()` leaves its computed value null for
+zero items (`xmlschemas.c`, list branch starting at line 24230), and
+`xmlSchemaCheckFacet()` reports that successful empty value as uncomputed at
+lines 18337–18340. `test_union_list_identity.py` requires the two precise
+`SCHEMAP_INTERNAL` compiler diagnostics for this named case and reports the three
+affected schemas and their unassessed document counts. It still requires every
+Xerces schema/document verdict and every ordered primitive-value assertion.
+No source schema is rewritten. All other libxml2 errors fail the matrix.
+
+P3-14 also exposes libxml2's base64 lexical false positives: both 2.12.10 and
+2.15.4 accept `!? ???` as a list of `base64Binary` values. The
+[2.15.4 implementation](https://github.com/GNOME/libxml2/blob/v2.15.4/xmlschemastypes.c)
+explicitly follows MIME decoding's tolerance for stray characters: both scanning
+loops in the `XML_SCHEMAS_BASE64BINARY` branch ignore negative results from
+`_xmlSchemaBase64Decode()`, and allocation copies only alphabet/padding characters.
+The punctuation therefore becomes empty data. XSD 1.0
+[base64Binary lexical rules](https://www.w3.org/TR/xmlschema-2/#base64Binary)
+permit alphabet/padding characters and XML whitespace, excluding that punctuation.
+Qore and Xerces reject the input. The matrix retains exactly 12 libxml2 false
+positives across three content models, two bindings and two directions, verifies
+the exact offending text/attribute, and independently rejects its tokens with
+Python's strict base64 decoder. Consumer/output cases have no such disagreement.
+Other mismatches still fail; these false positives are explicitly counted and
+never used to relax Qore validation.
+
 The matrices retain original and reconstructed schemas/providers, atomic elements,
 attributed simple content, attributes, repeated elements and generated examples.
 They use actual SOAP 1.1/1.2 bindings and both request/response directions. Separate

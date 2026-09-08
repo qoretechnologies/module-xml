@@ -710,3 +710,15 @@ matrix checks primitive family and value across real SOAP 1.1/1.2 bindings in bo
 directions, attributed/repeated values, reconstructed consumers and examples.
 These checks cover the implemented scalar families; the remaining P3 union and
 datatype requirements stay tracked in [EXECUTION.md](EXECUTION.md).
+
+Atomic list members of unions are checked by `../wsdl-union-list-identity.qtest`
+and `test_union_list_identity.py`. Ordered primitive item values determine equality,
+including integer/decimal equivalence, boolean and binary family distinctions,
+empty lists and single-item lists distinct from atomic values. Tests cover retained
+spellings, native item boundaries, union facets, provider choices, metadata changes,
+errors, both SOAP bindings/directions, reconstructed consumers and examples.
+The independent matrix reports the already adjudicated libxml2 empty-list enumeration
+compiler defect as unassessed schemas/documents; Xerces assesses all documents and
+exact Qore value checks remain mandatory. The matrix also counts libxml2's
+base64 punctuation false positives; Qore, Xerces and a strict base64 decoder reject
+those inputs. Both oracle defects are explained in the list adjudication document.

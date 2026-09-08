@@ -2812,3 +2812,65 @@ in reviewed-matrix-combined.log; xml.qtest was rerun separately and all 57 per-s
 summaries were verified in reviewed-checks.json. Full 62-item audit:
 audits/P3-13-union-value-identity.md. Remaining P3 and all P4-P9 requirements above
 are unchanged; the phase is still in progress.
+
+
+### P3-14 atomic list values in unions
+
+Atomic list members now carry ordered primitive item identities through schema
+conversion and detached providers. Exact integer/decimal lists can compare equal;
+boolean/string/binary families and single-item lists versus atomic values remain
+distinct. XML list text is split before member conversion; native item boundaries
+remain strict. Ambiguous conversions retain item spellings in native lists, and
+whole-union patterns can retain complete lexical text. Enumeration and finite field
+choices share these keys. Typed metadata follows member reordering/pruning and
+validates item rules, provider identities, list shape and mandatory items.
+
+The baseline converts boolean list 1 0 into string list true false, rejects
+numeric-equivalent list enumerations, and directly casts native provider lists to
+string. Six initial regressions fail; binary coverage separately exposes native
+PARSE-HEX-ERROR escaping instead of trying the valid base64 list. The conversion,
+identity and error-category fixes pass 10 cases / 214 assertions from source and
+rebuilt AOT. All 58 affected XML suites pass: 680 cases / 12246 assertions. The
+previous P3-13 aggregate omitted soap.qtest's 1031 assertion count; the original
+57 passing logs contain 12032. No historical artifact is rewritten.
+
+The independent matrix covers 24 schemas / 48 SOAP 1.1/1.2 contracts, 588 input
+and 312 emitted binding documents, 3520 consumer results and 2048 emitted/provider/
+example documents. Xerces assesses all 2948 documents with no warnings. The existing
+libxml2 empty-list enumeration compiler defect also affects these unions: three
+schemas and 72/176 documents in the respective matrices remain unassessed by
+libxml2. Both system 2.12.10 and private 2.15.4 reproduce it. The new binary matrix
+also exposes exactly 12 libxml2 false positives for !? ???, caused by its base64
+parser following MIME's nonalphabet-character tolerance instead of XSD's grammar.
+Qore, Xerces and strict Python base64 reject those inputs. Exact diagnostic/input
+checks and counters preserve both oracle findings; no Qore verdict is waived.
+See list-values-adjudication.md for root causes and normative references.
+
+Full Python discovery runs 129 methods. Apart from those 12 newly adjudicated
+oracle false positives, its 33 tracked P4/P5/P6 failure signatures are identical
+to P3-13. The affected two-method independent matrix passes after the precise
+adjudication; production code is unchanged after full discovery. Both-version
+survey and strict coverage are identical to P3-13 outside versions: 89 selected
+WSDLs / 756 directions, zero selected failures, 220 broad diagnostic failures.
+AOT and WSDL/native docs including qjar pass without warnings/errors. No C++ source
+changed; no additional Valgrind run is required for this Qore increment.
+
+Final WSDL SHA-256: 01f96dbb5449251b09ddc3d2c9a4a739bdfba686ccc4ce6988a67dc25137f0b6.
+Native XML SHA-256: 8ec5487ebe937450478fc856e5c02114e5cf9ffaf9201cf70d052907b40f2e12.
+Logs/reports: /tmp/wsdl-p3-14-*. Full 62-item audit:
+audits/P3-14-union-list-values.md.
+
+The user's Qore commit request is satisfied: another developer completed and
+committed the remaining DeepSeek follow-up as 39c4da922; the main develop checkout
+was then clean. Earlier XML prerequisites bac32354a and 512b4e298 remain committed.
+This task made no additional main-Qore changes and did not push.
+
+Next P3 increment: list members whose items are themselves atomic unions.
+/tmp/wsdl-p3-15-union-items-{probe.qr,baseline.log} reproduces a list of boolean/int
+union items followed by a decimal list, restricted by enumeration 01 2. Equivalent
+1.0 2.00 is rejected and detached provider choice validation still casts that
+unclassified native list to string. The root is missing per-item union identity
+metadata; atomic-item lists are fixed here. This is retained as required P3-15
+work, along with the remaining primitive families and native-input ambiguity.
+All earlier remaining date/IEEE/binary/QName/entity/regex/XML-RPC requirements and
+all P4-P9 requirements remain in scope. P3 acceptance is not yet complete.

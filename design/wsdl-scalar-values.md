@@ -505,6 +505,42 @@ field choices. `test_union_value_identity.py` checks actual SOAP 1.1/1.2 binding
 in both directions with independent primitive-value assertions and validators,
 including attributed/repeated values, detached providers and generated examples.
 
+List members whose items use the atomic families above carry ordered item identities.
+Each item key includes its primitive family; the whole list key uses length-prefixed
+item keys. Integer and decimal lists can therefore compare equal, while boolean
+and decimal items remain distinct. Empty lists compare equal regardless of item
+type, and a single-item list remains distinct from an atomic value.
+
+`XsdUnionListInfo` records the item spelling rules and the corresponding list and
+item providers. A union accepts either XML list text or native item lists for these
+members. XML text is split at XML whitespace boundaries before member conversion;
+native string items must each have a nonempty, whitespace-free spelling after the
+item's own normalization. A supplied empty binary item is rejected because its
+empty spelling cannot represent a list item. Empty lists themselves remain valid.
+Only the selected binary builtin's lexical parser errors permit trying the next
+member; unexpected errors from custom providers still propagate.
+
+When conversion would change list member selection, the result retains the original
+item spellings in a native list. For example, with a list of strings restricted to
+`true|false` before a boolean list, `"1 0"` becomes `["1", "0"]`. Serializing native
+booleans as `true false` would instead select the string list. Unambiguous native
+values and the existing `xs:integer` spelling policy are preserved. Whole-union
+patterns can retain the entire lexical string, including its whitespace.
+
+Detached metadata follows member reordering and pruning. Restoration checks list
+shape, exact list/item provider identities, mandatory items and atomic spelling
+rules. Missing list descriptions retain the older native-list conversion contract.
+Providers advertise lexical string input when a current member has a list
+description. Finite choices use the same ordered primitive keys, and failed choice
+updates leave existing constraints intact.
+
+`wsdl-union-list-identity.qtest` covers these conversions, facets, choices, metadata,
+binary item boundaries and semantic probe failures. `test_union_list_identity.py`
+checks both SOAP bindings and directions, attributed/repeated values, reconstructed
+consumers and examples, using independent ordered primitive values and validators.
+The previously adjudicated libxml2 empty-list enumeration compiler defect is counted
+explicitly; Xerces assesses every document, with no waiver of Qore value checks.
+
 Union whitespace is governed by the successfully validating member (XSD 1.0
 Part 2 section 4.3.6). The union itself does not introduce collapse: a leading
 `xs:string` member retains whitespace; `xs:token` collapses it. Ordered bounds
