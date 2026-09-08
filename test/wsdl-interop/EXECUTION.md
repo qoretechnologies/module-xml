@@ -844,3 +844,29 @@ Logs: /tmp/wsdl-p2-27-{affected,attributes,mixed,survey,docs}.log and
 /tmp/wsdl-survey-p2-27.json. Full 62-item audit:
 [audits/P2-27-constraints.md](audits/P2-27-constraints.md).
 No native code, astparser change, installation or push.
+
+## P2-28 schema validation acceptance (2026-09-08)
+
+Inherited attribute and mixed-base construction was committed as 8b8c3d1.
+The next isolated candidate combines P2-16 through P2-19: source-local import
+permissions, expanded-name element declaration consistency, attribute wildcard
+construction algebra, declaration exclusivity/context and resolved ID constraints.
+Three Qore-authored SOAP fixtures now declare their encoding imports. Pinned
+upstream fixtures and historical findings remain byte-identical.
+
+30 affected Qore suites pass 403 cases, including 28 new cases / 266 assertions.
+Eight independent tests pass 235 schema graphs through 470 actual SOAP 1.1/1.2
+binding parses and 180 request/response documents with exact name/type/value,
+provider/example/reconstruction checks. Oracle disagreements are explicit assertions
+against the cited XSD requirements. WSDL documentation has no warnings/errors.
+
+The both-version survey retains all counts and classifications. The already-invalid
+SOAPEncodedArray fails earlier on an unimported WSDL-namespace QName, with the same
+WSDL-ERROR category. Other rows are unchanged apart from versions; the full report
+is recursively equal to historical P2-19 excluding versions. No missing cases,
+regression skips or new passing claims for P3/P4/P5/P6 failures.
+
+Logs: /tmp/wsdl-p2-28-{affected,references,elements,wildcards,declarations,survey,docs}.log.
+Report: /tmp/wsdl-survey-p2-28.json. Full 62-item audit:
+[audits/P2-28-validation.md](audits/P2-28-validation.md).
+No native or astparser changes, installation or push.

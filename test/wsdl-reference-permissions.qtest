@@ -1,0 +1,120 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires xml
+%requires ../qlib/WSDL.qm
+%exec-class ReferencePermissionsTest
+
+class ReferencePermissionsTest inherits QUnit::Test {
+    private {
+        const Base = "https://example.invalid/references/";
+    }
+
+    constructor() : QUnit::Test("WSDL schema reference namespace permissions", "1.0") {
+        addTestCase("All schema component references require a declared import", \components());
+        addTestCase("No-namespace references require an explicit absent-namespace import", \absent());
+        addTestCase("Imports grant permission only in their declaring source", \sourceScope());
+        addTestCase("Included documents retain their own reference permissions", \includeScope());
+        addTestCase("Nested import failures restore subsequent schema and QName parsing", \recovery());
+        set_return_value(main());
+    }
+
+    private string schema(string body, *string ns = "urn:local") {
+        return '<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:f="urn:foreign"
+            xmlns:t="urn:local" xmlns:m="urn:middle"'
+            + (ns ? ' targetNamespace="' + ns + '"' : "") + '>' + body + '</xs:schema>';
+    }
+
+    private XsdSchema parse(string source, *hash<string, string> cache) {
+        return new XsdSchema(source, {"async_only": True, "def_path": Base, "xsd_cache": cache ?? {}});
+    }
+
+    private string foreign() {
+        return schema('<xs:simpleType name="T"><xs:restriction base="xs:int"/></xs:simpleType>
+            <xs:complexType name="C"><xs:attribute name="flag" type="xs:boolean"/></xs:complexType>
+            <xs:element name="E" type="xs:int"/><xs:attribute name="A" type="xs:boolean"/>
+            <xs:group name="G"><xs:sequence><xs:element name="child" type="xs:int"/></xs:sequence></xs:group>
+            <xs:attributeGroup name="AG"><xs:attribute name="unit" type="xs:string"/></xs:attributeGroup>',
+            "urn:foreign");
+    }
+
+    components() {
+        foreach string declaration in ('<xs:element name="value" type="f:T"/>',
+                '<xs:simpleType name="Value"><xs:restriction base="f:T"/></xs:simpleType>',
+                '<xs:simpleType name="Value"><xs:list itemType="f:T"/></xs:simpleType>',
+                '<xs:simpleType name="Value"><xs:union memberTypes="xs:boolean f:T"/></xs:simpleType>',
+                '<xs:complexType name="Value"><xs:complexContent><xs:extension base="f:C"/>
+                    </xs:complexContent></xs:complexType>',
+                '<xs:complexType name="Value"><xs:sequence><xs:element ref="f:E"/></xs:sequence></xs:complexType>',
+                '<xs:complexType name="Value"><xs:attribute ref="f:A"/></xs:complexType>',
+                '<xs:complexType name="Value"><xs:group ref="f:G"/></xs:complexType>',
+                '<xs:complexType name="Value"><xs:attributeGroup ref="f:AG"/></xs:complexType>') {
+            XsdSchema s = parse(foreign());
+            assertThrows("WSDL-ERROR", \s.addSchemaString(), (schema(declaration),));
+            s.addSchemaString(schema('<xs:import namespace="urn:foreign"/>' + declaration));
+            assertEq("urn:foreign", s.nsc.getTypeHash("f:T").uri);
+            XsdSchema restored = Serializable::deserialize(s.serialize());
+            assertEq(s.getElementNamespaces(), restored.getElementNamespaces());
+            assertEq(s.getTypeMap().size(), restored.getTypeMap().size());
+        }
+    }
+
+    absent() {
+        string no_ns = schema('<xs:simpleType name="T"><xs:restriction base="xs:int"/></xs:simpleType>', "");
+        XsdSchema s = parse(no_ns);
+        assertThrows("WSDL-ERROR", \s.addSchemaString(), (schema('<xs:element name="value" type="T"/>'),));
+        assertThrows("WSDL-ERROR", \s.addSchemaString(),
+            (schema('<xs:import namespace=""/><xs:element name="value" type="T"/>'),));
+        s.addSchemaString(schema('<xs:import/><xs:element name="value" type="T"/>'));
+        assertEq(0, s.getElement("urn:local", "value").type.deserializeValue("v", s.getTypeMap(), NOTHING, "0"));
+        XsdSchema restored = Serializable::deserialize(s.serialize());
+        assertEq(0, restored.getElement("urn:local", "value").type.deserializeValue("v", restored.getTypeMap(),
+            NOTHING, "0"));
+        XsdSchema empty_import = parse(schema('<xs:import namespace=""/><xs:element name="local" type="xs:int"/>', ""));
+        assertEq("int", empty_import.getElement("", "local").type.name);
+        assertThrows("WSDL-ERROR", \parse(), (schema('<xs:import schemaLocation="bare.xsd"/>
+            <xs:import namespace="" schemaLocation="bare.xsd"/>'), {Base + "bare.xsd": no_ns}));
+        foreach string target in ("", " ") {
+            assertThrows("WSDL-ERROR", \parse(), ('<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"
+                targetNamespace="' + target + '"><xs:element name="bad" type="xs:int"/></xs:schema>',));
+        }
+    }
+
+    sourceScope() {
+        string middle = schema('<xs:import namespace="urn:foreign" schemaLocation="foreign.xsd"/>
+            <xs:element name="middle" type="f:T"/>', "urn:middle");
+        hash<string, string> cache = {Base + "foreign.xsd": foreign(), Base + "middle.xsd": middle};
+        string own = '<xs:import namespace="urn:middle" schemaLocation="middle.xsd"/>';
+        assertThrows("WSDL-ERROR", \parse(), (schema(own + '<xs:element name="value" type="f:T"/>'), cache));
+        XsdSchema s = parse(schema(own + '<xs:import namespace="urn:foreign"/>
+            <xs:element name="value" type="f:T"/>'), cache);
+        assertEq(0, s.getElement("urn:local", "value").type.deserializeValue("v", s.getTypeMap(), NOTHING, "0"));
+        assertEq(0, s.getElement("urn:middle", "middle").type.deserializeValue("v", s.getTypeMap(), NOTHING, "0"));
+    }
+
+    includeScope() {
+        string root = schema('<xs:import namespace="urn:foreign" schemaLocation="foreign.xsd"/>
+            <xs:include schemaLocation="included.xsd"/>');
+        hash<string, string> cache = {Base + "foreign.xsd": foreign(),
+            Base + "included.xsd": schema('<xs:element name="value" type="f:T"/>')};
+        assertThrows("WSDL-ERROR", \parse(), (root, cache));
+        cache{Base + "included.xsd"} = schema('<xs:import namespace="urn:foreign"/>
+            <xs:element name="value" type="f:T"/>');
+        XsdSchema s = parse(root, cache);
+        assertEq(0, s.getElement("urn:local", "value").type.deserializeValue("v", s.getTypeMap(), NOTHING, "0"));
+    }
+
+    recovery() {
+        XsdSchema s = parse(schema('<xs:element name="existing" type="xs:string"/>'),
+            {Base + "bad.xsd": schema('<xs:element name="bad" type="t:Missing"/>', "urn:foreign")});
+        assertThrows("WSDL-ERROR", \s.addSchemaString(),
+            (schema('<xs:import namespace="urn:foreign" schemaLocation="bad.xsd"/>'),));
+        s.addSchemaString(schema('<xs:element name="after" type="xs:boolean"/>'));
+        assertEq(False, s.getElement("urn:local", "after").type.deserializeValue("v", s.getTypeMap(), NOTHING, "false"));
+        assertEq("urn:foreign", s.nsc.getTypeHash("f:T").uri);
+        assertEq("string", s.getElement("urn:local", "existing").type.name);
+    }
+}

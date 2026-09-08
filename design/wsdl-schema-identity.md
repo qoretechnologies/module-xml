@@ -97,6 +97,22 @@ Local `form` overrides determine output qualification independently of the conta
 type's schema default. Input QName lookup does not substitute the target namespace
 for an absent default namespace.
 
+Component QName resolution also checks the imports of the source document containing
+the reference. A component loaded through another inline schema, an include or a
+transitive import does not grant that document permission to reference its namespace.
+During construction, `Namespaces::schema_reference_namespaces` contains the source
+target namespace, its imports and builtin XSD types. It is restored on every exit,
+so general public QName expansion outside construction retains its existing behavior.
+For example, a billing schema referencing `customer:Account` declares an import for
+the customer namespace even when the surrounding WSDL has already supplied that schema.
+
+An import without a `namespace` attribute grants references to components with no
+namespace. An explicit `namespace=""` does not grant that permission. Import reference
+cache keys retain presence as well as value, and imported source target namespaces
+must match both. A schema with no target namespace omits `targetNamespace`; empty
+or whitespace-only target declarations are rejected. Chameleon adoption still uses
+the including namespace before checking references to the adopted components.
+
 Global attributes have their own expanded-name registry, `XsdSchema::attributeMap`,
 and can be inspected with `getAttribute(uri, localName)`. Attribute references retain
 their declaration namespace in `refInfo`, resolve through this registry, and share the
@@ -390,3 +406,121 @@ and `test/wsdl-interop/test_message_identity.py`. The independent test checks
 both directions and provider/example reconstruction. Its explicitly failing
 P3 lexical-rejection assertions remain visible in the execution record.
 The namespace/part rules come from [WSDL 1.1 sections 2.3, 3.5 and 3.7](https://www.w3.org/TR/2001/NOTE-wsdl-20010315).
+
+## Element declaration consistency
+
+Construction retains local element declarations separately from the public field
+maps until references have resolved. The XSD 1.0 `cos-element-consistent` check
+compares declarations by expanded element name and resolved type identity before
+field merges can discard an earlier declaration. Distinct declarations must use
+the same named type. Repeated references to one global declaration, or reuse of
+one local declaration through a named group, retain that declaration's identity
+and can share its anonymous type; identical source text in two different local
+anonymous declarations does not establish identity.
+
+Named groups recursively retain declarations and references in nested
+compositors. Each resolved group caches one checked representative per expanded
+name. Combining cached maps is bounded by the sum of their distinct name counts
+at reference edges, rather than by the number of expanded particle occurrences.
+The shared 32-level group regression doubles references at each level without
+expanding an exponential declaration list.
+
+Extensions check the combined base and own declarations; restrictions check
+their replacement content model. Child element types define their own declaration
+scopes. A particle with both occurrence limits equal to zero contributes no
+declaration, including its nested descendants. Ordinary optional particles still
+contribute their declarations. Checks run before field/occurrence merges, so an
+invalid addition cannot alter declarations already used by another schema type.
+
+For example, two positions named `lineCode` in a purchase-order content model
+can both reference the named `OrderCode` type. Assigning `xs:int` to one and
+`xs:string` to the other is a schema error, even in disjoint nested branches.
+A different namespace or a different containing element type establishes a
+different identity or scope. Existing unambiguous provider fields remain local
+names; namespace collisions retain the documented expanded field names.
+
+This metadata checks construction consistency. Ordered occurrence matching is
+still governed by the particle implementation, and implicit declarations from
+substitution groups require the separate substitution-group resolution work.
+
+## Attribute wildcard construction
+
+`XsdAttributeWildcardInfo` describes the resolved namespace constraint and
+processing strength of an attribute wildcard. The constraint is `Any`, `Not`, or
+`Set`; the latter two carry an excluded namespace or a set of namespace names.
+An empty string denotes no namespace. `Not` also excludes no namespace, as XSD
+1.0 requires for `##other`. A present empty namespace list is an empty set and is
+distinct from an absent wildcard. The public enums avoid stringly typed metadata.
+`XsdComplexType::getAttributeWildcard()` and
+`XsdAttributeGroup::getAttributeWildcard()` return this metadata after resolution.
+Returned maps use copy-on-write; editing a view does not mutate the component.
+
+Construction captures `##targetNamespace` and `##other` in the declaring schema's
+context, including imported groups. Nested attribute groups intersect namespace
+constraints. An explicit local wildcard determines processing strength; otherwise
+the first non-absent group wildcard does. Extensions inherit an absent local
+wildcard or union their own complete wildcard with the base, retaining the own
+wildcard's processing strength. Unions/intersections use the XSD 1.0 intensional
+rules and reject combinations that the specification declares non-expressible.
+
+Restrictions can introduce an attribute absent from the base's explicit uses
+only when the base attribute wildcard allows that attribute's namespace. The
+restriction's wildcard must be an intensional subset of the base wildcard, with
+identical or stronger processing (`strict` > `lax` > `skip`). The ur-type exception
+permits weaker processing when restricting `xs:anyType`. An element wildcard does
+not authorize additional attributes. Attribute-use merging and wildcard
+composition finish before the resolved group/type publishes its new metadata.
+
+For example, a base record admitting extension attributes only from a partner's
+namespace can be restricted to a required `partner:accountId` declaration. Adding
+an unqualified `accountId` instead is a schema error. This construction metadata
+retains native field shapes; full runtime wildcard validation and lossless
+unknown-attribute values remain part of the content processing implementation.
+
+These rules follow [complex-type property mapping](https://www.w3.org/TR/xmlschema-1/#Complex_Type_Definitions),
+[attribute derivation restrictions](https://www.w3.org/TR/xmlschema-1/#derivation-ok-restriction),
+and [wildcard namespace algebra](https://www.w3.org/TR/xmlschema-1/#cos-aw-intersect).
+
+## Element declarations and ID constraints
+
+Element construction distinguishes schema-level declarations from local
+particles and global-element references. A declaration has exactly one name or
+reference and at most one type attribute, anonymous simple type or anonymous
+complex type. An empty anonymous complex type is valid; a named or duplicate
+inline type is rejected. References permit occurrence limits and annotations,
+while declaration-only properties, type children and identity constraints are
+rejected. Local/global property restrictions are checked independently of the
+value of the property: `abstract="false"` is still invalid on a local element.
+Both `default` and `fixed` cannot be present. Empty QName attributes follow the
+same namespace error path as other malformed QNames.
+
+The declaration booleans `nillable` and `abstract` accept `true`, `false`, `1`,
+`0` and surrounding XML whitespace. In particular, `nillable="1"` sets the same
+metadata as `nillable="true"`. Abstract-element runtime validation and general
+element default/fixed application are separate from these construction checks.
+
+Type-dependent checks run after resolution. Attributes with default/fixed
+constraints cannot have an ID-derived type. Constrained elements are retained
+in the construction resolver and checked after complex-type finalization, so
+named and anonymous simple-content types are checked as well. Complex types
+admit at most one ID-derived attribute use after local/group and inherited
+attribute merging. A prohibited use is absent from this set; IDREF is a distinct
+type. A failed check uses the existing schema-addition rollback and does not
+publish a merged inherited attribute map.
+
+For example, an account record may declare one `xs:ID` attribute named `id` and
+an `xs:IDREF` attribute named `parent`. Giving `id` a fixed value or adding a
+second ID-derived attribute through an extension is a schema error. Native
+field representations, provider conversion and generated examples retain their
+existing shapes. ID/IDREF document binding and uniqueness remain runtime work.
+
+Requirements: [element representation](https://www.w3.org/TR/xmlschema-1/#src-element),
+[attribute constraint rule 3](https://www.w3.org/TR/xmlschema-1/#a-props-correct),
+[element constraint rule 5](https://www.w3.org/TR/xmlschema-1/#e-props-correct),
+[complex-type rule 5](https://www.w3.org/TR/xmlschema-1/#ct-props-correct), and
+[boolean whitespace](https://www.w3.org/TR/xmlschema-2/#rf-whiteSpace).
+
+ID ancestry follows the resolved type objects directly. It does not dereference
+the type's borrowed namespace context, which can have expired after an imported
+source context or an owning schema was destroyed. This also keeps detached
+attribute constraints usable without extending namespace-object lifetimes.

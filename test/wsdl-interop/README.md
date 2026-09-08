@@ -435,3 +435,47 @@ It records two libxml2 disagreements: outer restriction facets on a mixed base
 are ignored, and `complexContent mixed="false"` incorrectly retains an outer
 `complexType mixed="true"`. Xerces and Qore enforce the XSD 1.0 complex-type
 property mappings; the exact differing verdicts remain asserted in the test.
+
+`test/wsdl-declaration-constraints.qtest` and `test_declaration_constraints.py`
+cover exclusive type declarations, local/global/reference properties, empty
+declarations, legal boolean spellings, ID-derived value constraints and merged
+ID attribute uses. The independent tests check 94 schemas through 188 actual
+binding parses and 24 SOAP documents, including reconstructed services,
+providers and generated examples. Fourteen libxml2 disagreements and two Xerces
+disagreements are explicitly asserted against the cited XSD 1.0 requirements;
+Qore rejects the invalid schemas. Runtime ID/IDREF binding and general element
+default/fixed semantics remain assigned to P5.
+
+`test/wsdl-attribute-wildcards.qtest` and `test_attribute_wildcards.py` cover
+attribute wildcard construction, imported/nested group intersections, extension
+unions, restriction admission/subsets, processing strength and metadata views.
+The independent matrix checks 82 schemas through 164 actual binding parses and
+112 SOAP documents across simple/complex content, qualified/unqualified attributes,
+both versions/directions, providers, examples and reconstructed services. Two
+libxml2 subset verdict gaps are explicit: it admits `##local` into `##other` and
+rejects the empty set as a subset of `##other`; Xerces and Qore enforce XSD 1.0.
+Runtime wildcard value validation and preservation remain tracked under P5.
+
+`test/wsdl-element-consistency.qtest` and `test_element_consistency.py` check
+conflicting element types before flat field maps merge, including nested named
+groups, inheritance, resolved references and absent particles. The independent
+matrix covers 30 schemas through both actual SOAP bindings and 20 documents in
+both directions, with provider/example and reconstructed-service consumers.
+The tests record libxml2's 13 accepted conflicting models and two rejected valid
+`+00` occurrence spellings, plus Xerces's two unchecked unused conflicting groups.
+Qore enforces the XSD 1.0 construction constraints without those oracle gaps.
+These checks do not replace P4 ordered particle matching or P5 substitution groups.
+
+`test/wsdl-reference-permissions.qtest` and `test_reference_permissions.py` check
+source-local import permissions, including preloaded components, transitive imports,
+included documents and absent namespaces. The Python matrix checks 29 schema graphs
+and 24 SOAP documents, with actual bindings in both versions/directions and native,
+provider, generated-example and reconstructed consumers. The matrix records seven
+libxml2 and two Xerces differing schema verdicts for missing type-reference imports
+and empty/absent namespace distinctions. Requirements come from XSD 1.0
+[src-resolve](https://www.w3.org/TR/xmlschema-1/#src-resolve),
+[src-import](https://www.w3.org/TR/xmlschema-1/#src-import) and the schema target
+namespace property mapping; Qore enforces these even when a validator misses them.
+The Qore-authored `test.wsdl`, `soap-comprehensive.wsdl` and inline SOAP-feature
+contract declare their SOAP encoding imports explicitly. Pinned upstream corpus
+bytes are unchanged.

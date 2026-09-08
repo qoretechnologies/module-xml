@@ -1,0 +1,165 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%exec-class Main
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires ../qlib/WSDL.qm
+%requires QUnit
+
+class Main inherits QUnit::Test {
+    const Xsd = "http://www.w3.org/2001/XMLSchema";
+    const Ns = "urn:consistent";
+
+    constructor() : Test("WSDL element declaration consistency", "1.0") {
+        addTestCase("Direct and nested declarations retain conflicting types", \conflicts());
+        addTestCase("Type identity is independent of spelling and declaration scope", \identities());
+        addTestCase("References and nested reusable groups preserve declaration identity", \groups());
+        addTestCase("Extension combines declarations while restriction replaces content", \derivation());
+        addTestCase("Absent particles do not contribute declarations", \absent());
+        addTestCase("Failed additions restore schema and consumer state", \recovery());
+        addTestCase("Shared group graphs do not expand exponentially", \sharedGraph());
+        set_return_value(main());
+    }
+
+    private string schema(string body) {
+        return sprintf('<xs:schema xmlns:xs="%s" xmlns:t="%s" targetNamespace="%s">%s</xs:schema>',
+            Xsd, Ns, Ns, body);
+    }
+
+    private XsdSchema parse(string body) {
+        return new XsdSchema(schema(body), {"async_only": True});
+    }
+
+    private string elem(string type_name, string extra = "") {
+        return sprintf('<xs:element name="item" type="%s" %s/>', type_name, extra);
+    }
+
+    private string record(string model, string name = "Record") {
+        return sprintf('<xs:complexType name="%s">%s</xs:complexType>', name, model);
+    }
+
+    private XsdComplexType getRecord(XsdSchema s, string name = "Record") {
+        return cast<XsdComplexType>(s.findType(make_qname(Ns, name)));
+    }
+
+    conflicts() {
+        foreach string model in ("sequence", "choice", "all") {
+            assertThrows("WSDL-ERROR", \parse(), (record(sprintf('<xs:%s>%s%s</xs:%s>', model,
+                elem("xs:int"), elem("xs:string"), model)),));
+        }
+        foreach string nested in ("sequence", "choice") {
+            assertThrows("WSDL-ERROR", \parse(), (record('<xs:sequence>' + elem("xs:int")
+                + '<xs:' + nested + ' minOccurs="0">' + elem("xs:string") + '</xs:' + nested
+                + '></xs:sequence>'),));
+        }
+        string anonymous = '<xs:element name="item"><xs:simpleType><xs:restriction base="xs:int"/>
+            </xs:simpleType></xs:element>';
+        assertThrows("WSDL-ERROR", \parse(), (record('<xs:sequence>' + anonymous + anonymous
+            + '</xs:sequence>'),));
+        assertThrows("WSDL-ERROR", \parse(), (record('<xs:sequence><xs:element name="item"/>'
+            + elem("xs:int") + '</xs:sequence>'),));
+    }
+
+    identities() {
+        XsdSchema s = parse(record('<xs:sequence>' + elem("xs:int")
+            + elem("alias:int", 'xmlns:alias="' + Xsd + '"') + '</xs:sequence>'));
+        assertEq("int", getRecord(s).elementmap.item.type.name);
+        s = parse(record('<xs:sequence><xs:element name="item"/>' + elem("xs:anyType") + '</xs:sequence>'));
+        assertEq("anyType", getRecord(s).elementmap.item.type.name);
+        string types = '<xs:simpleType name="A"><xs:restriction base="xs:int"/></xs:simpleType>
+            <xs:simpleType name="B"><xs:restriction base="xs:int"/></xs:simpleType>';
+        assertThrows("WSDL-ERROR", \parse(), (types + record('<xs:sequence>' + elem("t:A") + elem("t:B")
+            + '</xs:sequence>'),));
+        s = parse(types + record('<xs:sequence>' + elem("t:A") + elem("t:A") + '</xs:sequence>'));
+        assertEq("A", getRecord(s).elementmap.item.type.name);
+        s = parse(record('<xs:sequence>' + elem("xs:int") + '<xs:element name="nested"><xs:complexType>
+            <xs:sequence>' + elem("xs:string") + '</xs:sequence></xs:complexType></xs:element></xs:sequence>'));
+        assertEq("int", getRecord(s).elementmap.item.type.name);
+        assertEq("string", cast<XsdComplexType>(getRecord(s).elementmap.nested.type).elementmap.item.type.name);
+        s = parse(record('<xs:sequence>' + elem("xs:int") + elem("xs:boolean", 'form="qualified"')
+            + '</xs:sequence>'));
+        assertEq(("{}item", "{" + Ns + "}item"), keys getRecord(s).elementmap);
+    }
+
+    groups() {
+        string global = '<xs:element name="item"><xs:simpleType><xs:restriction base="xs:int"/>
+            </xs:simpleType></xs:element>';
+        XsdSchema s = parse(record('<xs:sequence><xs:element ref="t:item"/><xs:element ref="t:item"/>
+            </xs:sequence>') + global);
+        assertEq("int", cast<XsdSimpleType>(getRecord(s).elementmap.item.type).type.name);
+        string refs = record('<xs:sequence><xs:element ref="t:item"/>' + elem("xs:string", 'form="qualified"')
+            + '</xs:sequence>') + '<xs:element name="item" type="xs:int"/>';
+        assertThrows("WSDL-ERROR", \parse(), (refs,));
+        string group = '<xs:group name="G"><xs:sequence>' + elem("xs:int") + '</xs:sequence></xs:group>';
+        assertThrows("WSDL-ERROR", \parse(), (group + record('<xs:sequence><xs:group ref="t:G"/>'
+            + elem("xs:string") + '</xs:sequence>'),));
+        assertThrows("WSDL-ERROR", \parse(), ('<xs:group name="Unused"><xs:sequence>' + elem("xs:int")
+            + '<xs:choice><xs:sequence>' + elem("xs:string") + '</xs:sequence></xs:choice></xs:sequence></xs:group>',));
+        assertThrows("WSDL-ERROR", \parse(), (group + '<xs:group name="Outer"><xs:sequence><xs:sequence>
+            <xs:group ref="t:G"/>' + elem("xs:string") + '</xs:sequence></xs:sequence></xs:group>',));
+        s = parse(group + '<xs:group name="Outer"><xs:sequence><xs:sequence><xs:group ref="t:G"/>
+            </xs:sequence></xs:sequence></xs:group>' + record('<xs:group ref="t:Outer"/>'));
+        assertEq("int", getRecord(s).elementmap.item.type.name);
+    }
+
+    derivation() {
+        string base = record('<xs:sequence>' + elem("xs:int") + '</xs:sequence>', "Base");
+        string model = '<xs:complexContent><xs:extension base="t:Base"><xs:sequence>%s</xs:sequence>
+            </xs:extension></xs:complexContent>';
+        assertThrows("WSDL-ERROR", \parse(), (base + record(sprintf(model, elem("xs:string"))),));
+        XsdSchema s = parse(base + record(sprintf(model, elem("xs:int"))));
+        assertEq("int", getRecord(s).elementmap.item.type.name);
+        s = parse(base + record('<xs:complexContent><xs:restriction base="t:Base"><xs:sequence>'
+            + elem("xs:short") + '</xs:sequence></xs:restriction></xs:complexContent>'));
+        assertEq("short", getRecord(s).elementmap.item.type.name);
+        assertEq("int", getRecord(s, "Base").elementmap.item.type.name);
+    }
+
+    absent() {
+        foreach string zero in ('0', '+00', ' 0 ') {
+            string occurs = sprintf('minOccurs="%s" maxOccurs="%s"', zero, zero);
+            XsdSchema s = parse(record('<xs:sequence>' + elem("xs:int") + elem("xs:string", occurs)
+                + '</xs:sequence>'));
+            assertEq("Record", getRecord(s).name);
+            s = parse(record('<xs:sequence>' + elem("xs:int") + '<xs:sequence ' + occurs + '>'
+                + elem("xs:string") + '</xs:sequence></xs:sequence>'));
+            assertEq("Record", getRecord(s).name);
+        }
+        XsdSchema s = parse('<xs:group name="G"><xs:sequence>' + elem("xs:string") + '</xs:sequence></xs:group>'
+            + record('<xs:sequence>' + elem("xs:int") + '<xs:group ref="t:G" minOccurs="0" maxOccurs="0"/>
+            </xs:sequence>'));
+        assertEq("Record", getRecord(s).name);
+    }
+
+    recovery() {
+        XsdSchema original = parse('<xs:group name="G"><xs:sequence>' + elem("xs:int")
+            + '</xs:sequence></xs:group>' + record('<xs:group ref="t:G"/>'));
+        foreach XsdSchema s in (original, Serializable::deserialize(original.serialize())) {
+            XsdComplexType before = getRecord(s);
+            assertThrows("WSDL-ERROR", \s.addSchemaString(), (schema(record('<xs:sequence>' + elem("xs:int")
+                + elem("xs:string") + '</xs:sequence>', "Broken")),));
+            assertEq(before, getRecord(s));
+            assertThrows("WSDL-ERROR", \s.addSchemaString(), (schema(record('<xs:sequence>
+                <xs:group ref="t:G" minOccurs="0"/>' + elem("xs:string") + '</xs:sequence>', "Broken")),));
+            assertEq(1, before.elementmap.item.minOccurs);
+            assertEq({"item": 0}, before.getDataProviderType().acceptsValue({"item": 0}));
+            assertEq({"item": 0}, before.deserializeValue("Record", s.getTypeMap(), NOTHING, {"item": "0"}));
+            s.addSchemaString(schema(record('<xs:sequence>' + elem("xs:boolean") + '</xs:sequence>', "Added")));
+            assertEq({"item": False}, getRecord(s, "Added").getDataProviderType().acceptsValue({"item": False}));
+        }
+    }
+
+    sharedGraph() {
+        string source = '<xs:group name="G0"><xs:sequence><xs:element name="item"><xs:simpleType>
+            <xs:restriction base="xs:int"/></xs:simpleType></xs:element></xs:sequence></xs:group>';
+        for (int i = 1; i <= 32; ++i) {
+            source += sprintf('<xs:group name="G%d"><xs:sequence><xs:group ref="t:G%d"/>
+                <xs:group ref="t:G%d"/></xs:sequence></xs:group>', i, i - 1, i - 1);
+        }
+        XsdSchema original = parse(source + record('<xs:group ref="t:G32"/>'));
+        foreach XsdSchema s in (original, Serializable::deserialize(original.serialize())) {
+            assertEq(("item",), keys getRecord(s).elementmap);
+            assertEq("int", cast<XsdSimpleType>(getRecord(s).elementmap.item.type).type.name);
+        }
+    }
+}
