@@ -3690,3 +3690,103 @@ also stores/computes duration seconds as `double`. Exact duration facet work mus
 preserve these distinctions. The separate rational four-anchor scratch reference
 confirms the prescribed comparison and Gregorian-cycle aliases; none of this
 scratch duration code is included in the calendar commit.
+
+## P3-25 — Strict duration lexical/native conversion
+
+P3-24 calendar values are committed on XML develop as `9f6e735`; no push occurred.
+This increment addresses duration lexical/native conversion and validated scalar
+providers. Exact duration bounds, enumeration/fixed/choice identity, derived
+provider facets and collection value identity remain the next P3 increment.
+DateTime/time work still awaits the unresolved leap-second policy question.
+P4–P9 remain in scope and have not begun implementation.
+
+The original duration regex accepted `P1DT`. Native serialization omitted
+microseconds, emitted embedded negative component signs and accepted absolute
+dates. Deserialization coerced unrelated categories to strings; generic soft-string
+providers bypassed duration grammar. The new helper uses complete ASCII grammar
+and retains XML lexical text without bounded numeric conversion. Native relative
+dates normalize month and whole-second groups separately, preserve microseconds
+and reject opposing group signs. The output remains a string. Keeping microseconds
+separate prevents 64-bit overflow at the native 32-bit day limit. No core C++ change,
+rounding heuristic, lexical cap or fixture-specific behavior is added.
+
+`XsdDurationDataType` retains requiredness and strict conversion through optional
+copies, serialization and enclosing providers. Audit exposed one missing identity
+branch: the new provider could be accepted as a numeric/calendar base in public
+metadata. A failing negative regression reproduced that omission; the shared
+known-provider check now rejects it, including list item metadata. Reconstruction
+validates optionality before assignment. Interruption retains its category and
+provider/list conversion recovers without partial state.
+
+Requirement ownership remains P3 lexical/native duration handling. New tests:
+
+- `wsdl-duration-values.qtest`: eight cases / 869 assertions, covering grammar,
+  empty/malformed/Unicode/category negatives, whitespace, signs, microseconds,
+  every native year/day limit, 1,000-digit components/fractions, metadata,
+  optional/reconstructed providers, basic lists/unions and cancellation/recovery.
+- `wsdl-duration-consumers.qtest`: one case / 20 assertions through local HTTP,
+  actual SOAP 1.1/1.2 bindings and original/reconstructed WebService instances.
+  Requests/responses preserve native and arbitrary-precision durations, required
+  attributes, basic lists and union alternatives. Invalid requests reject before
+  a following valid request succeeds; queue/I/O deadlines and cleanup are bounded.
+- `test_duration_values.py`: all three methods pass. Atomic elements, attributed
+  simple content and repeated values use independent integer-month/rational-second
+  assertions in both binding versions and directions, detached providers and
+  generated examples. Component preservation here is not substituted for XSD's
+  four-anchor duration identity/ordering.
+
+`duration-validator-defects.json` and `duration-values-evidence.md` retain exact
+normative/source evidence for three lexical oracle discrepancies. Both libxml2
+versions and Xerces accept `PT.5S`; libxml2 also accepts `PT1.S`, contrary to XSD
+1.0 Second Edition's digit-before/after rule. libxml2 2.12.10 handles leading but
+not trailing duration whitespace; private 2.15.4 fixes the component-loop tail.
+The binding matrix requires exactly 36 incorrect libxml2 and 12 incorrect Xerces
+verdicts; generated/reconstructed outputs have zero disagreements. All native
+2.15.4 scalar reproductions match the fixture and stderr is empty. Original W3C
+fixtures and historical findings are unchanged.
+
+The final affected suite rerun after the metadata audit fix passes **71 Qore suites,
+789 cases / 27,298 assertions**, including WSDL interoperability and all required
+SOAP consumers. The affected Python run executes **29 methods in 36.468 seconds**
+and retains exactly the two previously tracked P6 selected-binding-version failure
+signatures, with no new failures or errors. Its source/test set is frozen. This
+increment uses the affected Python subset; the immediately preceding calendar
+increment's 179-method discovery is separately recorded above and is not claimed
+as a run of these new duration changes. Evidence:
+`/tmp/wsdl-p3-25-duration-final-suites.log`,
+`/tmp/wsdl-p3-25-duration-python-affected-final.log` and
+`/tmp/wsdl-p3-25-duration-python-comparison.json`.
+
+The final both-version survey and strict coverage retain exactly the previous
+counts and failure signatures: 168 broad failures, zero selected failures,
+114 selected WSDLs / 1,100 directions, and unchanged corpus/catalog hashes.
+The survey remains at 102 decode failures, two serialization failures and 46
+invalid outputs, including eight valid-input/invalid-output cases. These remain
+visible diagnostics assigned to unfinished work. Current reports now record the
+final duration source hash. Full duration corpus value promotion remains tied to
+its following exact-facet/identity increment.
+
+WSDL/SoapDataProvider/SoapClient/SoapHandler compiled modules and WSDL Qdx/Doxygen
+rebuild without warnings/errors. No native change requires Valgrind. The final
+mode/zone, compiled-module/example results, complete audit and source hashes are
+recorded below before committing. Initial failing reductions and audit reproduction
+remain under `/tmp/wsdl-p3-25-duration-*before.log`.
+
+### P3-25 final commit gate
+
+The final new suites pass in AST/IR/JIT/tiered under UTC and Europe/Prague:
+**72 cases / 7,112 assertions across eight combinations**. Compiled-module runs
+pass another **nine cases / 889 assertions**, and the implemented design example
+runs without output. Logs: `/tmp/wsdl-p3-25-duration-modes-final.log` and
+`/tmp/wsdl-p3-25-duration-aot-final.log`, with their adjacent JSON summaries.
+The complete 62-item audit is **20 Pass, 42 N/A, 0 Fail** in
+`audits/P3-25-duration-values.md`. No source or test changed after final verification;
+only the execution/audit records were completed. All intended file and runtime/qmod
+hashes are retained in `/tmp/wsdl-p3-25-duration-final-hashes.json`.
+
+This completes the independently tested lexical/native duration increment.
+P3-26 must implement exact four-anchor duration relations, bounds and declarations,
+enumeration/fixed/finite choices, list/union identity, derived provider metadata and
+valid sample construction before duration acceptance can close. The exact
+fraction/400-year oracle defects and reference experiment recorded above remain
+part of that work. No P3 completion or final interoperability acceptance is claimed.

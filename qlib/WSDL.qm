@@ -80,6 +80,11 @@ module WSDL {
     @section wsdlrelnotes WSDL Module Release Notes
 
     @subsection wsdl_0_5_8 WSDL v0.5.8
+    - duration values validate XSD 1.0 grammar and retain arbitrary component sizes and fractional digits;
+      native relative dates retain microseconds and use one leading sign, while absolute dates and
+      opposing month/second component signs reject instead of producing invalid XML
+    - added \c XsdDurationDataType for validated duration conversion in reconstructed and optional providers;
+      duration decoding returns exact XML text and never coerces unrelated native categories
     - date, gYear, gYearMonth, gMonthDay, gMonth and gDay validate exact XML calendar grammar, Gregorian
       limits, signed extended years and whole-minute timezones within 14 hours of UTC
     - date decoding returns a native date only for an explicitly zoned value within the native year range;
@@ -3189,6 +3194,234 @@ class XsdDecimalLexicalHelper {
     }
 }
 
+class XsdDurationLexicalHelper {
+    static string lexical(auto value, string error) {
+        if (value.typeCode() == NT_DATE) {
+            return native(value, error);
+        }
+        if (value.typeCode() != NT_STRING) {
+            throw error, sprintf("type duration requires XML duration text or a relative date; got %Y", value.type());
+        }
+        string text = XsdSimpleType::normalizeWhiteSpace(value, "collapse");
+        if (text !~ /\A-?P(?:[0-9]+Y)?(?:[0-9]+M)?(?:[0-9]+D)?(?:T(?:[0-9]+H)?(?:[0-9]+M)?(?:[0-9]+(?:\.[0-9]+)?S)?)?\z/
+                || text =~ /\A-?P\z/ || text =~ /T\z/) {
+            throw error, sprintf("invalid XML duration spelling %Y", text);
+        }
+        return text;
+    }
+
+    private static string native(date value, string error) {
+        if (!value.relative()) {
+            throw error, "type duration requires a relative date; an absolute date is not a duration";
+        }
+        # Native component fields are signed 32-bit integers. Combining months
+        # and whole seconds separately stays in the signed 64-bit integer range;
+        # multiplying a large day count by microseconds would overflow.
+        int months = get_years(value) * 12 + get_months(value);
+        int seconds = ((get_days(value) * 24 + get_hours(value)) * 60 + get_minutes(value)) * 60
+            + get_seconds(value);
+        int micros = get_microseconds(value);
+        seconds += micros / 1000000;
+        micros %= 1000000;
+        @assert(abs(micros) < 1000000);
+        if (seconds > 0 && micros < 0) {
+            --seconds;
+            micros += 1000000;
+        } else if (seconds < 0 && micros > 0) {
+            ++seconds;
+            micros -= 1000000;
+        }
+        int second_sign = seconds ? seconds <=> 0 : micros <=> 0;
+        if (months && second_sign && (months <=> 0) != second_sign) {
+            throw error, "XML duration cannot represent opposing month and second component signs";
+        }
+        bool negative = months < 0 || second_sign < 0;
+        months = abs(months);
+        seconds = abs(seconds);
+        micros = abs(micros);
+        string result = negative ? "-P" : "P";
+        if (months / 12) {
+            result += sprintf("%dY", months / 12);
+        }
+        if (months % 12) {
+            result += sprintf("%dM", months % 12);
+        }
+        if (seconds / 86400) {
+            result += sprintf("%dD", seconds / 86400);
+        }
+        seconds %= 86400;
+        if (seconds || micros) {
+            result += "T";
+            if (seconds / 3600) {
+                result += sprintf("%dH", seconds / 3600);
+            }
+            seconds %= 3600;
+            if (seconds / 60) {
+                result += sprintf("%dM", seconds / 60);
+            }
+            seconds %= 60;
+            if (seconds || micros) {
+                result += string(seconds);
+                if (micros) {
+                    string fraction = sprintf("%06d", micros);
+                    fraction =~ s/0+\z//;
+                    result += "." + fraction;
+                }
+                result += "S";
+            }
+        }
+        return result == "P" ? "PT0S" : result;
+    }
+}
+
+
+#! provider preserving exact XML duration text and native relative-date components
+/** XML duration text retains arbitrary component sizes, fractional precision and lexical spelling
+    after whitespace collapse. Native relative dates are normalized to one XSD sign without dropping
+    microseconds. Absolute dates and opposing month/second signs cannot represent an XSD duration.
+    @par Example
+    A processing interval of one microsecond becomes \c "PT0.000001S"; the string
+    \c "PT0.00000000000000001S" retains every fractional digit.
+    @since %WSDL 0.5.8
+*/
+public class XsdDurationDataType inherits AbstractDataProviderType {
+    private {
+        bool optional;
+    }
+
+    #! constructs a duration provider
+    /** @param optional whether NOTHING is accepted */
+    constructor(bool optional = False) {
+        self.optional = optional;
+    }
+
+    private:internal deserializeMembers(hash<auto> members) {
+        if (members.optional.typeCode() != NT_BOOLEAN) {
+            throw "DESERIALIZATION-ERROR", "duration provider requires boolean optionality";
+        }
+        optional = members.optional;
+    }
+
+    #! returns the XSD builtin underlying this provider
+    /** @return duration */
+    string getBuiltinName() {
+        return "duration";
+    }
+
+    #! returns the provider type name
+    /** @return xsd:duration with an optionality prefix when appropriate */
+    string getName() {
+        return (optional ? "*" : "") + "xsd:duration";
+    }
+
+    #! requires validation before conversion by an enclosing list
+    /** @return NOTHING */
+    *Type getValueType() {
+    }
+
+    #! returns the exact output category
+    /** @return NT_STRING */
+    int getBaseTypeCode() {
+        return NT_STRING;
+    }
+
+    #! returns the native output category name
+    /** @return string */
+    string getBaseTypeName() {
+        return "string";
+    }
+
+    #! returns no item type for an atomic duration
+    /** @return NOTHING */
+    *AbstractDataProviderType getElementType() {
+    }
+
+    #! returns no record fields for an atomic duration
+    /** @return NOTHING */
+    *hash<string, AbstractDataField> getFields() {
+    }
+
+    #! requires validation of every supplied duration
+    /** @return an empty map */
+    *hash<string, bool> getDirectTypeHash() {
+        return {};
+    }
+
+    #! reports accepted native categories
+    /** @param simple request simplified names
+        @return string/date, plus nothing for optional types
+    */
+    hash<string, bool> getAcceptTypeHash(*bool simple) {
+        hash<string, bool> result = {"string": True, "date": True};
+        if (optional) {
+            result.nothing = True;
+        }
+        return result;
+    }
+
+    #! reports exact output categories
+    /** @param simple request simplified names
+        @return string, plus nothing for optional types
+    */
+    hash<string, bool> getReturnTypeHash(*bool simple) {
+        hash<string, bool> result = {"string": True};
+        if (optional) {
+            result.nothing = True;
+        }
+        return result;
+    }
+
+    #! validates and converts duration input
+    /** @param value XML duration text or a native relative date
+        @return validated XML text, or NOTHING for optional omission
+        @throw MISSING-VALUE-ERROR a required value is absent
+        @throw RUNTIME-TYPE-ERROR invalid syntax, unsupported category, an absolute date or opposing component signs
+    */
+    auto acceptsValue(auto value) {
+        if (!exists value) {
+            if (optional) {
+                return;
+            }
+            throw "MISSING-VALUE-ERROR", "a duration value must be supplied";
+        }
+        return XsdDurationLexicalHelper::lexical(value, "RUNTIME-TYPE-ERROR");
+    }
+
+    #! returns whether a duration must be supplied
+    /** @return True for mandatory providers */
+    bool isMandatory() {
+        return !optional;
+    }
+
+    #! returns whether omission is allowed
+    /** @return True for optional providers */
+    bool isOrNothingType() {
+        return optional;
+    }
+
+    #! creates the optional equivalent
+    /** @return an optional duration provider */
+    AbstractDataProviderType getOrNothingType() {
+        if (optional) {
+            return self;
+        }
+        XsdDurationDataType result = self.copy();
+        result.optional = True;
+        return result;
+    }
+
+    #! creates the mandatory equivalent
+    /** @return a mandatory duration provider */
+    AbstractDataProviderType getMandatoryType() {
+        if (!optional) {
+            return self;
+        }
+        XsdDurationDataType result = self.copy();
+        result.optional = False;
+        return result;
+    }
+}
+
 # Calendar fields retain their XML lexical value independently of native epoch limits.
 hashdecl XsdCalendarValueInfo {
     string lexical;
@@ -4826,6 +5059,8 @@ class XsdNumericFacetHelper {
             supplied = cast<XsdIeeeDataType>(provider).getBuiltinName();
         } else if (provider instanceof XsdNumericRestrictionDataType) {
             supplied = cast<XsdNumericRestrictionDataType>(provider).getBuiltinName();
+        } else if (provider instanceof XsdDurationDataType) {
+            supplied = "duration";
         } else if (provider instanceof XsdCalendarDataType) {
             supplied = cast<XsdCalendarDataType>(provider).getBuiltinName();
         } else if (provider instanceof XsdCalendarRestrictionDataType) {
@@ -6212,55 +6447,7 @@ public class XsdBaseType inherits WSDL::XsdAbstractType {
                 break;
 
             case "duration":
-                # ISO 8601 duration: P[n]Y[n]M[n]DT[n]H[n]M[n]S
-                if (val.typeCode() == NT_STRING) {
-                    # Validate duration format
-                    if (val !~ /^-?P(\d+Y)?(\d+M)?(\d+D)?(T(\d+H)?(\d+M)?(\d+(\.\d+)?S)?)?$/) {
-                        throw SOAP_SERIALIZATION_ERROR, sprintf("value %y is not a valid ISO 8601 duration for type %y", val, type);
-                    }
-                    # Reject empty durations: "P", "-P", "PT", "-PT"
-                    if (val =~ /^-?PT?$/) {
-                        throw SOAP_SERIALIZATION_ERROR, sprintf("value %y is an empty ISO 8601 duration (missing components) for type %y", val, type);
-                    }
-                } else if (val.typeCode() == NT_DATE) {
-                    # Convert date/time duration to ISO 8601 format
-                    # For relative dates, format appropriately
-                    int years = get_years(val);
-                    int months = get_months(val);
-                    int days = get_days(val);
-                    int hours = get_hours(val);
-                    int minutes = get_minutes(val);
-                    int seconds = get_seconds(val);
-
-                    string dur = "P";
-                    if (years) {
-                        dur += sprintf("%dY", years);
-                    }
-                    if (months) {
-                        dur += sprintf("%dM", months);
-                    }
-                    if (days) {
-                        dur += sprintf("%dD", days);
-                    }
-                    if (hours || minutes || seconds) {
-                        dur += "T";
-                        if (hours) {
-                            dur += sprintf("%dH", hours);
-                        }
-                        if (minutes) {
-                            dur += sprintf("%dM", minutes);
-                        }
-                        if (seconds) {
-                            dur += sprintf("%dS", seconds);
-                        }
-                    }
-                    if (dur == "P") {
-                        dur = "PT0S";  # Zero duration
-                    }
-                    val = dur;
-                } else {
-                    throw SOAP_SERIALIZATION_ERROR, sprintf("type %y requires a string or date value; type %y supplied", type, val.type());
-                }
+                val = XsdDurationLexicalHelper::lexical(val, SOAP_SERIALIZATION_ERROR);
                 break;
 
             case "gYear":
@@ -6404,21 +6591,7 @@ public class XsdBaseType inherits WSDL::XsdAbstractType {
                 return XsdIeeeLexicalHelper::decode(type, val, SOAP_DESERIALIZATION_ERROR);
 
             case "duration":
-                # Return duration as string (ISO 8601 format)
-                # Applications can parse this as needed
-                if (val.typeCode() == NT_STRING) {
-                    # Validate format
-                    if (val !~ /^-?P(\d+Y)?(\d+M)?(\d+D)?(T(\d+H)?(\d+M)?(\d+(\.\d+)?S)?)?$/) {
-                        throw SOAP_DESERIALIZATION_ERROR, sprintf("value %y is not a valid ISO 8601 duration", val);
-                    }
-                    # Reject empty durations: "P", "-P", "PT", "-PT"
-                    if (val =~ /^-?PT?$/) {
-                        throw SOAP_DESERIALIZATION_ERROR, sprintf("value %y is an empty ISO 8601 duration (missing components)", val);
-                    }
-                    return val;
-                }
-                return string(val);
-
+                return XsdDurationLexicalHelper::lexical(val, SOAP_DESERIALIZATION_ERROR);
 
             default: {
                 if (name == "anyType")  {
@@ -6470,6 +6643,7 @@ public class XsdBaseType inherits WSDL::XsdAbstractType {
         @note Integer providers preserve exact values outside signed 64-bit range as strings.
         Decimal providers preserve high precision and noncanonical lexical forms as strings.
         IEEE providers validate complete lexical input and round at the declared float/double precision.
+        Duration providers retain exact XML text and validate relative-date conversion without losing microseconds.
         Text providers apply the builtin whitespace rule; builtin token lists require at least one item.
     */
     AbstractDataProviderType getDataProviderType() {
@@ -6480,6 +6654,9 @@ public class XsdBaseType inherits WSDL::XsdAbstractType {
         }
         if (name == "decimal") {
             return new XsdDecimalDataType();
+        }
+        if (name == "duration") {
+            return new XsdDurationDataType();
         }
         if (XsdIntegerLexicalHelper::Types{name}) {
             return new XsdIntegerDataType(name);

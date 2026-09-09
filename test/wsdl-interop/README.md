@@ -838,3 +838,16 @@ qore -b --enable-debug test/wsdl-interop/calendar-validator.qr \
 The diagnostic prints each native verdict and its expected rejection diagnostic;
 its exit status reports successful execution, not standards conformance.
 DateTime, time, duration and the remaining P3 requirements stay open.
+
+## Duration lexical values
+
+Run `wsdl-duration-values.qtest` and `wsdl-duration-consumers.qtest` with debugging
+enabled, plus `python3 test/wsdl-interop/test_duration_values.py -v`.
+Duration conversion validates XSD 1.0 grammar, retains arbitrary component and
+fractional precision as strings, and preserves native relative-date signs and
+microseconds. Absolute dates and opposing month/second component signs reject.
+Optional and reconstructed providers retain validation; local HTTP tests exercise
+actual SOAP 1.1/1.2 bindings, attributes, basic lists/unions and request recovery.
+See [the public contract](../../design/wsdl-duration-values.md) and
+[validator evidence](duration-values-evidence.md). Exact duration facets, choices
+and collection identity remain following P3 work.
