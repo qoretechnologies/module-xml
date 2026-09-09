@@ -3292,3 +3292,78 @@ lifecycle checks, cpp-owned-locale checks, unity syntax and final hashes.
 Main Qore remains clean on develop at 9dab82749. Nothing was pushed or installed,
 and its shared build was not touched. All remaining P3 and P4-P9 criteria remain
 in scope; P3 acceptance is not complete.
+
+## P3-22 — WSDL IEEE builtin scalars and providers
+
+The native prerequisite is committed as `aa3751f`. Main Qore remains clean on
+`develop` at `9dab82749`; it has no uncommitted work to include and has not been
+pushed. This increment uses the same isolated Debug core and private XML module.
+No main-checkout build, runtime installation or C++ change is part of P3-22.
+
+Root cause: WSDL used Qore's permissive binary64 float conversion for both IEEE
+builtins and soft providers. The `aa3751f` WSDL source on the current runtime
+returns `16777217.0` for binary32 text `16777217`, and accepts `1tail` as `1.0`
+in both decoding and providers. `/tmp/wsdl-p3-22-baseline/` records the reduction.
+`XsdIeeeLexicalHelper` now invokes the exact native conversion on the original
+input and remaps only lexical rejection. `XsdIeeeDataType` validates precision,
+requiredness and reconstructed metadata; native lists cannot preconvert input.
+String serialization preserves normalized valid text. Native serialization emits
+round-trip-safe target values, and decoded results remain native floats.
+
+The integration tests exposed missing `WSMessageHelper` float/double sample
+entries. Both now supply a rounded native number rather than an unknown-type
+placeholder. The old interop test expected an intermediate native serializer
+value and no binary32 overflow; it now checks serialized text and the correct
+rounded/overflowed decoded value. No source fixture was changed.
+
+The new Qore suite passes 6 cases / 793 assertions across AST, IR, JIT and tiered,
+and against the built AOT WSDL module. All 65 affected Qore suites pass 748 cases /
+16,120 assertions. SOAP's three deliberate assertion failures remain contained
+inside passing test cases. The focused three-suite matrix passes in all four
+execution modes. AOT compilation, Qdx/Doxygen and the documentation example are
+clean. This Qore-only increment does not require another Valgrind run; the native
+prerequisite's Valgrind evidence and the separately tracked P9 environment warning
+ledger remain unchanged.
+
+The seven new Python methods pass. They cover 24 real SOAP 1.1/1.2 contracts,
+1,248 input messages (648 valid / 600 invalid), 648 checked binding outputs,
+6,848 provider results (3,648 valid outputs including 192 examples / 3,200
+rejections), and 12,576 exact rational-reference conversion comparisons.
+Both validators assess 5,544 document verdicts. See
+[IEEE scalar evidence](ieee-scalars-evidence.md) for the exact matrix and the
+source-adjudicated 72 libxml2 false positives for missing exponent digits.
+Xerces and an independent complete lexical grammar reject every such input.
+The original invalid documents stay in the mandatory test matrix. Private
+libxml2 2.15.4 independently reproduces the same defect as lxml's libxml2 2.12.10.
+
+Both-version corpus status is unchanged: 89 selected WSDLs / 756 directions,
+zero selected failures and 220 tracked broad failures. The survey differs only
+in two existing FloatEnumerationType diagnostic values, now rounded to binary32.
+The coverage report changes four corresponding diagnostics and 16 float/double
+output bodies. An independent rational check against the original source values
+confirms all 16 outputs preserve the required target IEEE values. Every other
+non-version field matches P3-21. No failure changed to a skip or an unassessed
+success.
+
+Frozen production WSDL SHA-256:
+`3e9aa3351b0933110dffa7905f6b9249995ece492b70d980cf0789cdb61f57e8`.
+Native XML remains
+`e5f15836d1d3b1577d223fcff29fa59ce916192c229cac579eb3343ed3c0ac02`;
+Debug core remains
+`c8b0739f796b93c0f056cbf2a37050d6902de45c3e9361ed3565754ac5549afb`.
+Evidence prefix `/tmp/wsdl-p3-22-`: final-* suite/build/corpus logs,
+runtime-hashes.json, corpus-values.json, *-comparison.json, matrix-counts.json
+and the original/native-validator reproducers. The full 160-method Python
+run completes in 700.836 seconds with exactly the preceding 33 P4/P5/P6 failure
+signatures, zero new/removed failures, zero errors and zero warnings. Source and
+runtime hashes remain unchanged. The current reports are regenerated from the
+same tested outputs. Full [P3-22 audit](audits/P3-22-ieee-scalars.md): 20 Pass,
+42 N/A, 0 Fail. This is a tested scalar increment, not full P3 acceptance.
+
+Next: IEEE value-space bounds, enumerations, fixed values, list/union identity
+and patterned restrictions. XSD 1.0 requires NaN identity for schema comparisons,
+excludes incomparable values from bounds, identifies the two zeros, and keeps
+float/double primitive value spaces disjoint in unions. Extend the existing
+numeric facet/field framework with explicit partial comparisons rather than
+reusing decimal lexical comparisons or adding display-rounding heuristics.
+All remaining P3 and P4-P9 requirements remain in scope.

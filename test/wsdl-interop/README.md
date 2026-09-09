@@ -16,8 +16,12 @@ See [EXECUTION.md](EXECUTION.md) for implementation progress and commit/audit ev
 rounding, exact native number boundaries, signed zero, cancellation and floating-point
 environment restoration. The three Python methods check 3,144 conversions with
 an integer-rational reference. See the [implemented native conversion design](../../design/xml-ieee-conversion.md).
-WSDL scalar/provider/facet integration remains the next P3 increment; these
-primitive conversion tests alone do not close the IEEE WSDL requirement.
+`test/wsdl-ieee-scalars.qtest` and `test_ieee_scalars.py` integrate strict conversion
+with WSDL builtins, providers and example generation. They check 24 real SOAP
+contracts, 1,248 input messages, 6,848 provider results and 12,576 rational-reference
+conversion verdicts. See the [implemented WSDL scalar contract](../../design/wsdl-ieee-scalars.md)
+and [validator evidence](ieee-scalars-evidence.md). IEEE facet and union identity
+integration remains the next P3 increment; these tests do not close all IEEE requirements.
 
 `test/wsdl-regex-classes.qtest` and `test_regex_classes.py` cover XSD regex
 grammar, Unicode class complements, ranges, nested subtraction and bounded
