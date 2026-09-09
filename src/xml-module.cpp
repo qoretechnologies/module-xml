@@ -118,10 +118,21 @@ public:
                 return true;
             }
             if (http) {
+                // Direct schema locations can be raw LEIRIs. Escape their UTF-8
+                // bytes once while retaining existing URI delimiters and percent escapes.
+                xmlChar* escaped = xmlURIEscapeStr(BAD_CAST location, BAD_CAST ":/?#[]@!$&()*+,;='%");
+                if (!escaped) {
+                    xsink->raiseException("XSD-SYNTAX-ERROR", "could not encode an HTTP schema URI");
+                    return true;
+                }
+                ON_BLOCK_EXIT(xmlFree, escaped);
+                resolved_location = reinterpret_cast<const char*>(escaped);
                 QoreHttpClientObject client;
                 client.setSslVerifyMode(SSL_VERIFY_PEER);
+                // libxml2 supplies URI references with existing percent escapes.
+                client.setPreEncodedUrls(true);
                 client.setEncodingPassthru(true);
-                if (client.setURL(location, xsink)) {
+                if (client.setURL(resolved_location.c_str(), xsink)) {
                     return true;
                 }
                 ReferenceHolder<QoreHashNode> info(new QoreHashNode(autoTypeInfo), xsink);

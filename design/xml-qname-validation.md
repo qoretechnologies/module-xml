@@ -12,6 +12,8 @@ bindings, prefix aliases, wrong and missing bindings, malformed names, and
 enumeration identity across absent and explicitly empty default namespaces.
 A package version string does not establish correctness; a distribution
 backport passing the probe remains eligible.
+The probe also checks [schema URI identity and XML Base](xml-schema-uris.md);
+a library with only the QName fixes is not sufficient.
 
 Unpatched libxml2 2.15.4 has three QName defects. Its streaming namespace lookup
 searches only declared bindings and misses the predefined `xml` binding. Its

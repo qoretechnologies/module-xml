@@ -68,6 +68,8 @@ project(libxml2_backport_fixture C)
 add_subdirectory("{cls.source}" libxml)
 include("{REPO}/cmake/QoreXmlLibXml2QNameFix.cmake")
 qore_xml_fix_libxml2_qnames("{cls.source}" "${{CMAKE_CURRENT_BINARY_DIR}}/libxml")
+include("{REPO}/cmake/QoreXmlLibXml2UriFix.cmake")
+qore_xml_fix_libxml2_uris("{cls.source}" "${{CMAKE_CURRENT_BINARY_DIR}}/libxml")
 ''')
         cls.fixed = cls.root / "fixed/build-debug"
         cls.run_command(["cmake", "-S", fixed_project, "-B", cls.fixed, "-DCMAKE_BUILD_TYPE=Debug",
@@ -96,6 +98,7 @@ qore_xml_fix_libxml2_qnames("{cls.source}" "${{CMAKE_CURRENT_BINARY_DIR}}/libxml
         self.assertIn("namespace_identity=PASS", output)
         self.assertIn("runtime=21504", output)
         self.assertIn("qname_unions=PASS", output)
+        self.assertIn("uri_identity=PASS", output)
         stage = self.root / "stage"
         self.run_command(["cmake", "--install", self.root / "bundled", "--prefix", stage])
         self.assertEqual(["bin/probe", "share/licenses/qore-xml/libxml2-NOTICES.txt"],
@@ -105,6 +108,43 @@ qore_xml_fix_libxml2_qnames("{cls.source}" "${{CMAKE_CURRENT_BINARY_DIR}}/libxml
         for name in ("dict.c", "list.c"):
             body = (self.source / name).read_text()
             self.assertIn(body[:body.index("*/") + 2], notice)
+
+    def test_qname_fixed_library_with_broken_uris_uses_fallback(self):
+        project = self.root / "uri-broken/source"
+        project.mkdir(parents=True)
+        (project / "CMakeLists.txt").write_text(f'''cmake_minimum_required(VERSION 3.18...3.31)
+project(uri_broken_fixture C)
+add_subdirectory("{self.source}" libxml)
+include("{REPO}/cmake/QoreXmlLibXml2QNameFix.cmake")
+qore_xml_fix_libxml2_qnames("{self.source}" "${{CMAKE_CURRENT_BINARY_DIR}}/libxml")
+''')
+        build = self.root / "uri-broken/build-debug"
+        self.run_command(["cmake", "-S", project, "-B", build, "-DCMAKE_BUILD_TYPE=Debug",
+                          "-DBUILD_SHARED_LIBS=ON", "-DLIBXML2_WITH_PROGRAMS=OFF",
+                          "-DLIBXML2_WITH_TESTS=OFF", "-DLIBXML2_WITH_PYTHON=OFF"])
+        self.run_command(["cmake", "--build", build, "--target", "LibXml2", "-j4"])
+        libraries = list((build / "libxml").glob("libxml2.so")) + list((build / "libxml").glob("libxml2.dylib"))
+        self.assertEqual(1, len(libraries))
+        options = [f"-DLIBXML2_LIBRARY={libraries[0]}", f"-DLIBXML2_INCLUDE_DIR={self.fixed_include}",
+                   f"-DFETCHCONTENT_SOURCE_DIR_QORE_XML_LIBXML2={self.source}"]
+        self.configure("uri-broken-auto", "-DQORE_XML_LIBXML2_PROVIDER=AUTO", *options)
+        probe = (self.root / "uri-broken-auto/system-libxml2/namespace-probe.log").read_text()
+        self.assertIn("qname_values=PASS", probe)
+        self.assertIn("qname_unions=PASS", probe)
+        self.assertIn("uri_identity=FAIL", probe)
+        self.configure("uri-broken-system", "-DQORE_XML_LIBXML2_PROVIDER=SYSTEM", *options, success=False)
+
+    def test_unexpected_uri_sources_are_rejected(self):
+        import shutil
+        for filename in ("uri.c", "tree.c"):
+            with self.subTest(filename=filename):
+                source = self.root / ("changed-uri-source-" + filename)
+                shutil.copytree(self.source, source)
+                path = source / filename
+                path.write_bytes(path.read_bytes() + b"\n/* Unrecognized URI source modification. */\n")
+                output = self.configure("changed-uri-" + filename, "-DQORE_XML_LIBXML2_PROVIDER=BUNDLED",
+                                        f"-DFETCHCONTENT_SOURCE_DIR_QORE_XML_LIBXML2={source}", success=False)
+                self.assertIn(f"Unexpected libxml2 {filename}; cannot apply URI fixes", output)
 
     def test_catalog_error_cleanup(self):
         import hashlib
@@ -132,11 +172,19 @@ qore_xml_fix_libxml2_qnames("{cls.source}" "${{CMAKE_CURRENT_BINARY_DIR}}/libxml
                   "xmlschemastypes.c": "08cac7d1dbdb617688ac5b36ab6fee75f634e5bf0372aa0e6569a0bebe3b0c8f"}
         replacements = self.root / "bundled/_deps/qore_xml_libxml2-build/qore-qname-fix"
         times = {name: (replacements / name).stat().st_mtime_ns for name in hashes}
+        uri_hashes = {"uri.c": "16cc4794868487cb3dac76faffef603163f8d8472508735df7b5a4cf0a4c4e44",
+                      "tree.c": "2045cf4d1a93bd5d2e9b2781ed92a748e146e30c2919f59fb3ea1845f5795dea",
+                      "xmlschemas.c": hashes["xmlschemas.c"]}
+        uri_replacements = self.root / "bundled/_deps/qore_xml_libxml2-build/qore-uri-fix"
+        uri_times = {name: (uri_replacements / name).stat().st_mtime_ns for name in uri_hashes}
         self.configure("bundled", "-DQORE_XML_LIBXML2_PROVIDER=BUNDLED",
                        f"-DFETCHCONTENT_SOURCE_DIR_QORE_XML_LIBXML2={self.source}")
         for name, expected in hashes.items():
             self.assertEqual(expected, hashlib.sha256((self.source / name).read_bytes()).hexdigest())
             self.assertEqual(times[name], (replacements / name).stat().st_mtime_ns)
+        for name, expected in uri_hashes.items():
+            self.assertEqual(expected, hashlib.sha256((self.source / name).read_bytes()).hexdigest())
+            self.assertEqual(uri_times[name], (uri_replacements / name).stat().st_mtime_ns)
         self.assertIn("qname_values=PASS", self.run_command([self.root / "bundled/probe"]))
 
     def test_unexpected_qname_sources_are_rejected(self):

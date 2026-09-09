@@ -108,6 +108,8 @@ Native schema attachment and resource loading have separate checks:
 ```sh
 qore -b --enable-debug test/xml-reader-schemas.qtest
 python3 test/wsdl-interop/test_schema_resources.py -v
+python3 test/wsdl-interop/test_schema_uris.py -v
+python3 test/wsdl-interop/test_schema_uri_oracle.py -v
 python3 test/wsdl-interop/test_qname_union_validator.py -v
 ```
 
@@ -117,7 +119,14 @@ With a module built against libxml2 advertising `LIBXML_FTP_ENABLED`, also run
 `python3 test/wsdl-interop/legacy_schema_ftp.py -v`. This compatibility check
 does not bypass the production dependency probe. See
 [schema attachment evidence](xml-reader-schemas-evidence.md) for the exact build,
-memory checks and the separately recorded open URI-resolution finding.
+memory checks. The original URI-resolution finding remains historical evidence;
+the exact source now has a native regression. See the
+[URI implementation](../../design/xml-schema-uris.md) for XSD anyURI, XML Base,
+runtime hints, URI identity and the separate Xerces XML Base disagreements.
+`cmake --build build-debug --target qore-xml-namespace-probe qore-xml-uri-allocation`
+builds the offline native behavior and allocation-failure checks. Run those
+executables under Valgrind as well as the affected Qore suites. Set `QORE_EXEC_MODE`
+to run the Python resource/URI tests in AST, IR, JIT or tiered mode (default: JIT).
 
 ## Fixture provenance
 

@@ -28,6 +28,133 @@ import org.xml.sax.SAXException;
 import org.xml.sax.SAXParseException;
 
 public final class XsdOracle {
+    private static String normalizeAnyURI(String value) {
+        StringBuilder normalized = new StringBuilder(value.length());
+        boolean space = false;
+        for (int index = 0; index < value.length(); ++index) {
+            char c = value.charAt(index);
+            if (c == ' ' || c == '\t' || c == '\r' || c == '\n') {
+                space = normalized.length() != 0;
+            } else {
+                if (space) {
+                    normalized.append(' ');
+                    space = false;
+                }
+                normalized.append(c);
+            }
+        }
+        return normalized.toString();
+    }
+
+    // XSD 1.0 anyURI uses the XLink 1.0 UTF-8 escaping procedure. Existing
+    // percent escapes and URI delimiters retain their meaning.
+    private static URI uri(String value) {
+        StringBuilder escaped = new StringBuilder(value.length());
+        final String hex = "0123456789ABCDEF";
+        for (byte octet : value.getBytes(StandardCharsets.UTF_8)) {
+            int c = octet & 255;
+            if (c <= 32 || c >= 127 || "\"<>\\^`{|}".indexOf(c) >= 0) {
+                escaped.append('%').append(hex.charAt(c >>> 4)).append(hex.charAt(c & 15));
+            } else {
+                escaped.append((char) c);
+            }
+        }
+        return URI.create(escaped.toString());
+    }
+
+    // RFC 3986 section 5.2.4. URI.normalize() collapses empty path segments;
+    // those segments can identify a different resource and must be preserved.
+    private static String removeDotSegments(String path) {
+        StringBuilder result = new StringBuilder(path.length());
+        int read = 0;
+        while (read < path.length()) {
+            if (path.startsWith("../", read)) {
+                read += 3;
+            } else if (path.startsWith("./", read)) {
+                read += 2;
+            } else if (path.startsWith("/./", read)) {
+                read += 2;
+            } else if (path.startsWith("/.", read) && read + 2 == path.length()) {
+                result.append('/');
+                break;
+            } else if (path.startsWith("/../", read)
+                       || (path.startsWith("/..", read) && read + 3 == path.length())) {
+                read += 3;
+                int slash = result.lastIndexOf("/");
+                result.setLength(Math.max(slash, 0));
+                if (read == path.length()) {
+                    result.append('/');
+                    break;
+                }
+            } else if ((path.startsWith(".", read) && read + 1 == path.length())
+                       || (path.startsWith("..", read) && read + 2 == path.length())) {
+                break;
+            } else {
+                int next = path.indexOf('/', read + (path.charAt(read) == '/' ? 1 : 0));
+                if (next < 0) {
+                    next = path.length();
+                }
+                result.append(path, read, next);
+                read = next;
+            }
+        }
+        return result.toString();
+    }
+
+    private static boolean hasAuthority(URI value) {
+        return value.getRawSchemeSpecificPart().startsWith("//");
+    }
+
+    // Resolve raw components per RFC 3986 section 5.2. java.net.URI.resolve()
+    // uses older rules for empty/query references, excess parents and slashes.
+    private static URI resolve(String reference, String base) {
+        URI ref = uri(reference);
+        if (ref.isOpaque()) {
+            return ref;
+        }
+        URI parent = base == null ? null : uri(base);
+        String scheme = ref.getScheme();
+        String authority = ref.getRawAuthority();
+        boolean authorityPresent = hasAuthority(ref);
+        String path = ref.getRawPath();
+        String query = ref.getRawQuery();
+        if (scheme == null && parent != null) {
+            scheme = parent.getScheme();
+            if (!authorityPresent) {
+                authority = parent.getRawAuthority();
+                authorityPresent = hasAuthority(parent);
+                String parentPath = parent.getRawPath() == null ? "" : parent.getRawPath();
+                if (path.isEmpty()) {
+                    path = parentPath;
+                    if (query == null) {
+                        query = parent.getRawQuery();
+                    }
+                } else if (!path.startsWith("/")) {
+                    path = (authorityPresent && parentPath.isEmpty() ? "/"
+                            : parentPath.substring(0, parentPath.lastIndexOf('/') + 1)) + path;
+                }
+            }
+        }
+        StringBuilder result = new StringBuilder();
+        if (scheme != null) {
+            result.append(scheme).append(':');
+        }
+        if (authorityPresent) {
+            result.append("//");
+            if (authority != null) {
+                result.append(authority);
+            }
+        }
+        result.append(removeDotSegments(path));
+        if (query != null) {
+            result.append('?').append(query);
+        }
+        if (ref.getRawFragment() != null) {
+            result.append('#').append(ref.getRawFragment());
+        }
+        return URI.create(result.toString());
+    }
+
     private static final class Diagnostics implements ErrorHandler {
         private final List<String> warnings = new ArrayList<>();
 
@@ -74,7 +201,7 @@ public final class XsdOracle {
         if (Files.size(manifest) > 128L * 1024 * 1024) {
             throw new IllegalArgumentException("oracle manifest exceeds 128 MiB");
         }
-        Map<String, byte[]> resources = new HashMap<>();
+        Map<URI, byte[]> resources = new HashMap<>();
         Map<String, Schema> schemas = new HashMap<>();
         Set<String> documents = new HashSet<>();
         LSResourceResolver resolver = (type, namespace, publicId, systemId, baseURI) -> {
@@ -83,15 +210,14 @@ public final class XsdOracle {
                 // let the schema processor resolve known components or report unresolved refs.
                 return null;
             }
-            URI location = URI.create(systemId);
-            String uri = (baseURI == null ? location : URI.create(baseURI).resolve(location)).toString();
-            byte[] data = resources.get(uri);
+            URI location = resolve(normalizeAnyURI(systemId), baseURI);
+            byte[] data = resources.get(location);
             if (data == null) {
-                throw new IllegalArgumentException("resource unavailable offline: " + uri);
+                throw new IllegalArgumentException("resource unavailable offline: " + location);
             }
             DOMInputImpl input = new DOMInputImpl();
-            input.setSystemId(uri);
-            input.setBaseURI(uri);
+            input.setSystemId(location.toASCIIString());
+            input.setBaseURI(location.toASCIIString());
             input.setByteStream(new ByteArrayInputStream(data));
             return input;
         };
@@ -103,7 +229,7 @@ public final class XsdOracle {
             while ((line = reader.readLine()) != null) {
                 String[] fields = line.split("\t", -1);
                 if (fields.length == 3 && fields[0].equals("R") && !started) {
-                    if (resources.putIfAbsent(fields[1], Base64.getDecoder().decode(fields[2])) != null) {
+                    if (resources.putIfAbsent(resolve(fields[1], null), Base64.getDecoder().decode(fields[2])) != null) {
                         throw new IllegalArgumentException("duplicate resource: " + fields[1]);
                     }
                     continue;
@@ -125,7 +251,8 @@ public final class XsdOracle {
                     factory.setResourceResolver(resolver);
                     factory.setErrorHandler(diagnostics);
                     try {
-                        schemas.put(fields[1], factory.newSchema(source(data, fields[2], diagnostics)));
+                        schemas.put(fields[1], factory.newSchema(source(data, resolve(fields[2], null).toASCIIString(),
+                                                                        diagnostics)));
                         result("S", fields[1], "valid", "", diagnostics);
                     } catch (SAXException | IllegalArgumentException error) {
                         result("S", fields[1], "invalid", error.toString(), diagnostics);

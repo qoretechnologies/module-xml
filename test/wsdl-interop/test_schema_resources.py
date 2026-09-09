@@ -62,7 +62,7 @@ def load(schema, **options):
 
 
 def run_fixture(fixture, catalog="", certificate=None):
-    command = ["qore", "-b", "--enable-debug", "--exec-mode=jit"]
+    command = ["qore", "-b", "--enable-debug", "--exec-mode=" + os.getenv("QORE_EXEC_MODE", "jit")]
     timeout = 30
     if log_directory := os.getenv("QORE_SCHEMA_VALGRIND_DIR"):
         command = ["valgrind", "--error-exitcode=90", "--leak-check=full",

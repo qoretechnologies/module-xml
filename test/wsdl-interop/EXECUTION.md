@@ -4718,3 +4718,174 @@ native-URI increment, alongside the offline oracle's Java URI/file-key issues.
 A direct libxml2 C probe proves this failure exists without Qore. The valid raw
 source is not rewritten or counted as passing. P3 is not complete; the WSDL QName,
 list/union, provider, sample and wire integration work also remains active.
+
+
+P3-36 was committed as `7a5ef5d` on develop, without pushing. Final source/artifact
+hashes are in `/tmp/wsdl-p3-36-native-final-manifest.json`.
+
+## P3-37 — Schema-location anyURI resolution
+
+The next increment starts from the preserved URI finding. Source inspection shows
+separate raw xmlBuildURI calls in xmlSchemaParseIncludeOrRedefineAttrs (includes
+and redefines) and xmlSchemaBuildAbsoluteURI (imports and runtime schema hints).
+The fix must apply the XSD anyURI-to-URI mapping at those resolution boundaries,
+leaving original XML/schema lexical text unchanged, and retain percent escapes
+without double escaping. The configured dependency must be behaviorally probed
+for this defect too; the current pinned source is libxml2 2.15.4, whose original
+archive/source files remain immutable. XML Base resolution and the existing
+oracle's URI key normalization need boundary coverage before choosing the exact
+patch. The QName/list/union WSDL integration scratch remains paused until this
+native prerequisite passes.
+
+
+P3-37 preflight is `/tmp/wsdl-p3-37-preflight.py`: 36 include/import/redefine
+cases spanning raw versus escaped names, filesystem bases, XML Base and Unicode/
+percent-containing directory names. The initial dependency passes the 18 escaped
+references and rejects the 18 raw references. Existing percent escapes must retain
+their URI meaning; the fixture explicitly encodes a literal filename percent before
+comparing the raw-Unicode/space and fully encoded URI forms.
+
+The first scratch native prototype is `/tmp/wsdl-p3-37-prototype.py` and builds an
+isolated module in `/tmp/wsdl-p3-37-libxml/build-debug` without modifying upstream
+sources or the production module. An early attempt escaped filesystem bases and
+therefore changed their paths; this was rejected. libxml2 2.15.4 deliberately uses
+xmlResolvePath for bases without `://`, so those bases must remain filesystem paths.
+Further XML Base/URI and no-document-base cases remain to verify. XML Base Second
+Edition section 3.1 recommends returning unescaped LEIRIs from base-access APIs;
+a global eager escaping change to xmlNodeGetBase would need to preserve that
+contract and is not the selected implementation.
+
+A prototype missing-import path also exposed the existing Debug schema warning
+handler's unconditional stdout printf, which corrupts JSON application output.
+Its root is qore_xml_schema_warning_func in src/ql_xml.qpp. Preserve a regression
+for optional missing imports and caught unresolved-type errors when addressing it;
+do not strip the warning from diagnostic-driver output.
+
+
+The direct base/URI probe `/tmp/wsdl-p3-37-base-probe.c` identifies a related
+resource-identity defect: resolving `a%2Fb.xsd` against an HTTP base produces
+`a/b.xsd`. Root cause: xmlBuildURISafe parses with percent unescaping before
+reassembling the path. The scratch patch `/tmp/wsdl-p3-37-uri-patch.py` preserves
+raw percent-encoded URI components through this resolver and teaches serialization
+to retain valid percent triplets from raw components. It does not relax parsing of
+invalid URI syntax. Include/import/redefine and XML Base tests must exercise this
+identity preservation, not only schema validity. No production URI patch or probe
+change has been applied yet.
+
+
+The expanded scratch prototype now passes all 36 component/filename/XML Base
+cases. `/tmp/wsdl-p3-37-base-helper.c` resolves XML Base LEIRIs while preserving
+existing encoded values and returning newly resolved raw Unicode/space values;
+it preserves reserved percent escapes and leaves malformed UTF-8 encoded. Direct
+base tests return `http://example.org/wine/rosé` and retain `white%2Fwine`.
+The prototype broad XML gate passes all 84 suites before production integration.
+
+New durable regressions are in `test_schema_uris.py`. Live HTTP tests found a
+module-loader error in P3-36: Qore's default client encoding changed `%2F` into
+`%252F`. The correct existing API is setPreEncodedUrls(true), now added to the
+loader. With that setting and the prototype dependency, actual request paths
+preserve percent escapes and raw Unicode schema locations resolve correctly.
+No new Qore core change is needed for this finding.
+
+The native schema warning callbacks now use debug level 5 rather than unconditional
+stdout output. A same-process regression keeps an optional missing import valid,
+retains XSD-SYNTAX-ERROR when its type is required, then validates a later schema.
+The baseline fails because the warning corrupts JSON output; the driver is not
+changed to filter diagnostics. Runtime/parser warning behavior remains unchanged
+in Release builds. Final dependency patches, CMake behavioral probes, independent
+oracle URI normalization, comprehensive direct API checks, audit and commit remain
+pending for P3-37.
+
+
+P3-37 core prerequisite was committed as `3b70f8ccd` on main Qore develop, with no
+push. It removes the incorrect tilde entry from pre-encoded URL rejection. The
+independent HTTP peer covers ten exact successful targets and 39 rejected paths
+per run, constructor/setter behavior and recovery. All four modes and three
+Valgrind processes pass with zero memory errors/loss. The 84-suite XML gate and
+both-version raw/strict reports are unchanged. Full audit: 19 Pass / 43 N/A / 0 Fail.
+Core artifact SHA-256: `40c2824efa1fdd66cd20c50ad767dd18614c6f6f2842d9a5fd4e94311e89802e`.
+Concurrent main-repository developer changes were preserved.
+
+The native URI prototype now uses libxml2's existing extended parser mode for XML
+Base, preserving raw Unicode and encoded octets directly. Its missing NUL
+terminator guard was fixed before use; the earlier custom escape/decode helper is
+retired. RFC 3986 vectors also exposed missing absolute-path normalization, incorrect
+extraneous parent handling and collapse of empty URI path segments. The resolver
+now uses linear in-place dot-segment removal preserving empty segments and percent
+escapes; filesystem normalization separately corrects its absolute-root check.
+The direct probe passes 106 URI/XML Base checks, including invalid percent syntax,
+public raw/decoded parser compatibility and source-attribute preservation.
+
+The checksum-guarded production CMake patch is being integrated with a behavioral
+URI probe. It chains the existing QName source copy and leaves upstream sources
+immutable. HTTP resource tests pass all twelve character forms, including tilde,
+colon, reserved percent escapes, raw/escaped Unicode and query separators. The
+full production dependency/provider, independent oracle and memory gates remain
+pending before the XML commit; P3 remains active.
+
+
+The integrated direct probe now includes 24 runtime schema-hint checks. They
+exposed three additional boundaries: no-base streaming references bypassed the
+anyURI mapper; noNamespaceSchemaLocation was split as a whitespace list; and
+XmlReader supplied its document URI through a locator which assembly ignored.
+The fixes map no-base references too, normalize one complete anyURI value, process
+both hint attributes independently and consult the streaming locator. DOM/streaming,
+absolute/relative, namespace-only/combined hints, whitespace and invalid integer
+content all pass. The direct URI/XML Base allocation test passes 29 injected
+allocation/recovery cases with zero Valgrind errors and all blocks freed.
+
+The final module loader also escapes direct raw HTTP schema locations exactly once
+before enabling pre-encoded URL mode. A direct raw Unicode/space URL previously
+sent invalid HTTP bytes after that mode was enabled; the root boundary now handles
+raw and escaped locations consistently. Live tests assert both exact request targets.
+
+The offline oracle now uses raw-component RFC 3986 resolution and URI-identity keys.
+Java URI.resolve/normalize were directly shown to collapse empty segments and use
+older query/parent rules, so they are not used as the resolution oracle. Pinned
+Xerces ignores XML Base in schema composition: XSDHandler.doc2SystemId reads the
+SchemaDOM document URI (verified against the pinned JAR bytecode), and all three
+component relations use it for the resolver base. Six exact false negatives remain
+recorded; all twelve identical source schemas validate natively and reject bad
+integers. The harness does not rewrite schema bytes or add aliases for the wrong
+URI. Initial evidence: /tmp/xml-schema-uri-oracle-ao2k0vx6/results.json.
+
+The production CMake provider matrix passes 20 methods, including an otherwise
+QName-fixed shared library whose URI probe fails. Initial final gates and memory
+checks are in /tmp/wsdl-p3-37-final-*. The first multi-target make command regenerated
+its build files but retained its old in-memory target graph for the newly added
+allocation target; a fresh invocation built all targets successfully. No source
+workaround was needed. Full final evidence/audit and the XML commit are still pending.
+
+### P3-37 final evidence and audit
+
+The implementation and [final evidence](schema-uri-evidence.md) close the exact
+historical native URI finding without changing its original source. The complete
+probe passes 142 URI/component/runtime-hint checks. Allocation failure/recovery
+passes 29 checks; both standalone native executables free all blocks under
+Valgrind with zero errors and no suppressions. Six live URI methods pass all four
+Qore execution modes, and all seven existing resource methods pass in Debug and
+Release. The reader's eight mode/timezone runs pass 96 cases / 1,528 assertions.
+
+The full 84-suite XML gate passes 902 cases / 33,321 reported assertions. All 300
+QName oracle documents preserve exact values across six native paths and Xerces.
+Final raw and strict corpus reports are structurally identical to P3-36; the
+coverage unit tests retain exactly the two P6-selected-binding-version failures.
+Survey unit tests pass all 15 methods. The 20-method provider matrix verifies
+URI-sensitive selection, passing backports and immutable source/reconfiguration.
+Debug/Release and documentation builds complete without warnings/errors.
+
+Affected Qore Valgrind tests pass 51 cases / 914 assertions; three additional HTTP
+processes pass exact targets, direct raw/encoded locations and failure recovery.
+All have zero memory errors and zero definite/indirect/possible lost bytes.
+Known unsuppressed environment warnings and native file I/O interruptibility remain
+explicit P9 findings. The independent oracle's five URI and seven existing methods
+pass their checks. Six exact Xerces XML Base schema false negatives, with document
+checks still unreachable, are retained in
+[schema-uri-validator-defects.json](schema-uri-validator-defects.json).
+
+The full [62-item audit](audits/P3-37-schema-uris.md) is 20 Pass / 42 N/A / 0 Fail.
+Its brace cleanup in the extracted URI parser helper was rebuilt and retested.
+Final hashes are in `/tmp/wsdl-p3-37-final-manifest.json`. The earlier oracle load
+failure caused by overlapping a module relink is retained in its log; the completed
+build's URI/QName oracle and corpus reruns pass. P3 remains active; the next work
+resumes QName/list/union WSDL provider, sample, reconstruction and wire integration.
