@@ -142,12 +142,12 @@ def validate_selection(selection: dict, records: dict) -> None:
             for assertion in assertions:
                 if (not isinstance(assertion, dict) or not isinstance(assertion.get("elements"), list)
                         or not assertion["elements"] or any(not isinstance(s, str) for s in assertion["elements"])
-                        or assertion.get("datatype") not in {"list", "boolean", "string", "normalizedString", "token", "decimal",
+                        or assertion.get("datatype") not in {"list", "boolean", "string", "normalizedString", "token", "decimal", "float", "double",
                             *normative.UNSIGNED_MAX, *normative.INTEGER_BOUNDS}
                         or ("attribute" in assertion and not isinstance(assertion["attribute"], str))):
                     raise ValueError("malformed strict value assertion")
                 if assertion["datatype"] == "list" and assertion.get("item_datatype") not in {
-                        "boolean", "string", "normalizedString", "token", "decimal",
+                        "boolean", "string", "normalizedString", "token", "decimal", "float", "double",
                         *normative.UNSIGNED_MAX, *normative.INTEGER_BOUNDS}:
                     raise ValueError("malformed strict list item assertion")
 

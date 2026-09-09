@@ -20,8 +20,14 @@ an integer-rational reference. See the [implemented native conversion design](..
 with WSDL builtins, providers and example generation. They check 24 real SOAP
 contracts, 1,248 input messages, 6,848 provider results and 12,576 rational-reference
 conversion verdicts. See the [implemented WSDL scalar contract](../../design/wsdl-ieee-scalars.md)
-and [validator evidence](ieee-scalars-evidence.md). IEEE facet and union identity
-integration remains the next P3 increment; these tests do not close all IEEE requirements.
+and [validator evidence](ieee-scalars-evidence.md).
+`test/wsdl-ieee-facets.qtest` and `test_ieee_facets.py` cover IEEE restrictions,
+fixed attributes, provider choices, list/union identity and adjacent-value examples.
+The eight Python methods check 228 value-processing and 40 schema-only SOAP contracts, 2,844 input messages,
+16,992 provider results and 1,128 boundary intervals. See the
+[implemented facet design](../../design/wsdl-ieee-facets.md) and
+[independent evidence](ieee-facets-evidence.md). Eight IEEE corpus families
+now belong to the strict gate; this increment leaves the remaining P3 scalar work open.
 
 `test/wsdl-regex-classes.qtest` and `test_regex_classes.py` cover XSD regex
 grammar, Unicode class complements, ranges, nested subtraction and bounded
@@ -274,8 +280,8 @@ each direction. The worker explicitly selects that binding and operation. Every 
 retained and independently checked with libxml2 and Xerces. Output envelope versions are checked against
 the selected binding; the W3C SOAP 1.2 inputs still exercise a SOAP 1.1 contract.
 
-`--strict` requires the explicit [strict-selection.json](strict-selection.json) to pass: 63 WSDLs,
-including all 14 source-invalid descriptions, and 576 selected message/direction combinations. Positive
+`--strict` requires the explicit [strict-selection.json](strict-selection.json) to pass: 97 WSDLs,
+including all 14 source-invalid descriptions, and 828 selected message/direction combinations. Positive
 cases require independent exact-value assertions; negative cases require the intended exception category.
 Missing, duplicate, stale, malformed or unclassified entries fail. This selection is deliberately named
 and bounded; it does not turn known implementation failures elsewhere into passing conformance tests.
@@ -298,9 +304,9 @@ values and Xerces checks every document. The already adjudicated old-libxml2
 decimals. Qore 3.0 supplies shortest round-trip native float/number formatting,
 while XML decimal text retains its precision and noncanonical spellings.
 
-[coverage-report.json](coverage-report.json) preserves the complete current ledger, including 252 failed
-requirements assigned to later phases. Its stage accounting includes unreachable, missing, skipped and
-unassessed work. In this run 1,464 value/infoset assessments remain unimplemented, explicitly counted as
+[coverage-report.json](coverage-report.json) preserves the complete current ledger, including 196 failed
+requirements assigned to remaining phases. Its stage accounting includes unreachable, missing, skipped and
+unassessed work. In this run 1,268 value/infoset assessments remain unimplemented, explicitly counted as
 unassessed. Successful schema validation is insufficient to close them. Exact numeric checks now pass
 all eight formerly failing decimal output cases. Decimal attributes, elements and retained decimal
 patterns belong to the strict gate, alongside all thirteen integer builtin families, including original

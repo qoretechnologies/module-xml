@@ -3367,3 +3367,100 @@ float/double primitive value spaces disjoint in unions. Extend the existing
 numeric facet/field framework with explicit partial comparisons rather than
 reusing decimal lexical comparisons or adding display-rounding heuristics.
 All remaining P3 and P4-P9 requirements remain in scope.
+
+## P3-23 — IEEE facet and composite value identity
+
+P3-22 is committed as `cbc343d`. Main Qore remains clean on develop at
+`9dab82749`; the user's commit request is satisfied and nothing is pushed.
+No C++ change, installation or main-Qore build belongs to this increment.
+
+The shared numeric facet/field framework now handles float/double target
+rounding, explicit NaN partial comparison, enumeration/fixed value identity,
+primitive-specific list/union keys and adjacent target examples. Numeric
+providers expose `getBuiltinName()` and reject conflicting known builtin
+metadata. The enumeration sample path includes float, preserving pattern
+spellings such as `001.00e0`. The existing integer-to-float list metadata
+negative test remains negative; its inconsistent provider now rejects.
+
+The pre-change reductions are `/tmp/wsdl-p3-23-{preflight,serialize-preflight}.qr`
+and their logs. Serialization wrongly admitted values rounding to exclusive
+endpoints and rejected ones rounding to inclusive endpoints; decoding admitted
+NaN through ordinary bounds. Two audit findings are also fixed: native decimal
+fixed values compared through short display strings, and digit-count fixed
+facets compared against an unrelated scalar range. Dedicated negative and
+positive regressions cover both corrections. Counts now use their own integer
+count space, while scalar comparisons use the datatype's value space.
+
+The new Qore suite passes 13 cases / 4,837 assertions. All 66 affected suites
+pass 761 cases / 20,957 assertions. SOAP's three intentional assertion failures
+remain within successful cases. The focused IEEE/numeric/declaration matrix
+passes AST, IR, JIT and tiered modes, and the new suite passes against the AOT
+WSDL module. WSDL/SoapDataProvider AOT, Qdx/Doxygen and the executed design
+example pass without diagnostics. No new Valgrind run is needed for Qore-only
+changes; native/core runtime hashes remain unchanged.
+
+Eight Python methods cover 228 value-processing SOAP contracts plus 40
+schema-only binding contracts, 2,844 input messages (1,128 valid / 1,716
+invalid), 1,128 outputs, 16,992 provider results and 1,128 adjacent boundary
+intervals. Xerces checks 11,640 documents; libxml2 checks 11,480, with 160
+unreachable checks for three rejected valid repeated-exclusive schemas.
+The original schemas remain unchanged. The IEEE matrix requires precisely
+372 libxml2 NaN-ordering false positives; every such document must fail both
+Xerces and the independent rational/partial-order predicate. Private libxml2
+2.15.4 reproduces the same NaN-as-largest source defect as lxml's 2.12.10.
+See [IEEE facet evidence](ieee-facets-evidence.md).
+
+Eight IEEE W3C families now belong to the strict gate, with independent exact
+rounding and zero-sign checks shared from `ieee_reference.py`: 97 selected
+WSDLs / 828 directions, zero selected failures. There are 24 resolved broad
+failures (8 each for Float/DoubleSimpleTypePattern and 4 each for their
+EnumerationType families), no new failures, and 196 remaining tracked broad
+failures. The final reviewed corpus files are `/tmp/wsdl-p3-23-reviewed-*.json`.
+Historical fixtures, findings and adjudication remain unchanged.
+
+Final frozen WSDL SHA-256:
+`10a963ad9b69540a40925acaa6ed376ae787b1bbd92b1f62017c443d34000946`.
+Native XML remains
+`e5f15836d1d3b1577d223fcff29fa59ce916192c229cac579eb3343ed3c0ac02`;
+Debug core remains
+`c8b0739f796b93c0f056cbf2a37050d6902de45c3e9361ed3565754ac5549afb`.
+Evidence prefix `/tmp/wsdl-p3-23-reviewed-` covers final suites, modes, AOT,
+documentation and corpus. The full 169-method Python run completed in 822.191
+seconds with the preceding 33 P4/P5/P6 failure signatures and one stale strict-gate
+count assertion (89/756 instead of 97/828). Production, test and runtime hashes
+were unchanged during that run. The assertion now expects the expanded selection
+and explicitly checks all eight IEEE families, retaining their historical phase
+ownership. The corrected gate passes in 17.591 seconds; the complete affected
+coverage test file completes 10 methods in 23.126 seconds with only its two
+existing P6 binding-version failures. The combined comparison retains exactly
+the previous 33 failure signatures. No production code changed after the full
+run. Its other 168 methods retain their recorded results; the run is not described
+as wholly passing conformance. There are no errors or new warning diagnostics.
+The earlier run intentionally interrupted before the fixed-count correction is
+not claimed as completed verification. Evidence retains all original logs under
+`/tmp/wsdl-p3-23-final-frozen-*` and the corrected gate under
+`/tmp/wsdl-p3-23-reviewed-gate.log`. Current reports use the final reviewed corpus
+outputs. Full [P3-23 audit](audits/P3-23-ieee-facets.md): 21 Pass, 41 N/A, 0 Fail.
+
+### Next P3 temporal reductions (read-only)
+
+`/tmp/wsdl-p3-24-temporal-preflight.qr` and its log reduce the next remaining
+scalar defects on the current runtime. Zoned date/time serialization drops
+timezones; time formatting loses precision after milliseconds and dateTime
+conversion truncates beyond microseconds. An absent dateTime zone acquires the
+program's zone. A dateTime is wrongly accepted as date, a date as dateTime,
+and XSD 1.0 year zero is accepted. Valid hour 24 midnight is rejected. The
+five-digit and negative-year failures originate in
+`qore_absolute_time::set()` in core `lib/qore_date_private.cpp`: it consumes
+exactly four unsigned year digits. Partial gMonth accepts invalid month 13
+and timezone +15:00. Empty P/PT durations already reject correctly.
+
+No temporal implementation or representation decision is claimed yet.
+Strict temporal grammar/value identity must precede the flexible core parser,
+and lexical forms without a lossless native representation need explicit
+preservation, consistent with the existing scalar and retained-XML contracts.
+Negative-year/calendar semantics, arbitrary years/fractions, timezone partial
+order, durations and partial dates require normative and independent checks.
+A core extended-year fix, if needed, must be separately tested/audited using
+the isolated build and committed to main develop without touching parallel work.
+All remaining P3 and P4–P9 acceptance criteria remain in scope.

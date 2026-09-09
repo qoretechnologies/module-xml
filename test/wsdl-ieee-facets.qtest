@@ -1,0 +1,318 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires xml
+%requires ../qlib/WSDL.qm
+%exec-class IeeeFacetsTest
+
+class IeeeFacetsTest inherits QUnit::Test {
+    constructor() : Test("XSD IEEE facets and value identity", "1.0") {
+        addTestCase("Bounds compare rounded target values", \bounds());
+        addTestCase("NaN and infinity use the XSD partial order", \special());
+        addTestCase("Enumerations identify rounded values and both zeros", \enumerations());
+        addTestCase("Patterns retain authored lexical text", \patterns());
+        addTestCase("Inherited, fixed and contradictory facets", \declarations());
+        addTestCase("Numeric provider metadata retains builtin precision", \metadata());
+        addTestCase("Fixed attributes and finite field choices use value identity", \fixedValues());
+        addTestCase("Fixed attribute derivation compares NaN and rounded values", \fixedDerivation());
+        addTestCase("Shared fixed-value comparison retains canonical decimal precision", \decimalFixed());
+        addTestCase("Fixed digit counts use count identity independently of the scalar range", \fixedCounts());
+        addTestCase("Field choice updates retain IEEE identities atomically", \fieldUpdates());
+        addTestCase("IEEE lists and unions retain primitive identities", \collections());
+        addTestCase("Examples choose adjacent IEEE boundary values", \examples());
+        set_return_value(main());
+    }
+
+    private static XsdSchema schema(string builtin, string facets, string parent = "", string extra = "") {
+        return new XsdSchema('<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:t="urn:ieee-facets"
+            targetNamespace="urn:ieee-facets"><xs:simpleType name="Base"><xs:restriction base="xs:' + builtin + '">'
+            + parent + '</xs:restriction></xs:simpleType><xs:simpleType name="Value"><xs:restriction base="t:Base">'
+            + facets + '</xs:restriction></xs:simpleType>' + extra + '</xs:schema>', {"async_only": True});
+    }
+
+    private same(float expected, auto actual) {
+        assertEq(NT_FLOAT, actual.typeCode());
+        assertEq(expected.toStringRoundTrip(), actual.toStringRoundTrip());
+    }
+
+    private check(string builtin, string facets, list<auto> valid, list<auto> invalid, string parent = "") {
+        XsdSchema original = schema(builtin, facets, parent);
+        foreach XsdSchema definition in (original, Serializable::deserialize(original.serialize())) {
+            XsdAbstractType type = definition.findType(make_qname("urn:ieee-facets", "Value"));
+            AbstractDataProviderType provider = type.getDataProviderType();
+            foreach AbstractDataProviderType current in (provider, Serializable::deserialize(provider.serialize()),
+                    provider.getOrNothingType().getMandatoryType()) {
+                assertEq(builtin, cast<XsdNumericRestrictionDataType>(current).getBuiltinName());
+                assertEq(NOTHING, current.getValueType());
+                foreach auto value in (valid) {
+                    float expected = convert_xsd_float(value, builtin == "double");
+                    same(expected, type.deserializeValue("value", {}, NOTHING, value));
+                    same(expected, type.deserializeValue("value", {}, NOTHING,
+                        type.serializeValue(new Namespaces({}), value, True)));
+                    same(expected, current.acceptsValue(value));
+                    same(expected, new ListDataType(current).acceptsValue((value,))[0]);
+                }
+                foreach auto value in (invalid) {
+                    assertThrows("SOAP-SERIALIZATION-ERROR", \type.serializeValue(), (new Namespaces({}), value, True));
+                    assertThrows("SOAP-DESERIALIZATION-ERROR", \type.deserializeValue(), ("value", {}, NOTHING, value));
+                    assertThrows("RUNTIME-TYPE-ERROR", \current.acceptsValue(), (value,));
+                }
+                assertThrows("MISSING-VALUE-ERROR", \current.acceptsValue(), (NOTHING,));
+                assertEq(NOTHING, current.getOrNothingType().acceptsValue(NOTHING));
+            }
+        }
+    }
+
+    bounds() {
+        check("float", '<xs:minExclusive value="1"/>', ("1.00000006", 2, "INF"),
+            ("1.00000001", number("1.00000001"), "1", "NaN"));
+        check("float", '<xs:maxInclusive value="1"/>', ("1.00000001", number("1.00000001"), "1", "-INF"),
+            ("1.00000006", 2, "INF", "NaN"));
+        check("float", '<xs:minInclusive value="1.00000001"/><xs:maxInclusive value="1.00000005"/>',
+            ("1", "1.00000001", 1.0), ("0.9999999", "1.00000006"));
+        check("double", '<xs:minExclusive value="1"/>', ("1.00000001", "1.0000000000000002"),
+            ("1.00000000000000001", "1"));
+        check("double", '<xs:maxExclusive value="1.00000000000000001"/>', ("0.9999999999999999",),
+            ("1", "1.00000000000000001"));
+    }
+
+    special() {
+        foreach string builtin in ("float", "double") {
+            foreach string facet in ("minInclusive", "maxInclusive") {
+                check(builtin, '<xs:' + facet + ' value="NaN"/>', ("NaN", @nan@, number(@nan@)),
+                    ("0", "INF", "-INF", -0.0));
+            }
+            foreach string facet in ("minExclusive", "maxExclusive") {
+                check(builtin, '<xs:' + facet + ' value="NaN"/>', (), ("NaN", "0", "INF", "-INF"));
+            }
+            check(builtin, '<xs:minInclusive value="-INF"/><xs:maxInclusive value="INF"/>',
+                ("-INF", "INF", "-0", "0", "1e999", "-1e999"), ("NaN", @nan@));
+            check(builtin, '<xs:minExclusive value="-INF"/><xs:maxExclusive value="INF"/>',
+                ("-0", "1", "-1"), ("NaN", "INF", "-INF", "1e999"));
+        }
+    }
+
+    enumerations() {
+        check("float", '<xs:enumeration value="1.00000001"/><xs:enumeration value="-0"/><xs:enumeration value="NaN"/>',
+            ("1", 1.0, "1.00000005", "+0", "-0", -0.0, "NaN", @nan@), ("1.00000006", "INF"));
+        check("double", '<xs:enumeration value="1.00000000000000001"/>',
+            ("1", "1.00000000000000001"), ("1.0000000000000002", "1.00000001"));
+        check("float", '<xs:enumeration value="INF"/>', ("3.5e38", "INF", @inf@), ("3.4e38", "NaN"));
+    }
+
+    patterns() {
+        XsdSchema original = schema("float", '<xs:enumeration value="1"/><xs:pattern value="001[.]00e0"/>');
+        foreach XsdSchema definition in (original, Serializable::deserialize(original.serialize())) {
+            XsdAbstractType type = definition.findType(make_qname("urn:ieee-facets", "Value"));
+            assertEq("001.00e0", type.deserializeValue("value", {}, NOTHING, " \t001.00e0\r\n"));
+            assertEq("001.00e0", type.serializeValue(new Namespaces({}), "001.00e0", True));
+            AbstractDataProviderType provider = Serializable::deserialize(type.getDataProviderType().serialize());
+            assertEq("001.00e0", provider.acceptsValue("001.00e0"));
+            foreach auto bad in (1, "1", "1e0", "001.01e0") {
+                assertThrows("RUNTIME-TYPE-ERROR", \provider.acceptsValue(), (bad,));
+                assertThrows("SOAP-SERIALIZATION-ERROR", \type.serializeValue(), (new Namespaces({}), bad, True));
+                assertThrows("SOAP-DESERIALIZATION-ERROR", \type.deserializeValue(), ("value", {}, NOTHING, bad));
+            }
+        }
+    }
+
+    declarations() {
+        foreach string builtin in ("float", "double") {
+            foreach string facets in ('<xs:totalDigits value="2"/>', '<xs:fractionDigits value="0"/>',
+                    '<xs:length value="1"/>', '<xs:whiteSpace value="preserve"/>',
+                    '<xs:minInclusive value="0"/><xs:maxInclusive value="NaN"/>',
+                    '<xs:minInclusive value="INF"/><xs:maxExclusive value="INF"/>',
+                    '<xs:enumeration value="1e"/>') {
+                assertThrows("XSD-SIMPLETYPE-ERROR", \schema(), (builtin, facets));
+            }
+        }
+        assertThrows("XSD-SIMPLETYPE-ERROR", \schema(), ("float",
+            '<xs:minExclusive value="1"/><xs:maxInclusive value="1.00000001"/>'));
+        check("float", '<xs:minInclusive value="1.00000001"/>', ("1", "2"), ("0", "NaN"),
+            '<xs:minInclusive value="1" fixed="true"/>');
+        assertThrows("XSD-SIMPLETYPE-ERROR", \schema(), ("float", '<xs:minInclusive value="1.00000006"/>',
+            '<xs:minInclusive value="1" fixed="true"/>'));
+        check("float", '<xs:minExclusive value="1.00000001"/>', ("1.00000006",), ("1", "NaN"),
+            '<xs:minExclusive value="1"/>');
+    }
+
+    metadata() {
+        hash<XsdNumericFacetInfo> facets = <XsdNumericFacetInfo>{"name": "Value", "base_name": "float", "bounds": {}};
+        foreach AbstractDataProviderType wrong in (new XsdIeeeDataType("double"), new XsdIntegerDataType("int"),
+                new XsdDecimalDataType()) {
+            assertThrows("XSD-SIMPLETYPE-ERROR", sub() { new XsdNumericRestrictionDataType(facets, wrong); });
+        }
+        XsdNumericRestrictionDataType original(facets, new XsdIeeeDataType("float"));
+        hash<SerializationInfo> state = original.serializeToData();
+        string index = state._index."0"._class_data."WSDL::XsdNumericRestrictionDataType".facets._index;
+        state._index{index}._members.base_name = "double";
+        assertThrows("DESERIALIZATION-ERROR", \Serializable::deserialize(), (state,));
+        same(16777216.0, Serializable::deserialize(original.serialize()).acceptsValue("16777217"));
+    }
+
+    fixedValues() {
+        XsdSchema original = schema("float", "", "",
+            '<xs:complexType name="Record"><xs:attribute name="reading" type="t:Value" fixed="NaN"/>
+            <xs:attribute name="zero" type="xs:float" fixed="-0"/>
+            <xs:attribute name="one" type="xs:float" fixed="1.00000001"/></xs:complexType>');
+        foreach XsdSchema definition in (original, Serializable::deserialize(original.serialize())) {
+            XsdAbstractType record = definition.findType(make_qname("urn:ieee-facets", "Record"));
+            hash<auto> input = {"^attributes^": {"reading": "NaN", "zero": "+0", "one": "1"}};
+            hash<auto> decoded = record.deserializeValue("value", definition.getTypeMap(), NOTHING, input);
+            same(@nan@, decoded."^attributes^".reading);
+            same(0.0, decoded."^attributes^".zero);
+            same(1.0, decoded."^attributes^".one);
+            record.serializeValue(new Namespaces({}), input, True);
+            AbstractDataProviderType provider = Serializable::deserialize(record.getDataProviderType().serialize());
+            decoded = provider.acceptsValue(input);
+            same(@nan@, decoded."^attributes^".reading);
+            input."^attributes^".reading = "1";
+            assertThrows("SOAP-SERIALIZATION-ERROR", \record.serializeValue(), (new Namespaces({}), input, True));
+            assertThrows("RUNTIME-TYPE-ERROR", \provider.acceptsValue(), (input,));
+            AbstractDataField field = provider.getFields()."^attributes^".getType().getFields().reading;
+            same(@nan@, field.acceptsValue("NaN"));
+            assertThrows("FIELD-VALUE-ERROR", \field.acceptsValue(), ("1",));
+        }
+    }
+
+    fixedDerivation() {
+        foreach hash<auto> row in ({"fixed": "NaN", "equivalent": "NaN", "different": "INF"},
+                {"fixed": "1.00000001", "equivalent": "1", "different": "1.00000006"},
+                {"fixed": "-0", "equivalent": "+0", "different": "1"}) {
+            string extra = '<xs:attribute name="global" type="t:Value" fixed="' + row.fixed + '"/>
+                <xs:complexType name="Record"><xs:attribute ref="t:global" fixed="' + row.equivalent + '"/></xs:complexType>
+                <xs:complexType name="Parent"><xs:attribute name="reading" type="t:Value" fixed="' + row.fixed + '"/>
+                </xs:complexType><xs:complexType name="Child"><xs:complexContent><xs:restriction base="t:Parent">
+                <xs:attribute name="reading" type="t:Value" fixed="' + row.equivalent + '"/>
+                </xs:restriction></xs:complexContent></xs:complexType>';
+            XsdSchema original = schema("float", "", "", extra);
+            foreach XsdSchema definition in (original, Serializable::deserialize(original.serialize())) {
+                foreach string name in ("Record", "Child") {
+                    XsdComplexType type = cast<XsdComplexType>(definition.findType(make_qname("urn:ieee-facets", name)));
+                    XsdAttribute attr = type.attrs.firstValue();
+                    same(convert_xsd_float(row.equivalent), attr.getDefaultValue());
+                    same(convert_xsd_float(row.fixed), attr.getValue(row.fixed));
+                }
+            }
+            string invalid_ref = '<xs:attribute name="global" type="t:Value" fixed="' + row.fixed + '"/>
+                <xs:complexType name="Record"><xs:attribute ref="t:global" fixed="' + row.different + '"/></xs:complexType>';
+            assertThrows("WSDL-ERROR", \schema(), ("float", "", "", invalid_ref));
+            string invalid_child = '<xs:complexType name="Parent"><xs:attribute name="reading" type="t:Value" fixed="'
+                + row.fixed + '"/></xs:complexType><xs:complexType name="Child"><xs:complexContent>
+                <xs:restriction base="t:Parent"><xs:attribute name="reading" type="t:Value" fixed="' + row.different + '"/>
+                </xs:restriction></xs:complexContent></xs:complexType>';
+            assertThrows("WSDL-ERROR", \schema(), ("float", "", "", invalid_child));
+        }
+    }
+
+    decimalFixed() {
+        XsdSchema original = schema("decimal", "", "", '<xs:complexType name="Record">
+            <xs:attribute name="value" type="t:Value" fixed="1.234567891234567"/></xs:complexType>');
+        foreach XsdSchema definition in (original, Serializable::deserialize(original.serialize())) {
+            XsdAbstractType type = definition.findType(make_qname("urn:ieee-facets", "Record"));
+            hash<auto> good = {"^attributes^": {"value": "1.234567891234567"}};
+            hash<auto> bad = {"^attributes^": {"value": "1.234567891234568"}};
+            assertEq("1.234567891234567", type.deserializeValue("value", {}, NOTHING, good)
+                ."^attributes^".value.toStringRoundTrip());
+            type.serializeValue(new Namespaces({}), good, True);
+            assertThrows("SOAP-DESERIALIZATION-ERROR", \type.deserializeValue(), ("value", {}, NOTHING, bad));
+            assertThrows("SOAP-SERIALIZATION-ERROR", \type.serializeValue(), (new Namespaces({}), bad, True));
+            AbstractDataProviderType provider = Serializable::deserialize(type.getDataProviderType().serialize());
+            assertEq("1.234567891234567", provider.acceptsValue(good)."^attributes^".value.toStringRoundTrip());
+            assertThrows("RUNTIME-TYPE-ERROR", \provider.acceptsValue(), (bad,));
+        }
+    }
+
+    fixedCounts() {
+        foreach hash<auto> row in ({"base": "byte", "facet": "totalDigits", "count": "300", "value": "1"},
+                {"base": "unsignedByte", "facet": "totalDigits", "count": "1000", "value": "1"},
+                {"base": "nonPositiveInteger", "facet": "totalDigits", "count": "2", "value": "0"},
+                {"base": "negativeInteger", "facet": "fractionDigits", "count": "0", "value": "-1"},
+                {"base": "positiveInteger", "facet": "fractionDigits", "count": "0", "value": "1"}) {
+            string facet = '<xs:' + row.facet + ' value="' + row.count + '"/>';
+            string parent = '<xs:' + row.facet + ' value="' + row.count + '" fixed="true"/>';
+            XsdSchema original = schema(row.base, facet, parent);
+            foreach XsdSchema definition in (original, Serializable::deserialize(original.serialize())) {
+                XsdAbstractType type = definition.findType(make_qname("urn:ieee-facets", "Value"));
+                assertEq(int(row.value), type.deserializeValue("value", {}, NOTHING, row.value));
+                assertEq(row.value, type.serializeValue(new Namespaces({}), row.value, True));
+                AbstractDataProviderType provider = Serializable::deserialize(type.getDataProviderType().serialize());
+                assertEq(int(row.value), provider.acceptsValue(row.value));
+            }
+            string changed = '<xs:' + row.facet + ' value="1"/>';
+            assertThrows("XSD-SIMPLETYPE-ERROR", \schema(), (row.base, changed, parent));
+        }
+    }
+
+    fieldUpdates() {
+        foreach string builtin in ("float", "double") {
+            XsdNumericDataField field({"name": "reading", "type": new XsdIeeeDataType(builtin)}, builtin);
+            field.setAllowedValues(("NaN", "-0", "001.00e0"), False);
+            same(@nan@, field.acceptsValue("NaN"));
+            same(0.0, field.acceptsValue("+0"));
+            same(1.0, field.acceptsValue("1"));
+            assertEq("001.00e0", field.getAllowedValues()[2].value);
+            assertThrows("FIELD-VALUE-ERROR", \field.acceptsValue(), ("INF",));
+            assertThrows("XSD-SIMPLETYPE-ERROR", \field.setAllowedValues(), (("INF", "1e"), False));
+            assertEq("001.00e0", field.getAllowedValues()[2].value);
+            assertThrows("FIELD-VALUE-ERROR", \field.acceptsValue(), ("INF",));
+            field.setAllowedValues(("NaN",), True);
+            same(@inf@, field.acceptsValue("INF"));
+            XsdNumericDataField repeated({"name": "readings", "type": new ListDataType(new XsdIeeeDataType(builtin))},
+                builtin);
+            repeated.setElementAllowedValues(("NaN", "-0", "1"), False);
+            list<auto> values = repeated.acceptsValue(("NaN", "+0", "001.00e0"));
+            same(@nan@, values[0]); same(0.0, values[1]); same(1.0, values[2]);
+            assertThrows("FIELD-VALUE-ERROR", \repeated.acceptsValue(), (("NaN", "INF"),));
+            assertThrows("XSD-SIMPLETYPE-ERROR", \repeated.setElementAllowedValues(), (("INF", "1e"), False));
+            assertThrows("FIELD-VALUE-ERROR", \repeated.acceptsValue(), (("NaN", "INF"),));
+            repeated.setElementAllowedValues((), False);
+            same(@inf@, repeated.acceptsValue(("INF",))[0]);
+        }
+    }
+
+    collections() {
+        XsdSchema definition = schema("float", "", "", '<xs:simpleType name="Items"><xs:list itemType="xs:float"/></xs:simpleType>
+            <xs:simpleType name="Selected"><xs:restriction base="t:Items"><xs:enumeration value="NaN -0 1.00000001"/>
+            </xs:restriction></xs:simpleType><xs:simpleType name="DoubleOne"><xs:restriction base="xs:double">
+                <xs:pattern value="1[.]0"/></xs:restriction></xs:simpleType>
+            <xs:simpleType name="Either"><xs:union memberTypes="t:DoubleOne xs:float"/></xs:simpleType>
+            <xs:simpleType name="OnlyDouble"><xs:restriction base="t:Either"><xs:enumeration value="1.0"/>
+            </xs:restriction></xs:simpleType>');
+        XsdAbstractType items = definition.findType(make_qname("urn:ieee-facets", "Selected"));
+        list<auto> result = items.deserializeValue("value", {}, NOTHING, "NaN +0 1");
+        same(@nan@, result[0]); same(0.0, result[1]); same(1.0, result[2]);
+        AbstractDataProviderType provider = Serializable::deserialize(items.getDataProviderType().serialize());
+        result = provider.acceptsValue(("NaN", "+0", "1"));
+        same(@nan@, result[0]); same(1.0, result[2]);
+        assertThrows("RUNTIME-TYPE-ERROR", \provider.acceptsValue(), (("NaN", "+0", "1.00000006"),));
+        XsdAbstractType selected = definition.findType(make_qname("urn:ieee-facets", "OnlyDouble"));
+        assertEq("1.0", selected.deserializeValue("value", {}, NOTHING, "1.0"));
+        assertThrows("SOAP-DESERIALIZATION-ERROR", \selected.deserializeValue(), ("value", {}, NOTHING, "1"));
+        provider = Serializable::deserialize(selected.getDataProviderType().serialize());
+        assertEq("1.0", provider.acceptsValue("1.0"));
+        assertThrows("RUNTIME-TYPE-ERROR", \provider.acceptsValue(), ("1",));
+    }
+
+    examples() {
+        foreach hash<auto> row in (
+                {"base": "float", "low": "1", "high": "1.00000011920928955078125", "value": 1.0000001192092896},
+                {"base": "float", "low": "0", "high": "1.401298464324817e-45", "value": 1.401298464324817e-45},
+                {"base": "double", "low": "1", "high": "1.0000000000000002220446049250313080847263336181640625",
+                    "value": 1.0000000000000002},
+                {"base": "double", "low": "0", "high": "4.9406564584124654e-324", "value": 5e-324},
+                {"base": "float", "low": "3.4028234663852886e38", "high": "INF", "value": @inf@}) {
+            XsdSchema definition = schema(row.base, '<xs:minExclusive value="' + row.low + '"/><xs:maxInclusive value="'
+                + row.high + '"/>');
+            XsdSimpleType type = cast<XsdSimpleType>(definition.findType(make_qname("urn:ieee-facets", "Value")));
+            same(row.value, type.getSampleValue(-1.0));
+        }
+        XsdSchema definition = schema("float", '<xs:minInclusive value="NaN"/>');
+        same(@nan@, cast<XsdSimpleType>(definition.findType(make_qname("urn:ieee-facets", "Value"))).getSampleValue(1.0));
+        definition = schema("float", '<xs:minExclusive value="NaN"/>');
+        XsdSimpleType empty = cast<XsdSimpleType>(definition.findType(make_qname("urn:ieee-facets", "Value")));
+        assertThrows("XSD-SAMPLE-ERROR", \empty.getSampleValue(), (1.0,));
+    }
+}

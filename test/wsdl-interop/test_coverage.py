@@ -114,11 +114,48 @@ class CoverageTest(unittest.TestCase):
                 self.assertEqual(valid, result["ok"], result)
         _, records = coverage.prepare(self.root, self.source)
         name = next(iter(records["BooleanElement"]["messages"]))
-        for item_type in (None, "list", "float", "unknown"):
+        for item_type in (None, "list", "union", "unknown"):
             selection = {"format": 1, "cases": {"BooleanElement": {"messages": {name: [
                 {"elements": ["value"], "datatype": "list", "item_datatype": item_type}]}}}}
             with self.subTest(item_type=item_type), self.assertRaises(ValueError):
                 coverage.validate_selection(selection, records)
+
+    def test_ieee_value_assertions_detect_precision_and_sign_changes(self):
+        for datatype, before, after, valid in (
+                ("float", "16777217", "16777216", True),
+                ("double", "16777217", "16777216", False),
+                ("float", "1.00000005960464477539062500000000001", "1.00000011920928955078125", True),
+                ("float", "1.00000005960464477539062500000000001", "1", False),
+                ("double", "1.00000000000000011102230246251565404236316680908203125001",
+                 "1.0000000000000002", True),
+                ("double", "1.00000000000000011102230246251565404236316680908203125001", "1", False),
+                ("float", "3.5e38", "INF", True),
+                ("double", "3.5e38", "INF", False),
+                ("float", "-1e-999", "-0", True),
+                ("double", "-0", "0", False),
+                ("float", "NaN", "NaN", True),
+                ("double", "NaN", "INF", False),
+                ("double", "1.234567891234567", "1.23456789", False),
+                ("float", "1e", "1", False),
+                ("double", "+INF", "INF", False),
+                ("float", "nan", "NaN", False),
+                ("double", "1\u00a0", "1", False)):
+            with self.subTest(datatype=datatype, before=before, after=after):
+                for is_list in (False, True):
+                    left, right = etree.Element("value"), etree.Element("value")
+                    left.text, right.text = before, after
+                    assertion = {"elements": ["value"], "datatype": "list" if is_list else datatype}
+                    if is_list:
+                        assertion["item_datatype"] = datatype
+                    result = coverage.value_checks(left, right, [assertion])
+                    self.assertEqual(valid, result["ok"], result)
+        _, records = coverage.prepare(self.root, self.source)
+        name = next(iter(records["BooleanElement"]["messages"]))
+        for datatype in ("float", "double"):
+            for assertion in ({"elements": ["value"], "datatype": datatype},
+                              {"elements": ["value"], "datatype": "list", "item_datatype": datatype}):
+                coverage.validate_selection({"format": 1, "cases": {"BooleanElement": {"messages": {name: [assertion]}}}},
+                                            records)
 
     def test_missing_worker_stage_cannot_pass(self):
         cases, _ = coverage.prepare(self.root, self.source)
@@ -285,7 +322,7 @@ class CoverageTest(unittest.TestCase):
         self.assertEqual("", process.stderr)
         report = json.loads(output.read_text())
         self.assertEqual([], report["selected_failures"])
-        self.assertEqual({"wsdls": 89, "message_directions": 756}, report["selected_scope"])
+        self.assertEqual({"wsdls": 97, "message_directions": 828}, report["selected_scope"])
         self.assertEqual(293, len(report["cases"]))
         self.assertEqual(2272, sum(len(c["messages"]) for c in report["cases"]))
         for stage, counts in report["stage_accounting"]["counts"].items():
@@ -299,12 +336,17 @@ class CoverageTest(unittest.TestCase):
                      "DecimalElement", "DecimalSimpleTypePattern", "IntSimpleTypePattern",
                      "IntegerSimpleTypePattern", "LongSimpleTypePattern", "ShortSimpleTypePattern",
                      "NonNegativeIntegerSimpleTypePattern", "PositiveIntegerSimpleTypePattern",
-                     "UnsignedIntSimpleTypePattern", "UnsignedLongSimpleTypePattern", "UnsignedShortSimpleTypePattern"):
+                     "UnsignedIntSimpleTypePattern", "UnsignedLongSimpleTypePattern", "UnsignedShortSimpleTypePattern",
+                     "FloatElement", "DoubleElement", "FloatAttribute", "DoubleAttribute",
+                     "FloatSimpleTypePattern", "DoubleSimpleTypePattern", "FloatEnumerationType",
+                     "DoubleEnumerationType"):
             for message in by_name[name]["messages"]:
                 self.assertEqual([], message["failures"], message)
                 self.assertTrue(message["values"]["ok"], message)
-            # IntegerSimpleTypePattern already passed the original corpus and retains its P9 coverage ownership.
-            self.assertEqual("P9" if name == "IntegerSimpleTypePattern" else "P3",
+            # These families passed the original corpus and retain their P9 coverage ownership.
+            baseline_passes = ("IntegerSimpleTypePattern", "FloatElement", "DoubleElement",
+                               "FloatAttribute", "DoubleAttribute")
+            self.assertEqual("P9" if name in baseline_passes else "P3",
                              by_name[name]["implementation_phase"])
         self.assertTrue(by_name["ImportSchema"]["parse_requirement_passed"])
         self.assertEqual("PARSE-XML-EXCEPTION", by_name["ImportSchema"]["expected_parse"])

@@ -5,9 +5,12 @@ These independent test predicates cover the scalar disagreements in P1, not all 
 """
 
 from decimal import Decimal
+import math
 import re
+import struct
 
 from lxml import etree
+from ieee_reference import rounded_value
 
 
 UNSIGNED_MAX = {"unsignedByte": 255, "unsignedShort": 65535, "unsignedInt": 4294967295,
@@ -15,6 +18,7 @@ UNSIGNED_MAX = {"unsignedByte": 255, "unsignedShort": 65535, "unsignedInt": 4294
 INTEGER_BOUNDS = {"integer": (None, None), "positiveInteger": (1, None), "negativeInteger": (None, -1),
                   "nonNegativeInteger": (0, None), "nonPositiveInteger": (None, 0)}
 MONTH = re.compile(r"--(?:0[1-9]|1[0-2])(?:Z|[+-](?:(?:0[0-9]|1[0-3]):[0-5][0-9]|14:00))?")
+IEEE = re.compile(r"(?:NaN|-?INF|[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?)")
 
 
 def lexical_valid(datatype: str, lexical: str) -> bool:
@@ -32,11 +36,22 @@ def lexical_valid(datatype: str, lexical: str) -> bool:
         return (minimum is None or number >= minimum) and (maximum is None or number <= maximum)
     if datatype == "decimal":
         return re.fullmatch(r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)", value) is not None
+    if datatype in ("float", "double"):
+        return IEEE.fullmatch(value) is not None
     raise ValueError(f"no P1 normative predicate for datatype: {datatype}")
 
 
 def same_number(datatype: str, expected: str, actual: str) -> bool:
     """Compare exact numeric values only after validating both lexical representations."""
+    if datatype in ("float", "double"):
+        if not lexical_valid(datatype, expected) or not lexical_valid(datatype, actual):
+            return False
+        def key(text):
+            text = text.strip(" \t\r\n")
+            value = float(text) if text in ("NaN", "INF", "-INF") else rounded_value(text, datatype == "double")
+            # Value preservation also checks the native IEEE zero sign promised by WSDL.
+            return "NaN" if math.isnan(value) else struct.pack("!d", value)
+        return key(expected) == key(actual)
     if datatype not in UNSIGNED_MAX and datatype not in INTEGER_BOUNDS and datatype != "decimal":
         raise ValueError(f"not a P1 numeric datatype: {datatype}")
     return (lexical_valid(datatype, expected) and lexical_valid(datatype, actual)
