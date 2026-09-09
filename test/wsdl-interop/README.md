@@ -888,3 +888,21 @@ HTTP tests carry these values through actual SOAP 1.1/1.2 bindings in both direc
 Union patterns use the selected leaf member's whitespace normalization, including
 nested unions and binary values within union-item lists. Strict coverage now adds
 all four binary element/attribute families: 120 WSDLs and 1,148 message directions.
+
+## QName lexical values
+
+Run `wsdl-qname-lexical.qtest` and `wsdl-qname-consumers.qtest` with debugging
+enabled, plus `python3 test/wsdl-interop/test_qname_lexical.py -v`.
+QName conversion validates both NCName components, collapses XML whitespace,
+and rejects empty or malformed text. Providers retain lexical and inherited
+pattern checks after reconstruction. Examples satisfy lexical restrictions or
+raise `XSD-SAMPLE-ERROR`; deprecated QName length facets do not alter them.
+
+The independent tests cover 4,036 character-boundary inputs, seven schema
+declarations, and 42 SOAP 1.1/1.2 contracts with 612 messages in both directions.
+They compare namespace/local identity for their local and implicitly bound `xml`
+names and independently validate output. Local HTTP tests exercise SoapClient
+and SoapHandler, attributes, lists, union fallback and rejection recovery.
+See [the lexical contract](../../design/wsdl-qname-lexical.md) and
+[evidence](qname-lexical-evidence.md). General QName namespace context,
+enumeration identity and output prefix handling remain open requirements.

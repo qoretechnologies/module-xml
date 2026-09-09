@@ -4057,3 +4057,70 @@ This completes the binary facet/choice/collection increment. QName/entity contex
 dateTime/time policy and remaining XML-RPC/P3 criteria remain in scope; P4-P9
 have not begun. Read-only next-name reductions are in
 `/tmp/wsdl-p3-29-name-preflight.qr`, `.log` and `.md`; they do not modify this commit.
+
+## P3-29 — QName lexical grammar, provider patterns and examples
+
+P3-28 is committed as `494633c`. This increment completes QName lexical checking
+without claiming namespace-context or enumeration-value acceptance. Root causes,
+normative references and independent reproductions are in
+[qname-lexical-evidence.md](qname-lexical-evidence.md); the implemented contract
+and executable example are in [the design](../../design/wsdl-qname-lexical.md).
+
+| Requirement | Implementation and evidence |
+| --- | --- |
+| P3-QName-grammar | Both NCName components follow the referenced XML 1.0 Second Edition productions; builtin serialization/decoding and reconstructed providers reject malformed and empty text with the expected categories. |
+| P3-QName-lexical-facets | XML whitespace collapse precedes inherited patterns; detached providers retain those patterns. Deprecated QName lengths impose no value-length constraint. |
+| P3-QName-examples | Builtin examples are local names; restricted examples pass complete scalar validation or raise XSD-SAMPLE-ERROR. Malformed enumeration spellings fail schema construction. |
+| P3-QName-boundaries | 4,036 independently generated character boundaries pass libxml2 2.12.10, Xerces-J 2.12.2 and all three Qore conversion paths, also with PCRE2 JIT disabled. |
+| P3-QName-consumers | 42 actual SOAP contracts / 612 input messages cover both versions and directions, atomic/attribute/simple-content/repeated values, providers and examples. The 216 accepted inputs preserve checked namespace/local identity. Seven schema-only cases cover malformed names and equivalent local aliases. |
+
+The new Qore suites pass **8 cases / 335 assertions**: lexical 7/307 and actual
+HTTP consumers 1/28. The frozen-source regression gate passes **77 Qore suites,
+830 cases / 31,555 assertions**, including the existing schema/SOAP/XML-RPC/CDA/
+Cargo consumers. The soap suite retains its documented 1,031 total / 1,028
+succeeded assertion accounting, with all 20 cases passing. No new warnings or
+test-case errors occur. Logs: `/tmp/wsdl-p3-29-qname-final.log` and its adjacent
+`qname-final-<suite>.log` files.
+
+The two QName suites plus existing builtin-name/list suite pass **136 cases /
+8,800 assertions** across AST/IR/JIT/tiered and UTC/Europe-Prague. Local compiled
+modules pass **17 cases / 1,100 assertions**, and the full design example runs
+with no output. WSDL, SoapDataProvider, SoapClient and SoapHandler qmods and WSDL
+Qdx/Doxygen build cleanly. Evidence: `/tmp/wsdl-p3-29-qname-modes.json`,
+`qname-aot.json`, `qname-build-final.log` and `qname-no-jit.log` under that prefix.
+
+The four-method standalone QName matrix passes in **58.417 seconds**. The final
+affected Python gate completes **52 methods in 427.691 seconds**, with exactly
+the two known P6 selected-binding-version failures and no new failures, errors or
+warnings. Logs: `/tmp/wsdl-p3-29-qname-python-final.log` and
+`qname-python-gate.log`; exact baseline comparison: `qname-python-comparison.json`.
+An initial enum check could reject equivalent namespace aliases; the audit
+replaced it with the intended lexical-only check and added independent regressions.
+The initial overlapping development save/read error in schema-composition is
+superseded by the complete frozen-source rerun above.
+
+The comparable both-version survey retains every prior count and source/catalog
+hash. Strict coverage remains **120 WSDLs / 1,148 message directions**, zero
+selected failures; all **168 broad failure signatures** are unchanged. QName
+output-namespace and entity-context failures remain visible. Reports:
+`/tmp/wsdl-p3-29-qname-survey-final.json`, `qname-coverage.json` and
+`qname-report-comparison.json` under that prefix. An additional survey with the
+offline catalog (`qname-survey.json`) resolves three imports absent from the
+legacy survey's default configuration; its changed stage counts are configuration
+coverage, not QName fixes. The strict coverage gate always uses that pinned catalog.
+
+The full 62-item audit is **20 Pass, 42 N/A, 0 Fail**, recorded in
+[P3-29-qname-lexical.md](audits/P3-29-qname-lexical.md). Frozen WSDL SHA256:
+`5e3a364edfaec0c732282db12dbe6a29f6fd4657db5689fb4b6639dd4c9f35f6`.
+Code/test/example hashes are in `/tmp/wsdl-p3-29-qname-source-hashes.json`; the
+final intended-file/artifact manifest is `qname-final-hashes.json` under that prefix.
+The Debug core and native XML qmod retain their P3-28 hashes. No native source,
+main-Qore worktree change, install or push is part of this increment.
+
+P3 remains active. Next reductions in `/tmp/wsdl-p3-30-qname-context.qr` and `.log`
+show a valid enum alias rejected, the same prefix rebound to a wrong namespace
+accepted, and an enumerated provider accepting an unrelated QName. The namespace
+loss boundary and affected scalar/attribute paths are recorded in
+`/tmp/wsdl-p3-30-qname-context-preflight.md`. QName value identity, ENTITY/ENTITIES,
+dateTime/time policy and other remaining P3 criteria stay in scope. No answer to
+the pending leap-second question is inferred. P4-P9 have not begun.
