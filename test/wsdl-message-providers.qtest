@@ -1,0 +1,317 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires xml
+%requires ../qlib/WSDL.qm
+%exec-class MessageProvidersTest
+
+class MessageProvidersTest inherits QUnit::Test {
+    const Uri = "urn:qore:message-provider";
+    const Definitions = '<xs:simpleType name="EntityText"><xs:union memberTypes="xs:ENTITY xs:string"/></xs:simpleType>
+        <xs:simpleType name="TextEntity"><xs:union memberTypes="xs:string xs:ENTITY"/></xs:simpleType>
+        <xs:simpleType name="EntityInt"><xs:union memberTypes="xs:ENTITY xs:int"/></xs:simpleType>
+        <xs:simpleType name="Items"><xs:list itemType="xs:ENTITY"/></xs:simpleType>
+        <xs:simpleType name="MixedItems"><xs:list itemType="t:EntityInt"/></xs:simpleType>';
+
+    constructor() : Test("WSDL message provider instance requirements", "1.0") {
+        addTestCase("Selected scalar and list requirements survive reconstruction", \scalars());
+        addTestCase("Complex records, attributes, defaults and repeated fields retain checks", \records());
+        addTestCase("Optional and soft copies retain checks in enclosing providers", \variants());
+        addTestCase("Field projections follow their current metadata", \projections());
+        addTestCase("Detached providers retain values and private namespace state", \ownership());
+        addTestCase("Particle metadata and shared declarations survive component reconstruction", \components());
+        addTestCase("Concurrent provider conversions keep independent namespace scopes", \concurrency());
+        addTestCase("Malformed serialized message context is rejected", \metadata());
+        addTestCase("Reentrant schema callbacks propagate interruption and recover", \callbacks());
+        set_return_value(main());
+    }
+
+    private static WebService service(string datatype, string extra = "", string version = "11") {
+        string soap = "http://schemas.xmlsoap.org/wsdl/soap" + (version == "12" ? "12" : "") + "/";
+        return new WebService(sprintf('<w:definitions xmlns:w="http://schemas.xmlsoap.org/wsdl/" xmlns:s="%s"
+            xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:t="%s" targetNamespace="%s"><w:types>
+            <xs:schema targetNamespace="%s">%s%s<xs:element name="Submit" type="%s"/>
+            <xs:element name="Reply" type="%s"/></xs:schema></w:types>
+            <w:message name="Request"><w:part name="body" element="t:Submit"/></w:message>
+            <w:message name="Response"><w:part name="body" element="t:Reply"/></w:message>
+            <w:portType name="Port"><w:operation name="submit"><w:input message="t:Request"/>
+            <w:output message="t:Response"/></w:operation></w:portType><w:binding name="Soap" type="t:Port">
+            <s:binding style="document" transport="http://schemas.xmlsoap.org/soap/http"/>
+            <w:operation name="submit"><s:operation soapAction="urn:submit"/>
+            <w:input><s:body use="literal"/></w:input><w:output><s:body use="literal"/></w:output>
+            </w:operation></w:binding><w:service name="Service"><w:port name="Port" binding="t:Soap">
+            <s:address location="http://example.invalid/"/></w:port></w:service></w:definitions>',
+            soap, Uri, Uri, Uri, Definitions, extra, datatype, datatype), {"async_only": True});
+    }
+
+    private static HashDataType provider(WebService ws, bool response = False) {
+        WSOperation operation = ws.getBindingOperation("Soap", "submit");
+        return cast<HashDataType>((response ? operation.output : operation.input).getDataProviderType());
+    }
+
+    private scalars() {
+        foreach hash<auto> row in ({"type": "t:EntityText", "bad": "photo", "good": "17"},
+                {"type": "t:EntityInt", "bad": "photo", "good": 17},
+                {"type": "t:Items", "bad": ("photo",), "good": ()},
+                {"type": "t:MixedItems", "bad": (17, "photo"), "good": (17, 18)}) {
+            foreach string version in ("11", "12") {
+                WebService ws = service(row.type, "", version);
+                foreach bool response in (False, True) {
+                    HashDataType original = provider(ws, response);
+                    foreach HashDataType type in (original, Serializable::deserialize(original.serialize())) {
+                        assertThrows("RUNTIME-TYPE-ERROR", \type.acceptsValue(), ({"body": row.bad},));
+                        assertEq(row.good, type.acceptsValue({"body": row.good}).body);
+                        assertThrows("RUNTIME-TYPE-ERROR", \type.acceptsValue(), ({"body": row.bad},));
+                    }
+                }
+            }
+        }
+        foreach string datatype in ("xs:ENTITY", "xs:ENTITIES") {
+            HashDataType type = provider(service(datatype));
+            assertThrows("RUNTIME-TYPE-ERROR", \type.acceptsValue(), ({"body": "photo"},));
+        }
+        HashDataType string_first = provider(service("t:TextEntity"));
+        assertEq("photo", string_first.acceptsValue({"body": "photo"}).body);
+        # A detached datatype still describes the lexical value space.
+        WebService ws = service("xs:ENTITY");
+        assertEq("photo", ws.nsc.getBaseType("ENTITY").getDataProviderType().acceptsValue("photo"));
+    }
+
+    private records() {
+        foreach bool defaulted in (False, True) {
+            WebService ws = service("t:Record", '<xs:complexType name="Record"><xs:sequence>
+                <xs:element name="item" type="t:EntityInt" maxOccurs="3"/></xs:sequence>
+                <xs:attribute name="choice" type="t:EntityText" ' + (defaulted ? 'default="photo"' : 'use="required"')
+                + '/></xs:complexType>');
+            HashDataType original = provider(ws);
+            foreach HashDataType type in (original, Serializable::deserialize(original.serialize())) {
+                hash<auto> value = {"body": {"item": (17, 18), "^attributes^": {"choice": "!"}}};
+                assertEq(value, type.acceptsValue(value));
+                value.body.item = (17, "photo");
+                assertThrows("RUNTIME-TYPE-ERROR", \type.acceptsValue(), (value,));
+                value.body.item = (17, 18);
+                value.body."^attributes^".choice = "photo";
+                assertThrows("RUNTIME-TYPE-ERROR", \type.acceptsValue(), (value,));
+                if (defaulted) {
+                    remove value.body."^attributes^";
+                    assertThrows("RUNTIME-TYPE-ERROR", \type.acceptsValue(), (value,));
+                }
+            }
+        }
+        WebService ws = service("t:Record", '<xs:complexType name="Record"><xs:simpleContent>
+            <xs:extension base="t:EntityInt"><xs:attribute name="label" type="xs:string" use="required"/>
+            </xs:extension></xs:simpleContent></xs:complexType>');
+        HashDataType type = Serializable::deserialize(provider(ws).serialize());
+        assertEq(17, type.acceptsValue({"body": {"^value^": 17, "^attributes^": {"label": "Invoice"}}})
+            .body."^value^");
+        assertThrows("RUNTIME-TYPE-ERROR", \type.acceptsValue(),
+            ({"body": {"^value^": "photo", "^attributes^": {"label": "Invoice"}}},));
+    }
+
+    private variants() {
+        HashDataType original = provider(service("t:EntityInt"));
+        foreach HashDataType variant in (original, original.getSoftType(), original.getOrNothingType(),
+                original.getDeepOrNothingType(), original.getOrNothingType().getMandatoryType()) {
+            foreach HashDataType type in (variant, Serializable::deserialize(variant.serialize())) {
+                assertThrows("RUNTIME-TYPE-ERROR", \type.acceptsValue(), ({"body": "photo"},));
+                assertEq(17, type.acceptsValue({"body": 17}).body);
+                ListDataType list(type);
+                assertThrows("RUNTIME-TYPE-ERROR", \list.acceptsValue(), (({"body": "photo"},),));
+                assertEq(17, list.acceptsValue(({"body": 17},))[0].body);
+                QoreDataField field({"name": "request", "type": type});
+                assertThrows("RUNTIME-TYPE-ERROR", \field.acceptsValue(), ({"body": "photo"},));
+                assertEq(17, field.acceptsValue({"body": 17}).body);
+            }
+        }
+        assertEq(NOTHING, original.getOrNothingType().acceptsValue(NOTHING));
+        assertEq({}, original.getDeepOrNothingType().acceptsValue({}));
+        assertThrows("MISSING-VALUE-ERROR", \original.acceptsValue(), ({},));
+    }
+
+    private projections() {
+        HashDataType original = provider(service("t:EntityInt"));
+        HashDataType projected = original.copyWithFields({});
+        assertEq({}, projected.acceptsValue({}));
+        assertThrows("RUNTIME-TYPE-ERROR", \original.acceptsValue(), ({"body": "photo"},));
+        HashDataType optional = original.copyWithFields({"body": original.getField("body").getOrNothingType()});
+        assertEq({}, optional.acceptsValue({}));
+        assertThrows("RUNTIME-TYPE-ERROR", \optional.acceptsValue(), ({"body": "photo"},));
+    }
+
+    private ownership() {
+        WebService ws = service("t:Record", '<xs:complexType name="Record"><xs:attribute xmlns:p="urn:declaration"
+            name="category" type="xs:QName" default="p:Photo"/></xs:complexType>');
+        hash<auto> before = ws.nsc.getOutputNamespaceHash(NOTHING);
+        HashDataType original = provider(ws);
+        foreach HashDataType type in (original, Serializable::deserialize(original.serialize())) {
+            XsdQNameValue category = type.acceptsValue({"body": {}}).body."^attributes^".category;
+            assertEq("urn:declaration", category.getNamespaceUri());
+            assertEq("Photo", category.getLocalName());
+            assertEq(before, ws.nsc.getOutputNamespaceHash(NOTHING));
+        }
+        remove ws;
+        HashDataType detached = Serializable::deserialize(original.serialize());
+        assertEq("urn:declaration", detached.acceptsValue({"body": {}}).body."^attributes^".category.getNamespaceUri());
+        HashDataType scalar = provider(service("xs:QName"));
+        XsdQNameValue value("urn:caller", "p:Invoice");
+        assertTrue(value === scalar.acceptsValue({"body": value}).body);
+        assertEq("p:Invoice", value.getLexicalValue());
+    }
+
+    private components() {
+        WebService ws = service("t:Record", '<xs:group name="Optional"><xs:sequence minOccurs="0">'
+            '<xs:choice><xs:element name="first" type="xs:string"/><xs:element name="second" type="xs:string"/>'
+            '</xs:choice></xs:sequence></xs:group><xs:complexType name="Record"><xs:sequence>'
+            '<xs:element name="left" type="t:EntityInt"/>'
+            '<xs:element name="right" type="t:EntityInt"/></xs:sequence></xs:complexType>');
+        XsdGroup group = ws.groupMap{make_qname(Uri, "Optional")};
+        XsdGroup restored = Serializable::deserialize(group.serialize());
+        assertEq(group.isEmptiable(ws.groupMap), restored.isEmptiable({}));
+        assertEq(group.contentModel, restored.contentModel);
+        XsdComplexType original = ws.findType(make_qname(Uri, "Record"));
+        XsdComplexType copy = Serializable::deserialize(original.serialize());
+        assertTrue(copy.elementmap.left.type === copy.elementmap.right.type);
+        assertEq(keys original.elementmap, keys copy.elementmap);
+        assertEq(original.isRequired(), copy.isRequired());
+        Namespaces namespaces = ws.nsc.copy();
+        hash<auto> good = {"left": 17, "right": 18};
+        assertEq(original.serializeValue(namespaces, good, True), copy.serializeValue(namespaces, good, True));
+        assertThrows("SOAP-SERIALIZATION-ERROR", \copy.serializeValue(),
+            (namespaces, {"left": 17, "right": "photo"}, True));
+        hash<SerializationInfo> state = original.serializeToData();
+        remove state._index."0"._class_data."WSDL::XsdComplexType".emptiability;
+        assertThrows("DESERIALIZATION-ERROR", \Serializable::deserialize(), (state,));
+        foreach string flag in ("optional", "absent", "choice", "terminal") {
+            state = original.serializeToData();
+            string node = state._index."0"._class_data."WSDL::XsdComplexType".emptiability._index;
+            state._index{node}._members{flag} = "false";
+            assertThrows("DESERIALIZATION-ERROR", \Serializable::deserialize(), (state,));
+        }
+    }
+
+    private concurrency() {
+        HashDataType shared = provider(service("xs:QName"));
+        Qore::Thread::Queue ready();
+        Qore::Thread::Queue start();
+        Qore::Thread::Queue results();
+        Qore::Thread::Counter running();
+        on_exit {
+            for (int index = 0; index < 4; ++index) {
+                start.push(True);
+            }
+            assertEq(0, running.waitForZero(30s));
+        }
+        for (int index = 0; index < 4; ++index) {
+            running.inc();
+            background sub(int worker) {
+                on_exit running.dec();
+                ready.push(True);
+                try {
+                    start.get(30s);
+                    XsdQNameValue value("urn:worker:" + worker, "p:Invoice");
+                    for (int attempt = 0; attempt < 8; ++attempt) {
+                        @assert(shared.acceptsValue({"body": value}).body === value);
+                        @assert(value.getNamespaceUri() == "urn:worker:" + worker);
+                    }
+                    results.push(worker);
+                } catch (hash<ExceptionInfo> ex) {
+                    results.push(ex);
+                }
+            }(index);
+        }
+        for (int index = 0; index < 4; ++index) {
+            ready.get(30s);
+        }
+        for (int index = 0; index < 4; ++index) {
+            start.push(True);
+        }
+        hash<string, bool> seen();
+        for (int index = 0; index < 4; ++index) {
+            auto result = results.get(30s);
+            assertEq(NT_INT, result.typeCode());
+            assertFalse(exists seen{result});
+            seen{result} = True;
+        }
+    }
+
+    private metadata() {
+        HashDataType type = provider(service("t:EntityInt"));
+        hash<SerializationInfo> original = type.serializeToData();
+        foreach string member in ("namespaces", "parts") {
+            hash<SerializationInfo> state = original;
+            remove state._index."0"._class_data."WSDL::XsdMessageDataType"{member};
+            assertThrows("DESERIALIZATION-ERROR", \Serializable::deserialize(), (state,));
+        }
+        string parts_index = original._index."0"._class_data."WSDL::XsdMessageDataType".parts._index;
+        string part_index = original._index{parts_index}._members.firstValue()._index;
+        foreach string mutation in ("empty-name", "missing-type", "duplicate-name") {
+            hash<SerializationInfo> state = original;
+            if (mutation == "empty-name") {
+                state._index{part_index}._members.name = "";
+            } else if (mutation == "missing-type") {
+                remove state._index{part_index}._members.element;
+            } else {
+                state._index{parts_index}._members.duplicate = {"_index": part_index};
+            }
+            assertThrows("DESERIALIZATION-ERROR", \Serializable::deserialize(), (state,));
+        }
+    }
+
+    private callbacks() {
+        WebService ws = service("xs:string");
+        WSMessage message = ws.getBindingOperation("Soap", "submit").input;
+        MessageProviderProbe probe(ws.nsc);
+        XsdElement element = message.args.firstValue().element;
+        element.type = probe;
+        HashDataType type = message.getDataProviderType();
+        assertEq("invoice", type.acceptsValue({"body": "invoice"}).body);
+        assertEq(1, probe.calls);
+        foreach string error in ("CONTROLLED-ERROR", "THREAD-CANCELLED") {
+            probe.error = error;
+            assertThrows(error, \type.acceptsValue(), ({"body": "invoice"},));
+            probe.error = NOTHING;
+            assertEq("invoice", type.acceptsValue({"body": "invoice"}).body);
+        }
+        Program program(PO_MODERN);
+        SandboxManager manager();
+        on_exit manager.clearInterrupt();
+        program.setSandboxManager(manager);
+        program.parse("%modern\nsub execute(code<nothing()> work) { work(); }\n",
+            get_script_dir() + "/message-provider-interrupt.qr");
+        probe.manager = manager;
+        code<nothing()> work = sub() { type.acceptsValue({"body": "invoice"}); };
+        *hash<ExceptionInfo> failure;
+        try {
+            program.callFunction("execute", work);
+        } catch (hash<ExceptionInfo> ex) {
+            failure = ex;
+        }
+        manager.clearInterrupt();
+        probe.manager = NOTHING;
+        assertEq("PROGRAM-INTERRUPTED", failure.err);
+        assertEq("invoice", type.acceptsValue({"body": "invoice"}).body);
+    }
+}
+
+class MessageProviderProbe inherits XsdBaseType {
+    public {
+        int calls = 0;
+        *string error;
+        *SandboxManager manager;
+    }
+    constructor(Namespaces namespaces) : XsdBaseType("string", namespaces) {
+    }
+    auto serializeValue(Namespaces namespaces, auto value, *softbool omitType) {
+        ++calls;
+        @assert(nsc.getBaseType("ENTITY").getDataProviderType().acceptsValue("photo") == "photo");
+        if (manager) {
+            manager.requestInterrupt();
+        }
+        if (error) {
+            throw error, "controlled message conversion failure";
+        }
+        return XsdBaseType::serializeValue(namespaces, value, omitType);
+    }
+}

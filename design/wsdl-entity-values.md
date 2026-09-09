@@ -46,9 +46,10 @@ is described in [the native ENTITY design](xml-entity-validation.md).
 
 ## Detached values, defaults and examples
 
-Detached simple-type conversion, provider type acceptance, schema facet
-compilation and finite-value comparison remain datatype operations. A provider
-accepted value must also pass the document conversion that emits its XML.
+Detached simple-type conversion, simple-type provider acceptance, schema facet
+compilation and finite-value comparison remain datatype operations. Complete
+message providers additionally check the supplied parts through their schema
+instance conversion; see [message provider validation](wsdl-message-providers.md).
 `XsdXmlValueDataType` checks the complete retained element through that conversion.
 
 `XsdAttribute::getDefaultValue()` returns the compiled schema value.

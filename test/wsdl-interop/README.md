@@ -1051,3 +1051,13 @@ Datatype-only providers and schema facet comparison retain their lexical value
 contract; document conversion enforces the selected member's declaration requirement.
 See [the public contract](../../design/wsdl-entity-values.md) and
 [execution evidence](entity-wsdl-evidence.md).
+
+## Complete message providers
+
+`qore -b --enable-debug test/wsdl-message-providers.qtest` checks message-part
+instance requirements before a native provider value can be accepted. It includes
+original/reconstructed providers, both bindings/directions, field projections,
+container wrapping, QName ownership, component metadata, callback failures,
+program interruption and synchronized concurrent calls. The existing
+`test_entity_wsdl.py` matrix independently checks every reachable document.
+See [the provider contract](../../design/wsdl-message-providers.md).

@@ -80,6 +80,8 @@ module WSDL {
     @section wsdlrelnotes WSDL Module Release Notes
 
     @subsection wsdl_0_5_8 WSDL v0.5.8
+    - complete message providers validate supplied part values against their schema instance requirements,
+      preserving field metadata, optional/soft copies, namespace ownership and Serializable reconstruction
     - element, attribute and WSDL part conversion enforces ENTITY/ENTITIES document declarations
       after datatype and ordered union selection; undeclared selected names cannot fall through to a string member
     - defaults retain their declaration QName identity when checked for instance constraints;
@@ -10527,6 +10529,130 @@ public class XsdXmlValueDataType inherits QoreDataType {
     }
 }
 
+#! provider type for native values of a complete WSDL message
+/** Field metadata and native conversion follow HashDataType. Each accepted part also satisfies
+    its schema instance requirements, including selected ENTITY/ENTITIES declarations.
+
+    @par Example
+    Validate an invoice request before enqueuing it for a SOAP client. An ENTITY name that has
+    valid spelling still fails when its containing message cannot supply an unparsed declaration.
+
+    @since %WSDL 0.5.8
+*/
+public class XsdMessageDataType inherits HashDataType {
+    private {
+        Namespaces namespaces;
+        hash<string, hash<ArgInfo>> parts;
+    }
+
+    #! constructs a message provider retaining its part validation context
+    /** @param message the resolved WSDL message
+        @note The namespace registry is copied for each value check; prefix allocations are private.
+    */
+    constructor(WSMessage message) : HashDataType(message.name) {
+        namespaces = message.nsc;
+        parts = message.args;
+        foreach hash<ArgInfo> arg in (parts.iterator()) {
+            hash<auto> info = {"name": arg.name,
+                "type": arg.type ? arg.type.getDataProviderType() : arg.element.getDataProviderType(),
+                "allowed_values": arg.type ? arg.type.getDataProviderAllowedValues()
+                    : arg.element.getDataProviderAllowedValues()};
+            addField(arg.type ? XsdDataFieldHelper::create(arg.type, info)
+                : XsdDataFieldHelper::create(arg.element, info));
+        }
+    }
+
+    private:internal deserializeMembers(hash<auto> members) {
+        if (!(members.namespaces instanceof Namespaces) || members.parts.typeCode() != NT_HASH) {
+            throw "DESERIALIZATION-ERROR", "a WSDL message provider requires part and namespace metadata";
+        }
+        hash<string, hash<ArgInfo>> restored();
+        hash<string, bool> names();
+        foreach hash<auto> row in (members.parts.pairIterator()) {
+            if (row.value.typeCode() != NT_HASH || row.value.name.typeCode() != NT_STRING
+                    || !row.value.name || row.value.part.typeCode() != NT_STRING
+                    || (exists row.value.element && !(row.value.element instanceof XsdElement))
+                    || (exists row.value.type && !(row.value.type instanceof XsdAbstractType))
+                    || (boolean(row.value.element) == boolean(row.value.type))) {
+                throw "DESERIALIZATION-ERROR", "a WSDL message part requires a name and exactly one element or type";
+            }
+            hash<ArgInfo> part = new hash<ArgInfo>(row.value);
+            if (names{part.name}) {
+                throw "DESERIALIZATION-ERROR", sprintf("duplicate WSDL message provider field %Y", part.name);
+            }
+            names{part.name} = True;
+            restored{row.key} = part;
+        }
+        namespaces = members.namespaces;
+        parts = restored;
+    }
+
+    #! requires instance checks even for native hashes
+    /** @return NOTHING; native type compatibility alone cannot validate a message */
+    *Type getValueType() {
+        return;
+    }
+
+    #! prevents enclosing providers from bypassing message validation
+    /** @return an empty map */
+    *hash<string, bool> getDirectTypeHash() {
+        return {};
+    }
+
+    #! converts fields and validates the resulting XML part values
+    /** @param input the message hash keyed by part name
+        @return converted fields, or NOTHING for an optional omitted message
+        @throw MISSING-VALUE-ERROR a mandatory message field is absent
+        @throw RUNTIME-TYPE-ERROR a field or its document requirements reject the value
+    */
+    auto acceptsValue(auto input) {
+        auto value = HashDataType::acceptsValue(input);
+        if (!exists value) {
+            return;
+        }
+        Namespaces validation_namespaces = namespaces.copy();
+        XsdQNameOutputScope output_scope(validation_namespaces);
+        foreach hash<ArgInfo> part in (parts.iterator()) {
+            *AbstractDataField field = getField(part.name);
+            # Explicit optional projections may omit a part. A supplied value still
+            # has the selected type's instance requirements.
+            if (!field || (!exists value{part.name} && !field.isMandatory())) {
+                continue;
+            }
+            try {
+                if (part.element) {
+                    part.element.serializeValue(validation_namespaces, value{part.name}, True, part.name, getName());
+                } else {
+                    XsdDocumentValueHelper::serializeValue(part.type, validation_namespaces, value{part.name}, True);
+                }
+            } catch (hash<ExceptionInfo> ex) {
+                if (ex.err == SOAP_SERIALIZATION_ERROR) {
+                    rethrow "RUNTIME-TYPE-ERROR", sprintf("WSDL message part %Y: %s", part.name, ex.desc), ex.arg;
+                }
+                rethrow;
+            }
+        }
+        return value;
+    }
+
+    #! returns a soft-field copy retaining the message's document requirements
+    /** @return a message provider with soft fields and the same validation context */
+    AbstractDataProviderType getSoftType() {
+        if (soft_type) {
+            return self;
+        }
+        XsdMessageDataType result = self.copy();
+        foreach AbstractDataField field in (getFields().iterator()) {
+            result.replaceField(field.getSoftType());
+        }
+        if (*AbstractDataProviderType other = getDefaultOtherFieldType()) {
+            result.setDefaultOtherFieldType(other.getSoftType());
+        }
+        result.soft_type = True;
+        return result;
+    }
+}
+
 #! provider type enforcing attribute-use presence independently of the scalar type
 /** Attribute uses can be required even when their scalar representation accepts NOTHING, for example
     \c anySimpleType or a union. This type preserves the scalar conversion while enforcing that requirement.
@@ -16724,6 +16850,35 @@ hashdecl XsdEmptiabilityInfo {
 # Schema construction metadata for the Particle Emptiable predicate. This does not flatten
 # occurrences into fields or match instance content; it retains nested zero/choice/sequence logic.
 class XsdEmptiabilityHelper {
+    # The wire representation uses ordinary containers. The private recursive hashdecl
+    # is reconstructed inside its declaring module, rather than
+    # asking Serializable to resolve a module-private list element type globally.
+    static hash<auto> serialize(hash<XsdEmptiabilityInfo> info) {
+        list<auto> children();
+        foreach hash<XsdEmptiabilityInfo> child in (info.children) {
+            push children, serialize(child);
+        }
+        return {"optional": info.optional, "absent": info.absent, "choice": info.choice,
+            "terminal": info.terminal, "ref": info.ref, "children": children};
+    }
+
+    static hash<XsdEmptiabilityInfo> deserialize(auto data) {
+        if (data.typeCode() != NT_HASH || data.children.typeCode() != NT_LIST
+                || (exists data.ref && data.ref.typeCode() != NT_STRING)) {
+            throw "DESERIALIZATION-ERROR", "invalid particle emptiability metadata";
+        }
+        foreach string flag in ("optional", "absent", "choice", "terminal") {
+            if (data{flag}.typeCode() != NT_BOOLEAN) {
+                throw "DESERIALIZATION-ERROR", sprintf("particle emptiability flag %Y must be a boolean", flag);
+            }
+        }
+        hash<XsdEmptiabilityInfo> info = new hash<XsdEmptiabilityInfo>(data - "children");
+        foreach auto child in (data.children) {
+            push info.children, deserialize(child);
+        }
+        return info;
+    }
+
     static hash<XsdEmptiabilityInfo> parse(*hash<auto> data, Namespaces nsc, string kind = "sequence") {
         NamespacePrefixHelper scope(nsc, data."^attributes^");
         WSDL::XsdBase::removeNS(\data);
@@ -16830,9 +16985,20 @@ public class XsdGroup inherits WSDL::XsdNamedData, Qore::Serializable {
         hash<string, XsdElement> elementDeclarations();
         bool resolving = False;
         bool resolved = False;
-        hash<XsdEmptiabilityInfo> emptiability;
+        transient hash<XsdEmptiabilityInfo> emptiability;
         *bool emptiable;
         bool evaluating_emptiability = False;
+    }
+
+    private:internal hash<auto> serializeMembers(*hash<auto> members) {
+        hash<auto> values = self.(keys members);
+        values.emptiability = XsdEmptiabilityHelper::serialize(emptiability);
+        return values;
+    }
+
+    private:internal deserializeMembers(hash<auto> members) {
+        emptiability = XsdEmptiabilityHelper::deserialize(remove members.emptiability);
+        self += members;
     }
 
     #! constructs a named model group with declaration-local QName references
@@ -17480,7 +17646,7 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
         bool content_emptiable = True;
         bool content_empty = True;
         bool has_element_wildcard = False;
-        hash<XsdEmptiabilityInfo> emptiability();
+        transient hash<XsdEmptiabilityInfo> emptiability();
         list<XsdElement> declared_elements();
         list<string> element_group_refs();
         hash<string, XsdElement> element_declarations();
@@ -17493,6 +17659,17 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
         const XET_SEQUENCE = "SEQUENCE";
         const XET_SIMPLE   = "SIMPLE";
         const XET_NONE     = "NONE";
+    }
+
+    private:internal hash<auto> serializeMembers(*hash<auto> members) {
+        hash<auto> values = self.(keys members);
+        values.emptiability = XsdEmptiabilityHelper::serialize(emptiability);
+        return values;
+    }
+
+    private:internal deserializeMembers(hash<auto> members) {
+        emptiability = XsdEmptiabilityHelper::deserialize(remove members.emptiability);
+        self += members;
     }
 
     # ct can be NOTHING in case of an empty complex type
@@ -19303,18 +19480,13 @@ public class WSMessage inherits WSDL::XsdNamedData {
         }
     }
 
-    #! Returns the data provider type for this message
+    #! returns native fields with schema instance checks for the message parts
+    /** @return a HashDataType-compatible provider keyed by WSDL part name
+        @note Explicit field projections can omit parts; supplied retained fields still satisfy their schema.
+        @since %WSDL 0.5.8
+    */
     AbstractDataProviderType getDataProviderType() {
-        HashDataType rv(name);
-        foreach hash<ArgInfo> arg in (args.iterator()) {
-            hash<auto> info = {"name": arg.name,
-                "type": arg.type ? arg.type.getDataProviderType() : arg.element.getDataProviderType(),
-                "allowed_values": arg.type ? arg.type.getDataProviderAllowedValues()
-                    : arg.element.getDataProviderAllowedValues()};
-            rv.addField(arg.type ? XsdDataFieldHelper::create(arg.type, info)
-                : XsdDataFieldHelper::create(arg.element, info));
-        }
-        return rv;
+        return new XsdMessageDataType(self);
     }
 
     /**

@@ -5199,3 +5199,48 @@ Final fixture inventory: `/tmp/wsdl-p3-41-final-fixtures.json`, SHA-256
 seconds; see `/tmp/wsdl-p3-41-completeness-final.log`. Source, artifact and log
 hashes are in `/tmp/wsdl-p3-41-final-manifest.json`. The full audit resolves all
 62 checks: 19 Pass / 43 N/A / 0 Fail.
+
+P3-41 was committed as `a6bb218` on `develop`, without pushing.
+
+## P3-42 — Complete message providers
+
+`/tmp/wsdl-p3-42-preflight.qr` isolates six scalar contracts and their reconstructed
+message providers: ten provider acceptances (five inputs, original/restored) fail
+instance serialization, and five of six native examples are unusable. The exact
+baseline is `/tmp/wsdl-p3-42-preflight.log`. Direct string-first values, integer
+alternatives and empty custom lists remain valid.
+
+An uncommitted `XsdMessageDataType` prototype retains the existing HashDataType
+field metadata and adds a private-namespace check of supplied part values after
+field conversion. It prevents native-container shortcuts and preserves optional
+copies/reconstruction. Its initial reduction changes the ten false acceptances
+into `RUNTIME-TYPE-ERROR`; native samples have not been changed. The prototype is
+not audited or ready to commit. The independent matrix, metadata/projection and
+callback/recovery tests must establish that the retained schema context preserves
+all provider contracts before choosing the final implementation.
+
+The final message adapter retains resolved part components and applies existing
+schema instance conversion after normal field conversion, with private namespace
+allocation and no global document-validation flag. Field metadata, optional and
+soft copies, field projections, enclosing providers and caller-owned values are
+covered. Groups/complex types explicitly transport their private emptiability
+metadata; their compiled type graphs and declaration QName defaults reconstruct.
+
+Final verification passes 93 Qore suites, 957 cases and 36,372 assertions. The new
+nine-case suite passes 226 assertions in AST/IR/JIT/tiered modes, including malformed
+metadata, shared graphs, reentrant schema callbacks, actual program interruption
+and synchronized concurrent use. The independent matrix passes 12,096 outcomes
+and 8,280 document verdicts in 137.108 seconds. All 72 generated WSDLs are unchanged.
+
+The survey's 2,411 rows and coverage report's 293 cases compare exactly with P3-41;
+only WSDL source provenance changes. Strict selection has no failure; 144 broader
+failure signatures remain. Survey tests pass fifteen methods; coverage tests
+retain exactly the two known P6 binding-version failures. The catalog example and
+Doxygen build pass. No C++ or main-Qore changes, installs or pushes were made.
+
+The initial optional-group test reproduced the already tracked P4 missing-group
+semantics; its source and failure log are preserved, and group metadata is tested
+independently here. Native sample generation remains the next independent P3 fix.
+See [provider evidence](message-providers-evidence.md),
+[the design](../../design/wsdl-message-providers.md) and
+[all 62 audit checks](audits/P3-42-message-providers.md): 20 Pass / 42 N/A / 0 Fail.
