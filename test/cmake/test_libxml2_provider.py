@@ -61,8 +61,16 @@ install(TARGETS probe RUNTIME DESTINATION bin)
         cls.run_command(["cmake", "--build", cls.root / "bundled", "--target", "probe", "-j4"])
         cls.source = Path(source) if source else cls.root / "bundled/_deps/qore_xml_libxml2-src"
         # Build a real fixed shared dependency to exercise the SYSTEM branch.
+        fixed_project = cls.root / "fixed/source"
+        fixed_project.mkdir(parents=True)
+        (fixed_project / "CMakeLists.txt").write_text(f'''cmake_minimum_required(VERSION 3.18...3.31)
+project(libxml2_backport_fixture C)
+add_subdirectory("{cls.source}" libxml)
+include("{REPO}/cmake/QoreXmlLibXml2QNameFix.cmake")
+qore_xml_fix_libxml2_qnames("{cls.source}" "${{CMAKE_CURRENT_BINARY_DIR}}/libxml")
+''')
         cls.fixed = cls.root / "fixed/build-debug"
-        cls.run_command(["cmake", "-S", cls.source, "-B", cls.fixed, "-DCMAKE_BUILD_TYPE=Debug",
+        cls.run_command(["cmake", "-S", fixed_project, "-B", cls.fixed, "-DCMAKE_BUILD_TYPE=Debug",
                          "-DBUILD_SHARED_LIBS=ON", "-DLIBXML2_WITH_PROGRAMS=OFF",
                          "-DLIBXML2_WITH_TESTS=OFF", "-DLIBXML2_WITH_PYTHON=OFF"])
         cls.run_command(["cmake", "--build", cls.fixed, "--target", "LibXml2", "-j4"])
@@ -73,11 +81,11 @@ install(TARGETS probe RUNTIME DESTINATION bin)
         # follow the run result, not the advertised release number.
         import shutil
         shutil.copytree(cls.source / "include/libxml", cls.fixed_include / "libxml")
-        header = (cls.fixed / "libxml/xmlversion.h").read_text()
+        header = (cls.fixed / "libxml/libxml/xmlversion.h").read_text()
         (cls.fixed_include / "libxml/xmlversion.h").write_text(
             header.replace('#define LIBXML_DOTTED_VERSION "2.15.4"',
                            '#define LIBXML_DOTTED_VERSION "2.12.10"'))
-        libraries = list(cls.fixed.glob("libxml2.so")) + list(cls.fixed.glob("libxml2.dylib"))
+        libraries = list((cls.fixed / "libxml").glob("libxml2.so")) + list((cls.fixed / "libxml").glob("libxml2.dylib"))
         if len(libraries) != 1:
             raise AssertionError(f"Expected one fixed shared library: {libraries}")
         cls.fixed_options = [f"-DLIBXML2_LIBRARY={libraries[0]}",
@@ -105,6 +113,74 @@ install(TARGETS probe RUNTIME DESTINATION bin)
         self.run_command(["cmake", "--build", self.root / "bundled", "--target", "catalog-cleanup", "-j4"])
         self.assertIn("catalog cleanup: PASS", self.run_command([self.root / "bundled/catalog-cleanup"]))
         self.assertEqual(original, (self.source / "parserInternals.c").read_bytes())
+
+    def qname_source_override(self, name, filename, *, fixed):
+        override = self.root / name
+        override.mkdir()
+        for entry in self.source.iterdir():
+            if entry.name != filename:
+                (override / entry.name).symlink_to(entry, target_is_directory=entry.is_dir())
+        source = ((self.root / "bundled/_deps/qore_xml_libxml2-build/qore-qname-fix" / filename).read_bytes()
+                  if fixed else (self.source / filename).read_bytes() + b"\n/* Unexpected source modification. */\n")
+        (override / filename).write_bytes(source)
+        return override
+
+    def test_qname_fixes_preserve_sources_and_reconfigure(self):
+        import hashlib
+        hashes = {"xmlschemas.c": "bed8bfbfd61a2025b67b7a0e4d05ce50093e7a6bb5e43a3ebac343b8df4329a7",
+                  "xmlschemastypes.c": "08cac7d1dbdb617688ac5b36ab6fee75f634e5bf0372aa0e6569a0bebe3b0c8f"}
+        replacements = self.root / "bundled/_deps/qore_xml_libxml2-build/qore-qname-fix"
+        times = {name: (replacements / name).stat().st_mtime_ns for name in hashes}
+        self.configure("bundled", "-DQORE_XML_LIBXML2_PROVIDER=BUNDLED",
+                       f"-DFETCHCONTENT_SOURCE_DIR_QORE_XML_LIBXML2={self.source}")
+        for name, expected in hashes.items():
+            self.assertEqual(expected, hashlib.sha256((self.source / name).read_bytes()).hexdigest())
+            self.assertEqual(times[name], (replacements / name).stat().st_mtime_ns)
+        self.assertIn("qname_values=PASS", self.run_command([self.root / "bundled/probe"]))
+
+    def test_unexpected_qname_sources_are_rejected(self):
+        for filename in ("xmlschemas.c", "xmlschemastypes.c"):
+            with self.subTest(filename=filename):
+                name = "changed-" + filename
+                override = self.qname_source_override(name, filename, fixed=False)
+                output = self.configure(name + "-build", "-DQORE_XML_LIBXML2_PROVIDER=BUNDLED",
+                                        f"-DFETCHCONTENT_SOURCE_DIR_QORE_XML_LIBXML2={override}", success=False)
+                self.assertIn(f"Unexpected libxml2 {filename}; cannot apply the QName identity fix",
+                              " ".join(output.split()))
+
+    def test_unfixed_current_release_uses_qname_fallback(self):
+        raw = self.root / "unfixed/build-debug"
+        self.run_command(["cmake", "-S", self.source, "-B", raw, "-DCMAKE_BUILD_TYPE=Debug",
+                          "-DBUILD_SHARED_LIBS=ON", "-DLIBXML2_WITH_PROGRAMS=OFF",
+                          "-DLIBXML2_WITH_TESTS=OFF", "-DLIBXML2_WITH_PYTHON=OFF"])
+        self.run_command(["cmake", "--build", raw, "--target", "LibXml2", "-j4"])
+        import shutil
+        includes = self.root / "unfixed/include"
+        shutil.copytree(self.source / "include/libxml", includes / "libxml")
+        shutil.copyfile(raw / "libxml/xmlversion.h", includes / "libxml/xmlversion.h")
+        libraries = list(raw.glob("libxml2.so")) + list(raw.glob("libxml2.dylib"))
+        self.assertEqual(1, len(libraries))
+        options = [f"-DLIBXML2_LIBRARY={libraries[0]}", f"-DLIBXML2_INCLUDE_DIR={includes}",
+                   f"-DFETCHCONTENT_SOURCE_DIR_QORE_XML_LIBXML2={self.source}"]
+        output = self.configure("unfixed-system", "-DQORE_XML_LIBXML2_PROVIDER=AUTO", *options)
+        self.assertIn("2.15.4 failed namespace identity probe", output)
+        self.assertIn("using private static libxml2 2.15.4", output)
+        probe_log = (self.root / "unfixed-system/system-libxml2/namespace-probe.log").read_text()
+        self.assertIn("qname_values=FAIL", probe_log)
+        self.run_command(["cmake", "--build", self.root / "unfixed-system", "--target", "probe", "-j4"])
+        self.assertIn("qname_values=PASS", self.run_command([self.root / "unfixed-system/probe"]))
+        self.configure("unfixed-system", "-DQORE_XML_LIBXML2_PROVIDER=SYSTEM", *options, success=False)
+
+    def test_already_fixed_qname_sources_are_accepted(self):
+        for filename in ("xmlschemas.c", "xmlschemastypes.c"):
+            with self.subTest(filename=filename):
+                name = "fixed-" + filename
+                override = self.qname_source_override(name, filename, fixed=True)
+                output = self.configure(name + "-build", "-DQORE_XML_LIBXML2_PROVIDER=BUNDLED",
+                                        f"-DFETCHCONTENT_SOURCE_DIR_QORE_XML_LIBXML2={override}")
+                self.assertNotIn(f"applied libxml2 QName identity fix to {filename}", output)
+                self.run_command(["cmake", "--build", self.root / (name + "-build"), "--target", "probe", "-j4"])
+                self.assertIn("qname_values=PASS", self.run_command([self.root / (name + "-build") / "probe"]))
 
     def catalog_source_override(self, name, *, fixed):
         override = self.root / name

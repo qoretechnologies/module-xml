@@ -36,6 +36,7 @@ else()
         TLS_VERIFY TRUE)
 
     include("${_qore_xml_libxml2_cmake_dir}/QoreXmlLibXml2CatalogFix.cmake")
+    include("${_qore_xml_libxml2_cmake_dir}/QoreXmlLibXml2QNameFix.cmake")
 
     function(qore_xml_fetch_libxml2)
         # Normal variables are scoped to this function; do not overwrite the
@@ -67,6 +68,7 @@ else()
             message(FATAL_ERROR "The libxml2 source override must provide pinned version 2.15.4")
         endif()
         qore_xml_fix_libxml2_catalog("${qore_xml_libxml2_SOURCE_DIR}" "${qore_xml_libxml2_BINARY_DIR}")
+        qore_xml_fix_libxml2_qnames("${qore_xml_libxml2_SOURCE_DIR}" "${qore_xml_libxml2_BINARY_DIR}")
         # Neither upstream tools nor headers/libraries belong in our install.
         set_property(DIRECTORY "${qore_xml_libxml2_SOURCE_DIR}" PROPERTY EXCLUDE_FROM_ALL TRUE)
         set_target_properties(LibXml2 PROPERTIES POSITION_INDEPENDENT_CODE ON C_VISIBILITY_PRESET hidden)

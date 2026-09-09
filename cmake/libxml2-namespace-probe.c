@@ -2,6 +2,7 @@
 #include <libxml/xmlreader.h>
 #include <stdio.h>
 #include <string.h>
+#include "libxml2-qname-probe.h"
 
 static int check_namespace(const char* source, const char* expected) {
     xmlTextReaderPtr reader = xmlReaderForMemory(source, (int)strlen(source), NULL, "UTF-8", 0);
@@ -33,8 +34,12 @@ int main(void) {
     result |= check_namespace("<r xmlns:p='urn:a&#38;b'><p:x/></r>", "urn:a&b");
     result |= check_namespace("<r xmlns:p='urn:a&#x26;b'><p:x/></r>", "urn:a&b");
     result |= check_namespace("<r xmlns:p='urn:a&amp;#38;b'><p:x/></r>", "urn:a&#38;b");
-    printf("libxml2 headers=%s runtime=%s namespace_identity=%s\n",
-        LIBXML_DOTTED_VERSION, xmlParserVersion, result ? "FAIL" : "PASS");
+    {
+        int qnames = check_qname_values();
+        result |= qnames;
+        printf("libxml2 headers=%s runtime=%s namespace_identity=%s qname_values=%s\n",
+            LIBXML_DOTTED_VERSION, xmlParserVersion, result ? "FAIL" : "PASS", qnames ? "FAIL" : "PASS");
+    }
     xmlCleanupParser();
     return result;
 }

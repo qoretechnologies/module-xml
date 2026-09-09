@@ -56,9 +56,9 @@ dist_WebDavHandler_mod_DATA = $(wildcard qlib/WebDavHandler/*.q[cm])
 EXTRA_DIST = COPYING.LGPL COPYING.MIT AUTHORS README \
 	RELEASE-NOTES \
     CMakeLists.txt \
-    cmake/QoreXmlLibXml2.cmake cmake/QoreXmlLibXml2CatalogFix.cmake \
+    cmake/QoreXmlLibXml2.cmake cmake/QoreXmlLibXml2CatalogFix.cmake cmake/QoreXmlLibXml2QNameFix.cmake \
     cmake/system-libxml2/CMakeLists.txt \
-    cmake/libxml2-namespace-probe.c \
+    cmake/libxml2-namespace-probe.c cmake/libxml2-qname-probe.h \
     cmake/libxml2-NOTICES.txt \
 	src/QC_XmlDoc.qpp \
 	src/QC_XmlNode.qpp \

@@ -11,6 +11,15 @@ See [PLAN.md](PLAN.md) for the phased implementation plan, acceptance checks, an
 of the recorded findings and validator disagreements to the work needed to resolve them.
 See [EXECUTION.md](EXECUTION.md) for implementation progress and commit/audit evidence.
 
+`test/wsdl-qname-values.qtest` and `test_qname_values.py` exercise explicit QName
+values and namespace-aware detached providers, including reconstructed records,
+lists, cancellation and concurrent copies. The independent matrix checks 336
+retained envelopes, 2,016 conversion verdicts and 1,008 schema/document pairs.
+Native dependency fixes and the separate Python libxml2 empty-namespace
+limitation are documented in [qname-values-evidence.md](qname-values-evidence.md).
+See the [explicit value contract](../../design/wsdl-qname-values.md) and
+[dependency behavior](../../design/xml-qname-validation.md).
+
 `test/xsd-float.qtest`, the native `qore-xml-float-test` CMake target and
 `test_ieee_conversion.py` cover strict native IEEE conversion, direct binary32
 rounding, exact native number boundaries, signed zero, cancellation and floating-point

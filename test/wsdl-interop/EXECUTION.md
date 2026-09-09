@@ -4124,3 +4124,98 @@ loss boundary and affected scalar/attribute paths are recorded in
 `/tmp/wsdl-p3-30-qname-context-preflight.md`. QName value identity, ENTITY/ENTITIES,
 dateTime/time policy and other remaining P3 criteria stay in scope. No answer to
 the pending leap-second question is inferred. P4-P9 have not begun.
+
+
+## P3-30 — Explicit QName identity and native dependency validation
+
+P3-29 is committed as `f6a4615`. This increment implements immutable
+`XsdQNameValue` identities and explicit-context `XsdQNameDataType` providers.
+It also fixes two libxml2 QName defects exposed by independent validation.
+The [value contract](../../design/wsdl-qname-values.md),
+[dependency behavior](../../design/xml-qname-validation.md) and
+[root-cause evidence](qname-values-evidence.md) describe the implemented behavior.
+Ordinary WSDL schema enumeration/default/fixed conversion and QName wire prefix
+allocation remain open; this explicit API does not claim their completion.
+
+| Requirement | Implementation and evidence |
+| --- | --- |
+| P3-QName-explicit-identity | Exact namespace/local comparison, lexical retention, full binding validation, implicit XML/default-reset handling, immutable metadata and reconstruction. |
+| P3-QName-explicit-providers | String/object return metadata; optional/mandatory copies; record/list validation; independent contexts, cancellation and concurrent use. |
+| P3-QName-native-oracle | Dependency lookup supplies the implicit xml binding; QName/NOTATION comparison equates absent and empty namespace URIs. Native validation passes all generated pairs. |
+| P3-QName-dependency-selection | Runtime probe covers 48 schema/document pairs through DOM and streaming validation. Unpatched current releases fall back; corrected older-version backports remain system-selected. Original/corrected hashes, offline overrides, timestamps, distribution and install isolation are checked. |
+
+The new Qore suite passes **10 cases / 278 assertions**. The frozen regression
+gate passes **78 suites / 840 cases / 31,833 assertions**, including the existing
+SOAP, schema, retained XML, XML-RPC, CDA and Cargo consumers. The soap suite
+retains its documented 1,031 total / 1,028 succeeded assertion accounting, with
+all cases passing. The final log is `/tmp/wsdl-p3-30-qname-complete.log`; per-suite
+logs use the adjacent `qname-complete-<suite>.log` prefix. No new warnings or errors
+occur in these gates.
+
+QName value/lexical/HTTP suites pass **144 cases / 4,904 assertions** across
+AST/IR/JIT/tiered and UTC/Europe-Prague. Compiled modules pass **18 cases / 613
+assertions**; the complete new design example executes without output. WSDL,
+SoapDataProvider, SoapClient and SoapHandler qmods, native documentation and WSDL
+Qdx/Doxygen build cleanly. The new suite also passes with PCRE2 JIT disabled.
+Evidence: `/tmp/wsdl-p3-30-qname-modes.json`, `qname-aot.json`,
+`qname-build-complete.log` and `qname-no-jit.log` under that prefix.
+
+The new independent Python method passes in **4.902 seconds**. It checks **336
+retained envelopes**, including **160 valid QName inputs**, **2,016 conversion
+verdicts** and **1,008 schema/document pairs** against Xerces and both native and
+Python libxml2. Python's unchanged libxml2 2.12.10 retains four precisely
+classified empty-default-namespace enumeration rejections; native and Xerces
+validation plus exact value assertions pass. The matrix tests retained XML
+scope and explicit providers, not new ordinary SOAP conversion. The existing
+actual SOAP 1.1/1.2 HTTP suites also pass.
+
+The affected Python gate completes **52 methods in 267.829 seconds**, retaining
+exactly the two known P6 selected-binding-version failures for request and
+response. The exact signatures match P3-29, with no new failures, errors or
+warnings. Logs: `/tmp/wsdl-p3-30-qname-python-complete.log`,
+`qname-python-gate-complete.log` and `qname-python-comparison-complete.json` under that prefix.
+
+All **17 CMake provider integration methods** pass in **37.883 seconds** with
+no warning diagnostics. They exercise real shared backports and the unpatched
+2.15.4 release, both corrected source overrides, tampered inputs, reconfiguration,
+offline/cross builds, selection changes and installation. Source-distribution
+entries were added for both new CMake inputs. Complete logs:
+`/tmp/wsdl-p3-30-qname-cmake-complete.log` and
+`/tmp/qore-xml-libxml2-test-yb26iipq/commands.log`.
+
+Valgrind verifies the final 48-pair DOM/streaming probe with **zero errors and
+zero live allocations**. The complete 336-row worker and new Qore suite run
+with `qore -b --enable-debug --exec-mode=ast` and the previously authorized
+`QORE_PCRE2_NO_JIT=1`: **zero errors and zero definitely, indirectly or possibly
+lost bytes**. All 336 worker results were checked. The existing core DWARF-reader
+warning remains tracked for P9. The initial worker run used PCRE2 JIT, reproduced
+its already root-caused diagnostic, and was stopped; only the completed
+interpreter runs are claimed as memory-check evidence. No suppression was added.
+Logs: `/tmp/wsdl-p3-30-qname-probe-valgrind-final.log`,
+`qname-worker-valgrind-final.log/.jsonl` and `qname-values-valgrind-complete.log` under
+that prefix.
+
+The both-version survey and strict corpus reports differ from P3-29 only in
+WSDL source hash. All counts, source/catalog hashes and **168 broad failure
+signatures** are unchanged. Strict coverage remains **120 WSDLs / 1,148 message
+directions**, zero selected failures. Reports and complete structural comparison:
+`/tmp/wsdl-p3-30-qname-survey-complete.json`, `qname-coverage-complete.json` and
+`qname-report-comparison-complete.json` under that prefix.
+
+The full audit is **22 Pass / 40 N/A / 0 Fail**:
+[audits/P3-30-qname-values.md](audits/P3-30-qname-values.md). Final WSDL SHA256 is
+`3684be4393f6c63faf470894745d324229202a4be745a6957b393b00e13aa469`; the corrected Debug native XML qmod SHA256 is
+`0b205d392e45a9c50f01aec6026ce3e325a1a23b5ee9f6c598eb170055ea45fd`. The isolated Debug core remains
+`80078ec30d71bc618b7bb40991bad63604303f379c3e47e6dd41d58d0dbc56fd`.
+The final review preserves explicit QName objects through repeated conversions
+and providers with different defaults; unboxing a no-namespace object could
+otherwise change its identity. New regressions and affected gates were rerun.
+The final input/artifact manifests use `/tmp/wsdl-p3-30-qname-complete-source-hashes.json`
+and `qname-final-hashes.json` under that prefix. Main Qore remains clean on
+develop; no core edit, installation or push was made.
+
+P3 remains active. Next is scoped QName conversion through declarations,
+attributes, lists/unions and ordinary SOAP input/output, preserving both value
+identity and lexical restrictions. ENTITY/ENTITIES, dateTime/time policy and
+other remaining P3 criteria remain in scope. The pending leap-second question
+has no inferred answer. P4-P9 have not begun.
