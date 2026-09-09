@@ -3464,3 +3464,229 @@ order, durations and partial dates require normative and independent checks.
 A core extended-year fix, if needed, must be separately tested/audited using
 the isolated build and committed to main develop without touching parallel work.
 All remaining P3 and P4–P9 acceptance criteria remain in scope.
+
+
+## P3-24 — Temporal scalar prerequisites (in progress)
+
+P3-23 is committed on XML develop as `039958f`. Its final reference-file whitespace
+cleanup was followed by all three native IEEE conversion methods passing, and the
+staged diff is clean. Nothing was pushed. Main Qore remains clean on develop at
+`9dab82749`; the following prerequisite is being tested in `/tmp/wsdl-core-date`.
+
+The isolated core patch handles separated signed/extended years within the native
+integer calendar range, preserving unsigned compact date/time forms. Reductions
+also prove negative weekday indexes and 16-bit truncation in `get_years()` and
+`date.years()`. Epoch calculation now widens before subtraction/multiplication,
+counts negative leap years with floor division, and restores the March-based year
+before narrowing. Weekdays use an equivalent positive Gregorian cycle year.
+Qore accessors use existing `getInfo()` without changing the legacy C++ ABI.
+Negative year formatting writes the sign separately from at least four digits.
+The native calendar continues to use astronomical year zero, distinct from XSD 1.0.
+
+The new `examples/test/qore/vars/extended-years.qtest` has seven cases, including
+native year limits, compact forms, explicit offsets, malformed input/recovery,
+a complete negative Gregorian cycle and full-year accessors. A deterministic
+native test requests cancellation before entering the year scanner and then checks
+recovery. Initial failing evidence is `/tmp/wsdl-p3-24-core-before.log`.
+During calendar review, 2004-12-31 wrongly returned 2005-W01-5 and 2005-01-01
+returned 2004-W52-6. The common 53-week rule wrongly excluded Thursday-start
+leap years. Both directions are corrected with positive/negative-year regressions;
+`/tmp/wsdl-p3-24-iso-week-before.{qr,log}` retains the original reduction.
+
+Source backups for applying only this prerequisite to main Qore are in
+`/tmp/wsdl-p3-24-core-base/`. The isolated checkout contains older prerequisite
+changes too; they must not be committed wholesale. Its first build passed, but
+source refinements followed and final build/tests/Valgrind/audit are still pending.
+No P3-24 core or XML acceptance is claimed. WSDL temporal representation, lexical
+validation, partial ordering, facet/list/union/provider integration and independent
+binding matrices remain to implement before P3 can close.
+
+
+The first frozen core build passed and its initial suite passed six of seven
+cases. Correcting the test's compact-date expectation then exposed a separate
+native defect: `QoreString(DateTime*)` writes extended dates into a fixed 15-byte
+buffer, and compact negative years omit magnitude padding. A standalone Valgrind
+reduction reports six memory errors from that constructor
+(`/tmp/wsdl-p3-24-string-overflow-before.log`). The constructor now delegates to
+the growing string implementation; both compact concatenation paths preserve the
+full signed year. Native tests cover all three paths with literal expected values
+and an explicit UTC program context. Final verification has restarted with this
+root fix; the earlier failed runs remain preserved, not counted as final passes.
+An additive wide ISO-week overload also prevents week-year truncation at the
+maximum calendar year. Focused native/QPP Doxygen checks have zero diagnostics.
+
+
+### P3-24 core prerequisite committed
+
+Qore main `develop` now contains `516e6f434` (extended calendar years and safe date
+strings), with a clean working tree and no push. Only the tested eight-file delta
+and four new regression/design/audit files were applied; older isolated work and
+the shared Qore build were left intact. All seven native/QPP files and both test
+sources match the final isolated source hashes exactly.
+
+Final core runtime SHA-256:
+`80078ec30d71bc618b7bb40991bad63604303f379c3e47e6dd41d58d0dbc56fd`.
+The core matrix passes 92 cases / 76,940 assertions across AST/IR/JIT/tiered and
+UTC/Prague, including five affected existing suites. The final runtime passes the
+new seven-case / 9,481-assertion suite, its AOT executable, native deterministic
+cancellation and all three compact string paths. Valgrind reports zero errors and
+zero definitely/indirectly/possibly lost bytes in the new suite, existing date
+suite and native helper. The previously tracked DWARF-reader warning remains
+visible; these instrumentation runs are not called warning-free. Focused native
+and QPP documentation logs are empty; the implemented example runs successfully.
+Full Qore audit: 21 Pass, 41 N/A, 0 Fail, committed beside the regression.
+
+All 66 affected XML suites pass (761 cases / 20,957 assertions). The both-version
+survey resolves eight decode failures; bidirectional coverage resolves sixteen
+Date/DateTime element/attribute decode failures, with zero new failure signatures.
+Broad failures fall from 196 to 180. Strict selection is unchanged at 97 WSDLs /
+828 directions with zero selected failures. Source/catalog hashes are unchanged.
+Typed temporal values are still unassessed outside explicit existing assertions;
+these improvements do not complete the XML temporal contract. The new reports and
+exact comparison are retained under `/tmp/wsdl-p3-24-core-{survey,coverage}.json`
+and `/tmp/wsdl-p3-24-core-report-comparison.json`; committed XML reports still
+represent P3-23 until the XML temporal increment is complete.
+
+Remaining P3-24 work is strict temporal grammar and exact value representation,
+including missing timezones, arbitrary years/fractions, hour-24 normalization,
+calendar partial order, durations, facets/collections/providers and independent
+SOAP binding matrices. No XML production temporal change is claimed yet.
+
+### P3-24 XML calendar implementation and verification
+
+The XML increment implements `date`, `gYear`, `gYearMonth`, `gMonthDay`, `gMonth`
+and `gDay`. DateTime/time and duration retain their prior production paths and
+remain unfinished P3 work. The pending leap-second policy question affects
+DateTime/time; elapsed time is not approval. Duration work can proceed independently.
+
+Calendar grammar is anchored ASCII with XML whitespace collapse, Gregorian field
+checks, XSD 1.0 year labels and explicit timezone limits. Arbitrary years remain
+exact strings. Zoned dates within native year limits decode to native dates with
+their original offset; unzoned/out-of-range dates and partial calendars remain
+validated strings. This public compatibility change is explicit in WSDL release
+notes and `design/wsdl-calendar-values.md`, including an executed example.
+Facets, fixed values, provider choices and ordered list/union identity share exact
+calendar value semantics and missing-timezone partial ordering. No rounding or
+tolerance is used. Native inputs project fields without dropping their offset.
+
+The provider/binding matrix exposed invalid partial-calendar defaults and a date
+sample path that bypassed pattern validation. Both root causes are fixed; every
+sample is checked against its complete restriction chain. Provider metadata,
+optional/reconstructed types, repeated choices, malformed inputs and deterministic
+cancellation/recovery have targeted regressions. Real local HTTP tests cover
+SoapClient/SoapHandler, actual SOAP 1.1 and 1.2 bindings, original/reconstructed
+schemas, all six types, required attributes, ordered lists/unions, arbitrary years
+and failed-request recovery with bounded queues and cleanup.
+
+Requirement ownership remains P3 in the plan's original-family register.
+`test_calendar_values.py` covers atomic elements, attributed simple content,
+repeated elements, lists, unions, detached providers and generated examples in
+both directions. Its independent reference uses arbitrary-precision ordinal-day
+arithmetic, distinct from production's normalized tuples and year suffix carry.
+The 1,838-row seeded boundary worker includes native year limits, 1,000-digit
+years, complete positive/negative Gregorian cycles, timezone boundaries and exact
+facets. `calendar-values-evidence.md` maps requirements and root causes to primary
+specifications and pinned independent validators. The exact 133 scalar diagnostic
+triples preserve 126 libxml2 ordering defects, six old-libxml2 whitespace defects
+(fixed in private 2.15.4), and one obsolete Xerces gMonth spelling. No upstream
+fixture or historical finding was changed; unexpected oracle differences fail.
+
+Completed gates on the frozen final runtime:
+
+- All 69 affected Qore suites pass: 780 cases / 26,409 assertions. Evidence:
+  `/tmp/wsdl-p3-24-calendar-final-suites.log` and per-suite logs. The final test
+  diagnostic-label correction was then checked in all modes and compiled modules.
+- The three new suites pass 19 cases / 5,451 assertions in each AST/IR/JIT/tiered
+  mode under UTC and Europe/Prague: 152 cases / 43,608 assertions total. Evidence:
+  `/tmp/wsdl-p3-24-calendar-modes-final.log` and `calendar-modes.json` with the
+  same `/tmp/wsdl-p3-24-` prefix. Compiled-module runs pass another 19 / 5,451;
+  the documented example also executes successfully.
+- All nine new Python methods pass in 260.063 seconds; the exact 1,838-row
+  boundary matrix and both binding/consumer directions pass. Logs are
+  `/tmp/wsdl-p3-24-calendar-python-final.log` and boundary evidence described above.
+- WSDL, SoapDataProvider, SoapClient and SoapHandler compiled-module targets and
+  WSDL Qdx/Doxygen documentation pass with zero diagnostics. No XML C++ changes
+  require another Valgrind run; the prerequisite's separate native evidence remains
+  recorded above, including its known DWARF-reader warning.
+- Both-version survey: parse 276/17, decode 1,012/102 and serialize 1,010/2
+  success/failure. Input validation reports 1,026 valid / 106 rejected / 4
+  unassessed; outputs report 964 valid / 46 rejected and eight valid-input,
+  invalid-output cases. These remain diagnostic failures, not conformance passes.
+- Strict selection expands from 97 WSDLs / 828 directions to 114 / 1,100 with
+  zero selected failures and exact calendar/attribute value checks. Broad coverage
+  resolves twelve failures against the core prerequisite baseline (180 to 168),
+  with zero added failure signatures and unchanged source/catalog hashes. Eight
+  DateSimpleTypePattern decode failures and four GMonthAttribute invalid-input
+  acceptances are resolved. Combined with the core prerequisite, 28 failures are
+  resolved against committed P3-23. The new reports are now the current checked-in
+  reports; original findings remain intact.
+
+The full 179-method Python discovery ran against frozen production and test
+sources. Its completed comparison and commit gate are recorded below.
+
+### Next P3 duration root causes (independent investigation)
+
+The existing duration regex admits `P1DT`, contrary to XSD 1.0 §3.2.6.1's required
+component after `T`. Native serialization omits microseconds, emits embedded
+negative fields (`P-1D`), and accepts absolute dates as durations. Nonstring
+deserialization falls through to unrestricted string conversion. A relative date
+with one day and minus one hour is representable as `PT23H`; opposing month and
+second groups have no XSD duration representation without an external reference
+date. Combining native whole seconds separately from microseconds avoids overflow
+at the native 32-bit day boundary. Initial reductions are preserved in
+`/tmp/wsdl-p3-25-duration-before.log` and `duration-native-probe.log` with the same
+prefix. The scratch lexical conversion experiment is outside repository source;
+it is not counted as implemented or accepted work.
+
+Duration lexical/native/provider validation is the next independently testable
+increment. Duration bounds, value equality, choices, list/union identity and
+sample construction remain in P3 and require the four reference dates in XSD 1.0
+§3.2.6.2 and Appendix E. Direct comparison of source strings or approximate seconds
+cannot implement that partial ordering. Current independent reductions show
+libxml2's `xmlSchemaCompareDurations()` ignores Gregorian 100/400-year exceptions;
+both tested versions reject `P400Y` versus enumerated `P146097D`, while Xerces
+accepts. Both validators also accept `PT.5S`, contrary to XSD 1.0's digit-before-
+and-after-decimal grammar; libxml2 accepts `PT1.S` too. Private 2.15.4 fixes the
+old duration-whitespace defect. Normative grammar remains authoritative. Sources:
+[XSD 1.0 duration](https://www.w3.org/TR/xmlschema-2/#duration),
+[Appendix E](https://www.w3.org/TR/xmlschema-2/#adding-durations-to-dateTimes),
+[the later fractional-grammar discrepancy report](https://lists.w3.org/Archives/Public/www-xml-schema-comments/2023JulSep/0000.html).
+These findings are explicitly retained for the following duration work, not
+silently deferred to a later phase or counted as passing calendar requirements.
+
+During the final XML gate, parallel development rebased main Qore develop. The
+calendar prerequisite is now `db964e98f` (formerly `516e6f434`). A scoped diff
+confirms all seven native/QPP files and both regression sources are unchanged;
+main develop remains clean and eight commits ahead. This XML task performed no
+pull, shared rebuild, installation or push. Its isolated tested runtime is frozen.
+
+### P3-24 final XML commit gate
+
+Full Python discovery ran **179 methods in 1,118.493 seconds**, retaining exactly
+**33 previously tracked P4/P5/P6 failure signatures**, with **zero new signatures,
+zero removed signatures and zero errors**. These known later-phase checks remain
+failing tests. There are no current-increment failures or warning diagnostics.
+Evidence: `/tmp/wsdl-p3-24-calendar-python-all.log` and the exact comparison in
+`/tmp/wsdl-p3-24-calendar-python-comparison.json`. All production and test files
+match the hashes frozen before this run; subsequent changes are execution/audit
+records and the updated core commit reference in validator evidence.
+
+The full 62-item audit is complete: **21 Pass, 41 N/A, 0 Fail**, with every item
+and supporting evidence in `audits/P3-24-calendar-values.md`. The final diff is
+limited to the six calendar primitives and their tests, providers, reports,
+selection and documentation. Source/runtime/compiled-module hashes are retained
+in `/tmp/wsdl-p3-24-calendar-final-hashes.json`. WSDL source SHA-256 is
+`de49bcecea41c030e8d7cde079b141df591f342e3ee12f1132d93776b070d87a`;
+its compiled module SHA-256 is
+`628b0ac7180d543823f7b9a4e48b6ec5a7368bae041ad7f67589085684ac3a28`.
+The native runtime and XML module match the separately recorded tested hashes.
+This completes the calendar increment, not P3 or final interoperability acceptance.
+
+Further duration reductions in `/tmp/wsdl-p3-25-duration-facet-oracles.json` show
+both validators round distinct decimal seconds into equal binary values, including
+`PT1.00000000000000001S` and `PT1.00000000000000002S`, and underflow sufficiently
+small fractions to zero. Xerces stores seconds as `double` in `DurationDV`; libxml2
+also stores/computes duration seconds as `double`. Exact duration facet work must
+preserve these distinctions. The separate rational four-anchor scratch reference
+confirms the prescribed comparison and Gregorian-cycle aliases; none of this
+scratch duration code is included in the calendar commit.

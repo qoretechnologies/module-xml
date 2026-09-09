@@ -1,0 +1,113 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires xml
+%requires ../qlib/WSDL.qm
+%requires ../qlib/SoapClient.qm
+%requires ../qlib/SoapHandler.qm
+%requires HttpServer
+%exec-class CalendarConsumersTest
+
+class CalendarConsumerCallback {
+    public {
+        Queue requests();
+        Queue responses();
+    }
+
+    hash<auto> call(hash<auto> cx, hash<auto> request) {
+        requests.push(request);
+        return responses.pop(30000);
+    }
+}
+
+class CalendarConsumersTest inherits QUnit::Test {
+    constructor() : Test("Calendar SOAP consumers", "1.0") {
+        addTestCase("Actual SOAP bindings retain calendars over local HTTP", \httpValues());
+        set_return_value(main());
+    }
+
+    private WebService service(string version) {
+        return new WebService('<w:definitions xmlns:w="http://schemas.xmlsoap.org/wsdl/"
+            xmlns:t="urn:calendar-consumers" xmlns:s="http://schemas.xmlsoap.org/wsdl/soap'
+            + (version == "12" ? "12" : "") + '/" targetNamespace="urn:calendar-consumers"><w:types>
+            <xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" targetNamespace="urn:calendar-consumers">
+            <xs:simpleType name="Dates"><xs:list itemType="xs:date"/></xs:simpleType>
+            <xs:simpleType name="Either"><xs:union memberTypes="xs:date xs:string"/></xs:simpleType>
+            <xs:complexType name="Record"><xs:sequence>
+            <xs:element name="date" type="xs:date"/><xs:element name="year" type="xs:gYear"/>
+            <xs:element name="yearMonth" type="xs:gYearMonth"/><xs:element name="monthDay" type="xs:gMonthDay"/>
+            <xs:element name="month" type="xs:gMonth"/><xs:element name="day" type="xs:gDay"/>
+            <xs:element name="dates" type="t:Dates"/><xs:element name="either" type="t:Either"/>
+            </xs:sequence><xs:attribute name="anniversary" type="xs:gMonthDay" use="required"/>
+            </xs:complexType><xs:element name="Submit" type="t:Record"/><xs:element name="Reply" type="t:Record"/>
+            </xs:schema></w:types><w:message name="In"><w:part name="body" element="t:Submit"/></w:message>
+            <w:message name="Out"><w:part name="body" element="t:Reply"/></w:message>
+            <w:portType name="Port"><w:operation name="submit"><w:input message="t:In"/>
+            <w:output message="t:Out"/></w:operation></w:portType><w:binding name="Soap" type="t:Port">
+            <s:binding style="document" transport="http://schemas.xmlsoap.org/soap/http"/>
+            <w:operation name="submit"><s:operation soapAction="urn:submit"/><w:input><s:body use="literal"/>
+            </w:input><w:output><s:body use="literal"/></w:output></w:operation></w:binding>
+            <w:service name="Service"><w:port name="Port" binding="t:Soap"><s:address location="http://example.invalid/"/>
+            </w:port></w:service></w:definitions>', {"async_only": True});
+    }
+
+    private hash<auto> record(bool response) {
+        return {"date": response ? "-0004-02-29-03:30" : "2000-02-29+05:30",
+            "year": "1" + strmul("0", 1000) + (response ? "Z" : ""),
+            "yearMonth": response ? "-0001-12+14:00" : "2000-01",
+            "monthDay": response ? "--02-29-00:00" : "--01-02+14:00", "month": response ? "--12Z" : "--01",
+            "day": response ? "---31-14:00" : "---01+14:00",
+            "dates": ("2000-01-01", "2147483648-01-01Z", response ? "2000-01-03Z" : "2000-01-02Z"),
+            "either": response ? "label" : "2000-01-01Z", "^attributes^": {"anniversary": "--02-29"}};
+    }
+
+    private check(hash<auto> actual, bool response) {
+        hash<auto> expected = record(response);
+        foreach string key in ("year", "yearMonth", "monthDay", "month", "day", "^attributes^") {
+            assertEq(expected{key}, actual{key});
+        }
+        assertEq(response ? -4 : 2000, actual.date.years());
+        assertEq(response ? -12600 : 19800, actual.date.getUtcOffset());
+        assertEq("02-29", actual.date.format("MM-DD"));
+        assertEq(3, actual.dates.size());
+        assertEq(expected.dates[0], actual.dates[0]);
+        assertEq(expected.dates[1], actual.dates[1]);
+        assertEq(response ? "2000-01-03" : "2000-01-02", actual.dates[2].format("YYYY-MM-DD"));
+        assertEq(0, actual.dates[2].getUtcOffset());
+        if (response) {
+            assertEq("label", actual.either);
+        } else {
+            assertEq("2000-01-01", actual.either.format("YYYY-MM-DD"));
+            assertEq(0, actual.either.getUtcOffset());
+        }
+    }
+
+    private httpValues() {
+        foreach string version in ("11", "12") {
+            WebService original = service(version);
+            foreach WebService ws in (original, Serializable::deserialize(original.serialize())) {
+                HttpServer server();
+                on_exit server.stop();
+                SoapHandler handler(new PermissiveAuthenticator());
+                server.setDefaultHandler("soap", handler);
+                CalendarConsumerCallback callback();
+                handler.addMethod(ws, ws.getBindingOperation("Soap", "submit"), \callback.call(), NOTHING,
+                    NOTHING, NOTHING, "Service", NOTHING, NOTHING, "Soap");
+                server.addListener(0);
+                string url = sprintf("http://127.0.0.1:%d/Service", server.getListenerInfo(0).port);
+                SoapClient client({"wsdl": ws, "url": url, "timeout": 30000, "connect_timeout": 30000});
+                callback.responses.push(record(True));
+                check(client.callOperation("submit", record(False)), True);
+                check(callback.requests.pop(30000), False);
+                hash<auto> invalid = record(False);
+                invalid.date = "2000-02-30Z";
+                assertThrows("SOAP-SERIALIZATION-ERROR", \client.callOperation(), ("submit", invalid));
+                callback.responses.push(record(True));
+                check(client.callOperation("submit", record(False)), True);
+                check(callback.requests.pop(30000), False);
+            }
+        }
+    }
+}

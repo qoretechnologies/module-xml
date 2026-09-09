@@ -80,6 +80,15 @@ module WSDL {
     @section wsdlrelnotes WSDL Module Release Notes
 
     @subsection wsdl_0_5_8 WSDL v0.5.8
+    - date, gYear, gYearMonth, gMonthDay, gMonth and gDay validate exact XML calendar grammar, Gregorian
+      limits, signed extended years and whole-minute timezones within 14 hours of UTC
+    - date decoding returns a native date only for an explicitly zoned value within the native year range;
+      unzoned and arbitrary-year dates remain validated strings, and partial calendars remain strings;
+      callers must handle this lossless string alternative instead of assuming every date is native
+    - calendar serialization retains timezone offsets; bounds use the XSD partial order, with missing
+      timezones kept distinct from UTC; enumerations, fixed values, lists and unions use exact calendar identity
+    - added calendar provider types and finite-choice fields with validated reconstruction and optionality;
+      calendar examples satisfy inherited facets and lexical patterns or raise XSD-SAMPLE-ERROR
     - float and double scalars validate complete XML numeric spellings and round directly to binary32 or
       binary64, including subnormals, overflow, signed zero and special values; serialization retains
       valid input text and emits round-trip-safe text for native values
@@ -2253,6 +2262,10 @@ class XsdScalarValueHelper {
             return provider.valueKey(left) == provider.valueKey(right);
         }
         if (base instanceof XsdBaseType) {
+            if (XsdCalendarLexicalHelper::isType(base.name)) {
+                return XsdCalendarLexicalHelper::key(base.name, left, "XSD-SIMPLETYPE-ERROR")
+                    == XsdCalendarLexicalHelper::key(base.name, right, "XSD-SIMPLETYPE-ERROR");
+            }
             if (XsdNumericFacetHelper::isType(base.name)) {
                 return XsdNumericFacetHelper::equal(base.name, left, right, "XSD-SIMPLETYPE-ERROR");
             }
@@ -3176,6 +3189,475 @@ class XsdDecimalLexicalHelper {
     }
 }
 
+# Calendar fields retain their XML lexical value independently of native epoch limits.
+hashdecl XsdCalendarValueInfo {
+    string lexical;
+    string year = "2000";
+    int month = 1;
+    int day = 1;
+    *int offset;
+}
+
+hashdecl XsdCalendarInstantInfo {
+    string year;
+    int month;
+    int day;
+    int minute;
+}
+
+class XsdCalendarLexicalHelper {
+    const Types = {"date": True, "gYear": True, "gYearMonth": True,
+        "gMonthDay": True, "gMonth": True, "gDay": True};
+    const Formats = {"date": "YYYY-MM-DD", "gYear": "YYYY", "gYearMonth": "YYYY-MM",
+        "gMonthDay": "--MM-DD", "gMonth": "--MM", "gDay": "---DD"};
+    const Samples = {"date": "2000-01-01Z", "gYear": "2000Z", "gYearMonth": "2000-01Z",
+        "gMonthDay": "--01-01Z", "gMonth": "--01Z", "gDay": "---01Z"};
+    const MonthDays = (31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31);
+
+    static bool isType(string builtin) {
+        return boolean(Types{builtin});
+    }
+
+    static string lexical(string builtin, auto value, string error) {
+        return parse(builtin, value, error).lexical;
+    }
+
+    static hash<XsdCalendarValueInfo> parse(string builtin, auto value, string error) {
+        if (!isType(builtin)) {
+            throw error, sprintf("unknown calendar builtin %Y", builtin);
+        }
+        if (value.typeCode() == NT_DATE) {
+            if (value.relative()) {
+                throw error, sprintf("type %Y requires an absolute calendar date", builtin);
+            }
+            int seconds = value.getUtcOffset();
+            if (seconds % 60 || abs(seconds) > 50400) {
+                throw error, sprintf("type %Y requires a timezone in whole minutes within -14:00 to +14:00", builtin);
+            }
+            value = value.format(Formats{builtin}) + (seconds
+                ? sprintf("%s%02d:%02d", seconds < 0 ? "-" : "+", abs(seconds) / 3600, (abs(seconds) % 3600) / 60)
+                : "Z");
+        }
+        if (value.typeCode() != NT_STRING) {
+            throw error, sprintf("type %Y requires XML calendar text or an absolute date; got %Y", builtin, value.type());
+        }
+        string text = XsdSimpleType::normalizeWhiteSpace(value, "collapse");
+        hash<XsdCalendarValueInfo> result = <XsdCalendarValueInfo>{"lexical": text};
+        *string zone = (text =~ x/(Z|[+-][0-9]{2}:[0-9]{2})\z/)[0];
+        if (exists zone) {
+            result.offset = 0;
+            if (zone != "Z") {
+                int hour = int(zone.substr(1, 2));
+                int minute = int(zone.substr(4, 2));
+                if (hour > 14 || minute > 59 || (hour == 14 && minute)) {
+                    throw error, sprintf("invalid timezone %Y for type %Y", zone, builtin);
+                }
+                result.offset = (zone[0] == "-" ? -1 : 1) * (hour * 60 + minute);
+            }
+            text = text.substr(0, text.size() - zone.size());
+        }
+        *list<string> fields;
+        switch (builtin) {
+            case "date":
+                fields = text =~ x/\A(-?[0-9]{4,})-([0-9]{2})-([0-9]{2})\z/;
+                if (fields) {
+                    result.year = fields[0];
+                    result.month = int(fields[1]);
+                    result.day = int(fields[2]);
+                }
+                break;
+            case "gYearMonth":
+                fields = text =~ x/\A(-?[0-9]{4,})-([0-9]{2})\z/;
+                if (fields) {
+                    result.year = fields[0];
+                    result.month = int(fields[1]);
+                }
+                break;
+            case "gYear":
+                fields = text =~ x/\A(-?[0-9]{4,})\z/;
+                if (fields) {
+                    result.year = fields[0];
+                }
+                break;
+            case "gMonthDay":
+                fields = text =~ x/\A--([0-9]{2})-([0-9]{2})\z/;
+                if (fields) {
+                    result.month = int(fields[0]);
+                    result.day = int(fields[1]);
+                }
+                break;
+            case "gMonth":
+                fields = text =~ x/\A--([0-9]{2})\z/;
+                if (fields) {
+                    result.month = int(fields[0]);
+                }
+                break;
+            case "gDay":
+                fields = text =~ x/\A---([0-9]{2})\z/;
+                if (fields) {
+                    result.day = int(fields[0]);
+                }
+                break;
+        }
+        if (!fields) {
+            throw error, sprintf("invalid XML calendar spelling %Y for type %Y", result.lexical, builtin);
+        }
+        string magnitude = result.year[0] == "-" ? result.year.substr(1) : result.year;
+        if ((magnitude.size() > 4 && magnitude[0] == "0") || magnitude == "0000") {
+            throw error, sprintf("type %Y prohibits year zero and leading zeros in extended years", builtin);
+        }
+        result.year = XsdIntegerLexicalHelper::canonical(result.year);
+        if (result.month < 1 || result.month > 12 || result.day < 1
+                || result.day > lastDay(result.year, result.month)) {
+            throw error, sprintf("invalid Gregorian calendar date %Y for type %Y", result.lexical, builtin);
+        }
+        return result;
+    }
+
+    static int lastDay(string year, int month) {
+        @assert(month >= 1 && month <= 12);
+        # Divisibility by 400 depends only on the final four decimal digits.
+        int cycle = int(year.substr(max(0, year.size() - 4)));
+        return month == 2 && !(cycle % 4) && ((cycle % 100) || !(cycle % 400)) ? 29 : MonthDays[month - 1];
+    }
+
+    static string key(string builtin, auto value, string error) {
+        hash<XsdCalendarValueInfo> fields = parse(builtin, value, error);
+        hash<XsdCalendarInstantInfo> instant = normalize(fields, fields.offset ?? 0);
+        return (exists fields.offset ? "Z:" : "local:") + instant.year
+            + sprintf("-%02d-%02dT%04d", instant.month, instant.day, instant.minute);
+    }
+
+    static *int compare(string builtin, auto left, auto right, string error) {
+        hash<XsdCalendarValueInfo> lhs = parse(builtin, left, error);
+        hash<XsdCalendarValueInfo> rhs = parse(builtin, right, error);
+        if ((exists lhs.offset) == (exists rhs.offset)) {
+            return compareInstants(normalize(lhs, lhs.offset ?? 0), normalize(rhs, rhs.offset ?? 0));
+        }
+        # A missing timezone ranges from -14:00 through +14:00. Touching an
+        # endpoint is indeterminate, as are overlapping possible UTC intervals.
+        if (compareInstants(normalize(lhs, lhs.offset ?? -840), normalize(rhs, rhs.offset ?? 840)) < 0) {
+            return -1;
+        }
+        if (compareInstants(normalize(lhs, lhs.offset ?? 840), normalize(rhs, rhs.offset ?? -840)) > 0) {
+            return 1;
+        }
+    }
+
+    private static int compareInstants(hash<XsdCalendarInstantInfo> left, hash<XsdCalendarInstantInfo> right) {
+        int relation = XsdIntegerLexicalHelper::compare(left.year, right.year);
+        if (!relation) {
+            relation = left.month <=> right.month;
+        }
+        if (!relation) {
+            relation = left.day <=> right.day;
+        }
+        return relation ? relation : left.minute <=> right.minute;
+    }
+
+    private static hash<XsdCalendarInstantInfo> normalize(hash<XsdCalendarValueInfo> fields, int offset) {
+        @assert(offset >= -840 && offset <= 840);
+        hash<XsdCalendarInstantInfo> instant = <XsdCalendarInstantInfo>{
+            "year": fields.year, "month": fields.month, "day": fields.day, "minute": -offset,
+        };
+        if (instant.minute < 0) {
+            instant.minute += 1440;
+            --instant.day;
+            if (!instant.day) {
+                --instant.month;
+                if (!instant.month) {
+                    instant.month = 12;
+                    instant.year = previousYear(instant.year);
+                }
+                instant.day = lastDay(instant.year, instant.month);
+            }
+        }
+        return instant;
+    }
+
+    private static string previousYear(string year) {
+        if (year == "1") {
+            # XSD 1.0 labels have no year zero.
+            return "-1";
+        }
+        bool negative = year[0] == "-";
+        string magnitude = negative ? year.substr(1) : year;
+        # Split the carry/borrow suffix in one anchored scan. Repeated character
+        # indexing must not make extended UTF-8 year strings quadratic to process.
+        *list<string> pieces = negative ? (magnitude =~ x/\A(.*[0-8])(9*)\z/)
+            : (magnitude =~ x/\A(.*[1-9])(0*)\z/);
+        if (!pieces) {
+            @assert(negative);
+            return "-1" + strmul("0", magnitude.size());
+        }
+        string prefix = pieces[0];
+        string suffix = pieces[1] ?? "";
+        string result = prefix.substr(0, prefix.size() - 1)
+            + chr(ord(prefix[prefix.size() - 1]) + (negative ? 1 : -1))
+            + strmul(negative ? "0" : "9", suffix.size());
+        return (negative ? "-" : "") + XsdIntegerLexicalHelper::canonical(result);
+    }
+
+    static list<string> nearby(string builtin, string value) {
+        hash<XsdCalendarValueInfo> fields = parse(builtin, value, "XSD-SIMPLETYPE-ERROR");
+        list<string> candidates();
+        foreach int direction in (-1, 1) {
+            if (exists fields.offset && abs(fields.offset + direction) <= 840) {
+                hash<XsdCalendarValueInfo> offset = fields;
+                offset.offset += direction;
+                push candidates, render(builtin, offset);
+            }
+            hash<XsdCalendarValueInfo> adjacent = fields;
+            if (builtin == "gYear") {
+                adjacent.year = shiftYear(adjacent.year, direction);
+            } else if (builtin == "gMonth" || builtin == "gYearMonth") {
+                adjacent.month += direction;
+                adjustMonth(\adjacent);
+            } else {
+                adjacent.day += direction;
+                if (adjacent.day < 1) {
+                    --adjacent.month;
+                    adjustMonth(\adjacent);
+                    adjacent.day = lastDay(adjacent.year, adjacent.month);
+                } else if (adjacent.day > lastDay(adjacent.year, adjacent.month)) {
+                    adjacent.day = 1;
+                    ++adjacent.month;
+                    adjustMonth(\adjacent);
+                }
+            }
+            push candidates, render(builtin, adjacent);
+            if (exists adjacent.offset) {
+                foreach int zone in (-840, 0, 840) {
+                    adjacent.offset = zone;
+                    push candidates, render(builtin, adjacent);
+                }
+                # Dates and day-based partials can express the adjacent minute
+                # across the timezone limit by moving one calendar day.
+                if (builtin == "date" || builtin == "gMonthDay" || builtin == "gDay") {
+                    adjacent.offset = fields.offset + direction * 1439;
+                    if (abs(adjacent.offset) <= 840) {
+                        push candidates, render(builtin, adjacent);
+                    }
+                }
+            }
+        }
+        return candidates;
+    }
+
+    private static adjustMonth(reference<hash<XsdCalendarValueInfo>> fields) {
+        if (fields.month < 1) {
+            fields.month = 12;
+            fields.year = shiftYear(fields.year, -1);
+        } else if (fields.month > 12) {
+            fields.month = 1;
+            fields.year = shiftYear(fields.year, 1);
+        }
+    }
+
+    private static string shiftYear(string year, int direction) {
+        @assert(direction == -1 || direction == 1);
+        if (direction < 0) {
+            return previousYear(year);
+        }
+        string opposite = year[0] == "-" ? year.substr(1) : "-" + year;
+        string previous = previousYear(opposite);
+        return previous[0] == "-" ? previous.substr(1) : "-" + previous;
+    }
+
+    private static string render(string builtin, hash<XsdCalendarValueInfo> fields) {
+        string magnitude = fields.year[0] == "-" ? fields.year.substr(1) : fields.year;
+        string year = (fields.year[0] == "-" ? "-" : "") + strmul("0", max(0, 4 - magnitude.size())) + magnitude;
+        string text;
+        switch (builtin) {
+            case "date": text = year + sprintf("-%02d-%02d", fields.month, fields.day); break;
+            case "gYear": text = year; break;
+            case "gYearMonth": text = year + sprintf("-%02d", fields.month); break;
+            case "gMonthDay": text = sprintf("--%02d-%02d", fields.month, fields.day); break;
+            case "gMonth": text = sprintf("--%02d", fields.month); break;
+            case "gDay": text = sprintf("---%02d", fields.day); break;
+        }
+        if (exists fields.offset) {
+            text += fields.offset ? sprintf("%s%02d:%02d", fields.offset < 0 ? "-" : "+",
+                abs(fields.offset) / 60, abs(fields.offset) % 60) : "Z";
+        }
+        return text;
+    }
+
+    static auto decode(string builtin, auto value, string error) {
+        hash<XsdCalendarValueInfo> fields = parse(builtin, value, error);
+        # Native dates always carry a timezone and have signed-int calendar components.
+        # Partial calendar values and dates outside that lossless contract retain XML text.
+        if (builtin != "date" || !exists fields.offset
+                || XsdIntegerLexicalHelper::compare(fields.year, "-2147483648") < 0
+                || XsdIntegerLexicalHelper::compare(fields.year, "2147483647") > 0) {
+            return fields.lexical;
+        }
+        TimeZone zone(fields.offset * 60);
+        return zone.date(fields.lexical);
+    }
+}
+
+#! provider preserving calendar timezone absence and extended years
+/** Explicitly zoned dates within the native calendar range return native dates.
+    Other dates and partial calendars return validated XML strings. Absent XML timezones
+    are retained and never acquire the program's timezone.
+    @par Example
+    The date \c "2026-09-09" remains a string; \c "2026-09-09+05:30" returns a date with that offset.
+    @since %WSDL 0.5.8
+*/
+public class XsdCalendarDataType inherits AbstractDataProviderType {
+    private {
+        string datatype;
+        bool optional;
+    }
+
+    #! constructs a calendar type with explicit requiredness
+    /** @param datatype the calendar builtin local name
+        @param optional whether NOTHING is accepted
+        @throw WSDL-ERROR the name is not a calendar builtin
+    */
+    constructor(string datatype, bool optional = False) {
+        if (!XsdCalendarLexicalHelper::isType(datatype)) {
+            throw WSDL_ERROR, sprintf("unknown calendar builtin %Y", datatype);
+        }
+        self.datatype = datatype;
+        self.optional = optional;
+    }
+
+    private:internal deserializeMembers(hash<auto> members) {
+        if (members.datatype.typeCode() != NT_STRING || !XsdCalendarLexicalHelper::isType(members.datatype)
+                || members.optional.typeCode() != NT_BOOLEAN) {
+            throw "DESERIALIZATION-ERROR", "calendar provider requires a builtin name and boolean requiredness";
+        }
+        datatype = members.datatype;
+        optional = members.optional;
+    }
+
+    #! returns the XSD builtin underlying this calendar provider
+    /** @return the calendar builtin local name
+        @since %WSDL 0.5.8
+    */
+    string getBuiltinName() {
+        return datatype;
+    }
+
+    #! returns the provider type name
+    /** @return XSD builtin name with an optionality prefix */
+    string getName() {
+        return (optional ? "*" : "") + "xsd:" + datatype;
+    }
+
+    #! keeps input conversion in the XML calendar validator
+    /** @return NOTHING; a native soft type would convert strings before lexical/range validation */
+    *Type getValueType() {
+    }
+
+    #! returns the output category
+    /** @return NT_ALL for date/string output; NT_STRING for partial calendars */
+    int getBaseTypeCode() {
+        return datatype == "date" ? NT_ALL : NT_STRING;
+    }
+
+    #! returns the native output category name
+    /** @return all for date/string output; string for partial calendars */
+    string getBaseTypeName() {
+        return datatype == "date" ? "all" : "string";
+    }
+
+    #! returns NOTHING because a calendar scalar has no element type
+    /** @return NOTHING */
+    *AbstractDataProviderType getElementType() {
+    }
+
+    #! returns NOTHING because a calendar scalar has no fields
+    /** @return NOTHING */
+    *hash<string, AbstractDataField> getFields() {
+    }
+
+    #! requires validation even for native dates
+    /** @return an empty map; calendar and timezone validation must not be bypassed */
+    *hash<string, bool> getDirectTypeHash() {
+        return {};
+    }
+
+    #! returns accepted scalar type names
+    /** @param simple request simplified names
+        @return string/date, plus nothing for optional types
+    */
+    hash<string, bool> getAcceptTypeHash(*bool simple) {
+        hash<string, bool> rv = {"string": True, "date": True};
+        if (optional) {
+            rv.nothing = True;
+        }
+        return rv;
+    }
+
+    #! returns the exact output alternatives
+    /** @param simple request simplified names
+        @return string, date for complete dates, and nothing for optional types
+    */
+    hash<string, bool> getReturnTypeHash(*bool simple) {
+        hash<string, bool> rv = {"string": True};
+        if (datatype == "date") {
+            rv.date = True;
+        }
+        if (optional) {
+            rv.nothing = True;
+        }
+        return rv;
+    }
+
+    #! validates XML calendar input before choosing a lossless representation
+    /** @param value an absolute native date or XML calendar lexical string
+        @return a native date when lossless, otherwise XML text; NOTHING for an omitted optional value
+        @throw MISSING-VALUE-ERROR a mandatory value is absent
+        @throw RUNTIME-TYPE-ERROR invalid lexical syntax or an unsupported native input category
+    */
+    auto acceptsValue(auto value) {
+        if (!exists value) {
+            if (optional) {
+                return;
+            }
+            throw "MISSING-VALUE-ERROR", sprintf("calendar value %Y must be supplied", datatype);
+        }
+        return XsdCalendarLexicalHelper::decode(datatype, value, "RUNTIME-TYPE-ERROR");
+    }
+
+    #! returns whether a value is required
+    /** @return True for mandatory types */
+    bool isMandatory() {
+        return !optional;
+    }
+
+    #! returns whether a value can be omitted
+    /** @return True for optional types */
+    bool isOrNothingType() {
+        return optional;
+    }
+
+    #! returns the optional equivalent
+    /** @return an optional calendar provider with the same builtin constraints */
+    AbstractDataProviderType getOrNothingType() {
+        if (optional) {
+            return self;
+        }
+        XsdCalendarDataType rv = self.copy();
+        rv.optional = True;
+        return rv;
+    }
+
+    #! returns the mandatory equivalent
+    /** @return a mandatory calendar provider with the same builtin constraints */
+    AbstractDataProviderType getMandatoryType() {
+        if (!optional) {
+            return self;
+        }
+        XsdCalendarDataType rv = self.copy();
+        rv.optional = False;
+        return rv;
+    }
+}
+
 #! provider type that preserves XML decimal values and lexical forms
 /** Common canonical decimal spellings retain native float output when the float's round-trip spelling
     reproduces them exactly. Other values remain strings, including high-precision decimals and spellings
@@ -3496,7 +3978,8 @@ class XsdListValueHelper {
         "anyURI": True};
 
     static bool supports(string builtin) {
-        return builtin == "boolean" || XsdNumericFacetHelper::isType(builtin) || TextTypes{builtin};
+        return builtin == "boolean" || XsdNumericFacetHelper::isType(builtin)
+            || XsdCalendarLexicalHelper::isType(builtin) || TextTypes{builtin};
     }
 
     static *hash<XsdListItemInfo> describe(XsdAbstractType item) {
@@ -3543,13 +4026,15 @@ class XsdListValueHelper {
             throw error, "invalid list item whitespace metadata";
         }
         XsdNumericFacetHelper::checkProvider(item.builtin, item.provider, error);
+        XsdCalendarFacetHelper::checkProvider(item.builtin, item.provider, error);
         hash<string, bool> categories = item.provider.getReturnTypeHash(True);
         if (!item.provider.isMandatory() || !categories) {
             throw error, "an atomic list item requires a mandatory scalar provider";
         }
         foreach string category in (keys categories) {
             if (category != "string" && category != "int" && category != "number"
-                    && category != "float" && category != "bool") {
+                    && category != "float" && category != "bool"
+                    && !(category == "date" && XsdCalendarLexicalHelper::isType(item.builtin))) {
                 throw error, sprintf("invalid atomic list item output category %Y", category);
             }
         }
@@ -3672,6 +4157,8 @@ class XsdListValueHelper {
                 token = XsdDecimalLexicalHelper::canonical(token);
             } else if (item.builtin == "boolean") {
                 token = XsdBooleanLexicalHelper::decode(token, error) ? "true" : "false";
+            } else if (XsdCalendarLexicalHelper::isType(item.builtin)) {
+                token = XsdCalendarLexicalHelper::key(item.builtin, token, error);
             } else if (XsdIeeeLexicalHelper::isType(item.builtin)) {
                 token = XsdIeeeLexicalHelper::key(item.builtin, token, error);
             }
@@ -4339,6 +4826,10 @@ class XsdNumericFacetHelper {
             supplied = cast<XsdIeeeDataType>(provider).getBuiltinName();
         } else if (provider instanceof XsdNumericRestrictionDataType) {
             supplied = cast<XsdNumericRestrictionDataType>(provider).getBuiltinName();
+        } else if (provider instanceof XsdCalendarDataType) {
+            supplied = cast<XsdCalendarDataType>(provider).getBuiltinName();
+        } else if (provider instanceof XsdCalendarRestrictionDataType) {
+            supplied = cast<XsdCalendarRestrictionDataType>(provider).getBuiltinName();
         }
         if (exists supplied && supplied != builtin) {
             throw error, sprintf("numeric provider builtin %Y does not match declared builtin %Y", supplied, builtin);
@@ -4514,6 +5005,270 @@ class XsdNumericFacetHelper {
             throw error, sprintf("value %Y for simpleType %Y is not in its numeric enumeration", text, facets.name);
         }
         return text;
+    }
+}
+
+#! resolved facets for a calendar restriction
+/** @since %WSDL 0.5.8 */
+public hashdecl XsdCalendarFacetInfo {
+    #! declared type name
+    string name;
+    #! calendar builtin local name
+    string base_name;
+    #! compiled alternatives at this derivation step
+    *list<XsdPatternConstraint> patterns;
+    #! inclusive/exclusive lower and upper endpoints
+    hash<string, string> bounds();
+    #! allowed lexical values, compared by calendar value
+    *list<string> enumeration;
+}
+
+class XsdCalendarFacetHelper {
+    static checkProvider(string builtin, AbstractDataProviderType provider, string error) {
+        XsdNumericFacetHelper::checkProvider(builtin, provider, error);
+        *string supplied;
+        if (provider instanceof XsdCalendarDataType) {
+            supplied = cast<XsdCalendarDataType>(provider).getBuiltinName();
+        } else if (provider instanceof XsdCalendarRestrictionDataType) {
+            supplied = cast<XsdCalendarRestrictionDataType>(provider).getBuiltinName();
+        }
+        if (exists supplied && supplied != builtin) {
+            throw error, sprintf("calendar provider builtin %Y does not match declared builtin %Y", supplied, builtin);
+        }
+    }
+
+    static checkDefinition(hash<XsdCalendarFacetInfo> facets, string error) {
+        if (!XsdCalendarLexicalHelper::isType(facets.base_name)) {
+            throw error, sprintf("unknown calendar restriction base %Y", facets.base_name);
+        }
+        foreach string facet in (keys facets.bounds) {
+            if (facet != "minInclusive" && facet != "minExclusive" && facet != "maxInclusive"
+                    && facet != "maxExclusive") {
+                throw error, sprintf("unknown calendar bound facet %Y", facet);
+            }
+            string checked = XsdCalendarLexicalHelper::lexical(facets.base_name, facets.bounds{facet}, error);
+        }
+        if ((exists facets.bounds.minInclusive && exists facets.bounds.minExclusive)
+                || (exists facets.bounds.maxInclusive && exists facets.bounds.maxExclusive)) {
+            throw error, "inclusive and exclusive bounds cannot coexist in the same restriction step";
+        }
+        checkBounds(facets.base_name, facets.bounds, error);
+        foreach string value in (facets.enumeration) {
+            string checked = XsdCalendarLexicalHelper::lexical(facets.base_name, value, error);
+        }
+        foreach XsdPatternConstraint pattern in (facets.patterns) {
+            try {
+                bool checked = XsdPatternConstraintHelper::matches("", pattern);
+            } catch (hash<ExceptionInfo> ex) {
+                if (ex.err != "REGEX-ERROR" && ex.err != "REGEX-COMPILATION-ERROR") {
+                    rethrow;
+                }
+                throw error, sprintf("invalid compiled calendar pattern: %s", ex.desc);
+            }
+        }
+    }
+
+    static checkBounds(string builtin, hash<string, string> bounds, string error) {
+        foreach string minimum in ("minInclusive", "minExclusive") {
+            foreach string maximum in ("maxInclusive", "maxExclusive") {
+                if (!exists bounds{minimum} || !exists bounds{maximum}) {
+                    continue;
+                }
+                *int relation = XsdCalendarLexicalHelper::compare(builtin, bounds{minimum}, bounds{maximum}, error);
+                bool mixed = minimum.endsWith("Inclusive") != maximum.endsWith("Inclusive");
+                if (!exists relation || relation > 0 || (!relation && mixed)) {
+                    throw error, sprintf("contradictory calendar %s and %s facets", minimum, maximum);
+                }
+            }
+        }
+    }
+
+    static string validate(hash<XsdCalendarFacetInfo> facets, auto value, string error) {
+        string text = XsdCalendarLexicalHelper::lexical(facets.base_name, value, error);
+        if (facets.patterns) {
+            bool matched = False;
+            foreach XsdPatternConstraint pattern in (facets.patterns) {
+                if (XsdPatternConstraintHelper::matches(text, pattern)) {
+                    matched = True;
+                    break;
+                }
+            }
+            if (!matched) {
+                throw error, sprintf("calendar value %Y for %Y does not match its pattern facets", text, facets.name);
+            }
+        }
+        foreach string facet in (keys facets.bounds) {
+            *int relation = XsdCalendarLexicalHelper::compare(facets.base_name, text, facets.bounds{facet}, error);
+            bool invalid = !exists relation;
+            if (!invalid) {
+                switch (facet) {
+                    case "minInclusive": invalid = relation < 0; break;
+                    case "minExclusive": invalid = relation <= 0; break;
+                    case "maxInclusive": invalid = relation > 0; break;
+                    case "maxExclusive": invalid = relation >= 0; break;
+                }
+            }
+            if (invalid) {
+                throw error, sprintf("calendar value %Y for %Y violates %s %Y", text, facets.name,
+                    facet, facets.bounds{facet});
+            }
+        }
+        if (facets.enumeration) {
+            string key = XsdCalendarLexicalHelper::key(facets.base_name, text, error);
+            foreach string allowed in (facets.enumeration) {
+                if (key == XsdCalendarLexicalHelper::key(facets.base_name, allowed, error)) {
+                    return text;
+                }
+            }
+            throw error, sprintf("calendar value %Y for %Y is outside its enumeration", text, facets.name);
+        }
+        return text;
+    }
+}
+
+#! a calendar provider that retains lexical patterns and exact value facets
+/** Bounds use the XSD partial order, with timezone absence kept distinct from UTC.
+    Enumerations compare timezone-normalized calendar values. Patterns retain the XML spelling.
+    @par Example
+    A date enumeration containing \c "2002-10-10+13:00" also accepts \c "2002-10-09-11:00".
+    @since %WSDL 0.5.8
+*/
+public class XsdCalendarRestrictionDataType inherits AbstractDataProviderType {
+    private {
+        hash<XsdCalendarFacetInfo> facets;
+        AbstractDataProviderType base;
+    }
+
+    #! constructs a provider for a calendar restriction
+    /** @param facets the resolved scalar facet data
+        @param base the base provider supplying native categories and requiredness
+        @throw XSD-SIMPLETYPE-ERROR invalid calendar facet metadata
+    */
+    constructor(hash<XsdCalendarFacetInfo> facets, AbstractDataProviderType base) {
+        XsdCalendarFacetHelper::checkDefinition(facets, "XSD-SIMPLETYPE-ERROR");
+        XsdCalendarFacetHelper::checkProvider(facets.base_name, base, "XSD-SIMPLETYPE-ERROR");
+        self.facets = facets;
+        self.base = base;
+    }
+
+    private:internal deserializeMembers(hash<auto> members) {
+        if (!(members.base instanceof AbstractDataProviderType)) {
+            throw "DESERIALIZATION-ERROR", "calendar restriction provider requires a base provider";
+        }
+        hash<XsdCalendarFacetInfo> resolved = new hash<XsdCalendarFacetInfo>(members.facets);
+        XsdCalendarFacetHelper::checkDefinition(resolved, "DESERIALIZATION-ERROR");
+        XsdCalendarFacetHelper::checkProvider(resolved.base_name, members.base, "DESERIALIZATION-ERROR");
+        facets = resolved;
+        base = members.base;
+    }
+
+    #! returns the XSD builtin underlying this calendar provider
+    /** @return the calendar builtin local name
+        @since %WSDL 0.5.8
+    */
+    string getBuiltinName() {
+        return facets.base_name;
+    }
+
+    #! returns the restricted type name
+    /** @return the XSD type name with its optionality prefix */
+    string getName() {
+        return (base.isOrNothingType() ? "*" : "") + "xsd:" + facets.name;
+    }
+
+    #! prevents list providers from converting values before facet validation
+    /** @return NOTHING */
+    *Type getValueType() {
+    }
+
+    #! returns the output category, retaining patterned values as strings
+    /** @return string for this step's pattern, otherwise the base provider category */
+    int getBaseTypeCode() {
+        return facets.patterns ? NT_STRING : base.getBaseTypeCode();
+    }
+
+    #! returns the output category name, including retained patterned strings
+    /** @return string for this step's pattern, otherwise the base provider category name */
+    string getBaseTypeName() {
+        return facets.patterns ? "string" : base.getBaseTypeName();
+    }
+
+    #! returns no item type for this atomic value
+    /** @return NOTHING */
+    *AbstractDataProviderType getElementType() {
+    }
+
+    #! returns no record fields for this atomic value
+    /** @return NOTHING */
+    *hash<string, AbstractDataField> getFields() {
+    }
+
+    #! requires facet validation for all values
+    /** @return an empty map */
+    *hash<string, bool> getDirectTypeHash() {
+        return {};
+    }
+
+    #! returns accepted native categories
+    /** @param simple request simplified names
+        @return the base provider's accepted categories
+    */
+    hash<string, bool> getAcceptTypeHash(*bool simple) {
+        return base.getAcceptTypeHash(simple);
+    }
+
+    #! returns converted native categories
+    /** @param simple request simplified names
+        @return string and optional nothing for this step's pattern, otherwise the base provider's categories
+    */
+    hash<string, bool> getReturnTypeHash(*bool simple) {
+        if (facets.patterns) {
+            hash<string, bool> result = {"string": True};
+            if (base.isOrNothingType()) {
+                result.nothing = True;
+            }
+            return result;
+        }
+        return base.getReturnTypeHash(simple);
+    }
+
+    #! validates the declared restriction and converts the accepted value
+    /** @param value the native value or XML calendar text
+        @return the validated calendar value, or NOTHING for optional omission
+        @throw MISSING-VALUE-ERROR a required value is omitted
+        @throw RUNTIME-TYPE-ERROR lexical input or a restriction facet is invalid
+    */
+    auto acceptsValue(auto value) {
+        if (!exists value) {
+            return base.acceptsValue(value);
+        }
+        string lexical = XsdCalendarFacetHelper::validate(facets, value, "RUNTIME-TYPE-ERROR");
+        auto converted = base.acceptsValue(lexical);
+        return facets.patterns ? lexical : converted;
+    }
+
+    #! returns the requiredness of the value
+    /** @return True for mandatory values */
+    bool isMandatory() {
+        return base.isMandatory();
+    }
+
+    #! returns whether omission is accepted
+    /** @return True for optional values */
+    bool isOrNothingType() {
+        return base.isOrNothingType();
+    }
+
+    #! returns an optional equivalent retaining the same restriction
+    /** @return the optional provider */
+    AbstractDataProviderType getOrNothingType() {
+        return new XsdCalendarRestrictionDataType(facets, base.getOrNothingType());
+    }
+
+    #! returns a mandatory equivalent retaining the same restriction
+    /** @return the mandatory provider */
+    AbstractDataProviderType getMandatoryType() {
+        return new XsdCalendarRestrictionDataType(facets, base.getMandatoryType());
     }
 }
 
@@ -4774,6 +5529,126 @@ public class XsdNumericDataField inherits QoreDataField {
             foreach auto item in (value) {
                 if (!element_allowed_values_map{valueKey(item)}) {
                     throw "FIELD-VALUE-ERROR", sprintf("field %Y does not accept numeric element value %Y",
+                        getName(), item);
+                }
+            }
+        }
+        return value;
+    }
+}
+
+#! a calendar field comparing finite choices by XSD value
+/** Choices retain their display text while equivalent timezone representations share a value key.
+    @par Example
+    A date field fixed to \c "2002-10-10+13:00" accepts \c "2002-10-09-11:00".
+    @since %WSDL 0.5.8
+*/
+public class XsdCalendarDataField inherits QoreDataField {
+    private {
+        string builtin;
+    }
+
+    private static hash<auto> withoutChoices(hash<auto> info) {
+        remove info.allowed_values;
+        remove info.element_allowed_values;
+        return info;
+    }
+
+    #! constructs a calendar field with exact finite choices
+    /** @param info the ordinary QoreDataField field properties
+        @param builtin the calendar XSD builtin used for value comparison
+        @throw XSD-SIMPLETYPE-ERROR invalid calendar choice text
+    */
+    constructor(hash<auto> info, string builtin) : QoreDataField(XsdCalendarDataField::withoutChoices(info)) {
+        if (!XsdCalendarLexicalHelper::isType(builtin)) {
+            throw "XSD-SIMPLETYPE-ERROR", sprintf("invalid calendar field builtin %Y", builtin);
+        }
+        self.builtin = builtin;
+        if (exists info.allowed_values) {
+            setAllowedValues(info.allowed_values, info.allowed_values_creatable);
+        }
+        if (exists info.element_allowed_values) {
+            setElementAllowedValues(info.element_allowed_values, info.element_allowed_values_creatable);
+        }
+    }
+
+    private:internal deserializeMembers(hash<auto> members) {
+        if (members.builtin.typeCode() != NT_STRING || !XsdCalendarLexicalHelper::isType(members.builtin)) {
+            throw "DESERIALIZATION-ERROR", "calendar field requires a valid builtin name";
+        }
+        builtin = members.builtin;
+    }
+
+    #! sets calendar choices without applying this restriction's lexical patterns to facet declarations
+    /** @param choices calendar values or AllowedValueInfo entries
+        @param creatable whether this field permits values outside its finite choices
+        @return this field
+        @throw XSD-SIMPLETYPE-ERROR invalid calendar choice text
+        @note The provider still enforces its own schema enumeration, even if creatable is True.
+    */
+    AbstractDataField setAllowedValues(list<auto> choices, *bool creatable) {
+        list<hash<AllowedValueInfo>> resolved = resolveChoices(choices);
+        hash<string, bool> value_map = map {valueKey($1.value): True}, resolved;
+        allowed_values = resolved;
+        allowed_values_map = value_map;
+        allowed_values_creatable = creatable ?? False;
+        return self;
+    }
+
+    #! sets exact calendar choices for repeated elements
+    /** @param choices calendar values or AllowedValueInfo entries for each element
+        @param creatable whether element values outside these choices are permitted
+        @return this field
+        @throw XSD-SIMPLETYPE-ERROR invalid calendar choice text
+    */
+    AbstractDataField setElementAllowedValues(list<auto> choices, *bool creatable) {
+        list<hash<AllowedValueInfo>> resolved = resolveChoices(choices);
+        hash<string, bool> value_map = map {valueKey($1.value): True}, resolved;
+        element_allowed_values = resolved;
+        element_allowed_values_map = value_map;
+        element_allowed_values_creatable = creatable ?? False;
+        return self;
+    }
+
+    private list<hash<AllowedValueInfo>> resolveChoices(list<auto> choices) {
+        list<hash<AllowedValueInfo>> resolved();
+        foreach auto choice in (choices) {
+            hash<AllowedValueInfo> entry = choice.typeCode() == NT_HASH
+                ? new hash<AllowedValueInfo>(choice)
+                : <AllowedValueInfo>{"value": choice,
+                    "display_name": XsdCalendarLexicalHelper::lexical(builtin, choice, "XSD-SIMPLETYPE-ERROR")};
+            resolved += entry;
+        }
+        return resolved;
+    }
+
+    private string valueKey(auto value) {
+        return XsdCalendarLexicalHelper::key(builtin, value, "XSD-SIMPLETYPE-ERROR");
+    }
+
+    #! validates the type and compares finite choices in the calendar value space
+    /** @param value a native calendar value or XML lexical spelling
+        @return the provider's validated value with retained lexical information
+        @throw FIELD-VALUE-ERROR the calendar value is outside the field's finite choices
+        @throw RUNTIME-TYPE-ERROR the underlying type rejects the value
+        @throw MISSING-VALUE-ERROR a required value is omitted
+    */
+    auto acceptsValue(auto value) {
+        if (!exists value && exists (auto default_value = getDefaultValue())) {
+            value = default_value;
+        }
+        on_error rethrow $1.err, sprintf("%s (while setting field %Y)", $1.desc, getName()), $1.arg;
+        value = getType().acceptsValue(value);
+        if (exists value && allowed_values && !allowed_values_creatable) {
+            if (!allowed_values_map{valueKey(value)}) {
+                throw "FIELD-VALUE-ERROR", sprintf("field %Y does not accept calendar value %Y; allowed values: %Y",
+                    getName(), value, map $1.value, allowed_values);
+            }
+        }
+        if (exists value && element_allowed_values && !element_allowed_values_creatable) {
+            foreach auto item in (value) {
+                if (!element_allowed_values_map{valueKey(item)}) {
+                    throw "FIELD-VALUE-ERROR", sprintf("field %Y does not accept calendar element value %Y",
                         getName(), item);
                 }
             }
@@ -5135,6 +6010,9 @@ class XsdDataFieldHelper {
         if (schema instanceof XsdBaseType && XsdNumericFacetHelper::isType(schema.name)) {
             return new XsdNumericDataField(info, schema.name);
         }
+        if (schema instanceof XsdBaseType && XsdCalendarLexicalHelper::isType(schema.name)) {
+            return new XsdCalendarDataField(info, schema.name);
+        }
         if (schema instanceof XsdBaseType && schema.name == "boolean") {
             return new XsdBooleanDataField(info);
         }
@@ -5241,6 +6119,9 @@ public class XsdBaseType inherits WSDL::XsdAbstractType {
         } else if (XsdNameLexicalHelper::isType(type)) {
             val = XsdNameLexicalHelper::lexical(type, val, SOAP_SERIALIZATION_ERROR);
         }
+        if (XsdCalendarLexicalHelper::isType(type)) {
+            val = XsdCalendarLexicalHelper::lexical(type, val, SOAP_SERIALIZATION_ERROR);
+        }
         switch (type) {
             case "anySimpleType": {
                 if (exists val && !val.strp()) {
@@ -5251,7 +6132,6 @@ public class XsdBaseType inherits WSDL::XsdAbstractType {
                 break;
             }
             case "date":
-                val = format_date("YYYY-MM-DD", convertDate(val, SOAP_SERIALIZATION_ERROR));
                 break;
 
             case "dateTime":
@@ -5384,73 +6264,10 @@ public class XsdBaseType inherits WSDL::XsdAbstractType {
                 break;
 
             case "gYear":
-                # Format: YYYY with optional timezone
-                if (val.typeCode() == NT_DATE) {
-                    val = format_date("YYYY", date(val));
-                } else if (val.typeCode() == NT_STRING) {
-                    # Validate format
-                    if (val !~ /^-?\d{4,}(Z|[+-]\d{2}:\d{2})?$/) {
-                        throw SOAP_SERIALIZATION_ERROR, sprintf("value %y is not a valid gYear for type %y", val, type);
-                    }
-                } else {
-                    throw SOAP_SERIALIZATION_ERROR, sprintf("type %y requires a date or string value; type %y supplied", type, val.type());
-                }
-                break;
-
             case "gYearMonth":
-                # Format: YYYY-MM with optional timezone
-                if (val.typeCode() == NT_DATE) {
-                    val = format_date("YYYY-MM", date(val));
-                } else if (val.typeCode() == NT_STRING) {
-                    # Validate format
-                    if (val !~ /^-?\d{4,}-\d{2}(Z|[+-]\d{2}:\d{2})?$/) {
-                        throw SOAP_SERIALIZATION_ERROR, sprintf("value %y is not a valid gYearMonth for type %y", val, type);
-                    }
-                } else {
-                    throw SOAP_SERIALIZATION_ERROR, sprintf("type %y requires a date or string value; type %y supplied", type, val.type());
-                }
-                break;
-
             case "gMonthDay":
-                # Format: --MM-DD with optional timezone
-                if (val.typeCode() == NT_DATE) {
-                    val = format_date("--MM-DD", date(val));
-                } else if (val.typeCode() == NT_STRING) {
-                    # Validate format
-                    if (val !~ /^--\d{2}-\d{2}(Z|[+-]\d{2}:\d{2})?$/) {
-                        throw SOAP_SERIALIZATION_ERROR, sprintf("value %y is not a valid gMonthDay for type %y", val, type);
-                    }
-                } else {
-                    throw SOAP_SERIALIZATION_ERROR, sprintf("type %y requires a date or string value; type %y supplied", type, val.type());
-                }
-                break;
-
             case "gMonth":
-                # Format: --MM with optional timezone
-                if (val.typeCode() == NT_DATE) {
-                    val = format_date("--MM", date(val));
-                } else if (val.typeCode() == NT_STRING) {
-                    # Validate format
-                    if (val !~ /^--\d{2}(Z|[+-]\d{2}:\d{2})?$/) {
-                        throw SOAP_SERIALIZATION_ERROR, sprintf("value %y is not a valid gMonth for type %y", val, type);
-                    }
-                } else {
-                    throw SOAP_SERIALIZATION_ERROR, sprintf("type %y requires a date or string value; type %y supplied", type, val.type());
-                }
-                break;
-
             case "gDay":
-                # Format: ---DD with optional timezone
-                if (val.typeCode() == NT_DATE) {
-                    val = format_date("---DD", date(val));
-                } else if (val.typeCode() == NT_STRING) {
-                    # Validate format
-                    if (val !~ /^---\d{2}(Z|[+-]\d{2}:\d{2})?$/) {
-                        throw SOAP_SERIALIZATION_ERROR, sprintf("value %y is not a valid gDay for type %y", val, type);
-                    }
-                } else {
-                    throw SOAP_SERIALIZATION_ERROR, sprintf("type %y requires a date or string value; type %y supplied", type, val.type());
-                }
                 break;
 
             default:
@@ -5521,6 +6338,9 @@ public class XsdBaseType inherits WSDL::XsdAbstractType {
         if (XsdNameLexicalHelper::isType(type)) {
             return XsdNameLexicalHelper::lexical(type, val, SOAP_DESERIALIZATION_ERROR);
         }
+        if (XsdCalendarLexicalHelper::isType(type)) {
+            return XsdCalendarLexicalHelper::decode(type, val, SOAP_DESERIALIZATION_ERROR);
+        }
 
         switch (type) {
             case "anySimpleType":
@@ -5544,7 +6364,6 @@ public class XsdBaseType inherits WSDL::XsdAbstractType {
                 }
                 return nsc.opt_empty_string_is_nothing ? val : string(val);
 
-            case "date":
             case "dateTime":
                 return convertDate(val, SOAP_DESERIALIZATION_ERROR);
 
@@ -5600,56 +6419,6 @@ public class XsdBaseType inherits WSDL::XsdAbstractType {
                 }
                 return string(val);
 
-            case "gYear":
-                # Return gYear as string (YYYY with optional timezone)
-                if (val.typeCode() == NT_STRING) {
-                    # Extract year portion for validation
-                    if (val !~ /^-?\d{4,}(Z|[+-]\d{2}:\d{2})?$/) {
-                        throw SOAP_DESERIALIZATION_ERROR, sprintf("value %y is not a valid gYear", val);
-                    }
-                    return val;
-                }
-                return string(val);
-
-            case "gYearMonth":
-                # Return gYearMonth as string (YYYY-MM with optional timezone)
-                if (val.typeCode() == NT_STRING) {
-                    if (val !~ /^-?\d{4,}-\d{2}(Z|[+-]\d{2}:\d{2})?$/) {
-                        throw SOAP_DESERIALIZATION_ERROR, sprintf("value %y is not a valid gYearMonth", val);
-                    }
-                    return val;
-                }
-                return string(val);
-
-            case "gMonthDay":
-                # Return gMonthDay as string (--MM-DD with optional timezone)
-                if (val.typeCode() == NT_STRING) {
-                    if (val !~ /^--\d{2}-\d{2}(Z|[+-]\d{2}:\d{2})?$/) {
-                        throw SOAP_DESERIALIZATION_ERROR, sprintf("value %y is not a valid gMonthDay", val);
-                    }
-                    return val;
-                }
-                return string(val);
-
-            case "gMonth":
-                # Return gMonth as string (--MM with optional timezone)
-                if (val.typeCode() == NT_STRING) {
-                    if (val !~ /^--\d{2}(Z|[+-]\d{2}:\d{2})?$/) {
-                        throw SOAP_DESERIALIZATION_ERROR, sprintf("value %y is not a valid gMonth", val);
-                    }
-                    return val;
-                }
-                return string(val);
-
-            case "gDay":
-                # Return gDay as string (---DD with optional timezone)
-                if (val.typeCode() == NT_STRING) {
-                    if (val !~ /^---\d{2}(Z|[+-]\d{2}:\d{2})?$/) {
-                        throw SOAP_DESERIALIZATION_ERROR, sprintf("value %y is not a valid gDay", val);
-                    }
-                    return val;
-                }
-                return string(val);
 
             default: {
                 if (name == "anyType")  {
@@ -5718,6 +6487,9 @@ public class XsdBaseType inherits WSDL::XsdAbstractType {
         if (XsdIeeeLexicalHelper::isType(name)) {
             return new XsdIeeeDataType(name);
         }
+        if (XsdCalendarLexicalHelper::isType(name)) {
+            return new XsdCalendarDataType(name);
+        }
         if (XsdBuiltinListHelper::isType(name)) {
             return new XsdSizedRestrictionDataType(<XsdSizedFacetInfo>{
                 "name": name, "kind": "tokens", "white_space": "collapse", "min_length": 1,
@@ -5735,9 +6507,10 @@ public class XsdBaseType inherits WSDL::XsdAbstractType {
     }
 
     #! returns the %Qore type closest to the XSD type
-    /** @note this returns the strict %Qore type; the data provider type returned by
-        @ref WSDL::XsdBaseType::getDataProviderType() "XsdBaseType::getDataProviderType()" is a soft type, because
-        serialization accepts any value convertible to the target type
+    /** @return the legacy closest native type; it does not describe every lossless output alternative
+        @note Use @ref WSDL::XsdBaseType::getDataProviderType() "XsdBaseType::getDataProviderType()" for the
+        validated conversion contract. Calendar date providers can also return strings for missing timezones
+        or years outside the native range, and scalar providers enforce XSD syntax before native conversion.
     */
     Type getDataProviderBaseType() {
         switch (name) {
@@ -7086,7 +7859,8 @@ class XsdUnionValueHelper {
 
     static bool supports(string builtin) {
         return XsdNumericFacetHelper::isType(builtin) || builtin == "boolean" || builtin == "hexBinary"
-            || builtin == "base64Binary" || StringFamily{builtin} || XsdBuiltinListHelper::isType(builtin);
+            || builtin == "base64Binary" || StringFamily{builtin} || XsdBuiltinListHelper::isType(builtin)
+            || XsdCalendarLexicalHelper::isType(builtin);
     }
 
     # Returns exact identities for the scalar families with completed value rules.
@@ -7282,6 +8056,10 @@ class XsdUnionValueHelper {
     static *hash<XsdUnionValueIdentity> atomicIdentity(hash<XsdUnionAtomicInfo> info, auto input, auto converted,
             string error) {
         string builtin = info.builtin;
+        if (XsdCalendarLexicalHelper::isType(builtin)) {
+            return <XsdUnionValueIdentity>{"family": builtin, "value": XsdCalendarLexicalHelper::key(builtin,
+                XsdScalarTextHelper::value(input, error), error)};
+        }
         if (XsdIeeeLexicalHelper::isType(builtin)) {
             return <XsdUnionValueIdentity>{"family": builtin, "value": XsdIeeeLexicalHelper::key(builtin,
                 XsdScalarTextHelper::value(input, error), error)};
@@ -10394,6 +11172,9 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
         } else if (exists totalDigits || exists fractionDigits) {
             throw "XSD-SIMPLETYPE-ERROR", "totalDigits and fractionDigits apply only to decimal-derived types";
         }
+        if (getCalendarBaseName()) {
+            validateCalendarDeclaration();
+        }
         string kind = getFacetKind();
         if (kind == "union" && (exists minInclusive || exists minExclusive
                 || exists maxInclusive || exists maxExclusive)) {
@@ -10708,6 +11489,9 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
         if (getNumericBaseName()) {
             return new XsdNumericRestrictionDataType(getNumericFacets(), type.getDataProviderType());
         }
+        if (getCalendarBaseName()) {
+            return new XsdCalendarRestrictionDataType(getCalendarFacets(), type.getDataProviderType());
+        }
         string kind = getFacetKind();
         if (kind == "union" && type) {
             return new UnionDataType(self);
@@ -10728,6 +11512,83 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
             }, type.getDataProviderType());
         }
         return dataType ?? type.getDataProviderType();
+    }
+
+    private *string getCalendarBaseName() {
+        string kind = getFacetKind();
+        return XsdCalendarLexicalHelper::isType(kind) ? kind : NOTHING;
+    }
+
+    private hash<XsdCalendarFacetInfo> getCalendarFacets() {
+        *string builtin = getCalendarBaseName();
+        @assert(builtin);
+        hash<XsdCalendarFacetInfo> result = <XsdCalendarFacetInfo>{
+            "name": name, "base_name": builtin, "patterns": pcre_patterns,
+        };
+        foreach string facet in ("minInclusive", "minExclusive", "maxInclusive", "maxExclusive") {
+            if (exists self{facet}) {
+                result.bounds{facet} = XsdCalendarLexicalHelper::lexical(builtin, self{facet}, "XSD-SIMPLETYPE-ERROR");
+            }
+        }
+        if (enumValues) {
+            result.enumeration = keys enumValues;
+        }
+        return result;
+    }
+
+    private validateCalendarDeclaration() {
+        hash<XsdCalendarFacetInfo> facets = getCalendarFacets();
+        XsdCalendarFacetHelper::checkDefinition(facets, "XSD-SIMPLETYPE-ERROR");
+        foreach string facet in (keys facets.bounds) {
+            validateCalendarBaseValue(facets.bounds{facet}, facet.endsWith("Exclusive") ? facet : NOTHING);
+        }
+        foreach string value in (facets.enumeration) {
+            validateCalendarBaseValue(value);
+        }
+        *XsdSimpleType ancestor = type instanceof XsdSimpleType ? cast<XsdSimpleType>(type) : NOTHING;
+        hash<string, string> effective = facets.bounds;
+        while (ancestor) {
+            hash<XsdCalendarFacetInfo> inherited = ancestor.getCalendarFacets();
+            foreach string bound in (keys inherited.bounds) {
+                if (!exists effective{bound}) {
+                    effective{bound} = inherited.bounds{bound};
+                }
+                if (ancestor.fixedFacets{bound} && exists facets.bounds{bound}
+                        && XsdCalendarLexicalHelper::key(facets.base_name, facets.bounds{bound}, "XSD-SIMPLETYPE-ERROR")
+                            != XsdCalendarLexicalHelper::key(facets.base_name, inherited.bounds{bound}, "XSD-SIMPLETYPE-ERROR")) {
+                    throw "XSD-SIMPLETYPE-ERROR", sprintf("%s in %Y changes a fixed calendar bound", bound, name);
+                }
+            }
+            ancestor = ancestor.type instanceof XsdSimpleType ? cast<XsdSimpleType>(ancestor.type) : NOTHING;
+        }
+        XsdCalendarFacetHelper::checkBounds(facets.base_name, effective, "XSD-SIMPLETYPE-ERROR");
+    }
+
+    private validateCalendarBaseValue(string value, *string exclusive) {
+        *XsdSimpleType ancestor = type instanceof XsdSimpleType ? cast<XsdSimpleType>(type) : NOTHING;
+        bool repeated = False;
+        if (exclusive) {
+            *XsdSimpleType candidate = ancestor;
+            while (candidate) {
+                if (exists candidate{exclusive}) {
+                    repeated = XsdCalendarLexicalHelper::key(getCalendarBaseName(), value, "XSD-SIMPLETYPE-ERROR")
+                        == XsdCalendarLexicalHelper::key(getCalendarBaseName(), candidate{exclusive}, "XSD-SIMPLETYPE-ERROR");
+                    break;
+                }
+                candidate = candidate.type instanceof XsdSimpleType ? cast<XsdSimpleType>(candidate.type) : NOTHING;
+            }
+        }
+        while (ancestor) {
+            hash<XsdCalendarFacetInfo> facets = ancestor.getCalendarFacets();
+            if (repeated) {
+                # XSD 1.0 permits repetition of an inherited exclusive endpoint,
+                # including an endpoint excluded from the base value space.
+                facets.bounds = {};
+                remove facets.enumeration;
+            }
+            string checked = XsdCalendarFacetHelper::validate(facets, value, "XSD-SIMPLETYPE-ERROR");
+            ancestor = ancestor.type instanceof XsdSimpleType ? cast<XsdSimpleType>(ancestor.type) : NOTHING;
+        }
     }
 
     private *string getNumericBaseName() {
@@ -10771,10 +11632,26 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
             return boolean(stringEnumValues{value});
         }
         # Numeric enumeration is checked together with the other value facets.
-        return getNumericBaseName() || !enumValues || boolean(enumValues{value});
+        return getNumericBaseName() || getCalendarBaseName() || !enumValues || boolean(enumValues{value});
     }
 
     *list<auto> getAllowedValues() {
+        if (getCalendarBaseName()) {
+            *XsdSimpleType ancestor = self;
+            while (ancestor) {
+                if (ancestor.enumValues) {
+                    list<auto> choices();
+                    foreach string lexical in (keys ancestor.enumValues) {
+                        if (acceptsSample(lexical)) {
+                            push choices, getEnumValue(lexical);
+                        }
+                    }
+                    return choices;
+                }
+                ancestor = ancestor.type instanceof XsdSimpleType ? cast<XsdSimpleType>(ancestor.type) : NOTHING;
+            }
+            return;
+        }
         if (listItemValueInfo) {
             *XsdSimpleType ancestor = self;
             while (ancestor) {
@@ -10889,6 +11766,11 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
                 SchemaUnionItemCapture.identity = result.identity;
             }
             return XsdScalarTextHelper::withComments(rh, converted);
+        }
+
+        if (getCalendarBaseName()) {
+            string lexical = XsdCalendarFacetHelper::validate(getCalendarFacets(), val, SOAP_SERIALIZATION_ERROR);
+            return XsdScalarTextHelper::withComments(rh, type.serializeValue(nsc, lexical, omitType));
         }
 
         if (!exists val && getFacetKind() == "list" && hasNativeListValue()) {
@@ -11383,6 +12265,9 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
         @since %WSDL 0.5.8
     */
     auto getSampleValue(auto default_value) {
+        if (getCalendarBaseName()) {
+            return getCalendarSample(default_value);
+        }
         if (getFacetKind() == "boolean") {
             foreach auto candidate in (default_value, "true", "false", "1", "0") {
                 if (acceptsSample(candidate)) {
@@ -11580,6 +12465,40 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
         }
     }
 
+    private auto getCalendarSample(auto default_value) {
+        if (acceptsSample(default_value)) {
+            return default_value;
+        }
+        *XsdSimpleType ancestor = self;
+        list<string> candidates();
+        while (ancestor) {
+            foreach string choice in (keys ancestor.enumValues) {
+                if (acceptsSample(choice)) {
+                    return choice;
+                }
+            }
+            hash<XsdCalendarFacetInfo> facets = ancestor.getCalendarFacets();
+            foreach string facet in (keys facets.bounds) {
+                string endpoint = facets.bounds{facet};
+                push candidates, endpoint;
+                candidates += XsdCalendarLexicalHelper::nearby(facets.base_name, endpoint);
+            }
+            ancestor = ancestor.type instanceof XsdSimpleType ? cast<XsdSimpleType>(ancestor.type) : NOTHING;
+        }
+        *string patterned = getPatternSample();
+        if (exists patterned) {
+            push candidates, patterned;
+        }
+        push candidates, XsdCalendarLexicalHelper::Samples{getCalendarBaseName()};
+        foreach string candidate in (candidates) {
+            if (acceptsSample(candidate)) {
+                return candidate;
+            }
+        }
+        throw "XSD-SAMPLE-ERROR", sprintf("cannot construct a calendar example satisfying the patterns, "
+            "enumerations and bounds of %Y from its endpoints or adjacent calendar values; supply a valid example", name);
+    }
+
     private auto getNumericSample(auto default_value) {
         string base = getNumericBaseName();
         if (acceptsSample(default_value)) {
@@ -11742,6 +12661,10 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
             XsdNumericFacetHelper::validate(getNumericFacets(), val, errType);
             return;
         }
+        if (getCalendarBaseName()) {
+            string checked = XsdCalendarFacetHelper::validate(getCalendarFacets(), lexical ?? val, errType);
+            return;
+        }
 
         # Pattern validation
         # issue #5411: XSD 1.0 part 2 section 4.3.4.3: multiple "pattern" facets declared in the same restriction
@@ -11868,6 +12791,13 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
                 SchemaUnionItemCapture.identity = result.identity;
             }
             return converted;
+        }
+
+        if (getCalendarBaseName()) {
+            string lexical = XsdCalendarFacetHelper::validate(getCalendarFacets(),
+                XsdScalarTextHelper::value(val, SOAP_DESERIALIZATION_ERROR), SOAP_DESERIALIZATION_ERROR);
+            auto converted = type.deserializeValue(en, tmap, mrh, lexical);
+            return patterns ? lexical : converted;
         }
 
         if (getNumericBaseName()) {
@@ -19016,8 +19946,16 @@ public class WSMessageHelper {
             case "date":
                 res += {
                     "type": "date",
-                    "value": 2015-01-31,
+                    "value": XsdCalendarLexicalHelper::decode("date", XsdCalendarLexicalHelper::Samples.date,
+                        "XSD-SAMPLE-ERROR"),
                 };
+                break;
+            case "gYear":
+            case "gYearMonth":
+            case "gMonthDay":
+            case "gMonth":
+            case "gDay":
+                res += {"type": "string", "value": XsdCalendarLexicalHelper::Samples{t.name}};
                 break;
             case "dateTime":
                 res += {
@@ -19071,7 +20009,7 @@ public class WSMessageHelper {
                 }
                 res.comment = sprintf("Enum: %s",  (keys t.enumValues).join(','));
                 if (res.type == "int" || res.type == "number" || res.type == "float" || res.type == "string"
-                        || res.type == "list" || res.type == "binary") {
+                        || res.type == "list" || res.type == "binary" || res.type == "date") {
                     res.value = t.getSampleValue(res.value);
                 }
             } else {

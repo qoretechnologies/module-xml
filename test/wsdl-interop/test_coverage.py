@@ -105,7 +105,11 @@ class CoverageTest(unittest.TestCase):
                 ("integer", "01 +2", "1 2", True),
                 ("integer", "18446744073709551616", "18446744073709551617", False),
                 ("decimal", "1.00000000000000000001", "1.00000000000000000002", False),
-                ("decimal", "1.0e0", "1", False)):
+                ("decimal", "1.0e0", "1", False),
+                ("date", "2000-01-01Z 2000-01-02", "2000-01-01-00:00 2000-01-02", True),
+                ("date", "2000-01-01Z 2000-01-02", "2000-01-01Z 2000-01-02Z", False),
+                ("gDay", "---01 ---02", "---02 ---01", False),
+                ("gYear", "0000", "0000", False)):
             with self.subTest(item_type=item_type, before=before, after=after):
                 left, right = etree.Element("value"), etree.Element("value")
                 left.text, right.text = before, after
@@ -119,6 +123,27 @@ class CoverageTest(unittest.TestCase):
                 {"elements": ["value"], "datatype": "list", "item_datatype": item_type}]}}}}
             with self.subTest(item_type=item_type), self.assertRaises(ValueError):
                 coverage.validate_selection(selection, records)
+
+    def test_calendar_value_assertions_detect_timezone_and_year_loss(self):
+        huge = '1' + '0' * 1000
+        for datatype, before, after, valid in (
+                ('date', '2002-10-10+13:00', '2002-10-09-11:00', True),
+                ('date', '0001-01-01+14:00', '-0001-12-31-10:00', True),
+                ('date', '2000-01-01', '2000-01-01Z', False),
+                ('date', huge + '-01-01Z', huge + '-01-02Z', False),
+                ('date', '2000-01-01+05:30', '2000-01-01+05:00', False),
+                ('gYear', '-0001Z', '-0001-00:00', True),
+                ('gYearMonth', '2000-02', '2000-03', False),
+                ('gMonthDay', '--01-02+14:00', '--01-01-10:00', True),
+                ('gMonth', '--06Z', '--06-00:00', True),
+                ('gDay', '---02+14:00', '---01-10:00', True),
+                ('gMonth', '--01--', '--01--', False),
+                ('date', '-0001-02-29', '-0001-02-29', False)):
+            with self.subTest(datatype=datatype, before=before[:30]):
+                left, right = etree.Element('value'), etree.Element('value')
+                left.text, right.text = before, after
+                result = coverage.value_checks(left, right, [{'elements': ['value'], 'datatype': datatype}])
+                self.assertEqual(valid, result['ok'], result)
 
     def test_ieee_value_assertions_detect_precision_and_sign_changes(self):
         for datatype, before, after, valid in (
@@ -322,7 +347,7 @@ class CoverageTest(unittest.TestCase):
         self.assertEqual("", process.stderr)
         report = json.loads(output.read_text())
         self.assertEqual([], report["selected_failures"])
-        self.assertEqual({"wsdls": 97, "message_directions": 828}, report["selected_scope"])
+        self.assertEqual({"wsdls": 114, "message_directions": 1100}, report["selected_scope"])
         self.assertEqual(293, len(report["cases"]))
         self.assertEqual(2272, sum(len(c["messages"]) for c in report["cases"]))
         for stage, counts in report["stage_accounting"]["counts"].items():

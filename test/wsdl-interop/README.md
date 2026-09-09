@@ -280,8 +280,8 @@ each direction. The worker explicitly selects that binding and operation. Every 
 retained and independently checked with libxml2 and Xerces. Output envelope versions are checked against
 the selected binding; the W3C SOAP 1.2 inputs still exercise a SOAP 1.1 contract.
 
-`--strict` requires the explicit [strict-selection.json](strict-selection.json) to pass: 97 WSDLs,
-including all 14 source-invalid descriptions, and 828 selected message/direction combinations. Positive
+`--strict` requires the explicit [strict-selection.json](strict-selection.json) to pass: 114 WSDLs,
+including all 14 source-invalid descriptions, and 1,100 selected message/direction combinations. Positive
 cases require independent exact-value assertions; negative cases require the intended exception category.
 Missing, duplicate, stale, malformed or unclassified entries fail. This selection is deliberately named
 and bounded; it does not turn known implementation failures elsewhere into passing conformance tests.
@@ -803,3 +803,38 @@ strings and reject invalid inputs with the expected category. The named libxml2
 execution limit remains recorded as unassessed; original Xerces checks and
 separate language-equivalent schemas assess every affected document.
 See [execution evidence](regex-execution-evidence.md).
+
+
+## Calendar values and providers
+
+Run `wsdl-calendar-values.qtest`, `wsdl-calendar-facets.qtest` and
+`wsdl-calendar-consumers.qtest` with debugging enabled, plus
+`python3 test/wsdl-interop/test_calendar_values.py -v`. The six calendar
+primitives retain timezone absence, arbitrary years and required lexical patterns.
+Explicitly zoned complete dates in the native year range return native dates;
+other dates and partial calendars remain validated strings. Existing callers
+that assume every `xs:date` is native must handle that string alternative.
+See [the public contract](../../design/wsdl-calendar-values.md).
+
+The independent matrix checks actual SOAP 1.1/1.2 bindings, both directions,
+atomic/simple-content/attribute/repeated values, reconstructed providers, examples,
+lists and union primitive identity. A separate integer ordinal reference checks
+1,838 seeded offset, year and leap-day cases. Local HTTP tests exercise both
+SoapClient and SoapHandler with native, unzoned, extended and partial dates.
+The strict W3C selection includes all 18 calendar element/attribute/pattern
+families, with exact value assertions and original invalid inputs retained.
+
+[Calendar validator evidence](calendar-values-evidence.md) records 133 exact
+reproductions of libxml2 ordering/whitespace errors and Xerces's obsolete gMonth
+spelling acceptance. Qore's normative acceptance and value checks remain
+mandatory; the oracle comparison requires the exact recorded triples and counts.
+To reproduce the native libxml2 verdicts independently of WSDL conversion, run:
+
+```sh
+qore -b --enable-debug test/wsdl-interop/calendar-validator.qr \
+  test/wsdl-interop/calendar-validator-defects.json
+```
+
+The diagnostic prints each native verdict and its expected rejection diagnostic;
+its exit status reports successful execution, not standards conformance.
+DateTime, time, duration and the remaining P3 requirements stay open.

@@ -3,8 +3,9 @@
 Copyright (C) 2026 Qore Technologies, s.r.o.
 
 `WSDL::XsdXmlValue` retains a complete XML element document as a Qore string.
-It is an explicit value API; ordinary WSDL scalar and record values keep their
-existing types. Construction checks XML well-formedness, independently of XSD
+It is an explicit value API; ordinary WSDL scalars and records use their documented
+native conversion contracts, including lossless string alternatives for decimal
+and [calendar values](wsdl-calendar-values.md). Construction checks XML well-formedness, independently of XSD
 validation. The carrier is useful when callers need lexical spellings, namespace
 bindings or content that a scalar or flat record cannot represent.
 
