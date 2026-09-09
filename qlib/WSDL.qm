@@ -80,6 +80,10 @@ module WSDL {
     @section wsdlrelnotes WSDL Module Release Notes
 
     @subsection wsdl_0_5_8 WSDL v0.5.8
+    - duration bounds and enumerations use the XSD four-reference-date relation with exact Gregorian arithmetic
+      and arbitrary decimal fractions; fixed attributes, finite choices, lists and unions share this value identity
+    - added \c XsdDurationRestrictionDataType, \c XsdDurationFacetInfo and \c XsdDurationDataField;
+      reconstructed providers preserve inherited restrictions and examples validate every generated candidate
     - duration values validate XSD 1.0 grammar and retain arbitrary component sizes and fractional digits;
       native relative dates retain microseconds and use one leading sign, while absolute dates and
       opposing month/second component signs reject instead of producing invalid XML
@@ -2274,6 +2278,10 @@ class XsdScalarValueHelper {
             if (XsdNumericFacetHelper::isType(base.name)) {
                 return XsdNumericFacetHelper::equal(base.name, left, right, "XSD-SIMPLETYPE-ERROR");
             }
+            if (base.name == "duration") {
+                return XsdDurationValueHelper::key(left, "XSD-SIMPLETYPE-ERROR")
+                    == XsdDurationValueHelper::key(right, "XSD-SIMPLETYPE-ERROR");
+            }
             if (base.name == "boolean") {
                 return XsdBooleanLexicalHelper::decode(left, "XSD-SIMPLETYPE-ERROR")
                     == XsdBooleanLexicalHelper::decode(right, "XSD-SIMPLETYPE-ERROR");
@@ -3192,6 +3200,262 @@ class XsdDecimalLexicalHelper {
         # All other values, including noncanonical spellings used by patterns, remain exact strings.
         return !value.infp() && value.toStringRoundTrip() == lexical ? value : lexical;
     }
+}
+
+# Exact signed integer arithmetic for duration component and Gregorian-cycle calculations.
+# Base-10^9 limbs keep every intermediate below 10^18. No floating-point conversion is used.
+hashdecl XsdDurationDivisionInfo {
+    string quotient;
+    int remainder;
+}
+
+class XsdDurationIntegerHelper {
+    const Base = 1000000000;
+
+    private static list<int> limbs(string value) {
+        # Lexical validation already restricted the input to ASCII. Fixed-width
+        # encoding makes each backwards substring operation constant-time.
+        value = convert_encoding(value, "ASCII");
+        list<int> result();
+        for (int end = value.size(); end > 0; end -= 9) {
+            push result, int(value.substr(max(0, end - 9), min(9, end)));
+        }
+        return result;
+    }
+
+    private static string render(list<int> value, bool negative) {
+        while (value.size() > 1 && !value[value.size() - 1]) {
+            pop value;
+        }
+        list<string> pieces();
+        for (int index = value.size() - 1; index >= 0; --index) {
+            push pieces, index == value.size() - 1 ? string(value[index]) : sprintf("%09d", value[index]);
+        }
+        string result = pieces.join("");
+        return negative && result != "0" ? "-" + result : result;
+    }
+
+    static string negate(string value) {
+        return value == "0" ? value : value[0] == "-" ? value.substr(1) : "-" + value;
+    }
+
+    static string add(string left, string right) {
+        bool ln = left[0] == "-";
+        bool rn = right[0] == "-";
+        left = ln ? left.substr(1) : left;
+        right = rn ? right.substr(1) : right;
+        bool same_sign = ln == rn;
+        if (!same_sign && XsdIntegerLexicalHelper::compare(left, right) < 0) {
+            string swap = left;
+            left = right;
+            right = swap;
+            ln = rn;
+        }
+        list<int> lhs = limbs(left);
+        list<int> rhs = limbs(right);
+        list<int> result();
+        int carry = 0;
+        for (int index = 0; index < max(lhs.size(), rhs.size()); ++index) {
+            int total = (lhs[index] ?? 0) + (same_sign ? (rhs[index] ?? 0) : -(rhs[index] ?? 0)) + carry;
+            carry = total < 0 ? -1 : total / Base;
+            push result, total < 0 ? total + Base : total % Base;
+        }
+        @assert(carry >= 0);
+        if (carry) {
+            push result, carry;
+        }
+        return render(result, ln);
+    }
+
+    static string multiply(string value, int factor) {
+        @assert(factor >= 0 && factor < Base);
+        bool negative = value[0] == "-";
+        list<int> source = limbs(negative ? value.substr(1) : value);
+        list<int> result();
+        int carry = 0;
+        foreach int limb in (source) {
+            int total = limb * factor + carry;
+            push result, total % Base;
+            carry = total / Base;
+        }
+        if (carry) {
+            push result, carry;
+        }
+        return render(result, negative);
+    }
+
+    # Euclidean division: the remainder is always nonnegative, including negative durations.
+    static hash<XsdDurationDivisionInfo> divide(string value, int divisor) {
+        @assert(divisor > 0 && divisor < Base);
+        bool negative = value[0] == "-";
+        list<int> source = limbs(negative ? value.substr(1) : value);
+        list<int> quotient = source;
+        int remainder = 0;
+        for (int index = source.size() - 1; index >= 0; --index) {
+            int total = remainder * Base + source[index];
+            quotient[index] = total / divisor;
+            remainder = total % divisor;
+        }
+        string text = render(quotient, negative);
+        if (negative && remainder) {
+            text = add(text, "-1");
+            remainder = divisor - remainder;
+        }
+        return <XsdDurationDivisionInfo>{"quotient": text, "remainder": remainder};
+    }
+}
+
+hashdecl XsdDurationComponents {
+    bool negative;
+    string months;
+    string seconds;
+    string fraction;
+}
+
+hashdecl XsdDurationInstant {
+    string whole;
+    string fraction;
+}
+
+class XsdDurationValueHelper {
+    const Anchors = ((1696, 9), (1697, 2), (1903, 3), (1903, 7));
+    const MonthStarts = (0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334);
+
+    private static hash<XsdDurationComponents> components(auto value, string error) {
+        string text = XsdDurationLexicalHelper::lexical(value, error);
+        list<*string> fields = text =~ x/\A(-)?P(?:([0-9]+)Y)?(?:([0-9]+)M)?(?:([0-9]+)D)?(?:T(?:([0-9]+)H)?(?:([0-9]+)M)?(?:([0-9]+)(?:\.([0-9]+))?S)?)?\z/;
+        @assert(fields);
+        list<string> numbers();
+        for (int index = 1; index <= 6; ++index) {
+            push numbers, XsdIntegerLexicalHelper::canonical(fields[index] ?? "0");
+        }
+        string months = XsdDurationIntegerHelper::add(XsdDurationIntegerHelper::multiply(numbers[0], 12), numbers[1]);
+        string seconds = XsdDurationIntegerHelper::add(XsdDurationIntegerHelper::multiply(numbers[2], 24), numbers[3]);
+        seconds = XsdDurationIntegerHelper::add(XsdDurationIntegerHelper::multiply(seconds, 60), numbers[4]);
+        seconds = XsdDurationIntegerHelper::add(XsdDurationIntegerHelper::multiply(seconds, 60), numbers[5]);
+        string fraction = fields[7] ?? "";
+        fraction =~ s/0+\z//;
+        return <XsdDurationComponents>{"negative": boolean(fields[0]), "months": months, "seconds": seconds,
+            "fraction": fraction};
+    }
+
+    private static list<hash<XsdDurationInstant>> instants(auto value, string error) {
+        hash<XsdDurationComponents> parts = components(value, error);
+        string months = parts.negative ? XsdDurationIntegerHelper::negate(parts.months) : parts.months;
+        string seconds = parts.negative ? XsdDurationIntegerHelper::negate(parts.seconds) : parts.seconds;
+        string fraction = parts.fraction;
+        if (parts.negative && fraction.size()) {
+            seconds = XsdDurationIntegerHelper::add(seconds, "-1");
+            string complement = XsdDurationIntegerHelper::add("1" + strmul("0", fraction.size()),
+                XsdDurationIntegerHelper::negate(XsdIntegerLexicalHelper::canonical(fraction)));
+            fraction = strmul("0", fraction.size() - complement.size()) + complement;
+            fraction =~ s/0+\z//;
+        }
+        list<hash<XsdDurationInstant>> result();
+        foreach list<int> anchor in (Anchors) {
+            string month = XsdDurationIntegerHelper::add(months, string(anchor[0] * 12 + anchor[1] - 1));
+            hash<XsdDurationDivisionInfo> cycle = XsdDurationIntegerHelper::divide(month, 4800);
+            int year = cycle.remainder / 12;
+            int month_index = cycle.remainder % 12;
+            int prior = year - 1;
+            # Appendix E adds numeric years, including intermediate year zero.
+            # Every 400-year cycle has exactly 146097 days. Residual years fit int.
+            int day = year ? 365 * prior + prior / 4 - prior / 100 + prior / 400 : -366;
+            day += MonthStarts[month_index];
+            if (month_index > 1 && !(year % 4) && ((year % 100) || !(year % 400))) {
+                ++day;
+            }
+            string whole = XsdDurationIntegerHelper::add(
+                XsdDurationIntegerHelper::multiply(cycle.quotient, 146097), string(day));
+            whole = XsdDurationIntegerHelper::add(XsdDurationIntegerHelper::multiply(whole, 86400), seconds);
+            push result, <XsdDurationInstant>{"whole": whole, "fraction": fraction};
+        }
+        return result;
+    }
+
+    static string key(auto value, string error) {
+        return (map $1.whole + "." + $1.fraction, instants(value, error)).join(":");
+    }
+
+    static *int compare(auto left, auto right, string error) {
+        list<hash<XsdDurationInstant>> lhs = instants(left, error);
+        list<hash<XsdDurationInstant>> rhs = instants(right, error);
+        *int result;
+        for (int index = 0; index < 4; ++index) {
+            int relation = XsdIntegerLexicalHelper::compare(lhs[index].whole, rhs[index].whole);
+            if (!relation) {
+                # Qore sorts an empty string after nonempty strings; a zero
+                # fractional part must sort before every positive fraction.
+                relation = lhs[index].fraction.empty() || rhs[index].fraction.empty()
+                    ? int(!lhs[index].fraction.empty()) <=> int(!rhs[index].fraction.empty())
+                    : lhs[index].fraction <=> rhs[index].fraction;
+            }
+            if (exists result && relation != result) {
+                return;
+            }
+            result = relation;
+        }
+        return result;
+    }
+
+    static int fractionDigits(string value) {
+        return components(value, "XSD-SIMPLETYPE-ERROR").fraction.size();
+    }
+
+    static list<string> nearby(string value, int scale) {
+        hash<XsdDurationComponents> parts = components(value, "XSD-SIMPLETYPE-ERROR");
+        @assert(scale > parts.fraction.size());
+        string months = parts.negative ? XsdDurationIntegerHelper::negate(parts.months) : parts.months;
+        string grid = XsdIntegerLexicalHelper::canonical(parts.seconds + parts.fraction
+            + strmul("0", scale - parts.fraction.size()));
+        if (parts.negative) {
+            grid = XsdDurationIntegerHelper::negate(grid);
+        }
+        list<string> candidates();
+        foreach int direction in (-1, 1) {
+            *string candidate = render(months, XsdDurationIntegerHelper::add(grid, string(direction)), scale);
+            if (exists candidate) {
+                push candidates, candidate;
+            }
+            candidate = render(XsdDurationIntegerHelper::add(months, string(direction)), grid, scale);
+            if (exists candidate) {
+                push candidates, candidate;
+            }
+        }
+        # A duration has one sign. Close values on the other side of a pure
+        # negative month endpoint may need a day/second spelling. Each anchor's
+        # elapsed seconds supplies a bounded candidate, checked by the caller.
+        list<hash<XsdDurationInstant>> anchored = instants(value, "XSD-SIMPLETYPE-ERROR");
+        list<hash<XsdDurationInstant>> zero = instants("PT0S", "XSD-SIMPLETYPE-ERROR");
+        for (int index = 0; index < 4; ++index) {
+            string elapsed = XsdDurationIntegerHelper::add(anchored[index].whole,
+                XsdDurationIntegerHelper::negate(zero[index].whole));
+            string whole_grid = elapsed == "0" ? "0" : elapsed + strmul("0", scale);
+            string fraction_grid = XsdIntegerLexicalHelper::canonical(anchored[index].fraction
+                + strmul("0", scale - anchored[index].fraction.size()));
+            string base_grid = XsdDurationIntegerHelper::add(whole_grid, fraction_grid);
+            foreach int direction in (-1, 0, 1) {
+                push candidates, render("0", XsdDurationIntegerHelper::add(base_grid, string(direction)), scale);
+            }
+        }
+        return candidates;
+    }
+
+    private static *string render(string months, string grid, int scale) {
+        bool negative = months != "0" ? months[0] == "-" : grid[0] == "-";
+        if (months != "0" && grid != "0" && (months[0] == "-") != (grid[0] == "-")) {
+            return;
+        }
+        months = months[0] == "-" ? months.substr(1) : months;
+        grid = grid[0] == "-" ? grid.substr(1) : grid;
+        grid = strmul("0", max(0, scale + 1 - grid.size())) + grid;
+        string whole = grid.substr(0, grid.size() - scale);
+        string fraction = grid.substr(grid.size() - scale);
+        fraction =~ s/0+\z//;
+        return (negative ? "-P" : "P") + (months == "0" ? "" : months + "M")
+            + "T" + whole + (fraction.empty() ? "" : "." + fraction) + "S";
+    }
+
 }
 
 class XsdDurationLexicalHelper {
@@ -4211,7 +4475,7 @@ class XsdListValueHelper {
         "anyURI": True};
 
     static bool supports(string builtin) {
-        return builtin == "boolean" || XsdNumericFacetHelper::isType(builtin)
+        return builtin == "boolean" || builtin == "duration" || XsdNumericFacetHelper::isType(builtin)
             || XsdCalendarLexicalHelper::isType(builtin) || TextTypes{builtin};
     }
 
@@ -4390,6 +4654,8 @@ class XsdListValueHelper {
                 token = XsdDecimalLexicalHelper::canonical(token);
             } else if (item.builtin == "boolean") {
                 token = XsdBooleanLexicalHelper::decode(token, error) ? "true" : "false";
+            } else if (item.builtin == "duration") {
+                token = XsdDurationValueHelper::key(token, error);
             } else if (XsdCalendarLexicalHelper::isType(item.builtin)) {
                 token = XsdCalendarLexicalHelper::key(item.builtin, token, error);
             } else if (XsdIeeeLexicalHelper::isType(item.builtin)) {
@@ -5059,7 +5325,7 @@ class XsdNumericFacetHelper {
             supplied = cast<XsdIeeeDataType>(provider).getBuiltinName();
         } else if (provider instanceof XsdNumericRestrictionDataType) {
             supplied = cast<XsdNumericRestrictionDataType>(provider).getBuiltinName();
-        } else if (provider instanceof XsdDurationDataType) {
+        } else if (provider instanceof XsdDurationDataType || provider instanceof XsdDurationRestrictionDataType) {
             supplied = "duration";
         } else if (provider instanceof XsdCalendarDataType) {
             supplied = cast<XsdCalendarDataType>(provider).getBuiltinName();
@@ -5240,6 +5506,270 @@ class XsdNumericFacetHelper {
             throw error, sprintf("value %Y for simpleType %Y is not in its numeric enumeration", text, facets.name);
         }
         return text;
+    }
+}
+
+#! resolved facets for a duration restriction
+/** @since %WSDL 0.5.8 */
+public hashdecl XsdDurationFacetInfo {
+    #! declared type name
+    string name;
+    #! duration builtin local name
+    string base_name;
+    #! compiled alternatives at this derivation step
+    *list<XsdPatternConstraint> patterns;
+    #! inclusive/exclusive lower and upper endpoints
+    hash<string, string> bounds();
+    #! allowed lexical values, compared by duration value
+    *list<string> enumeration;
+}
+
+class XsdDurationFacetHelper {
+    static checkProvider(string builtin, AbstractDataProviderType provider, string error) {
+        XsdNumericFacetHelper::checkProvider(builtin, provider, error);
+        *string supplied;
+        if (provider instanceof XsdDurationDataType) {
+            supplied = cast<XsdDurationDataType>(provider).getBuiltinName();
+        } else if (provider instanceof XsdDurationRestrictionDataType) {
+            supplied = cast<XsdDurationRestrictionDataType>(provider).getBuiltinName();
+        }
+        if (exists supplied && supplied != builtin) {
+            throw error, sprintf("duration provider builtin %Y does not match declared builtin %Y", supplied, builtin);
+        }
+    }
+
+    static checkDefinition(hash<XsdDurationFacetInfo> facets, string error) {
+        if (facets.base_name != "duration") {
+            throw error, sprintf("unknown duration restriction base %Y", facets.base_name);
+        }
+        foreach string facet in (keys facets.bounds) {
+            if (facet != "minInclusive" && facet != "minExclusive" && facet != "maxInclusive"
+                    && facet != "maxExclusive") {
+                throw error, sprintf("unknown duration bound facet %Y", facet);
+            }
+            string checked = XsdDurationLexicalHelper::lexical(facets.bounds{facet}, error);
+        }
+        if ((exists facets.bounds.minInclusive && exists facets.bounds.minExclusive)
+                || (exists facets.bounds.maxInclusive && exists facets.bounds.maxExclusive)) {
+            throw error, "inclusive and exclusive bounds cannot coexist in the same restriction step";
+        }
+        checkBounds(facets.base_name, facets.bounds, error);
+        foreach string value in (facets.enumeration) {
+            string checked = XsdDurationLexicalHelper::lexical(value, error);
+        }
+        foreach XsdPatternConstraint pattern in (facets.patterns) {
+            try {
+                bool checked = XsdPatternConstraintHelper::matches("", pattern);
+            } catch (hash<ExceptionInfo> ex) {
+                if (ex.err != "REGEX-ERROR" && ex.err != "REGEX-COMPILATION-ERROR") {
+                    rethrow;
+                }
+                throw error, sprintf("invalid compiled duration pattern: %s", ex.desc);
+            }
+        }
+    }
+
+    static checkBounds(string builtin, hash<string, string> bounds, string error) {
+        foreach string minimum in ("minInclusive", "minExclusive") {
+            foreach string maximum in ("maxInclusive", "maxExclusive") {
+                if (!exists bounds{minimum} || !exists bounds{maximum}) {
+                    continue;
+                }
+                *int relation = XsdDurationValueHelper::compare(bounds{minimum}, bounds{maximum}, error);
+                bool mixed = minimum.endsWith("Inclusive") != maximum.endsWith("Inclusive");
+                if (!exists relation || relation > 0 || (!relation && mixed)) {
+                    throw error, sprintf("contradictory duration %s and %s facets", minimum, maximum);
+                }
+            }
+        }
+    }
+
+    static string validate(hash<XsdDurationFacetInfo> facets, auto value, string error) {
+        string text = XsdDurationLexicalHelper::lexical(value, error);
+        if (facets.patterns) {
+            bool matched = False;
+            foreach XsdPatternConstraint pattern in (facets.patterns) {
+                if (XsdPatternConstraintHelper::matches(text, pattern)) {
+                    matched = True;
+                    break;
+                }
+            }
+            if (!matched) {
+                throw error, sprintf("duration value %Y for %Y does not match its pattern facets", text, facets.name);
+            }
+        }
+        foreach string facet in (keys facets.bounds) {
+            *int relation = XsdDurationValueHelper::compare(text, facets.bounds{facet}, error);
+            bool invalid = !exists relation;
+            if (!invalid) {
+                switch (facet) {
+                    case "minInclusive": invalid = relation < 0; break;
+                    case "minExclusive": invalid = relation <= 0; break;
+                    case "maxInclusive": invalid = relation > 0; break;
+                    case "maxExclusive": invalid = relation >= 0; break;
+                }
+            }
+            if (invalid) {
+                throw error, sprintf("duration value %Y for %Y violates %s %Y", text, facets.name,
+                    facet, facets.bounds{facet});
+            }
+        }
+        if (facets.enumeration) {
+            string key = XsdDurationValueHelper::key(text, error);
+            foreach string allowed in (facets.enumeration) {
+                if (key == XsdDurationValueHelper::key(allowed, error)) {
+                    return text;
+                }
+            }
+            throw error, sprintf("duration value %Y for %Y is outside its enumeration", text, facets.name);
+        }
+        return text;
+    }
+}
+
+#! a duration provider that retains lexical patterns and exact value facets
+/** Bounds use the XSD four-reference-date partial order with exact decimal seconds.
+    Enumerations compare all four reference-date results. Patterns retain the XML spelling.
+    @par Example
+    An enumeration containing \c "P1Y" also accepts \c "P12M".
+    @since %WSDL 0.5.8
+*/
+public class XsdDurationRestrictionDataType inherits AbstractDataProviderType {
+    private {
+        hash<XsdDurationFacetInfo> facets;
+        AbstractDataProviderType base;
+    }
+
+    #! constructs a provider for a duration restriction
+    /** @param facets the resolved scalar facet data
+        @param base the base provider supplying native categories and requiredness
+        @throw XSD-SIMPLETYPE-ERROR invalid duration facet metadata
+    */
+    constructor(hash<XsdDurationFacetInfo> facets, AbstractDataProviderType base) {
+        XsdDurationFacetHelper::checkDefinition(facets, "XSD-SIMPLETYPE-ERROR");
+        XsdDurationFacetHelper::checkProvider(facets.base_name, base, "XSD-SIMPLETYPE-ERROR");
+        self.facets = facets;
+        self.base = base;
+    }
+
+    private:internal deserializeMembers(hash<auto> members) {
+        if (!(members.base instanceof AbstractDataProviderType)) {
+            throw "DESERIALIZATION-ERROR", "duration restriction provider requires a base provider";
+        }
+        hash<XsdDurationFacetInfo> resolved = new hash<XsdDurationFacetInfo>(members.facets);
+        XsdDurationFacetHelper::checkDefinition(resolved, "DESERIALIZATION-ERROR");
+        XsdDurationFacetHelper::checkProvider(resolved.base_name, members.base, "DESERIALIZATION-ERROR");
+        facets = resolved;
+        base = members.base;
+    }
+
+    #! returns the XSD builtin underlying this duration provider
+    /** @return the duration builtin local name
+        @since %WSDL 0.5.8
+    */
+    string getBuiltinName() {
+        return facets.base_name;
+    }
+
+    #! returns the restricted type name
+    /** @return the XSD type name with its optionality prefix */
+    string getName() {
+        return (base.isOrNothingType() ? "*" : "") + "xsd:" + facets.name;
+    }
+
+    #! prevents list providers from converting values before facet validation
+    /** @return NOTHING */
+    *Type getValueType() {
+    }
+
+    #! returns the output category, retaining patterned values as strings
+    /** @return string for this step's pattern, otherwise the base provider category */
+    int getBaseTypeCode() {
+        return facets.patterns ? NT_STRING : base.getBaseTypeCode();
+    }
+
+    #! returns the output category name, including retained patterned strings
+    /** @return string for this step's pattern, otherwise the base provider category name */
+    string getBaseTypeName() {
+        return facets.patterns ? "string" : base.getBaseTypeName();
+    }
+
+    #! returns no item type for this atomic value
+    /** @return NOTHING */
+    *AbstractDataProviderType getElementType() {
+    }
+
+    #! returns no record fields for this atomic value
+    /** @return NOTHING */
+    *hash<string, AbstractDataField> getFields() {
+    }
+
+    #! requires facet validation for all values
+    /** @return an empty map */
+    *hash<string, bool> getDirectTypeHash() {
+        return {};
+    }
+
+    #! returns accepted native categories
+    /** @param simple request simplified names
+        @return the base provider's accepted categories
+    */
+    hash<string, bool> getAcceptTypeHash(*bool simple) {
+        return base.getAcceptTypeHash(simple);
+    }
+
+    #! returns converted native categories
+    /** @param simple request simplified names
+        @return string and optional nothing for this step's pattern, otherwise the base provider's categories
+    */
+    hash<string, bool> getReturnTypeHash(*bool simple) {
+        if (facets.patterns) {
+            hash<string, bool> result = {"string": True};
+            if (base.isOrNothingType()) {
+                result.nothing = True;
+            }
+            return result;
+        }
+        return base.getReturnTypeHash(simple);
+    }
+
+    #! validates the declared restriction and converts the accepted value
+    /** @param value the native value or XML duration text
+        @return the validated duration value, or NOTHING for optional omission
+        @throw MISSING-VALUE-ERROR a required value is omitted
+        @throw RUNTIME-TYPE-ERROR lexical input or a restriction facet is invalid
+    */
+    auto acceptsValue(auto value) {
+        if (!exists value) {
+            return base.acceptsValue(value);
+        }
+        string lexical = XsdDurationFacetHelper::validate(facets, value, "RUNTIME-TYPE-ERROR");
+        auto converted = base.acceptsValue(lexical);
+        return facets.patterns ? lexical : converted;
+    }
+
+    #! returns the requiredness of the value
+    /** @return True for mandatory values */
+    bool isMandatory() {
+        return base.isMandatory();
+    }
+
+    #! returns whether omission is accepted
+    /** @return True for optional values */
+    bool isOrNothingType() {
+        return base.isOrNothingType();
+    }
+
+    #! returns an optional equivalent retaining the same restriction
+    /** @return the optional provider */
+    AbstractDataProviderType getOrNothingType() {
+        return new XsdDurationRestrictionDataType(facets, base.getOrNothingType());
+    }
+
+    #! returns a mandatory equivalent retaining the same restriction
+    /** @return the mandatory provider */
+    AbstractDataProviderType getMandatoryType() {
+        return new XsdDurationRestrictionDataType(facets, base.getMandatoryType());
     }
 }
 
@@ -5772,6 +6302,110 @@ public class XsdNumericDataField inherits QoreDataField {
     }
 }
 
+#! a duration field comparing finite choices by XSD value
+/** Choices retain their display text while equivalent durations share an exact four-reference-date key.
+    @par Example
+    A duration field fixed to \c "P1D" accepts \c "PT24H".
+    @since %WSDL 0.5.8
+*/
+public class XsdDurationDataField inherits QoreDataField {
+    private static hash<auto> withoutChoices(hash<auto> info) {
+        remove info.allowed_values;
+        remove info.element_allowed_values;
+        return info;
+    }
+
+    #! constructs a duration field with exact finite choices
+    /** @param info the ordinary QoreDataField field properties
+        @throw XSD-SIMPLETYPE-ERROR invalid duration choice text
+    */
+    constructor(hash<auto> info) : QoreDataField(XsdDurationDataField::withoutChoices(info)) {
+        if (exists info.allowed_values) {
+            setAllowedValues(info.allowed_values, info.allowed_values_creatable);
+        }
+        if (exists info.element_allowed_values) {
+            setElementAllowedValues(info.element_allowed_values, info.element_allowed_values_creatable);
+        }
+    }
+
+    #! sets duration choices without applying this restriction's lexical patterns to facet declarations
+    /** @param choices duration values or AllowedValueInfo entries
+        @param creatable whether this field permits values outside its finite choices
+        @return this field
+        @throw XSD-SIMPLETYPE-ERROR invalid duration choice text
+        @note The provider still enforces its own schema enumeration, even if creatable is True.
+    */
+    AbstractDataField setAllowedValues(list<auto> choices, *bool creatable) {
+        list<hash<AllowedValueInfo>> resolved = resolveChoices(choices);
+        hash<string, bool> value_map = map {valueKey($1.value): True}, resolved;
+        allowed_values = resolved;
+        allowed_values_map = value_map;
+        allowed_values_creatable = creatable ?? False;
+        return self;
+    }
+
+    #! sets exact duration choices for repeated elements
+    /** @param choices duration values or AllowedValueInfo entries for each element
+        @param creatable whether element values outside these choices are permitted
+        @return this field
+        @throw XSD-SIMPLETYPE-ERROR invalid duration choice text
+    */
+    AbstractDataField setElementAllowedValues(list<auto> choices, *bool creatable) {
+        list<hash<AllowedValueInfo>> resolved = resolveChoices(choices);
+        hash<string, bool> value_map = map {valueKey($1.value): True}, resolved;
+        element_allowed_values = resolved;
+        element_allowed_values_map = value_map;
+        element_allowed_values_creatable = creatable ?? False;
+        return self;
+    }
+
+    private list<hash<AllowedValueInfo>> resolveChoices(list<auto> choices) {
+        list<hash<AllowedValueInfo>> resolved();
+        foreach auto choice in (choices) {
+            hash<AllowedValueInfo> entry = choice.typeCode() == NT_HASH
+                ? new hash<AllowedValueInfo>(choice)
+                : <AllowedValueInfo>{"value": choice,
+                    "display_name": XsdDurationLexicalHelper::lexical(choice, "XSD-SIMPLETYPE-ERROR")};
+            resolved += entry;
+        }
+        return resolved;
+    }
+
+    private string valueKey(auto value) {
+        return XsdDurationValueHelper::key(value, "XSD-SIMPLETYPE-ERROR");
+    }
+
+    #! validates the type and compares finite choices in the duration value space
+    /** @param value a native duration value or XML lexical spelling
+        @return the provider's validated value with retained lexical information
+        @throw FIELD-VALUE-ERROR the duration value is outside the field's finite choices
+        @throw RUNTIME-TYPE-ERROR the underlying type rejects the value
+        @throw MISSING-VALUE-ERROR a required value is omitted
+    */
+    auto acceptsValue(auto value) {
+        if (!exists value && exists (auto default_value = getDefaultValue())) {
+            value = default_value;
+        }
+        on_error rethrow $1.err, sprintf("%s (while setting field %Y)", $1.desc, getName()), $1.arg;
+        value = getType().acceptsValue(value);
+        if (exists value && allowed_values && !allowed_values_creatable) {
+            if (!allowed_values_map{valueKey(value)}) {
+                throw "FIELD-VALUE-ERROR", sprintf("field %Y does not accept duration value %Y; allowed values: %Y",
+                    getName(), value, map $1.value, allowed_values);
+            }
+        }
+        if (exists value && element_allowed_values && !element_allowed_values_creatable) {
+            foreach auto item in (value) {
+                if (!element_allowed_values_map{valueKey(item)}) {
+                    throw "FIELD-VALUE-ERROR", sprintf("field %Y does not accept duration element value %Y",
+                        getName(), item);
+                }
+            }
+        }
+        return value;
+    }
+}
+
 #! a calendar field comparing finite choices by XSD value
 /** Choices retain their display text while equivalent timezone representations share a value key.
     @par Example
@@ -6247,6 +6881,9 @@ class XsdDataFieldHelper {
         }
         if (schema instanceof XsdBaseType && XsdCalendarLexicalHelper::isType(schema.name)) {
             return new XsdCalendarDataField(info, schema.name);
+        }
+        if (schema instanceof XsdBaseType && schema.name == "duration") {
+            return new XsdDurationDataField(info);
         }
         if (schema instanceof XsdBaseType && schema.name == "boolean") {
             return new XsdBooleanDataField(info);
@@ -8035,7 +8672,7 @@ class XsdUnionValueHelper {
         "Name": True, "NCName": True, "NMTOKEN": True, "ID": True, "IDREF": True, "ENTITY": True};
 
     static bool supports(string builtin) {
-        return XsdNumericFacetHelper::isType(builtin) || builtin == "boolean" || builtin == "hexBinary"
+        return XsdNumericFacetHelper::isType(builtin) || builtin == "boolean" || builtin == "duration" || builtin == "hexBinary"
             || builtin == "base64Binary" || StringFamily{builtin} || XsdBuiltinListHelper::isType(builtin)
             || XsdCalendarLexicalHelper::isType(builtin);
     }
@@ -8233,6 +8870,10 @@ class XsdUnionValueHelper {
     static *hash<XsdUnionValueIdentity> atomicIdentity(hash<XsdUnionAtomicInfo> info, auto input, auto converted,
             string error) {
         string builtin = info.builtin;
+        if (builtin == "duration") {
+            return <XsdUnionValueIdentity>{"family": builtin, "value": XsdDurationValueHelper::key(
+                XsdScalarTextHelper::value(input, error), error)};
+        }
         if (XsdCalendarLexicalHelper::isType(builtin)) {
             return <XsdUnionValueIdentity>{"family": builtin, "value": XsdCalendarLexicalHelper::key(builtin,
                 XsdScalarTextHelper::value(input, error), error)};
@@ -11352,6 +11993,9 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
         if (getCalendarBaseName()) {
             validateCalendarDeclaration();
         }
+        if (getDurationBaseName()) {
+            validateDurationDeclaration();
+        }
         string kind = getFacetKind();
         if (kind == "union" && (exists minInclusive || exists minExclusive
                 || exists maxInclusive || exists maxExclusive)) {
@@ -11669,6 +12313,9 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
         if (getCalendarBaseName()) {
             return new XsdCalendarRestrictionDataType(getCalendarFacets(), type.getDataProviderType());
         }
+        if (getDurationBaseName()) {
+            return new XsdDurationRestrictionDataType(getDurationFacets(), type.getDataProviderType());
+        }
         string kind = getFacetKind();
         if (kind == "union" && type) {
             return new UnionDataType(self);
@@ -11768,6 +12415,82 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
         }
     }
 
+    private *string getDurationBaseName() {
+        return getFacetKind() == "duration" ? "duration" : NOTHING;
+    }
+
+    private hash<XsdDurationFacetInfo> getDurationFacets() {
+        *string builtin = getDurationBaseName();
+        @assert(builtin);
+        hash<XsdDurationFacetInfo> result = <XsdDurationFacetInfo>{
+            "name": name, "base_name": builtin, "patterns": pcre_patterns,
+        };
+        foreach string facet in ("minInclusive", "minExclusive", "maxInclusive", "maxExclusive") {
+            if (exists self{facet}) {
+                result.bounds{facet} = XsdDurationLexicalHelper::lexical(self{facet}, "XSD-SIMPLETYPE-ERROR");
+            }
+        }
+        if (enumValues) {
+            result.enumeration = keys enumValues;
+        }
+        return result;
+    }
+
+    private validateDurationDeclaration() {
+        hash<XsdDurationFacetInfo> facets = getDurationFacets();
+        XsdDurationFacetHelper::checkDefinition(facets, "XSD-SIMPLETYPE-ERROR");
+        foreach string facet in (keys facets.bounds) {
+            validateDurationBaseValue(facets.bounds{facet}, facet.endsWith("Exclusive") ? facet : NOTHING);
+        }
+        foreach string value in (facets.enumeration) {
+            validateDurationBaseValue(value);
+        }
+        *XsdSimpleType ancestor = type instanceof XsdSimpleType ? cast<XsdSimpleType>(type) : NOTHING;
+        hash<string, string> effective = facets.bounds;
+        while (ancestor) {
+            hash<XsdDurationFacetInfo> inherited = ancestor.getDurationFacets();
+            foreach string bound in (keys inherited.bounds) {
+                if (!exists effective{bound}) {
+                    effective{bound} = inherited.bounds{bound};
+                }
+                if (ancestor.fixedFacets{bound} && exists facets.bounds{bound}
+                        && XsdDurationValueHelper::key(facets.bounds{bound}, "XSD-SIMPLETYPE-ERROR")
+                            != XsdDurationValueHelper::key(inherited.bounds{bound}, "XSD-SIMPLETYPE-ERROR")) {
+                    throw "XSD-SIMPLETYPE-ERROR", sprintf("%s in %Y changes a fixed duration bound", bound, name);
+                }
+            }
+            ancestor = ancestor.type instanceof XsdSimpleType ? cast<XsdSimpleType>(ancestor.type) : NOTHING;
+        }
+        XsdDurationFacetHelper::checkBounds(facets.base_name, effective, "XSD-SIMPLETYPE-ERROR");
+    }
+
+    private validateDurationBaseValue(string value, *string exclusive) {
+        *XsdSimpleType ancestor = type instanceof XsdSimpleType ? cast<XsdSimpleType>(type) : NOTHING;
+        bool repeated = False;
+        if (exclusive) {
+            *XsdSimpleType candidate = ancestor;
+            while (candidate) {
+                if (exists candidate{exclusive}) {
+                    repeated = XsdDurationValueHelper::key(value, "XSD-SIMPLETYPE-ERROR")
+                        == XsdDurationValueHelper::key(candidate{exclusive}, "XSD-SIMPLETYPE-ERROR");
+                    break;
+                }
+                candidate = candidate.type instanceof XsdSimpleType ? cast<XsdSimpleType>(candidate.type) : NOTHING;
+            }
+        }
+        while (ancestor) {
+            hash<XsdDurationFacetInfo> facets = ancestor.getDurationFacets();
+            if (repeated) {
+                # XSD 1.0 permits repetition of an inherited exclusive endpoint,
+                # including an endpoint excluded from the base value space.
+                facets.bounds = {};
+                remove facets.enumeration;
+            }
+            string checked = XsdDurationFacetHelper::validate(facets, value, "XSD-SIMPLETYPE-ERROR");
+            ancestor = ancestor.type instanceof XsdSimpleType ? cast<XsdSimpleType>(ancestor.type) : NOTHING;
+        }
+    }
+
     private *string getNumericBaseName() {
         *XsdAbstractType base = type;
         while (base instanceof XsdSimpleType) {
@@ -11809,11 +12532,11 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
             return boolean(stringEnumValues{value});
         }
         # Numeric enumeration is checked together with the other value facets.
-        return getNumericBaseName() || getCalendarBaseName() || !enumValues || boolean(enumValues{value});
+        return getNumericBaseName() || getCalendarBaseName() || getDurationBaseName() || !enumValues || boolean(enumValues{value});
     }
 
     *list<auto> getAllowedValues() {
-        if (getCalendarBaseName()) {
+        if (getCalendarBaseName() || getDurationBaseName()) {
             *XsdSimpleType ancestor = self;
             while (ancestor) {
                 if (ancestor.enumValues) {
@@ -11947,6 +12670,10 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
 
         if (getCalendarBaseName()) {
             string lexical = XsdCalendarFacetHelper::validate(getCalendarFacets(), val, SOAP_SERIALIZATION_ERROR);
+            return XsdScalarTextHelper::withComments(rh, type.serializeValue(nsc, lexical, omitType));
+        }
+        if (getDurationBaseName()) {
+            string lexical = XsdDurationFacetHelper::validate(getDurationFacets(), val, SOAP_SERIALIZATION_ERROR);
             return XsdScalarTextHelper::withComments(rh, type.serializeValue(nsc, lexical, omitType));
         }
 
@@ -12445,6 +13172,9 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
         if (getCalendarBaseName()) {
             return getCalendarSample(default_value);
         }
+        if (getDurationBaseName()) {
+            return getDurationSample(default_value);
+        }
         if (getFacetKind() == "boolean") {
             foreach auto candidate in (default_value, "true", "false", "1", "0") {
                 if (acceptsSample(candidate)) {
@@ -12640,6 +13370,43 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
             }
             rethrow;
         }
+    }
+
+    private auto getDurationSample(auto default_value) {
+        if (acceptsSample(default_value)) {
+            return default_value;
+        }
+        *XsdSimpleType ancestor = self;
+        list<string> endpoints();
+        int scale = 1;
+        while (ancestor) {
+            foreach string choice in (keys ancestor.enumValues) {
+                if (acceptsSample(choice)) {
+                    return choice;
+                }
+            }
+            foreach string endpoint in (ancestor.getDurationFacets().bounds.values()) {
+                push endpoints, endpoint;
+                scale = max(scale, XsdDurationValueHelper::fractionDigits(endpoint) + 1);
+            }
+            ancestor = ancestor.type instanceof XsdSimpleType ? cast<XsdSimpleType>(ancestor.type) : NOTHING;
+        }
+        list<string> candidates = endpoints;
+        foreach string endpoint in (endpoints) {
+            candidates += XsdDurationValueHelper::nearby(endpoint, scale);
+        }
+        *string patterned = getPatternSample();
+        if (exists patterned) {
+            push candidates, patterned;
+        }
+        push candidates, "PT0S";
+        foreach string candidate in (candidates) {
+            if (acceptsSample(candidate)) {
+                return candidate;
+            }
+        }
+        throw "XSD-SAMPLE-ERROR", sprintf("cannot construct a duration example satisfying the patterns, "
+            "enumerations and bounds of %Y from its endpoints or adjacent duration values; supply a valid example", name);
     }
 
     private auto getCalendarSample(auto default_value) {
@@ -12842,6 +13609,10 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
             string checked = XsdCalendarFacetHelper::validate(getCalendarFacets(), lexical ?? val, errType);
             return;
         }
+        if (getDurationBaseName()) {
+            string checked = XsdDurationFacetHelper::validate(getDurationFacets(), lexical ?? val, errType);
+            return;
+        }
 
         # Pattern validation
         # issue #5411: XSD 1.0 part 2 section 4.3.4.3: multiple "pattern" facets declared in the same restriction
@@ -12972,6 +13743,12 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
 
         if (getCalendarBaseName()) {
             string lexical = XsdCalendarFacetHelper::validate(getCalendarFacets(),
+                XsdScalarTextHelper::value(val, SOAP_DESERIALIZATION_ERROR), SOAP_DESERIALIZATION_ERROR);
+            auto converted = type.deserializeValue(en, tmap, mrh, lexical);
+            return patterns ? lexical : converted;
+        }
+        if (getDurationBaseName()) {
+            string lexical = XsdDurationFacetHelper::validate(getDurationFacets(),
                 XsdScalarTextHelper::value(val, SOAP_DESERIALIZATION_ERROR), SOAP_DESERIALIZATION_ERROR);
             auto converted = type.deserializeValue(en, tmap, mrh, lexical);
             return patterns ? lexical : converted;

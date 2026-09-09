@@ -20,6 +20,7 @@ import adjudicate
 import contract
 import corpus
 import calendar_reference
+import duration_reference
 from independent import SchemaJob, run as run_independent
 import normative
 import survey
@@ -85,6 +86,8 @@ def value_checks(expected: etree._Element, actual: etree._Element, assertions: l
                 values = {"true": True, "1": True, "false": False, "0": False}
                 before, after = before.strip(" \t\r\n"), after.strip(" \t\r\n")
                 valid = before in values and after in values and values[before] == values[after]
+            elif datatype == "duration":
+                valid = duration_reference.compare(before, after) == 0
             elif datatype in calendar_reference.FORMATS:
                 valid = calendar_reference.value(datatype, before) == calendar_reference.value(datatype, after)
             elif datatype == "list":
@@ -98,6 +101,8 @@ def value_checks(expected: etree._Element, actual: etree._Element, assertions: l
                         booleans = {"true": True, "1": True, "false": False, "0": False}
                         valid = all(a in booleans and b in booleans and booleans[a] == booleans[b]
                                     for a, b in zip(left, right))
+                    elif item_type == "duration":
+                        valid = all(duration_reference.compare(a, b) == 0 for a, b in zip(left, right))
                     elif item_type in calendar_reference.FORMATS:
                         valid = all(calendar_reference.value(item_type, a) == calendar_reference.value(item_type, b)
                                     for a, b in zip(left, right))
@@ -148,12 +153,12 @@ def validate_selection(selection: dict, records: dict) -> None:
             for assertion in assertions:
                 if (not isinstance(assertion, dict) or not isinstance(assertion.get("elements"), list)
                         or not assertion["elements"] or any(not isinstance(s, str) for s in assertion["elements"])
-                        or assertion.get("datatype") not in {"list", "boolean", "string", "normalizedString", "token", "decimal", "float", "double",
+                        or assertion.get("datatype") not in {"list", "boolean", "string", "normalizedString", "token", "decimal", "float", "double", "duration",
                             *calendar_reference.FORMATS, *normative.UNSIGNED_MAX, *normative.INTEGER_BOUNDS}
                         or ("attribute" in assertion and not isinstance(assertion["attribute"], str))):
                     raise ValueError("malformed strict value assertion")
                 if assertion["datatype"] == "list" and assertion.get("item_datatype") not in {
-                        "boolean", "string", "normalizedString", "token", "decimal", "float", "double",
+                        "boolean", "string", "normalizedString", "token", "decimal", "float", "double", "duration",
                         *calendar_reference.FORMATS, *normative.UNSIGNED_MAX, *normative.INTEGER_BOUNDS}:
                     raise ValueError("malformed strict list item assertion")
 

@@ -1,0 +1,300 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires xml
+%requires ../qlib/WSDL.qm
+
+%exec-class DurationFacetsTest
+
+class InterruptDurationFacetProvider inherits XsdDurationDataType {
+    public {
+        bool interrupt = True;
+    }
+
+    auto acceptsValue(auto value) {
+        if (interrupt) {
+            throw "PROGRAM-INTERRUPTED", "duration facet conversion interrupted";
+        }
+        return XsdDurationDataType::acceptsValue(value);
+    }
+}
+
+class DurationFacetsTest inherits QUnit::Test {
+    constructor() : Test("XSD duration facets", "1.0") {
+        addTestCase("Enumeration uses all four exact reference dates", \enumerations());
+        addTestCase("Duration bounds enforce the XSD partial order", \bounds());
+        addTestCase("Arbitrary components and decimal seconds remain exact", \extended());
+        addTestCase("Patterns retain lexical spelling across derivation", \patterns());
+        addTestCase("Contradictory, fixed and inherited duration facets reject", \declarations());
+        addTestCase("Finite duration choices compare values and update atomically", \fields());
+        addTestCase("Fixed attributes compare durations across spellings", \fixedValues());
+        addTestCase("Lists and unions retain duration primitive identity", \collections());
+        addTestCase("Examples fit exact narrow and negative intervals", \examples());
+        addTestCase("Malformed public metadata rejects before conversion", \metadata());
+        addTestCase("Cancellation propagates and provider conversion recovers", \cancellation());
+        set_return_value(main());
+    }
+
+    private static XsdSchema schema(string builtin, string facets, string parent = "", string extra = "") {
+        return new XsdSchema('<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:t="urn:duration"
+            targetNamespace="urn:duration"><xs:simpleType name="Base"><xs:restriction base="xs:' + builtin + '">'
+            + parent + '</xs:restriction></xs:simpleType><xs:simpleType name="Value"><xs:restriction base="t:Base">'
+            + facets + '</xs:restriction></xs:simpleType>' + extra + '</xs:schema>', {"async_only": True});
+    }
+
+    private check(string builtin, string facets, list<string> valid, list<string> invalid, string parent = "") {
+        XsdSchema original = schema(builtin, facets, parent);
+        foreach XsdSchema definition in (original, Serializable::deserialize(original.serialize())) {
+            XsdAbstractType type = definition.findType(make_qname("urn:duration", "Value"));
+            AbstractDataProviderType provider = type.getDataProviderType();
+            foreach AbstractDataProviderType current in (provider, Serializable::deserialize(provider.serialize()),
+                    provider.getOrNothingType().getMandatoryType()) {
+                assertEq(builtin, cast<XsdDurationRestrictionDataType>(current).getBuiltinName());
+                foreach string value in (valid) {
+                    auto decoded = type.deserializeValue("value", {}, NOTHING, value);
+                    assertEq(decoded, current.acceptsValue(value));
+                    assertEq(decoded, new ListDataType(current).acceptsValue((value,))[0]);
+                    assertEq(value, type.serializeValue(new Namespaces({}), value, True));
+                    assertEq(decoded, type.deserializeValue("value", {}, NOTHING,
+                        type.serializeValue(new Namespaces({}), decoded, True)));
+                }
+                foreach string value in (invalid) {
+                    assertThrows("SOAP-SERIALIZATION-ERROR", \type.serializeValue(), (new Namespaces({}), value, True), value);
+                    assertThrows("SOAP-DESERIALIZATION-ERROR", \type.deserializeValue(), ("value", {}, NOTHING, value), value);
+                    assertThrows("RUNTIME-TYPE-ERROR", \current.acceptsValue(), (value,), value);
+                }
+            }
+        }
+    }
+
+    private enumerations() {
+        check("duration", '<xs:enumeration value="P1Y"/>', ("P1Y", "P12M", "P0Y12M0DT0H0M0.000S"),
+            ("P365D", "P366D", "-P12M"));
+        check("duration", '<xs:enumeration value="P1D"/>', ("P1D", "PT24H", "PT1440M", "PT86400S"),
+            ("P1M", "PT86399.999999999999999999S"));
+        check("duration", '<xs:enumeration value="PT0S"/>', ("P0Y", "-PT0.00S", "P0Y0M0DT0H0M0S"),
+            ("PT0.00000000000000000001S", "-PT0.00000000000000000001S"));
+        foreach string sign in ("", "-") {
+            check("duration", '<xs:enumeration value="' + sign + 'P400Y"/>',
+                (sign + "P400Y", sign + "P4800M", sign + "P146097D"), (sign + "P146098D", sign + "P146096D"));
+            check("duration", '<xs:enumeration value="' + sign + 'P2000Y"/>',
+                (sign + "P2000Y", sign + "P730485D"), (sign + "P730484D",));
+        }
+    }
+
+    private bounds() {
+        check("duration", '<xs:minInclusive value="P1M"/>', ("P1M", "P32D", "P2M"),
+            ("P28D", "P29D", "P30D", "P31D", "P27D"));
+        check("duration", '<xs:maxInclusive value="P1M"/>', ("P1M", "P27D", "PT0S"),
+            ("P28D", "P29D", "P30D", "P31D", "P32D"));
+        check("duration", '<xs:minExclusive value="P1M"/>', ("P32D", "P2M"),
+            ("P1M", "P28D", "P31D"));
+        check("duration", '<xs:maxExclusive value="P1M"/>', ("P27D", "-P1M"),
+            ("P1M", "P28D", "P31D"));
+        check("duration", '<xs:minExclusive value="-P1M"/><xs:maxInclusive value="PT0S"/>',
+            ("-P27D", "-PT1S", "PT0S"), ("-P1M", "-P28D", "-P31D", "PT0.01S"));
+    }
+
+    private extended() {
+        string lower = "PT1.00000000000000001S";
+        string upper = "PT1.00000000000000002S";
+        check("duration", '<xs:enumeration value="' + lower + '"/>', (lower, "PT1.000000000000000010S"), (upper, "PT1S"));
+        check("duration", '<xs:minExclusive value="' + lower + '"/><xs:maxInclusive value="' + upper + '"/>',
+            (upper, "PT1.000000000000000015S"), (lower, "PT1.000000000000000021S"));
+        string tiny = "PT0." + strmul("0", 1000) + "1S";
+        check("duration", '<xs:minExclusive value="PT0S"/><xs:maxInclusive value="' + tiny + '"/>',
+            (tiny,), ("PT0S", "-" + tiny));
+        check("duration", '<xs:maxExclusive value="PT0S"/><xs:minInclusive value="-' + tiny + '"/>',
+            ("-" + tiny,), ("PT0S", tiny));
+        string years = "4" + strmul("0", 1000);
+        string days = "146097" + strmul("0", 998);
+        foreach string sign in ("", "-") {
+            check("duration", '<xs:enumeration value="' + sign + 'P' + years + 'Y"/>',
+                (sign + "P" + years + "Y", sign + "P" + days + "D"), (sign + "P" + days + "DT0.1S",));
+        }
+        # Carry and borrow cross multiple 10^9 limbs and the zero boundary.
+        check("duration", '<xs:enumeration value="PT1000000000000000000000000000S"/>',
+            ("PT1000000000000000000000000000S", "PT16666666666666666666666666M40S"),
+            ("PT999999999999999999999999999.999999999999999S",));
+    }
+
+    private patterns() {
+        check("duration", '<xs:pattern value="PT24H"/>', ("PT24H",), ("P1D", "PT86400S"),
+            '<xs:enumeration value="P1D"/>');
+        check("duration", '<xs:pattern value="P1D"/><xs:pattern value="PT24H"/>', ("P1D", "PT24H"),
+            ("PT86400S",), '<xs:minInclusive value="PT0S"/>');
+    }
+
+    private declarations() {
+        foreach string facets in ('<xs:totalDigits value="2"/>', '<xs:fractionDigits value="0"/>',
+                '<xs:length value="1"/>', '<xs:whiteSpace value="preserve"/>', '<xs:enumeration value="bad"/>',
+                '<xs:minInclusive value="P"/>', '<xs:minInclusive value="P2D"/><xs:maxInclusive value="P1D"/>',
+                '<xs:minInclusive value="P1M"/><xs:maxInclusive value="P30D"/>',
+                '<xs:minInclusive value="P1D"/><xs:minExclusive value="P1D"/>',
+                '<xs:minInclusive value="P1D"/><xs:maxExclusive value="PT24H"/>') {
+            assertThrows("XSD-SIMPLETYPE-ERROR", \schema(), ("duration", facets));
+        }
+        assertThrows("XSD-SIMPLETYPE-ERROR", \schema(), ("duration", '<xs:minInclusive value="P1D"/>',
+            '<xs:minInclusive value="P2D"/>'));
+        assertThrows("XSD-SIMPLETYPE-ERROR", \schema(), ("duration", '<xs:minInclusive value="P2D"/>',
+            '<xs:minInclusive value="P1D" fixed="true"/>'));
+        check("duration", '<xs:minInclusive value="PT24H"/>', ("P1D", "P2D"), ("PT23H",),
+            '<xs:minInclusive value="P1D" fixed="true"/>');
+        check("duration", '<xs:minExclusive value="PT24H"/>', ("P2D",), ("P1D",),
+            '<xs:minExclusive value="P1D"/>');
+    }
+    private fields() {
+        XsdDurationDataField original({"name": "delay", "type": new XsdDurationDataType(),
+            "allowed_values": ("P1D",)});
+        foreach XsdDurationDataField field in (original, Serializable::deserialize(original.serialize())) {
+            assertEq("PT24H", field.acceptsValue("PT24H"));
+            assertThrows("FIELD-VALUE-ERROR", \field.acceptsValue(), ("PT23H",));
+            assertThrows("XSD-SIMPLETYPE-ERROR", \field.setAllowedValues(), (("P2D", "bad"), False));
+            assertEq("P1D", field.getAllowedValues()[0].value);
+            assertThrows("FIELD-VALUE-ERROR", \field.acceptsValue(), ("P2D",));
+            field.setAllowedValues(("P2D",), True);
+            assertEq("P3D", field.acceptsValue("P3D"));
+        }
+        XsdDurationDataField repeated({"name": "delays", "type": new ListDataType(new XsdDurationDataType())});
+        repeated.setElementAllowedValues(("P1D",), False);
+        assertEq(("P1D", "PT24H"), repeated.acceptsValue(("P1D", "PT24H")));
+        assertThrows("FIELD-VALUE-ERROR", \repeated.acceptsValue(), (("P2D",),));
+        assertThrows("XSD-SIMPLETYPE-ERROR", \repeated.setElementAllowedValues(), (("P2D", "bad"), False));
+        assertThrows("FIELD-VALUE-ERROR", \repeated.acceptsValue(), (("P2D",),));
+        assertEq(("PT24H",), Serializable::deserialize(repeated.serialize()).acceptsValue(("PT24H",)));
+    }
+
+    private fixedValues() {
+        XsdSchema original = schema("duration", "", "", '<xs:complexType name="Record">
+            <xs:attribute name="delay" type="t:Value" fixed="P400Y"/>
+            <xs:attribute name="tiny" type="xs:duration" fixed="PT0.000000000000000001S"/></xs:complexType>');
+        foreach XsdSchema definition in (original, Serializable::deserialize(original.serialize())) {
+            XsdAbstractType record = definition.findType(make_qname("urn:duration", "Record"));
+            hash<auto> input = {"^attributes^": {"delay": "P146097D", "tiny": "PT0.0000000000000000010S"}};
+            hash<auto> decoded = record.deserializeValue("value", {}, NOTHING, input);
+            assertEq(input, decoded);
+            assertEq(input."^attributes^", record.serializeValue(new Namespaces({}), input, True)."^attributes^");
+            AbstractDataProviderType provider = Serializable::deserialize(record.getDataProviderType().serialize());
+            assertEq(decoded, provider.acceptsValue(input));
+            AbstractDataField field = provider.getFields()."^attributes^".getType().getFields().delay;
+            assertTrue(field instanceof XsdDurationDataField);
+            assertEq("P4800M", field.acceptsValue("P4800M"));
+            input."^attributes^".tiny = "PT0.000000000000000002S";
+            assertThrows("SOAP-SERIALIZATION-ERROR", \record.serializeValue(), (new Namespaces({}), input, True));
+            assertThrows("SOAP-DESERIALIZATION-ERROR", \record.deserializeValue(), ("value", {}, NOTHING, input));
+            assertThrows("RUNTIME-TYPE-ERROR", \provider.acceptsValue(), (input,));
+        }
+    }
+
+    private collections() {
+        XsdSchema original = schema("duration", "", "", '<xs:simpleType name="Items"><xs:list itemType="xs:duration"/></xs:simpleType>
+            <xs:simpleType name="Selected"><xs:restriction base="t:Items">
+            <xs:enumeration value="P1D PT0.000000000000000001S"/></xs:restriction></xs:simpleType>
+            <xs:simpleType name="Either"><xs:union memberTypes="xs:duration xs:string"/></xs:simpleType>
+            <xs:simpleType name="OnlyDuration"><xs:restriction base="t:Either"><xs:enumeration value="P1D"/>
+            </xs:restriction></xs:simpleType>
+            <xs:simpleType name="DayText"><xs:restriction base="xs:string"><xs:pattern value="P1D"/>
+            </xs:restriction></xs:simpleType><xs:simpleType name="TextFirst"><xs:union memberTypes="t:DayText xs:duration"/></xs:simpleType>
+            <xs:simpleType name="OnlyText"><xs:restriction base="t:TextFirst"><xs:enumeration value="P1D"/>
+            </xs:restriction></xs:simpleType>
+            <xs:simpleType name="MixedItems"><xs:list itemType="t:Either"/></xs:simpleType>
+            <xs:simpleType name="MixedSelected"><xs:restriction base="t:MixedItems">
+            <xs:enumeration value="P1D label"/></xs:restriction></xs:simpleType>');
+        foreach XsdSchema definition in (original, Serializable::deserialize(original.serialize())) {
+            foreach string name in ("Selected", "MixedSelected") {
+                string second = name == "Selected" ? "PT0.000000000000000001S" : "label";
+                XsdAbstractType items = definition.findType(make_qname("urn:duration", name));
+                list<auto> result = items.deserializeValue("value", {}, NOTHING, "PT24H " + second);
+                assertEq(("PT24H", second), result);
+                AbstractDataProviderType provider = Serializable::deserialize(items.getDataProviderType().serialize());
+                assertEq(result, provider.acceptsValue(("PT24H", second)));
+                assertEq("PT24H " + second, items.serializeValue(new Namespaces({}), result, True));
+                assertThrows("SOAP-DESERIALIZATION-ERROR", \items.deserializeValue(),
+                    ("value", {}, NOTHING, "PT23H " + second));
+                assertThrows("RUNTIME-TYPE-ERROR", \provider.acceptsValue(), (("PT23H", second),));
+                assertThrows("RUNTIME-TYPE-ERROR", \provider.acceptsValue(), ((second, "PT24H"),));
+            }
+            XsdAbstractType either = definition.findType(make_qname("urn:duration", "OnlyDuration"));
+            AbstractDataProviderType provider = Serializable::deserialize(either.getDataProviderType().serialize());
+            assertEq("PT24H", either.deserializeValue("value", {}, NOTHING, "PT24H"));
+            assertEq("PT24H", provider.acceptsValue("PT24H"));
+            assertThrows("SOAP-DESERIALIZATION-ERROR", \either.deserializeValue(), ("value", {}, NOTHING, "PT23H"));
+            assertThrows("RUNTIME-TYPE-ERROR", \provider.acceptsValue(), ("bad",));
+            either = definition.findType(make_qname("urn:duration", "OnlyText"));
+            provider = Serializable::deserialize(either.getDataProviderType().serialize());
+            assertEq("P1D", either.deserializeValue("value", {}, NOTHING, "P1D"));
+            assertEq("P1D", provider.acceptsValue("P1D"));
+            assertThrows("SOAP-DESERIALIZATION-ERROR", \either.deserializeValue(), ("value", {}, NOTHING, "PT24H"));
+            assertThrows("RUNTIME-TYPE-ERROR", \provider.acceptsValue(), ("PT24H",));
+        }
+    }
+
+    private examples() {
+        foreach list<string> pair in (("PT0S", "PT0.00000000000000000000001S"),
+                ("PT1.000000000000000001S", "PT1.000000000000000002S"), ("-P1M", "-P27D"),
+                ("P27D", "P1M"), ("-PT1.000000000000000002S", "-PT1.000000000000000001S")) {
+            XsdSchema definition = schema("duration", '<xs:minExclusive value="' + pair[0]
+                + '"/><xs:maxExclusive value="' + pair[1] + '"/>');
+            XsdSimpleType type = cast<XsdSimpleType>(definition.findType(make_qname("urn:duration", "Value")));
+            string sample = type.getSampleValue("bad");
+            assertTrue(pair[0] != sample);
+            assertTrue(pair[1] != sample);
+            assertEq(sample, type.deserializeValue("value", {}, NOTHING, sample));
+            assertEq(sample, Serializable::deserialize(type.getDataProviderType().serialize()).acceptsValue(sample));
+        }
+        foreach string facets in ('<xs:minExclusive value="P1D"/><xs:maxExclusive value="PT24H"/>',
+                '<xs:pattern value="bad"/>') {
+            XsdSchema definition = schema("duration", facets);
+            XsdSimpleType empty = cast<XsdSimpleType>(definition.findType(make_qname("urn:duration", "Value")));
+            assertThrows("XSD-SAMPLE-ERROR", \empty.getSampleValue(), ("bad",));
+        }
+        XsdSchema definition = schema("duration", '<xs:minInclusive value="P2D"/>',
+            '<xs:enumeration value="P1D"/><xs:enumeration value="P2D"/>');
+        XsdSimpleType type = cast<XsdSimpleType>(definition.findType(make_qname("urn:duration", "Value")));
+        assertEq(("P2D",), type.getAllowedValues());
+        assertEq("P2D", type.getSampleValue("bad"));
+    }
+
+    private static AbstractDataProviderType fromFacets(hash<XsdDurationFacetInfo> facets) {
+        return new XsdDurationRestrictionDataType(facets, new XsdDurationDataType());
+    }
+
+    private metadata() {
+        hash<XsdDurationFacetInfo> valid = <XsdDurationFacetInfo>{"name": "Value", "base_name": "duration",
+            "bounds": {"minInclusive": "P1D"}};
+        foreach hash<auto> change in ({"base_name": "string"}, {"bounds": {"minimum": "P1D"}},
+                {"bounds": {"minInclusive": "P"}}, {"enumeration": ("PT.1S",)},
+                {"bounds": {"minInclusive": "P1D", "minExclusive": "P1D"}},
+                {"bounds": {"minInclusive": "P2D", "maxInclusive": "P1D"}},
+                {"bounds": {"minInclusive": "P1M", "maxInclusive": "P30D"}}, {"patterns": ("[",)}) {
+            hash<XsdDurationFacetInfo> invalid = new hash<XsdDurationFacetInfo>(valid + change);
+            assertThrows("XSD-SIMPLETYPE-ERROR", \fromFacets(), (invalid,));
+        }
+        foreach AbstractDataProviderType wrong in (new XsdCalendarDataType("date"), new XsdIeeeDataType("double"),
+                new XsdIntegerDataType("int"), new XsdDecimalDataType()) {
+            assertThrows("XSD-SIMPLETYPE-ERROR", sub() { new XsdDurationRestrictionDataType(valid, wrong); });
+        }
+        AbstractDataProviderType original = fromFacets(valid);
+        hash<SerializationInfo> state = original.serializeToData();
+        string index = state._index."0"._class_data."WSDL::XsdDurationRestrictionDataType".facets._index;
+        state._index{index}._members.base_name = "date";
+        assertThrows("DESERIALIZATION-ERROR", \Serializable::deserialize(), (state,));
+        assertEq("PT24H", Serializable::deserialize(original.serialize()).acceptsValue("PT24H"));
+        hash<XsdNumericFacetInfo> numeric = <XsdNumericFacetInfo>{"name": "Number", "base_name": "float", "bounds": {}};
+        assertThrows("XSD-SIMPLETYPE-ERROR", sub() { new XsdNumericRestrictionDataType(numeric, original); });
+    }
+
+    private cancellation() {
+        InterruptDurationFacetProvider base();
+        XsdDurationRestrictionDataType provider(<XsdDurationFacetInfo>{"name": "Value", "base_name": "duration",
+            "bounds": {"minInclusive": "P1D"}}, base);
+        assertThrows("PROGRAM-INTERRUPTED", \provider.acceptsValue(), ("P2D",));
+        base.interrupt = False;
+        assertEq("P2D", provider.acceptsValue("P2D"));
+        assertThrows("RUNTIME-TYPE-ERROR", \provider.acceptsValue(), ("PT23H",));
+        assertEq("P3D", provider.acceptsValue("P3D"));
+    }
+
+}

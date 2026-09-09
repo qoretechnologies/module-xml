@@ -124,6 +124,21 @@ class CoverageTest(unittest.TestCase):
             with self.subTest(item_type=item_type), self.assertRaises(ValueError):
                 coverage.validate_selection(selection, records)
 
+    def test_duration_value_assertions_detect_precision_and_partial_order_loss(self):
+        for before, after, valid in (('P1D', 'PT24H', True), ('P400Y', 'P146097D', True),
+                ('-P2000Y', '-P730485D', True), ('P1M', 'P30D', False),
+                ('PT1.00000000000000001S', 'PT1.00000000000000002S', False),
+                ('PT0.' + '0' * 1000 + '1S', 'PT0S', False), ('PT.1S', 'PT0.1S', False)):
+            with self.subTest(before=before, after=after):
+                expected = etree.fromstring(('<value>' + before + '</value>').encode())
+                actual = etree.fromstring(('<value>' + after + '</value>').encode())
+                assertion = {'elements': ['value'], 'datatype': 'duration'}
+                self.assertEqual(valid, coverage.value_checks(expected, actual, [assertion])['ok'])
+                assertion = {'elements': ['value'], 'datatype': 'list', 'item_datatype': 'duration'}
+                expected.text = before + ' P1D'
+                actual.text = after + ' PT24H'
+                self.assertEqual(valid, coverage.value_checks(expected, actual, [assertion])['ok'])
+
     def test_calendar_value_assertions_detect_timezone_and_year_loss(self):
         huge = '1' + '0' * 1000
         for datatype, before, after, valid in (
@@ -347,7 +362,7 @@ class CoverageTest(unittest.TestCase):
         self.assertEqual("", process.stderr)
         report = json.loads(output.read_text())
         self.assertEqual([], report["selected_failures"])
-        self.assertEqual({"wsdls": 114, "message_directions": 1100}, report["selected_scope"])
+        self.assertEqual({"wsdls": 116, "message_directions": 1120}, report["selected_scope"])
         self.assertEqual(293, len(report["cases"]))
         self.assertEqual(2272, sum(len(c["messages"]) for c in report["cases"]))
         for stage, counts in report["stage_accounting"]["counts"].items():

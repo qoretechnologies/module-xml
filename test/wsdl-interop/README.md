@@ -837,9 +837,9 @@ qore -b --enable-debug test/wsdl-interop/calendar-validator.qr \
 
 The diagnostic prints each native verdict and its expected rejection diagnostic;
 its exit status reports successful execution, not standards conformance.
-DateTime, time, duration and the remaining P3 requirements stay open.
+DateTime, time and the remaining P3 requirements stay open.
 
-## Duration lexical values
+## Duration values and facets
 
 Run `wsdl-duration-values.qtest` and `wsdl-duration-consumers.qtest` with debugging
 enabled, plus `python3 test/wsdl-interop/test_duration_values.py -v`.
@@ -849,5 +849,19 @@ microseconds. Absolute dates and opposing month/second component signs reject.
 Optional and reconstructed providers retain validation; local HTTP tests exercise
 actual SOAP 1.1/1.2 bindings, attributes, basic lists/unions and request recovery.
 See [the public contract](../../design/wsdl-duration-values.md) and
-[validator evidence](duration-values-evidence.md). Exact duration facets, choices
-and collection identity remain following P3 work.
+[validator evidence](duration-values-evidence.md). Exact duration facets and collection identity are described below.
+
+
+`test/wsdl-duration-facets.qtest` covers all four bounds, inherited/fixed
+constraints, patterns, exact finite choices, fixed attributes, lists/unions,
+provider reconstruction and cancellation, and narrow-interval examples.
+`test_duration_facets.py` checks 1,376 arithmetic boundary rows against independent
+integer/Fraction reference-date calculations, plus actual SOAP bindings in both
+versions/directions with detached element/message providers and generated examples.
+The HTTP consumer suite also carries restricted durations, fixed attributes and
+list/union enumerations through SoapClient and SoapHandler.
+
+See [duration facet evidence](duration-facets-evidence.md) for the exact validator
+disagreements. The strict corpus selection includes `DurationElement` and
+`DurationAttribute` with independent duration-value assertions. The selection is
+116 WSDLs and 1,120 message directions; all broader P4/P5/P6 findings remain visible.

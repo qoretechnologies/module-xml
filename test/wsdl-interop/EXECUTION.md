@@ -3790,3 +3790,91 @@ enumeration/fixed/finite choices, list/union identity, derived provider metadata
 valid sample construction before duration acceptance can close. The exact
 fraction/400-year oracle defects and reference experiment recorded above remain
 part of that work. No P3 completion or final interoperability acceptance is claimed.
+
+## P3-26 — Exact duration facets and composite identity
+
+P3-25 is committed as `d8da402`. P3-26 completes its following exact duration
+relation, four bounds/declarations, enumeration/fixed/finite-choice identity,
+list/union semantics, derived providers and validated samples. Main Qore was clean
+on `develop` at resumption, with the separately committed calendar prerequisite
+at `db964e98f`; no main-repository work, installation or push was performed here.
+
+Root cause: generic duration restrictions coerced values for numeric comparisons,
+used authored strings for equality, and lost constraints in detached providers.
+The implementation now uses XSD 1.0 §3.2.6.2/Appendix E reference-date addition.
+Signed decimal limbs, Euclidean 400-year cycles and exact fractional strings avoid
+native range limits and binary rounding. The four reference results distinguish
+incomparable month/day values and identify 400-year Gregorian aliases. This is
+normative value comparison; Qore's display-rounding heuristic is not applied.
+
+`XsdDurationRestrictionDataType` retains inherited lexical patterns, exact bounds,
+enumerations and optionality. Construction rejects contradictory, weakened or
+changed fixed bounds and incompatible builtin metadata. Repeated inherited
+exclusive endpoints follow the XSD declaration rule. `XsdDurationDataField`, fixed
+attributes, list facets and union identities share exact four-reference-date keys.
+Finite choices validate replacements before changing state. Sample construction
+uses one decimal place finer than all endpoints and bounded nearby month/second
+candidates, including anchor-relative seconds for negative month endpoints. Every
+candidate passes all inherited constraints; unsuccessful search raises the existing
+explicit sample-generation error.
+
+The independent reference uses Python integers and Fraction arithmetic rather than
+the production limb/cycle calculation. The **1,376-row** boundary matrix passes
+wire encoding/decoding, reconstructed providers, all four bounds and enumeration,
+including arbitrary magnitudes, tiny signed fractions, zero/century transitions
+and seeded mixed-component aliases. Actual SOAP 1.1/1.2 WSDL binding tests cover
+both directions, scalar/record/repeated values, detached element/message providers
+and examples. Local HTTP SoapClient/SoapHandler tests carry restricted/fixed/list/
+union durations in requests and responses, with invalid-request recovery.
+
+The pinned validator fixture records **16 exact triples in 11 groups**: eight
+fractional-second defects in both libxml2 and Xerces, and eight Gregorian duration
+comparison defects in both libxml2 versions. Private libxml2 2.15.4 reproduces all
+16 with empty diagnostic stderr. Production keeps the normative verdicts, including
+the valid generated value `PT1.000000000000000009S` below the exclusive
+`PT1.00000000000000001S` bound. Sources, complete fixture and reproducer commands
+are in `duration-facets-evidence.md`; original corpus bytes are unchanged.
+
+### P3-26 verification and commit gate
+
+- All **72 affected Qore suites, 800 cases and 29,678 assertions** complete
+  successfully, with no warnings or test-case errors. The existing soap suite's
+  summary retains its baseline assertion accounting (1,031 total / 1,028 succeeded,
+  all 20 cases successful); no new test failure is hidden by that accounting.
+  Log: `/tmp/wsdl-p3-26-duration-final-suites.log`, with per-suite logs.
+- The three duration suites pass **20 cases / 3,269 assertions** per mode/zone,
+  **160 cases / 26,152 assertions** over AST/IR/JIT/tiered × UTC/Europe-Prague.
+  `/tmp/wsdl-p3-26-duration-modes.log` and adjacent JSON retain every result.
+- Local compiled modules pass another **20 cases / 3,269 assertions**; the expanded
+  design example executes with no output. WSDL/SoapDataProvider/SoapClient/SoapHandler
+  qmods and WSDL Qdx/Doxygen build without warnings/errors. Logs:
+  `/tmp/wsdl-p3-26-duration-aot.log` and
+  `/tmp/wsdl-p3-26-duration-build-docs-final.log`.
+- The affected Python run executes **34 methods in 119.111 seconds**, retaining
+  exactly the two known P6 selected-binding-version failures, with no new failures,
+  errors or warnings. All new methods pass. The final import/format cleanup is
+  rechecked by the three-method reference/coverage unit run in **22.205 seconds**.
+  Logs: `/tmp/wsdl-p3-26-python-affected.log`,
+  `/tmp/wsdl-p3-26-duration-final-reference.log` and
+  `/tmp/wsdl-p3-26-duration-python-comparison.json`. This is an affected subset,
+  not a new full Python discovery run; the prior full-run baseline remains above.
+- Both-version survey counts and all **168** broad coverage failure signatures
+  are unchanged. The strict gate adds DurationElement/DurationAttribute with
+  independent value assertions and passes **116 WSDLs / 1,120 message directions**
+  with **zero selected failures**. `/tmp/wsdl-p3-26-duration-report-comparison.json`
+  records empty added/removed failure sets. Current reports retain all wider
+  diagnostics, including 102 decoding failures, two serialization failures,
+  46 invalid outputs and eight valid-input/invalid-output examples.
+- The full audit is **21 Pass, 41 N/A, 0 Fail** in
+  `audits/P3-26-duration-facets.md`. No C++ changed, so Valgrind is not required.
+  All intended source/report/audit and built-artifact hashes are captured in
+  `/tmp/wsdl-p3-26-duration-final-hashes.json` before commit. The frozen Debug core
+  SHA256 remains `80078ec30d71bc618b7bb40991bad63604303f379c3e47e6dd41d58d0dbc56fd`;
+  the unchanged native XML qmod SHA256 is
+  `ea937cab716ed204aef3d3d90f0af17ee1930d9650ef7a6f3fceffbcfcac54fc`.
+
+P3 remains active. The leap-second compatibility decision for dateTime/time is
+still awaiting the previously requested explicit policy answer; no answer or
+approval has been inferred. Continue independent P3 binary/QName/entity/XML-RPC
+requirements while that decision is pending. All P4-P9 ownership and acceptance
+criteria remain open; this increment is not final interoperability acceptance.

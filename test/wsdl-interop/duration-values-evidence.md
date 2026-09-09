@@ -3,8 +3,8 @@
 Copyright (C) 2026 Qore Technologies, s.r.o.
 
 This increment implements strict duration lexical/native conversion and its scalar
-provider contract, including rejection of incompatible builtin provider metadata. Duration bounds, enumeration/fixed/choice identity, derived
-provider facets and collection value identity remain explicit following P3 work.
+provider contract, including rejection of incompatible builtin provider metadata. Duration bounds, enumeration/fixed/choice identity, derived provider facets and
+collection identity are now covered by [the following facet increment](duration-facets-evidence.md).
 The implemented representation is described in [the design](../../design/wsdl-duration-values.md).
 
 ## Normative requirements and root causes
