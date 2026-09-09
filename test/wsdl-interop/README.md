@@ -943,3 +943,17 @@ values, reconstruction, failure recovery, interruption and concurrent calls.
 `wsdl-binary-consumers.qtest` reuses the same retained values through real HTTP
 requests and responses in both SOAP versions. See [the lifetime contract](../../design/wsdl-binary-values.md#caller-ownership-during-record-conversion)
 and [regression evidence](caller-owned-values-evidence.md).
+
+
+## Native QName union validation
+
+Run `qore --enable-debug test/xml-qname-unions.qtest` and
+`python3 test/wsdl-interop/test_qname_union_validator.py -v` from the repository
+root with the local native module selected. A failed QName trial no longer
+rejects a union whose later member accepts. The tests preserve text/attributes,
+verify ordered enumeration identity, cover nested unions and lists, and check
+invalid input and cancellation recovery. CMake probes both DOM and streaming
+validation and rejects partial backports that still have this defect.
+See [the native design](../../design/xml-qname-validation.md) and
+[independent evidence](qname-union-validator-evidence.md). General WSDL QName
+instance/output integration remains a separate open P3 criterion.

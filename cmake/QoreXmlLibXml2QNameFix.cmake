@@ -12,6 +12,35 @@ function(qore_xml_replace_libxml2_qname_source source_dir binary_dir filename or
     endif()
     file(READ "${_original}" _source)
     string(REPLACE "${old}" "${new}" _fixed "${_source}")
+    if(filename STREQUAL "xmlschemas.c")
+        # Union trial validation passes fireErrors=0. Keep an unbound QName's
+        # rejection local to that candidate so another member can accept it.
+        string(REPLACE [=[		       int valNeeded)
+{
+    int ret;
+    xmlChar *stripped;]=]
+            [=[		       int valNeeded,
+		       int fireErrors)
+{
+    int ret;
+    xmlChar *stripped;]=] _fixed "${_fixed}")
+        string(REPLACE [=[	    xmlSchemaCustomErr(ACTXT_CAST vctxt, ret, NULL,
+		WXS_BASIC_CAST xmlSchemaGetBuiltInType(XML_SCHEMAS_QNAME),
+		"The QName value '%s' has no "
+		"corresponding namespace declaration in "
+		"scope", value, NULL);]=]
+            [=[	    if (fireErrors) {
+		xmlSchemaCustomErr(ACTXT_CAST vctxt, ret, NULL,
+		    WXS_BASIC_CAST xmlSchemaGetBuiltInType(XML_SCHEMAS_QNAME),
+		    "The QName value '%s' has no "
+		    "corresponding namespace declaration in "
+		    "scope", value, NULL);
+	    }]=] _fixed "${_fixed}")
+        string(REPLACE [=[ret = xmlSchemaValidateQName((xmlSchemaValidCtxtPtr) actxt,
+			value, &val, valNeeded);]=]
+            [=[ret = xmlSchemaValidateQName((xmlSchemaValidCtxtPtr) actxt,
+			value, &val, valNeeded, fireErrors);]=] _fixed "${_fixed}")
+    endif()
     string(SHA256 _fixed_hash "${_fixed}")
     if(NOT _fixed_hash STREQUAL fixed_hash)
         message(FATAL_ERROR "Pinned libxml2 QName fix did not match ${filename}")
@@ -35,7 +64,7 @@ endfunction()
 function(qore_xml_fix_libxml2_qnames source_dir binary_dir)
     qore_xml_replace_libxml2_qname_source("${source_dir}" "${binary_dir}" xmlschemas.c
         bed8bfbfd61a2025b67b7a0e4d05ce50093e7a6bb5e43a3ebac343b8df4329a7
-        e7910a943964ce25bac32479fec4b244e1b0080abd6ae7146210d88ca3877098
+        99eeb19c5c78c3407af28efc22752ae8c5e581ef74a5c09807ab3fcf37277650
         "{\n    if (vctxt->sax != NULL) {\n"
         "{\n    /* The xml prefix is bound even without a namespace declaration. */\n    if (xmlStrEqual(prefix, BAD_CAST \"xml\")) {\n        return (XML_XML_NAMESPACE);\n    }\n    if (vctxt->sax != NULL) {\n")
     qore_xml_replace_libxml2_qname_source("${source_dir}" "${binary_dir}" xmlschemastypes.c

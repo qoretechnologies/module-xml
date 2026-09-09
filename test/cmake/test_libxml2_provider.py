@@ -95,6 +95,7 @@ qore_xml_fix_libxml2_qnames("{cls.source}" "${{CMAKE_CURRENT_BINARY_DIR}}/libxml
         output = self.run_command([self.root / "bundled/probe"])
         self.assertIn("namespace_identity=PASS", output)
         self.assertIn("runtime=21504", output)
+        self.assertIn("qname_unions=PASS", output)
         stage = self.root / "stage"
         self.run_command(["cmake", "--install", self.root / "bundled", "--prefix", stage])
         self.assertEqual(["bin/probe", "share/licenses/qore-xml/libxml2-NOTICES.txt"],
@@ -170,6 +171,46 @@ qore_xml_fix_libxml2_qnames("{cls.source}" "${{CMAKE_CURRENT_BINARY_DIR}}/libxml
         self.run_command(["cmake", "--build", self.root / "unfixed-system", "--target", "probe", "-j4"])
         self.assertIn("qname_values=PASS", self.run_command([self.root / "unfixed-system/probe"]))
         self.configure("unfixed-system", "-DQORE_XML_LIBXML2_PROVIDER=SYSTEM", *options, success=False)
+
+    def test_qname_identity_backport_without_union_fix_is_rejected(self):
+        # Model a distribution that backported only the previous QName fixes.
+        # A new regression must invalidate its otherwise passing probe result.
+        import shutil
+        partial = self.root / "partial/source"
+        partial.mkdir(parents=True)
+        for entry in self.source.iterdir():
+            if entry.name not in ("xmlschemas.c", "xmlschemastypes.c"):
+                (partial / entry.name).symlink_to(entry, target_is_directory=entry.is_dir())
+        original = (self.source / "xmlschemas.c").read_text()
+        old = "{\n    if (vctxt->sax != NULL) {\n"
+        self.assertEqual(1, original.count(old))
+        (partial / "xmlschemas.c").write_text(original.replace(old,
+            "{\n    /* The xml prefix is bound even without a namespace declaration. */\n"
+            '    if (xmlStrEqual(prefix, BAD_CAST "xml")) {\n'
+            "        return (XML_XML_NAMESPACE);\n    }\n    if (vctxt->sax != NULL) {\n"))
+        import hashlib
+        self.assertEqual("e7910a943964ce25bac32479fec4b244e1b0080abd6ae7146210d88ca3877098",
+                         hashlib.sha256((partial / "xmlschemas.c").read_bytes()).hexdigest())
+        shutil.copyfile(self.root / "bundled/_deps/qore_xml_libxml2-build/qore-qname-fix/xmlschemastypes.c",
+                        partial / "xmlschemastypes.c")
+        build = self.root / "partial/build-debug"
+        self.run_command(["cmake", "-S", partial, "-B", build, "-DCMAKE_BUILD_TYPE=Debug",
+                          "-DBUILD_SHARED_LIBS=ON", "-DLIBXML2_WITH_PROGRAMS=OFF",
+                          "-DLIBXML2_WITH_TESTS=OFF", "-DLIBXML2_WITH_PYTHON=OFF"])
+        self.run_command(["cmake", "--build", build, "--target", "LibXml2", "-j4"])
+        include = self.root / "partial/include"
+        shutil.copytree(self.source / "include/libxml", include / "libxml")
+        shutil.copyfile(build / "libxml/xmlversion.h", include / "libxml/xmlversion.h")
+        libraries = list(build.glob("libxml2.so")) + list(build.glob("libxml2.dylib"))
+        self.assertEqual(1, len(libraries))
+        options = [f"-DLIBXML2_LIBRARY={libraries[0]}", f"-DLIBXML2_INCLUDE_DIR={include}",
+                   f"-DFETCHCONTENT_SOURCE_DIR_QORE_XML_LIBXML2={self.source}"]
+        output = self.configure("partial-system", "-DQORE_XML_LIBXML2_PROVIDER=AUTO", *options)
+        self.assertIn("using private static libxml2 2.15.4", output)
+        probe = (self.root / "partial-system/system-libxml2/namespace-probe.log").read_text()
+        self.assertIn("qname_values=PASS", probe)
+        self.assertIn("qname_unions=FAIL", probe)
+        self.configure("partial-system", "-DQORE_XML_LIBXML2_PROVIDER=SYSTEM", *options, success=False)
 
     def test_already_fixed_qname_sources_are_accepted(self):
         for filename in ("xmlschemas.c", "xmlschemastypes.c"):

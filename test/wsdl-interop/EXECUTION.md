@@ -4448,3 +4448,84 @@ implementation is excluded from this commit; scratch architecture and remaining
 paths are recorded in `/tmp/wsdl-p3-33-prototype-state.md`. ENTITY/ENTITIES,
 dateTime/time policy and all other P3 criteria remain open. The pending leap-second
 question has no inferred answer. P4-P9 have not begun.
+
+## P3-34 — Isolate QName union trial errors in libxml2
+
+P3-33 is committed as `115ea97`. The private libxml2 build now propagates
+`fireErrors` into `xmlSchemaValidateQName()` and guards its unbound-prefix
+diagnostic. A failed QName candidate still returns its datatype error, while
+a later valid union member can succeed without contaminating the validation
+context or invoking an application error callback. This fixes the dependency's
+existing error-reporting contract; no WSDL source or Qore core change is made.
+The fetched/offline libxml2 source remains byte-identical, with exact original
+and corrected compile-input hashes verified by CMake.
+
+The [implemented design](../../design/xml-qname-validation.md) and
+[regression evidence](qname-union-validator-evidence.md) record the normative
+ordered-union requirement and root cause. The native probe passes **148
+schema/document pairs** through DOM and streaming validation, including **100
+new union pairs**, callback accounting and DOM context reuse after rejection.
+The exact prior dependency rejects seven valid pairs; the partial-backport
+fixture preserves this failure. All **18 CMake provider tests** pass in
+37.507 seconds, including system/bundled selection, old advertised versions,
+partial fixes, offline/cross builds, source integrity, reconfiguration and
+staged notice installation. Logs: `/tmp/wsdl-p3-34-provider.log` and
+`/tmp/qore-xml-libxml2-test-mnmphkkf/commands.log`.
+
+The new Qore suite passes **5 cases / 351 assertions**, including separate
+invalid content/attribute paths, collection candidates, ordered enumeration,
+exact XML values and cancellation/recovery. The independent matrix checks
+**30 schemas / 300 documents** against pinned Xerces-J 2.12.2 and both native
+Qore parsing APIs. All normative verdicts agree; Python's separate libxml2
+2.12.10 has exactly **21 recorded false negatives**, each with its required
+error type/count. Complete fixtures and verdicts are retained under
+`/tmp/xml-qname-union-validator-bhanf7v2/` and reproduced by the committed test.
+The fixture manifest hash is
+`4504254bd15b7e1ce2e33ca48893d6bb1a48fc994994d2ad5dfdbdeec13d46ad`.
+
+The full Qore gate passes **82 suites / 880 cases / 32,606 assertions**.
+The soap suite retains its previously recorded assertion accounting, with all
+twenty cases passing. Eight AST/IR/JIT/tiered and UTC/Europe-Prague runs of the
+new suite pass **40 cases / 2,808 assertions**. Native C compiles with
+`-Wall -Wextra -Werror`; the Debug native module, probe and Doxygen build without
+warnings/errors, using the installed `/usr` prefix and frozen isolated Qore.
+The complete design example runs successfully. Logs and summaries use
+`/tmp/wsdl-p3-34-native-{gate,modes,docs}` plus
+`/tmp/wsdl-p3-34-{configure,build}.log`.
+
+The affected Python gate completes **65 methods in 394.138 seconds** and
+retains exactly the two previously tracked P6 selected-binding-version
+assertions. There are no new failures, errors or warnings; comparison is
+`/tmp/wsdl-p3-34-native-python-comparison.json`. Both corpus reports are
+structurally identical to P3-33: **120 selected WSDLs / 1,148 directions**,
+zero selected failures and **168 unchanged broad failure signatures**.
+The original broad survey was rerun with matching arguments for that comparison;
+an additional explicit-catalog survey is separately retained. Comparison:
+`/tmp/wsdl-p3-34-native-report-comparison.json`. Unchanged current reports are
+not rewritten, and historical findings/source fixtures remain intact.
+
+Valgrind passes the complete native probe and complete new Qore suite with
+**zero errors and zero definite/indirect/possible loss**, without suppressions.
+Qore runs with `-b --enable-debug --exec-mode=jit` and the authorized
+`QORE_PCRE2_NO_JIT=1`; the existing core DWARF-reader warning remains tracked
+for P9. Logs: `/tmp/wsdl-p3-34-native-valgrind.log` and
+`/tmp/wsdl-p3-34-native-qore-valgrind.log`. The full
+[audit](audits/P3-34-qname-union-validator.md) records **22 Pass / 40 N/A / 0 Fail**.
+
+The resulting native XML qmod SHA-256 is
+`c1014ef946c9ef5fd1d62988eac45b8950ae402fb4041585188deca53b3682f9`.
+WSDL remains
+`339e0fd59630f0bd442146baf4e2a3f50bf39e54ed473d25312eba3dfe63e364`;
+the frozen Debug core remains
+`745c1da619df1407bda9d75442c9012551a67c91ca4e3c4ab4a6834da5be0b8f`.
+Main Qore is clean on develop. No push or installation was performed.
+
+P3 remains active. Two independently reduced native reader defects are assigned
+to the next increment before resuming WSDL QName integration: scalar cursor
+conversion calls a hash-only helper, and `schemaValidate()` passes its documented
+XSD text argument to a schema-location API. Their root causes and exact baseline
+failures are recorded in the evidence above and `/tmp/wsdl-p3-35-reader-next.md`.
+The incomplete QName namespace/provider/list/union prototype remains in scratch
+and is excluded from this commit. ENTITY/ENTITIES, dateTime/time policy and all
+other P3 requirements remain open; no answer is inferred for the pending leap-
+second decision. P4-P9 have not begun.

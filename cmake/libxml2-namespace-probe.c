@@ -36,9 +36,11 @@ int main(void) {
     result |= check_namespace("<r xmlns:p='urn:a&amp;#38;b'><p:x/></r>", "urn:a&#38;b");
     {
         int qnames = check_qname_values();
-        result |= qnames;
-        printf("libxml2 headers=%s runtime=%s namespace_identity=%s qname_values=%s\n",
-            LIBXML_DOTTED_VERSION, xmlParserVersion, result ? "FAIL" : "PASS", qnames ? "FAIL" : "PASS");
+        int unions = check_qname_unions();
+        result |= qnames | unions;
+        printf("libxml2 headers=%s runtime=%s namespace_identity=%s qname_values=%s qname_unions=%s\n",
+            LIBXML_DOTTED_VERSION, xmlParserVersion, result ? "FAIL" : "PASS", qnames ? "FAIL" : "PASS",
+            unions ? "FAIL" : "PASS");
     }
     xmlCleanupParser();
     return result;
