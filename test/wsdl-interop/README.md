@@ -957,3 +957,12 @@ validation and rejects partial backports that still have this defect.
 See [the native design](../../design/xml-qname-validation.md) and
 [independent evidence](qname-union-validator-evidence.md). General WSDL QName
 instance/output integration remains a separate open P3 criterion.
+
+
+## Native reader cursor values
+
+`qore --enable-debug test/xml-reader-values.qtest` checks scalar and empty
+cursor conversion, sibling boundaries, mixed content/grouping, document
+hashes, errors, partial stream failure and cancellation. The QName union
+validator matrix also checks both cursor methods for all 300 documents,
+including exact scalar/empty results. See [the reader contract and example](../../design/xml-reader-values.md).

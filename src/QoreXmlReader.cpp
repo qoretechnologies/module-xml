@@ -198,6 +198,29 @@ QoreHashNode* QoreXmlReader::parseXmlData(const QoreEncoding* data_ccsid, int pf
     return rv.get<QoreHashNode>();
 }
 
+QoreValue QoreXmlReader::parseXmlValue(const QoreEncoding* data_ccsid, int pflags, ExceptionSink* xsink) {
+    const bool element = nodeType() == XML_READER_TYPE_ELEMENT;
+    const int parent_depth = depth();
+    // An empty current element has no children. Keep the cursor here so the
+    // caller's next read reaches the following node, rather than consuming it.
+    if (element && isEmptyElement()) {
+        setExceptionContext(xsink);
+        qore_check_cancel(xsink, "XML parsing");
+        return QoreValue();
+    }
+    if (read(xsink) != 1 || *xsink) {
+        return QoreValue();
+    }
+    if (element && depth() <= parent_depth) {
+        return QoreValue();
+    }
+    ValueHolder value(getXmlData(xsink, data_ccsid, pflags, element ? parent_depth + 1 : depth()), xsink);
+    if (*xsink) {
+        return QoreValue();
+    }
+    return value.release();
+}
+
 QoreValue QoreXmlReader::getXmlData(ExceptionSink* xsink, const QoreEncoding* data_ccsid, int pflags, int min_depth) {
     Qore::Xml::intern::xml_stack xstack(pflags);
     // A reader may start inside an existing document, below the declaration.

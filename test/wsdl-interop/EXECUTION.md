@@ -4529,3 +4529,78 @@ The incomplete QName namespace/provider/list/union prototype remains in scratch
 and is excluded from this commit. ENTITY/ENTITIES, dateTime/time policy and all
 other P3 requirements remain open; no answer is inferred for the pending leap-
 second decision. P4-P9 have not begun.
+
+## P3-35 — Native reader scalar and empty values
+
+P3-34 is committed as `ed0f53b`. `XmlReader::toQore()` and `toQoreData()` now
+use an owned `QoreValue` conversion helper instead of the hash-only document
+helper. Their documented scalar/empty values are returned safely, containing
+boundaries are retained, and an empty element does not consume its following
+sibling. Document-oriented parsing keeps its hash contract. The cursor methods'
+incorrect `RET_VALUE_ONLY` flags are removed because they advance reader state.
+No WSDL, libxml2 or Qore core source change is included.
+
+The [implemented contract/example](../../design/xml-reader-values.md) and
+[root-cause evidence](xml-reader-values-evidence.md) record the exact prior
+Debug assertion and cursor semantics. The new suite passes **10 cases / 524
+assertions**, covering scalar/empty/nested/mixed values, UTF-8 and both UTF-16
+byte orders, attributes, grouping flags, document hashes, schema validation,
+discarded results, invalid XML and interruption. An armed stream triggers
+failure or cancellation after entering a record, preserving the original
+exception and exercising partial-value cleanup. The saved baseline abort now
+returns the expected string. The complete design example executes without output.
+
+The existing independent QName union matrix now checks both cursor APIs for
+all **30 schemas / 300 documents**, in addition to its document/cursor-read
+checks. Pinned Xerces-J 2.12.2 validates every schema and assesses every
+instance. Qore preserves exact accepted text/empty values and rejects every
+invalid instance with the intended category. The previously recorded **21
+old-libxml2 false negatives** remain unchanged. Final fixture/results artifacts
+are `/tmp/xml-qname-union-validator-q1c2mf_5/`; the unchanged fixture manifest
+hash is `4504254bd15b7e1ce2e33ca48893d6bb1a48fc994994d2ad5dfdbdeec13d46ad`.
+
+The full audit corrected the side-effect flags and added an immediate pending-
+exception check after the reader operation. All final gates were rerun against
+the frozen resulting native build. **83 Qore suites / 890 cases / 33,130
+assertions** pass; the soap suite retains its prior documented assertion
+accounting with all twenty cases succeeding. Eight AST/IR/JIT/tiered and
+UTC/Europe-Prague runs pass **80 cases / 4,192 assertions**. Debug native and
+Doxygen builds, QPP generation and executed examples have no warnings/errors.
+Logs use `/tmp/wsdl-p3-35-reader-gate-final.log`, `reader-build-frozen.log`,
+`reader-modes.json` and `reader-example.log` under that prefix.
+
+The affected Python gate runs **29 methods**: the 300-document native matrix,
+15 survey tests and 13 coverage tests. It retains exactly the two previously
+tracked P6 selected-binding-version assertions, with no new failures/errors/
+warnings. Exact signatures are in
+`/tmp/wsdl-p3-35-reader-python-comparison.json`. Both corpus reports are
+structurally identical to P3-34: **120 selected WSDLs / 1,148 directions**, zero
+selected failures and **168 unchanged broad failure signatures**. Comparison:
+`/tmp/wsdl-p3-35-reader-report-comparison.json`. Original fixtures, historical
+findings and unchanged current reports are preserved.
+
+The complete new suite and affected existing `xml`, `xml-literal` and
+`xml-whitespace` suites all pass Valgrind: **53 cases / 2,832 assertions**,
+**zero errors and zero definite/indirect/possible loss**, without suppressions.
+Every run uses `qore -b --enable-debug --exec-mode=jit` and the authorized
+`QORE_PCRE2_NO_JIT=1`. The existing core DWARF-reader warning remains a P9
+finding. Logs use `/tmp/wsdl-p3-35-reader-valgrind-final.log` and
+`reader-valgrind-{xml,xml-literal,xml-whitespace}.log` under that prefix.
+The complete [audit](audits/P3-35-xml-reader-values.md) is **25 Pass / 37 N/A /
+0 Fail**.
+
+The final native XML qmod SHA-256 is
+`879f7178ed7307f9a36a9f549e26660f6c7d26cfd3c19cf7c2b4034c896853ff`;
+source/native hashes are frozen in `/tmp/wsdl-p3-35-reader-frozen-native.json`.
+WSDL and isolated Debug core retain their P3-34 hashes. Main Qore has newly
+appeared concurrent AsyncIoController and WebSocketHandler edits; these are
+not part of the XML work and are preserved in progress. No push or installation.
+
+P3 remains active. The separate schema-attachment API conflict is next. With
+no preference received yet, the stated compatibility assumption preserves
+`schemaValidate()`'s existing file/URI behavior, corrects its documentation and
+adds explicit `schemaValidateString()` for XSD text. The question remains open
+to user steering; this increment does not change schema attachment. General
+WSDL QName namespace/provider/list/union integration remains in scratch,
+followed by ENTITY/ENTITIES, dateTime/time policy and the other P3 criteria.
+No answer is inferred for the pending leap-second decision. P4-P9 have not begun.

@@ -1,0 +1,278 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires xml
+%exec-class XmlReaderValuesTest
+
+class ReaderValueTestStream inherits InputStream {
+    private {
+        binary data;
+        int offset = 0;
+        SandboxManager manager;
+    }
+    public {
+        string failure = "";
+        int calls = 0;
+    }
+
+    constructor(string xml, SandboxManager manager) {
+        data = binary(xml);
+        self.manager = manager;
+    }
+
+    *binary read(int limit) {
+        ++calls;
+        if (failure == "error") {
+            throw "READER-TEST-STREAM-ERROR", "stream failed during cursor conversion";
+        }
+        if (failure == "cancel") {
+            failure = "";
+            manager.requestInterrupt();
+        }
+        if (offset == data.size()) {
+            return NOTHING;
+        }
+        binary result = data.substr(offset, min(limit, 128));
+        offset += result.size();
+        return result;
+    }
+
+    int peek() {
+        return offset < data.size() ? data[offset] : -1;
+    }
+}
+
+class XmlReaderValuesTest inherits QUnit::Test {
+    constructor() : QUnit::Test("XML reader cursor values", "1.0") {
+        addTestCase("Scalar cursor values retain text, whitespace and encoding", \scalars());
+        addTestCase("Empty elements retain sibling cursor boundaries", \emptyElements());
+        addTestCase("Nested scalar and complex values stop at the containing element", \nested());
+        addTestCase("Mixed content and repeated children preserve conversion flags", \mixed());
+        addTestCase("Fresh readers and document APIs retain document hashes", \documents());
+        addTestCase("Schema-validated cursor values preserve valid union text", \schemas());
+        addTestCase("Malformed data rejects and later independent readers recover", \rejectedDocuments());
+        addTestCase("Partial conversion preserves stream errors and releases interrupted state", \partialFailure());
+        addTestCase("Discarded conversion results still advance the cursor", \discardedResults());
+        addTestCase("Interruption releases scalar and empty reader state", \cancellation());
+        set_return_value(main());
+    }
+
+    private static auto convert(XmlReader reader, bool grouped, *int flags) {
+        if (grouped) {
+            return flags === NOTHING ? reader.toQoreData() : reader.toQoreData(flags);
+        }
+        return flags === NOTHING ? reader.toQore() : reader.toQore(flags);
+    }
+
+    private static auto scalar(string xml, bool grouped) {
+        XmlReader reader(xml);
+        reader.read();
+        return convert(reader, grouped);
+    }
+
+    scalars() {
+        foreach bool grouped in (False, True) {
+            foreach string text in ("text", "0", " ", "\t\r\n", "a & <b>", "café 中文") {
+                foreach string encoding in ("UTF-8", "UTF-16LE", "UTF-16BE") {
+                    string xml = make_xml({"value": {"^attributes^": {"id": "keep"}, "^value^": text}}, 0, encoding);
+                    XmlReader reader(xml);
+                    assertTrue(reader.read());
+                    assertEq("keep", reader.getAttribute("id"));
+                    assertEq(text, convert(reader, grouped));
+                    assertEq(XML_NODE_TYPE_END_ELEMENT, reader.nodeType());
+                    assertEq("value", reader.name());
+                    assertFalse(reader.read());
+                    assertNothing(convert(reader, grouped));
+                }
+            }
+        }
+    }
+
+    emptyElements() {
+        foreach bool grouped in (False, True) {
+            foreach string empty in ("<empty/>", "<empty></empty>", '<empty id="7"/>') {
+                XmlReader reader('<root>' + empty + '<next>text</next></root>');
+                assertTrue(reader.read());
+                assertTrue(reader.read());
+                assertEq("empty", reader.name());
+                assertNothing(convert(reader, grouped));
+                assertEq("empty", reader.name());
+                assertTrue(reader.read());
+                assertEq("next", reader.name());
+                assertEq(XML_NODE_TYPE_ELEMENT, reader.nodeType());
+                assertEq("text", convert(reader, grouped));
+                assertTrue(reader.read());
+                assertEq("root", reader.name());
+                assertFalse(reader.read());
+            }
+            foreach string xml in ("<empty/>", "<empty></empty>", "<empty><!--ignored--></empty>") {
+                XmlReader reader(xml);
+                assertTrue(reader.read());
+                assertNothing(convert(reader, grouped));
+                assertFalse(reader.read());
+            }
+        }
+    }
+
+    nested() {
+        foreach bool grouped in (False, True) {
+            XmlReader reader('<root><value>one</value><value>two</value><record><item>3</item></record>'
+                '<value>four</value></root>');
+            assertTrue(reader.read());
+            foreach auto expected in ("one", "two", {"item": "3"}, "four") {
+                assertTrue(reader.read());
+                assertEq(1, reader.depth());
+                assertEq(expected, convert(reader, grouped));
+                assertEq(1, reader.depth());
+                assertEq(XML_NODE_TYPE_END_ELEMENT, reader.nodeType());
+            }
+            assertTrue(reader.read());
+            assertEq("root", reader.name());
+            assertFalse(reader.read());
+        }
+    }
+
+    mixed() {
+        string xml = '<root>before<a>1</a><![CDATA[raw]]><!--keep--><b>2</b><a>3</a>after</root>';
+        foreach bool grouped in (False, True) {
+            foreach int flags in (0, XPF_PRESERVE_ORDER, XPF_ADD_COMMENTS, XPF_PRESERVE_ORDER | XPF_ADD_COMMENTS) {
+                XmlReader reader(xml);
+                assertTrue(reader.read());
+                assertEq(parse_xml(xml, flags).root, convert(reader, grouped, flags));
+                assertFalse(reader.read());
+            }
+            XmlReader defaults('<root><a>1</a><b>2</b><a>3</a></root>');
+            assertTrue(defaults.read());
+            assertEq(grouped ? {"a": ("1", "3"), "b": "2"} : {"a": "1", "b": "2", "a^1": "3"},
+                convert(defaults, grouped));
+            assertEq({"^cdata^": "raw"}, scalar('<root><![CDATA[raw]]></root>', grouped));
+        }
+    }
+
+    documents() {
+        foreach bool grouped in (False, True) {
+            foreach string xml in ('<value id="7">text</value>', '<empty/>', '<root><a>1</a><a>2</a></root>') {
+                hash<auto> expected = parse_xml(xml);
+                XmlReader fresh(xml);
+                assertEq(expected, convert(fresh, grouped));
+                assertNothing(convert(fresh, grouped));
+                XmlDoc doc(xml);
+                assertEq(expected, grouped ? doc.toQoreData() : doc.toQore());
+                XmlReader tree(doc);
+                assertTrue(tree.read());
+                auto value = convert(tree, grouped);
+                assertEq(expected.value ? "text" : expected.root, value);
+            }
+        }
+    }
+
+    schemas() {
+        string xsd = '<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">'
+            '<xs:element name="value"><xs:simpleType><xs:union memberTypes="xs:QName xs:string"/>'
+            '</xs:simpleType></xs:element></xs:schema>';
+        foreach bool grouped in (False, True) {
+            XmlReader reader(new StringInputStream('<value>p:Name</value>'), {"xsd": xsd});
+            assertTrue(reader.read());
+            assertEq("p:Name", convert(reader, grouped));
+            assertFalse(reader.read());
+            assertTrue(reader.isValid());
+        }
+    }
+
+    rejectedDocuments() {
+        foreach bool grouped in (False, True) {
+            foreach string xml in ("<root>text</wrong>", "<root><child>text</root>", "<root>before\0after</root>") {
+                assertThrows("PARSE-XML-EXCEPTION", \scalar(), (xml, grouped));
+                assertEq("recovered", scalar("<root>recovered</root>", grouped));
+            }
+        }
+    }
+
+    partialFailure() {
+        string xml = "<root><record>";
+        foreach int index in (0 .. 1999) {
+            xml += sprintf("<item>kept%d</item>", index);
+        }
+        xml += "</record></root>";
+        SandboxManager manager();
+        on_exit {
+            manager.clearInterrupt();
+        }
+        Program program(PO_NEW_STYLE | PO_STRICT_ARGS | PO_REQUIRE_TYPES);
+        program.setSandboxManager(manager);
+        program.parse("%modern\n%requires xml\n"
+            "auto sub convert(XmlReader reader, bool grouped) {\n"
+            "    return grouped ? reader.toQoreData() : reader.toQore();\n"
+            "}\n", "reader_partial_failure");
+        foreach bool grouped in (False, True) {
+            foreach string failure in ("error", "cancel") {
+                ReaderValueTestStream stream(xml, manager);
+                XmlReader reader(stream);
+                assertTrue(reader.read());
+                assertTrue(reader.read());
+                assertEq("record", reader.name());
+                int before = stream.calls;
+                stream.failure = failure;
+                *hash<ExceptionInfo> error;
+                try {
+                    program.callFunction("convert", reader, grouped);
+                } catch (hash<ExceptionInfo> ex) {
+                    error = ex;
+                }
+                manager.clearInterrupt();
+                assertEq(failure == "error" ? "READER-TEST-STREAM-ERROR" : "PROGRAM-INTERRUPTED", error.err);
+                assertTrue(stream.calls > before);
+                assertEq("recovered", scalar("<root>recovered</root>", grouped));
+            }
+        }
+    }
+
+    discardedResults() {
+        foreach bool grouped in (False, True) {
+            XmlReader reader('<root><first>one</first><second>two</second></root>');
+            assertTrue(reader.read());
+            assertTrue(reader.read());
+            if (grouped) {
+                reader.toQoreData();
+            } else {
+                reader.toQore();
+            }
+            assertEq("first", reader.name());
+            assertEq(XML_NODE_TYPE_END_ELEMENT, reader.nodeType());
+            assertTrue(reader.read());
+            assertEq("second", reader.name());
+            assertEq("two", convert(reader, grouped));
+        }
+    }
+
+    cancellation() {
+        SandboxManager manager();
+        on_exit {
+            manager.clearInterrupt();
+        }
+        Program program(PO_NEW_STYLE | PO_STRICT_ARGS | PO_REQUIRE_TYPES);
+        program.setSandboxManager(manager);
+        program.parse("%modern\n%requires xml\n"
+            "auto sub interrupted(SandboxManager manager, string xml, bool grouped) {\n"
+            "    XmlReader reader(xml);\n"
+            "    reader.read();\n"
+            "    manager.requestInterrupt();\n"
+            "    return grouped ? reader.toQoreData() : reader.toQore();\n"
+            "}\n", "reader_value_cancel");
+        foreach bool grouped in (False, True) {
+            foreach string xml in ("<root/>", "<root></root>", "<root>text</root>", "<root><child>text</child></root>") {
+                *hash<ExceptionInfo> error;
+                try {
+                    program.callFunction("interrupted", manager, xml, grouped);
+                } catch (hash<ExceptionInfo> ex) {
+                    error = ex;
+                }
+                manager.clearInterrupt();
+                assertEq("PROGRAM-INTERRUPTED", error.err);
+                assertEq("recovered", scalar("<root>recovered</root>", grouped));
+            }
+        }
+    }
+}

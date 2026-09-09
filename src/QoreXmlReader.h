@@ -609,6 +609,9 @@ public:
 #endif
 
     DLLLOCAL QoreHashNode* parseXmlData(const QoreEncoding* data_ccsid, int pflags, ExceptionSink* xsink);
+
+    // Returns an owned scalar/hash/NOTHING value from the current reader scope.
+    DLLLOCAL QoreValue parseXmlValue(const QoreEncoding* data_ccsid, int pflags, ExceptionSink* xsink);
 };
 
 #endif

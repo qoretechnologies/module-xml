@@ -97,7 +97,7 @@ class QNameUnionValidatorTest(unittest.TestCase):
                 verdict = independent["documents"][row["name"]]
                 self.assertEqual(row["valid"], verdict["ok"], verdict)
                 self.assertEqual([], verdict["warnings"])
-                for method in ("parse", "reader"):
+                for method in ("parse", "reader", "cursor", "grouped"):
                     self.assertEqual(row["valid"], result[method], result)
                     if not row["valid"]:
                         self.assertEqual("PARSE-XML-EXCEPTION", result[method + "_error"])
@@ -106,6 +106,8 @@ class QNameUnionValidatorTest(unittest.TestCase):
                     self.assertEqual("value", result["element"])
                     self.assertEqual(row["text"], result["text"])
                     self.assertEqual(row["attribute"], result["attribute"])
+                    self.assertEqual(row["text"] or None, result["cursor_value"])
+                    self.assertEqual(row["text"] or None, result["grouped_value"])
                 validator = validators[row["group"]]
                 ok = validator.validate(etree.fromstring(row["xml"].encode()))
                 errors = [error.type_name for error in validator.error_log]
