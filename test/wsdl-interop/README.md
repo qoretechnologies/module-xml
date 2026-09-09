@@ -877,5 +877,14 @@ octets, including through optional copies and reconstructed providers.
 See [the public input contract](../../design/wsdl-binary-values.md) and
 [binary validator evidence](binary-values-evidence.md). Actual SOAP 1.1/1.2 HTTP
 exchanges and independent binding matrices check exact bytes in both directions,
-attributes, simple content, repeated values, providers and examples. Remaining
-binary facet/choice/collection identity acceptance is tracked in P3.
+attributes, simple content, repeated values, providers and examples.
+
+Binary restriction checks in `wsdl-binary-facets.qtest` and `test_binary_facets.py`
+cover octet counts/equality, fixed and finite choices, inherited patterns,
+reconstructed providers, list/union identities and generated examples. Patterned
+values can return `XsdBinaryValue` objects carrying exact bytes and lexical text;
+see the public contract above before assuming a restricted value is native binary.
+HTTP tests carry these values through actual SOAP 1.1/1.2 bindings in both directions.
+Union patterns use the selected leaf member's whitespace normalization, including
+nested unions and binary values within union-item lists. Strict coverage now adds
+all four binary element/attribute families: 120 WSDLs and 1,148 message directions.

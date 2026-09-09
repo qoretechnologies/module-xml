@@ -1,0 +1,347 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires xml
+%requires ../qlib/WSDL.qm
+%exec-class BinaryFacetsTest
+
+class InterruptRestrictedBinary inherits XsdBinaryDataType {
+    public {
+        bool interrupt = True;
+    }
+
+    constructor() : XsdBinaryDataType("hexBinary") {
+    }
+
+    auto acceptsValue(auto value) {
+        if (interrupt) {
+            throw "PROGRAM-INTERRUPTED", "interrupted inherited binary validation";
+        }
+        return XsdBinaryDataType::acceptsValue(value);
+    }
+}
+
+class BinaryFacetsTest inherits QUnit::Test {
+    constructor() : Test("Binary value facets", "1.0") {
+        addTestCase("Retained spellings validate and reconstruct immutable octets", \retained());
+        addTestCase("Enumeration compares octets independently of spelling", \enumeration());
+        addTestCase("Inherited patterns retain hex case and spaced base64", \patterns());
+        addTestCase("Length measures octets for raw strings and XML encodings", \lengths());
+        addTestCase("Binary facet declarations reject invalid restrictions", \declarations());
+        addTestCase("Generated binary samples satisfy lexical and value facets", \samples());
+        addTestCase("Finite binary choices and failed setters preserve exact values", \fields());
+        addTestCase("Fixed attributes compare octets through reconstructed fields", \fixedValues());
+        addTestCase("Binary list and union facets retain primitive item values", \collections());
+        addTestCase("Union serialization retains encoded lexical string inputs", \lexicalUnionStrings());
+        addTestCase("Invalid binary metadata rejects and cancellation preserves state", \metadata());
+        set_return_value(main());
+    }
+
+    private static XsdSchema schema(string builtin, string facets, string parent = "", string extra = "") {
+        return new XsdSchema('<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:t="urn:binary-facets"
+            targetNamespace="urn:binary-facets"><xs:simpleType name="Base"><xs:restriction base="xs:' + builtin
+            + '">' + parent + '</xs:restriction></xs:simpleType><xs:simpleType name="Value">'
+            '<xs:restriction base="t:Base">' + facets + '</xs:restriction></xs:simpleType>' + extra + '</xs:schema>',
+            {"async_only": True});
+    }
+
+    private static XsdAbstractType valueType(XsdSchema schema) {
+        return schema.findType(make_qname("urn:binary-facets", "Value"));
+    }
+
+    private static binary octets(auto value) {
+        return value instanceof XsdBinaryValue ? cast<XsdBinaryValue>(value).getBinaryValue() : value;
+    }
+
+    private check(XsdAbstractType type, string lexical, binary expected, *string retained) {
+        auto decoded = type.deserializeValue("value", {}, NOTHING, lexical);
+        assertEq(expected, octets(decoded));
+        string encoded = type.serializeValue(new Namespaces({}), decoded, True);
+        assertEq(expected, octets(type.deserializeValue("value", {}, NOTHING, encoded)));
+        if (exists retained) {
+            assertTrue(decoded instanceof XsdBinaryValue);
+            assertEq(retained, cast<XsdBinaryValue>(decoded).getLexicalValue());
+            assertEq(retained, encoded);
+        }
+        AbstractDataProviderType original = type.getDataProviderType();
+        foreach AbstractDataProviderType provider in (original, Serializable::deserialize(original.serialize()),
+                original.getOrNothingType().getMandatoryType()) {
+            auto converted = provider.acceptsValue(lexical);
+            assertEq(expected, octets(converted));
+            assertEq(expected, octets(type.deserializeValue("value", {}, NOTHING,
+                type.serializeValue(new Namespaces({}), converted, True))));
+            if (exists retained) {
+                assertEq(retained, cast<XsdBinaryValue>(converted).getLexicalValue());
+            }
+        }
+    }
+
+    private retained() {
+        foreach hash<auto> entry in ({"builtin": "hexBinary", "lexical": " \tFf\r\n", "text": "Ff", "bytes": <ff>},
+                {"builtin": "base64Binary", "lexical": " A\tA = = ", "text": "A A = =", "bytes": <00>}) {
+            XsdBinaryValue original(entry.builtin, entry.lexical);
+            foreach XsdBinaryValue value in (original, Serializable::deserialize(original.serialize())) {
+                assertEq(entry.builtin, value.getBuiltinName());
+                assertEq(entry.text, value.getLexicalValue());
+                assertEq(entry.bytes, value.getBinaryValue());
+                XsdBaseType base = new Namespaces({}).getBaseType(entry.builtin);
+                assertEq(entry.text, base.serializeValue(new Namespaces({}), value, True));
+                assertEq(entry.bytes, base.getDataProviderType().acceptsValue(value));
+            }
+        }
+        foreach hash<auto> entry in ({"builtin": "hexBinary", "text": "0"},
+                {"builtin": "base64Binary", "text": "AB=="}, {"builtin": "binary", "text": ""}) {
+            assertThrows("XSD-BINARY-VALUE-ERROR", sub() { new XsdBinaryValue(entry.builtin, entry.text); });
+        }
+        XsdBinaryValue value("hexBinary", "ff");
+        foreach string key in ("builtin", "lexical") {
+            hash<SerializationInfo> state = value.serializeToData();
+            state._index."0"._class_data."WSDL::XsdBinaryValue"{key} = 1;
+            assertThrows("DESERIALIZATION-ERROR", \Serializable::deserialize(), (state,));
+        }
+        XsdBaseType base = new Namespaces({}).getBaseType("base64Binary");
+        assertThrows("SOAP-SERIALIZATION-ERROR", \base.serializeValue(), (new Namespaces({}), value, True));
+        AbstractDataProviderType provider = base.getDataProviderType();
+        assertThrows("RUNTIME-TYPE-ERROR", \provider.acceptsValue(), (value,));
+        binary copy = value.getBinaryValue();
+        copy += <00>;
+        assertEq(<ff>, value.getBinaryValue());
+        string text = value.getLexicalValue();
+        text += "00";
+        assertEq("ff", value.getLexicalValue());
+    }
+
+    private enumeration() {
+        foreach hash<auto> entry in (
+                {"builtin": "hexBinary", "allowed": "FF", "value": " ff ", "bytes": <ff>, "invalid": "fe"},
+                {"builtin": "base64Binary", "allowed": "A A = =", "value": "AA==", "bytes": <00>, "invalid": "AQ=="}) {
+            XsdSchema original = schema(entry.builtin, '<xs:enumeration value="' + entry.allowed + '"/>');
+            foreach XsdSchema copy in (original, Serializable::deserialize(original.serialize())) {
+                XsdAbstractType type = valueType(copy);
+                check(type, entry.value, entry.bytes, NOTHING);
+                assertThrows("SOAP-DESERIALIZATION-ERROR", \type.deserializeValue(), ("value", {}, NOTHING, entry.invalid));
+                AbstractDataProviderType provider = type.getDataProviderType();
+                assertThrows("RUNTIME-TYPE-ERROR", \provider.acceptsValue(), (entry.invalid,));
+            }
+        }
+    }
+
+    private patterns() {
+        foreach hash<auto> entry in ({"builtin": "hexBinary", "pattern": "FF", "bytes": <ff>, "invalid": "ff"},
+                {"builtin": "base64Binary", "pattern": "A A = =", "bytes": <00>, "invalid": "AA=="}) {
+            XsdSchema original = schema(entry.builtin, '<xs:length value="1"/>',
+                '<xs:pattern value="' + entry.pattern + '"/>');
+            foreach XsdSchema copy in (original, Serializable::deserialize(original.serialize())) {
+                XsdAbstractType type = valueType(copy);
+                check(type, entry.pattern, entry.bytes, entry.pattern);
+                assertThrows("SOAP-DESERIALIZATION-ERROR", \type.deserializeValue(), ("value", {}, NOTHING, entry.invalid));
+                AbstractDataProviderType provider = type.getDataProviderType();
+                assertThrows("RUNTIME-TYPE-ERROR", \provider.acceptsValue(), (entry.invalid,));
+                assertThrows("SOAP-SERIALIZATION-ERROR", \type.serializeValue(), (new Namespaces({}), entry.bytes, True));
+                assertEq(NOTHING, provider.getOrNothingType().acceptsValue(NOTHING));
+            }
+        }
+    }
+
+    private lengths() {
+        foreach string builtin in ("hexBinary", "base64Binary") {
+            XsdAbstractType type = valueType(schema(builtin, '<xs:length value="5"/>'));
+            string encoded = type.serializeValue(new Namespaces({}), " a\tb ", True);
+            assertEq(<2061096220>, type.deserializeValue("value", {}, NOTHING, encoded));
+            assertThrows("SOAP-SERIALIZATION-ERROR", \type.serializeValue(), (new Namespaces({}), <20610962>, True));
+            type = valueType(schema(builtin, '<xs:length value="0"/>'));
+            check(type, " \t\r\n", binary(), NOTHING);
+            type = valueType(schema(builtin, '<xs:maxLength value="2"/>', '<xs:minLength value="1"/>'));
+            assertThrows("SOAP-SERIALIZATION-ERROR", \type.serializeValue(), (new Namespaces({}), binary(), True));
+            assertThrows("SOAP-SERIALIZATION-ERROR", \type.serializeValue(), (new Namespaces({}), <000000>, True));
+        }
+    }
+
+    private declarations() {
+        foreach string builtin in ("hexBinary", "base64Binary") {
+            foreach string facets in ('<xs:enumeration value="!"/>', '<xs:minInclusive value="0"/>',
+                    '<xs:totalDigits value="1"/>', '<xs:length value="1"/><xs:minLength value="2"/>',
+                    '<xs:whiteSpace value="preserve"/>') {
+                assertThrows("XSD-SIMPLETYPE-ERROR", \schema(), (builtin, facets));
+            }
+            assertThrows("XSD-SIMPLETYPE-ERROR", \schema(), (builtin, '<xs:maxLength value="2"/>',
+                '<xs:maxLength value="1" fixed="true"/>'));
+            assertThrows("XSD-SIMPLETYPE-ERROR", \schema(), (builtin, '<xs:minLength value="0"/>',
+                '<xs:minLength value="1"/>'));
+        }
+    }
+
+    private samples() {
+        foreach hash<auto> entry in ({"builtin": "hexBinary", "facets": '<xs:enumeration value="ff"/><xs:pattern value="FF"/>'},
+                {"builtin": "base64Binary", "facets": '<xs:pattern value="A A = ="/><xs:length value="1"/>'}) {
+            XsdAbstractType type = valueType(schema(entry.builtin, entry.facets));
+            auto sample = cast<XsdSimpleType>(type).getSampleValue(binary());
+            string text = type.serializeValue(new Namespaces({}), sample, True);
+            assertEq(entry.builtin == "hexBinary" ? "FF" : "A A = =", text);
+            assertEq(entry.builtin == "hexBinary" ? <ff> : <00>, octets(type.deserializeValue("value", {}, NOTHING, text)));
+        }
+        XsdAbstractType type = valueType(schema("hexBinary", '<xs:enumeration value="ff"/><xs:pattern value="FF"/>'));
+        list<auto> choices = cast<XsdSimpleType>(type).getAllowedValues();
+        assertEq(1, choices.size());
+        assertEq("FF", type.serializeValue(new Namespaces({}), choices[0], True));
+        foreach hash<auto> entry in ({"builtin": "hexBinary", "pattern": "[A-F]+"},
+                {"builtin": "base64Binary", "pattern": "A+"}) {
+            type = valueType(schema(entry.builtin, '<xs:pattern value="' + entry.pattern + '"/>'));
+            auto sample = cast<XsdSimpleType>(type).getSampleValue(binary());
+            string text = type.serializeValue(new Namespaces({}), sample, True);
+            assertEq(entry.builtin == "hexBinary" ? "AA" : "AAAA", text);
+            assertEq(entry.builtin == "hexBinary" ? <aa> : <000000>,
+                octets(type.deserializeValue("value", {}, NOTHING, text)));
+        }
+    }
+
+    private fields() {
+        XsdBinaryDataField original({"name": "tag", "type": new XsdBinaryDataType("hexBinary"),
+            "allowed_values": ("FF",)}, "hexBinary");
+        foreach XsdBinaryDataField field in (original, Serializable::deserialize(original.serialize())) {
+            assertEq(<ff>, field.acceptsValue("ff"));
+            assertThrows("FIELD-VALUE-ERROR", \field.acceptsValue(), ("fe",));
+            assertThrows("XSD-SIMPLETYPE-ERROR", \field.setAllowedValues(), (("00", "!"), False));
+            assertEq("FF", field.getAllowedValues()[0].value);
+            assertThrows("FIELD-VALUE-ERROR", \field.acceptsValue(), ("00",));
+            field.setAllowedValues((<00>,), True);
+            assertEq(<01>, field.acceptsValue("01"));
+        }
+        XsdBinaryDataField repeated({"name": "tags", "type": new ListDataType(new XsdBinaryDataType("hexBinary"))},
+            "hexBinary");
+        repeated.setElementAllowedValues(("FF",), False);
+        assertEq((<ff>, <ff>), repeated.acceptsValue(("FF", "ff")));
+        assertThrows("FIELD-VALUE-ERROR", \repeated.acceptsValue(), (("00",),));
+        assertThrows("XSD-SIMPLETYPE-ERROR", \repeated.setElementAllowedValues(), (("00", "!"), False));
+        assertEq((<ff>,), Serializable::deserialize(repeated.serialize()).acceptsValue(("ff",)));
+    }
+
+    private fixedValues() {
+        XsdSchema original = schema("hexBinary", "", "", '<xs:complexType name="Record">'
+            '<xs:attribute name="tag" type="t:Value" fixed="FF"/></xs:complexType>');
+        foreach XsdSchema copy in (original, Serializable::deserialize(original.serialize())) {
+            XsdAbstractType record = copy.findType(make_qname("urn:binary-facets", "Record"));
+            hash<auto> encoded = {"^attributes^": {"tag": "ff"}};
+            hash<auto> decoded = record.deserializeValue("value", {}, NOTHING, encoded);
+            assertEq(<ff>, decoded."^attributes^".tag);
+            assertEq("ff", record.serializeValue(new Namespaces({}), decoded, True)."^attributes^".tag);
+            AbstractDataProviderType provider = Serializable::deserialize(record.getDataProviderType().serialize());
+            assertEq(decoded, provider.acceptsValue(encoded));
+            AbstractDataField field = provider.getFields()."^attributes^".getType().getFields().tag;
+            assertTrue(field instanceof XsdBinaryDataField);
+            assertEq(<ff>, field.acceptsValue("ff"));
+            assertThrows("FIELD-VALUE-ERROR", \field.acceptsValue(), ("fe",));
+            encoded."^attributes^".tag = "fe";
+            assertThrows("SOAP-DESERIALIZATION-ERROR", \record.deserializeValue(), ("value", {}, NOTHING, encoded));
+        }
+    }
+
+    private collections() {
+        XsdSchema original = schema("hexBinary", '<xs:pattern value="FF"/>', "",
+            '<xs:simpleType name="Items"><xs:list itemType="xs:hexBinary"/></xs:simpleType>'
+            '<xs:simpleType name="Selected"><xs:restriction base="t:Items"><xs:enumeration value="FF 00"/>'
+            '</xs:restriction></xs:simpleType><xs:simpleType name="Either">'
+            '<xs:union memberTypes="t:Value xs:string"/></xs:simpleType>'
+            '<xs:simpleType name="OnlyBinary"><xs:restriction base="t:Either"><xs:enumeration value="FF"/>'
+            '</xs:restriction></xs:simpleType><xs:simpleType name="UnionItems"><xs:list itemType="t:OnlyBinary"/>'
+            '</xs:simpleType><xs:simpleType name="UnionList"><xs:union memberTypes="t:UnionItems xs:boolean"/>'
+            '</xs:simpleType><xs:simpleType name="PatternItems"><xs:list itemType="t:Value"/>'
+            '</xs:simpleType><xs:simpleType name="PlainUnion"><xs:union memberTypes="xs:hexBinary xs:string"/>'
+            '</xs:simpleType><xs:simpleType name="UnionPattern"><xs:restriction base="t:PlainUnion">'
+            '<xs:enumeration value="FF"/><xs:pattern value="FF"/></xs:restriction></xs:simpleType>');
+        foreach XsdSchema copy in (original, Serializable::deserialize(original.serialize())) {
+            XsdAbstractType items = copy.findType(make_qname("urn:binary-facets", "Selected"));
+            assertEq((<ff>, <00>), items.deserializeValue("value", {}, NOTHING, "ff 00"));
+            AbstractDataProviderType provider = Serializable::deserialize(items.getDataProviderType().serialize());
+            assertEq((<ff>, <00>), provider.acceptsValue(("ff", "00")));
+            assertThrows("RUNTIME-TYPE-ERROR", \provider.acceptsValue(), (("00", "ff"),));
+            assertThrows("SOAP-DESERIALIZATION-ERROR", \items.deserializeValue(), ("value", {}, NOTHING, "fe 00"));
+            items = copy.findType(make_qname("urn:binary-facets", "PatternItems"));
+            auto decoded = items.deserializeValue("value", {}, NOTHING, "FF FF");
+            assertEq("FF FF", items.serializeValue(new Namespaces({}), decoded, True));
+            provider = Serializable::deserialize(items.getDataProviderType().serialize());
+            assertEq("FF FF", items.serializeValue(new Namespaces({}), provider.acceptsValue(("FF", "FF")), True));
+            XsdAbstractType either = copy.findType(make_qname("urn:binary-facets", "OnlyBinary"));
+            check(either, "FF", <ff>, "FF");
+            assertThrows("SOAP-DESERIALIZATION-ERROR", \either.deserializeValue(), ("value", {}, NOTHING, "ff"));
+            either = copy.findType(make_qname("urn:binary-facets", "UnionPattern"));
+            check(either, " FF ", <ff>, "FF");
+            provider = Serializable::deserialize(either.getDataProviderType().serialize());
+            assertTrue(provider.getReturnTypeHash().object);
+            assertTrue(provider.getReturnTypeHash(True).object);
+            assertTrue(provider.getOrNothingType().getReturnTypeHash().object);
+            assertThrows("SOAP-DESERIALIZATION-ERROR", \either.deserializeValue(), ("value", {}, NOTHING, "ff"));
+            auto sample = cast<XsdSimpleType>(either).getSampleValue(binary());
+            assertEq("FF", either.serializeValue(new Namespaces({}), sample, True));
+            either = copy.findType(make_qname("urn:binary-facets", "UnionList"));
+            decoded = either.deserializeValue("value", {}, NOTHING, "FF FF");
+            assertEq((<ff>, <ff>), map octets($1), decoded);
+            assertEq("FF FF", either.serializeValue(new Namespaces({}), decoded, True));
+            provider = Serializable::deserialize(either.getDataProviderType().serialize());
+            auto converted = provider.acceptsValue(("FF", "FF"));
+            assertEq((<ff>, <ff>), map octets($1), converted);
+            assertEq("FF FF", either.serializeValue(new Namespaces({}), converted, True));
+            assertThrows("RUNTIME-TYPE-ERROR", \provider.acceptsValue(), (("FF", "ff"),));
+            assertEq((<ff>, <ff>), map octets($1), provider.acceptsValue(("FF", "FF")));
+        }
+    }
+
+    private lexicalUnionStrings() {
+        foreach hash<string, string> entry in ({"builtin": "hexBinary", "encoded": "41"},
+                {"builtin": "base64Binary", "encoded": "QQ=="}) {
+            XsdSchema original = schema(entry.builtin, "", "",
+                '<xs:simpleType name="Either"><xs:union memberTypes="xs:' + entry.builtin + ' xs:string"/>'
+                '</xs:simpleType><xs:simpleType name="Selected"><xs:restriction base="t:Either">'
+                '<xs:enumeration value="' + entry.encoded + '"/></xs:restriction></xs:simpleType>');
+            foreach XsdSchema copy in (original, Serializable::deserialize(original.serialize())) {
+                XsdAbstractType type = copy.findType(make_qname("urn:binary-facets", "Selected"));
+                assertThrows("SOAP-SERIALIZATION-ERROR", \type.serializeValue(), (copy.nsc, "A", True));
+                assertEq(entry.encoded, type.serializeValue(copy.nsc, <41>, True));
+                assertEq(entry.encoded, type.serializeValue(copy.nsc, entry.encoded, True));
+                assertEq(<41>, type.deserializeValue("value", {}, NOTHING, entry.encoded));
+                AbstractDataProviderType provider = Serializable::deserialize(type.getDataProviderType().serialize());
+                assertEq(<41>, provider.acceptsValue(entry.encoded));
+                assertEq(entry.encoded, type.serializeValue(copy.nsc, provider.acceptsValue(entry.encoded), True));
+                XsdAbstractType either = copy.findType(make_qname("urn:binary-facets", "Either"));
+                assertEq("AB==", either.serializeValue(copy.nsc, "AB==", True));
+                assertEq("AB==", either.deserializeValue("value", {}, NOTHING, "AB=="));
+                assertEq(entry.encoded, either.serializeValue(copy.nsc, entry.encoded, True));
+            }
+        }
+    }
+
+    private metadata() {
+        hash<XsdBinaryFacetInfo> facets = <XsdBinaryFacetInfo>{"name": "Tag", "base_name": "hexBinary", "length": 1};
+        foreach AbstractDataProviderType base in (new XsdBinaryDataType("base64Binary"), new XsdDurationDataType()) {
+            assertThrows("XSD-SIMPLETYPE-ERROR", sub() { new XsdBinaryRestrictionDataType(facets, base); });
+        }
+        XsdBinaryDataType base("hexBinary");
+        foreach hash<XsdBinaryFacetInfo> invalid in (
+                <XsdBinaryFacetInfo>{"name": "Tag", "base_name": "duration"},
+                <XsdBinaryFacetInfo>{"name": "Tag", "base_name": "hexBinary", "length": -1},
+                <XsdBinaryFacetInfo>{"name": "Tag", "base_name": "hexBinary", "enumeration": ("!",)},
+                <XsdBinaryFacetInfo>{"name": "Tag", "base_name": "hexBinary", "min_length": 2, "max_length": 1}) {
+            assertThrows("XSD-SIMPLETYPE-ERROR", sub() { new XsdBinaryRestrictionDataType(invalid, base); });
+        }
+        XsdBinaryRestrictionDataType original(facets, base);
+        foreach string builtin in ("duration", "base64Binary") {
+            hash<SerializationInfo> state = original.serializeToData();
+            string index = state._index."0"._class_data."WSDL::XsdBinaryRestrictionDataType".facets._index;
+            state._index{index}._members.base_name = builtin;
+            assertThrows("DESERIALIZATION-ERROR", \Serializable::deserialize(), (state,));
+        }
+        assertEq(<00>, Serializable::deserialize(original.serialize()).acceptsValue("00"));
+        AbstractDataProviderType optional = original.getOrNothingType();
+        assertEq(NOTHING, optional.acceptsValue(NOTHING));
+        assertThrows("RUNTIME-TYPE-ERROR", \optional.acceptsValue(), ("",));
+        InterruptRestrictedBinary interruptible();
+        XsdBinaryRestrictionDataType interrupted(facets, interruptible);
+        assertThrows("PROGRAM-INTERRUPTED", \interrupted.acceptsValue(), ("00",));
+        interruptible.interrupt = False;
+        assertEq(<00>, interrupted.acceptsValue("00"));
+        assertThrows("RUNTIME-TYPE-ERROR", \interrupted.acceptsValue(), ("0000",));
+        assertEq(<ff>, interrupted.acceptsValue("ff"));
+    }
+}

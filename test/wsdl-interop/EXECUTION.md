@@ -3958,3 +3958,102 @@ core and native XML qmod match the previously recorded tested hashes; there are
 no C++ changes requiring Valgrind. This completes the independently testable
 lexical/native binary increment; remaining binary restrictions and all other
 open P3-P9 criteria stay in scope.
+
+## P3-28 — Binary restrictions and retained lexical values
+
+P3-27 is committed as `17b6e75`. The binary restriction increment is complete; its commit gate is recorded below. Root causes and normative evidence are in `binary-values-evidence.md`.
+It separates encoded lexical patterns from octet lengths/enumerations/fixed values,
+adds immutable `XsdBinaryValue` and validating reconstructed restriction providers,
+and preserves exact finite choices, list items and selected union identities.
+
+Independent testing found and corrected three additional defects during this
+increment: pattern samples could end in an incomplete encoding unit; union samples
+replaced a selected binary carrier with a raw string; and union patterns used
+unnormalized input rather than the selected leaf member's whitespace policy.
+The initial outer-whitespace carrier interpretation was wrong. Both validators
+reject a binary union pattern requiring surrounding spaces, because its member
+collapses those spaces first. Carriers now retain normalized text. The generic
+union fix propagates leaf normalization through nested schemas/providers, including
+string, normalizedString, token, numeric and list members. Two earlier Qore-only
+list-union tests were corrected accordingly; no validator discrepancy is waived.
+
+Audit made the union binary input boundary explicit: union strings retain XML
+lexical values, whereas atomic binary serializers retain their raw-byte convention.
+An attempted extension of the atomic convention to unions broke the existing HTTP
+string fallback `AB==`; the final change validates encoded union text before
+invoking a binary member serializer. Native binary inputs remain octets. Binary
+carriers work inside union-item lists, and union metadata includes their object
+output alternative. Final unit, HTTP, reconstructed-provider, independent matrix,
+modes/AOT, docs/build, corpus and 62-item audit results follow at completion.
+
+Development evidence uses `/tmp/wsdl-p3-28-binary-*`. The first six-method facet
+matrix after leaf normalization passed in 136.530 seconds; the seven-method union
+whitespace set, including the selected token/numeric/list matrix, passed in 44.193
+seconds. Subsequent union-input and metadata audit fixes require affected reruns;
+these development results are not claimed as the exact final commit gate.
+
+The initial corpus promotion passed 120 WSDLs / 1,148 directions with zero selected
+failures and the same 168 broad failure signatures. Original corpus/catalog hashes
+and survey counts were unchanged. Final reports must carry the final WSDL source
+hash before commit. Main Qore was verified clean on develop (ahead nine); no shared
+checkout edits or pushes occurred. The unanswered leap-second policy question
+remains pending, and dateTime/time behavior is unchanged. P4-P9 remain open.
+
+### P3-28 final Qore, build and corpus gates
+
+The final implementation passes **75 Qore suites, 822 cases / 31,220 assertions**.
+The existing soap suite retains its documented 1,031 total / 1,028 succeeded
+assertion accounting, with all 20 cases passing. No new warning or test-case error
+occurs. Evidence: `/tmp/wsdl-p3-28-binary-complete-suites.log` and adjacent
+`binary-complete-<suite>.log` files under the same prefix. Binary values/facets/HTTP
+contribute **21 cases / 1,441 assertions** (987 + 362 + 92).
+
+All six affected suites (the three binary suites and union whitespace/list identity/
+union-item lists) pass **384 cases / 17,216 assertions** over AST/IR/JIT/tiered ×
+UTC/Europe-Prague, and **48 cases / 2,152 assertions** using local compiled modules.
+The complete binary design example executes with no output. Qmods for WSDL,
+SoapDataProvider, SoapClient and SoapHandler, plus WSDL Qdx/Doxygen, build without
+warnings/errors. Evidence: `/tmp/wsdl-p3-28-binary-modes-complete.log`,
+`binary-modes.json`, `binary-aot-complete.log`, `binary-aot.json` and
+`binary-build-docs-complete.log` under the same prefix.
+
+The both-version survey counts and every **168 broad diagnostic failure signature**
+remain unchanged. Strict selection adds HexBinaryElement/Attribute and
+Base64BinaryElement/Attribute, now **120 WSDLs / 1,148 message directions**, zero
+selected failures. Every original corpus and catalog hash is unchanged. Current
+reports carry final WSDL SHA256
+`7f041223c5499298218116d3c74a58a8c5ddf8f461f7b0b0b10978877972353f`.
+Evidence: `/tmp/wsdl-p3-28-binary-report-comparison.json` and the
+`binary-survey-complete` / `binary-coverage-complete` logs and JSON reports.
+
+The frozen Debug core SHA256 remains
+`80078ec30d71bc618b7bb40991bad63604303f379c3e47e6dd41d58d0dbc56fd`;
+the native XML qmod remains
+`ea937cab716ed204aef3d3d90f0af17ee1930d9650ef7a6f3fceffbcfcac54fc`.
+No native code changed. The final Python regression and complete audit follow.
+
+
+### P3-28 final Python and audit gate
+
+The exact final source passes the affected **58-method** Python run in **602.796
+seconds**, retaining exactly the two known P6 selected-binding-version failures.
+All new binary facet/list/union methods and selected union whitespace methods pass;
+there are no new failures, errors or warnings. Exact signatures and empty
+added/removed sets are in `/tmp/wsdl-p3-28-binary-python-comparison.json`; full log:
+`/tmp/wsdl-p3-28-binary-python-complete.log`. The earlier 58-method gate took
+647.592 seconds with the same two signatures; only the later run is claimed as
+verification of the final source. Original corpus, historical findings and
+validator defect classifications were preserved.
+
+The full 62-item audit is **21 Pass, 41 N/A, 0 Fail**, recorded in
+`audits/P3-28-binary-facets.md`. Audit findings were corrected and affected checks
+rerun. `/tmp/wsdl-p3-28-binary-verify-gate.py` verifies unchanged final code/test
+hashes, Qore totals, clean build/mode/AOT diagnostics and exact Python signatures.
+The final intended-file and artifact hashes are retained in
+`/tmp/wsdl-p3-28-binary-final-hashes.json` before commit. All implementation inputs
+match the verified WSDL SHA above. No push is authorized or performed.
+
+This completes the binary facet/choice/collection increment. QName/entity context,
+dateTime/time policy and remaining XML-RPC/P3 criteria remain in scope; P4-P9
+have not begun. Read-only next-name reductions are in
+`/tmp/wsdl-p3-29-name-preflight.qr`, `.log` and `.md`; they do not modify this commit.

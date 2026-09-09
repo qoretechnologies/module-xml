@@ -80,6 +80,13 @@ module WSDL {
     @section wsdlrelnotes WSDL Module Release Notes
 
     @subsection wsdl_0_5_8 WSDL v0.5.8
+    - union patterns use the selected leaf member's whitespace normalization through nested unions;
+      generated union examples decode candidate text before serialization to preserve the selected value
+    - binary restrictions compare enumeration/fixed/finite choices by octets and retain every inherited
+      length and lexical pattern through reconstructed providers, lists, unions and generated examples
+    - added \c XsdBinaryValue, \c XsdBinaryFacetInfo, \c XsdBinaryRestrictionDataType and \c XsdBinaryDataField;
+      patterned binary decoding can return an immutable carrier exposing the accepted text and exact bytes,
+      including internal base64 spacing; ordinary binary values retain their native representation
     - hexBinary and base64Binary decoding validates complete XSD lexical forms, including base64 padding
       positions and unused bits; XML whitespace between base64 characters is accepted
     - binary serialization preserves raw string bytes, including whitespace and the string's original encoding;
@@ -2286,6 +2293,10 @@ class XsdScalarValueHelper {
                 return XsdDurationValueHelper::key(left, "XSD-SIMPLETYPE-ERROR")
                     == XsdDurationValueHelper::key(right, "XSD-SIMPLETYPE-ERROR");
             }
+            if (XsdBinaryLexicalHelper::isType(base.name)) {
+                return XsdBinaryFacetHelper::key(base.name, left, "XSD-SIMPLETYPE-ERROR")
+                    == XsdBinaryFacetHelper::key(base.name, right, "XSD-SIMPLETYPE-ERROR");
+            }
             if (base.name == "boolean") {
                 return XsdBooleanLexicalHelper::decode(left, "XSD-SIMPLETYPE-ERROR")
                     == XsdBooleanLexicalHelper::decode(right, "XSD-SIMPLETYPE-ERROR");
@@ -3462,6 +3473,67 @@ class XsdDurationValueHelper {
 
 }
 
+#! an immutable binary value retaining an XSD lexical spelling
+/** Native octets alone cannot retain uppercase hex or spaced base64 required by a pattern.
+    This value carries the encoding, validated XML text and decoded bytes.
+    @par Example
+    \c XsdBinaryValue("hexBinary", "FF") preserves uppercase text while representing one 255 octet.
+    @note Ordinary serializer strings retain their existing raw-byte meaning; use this class for encoded text.
+    @since %WSDL 0.5.8
+*/
+public final class XsdBinaryValue inherits Serializable {
+    private {
+        string builtin;
+        string lexical;
+        transient binary bytes;
+    }
+
+    #! constructs a retained binary spelling
+    /** @param builtin hexBinary or base64Binary
+        @param lexical encoded XML text, normalized and validated with the builtin whitespace rule
+        @throw XSD-BINARY-VALUE-ERROR unknown encoding or malformed text
+    */
+    constructor(string builtin, string lexical) {
+        initialize(builtin, lexical, "XSD-BINARY-VALUE-ERROR");
+    }
+
+    private initialize(string builtin, string lexical, string error) {
+        if (!XsdBinaryLexicalHelper::isType(builtin)) {
+            throw error, sprintf("unknown XML binary encoding %Y", builtin);
+        }
+        string validated = XsdBinaryLexicalHelper::lexical(builtin, lexical, error);
+        binary decoded = XsdBinaryLexicalHelper::decode(builtin, validated, error);
+        self.builtin = builtin;
+        self.lexical = validated;
+        bytes = decoded;
+    }
+
+    private:internal deserializeMembers(hash<auto> members) {
+        if (members.builtin.typeCode() != NT_STRING || members.lexical.typeCode() != NT_STRING) {
+            throw "DESERIALIZATION-ERROR", "a retained binary value requires encoding and lexical strings";
+        }
+        initialize(members.builtin, members.lexical, "DESERIALIZATION-ERROR");
+    }
+
+    #! returns the primitive binary encoding
+    /** @return hexBinary or base64Binary */
+    string getBuiltinName() {
+        return builtin;
+    }
+
+    #! returns the validated XML spelling
+    /** @return normalized XML text retaining case and internal base64 spacing */
+    string getLexicalValue() {
+        return lexical;
+    }
+
+    #! returns the exact octets independently of their spelling
+    /** @return native binary content */
+    binary getBinaryValue() {
+        return bytes;
+    }
+}
+
 class XsdBinaryLexicalHelper {
     static bool isType(string builtin) {
         return builtin == "hexBinary" || builtin == "base64Binary";
@@ -3502,6 +3574,13 @@ class XsdBinaryLexicalHelper {
     }
 
     static binary decode(string builtin, auto value, string error) {
+        if (value instanceof XsdBinaryValue) {
+            XsdBinaryValue retained = cast<XsdBinaryValue>(value);
+            if (retained.getBuiltinName() != builtin) {
+                throw error, "retained binary value uses a different primitive encoding";
+            }
+            return retained.getBinaryValue();
+        }
         if (value.typeCode() == NT_BINARY) {
             return value;
         }
@@ -3522,6 +3601,13 @@ class XsdBinaryLexicalHelper {
 
     static string encode(string builtin, auto value, string error) {
         @assert(isType(builtin));
+        if (value instanceof XsdBinaryValue) {
+            XsdBinaryValue retained = cast<XsdBinaryValue>(value);
+            if (retained.getBuiltinName() != builtin) {
+                throw error, "retained binary value uses a different primitive encoding";
+            }
+            return retained.getLexicalValue();
+        }
         if (!exists value) {
             return "";
         }
@@ -3536,7 +3622,8 @@ class XsdBinaryLexicalHelper {
 
 #! provider validating encoded XML binary text before decoding octets
 /** Encoded strings follow the complete XSD hexBinary or base64Binary grammar, including base64 padding bits.
-    Native binary values retain every octet. XML whitespace and character encoding are handled before decoding.
+    Native binary values and XsdBinaryValue carriers retain every octet. XML whitespace and character encoding
+    are handled before decoding. Carriers must use this provider's primitive binary encoding.
     @par Example
     A base64 attachment fragment \c "A A = =" decodes to one zero octet; \c "AB==" rejects nonzero padding bits.
     @since %WSDL 0.5.8
@@ -3616,10 +3703,10 @@ public class XsdBinaryDataType inherits AbstractDataProviderType {
 
     #! reports accepted native categories
     /** @param simple request simplified names
-        @return string/binary, plus nothing for optional types
+        @return string/binary/object, plus nothing for optional types; only XsdBinaryValue objects are accepted
     */
     hash<string, bool> getAcceptTypeHash(*bool simple) {
-        hash<string, bool> result = {"string": True, "binary": True};
+        hash<string, bool> result = {"string": True, "binary": True, "object": True};
         if (optional) {
             result.nothing = True;
         }
@@ -3639,7 +3726,7 @@ public class XsdBinaryDataType inherits AbstractDataProviderType {
     }
 
     #! validates encoded text and returns its exact octets
-    /** @param value encoded XML text or native binary octets
+    /** @param value encoded XML text, native binary octets or an XsdBinaryValue carrier
         @return binary data, or NOTHING for optional omission
         @throw MISSING-VALUE-ERROR a required value is absent
         @throw RUNTIME-TYPE-ERROR invalid encoded text or unsupported native category
@@ -4707,7 +4794,7 @@ class XsdListValueHelper {
 
     static bool supports(string builtin) {
         return builtin == "boolean" || builtin == "duration" || XsdNumericFacetHelper::isType(builtin)
-            || XsdCalendarLexicalHelper::isType(builtin) || TextTypes{builtin};
+            || XsdBinaryLexicalHelper::isType(builtin) || XsdCalendarLexicalHelper::isType(builtin) || TextTypes{builtin};
     }
 
     static *hash<XsdListItemInfo> describe(XsdAbstractType item) {
@@ -4762,6 +4849,7 @@ class XsdListValueHelper {
         foreach string category in (keys categories) {
             if (category != "string" && category != "int" && category != "number"
                     && category != "float" && category != "bool"
+                    && !((category == "binary" || category == "object") && XsdBinaryLexicalHelper::isType(item.builtin))
                     && !(category == "date" && XsdCalendarLexicalHelper::isType(item.builtin))) {
                 throw error, sprintf("invalid atomic list item output category %Y", category);
             }
@@ -4885,6 +4973,8 @@ class XsdListValueHelper {
                 token = XsdDecimalLexicalHelper::canonical(token);
             } else if (item.builtin == "boolean") {
                 token = XsdBooleanLexicalHelper::decode(token, error) ? "true" : "false";
+            } else if (XsdBinaryLexicalHelper::isType(item.builtin)) {
+                token = XsdBinaryFacetHelper::key(item.builtin, token, error);
             } else if (item.builtin == "duration") {
                 token = XsdDurationValueHelper::key(token, error);
             } else if (XsdCalendarLexicalHelper::isType(item.builtin)) {
@@ -5558,6 +5648,8 @@ class XsdNumericFacetHelper {
             supplied = cast<XsdNumericRestrictionDataType>(provider).getBuiltinName();
         } else if (provider instanceof XsdBinaryDataType) {
             supplied = cast<XsdBinaryDataType>(provider).getBuiltinName();
+        } else if (provider instanceof XsdBinaryRestrictionDataType) {
+            supplied = cast<XsdBinaryRestrictionDataType>(provider).getBuiltinName();
         } else if (provider instanceof XsdDurationDataType || provider instanceof XsdDurationRestrictionDataType) {
             supplied = "duration";
         } else if (provider instanceof XsdCalendarDataType) {
@@ -6003,6 +6095,254 @@ public class XsdDurationRestrictionDataType inherits AbstractDataProviderType {
     /** @return the mandatory provider */
     AbstractDataProviderType getMandatoryType() {
         return new XsdDurationRestrictionDataType(facets, base.getMandatoryType());
+    }
+}
+
+#! resolved lexical and octet facets for a binary restriction
+/** @since %WSDL 0.5.8 */
+public hashdecl XsdBinaryFacetInfo {
+    #! declared type name
+    string name;
+    #! hexBinary or base64Binary
+    string base_name;
+    #! compiled alternatives at this derivation step
+    *list<XsdPatternConstraint> patterns;
+    #! encoded enumeration literals, compared by decoded octets
+    *list<string> enumeration;
+    #! exact octet count
+    *XsdFacetCount length;
+    #! minimum octet count
+    *XsdFacetCount min_length;
+    #! maximum octet count
+    *XsdFacetCount max_length;
+}
+
+class XsdBinaryFacetHelper {
+    static hash<XsdSizedFacetInfo> lengths(hash<XsdBinaryFacetInfo> facets) {
+        return <XsdSizedFacetInfo>{"name": facets.name, "kind": "binary", "length": facets.length,
+            "min_length": facets.min_length, "max_length": facets.max_length};
+    }
+
+    static checkProvider(string builtin, AbstractDataProviderType base, string error) {
+        XsdNumericFacetHelper::checkProvider(builtin, base, error);
+        if (!(base instanceof XsdBinaryDataType) && !(base instanceof XsdBinaryRestrictionDataType)) {
+            throw error, "a binary restriction requires a validating binary base provider";
+        }
+    }
+
+    static checkDefinition(hash<XsdBinaryFacetInfo> facets, string error) {
+        if (!XsdBinaryLexicalHelper::isType(facets.base_name)) {
+            throw error, "invalid binary restriction builtin";
+        }
+        XsdSizedFacetHelper::checkDefinition(lengths(facets), error);
+        foreach string lexical in (facets.enumeration) {
+            string checked = XsdBinaryLexicalHelper::lexical(facets.base_name, lexical, error);
+        }
+        foreach XsdPatternConstraint pattern in (facets.patterns) {
+            try {
+                bool checked = XsdPatternConstraintHelper::matches("", pattern);
+            } catch (hash<ExceptionInfo> ex) {
+                if (ex.err != "REGEX-ERROR" && ex.err != "REGEX-COMPILATION-ERROR") {
+                    rethrow;
+                }
+                throw error, sprintf("invalid compiled binary pattern: %s", ex.desc);
+            }
+        }
+    }
+
+    static string key(string builtin, auto value, string error) {
+        return make_hex_string(XsdBinaryLexicalHelper::decode(builtin, value, error));
+    }
+
+    # Provider inputs are encoded strings or native values. Serializer raw strings
+    # are encoded before this helper so the two public input conventions stay distinct.
+    static string validate(hash<XsdBinaryFacetInfo> facets, auto value, string error) {
+        string text = XsdBinaryLexicalHelper::lexical(facets.base_name,
+            value.typeCode() == NT_STRING ? value : XsdBinaryLexicalHelper::encode(facets.base_name, value, error), error);
+        binary decoded = XsdBinaryLexicalHelper::decode(facets.base_name, text, error);
+        XsdSizedFacetHelper::validate(lengths(facets), decoded, {}, error);
+        if (facets.patterns) {
+            bool matched = False;
+            foreach XsdPatternConstraint pattern in (facets.patterns) {
+                if (XsdPatternConstraintHelper::matches(text, pattern)) {
+                    matched = True;
+                    break;
+                }
+            }
+            if (!matched) {
+                throw error, sprintf("binary spelling %Y does not match a pattern of %Y", text, facets.name);
+            }
+        }
+        if (exists facets.enumeration) {
+            foreach string lexical in (facets.enumeration) {
+                if (decoded == XsdBinaryLexicalHelper::decode(facets.base_name, lexical, error)) {
+                    return text;
+                }
+            }
+            throw error, sprintf("binary value for %Y is outside its enumeration", facets.name);
+        }
+        return text;
+    }
+}
+
+#! a binary provider that retains lexical patterns and exact value facets
+/** Lengths count decoded octets; enumerations compare byte content.
+    Patterns retain the XML spelling in an immutable XsdBinaryValue.
+    @par Example
+    An enumeration containing \c "FF" also accepts \c "ff" for hexBinary.
+    @since %WSDL 0.5.8
+*/
+public class XsdBinaryRestrictionDataType inherits AbstractDataProviderType {
+    private {
+        hash<XsdBinaryFacetInfo> facets;
+        AbstractDataProviderType base;
+    }
+
+    #! constructs a provider for a binary restriction
+    /** @param facets the resolved scalar facet data
+        @param base the base provider supplying native categories and requiredness
+        @throw XSD-SIMPLETYPE-ERROR invalid binary facet metadata
+    */
+    constructor(hash<XsdBinaryFacetInfo> facets, AbstractDataProviderType base) {
+        XsdBinaryFacetHelper::checkDefinition(facets, "XSD-SIMPLETYPE-ERROR");
+        XsdBinaryFacetHelper::checkProvider(facets.base_name, base, "XSD-SIMPLETYPE-ERROR");
+        checkEnumeration(facets, base, "XSD-SIMPLETYPE-ERROR");
+        self.facets = facets;
+        self.base = base;
+    }
+
+    private:internal deserializeMembers(hash<auto> members) {
+        if (!(members.base instanceof AbstractDataProviderType)) {
+            throw "DESERIALIZATION-ERROR", "binary restriction provider requires a base provider";
+        }
+        hash<XsdBinaryFacetInfo> resolved = new hash<XsdBinaryFacetInfo>(members.facets);
+        XsdBinaryFacetHelper::checkDefinition(resolved, "DESERIALIZATION-ERROR");
+        XsdBinaryFacetHelper::checkProvider(resolved.base_name, members.base, "DESERIALIZATION-ERROR");
+        checkEnumeration(resolved, members.base, "DESERIALIZATION-ERROR");
+        facets = resolved;
+        base = members.base;
+    }
+
+    private static checkEnumeration(hash<XsdBinaryFacetInfo> facets, AbstractDataProviderType base, string error) {
+        foreach string lexical in (facets.enumeration) {
+            try {
+                auto checked = base.acceptsValue(lexical);
+            } catch (hash<ExceptionInfo> ex) {
+                if (ex.err != "RUNTIME-TYPE-ERROR" && ex.err != "MISSING-VALUE-ERROR") {
+                    rethrow;
+                }
+                throw error, sprintf("invalid base value in binary enumeration: %s", ex.desc);
+            }
+        }
+    }
+
+    #! returns the XSD builtin underlying this binary provider
+    /** @return the binary builtin local name
+        @since %WSDL 0.5.8
+    */
+    string getBuiltinName() {
+        return facets.base_name;
+    }
+
+    #! returns the restricted type name
+    /** @return the XSD type name with its optionality prefix */
+    string getName() {
+        return (base.isOrNothingType() ? "*" : "") + "xsd:" + facets.name;
+    }
+
+    #! prevents list providers from converting values before facet validation
+    /** @return NOTHING */
+    *Type getValueType() {
+    }
+
+    #! returns the output category, retaining patterned values as XsdBinaryValue objects
+    /** @return object for this step's pattern, otherwise the base provider category */
+    int getBaseTypeCode() {
+        return facets.patterns ? NT_OBJECT : base.getBaseTypeCode();
+    }
+
+    #! returns the output category name, including retained patterned objects
+    /** @return object for this step's pattern, otherwise the base provider category name */
+    string getBaseTypeName() {
+        return facets.patterns ? "object" : base.getBaseTypeName();
+    }
+
+    #! returns no item type for this atomic value
+    /** @return NOTHING */
+    *AbstractDataProviderType getElementType() {
+    }
+
+    #! returns no record fields for this atomic value
+    /** @return NOTHING */
+    *hash<string, AbstractDataField> getFields() {
+    }
+
+    #! requires facet validation for all values
+    /** @return an empty map */
+    *hash<string, bool> getDirectTypeHash() {
+        return {};
+    }
+
+    #! returns accepted native categories
+    /** @param simple request simplified names
+        @return the base provider's accepted categories
+    */
+    hash<string, bool> getAcceptTypeHash(*bool simple) {
+        return base.getAcceptTypeHash(simple);
+    }
+
+    #! returns converted native categories
+    /** @param simple request simplified names
+        @return object and optional nothing for this step's pattern, otherwise the base provider's categories
+    */
+    hash<string, bool> getReturnTypeHash(*bool simple) {
+        if (facets.patterns) {
+            hash<string, bool> result = {"object": True};
+            if (base.isOrNothingType()) {
+                result.nothing = True;
+            }
+            return result;
+        }
+        return base.getReturnTypeHash(simple);
+    }
+
+    #! validates the declared restriction and converts the accepted value
+    /** @param value the native value or XML binary text
+        @return the validated binary value, or NOTHING for optional omission
+        @throw MISSING-VALUE-ERROR a required value is omitted
+        @throw RUNTIME-TYPE-ERROR lexical input or a restriction facet is invalid
+    */
+    auto acceptsValue(auto value) {
+        if (!exists value) {
+            return base.acceptsValue(value);
+        }
+        string lexical = XsdBinaryFacetHelper::validate(facets, value, "RUNTIME-TYPE-ERROR");
+        auto converted = base.acceptsValue(lexical);
+        return facets.patterns ? new XsdBinaryValue(facets.base_name, lexical) : converted;
+    }
+
+    #! returns the requiredness of the value
+    /** @return True for mandatory values */
+    bool isMandatory() {
+        return base.isMandatory();
+    }
+
+    #! returns whether omission is accepted
+    /** @return True for optional values */
+    bool isOrNothingType() {
+        return base.isOrNothingType();
+    }
+
+    #! returns an optional equivalent retaining the same restriction
+    /** @return the optional provider */
+    AbstractDataProviderType getOrNothingType() {
+        return new XsdBinaryRestrictionDataType(facets, base.getOrNothingType());
+    }
+
+    #! returns a mandatory equivalent retaining the same restriction
+    /** @return the mandatory provider */
+    AbstractDataProviderType getMandatoryType() {
+        return new XsdBinaryRestrictionDataType(facets, base.getMandatoryType());
     }
 }
 
@@ -6639,6 +6979,128 @@ public class XsdDurationDataField inherits QoreDataField {
     }
 }
 
+#! a binary field comparing finite choices by XSD value
+/** Choices retain display text while equivalent encoded spellings share an octet value key.
+    @par Example
+    A hex field fixed to \c "FF" also accepts \c "ff" when the lexical pattern permits it.
+    @since %WSDL 0.5.8
+*/
+public class XsdBinaryDataField inherits QoreDataField {
+    private {
+        string builtin;
+    }
+
+    private static hash<auto> withoutChoices(hash<auto> info) {
+        remove info.allowed_values;
+        remove info.element_allowed_values;
+        return info;
+    }
+
+    #! constructs a binary field with exact finite choices
+    /** @param info the ordinary QoreDataField field properties
+        @param builtin the binary XSD builtin used for value comparison
+        @throw XSD-SIMPLETYPE-ERROR invalid binary choice text
+    */
+    constructor(hash<auto> info, string builtin) : QoreDataField(XsdBinaryDataField::withoutChoices(info)) {
+        if (!XsdBinaryLexicalHelper::isType(builtin)) {
+            throw "XSD-SIMPLETYPE-ERROR", sprintf("invalid binary field builtin %Y", builtin);
+        }
+        self.builtin = builtin;
+        if (exists info.allowed_values) {
+            setAllowedValues(info.allowed_values, info.allowed_values_creatable);
+        }
+        if (exists info.element_allowed_values) {
+            setElementAllowedValues(info.element_allowed_values, info.element_allowed_values_creatable);
+        }
+    }
+
+    private:internal deserializeMembers(hash<auto> members) {
+        if (members.builtin.typeCode() != NT_STRING || !XsdBinaryLexicalHelper::isType(members.builtin)) {
+            throw "DESERIALIZATION-ERROR", "binary field requires a valid builtin name";
+        }
+        builtin = members.builtin;
+    }
+
+    #! sets binary choices without applying this restriction's lexical patterns to facet declarations
+    /** @param choices binary values or AllowedValueInfo entries
+        @param creatable whether this field permits values outside its finite choices
+        @return this field
+        @throw XSD-SIMPLETYPE-ERROR invalid binary choice text
+        @note The provider still enforces its own schema enumeration, even if creatable is True.
+    */
+    AbstractDataField setAllowedValues(list<auto> choices, *bool creatable) {
+        list<hash<AllowedValueInfo>> resolved = resolveChoices(choices);
+        hash<string, bool> value_map = map {valueKey($1.value): True}, resolved;
+        allowed_values = resolved;
+        allowed_values_map = value_map;
+        allowed_values_creatable = creatable ?? False;
+        return self;
+    }
+
+    #! sets exact binary choices for repeated elements
+    /** @param choices binary values or AllowedValueInfo entries for each element
+        @param creatable whether element values outside these choices are permitted
+        @return this field
+        @throw XSD-SIMPLETYPE-ERROR invalid binary choice text
+    */
+    AbstractDataField setElementAllowedValues(list<auto> choices, *bool creatable) {
+        list<hash<AllowedValueInfo>> resolved = resolveChoices(choices);
+        hash<string, bool> value_map = map {valueKey($1.value): True}, resolved;
+        element_allowed_values = resolved;
+        element_allowed_values_map = value_map;
+        element_allowed_values_creatable = creatable ?? False;
+        return self;
+    }
+
+    private list<hash<AllowedValueInfo>> resolveChoices(list<auto> choices) {
+        list<hash<AllowedValueInfo>> resolved();
+        foreach auto choice in (choices) {
+            hash<AllowedValueInfo> entry = choice.typeCode() == NT_HASH
+                ? new hash<AllowedValueInfo>(choice)
+                : <AllowedValueInfo>{"value": choice,
+                    "display_name": choice.typeCode() == NT_STRING
+                        ? XsdBinaryLexicalHelper::lexical(builtin, choice, "XSD-SIMPLETYPE-ERROR")
+                        : XsdBinaryLexicalHelper::encode(builtin, choice, "XSD-SIMPLETYPE-ERROR")};
+            resolved += entry;
+        }
+        return resolved;
+    }
+
+    private string valueKey(auto value) {
+        return XsdBinaryFacetHelper::key(builtin, value, "XSD-SIMPLETYPE-ERROR");
+    }
+
+    #! validates the type and compares finite choices in the binary value space
+    /** @param value a native binary value or XML lexical spelling
+        @return the provider's validated value with retained lexical information
+        @throw FIELD-VALUE-ERROR the binary value is outside the field's finite choices
+        @throw RUNTIME-TYPE-ERROR the underlying type rejects the value
+        @throw MISSING-VALUE-ERROR a required value is omitted
+    */
+    auto acceptsValue(auto value) {
+        if (!exists value && exists (auto default_value = getDefaultValue())) {
+            value = default_value;
+        }
+        on_error rethrow $1.err, sprintf("%s (while setting field %Y)", $1.desc, getName()), $1.arg;
+        value = getType().acceptsValue(value);
+        if (exists value && allowed_values && !allowed_values_creatable) {
+            if (!allowed_values_map{valueKey(value)}) {
+                throw "FIELD-VALUE-ERROR", sprintf("field %Y does not accept binary value %Y; allowed values: %Y",
+                    getName(), value, map $1.value, allowed_values);
+            }
+        }
+        if (exists value && element_allowed_values && !element_allowed_values_creatable) {
+            foreach auto item in (value) {
+                if (!element_allowed_values_map{valueKey(item)}) {
+                    throw "FIELD-VALUE-ERROR", sprintf("field %Y does not accept binary element value %Y",
+                        getName(), item);
+                }
+            }
+        }
+        return value;
+    }
+}
+
 #! a calendar field comparing finite choices by XSD value
 /** Choices retain their display text while equivalent timezone representations share a value key.
     @par Example
@@ -7081,7 +7543,14 @@ public class XsdUnionDataField inherits QoreDataField {
 
 class XsdDataFieldHelper {
     static string display(auto value) {
-        return value.typeCode() == NT_LIST ? (map string($1), value).join(" ") : string(value);
+        return value.typeCode() == NT_LIST ? (map displayScalar($1), value).join(" ") : displayScalar(value);
+    }
+
+    private static string displayScalar(auto value) {
+        if (value instanceof XsdBinaryValue) {
+            return cast<XsdBinaryValue>(value).getLexicalValue();
+        }
+        return value.typeCode() == NT_BINARY ? make_hex_string(value) : string(value);
     }
 
     static QoreDataField create(XsdElement element, hash<auto> info) {
@@ -7117,6 +7586,9 @@ class XsdDataFieldHelper {
         }
         if (schema instanceof XsdBaseType && schema.name == "duration") {
             return new XsdDurationDataField(info);
+        }
+        if (schema instanceof XsdBaseType && XsdBinaryLexicalHelper::isType(schema.name)) {
+            return new XsdBinaryDataField(info, schema.name);
         }
         if (schema instanceof XsdBaseType && schema.name == "boolean") {
             return new XsdBooleanDataField(info);
@@ -8759,6 +9231,8 @@ hashdecl XsdUnionTrialResult {
     auto value;
     *hash<XsdUnionValueIdentity> identity;
     *string lexical;
+    # The selected leaf member controls normalization before union-owned patterns.
+    *string white_space;
     bool owner = False;
 }
 
@@ -8897,6 +9371,19 @@ class XsdUnionValueHelper {
         return info ? atomicIdentity(info, input, converted, error) : NOTHING;
     }
 
+    static auto serializeInput(XsdAbstractType member, auto input) {
+        if (input.typeCode() == NT_STRING) {
+            *hash<XsdUnionAtomicInfo> info = describeAtomic(member);
+            if (info && XsdBinaryLexicalHelper::isType(info.builtin)) {
+                # Union strings retain XML lexical values for member reselection.
+                # Explicitly distinguish them from atomic binary serializer raw strings.
+                string lexical = XsdBinaryLexicalHelper::lexical(info.builtin, input, SOAP_SERIALIZATION_ERROR);
+                return new XsdBinaryValue(info.builtin, lexical);
+            }
+        }
+        return input;
+    }
+
     static *XsdSimpleType listType(XsdAbstractType member) {
         hash<string, bool> visited();
         while (member instanceof XsdSimpleType) {
@@ -9026,7 +9513,8 @@ class XsdUnionValueHelper {
         list<string> tokens();
         bool known_lexical = True;
         foreach hash<XsdUnionTrialResult> item in (items) {
-            if (!exists item.value || (!item.value.strp() && item.value.typeCode() != NT_BINARY)) {
+            if (!exists item.value || (!item.value.strp() && item.value.typeCode() != NT_BINARY
+                    && !(item.value instanceof XsdBinaryValue))) {
                 throw "RUNTIME-TYPE-ERROR", "a list item union must produce an atomic value";
             }
             *string token = item.value.typeCode() == NT_STRING ? item.value : item.lexical;
@@ -9119,6 +9607,8 @@ class XsdUnionValueHelper {
             try {
                 Namespaces ns({});
                 value = input.typeCode() == NT_BINARY ? input : converted.typeCode() == NT_BINARY ? converted
+                    : input instanceof XsdBinaryValue ? XsdBinaryLexicalHelper::decode(builtin, input, error)
+                    : converted instanceof XsdBinaryValue ? XsdBinaryLexicalHelper::decode(builtin, converted, error)
                     : ns.getBaseType(builtin).deserializeValue("value", new hash<string, XsdAbstractType>(), NOTHING,
                         XsdScalarTextHelper::value(input, error));
             } catch (hash<ExceptionInfo> ex) {
@@ -9177,6 +9667,7 @@ hashdecl XsdSchemaUnionTrialResult inherits XsdUnionTrialResult {
 
 class XsdSchemaUnionTrialContext {
     public {
+        hash<string, string> selected_white_spaces();
         auto input;
         *Namespaces namespaces;
         *bool omit_type;
@@ -9544,6 +10035,9 @@ public class UnionDataType inherits AbstractDataProviderType {
         if (output) {
             # A native conversion can change member selection when serialized; retain lexical text in that case.
             result.string = True;
+            if (patterns && result.binary) {
+                result.object = True;
+            }
         }
         if (optional) {
             result.nothing = True;
@@ -9628,6 +10122,7 @@ public class UnionDataType inherits AbstractDataProviderType {
                 if (!result) {
                     result = <XsdUnionTrialResult>{"accepted": True, "value": converted};
                     if (info) {
+                        result.white_space = info.white_space;
                         result.identity = XsdUnionValueHelper::atomicIdentity(info, value, converted,
                             "RUNTIME-TYPE-ERROR");
                         if (result.identity) {
@@ -9639,6 +10134,9 @@ public class UnionDataType inherits AbstractDataProviderType {
                         result.identity = XsdUnionValueHelper::listIdentity(list_info, value, converted,
                             "RUNTIME-TYPE-ERROR");
                         result.lexical = XsdUnionValueHelper::listLexical(list_info, converted);
+                    }
+                    if (list_info) {
+                        result.white_space = "collapse";
                     }
                 }
             } catch (hash<ExceptionInfo> ex) {
@@ -9678,7 +10176,9 @@ public class UnionDataType inherits AbstractDataProviderType {
         if (!patterns && !enumeration) {
             return;
         }
-        string lexical = value.typeCode() == NT_STRING ? value : result.lexical ?? string(value);
+        string lexical = value instanceof XsdBinaryValue ? cast<XsdBinaryValue>(value).getLexicalValue()
+            : value.typeCode() == NT_STRING ? value : result.lexical ?? string(value);
+        lexical = XsdSimpleType::normalizeWhiteSpace(lexical, result.white_space ?? "preserve");
         if (patterns) {
             bool matched = False;
             foreach XsdPatternConstraint pattern in (patterns) {
@@ -9690,7 +10190,8 @@ public class UnionDataType inherits AbstractDataProviderType {
             if (!matched) {
                 rejectValue(value);
             }
-            result.value = lexical;
+            result.value = result.identity && XsdBinaryLexicalHelper::isType(result.identity.family)
+                ? new XsdBinaryValue(result.identity.family, lexical) : lexical;
             result.lexical = lexical;
         }
         if (enumeration) {
@@ -12208,6 +12709,9 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
         if (getDurationBaseName()) {
             validateDurationDeclaration();
         }
+        if (getBinaryBaseName()) {
+            validateBinaryDeclaration();
+        }
         string kind = getFacetKind();
         if (kind == "union" && (exists minInclusive || exists minExclusive
                 || exists maxInclusive || exists maxExclusive)) {
@@ -12528,6 +13032,9 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
         if (getDurationBaseName()) {
             return new XsdDurationRestrictionDataType(getDurationFacets(), type.getDataProviderType());
         }
+        if (getBinaryBaseName()) {
+            return new XsdBinaryRestrictionDataType(getBinaryFacets(), type.getDataProviderType());
+        }
         string kind = getFacetKind();
         if (kind == "union" && type) {
             return new UnionDataType(self);
@@ -12624,6 +13131,32 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
             }
             string checked = XsdCalendarFacetHelper::validate(facets, value, "XSD-SIMPLETYPE-ERROR");
             ancestor = ancestor.type instanceof XsdSimpleType ? cast<XsdSimpleType>(ancestor.type) : NOTHING;
+        }
+    }
+
+    private *string getBinaryBaseName() {
+        string kind = getFacetKind();
+        return XsdBinaryLexicalHelper::isType(kind) ? kind : NOTHING;
+    }
+
+    private hash<XsdBinaryFacetInfo> getBinaryFacets() {
+        return <XsdBinaryFacetInfo>{"name": name, "base_name": getBinaryBaseName(),
+            "patterns": pcre_patterns, "enumeration": enumValues ? keys enumValues : NOTHING,
+            "length": length, "min_length": minLength, "max_length": maxLength};
+    }
+
+    private validateBinaryDeclaration() {
+        hash<XsdBinaryFacetInfo> facets = getBinaryFacets();
+        XsdBinaryFacetHelper::checkDefinition(facets, "XSD-SIMPLETYPE-ERROR");
+        foreach string lexical in (facets.enumeration) {
+            try {
+                auto checked = type.deserializeValue(name, new hash<string, XsdAbstractType>(), NOTHING, lexical);
+            } catch (hash<ExceptionInfo> ex) {
+                if (ex.err != SOAP_DESERIALIZATION_ERROR) {
+                    rethrow;
+                }
+                throw "XSD-SIMPLETYPE-ERROR", sprintf("invalid base value in binary enumeration: %s", ex.desc);
+            }
         }
     }
 
@@ -12748,6 +13281,26 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
     }
 
     *list<auto> getAllowedValues() {
+        if (getBinaryBaseName()) {
+            *XsdSimpleType ancestor = self;
+            while (ancestor) {
+                if (ancestor.enumValues) {
+                    list<auto> result();
+                    hash<string, bool> seen();
+                    foreach string lexical in (keys ancestor.enumValues) {
+                        string key = XsdBinaryFacetHelper::key(getBinaryBaseName(), lexical, "XSD-SIMPLETYPE-ERROR");
+                        auto choice = getBinaryChoice(lexical);
+                        if (exists choice && !seen{key}) {
+                            push result, choice;
+                            seen{key} = True;
+                        }
+                    }
+                    return result;
+                }
+                ancestor = ancestor.type instanceof XsdSimpleType ? cast<XsdSimpleType>(ancestor.type) : NOTHING;
+            }
+            return;
+        }
         if (getCalendarBaseName() || getDurationBaseName()) {
             *XsdSimpleType ancestor = self;
             while (ancestor) {
@@ -12888,6 +13441,12 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
             string lexical = XsdDurationFacetHelper::validate(getDurationFacets(), val, SOAP_SERIALIZATION_ERROR);
             return XsdScalarTextHelper::withComments(rh, type.serializeValue(nsc, lexical, omitType));
         }
+        if (getBinaryBaseName()) {
+            string lexical = XsdBinaryLexicalHelper::encode(getBinaryBaseName(), val, SOAP_SERIALIZATION_ERROR);
+            lexical = XsdBinaryFacetHelper::validate(getBinaryFacets(), lexical, SOAP_SERIALIZATION_ERROR);
+            return XsdScalarTextHelper::withComments(rh, type.serializeValue(nsc,
+                new XsdBinaryValue(getBinaryBaseName(), lexical), omitType));
+        }
 
         if (!exists val && getFacetKind() == "list" && hasNativeListValue()) {
             val = ();
@@ -12936,13 +13495,15 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
                 try {
                     *hash<XsdUnionListInfo> list_info = XsdUnionValueHelper::describeList(member);
                     auto value = member.serializeValue(nsc, list_info
-                        ? XsdUnionValueHelper::listInput(val, SOAP_SERIALIZATION_ERROR, list_info) : val, omitType);
+                        ? XsdUnionValueHelper::listInput(val, SOAP_SERIALIZATION_ERROR, list_info)
+                        : XsdUnionValueHelper::serializeInput(member, val), omitType);
                     *hash<XsdUnionValueIdentity> member_identity = trial.identities{key}
                         ?? (list_info ? XsdUnionValueHelper::schemaListIdentity(list_info, member, val, value,
                                 SOAP_SERIALIZATION_ERROR, trial.identities)
                             : XsdUnionValueHelper::atomicIdentity(member, val, value, SOAP_SERIALIZATION_ERROR));
                     trial.results{key} = <XsdSchemaUnionTrialResult>{"accepted": True, "value": value,
-                        "identity": member_identity};
+                        "identity": member_identity,
+                        "white_space": trial.selected_white_spaces{key} ?? member.getWhiteSpace()};
                 } catch (hash<ExceptionInfo> ex) {
                     if (ex.err != SOAP_SERIALIZATION_ERROR) {
                         rethrow;
@@ -12954,10 +13515,13 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
             hash<XsdSchemaUnionTrialResult> result = trial.results{key};
             if (result.accepted) {
                 auto lexical = XsdScalarTextHelper::value(val, SOAP_SERIALIZATION_ERROR);
-                if (lexical.typeCode() != NT_STRING) {
+                if (lexical.typeCode() != NT_STRING
+                        || (result.identity && XsdBinaryLexicalHelper::isType(result.identity.family))) {
                     lexical = string(XsdScalarTextHelper::value(result.value, SOAP_SERIALIZATION_ERROR));
                 }
+                lexical = normalizeWhiteSpace(lexical, result.white_space ?? "preserve");
                 validateUnionFacets(lexical, result.identity, "serialize");
+                trial.selected_white_spaces{identity} = result.white_space ?? "preserve";
                 if (patterns) {
                     result.value = withUnionLexical(result.value, lexical);
                 }
@@ -13036,7 +13600,8 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
                                 SOAP_DESERIALIZATION_ERROR, trial.identities)
                             : XsdUnionValueHelper::atomicIdentity(member, val, value, SOAP_DESERIALIZATION_ERROR));
                     trial.results{key} = <XsdSchemaUnionTrialResult>{"accepted": True, "value": value,
-                        "identity": member_identity};
+                        "identity": member_identity,
+                        "white_space": trial.selected_white_spaces{key} ?? member.getWhiteSpace()};
                 } catch (hash<ExceptionInfo> ex) {
                     if (ex.err != SOAP_DESERIALIZATION_ERROR) {
                         rethrow;
@@ -13048,9 +13613,12 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
             hash<XsdSchemaUnionTrialResult> result = trial.results{key};
             if (result.accepted) {
                 string lexical = string(XsdScalarTextHelper::value(val, SOAP_DESERIALIZATION_ERROR));
+                lexical = normalizeWhiteSpace(lexical, result.white_space ?? "preserve");
                 validateUnionFacets(lexical, result.identity, "deserialize");
+                trial.selected_white_spaces{identity} = result.white_space ?? "preserve";
                 if (patterns) {
-                    result.value = lexical;
+                    result.value = result.identity && XsdBinaryLexicalHelper::isType(result.identity.family)
+                        ? new XsdBinaryValue(result.identity.family, lexical) : lexical;
                 }
                 if (result.identity) {
                     trial.identities{identity} = result.identity;
@@ -13383,11 +13951,17 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
         @since %WSDL 0.5.8
     */
     auto getSampleValue(auto default_value) {
+        if (getFacetKind() == "union") {
+            return getUnionSample(default_value);
+        }
         if (getCalendarBaseName()) {
             return getCalendarSample(default_value);
         }
         if (getDurationBaseName()) {
             return getDurationSample(default_value);
+        }
+        if (getBinaryBaseName()) {
+            return getBinarySample(default_value);
         }
         if (getFacetKind() == "boolean") {
             foreach auto candidate in (default_value, "true", "false", "1", "0") {
@@ -13584,6 +14158,107 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
             }
             rethrow;
         }
+    }
+
+    private auto getUnionSample(auto default_value) {
+        if (acceptsSample(default_value)) {
+            return default_value;
+        }
+        list<string> candidates();
+        *XsdSimpleType ancestor = self;
+        while (ancestor) {
+            foreach string lexical in (keys ancestor.enumValues) {
+                push candidates, lexical;
+            }
+            ancestor = ancestor.type instanceof XsdSimpleType ? cast<XsdSimpleType>(ancestor.type) : NOTHING;
+        }
+        *string patterned = getPatternSample();
+        if (exists patterned) {
+            push candidates, patterned;
+        }
+        foreach string lexical in (candidates) {
+            try {
+                auto candidate = deserializeValue(name, new hash<string, XsdAbstractType>(), NOTHING, lexical);
+                if (acceptsSample(candidate)) {
+                    return candidate;
+                }
+            } catch (hash<ExceptionInfo> ex) {
+                if (ex.err != SOAP_DESERIALIZATION_ERROR) {
+                    rethrow;
+                }
+            }
+        }
+        throw "XSD-SAMPLE-ERROR", sprintf("cannot construct a union example satisfying all restrictions of %Y "
+            "from its default value, enumerations or patterns; supply a valid example", name);
+    }
+
+    private auto getBinaryChoice(string lexical) {
+        list<string> candidates = (lexical,);
+        if (getBinaryBaseName() == "hexBinary") {
+            push candidates, toupper(lexical);
+            push candidates, tolower(lexical);
+        }
+        *string patterned = getPatternSample();
+        if (exists patterned) {
+            push candidates, patterned;
+        }
+        string key = XsdBinaryFacetHelper::key(getBinaryBaseName(), lexical, "XSD-SIMPLETYPE-ERROR");
+        foreach string text in (candidates) {
+            try {
+                auto value = deserializeValue(name, new hash<string, XsdAbstractType>(), NOTHING, text);
+                if (XsdBinaryFacetHelper::key(getBinaryBaseName(), value, "SOAP-DESERIALIZATION-ERROR") == key) {
+                    return value;
+                }
+            } catch (hash<ExceptionInfo> ex) {
+                if (ex.err != SOAP_DESERIALIZATION_ERROR) {
+                    rethrow;
+                }
+            }
+        }
+    }
+
+    private auto getBinarySample(auto default_value) {
+        if (acceptsSample(default_value)) {
+            return default_value;
+        }
+        list<string> candidates();
+        *XsdSimpleType ancestor = self;
+        while (ancestor) {
+            foreach string choice in (keys ancestor.enumValues) {
+                push candidates, choice;
+            }
+            ancestor = ancestor.type instanceof XsdSimpleType ? cast<XsdSimpleType>(ancestor.type) : NOTHING;
+        }
+        # Pattern samples must also form complete encoding units. A one-character
+        # sample of [A-F]+ is a valid regex word but not a complete hex octet.
+        int unit = getBinaryBaseName() == "hexBinary" ? 2 : 4;
+        for (int minimum = 1; minimum <= unit; ++minimum) {
+            *string patterned = getPatternSample(minimum);
+            if (exists patterned) {
+                push candidates, patterned;
+            }
+        }
+        foreach string lexical in (candidates) {
+            try {
+                XsdBinaryValue candidate(getBinaryBaseName(), lexical);
+                if (acceptsSample(candidate)) {
+                    return deserializeValue(name, new hash<string, XsdAbstractType>(), NOTHING, lexical);
+                }
+            } catch (hash<ExceptionInfo> ex) {
+                if (ex.err != "XSD-BINARY-VALUE-ERROR") {
+                    rethrow;
+                }
+            }
+        }
+        *XsdFacetCount required = getEffectiveFacet("length") ?? getEffectiveFacet("minLength");
+        if (!exists required || XsdFacetCountHelper::compare(required, XsdRegexHelper::MaxSampleLength) <= 0) {
+            binary zeros = parse_hex_string(strmul("00", exists required ? int(required) : 0));
+            if (acceptsSample(zeros)) {
+                return zeros;
+            }
+        }
+        throw "XSD-SAMPLE-ERROR", sprintf("cannot construct binary text satisfying all facets of %Y "
+            "within the %d-octet generated-example limit; supply a valid example", name, XsdRegexHelper::MaxSampleLength);
     }
 
     private auto getDurationSample(auto default_value) {
@@ -13827,6 +14502,10 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
             string checked = XsdDurationFacetHelper::validate(getDurationFacets(), lexical ?? val, errType);
             return;
         }
+        if (getBinaryBaseName()) {
+            string checked = XsdBinaryFacetHelper::validate(getBinaryFacets(), lexical ?? val, errType);
+            return;
+        }
 
         # Pattern validation
         # issue #5411: XSD 1.0 part 2 section 4.3.4.3: multiple "pattern" facets declared in the same restriction
@@ -13966,6 +14645,12 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
                 XsdScalarTextHelper::value(val, SOAP_DESERIALIZATION_ERROR), SOAP_DESERIALIZATION_ERROR);
             auto converted = type.deserializeValue(en, tmap, mrh, lexical);
             return patterns ? lexical : converted;
+        }
+        if (getBinaryBaseName()) {
+            string lexical = XsdBinaryFacetHelper::validate(getBinaryFacets(),
+                XsdScalarTextHelper::value(val, SOAP_DESERIALIZATION_ERROR), SOAP_DESERIALIZATION_ERROR);
+            auto converted = type.deserializeValue(en, tmap, mrh, lexical);
+            return patterns ? new XsdBinaryValue(getBinaryBaseName(), lexical) : converted;
         }
 
         if (getNumericBaseName()) {

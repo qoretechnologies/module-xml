@@ -59,5 +59,63 @@ qore -b --enable-debug test/wsdl-interop/calendar-validator.qr \
 This generic scalar diagnostic reports three `valid: true` results with empty
 stderr; its successful exit means execution completed, not that these inputs are
 normatively valid. Original W3C fixtures, hashes and historical findings are
-unchanged. Full binary facet/choice/collection identity acceptance remains in P3;
-this increment establishes the lexical/native/provider conversion boundary.
+unchanged. P3-27 established the lexical/native/provider conversion boundary.
+
+## P3-28 binary facets and collections
+
+XSD [length §4.3.1](https://www.w3.org/TR/xmlschema-2/#rf-length) counts binary
+octets, [pattern §4.3.4](https://www.w3.org/TR/xmlschema-2/#rf-pattern) constrains
+lexical text, and [enumeration §4.3.5](https://www.w3.org/TR/xmlschema-2/#rf-enumeration)
+compares values. Enumeration literals must belong to the base type; they need not
+use the spelling required by a pattern introduced in the same restriction.
+For example, hex enumeration `ff` with own pattern `FF` accepts `FF`.
+
+The previous generic facet path compared decoded binary to authored strings and
+called unsupported `string(binary)` for patterns. The two hex reductions also
+reproduce at `6218d07`, before P3-27. Spaced base64 previously stopped earlier in
+the decoder; fixing that decoder exposed the same pattern-conversion defect.
+Binary restrictions now validate encoded text and octet values separately.
+An immutable `XsdBinaryValue` retains the spelling needed by a pattern, while
+ordinary values remain native bytes. Detached providers enforce the same chain.
+Fields and fixed attributes compare octets; lists preserve item order, and unions
+retain distinct hex/base64 primitive identities.
+
+The first independent facet matrix exposed an example generator returning the
+one-character pattern sample `A` for `[A-F]+`, which is incomplete hex. Binary
+sample construction now considers complete encoding units and validates every
+candidate. The union matrix then exposed generic example selection replacing a
+decoded binary carrier with an enumeration string. Serializing that string as raw
+bytes changed the selected value. Union examples now decode candidate text before
+checking serialization.
+
+A further independent reduction rejected the initial outer-whitespace carrier
+behavior. XSD [whiteSpace §4.3.6](https://www.w3.org/TR/xmlschema-2/#rf-whiteSpace)
+delegates normalization to the selected member. Both validators correctly reject
+binary union pattern ` FF ` even for input ` FF `, since the selected binary
+member collapses the input to `FF`. The union trial now propagates the selected
+leaf's normalization through nested unions before applying union-owned facets.
+This also fixes normalizedString, token, numeric and list member patterns. The
+two older Qore-only union/list tests that expected a double-space pattern to accept
+were incorrect; they now require rejection and `XSD-SAMPLE-ERROR` for that empty
+lexical intersection. New positive tests check all three whitespace modes and
+continued conversion after rejection. Binary carriers retain normalized text.
+
+Audit traced an implicit binary union serialization boundary: atomic binary
+serializers interpret strings as raw bytes, while union strings retain XML lexical
+values to preserve member selection. Applying the raw-string convention to unions
+broke the existing HTTP round-trip of string alternative `AB==`. The final change
+explicitly validates union text as encoded binary before invoking that member's
+serializer. Malformed binary text can then select a later string member, and
+valid `41` selects hex octet 65 without an intermediate double encoding. Native
+binary remains the unambiguous byte input. Original/reconstructed schemas test both
+encodings, restrictions and fallback; the HTTP regression keeps `AB==` as a string.
+
+`test_binary_facets.py` compares exact Python bytes and primitive identities
+through both actual bindings and directions, content/attribute/repeated models,
+original/reconstructed element and message providers, and generated examples.
+Its atomic/list/union facet matrices require agreement from both pinned validators;
+the MIME-tolerance exceptions above apply only to the separate lexical matrix.
+`coverage.py` independently checks binary octets, including lists, and negative
+unit cases prove that changed bytes, invalid padding and ignored punctuation fail.
+The four original W3C binary element/attribute families add 28 message directions
+to the strict selection without changing original sources or their adjudication.

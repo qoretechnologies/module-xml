@@ -15,6 +15,7 @@ import survey
 
 import test_union_providers as providers
 import test_list_values as lists
+import test_union_value_identity as identities
 
 
 def definitions():
@@ -50,6 +51,29 @@ class UnionWhitespaceTest(providers.UnionProvidersTest):
     def provider_value(case, lexical):
         normalized = " ".join(lists.tokens(lexical))
         return lists.tokens(lexical) if case.base == "list" and normalized not in {"true", "false"} else lexical
+
+
+class SelectedUnionPatternWhitespaceTest(lists.ListValuesTest):
+    case_schema = staticmethod(identities.schema)
+    parse_value = staticmethod(lambda base, text: " ".join(lists.tokens(text)))
+
+    @staticmethod
+    def provider_value(case, lexical):
+        return lexical
+
+    @staticmethod
+    def case_definitions():
+        for name, members, pattern, values in (
+                ("selected-token", "xs:token xs:int", "A B",
+                 (("A B", True), (" A\t B ", True), ("A C", False), ("12", False))),
+                ("selected-number", "xs:int xs:boolean", "001",
+                 (("001", True), (" \t001\n", True), ("1", False), ("true", False))),
+                ("selected-list", "t:Items xs:boolean", "01 2",
+                 (("01 2", True), (" 01\t2 ", True), ("1 2", False), ("true", False)))):
+            declarations = '<xs:simpleType name="Items"><xs:list itemType="xs:int"/></xs:simpleType>'
+            declarations += '<xs:simpleType name="Inner"><xs:union memberTypes="' + members + '"/></xs:simpleType>'
+            yield identities.IdentityCase(name, name, "t:Inner xs:double", values, declarations,
+                                          facets=facet("pattern", pattern))
 
 
 class UnionWhitespaceDeclarationsTest(unittest.TestCase):

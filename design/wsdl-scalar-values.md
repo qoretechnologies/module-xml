@@ -481,7 +481,7 @@ Union restriction patterns inspect the lexical spelling, before native conversio
 can turn XML `false` into Qore string `"0"`. Their accepted spelling is retained.
 Enumeration declarations must be valid in the base union and compare in that
 base's value space. Thus an integer/decimal enumeration `01` accepts `1.0`, while
-a boolean/integer enumeration `1` rejects `01`. Restrictions are checked after
+a boolean/integer enumeration `1` rejects `01`. Union patterns use the selected leaf member's whitespace rule, propagated through nested unions. Restrictions are checked after
 the base has selected its member; a failed restriction does not select a different
 member of that same base.
 
@@ -526,7 +526,7 @@ item spellings in a native list. For example, with a list of strings restricted 
 `true|false` before a boolean list, `"1 0"` becomes `["1", "0"]`. Serializing native
 booleans as `true false` would instead select the string list. Unambiguous native
 values and the existing `xs:integer` spelling policy are preserved. Whole-union
-patterns can retain the entire lexical string, including its whitespace.
+patterns retain the lexical string after the selected list member collapses XML whitespace.
 
 Detached metadata follows member reordering and pruning. Restoration checks list
 shape, exact list/item provider identities, mandatory items and atomic spelling

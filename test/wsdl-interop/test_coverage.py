@@ -139,6 +139,35 @@ class CoverageTest(unittest.TestCase):
                 actual.text = after + ' PT24H'
                 self.assertEqual(valid, coverage.value_checks(expected, actual, [assertion])['ok'])
 
+    def test_binary_value_assertions_detect_changed_octets_and_malformed_text(self):
+        for datatype, before, after, valid in (
+                ('hexBinary', '00fF', '00FF', True), ('hexBinary', '00ff', '00fe', False),
+                ('hexBinary', '', '', True), ('hexBinary', '00', '', False),
+                ('hexBinary', '0', '00', False), ('hexBinary', 'ff', 'gg', False),
+                ('base64Binary', 'AA==', 'AA==', True), ('base64Binary', 'AA==', 'AQ==', False),
+                ('base64Binary', 'AB==', 'AA==', False), ('base64Binary', 'AA==', 'AA===', False),
+                ('base64Binary', '', '', True), ('base64Binary', 'AA==', '', False),
+                ('base64Binary', 'AA==!', 'AA==', False), ('base64Binary', 'AA==\u00a0', 'AA==', False)):
+            with self.subTest(datatype=datatype, before=before, after=after):
+                for is_list in (False, True):
+                    expected, actual = etree.Element('value'), etree.Element('value')
+                    expected.text, actual.text = before, after
+                    assertion = {'elements': ['value'], 'datatype': 'list' if is_list else datatype}
+                    if is_list:
+                        assertion['item_datatype'] = datatype
+                    self.assertEqual(valid, coverage.value_checks(expected, actual, [assertion])['ok'])
+        expected, actual = etree.Element('value'), etree.Element('value')
+        expected.text, actual.text = ' A A = = ', 'AA=='
+        self.assertTrue(coverage.value_checks(expected, actual,
+                        [{'elements': ['value'], 'datatype': 'base64Binary'}])['ok'])
+        _, records = coverage.prepare(self.root, self.source)
+        name = next(iter(records['BooleanElement']['messages']))
+        for datatype in ('hexBinary', 'base64Binary'):
+            for assertion in ({'elements': ['value'], 'datatype': datatype},
+                              {'elements': ['value'], 'datatype': 'list', 'item_datatype': datatype}):
+                coverage.validate_selection({'format': 1, 'cases': {'BooleanElement': {'messages': {name: [assertion]}}}},
+                                            records)
+
     def test_calendar_value_assertions_detect_timezone_and_year_loss(self):
         huge = '1' + '0' * 1000
         for datatype, before, after, valid in (
@@ -362,7 +391,7 @@ class CoverageTest(unittest.TestCase):
         self.assertEqual("", process.stderr)
         report = json.loads(output.read_text())
         self.assertEqual([], report["selected_failures"])
-        self.assertEqual({"wsdls": 116, "message_directions": 1120}, report["selected_scope"])
+        self.assertEqual({"wsdls": 120, "message_directions": 1148}, report["selected_scope"])
         self.assertEqual(293, len(report["cases"]))
         self.assertEqual(2272, sum(len(c["messages"]) for c in report["cases"]))
         for stage, counts in report["stage_accounting"]["counts"].items():
