@@ -4380,3 +4380,71 @@ outputs and hashes are retained. Architecture notes are in
 `/tmp/wsdl-p3-33-qname-integration-preflight.md`. ENTITY/ENTITIES, dateTime/time
 policy and all remaining P3 criteria remain open. The pending leap-second
 question has no inferred answer. P4-P9 have not begun.
+
+## P3-33 — Preserve caller-owned scalar objects
+
+P3-32 is committed as `1ad6ecf`. Complex record conversion now removes consumed
+entries from its local hash copy without explicitly deleting objects retained
+by the caller. The five cleanup sites cover sequence/all members, choice keys
+and discarded attribute containers. The independently reduced baseline uses
+the already-supported `XsdBinaryValue`: serialization succeeds, then access to
+the original value raises `OBJECT-ALREADY-DELETED`. This is an XML conversion
+defect; no native or Qore source change is needed. The main Qore checkout is
+clean on develop at this commit gate.
+
+The [ownership evidence](caller-owned-values-evidence.md) and
+[implemented contract/example](../../design/wsdl-binary-values.md#caller-ownership-during-record-conversion)
+describe the root cause and retained reference behavior. All **9 new cases /
+147 assertions** pass, and all nine cases fail against exact previous WSDL
+source. Coverage includes both conversion directions, shared siblings, repeated
+values, nested records, choices, reconstruction, failure after an earlier
+converted member, interruption and four synchronized concurrent callers.
+The HTTP consumer suite passes **1 case / 148 assertions**, reusing the same
+retained request and response objects through actual SOAP 1.1/1.2 bindings and
+original/reconstructed services. The documentation example executes successfully.
+
+The complete Qore gate passes **81 suites / 875 cases / 32,255 assertions**.
+The soap suite retains its previously recorded assertion accounting with all
+twenty cases passing. Five affected suites pass **40 mode/timezone invocations /
+344 cases / 13,992 assertions** across AST/IR/JIT/tiered and UTC/Europe-Prague;
+compiled modules pass **43 cases / 1,749 assertions**. After the final test-only
+brace cleanup, the new suite also passes all eight mode/timezone combinations,
+compiled execution and Valgrind again. Four affected qmods and WSDL Qdx/Doxygen
+build without warning/error diagnostics. Logs and JSON summaries use
+`/tmp/wsdl-p3-33-caller-values-{gate,modes,aot,build}`; the final eight runs are
+in `/tmp/wsdl-p3-33-caller-values-final-modes.json`.
+
+The affected Python gate completes **64 methods in 404.684 seconds**, with
+exactly the two previously tracked P6 selected-binding-version failures and
+no new failures, errors or warnings. The comparison is
+`/tmp/wsdl-p3-33-caller-values-python-comparison.json`. Independent matrices
+include binary values/facets, actual bindings, both directions, reconstruction
+and exact value preservation. Both corpus reports differ only in WSDL source
+hash: **120 selected WSDLs / 1,148 directions**, zero selected failures and
+**168 unchanged broad failure signatures**. The complete structural comparison
+is `/tmp/wsdl-p3-33-caller-values-report-comparison.json`.
+
+Final Valgrind execution of the complete new suite uses
+`qore -b --enable-debug --exec-mode=jit` with the authorized
+`QORE_PCRE2_NO_JIT=1`. It reports **zero errors and zero definite, indirect or
+possible loss**, with no suppressions. The known core DWARF-reader warning
+remains tracked for P9. Log:
+`/tmp/wsdl-p3-33-caller-values-valgrind-final.log`. The full
+[audit](audits/P3-33-caller-owned-values.md) records **20 Pass / 42 N/A / 0 Fail**.
+
+Final WSDL SHA256 is
+`339e0fd59630f0bd442146baf4e2a3f50bf39e54ed473d25312eba3dfe63e364`;
+the frozen Debug core remains
+`745c1da619df1407bda9d75442c9012551a67c91ca4e3c4ab4a6834da5be0b8f`.
+Intended-file hashes are in `/tmp/wsdl-p3-33-caller-values-manifest.json`.
+No push or installation was performed.
+
+P3 remains active. Next is QName instance/provider/list/union/fixed/default
+conversion and output namespace preservation. Scratch code now preserves
+QName identities across inherited bindings, local rebindings and default
+namespace resets: 24 scoped inputs and 24 outputs validate with both independent
+oracles, including structural element/attribute identity checks. That incomplete
+implementation is excluded from this commit; scratch architecture and remaining
+paths are recorded in `/tmp/wsdl-p3-33-prototype-state.md`. ENTITY/ENTITIES,
+dateTime/time policy and all other P3 criteria remain open. The pending leap-second
+question has no inferred answer. P4-P9 have not begun.

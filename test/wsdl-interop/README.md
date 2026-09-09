@@ -933,3 +933,13 @@ See [the ownership contract](../../design/wsdl-schema-identity.md#declaration-na
 and [regression evidence](namespace-ownership-evidence.md). Existing independent
 binding matrices continue to check schema validity and preserved values in both
 SOAP versions and directions.
+
+## Caller-owned scalar values
+
+Run `qore --enable-debug test/wsdl-caller-owned-values.qtest` to verify that
+record conversion preserves retained scalar objects supplied by the caller.
+The suite covers sequence/all/choice, nested records, shared and repeated
+values, reconstruction, failure recovery, interruption and concurrent calls.
+`wsdl-binary-consumers.qtest` reuses the same retained values through real HTTP
+requests and responses in both SOAP versions. See [the lifetime contract](../../design/wsdl-binary-values.md#caller-ownership-during-record-conversion)
+and [regression evidence](caller-owned-values-evidence.md).

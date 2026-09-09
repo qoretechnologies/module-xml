@@ -108,3 +108,31 @@ and directions, simple content, attributes, repeated elements, detached provider
 reconstruction and examples are covered. See
 [validator evidence](../test/wsdl-interop/binary-values-evidence.md) for precisely
 recorded libxml2 disagreements.
+
+## Caller ownership during record conversion
+
+Serialization and deserialization consume entries from their local record copies
+without deleting objects held by the caller. A retained binary value can be
+shared by multiple fields, repeated elements and concurrent calls, or reused for
+another SOAP request or response. Conversion failure and interruption after an
+earlier field preserve the original objects and record entries as well.
+
+```qore
+%modern
+%requires WSDL
+XsdSchema schema('<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
+    <xs:complexType name="Record"><xs:sequence>
+    <xs:element name="payload" type="xs:base64Binary"/>
+    </xs:sequence></xs:complexType></xs:schema>', {"async_only": True});
+XsdAbstractType record = schema.findType(make_qname("", "Record"));
+XsdBinaryValue payload("base64Binary", "QQ==");
+hash<auto> input = {"payload": payload};
+@assert(record.serializeValue(schema.nsc, input, True).payload == "QQ==");
+@assert(payload.getBinaryValue() == <41>);
+@assert(input.payload === payload);
+```
+
+`test/wsdl-caller-owned-values.qtest` verifies local conversion and ownership,
+including reconstructed schemas and values, cancellation and concurrent callers.
+The HTTP consumer suite repeats calls with the same retained request and response
+objects through actual SOAP 1.1/1.2 bindings.

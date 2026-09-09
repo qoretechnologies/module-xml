@@ -1,0 +1,224 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires xml
+%requires ../qlib/WSDL.qm
+%exec-class CallerOwnedValuesTest
+
+class InterruptingScalarType inherits XsdBaseType {
+    private {
+        SandboxManager manager;
+    }
+    constructor(Namespaces registry, SandboxManager manager) : XsdBaseType("string", registry) {
+        self.manager = manager;
+    }
+    auto serializeValue(Namespaces registry, auto value, *softbool omit_type) {
+        manager.requestInterrupt();
+        return XsdBaseType::serializeValue(registry, value, omit_type);
+    }
+}
+
+class CallerOwnedValuesTest inherits Test {
+    constructor() : Test("Caller-owned XML scalar values", "1.0") {
+        addTestCase("Sequence and all serialization preserve caller-owned objects", \serialization());
+        addTestCase("Sequence and all decoding preserve supplied scalar objects", \deserialization());
+        addTestCase("Shared sibling and repeated values remain usable", \shared());
+        addTestCase("Nested records preserve original object identity", \nested());
+        addTestCase("Choice branches preserve caller-owned values", \choices());
+        addTestCase("Failures after a converted member preserve the original record", \failure());
+        addTestCase("Reconstructed schema and value objects preserve ownership", \reconstruction());
+        addTestCase("Interruption after the first member leaves caller values usable", \cancellation());
+        addTestCase("Concurrent callers can share immutable scalar values", \concurrency());
+        set_return_value(main());
+    }
+
+    private static XsdSchema schema(string model = "sequence", string extra = "", bool repeated = False) {
+        return new XsdSchema('<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
+            <xs:complexType name="Record"><xs:' + model + '>
+            <xs:element name="payload" type="xs:base64Binary"'
+            + (repeated ? ' maxOccurs="3"' : '') + '/>' + extra
+            + '</xs:' + model + '></xs:complexType></xs:schema>', {"async_only": True});
+    }
+    private static XsdComplexType record(XsdSchema definition) {
+        return cast<XsdComplexType>(definition.findType(make_qname("", "Record")));
+    }
+    private retained(XsdBinaryValue value, hash<auto> original, string identity) {
+        assertEq(identity, value.uniqueHash());
+        assertEq("QQ==", value.getLexicalValue());
+        assertEq(<41>, value.getBinaryValue());
+        assertTrue(original.payload === value);
+        assertTrue(original.hasKey("payload"));
+    }
+    private serialization() {
+        foreach string model in ("sequence", "all") {
+            XsdSchema definition = schema(model);
+            XsdBinaryValue value("base64Binary", "QQ==");
+            hash<auto> original = {"payload": value};
+            string identity = value.uniqueHash();
+            for (int i = 0; i < 3; ++i) {
+                assertEq({"payload": "QQ=="}, record(definition).serializeValue(definition.nsc, original, True));
+                retained(value, original, identity);
+            }
+        }
+    }
+    private deserialization() {
+        foreach string model in ("sequence", "all") {
+            XsdSchema definition = schema(model);
+            XsdBinaryValue value("base64Binary", "QQ==");
+            hash<auto> original = {"payload": value};
+            string identity = value.uniqueHash();
+            for (int i = 0; i < 3; ++i) {
+                assertEq({"payload": <41>}, record(definition).deserializeValue("record", {}, NOTHING, original));
+                retained(value, original, identity);
+            }
+        }
+    }
+    private shared() {
+        XsdSchema definition = schema("sequence", '<xs:element name="second" type="xs:base64Binary"/>');
+        XsdBinaryValue value("base64Binary", "QQ==");
+        hash<auto> original = {"payload": value, "second": value};
+        string identity = value.uniqueHash();
+        assertEq({"payload": "QQ==", "second": "QQ=="}, record(definition).serializeValue(definition.nsc,
+            original, True));
+        retained(value, original, identity);
+        assertTrue(original.second === value);
+        XsdSchema repeated = schema("sequence", "", True);
+        hash<auto> items = {"payload": (value, value, value)};
+        assertEq({"payload": ("QQ==", "QQ==", "QQ==")}, record(repeated).serializeValue(repeated.nsc, items, True));
+        assertEq({"payload": (<41>, <41>, <41>)}, record(repeated).deserializeValue("record", {}, NOTHING, items));
+        foreach XsdBinaryValue item in (items.payload) {
+            assertTrue(item === value);
+            assertEq(<41>, item.getBinaryValue());
+        }
+    }
+    private nested() {
+        XsdSchema definition('<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
+            <xs:complexType name="Record"><xs:sequence><xs:element name="inner"><xs:complexType>
+            <xs:sequence><xs:element name="payload" type="xs:base64Binary"/></xs:sequence>
+            </xs:complexType></xs:element></xs:sequence></xs:complexType></xs:schema>', {"async_only": True});
+        XsdBinaryValue value("base64Binary", "QQ==");
+        hash<auto> original = {"inner": {"payload": value}};
+        assertEq({"inner": {"payload": "QQ=="}}, record(definition).serializeValue(definition.nsc, original, True));
+        assertEq({"inner": {"payload": <41>}}, record(definition).deserializeValue("record", {}, NOTHING, original));
+        assertTrue(original.inner.payload === value);
+        assertEq(<41>, value.getBinaryValue());
+    }
+    private choices() {
+        string branch = '<xs:choice><xs:element name="optional" type="xs:base64Binary"/>
+            <xs:element name="other" type="xs:base64Binary"/></xs:choice>';
+        XsdSchema definition = schema("sequence", branch);
+        XsdBinaryValue value("base64Binary", "QQ==");
+        hash<auto> original = {"payload": value, "optional": value};
+        assertEq({"payload": <41>, "optional": <41>}, record(definition).deserializeValue("record", {}, NOTHING,
+            original));
+        assertEq({"payload": "QQ==", "optional": "QQ=="}, record(definition).serializeValue(definition.nsc,
+            original, True));
+        assertEq(<41>, value.getBinaryValue());
+        assertTrue(original.optional === value);
+    }
+    private failure() {
+        XsdSchema definition = schema("sequence", '<xs:element name="later" type="xs:int"/>');
+        XsdComplexType target = record(definition);
+        XsdBinaryValue value("base64Binary", "QQ==");
+        hash<auto> original = {"payload": value, "later": "invalid"};
+        string identity = value.uniqueHash();
+        assertThrows("SOAP-SERIALIZATION-ERROR", \target.serializeValue(), (definition.nsc, original, True));
+        retained(value, original, identity);
+        assertThrows("SOAP-DESERIALIZATION-ERROR", \target.deserializeValue(), ("record", {}, NOTHING, original));
+        retained(value, original, identity);
+        original.later = 7;
+        assertEq({"payload": "QQ==", "later": 7}, target.serializeValue(definition.nsc, original, True));
+        retained(value, original, identity);
+    }
+    private reconstruction() {
+        XsdSchema original = schema();
+        XsdSchema restored = Serializable::deserialize(original.serialize());
+        XsdBinaryValue value = Serializable::deserialize(new XsdBinaryValue("base64Binary", "QQ==").serialize());
+        hash<auto> input = {"payload": value};
+        string identity = value.uniqueHash();
+        foreach XsdSchema definition in (original, restored) {
+            assertEq({"payload": "QQ=="}, record(definition).serializeValue(definition.nsc, input, True));
+            retained(value, input, identity);
+        }
+    }
+    private cancellation() {
+        XsdSchema definition = schema("sequence", '<xs:element name="later" type="xs:string"/>');
+        XsdComplexType target = record(definition);
+        Program program(PO_MODERN | PO_ENABLE_DEBUG);
+        SandboxManager manager();
+        on_exit {
+            manager.clearInterrupt();
+        }
+        program.setSandboxManager(manager);
+        program.parse("%modern\nsub execute(code<nothing()> work) { work(); }\n", "caller-owned-interrupt.qr");
+        target.elementmap.later.type = new InterruptingScalarType(definition.nsc, manager);
+        XsdBinaryValue value("base64Binary", "QQ==");
+        hash<auto> original = {"payload": value, "later": "end"};
+        string identity = value.uniqueHash();
+        code<nothing()> work = sub() {
+            target.serializeValue(definition.nsc, original, True);
+        };
+        *hash<ExceptionInfo> error;
+        try {
+            program.callFunction("execute", work);
+        } catch (hash<ExceptionInfo> ex) {
+            error = ex;
+        }
+        manager.clearInterrupt();
+        assertEq("PROGRAM-INTERRUPTED", error.err);
+        retained(value, original, identity);
+        target.elementmap.later.type = definition.nsc.getBaseType("string");
+        assertEq({"payload": "QQ==", "later": "end"}, target.serializeValue(definition.nsc, original, True));
+        retained(value, original, identity);
+    }
+    private concurrency() {
+        XsdSchema definition = schema();
+        XsdComplexType target = record(definition);
+        XsdBinaryValue value("base64Binary", "QQ==");
+        hash<auto> original = {"payload": value};
+        string identity = value.uniqueHash();
+        Qore::Thread::Queue ready();
+        Qore::Thread::Queue start();
+        Qore::Thread::Queue results();
+        Qore::Thread::Counter running();
+        on_exit {
+            for (int i = 0; i < 4; ++i) {
+                start.push(True);
+            }
+            assertEq(0, running.waitForZero(30s));
+        }
+        for (int i = 0; i < 4; ++i) {
+            running.inc();
+            background sub() {
+                on_exit {
+                    running.dec();
+                }
+                try {
+                    ready.push(True);
+                    start.get(30s);
+                    for (int j = 0; j < 3; ++j) {
+                        hash<auto> wire = target.serializeValue(definition.nsc, original, True);
+                        @assert(wire.payload == "QQ==");
+                        hash<auto> decoded = target.deserializeValue("record", {}, NOTHING, original);
+                        @assert(decoded.payload == <41>);
+                    }
+                    results.push(value.getBinaryValue());
+                } catch (hash<ExceptionInfo> ex) {
+                    results.push(ex);
+                }
+            }();
+        }
+        for (int i = 0; i < 4; ++i) {
+            ready.get(30s);
+        }
+        for (int i = 0; i < 4; ++i) {
+            start.push(True);
+        }
+        for (int i = 0; i < 4; ++i) {
+            assertEq(<41>, results.get(30s));
+        }
+        retained(value, original, identity);
+    }
+}
