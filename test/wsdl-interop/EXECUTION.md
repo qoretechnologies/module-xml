@@ -5244,3 +5244,37 @@ independently here. Native sample generation remains the next independent P3 fix
 See [provider evidence](message-providers-evidence.md),
 [the design](../../design/wsdl-message-providers.md) and
 [all 62 audit checks](audits/P3-42-message-providers.md): 20 Pass / 42 N/A / 0 Fail.
+
+P3-42 was committed as `a0bdea1` on develop, without pushing.
+
+## P3-43 — Native sample instance checks
+
+The existing generator may return datatype-valid values that cannot form the
+requested instance (the P3-42 preflight retains five such native samples across
+six scalar contracts). The boundary check now validates generated
+element/type-part candidates before returning them, raising XSD-SAMPLE-ERROR for
+ordinary schema rejection and propagating other failures. Nested generation is
+assembled before one root check. The existing choices option remains an
+explanatory all-alternative representation.
+
+Review found and fixed bypassed public subclass hooks in the initial nested
+builder. The final implementation preserves dispatch with a consumed child-call
+context, restored on exit and isolated per thread. Reentrant calls validate
+independently. The unknown-message diagnostic now includes its missing argument.
+The final regression suite fails eight of nine cases against parent `a0bdea1`.
+
+Final verification passes 94 suites, 966 cases and 36,510 reported assertions,
+without warnings or failures. The new nine-case suite passes 138 assertions in
+all four execution modes. The independent ENTITY matrix passes 12,096 outcomes
+and 8,280 document verdicts; the QName matrix passes 4,072 worker outcomes and
+3,776 document checks with its existing, explicitly adjudicated diagnostic.
+All 72 ENTITY WSDLs and every survey/coverage outcome remain unchanged. Strict
+selection passes; 144 broader signatures and the two known P6 coverage-test
+failures remain visible. Examples and Doxygen pass. The final documentation-only
+source edit was followed by new-suite, example, documentation and report checks.
+
+See [verification evidence](sample-instances-evidence.md),
+[implemented design](../../design/wsdl-sample-instances.md) and
+[the full audit](audits/P3-43-sample-instances.md): 19 Pass / 43 N/A / 0 Fail.
+No native or main-Qore change, installation or push was made. Remaining P3 scalar
+criteria and P4-P9 are still open; this increment does not close the plan.

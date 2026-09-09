@@ -1061,3 +1061,12 @@ container wrapping, QName ownership, component metadata, callback failures,
 program interruption and synchronized concurrent calls. The existing
 `test_entity_wsdl.py` matrix independently checks every reachable document.
 See [the provider contract](../../design/wsdl-message-providers.md).
+
+## Generated native instances
+
+`qore -b --enable-debug test/wsdl-sample-instances.qtest` checks that default
+helper calls return a valid candidate or raise XSD-SAMPLE-ERROR before returning.
+Coverage includes element/type/multipart entry points, defaults, occurrence
+limits, explanatory options, QName identity, callback/recovery and concurrency.
+The independent ENTITY and QName context matrices exercise the same consumers.
+See [the generation contract](../../design/wsdl-sample-instances.md).

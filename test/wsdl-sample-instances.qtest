@@ -1,0 +1,335 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires xml
+%requires ../qlib/WSDL.qm
+%exec-class SampleInstancesTest
+
+class SampleInstancesTest inherits QUnit::Test {
+    const Uri = "urn:qore:sample-instance";
+    constructor() : Test("WSDL generated instance requirements", "1.0") {
+        addTestCase("Native element and type-part samples fail before returning invalid ENTITY values", \entities());
+        addTestCase("Multipart examples check every element and type part", \multipart());
+        addTestCase("Generated records check attributes and simple content", \records());
+        addTestCase("Valid samples retain values and explanatory options", \validValues());
+        addTestCase("Generated occurrence limits are checked without truncating a required instance", \occurrences());
+        addTestCase("QName samples retain declaration identity and namespace ownership", \qnames());
+        addTestCase("Concurrent nested sample calls validate each root once", \concurrency());
+        addTestCase("Helper subclasses retain nested generation hooks and root validation", \subclassHooks());
+        addTestCase("Sample validation preserves callback errors and validates each leaf once", \callbacks());
+        set_return_value(main());
+    }
+
+    private static WebService service(string datatype, string extra = "", bool typed = False, *string second_type) {
+        return new WebService('<w:definitions xmlns:w="http://schemas.xmlsoap.org/wsdl/"
+            xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:t="' + Uri + '" targetNamespace="' + Uri + '">
+            <w:types><xs:schema targetNamespace="' + Uri + '">
+            <xs:simpleType name="EntityText"><xs:union memberTypes="xs:ENTITY xs:string"/></xs:simpleType>
+            <xs:simpleType name="TextEntity"><xs:union memberTypes="xs:string xs:ENTITY"/></xs:simpleType>
+            <xs:simpleType name="Items"><xs:list itemType="xs:ENTITY"/></xs:simpleType>' + extra
+            + '<xs:element name="value" type="' + datatype + '"/></xs:schema></w:types>
+            <w:message name="Request"><w:part name="body" ' + (typed ? 'type="' + datatype : 'element="t:value')
+            + '"/>' + (second_type ? '<w:part name="code" type="' + second_type + '"/>' : "")
+            + '</w:message></w:definitions>', {"async_only": True});
+    }
+
+    private entities() {
+        foreach string datatype in ("xs:ENTITY", "xs:ENTITIES", "t:EntityText", "t:Items") {
+            foreach bool typed in (False, True) {
+                WebService original = service(datatype, "", typed);
+                foreach WebService ws in (original, Serializable::deserialize(original.serialize())) {
+                    WSMessageHelper helper(ws);
+                    XsdElement element = ws.getElement(Uri, "value");
+                    assertThrows("XSD-SAMPLE-ERROR", \helper.getMessage(), (element,));
+                    *hash<ExceptionInfo> failure;
+                    try {
+                        helper.getMessage(element);
+                    } catch (hash<ExceptionInfo> ex) {
+                        failure = ex;
+                    }
+                    assertTrue(index(failure.desc, "ENTITY") >= 0);
+                    assertThrows("XSD-SAMPLE-ERROR", \helper.getMessage(), (ws.messages.Request,));
+                    ws.idocmap.value = element;
+                    assertThrows("XSD-SAMPLE-ERROR", \helper.getMessage(), ("value",));
+                }
+            }
+        }
+        WebService ws = service("t:Items");
+        XsdSimpleType items = ws.findType(make_qname(Uri, "Items"));
+        assertEq("", items.serializeValue(ws.nsc, (), True));
+        assertEq(("photo",), items.getSampleValue(("photo",)));
+    }
+
+    private multipart() {
+        foreach bool typed in (False, True) {
+            WebService valid = service("t:TextEntity", "", typed, "xs:int");
+            WSMessageHelper helper(valid);
+            assertEq({"body": "abc", "code": 123}, helper.getMessage(valid.messages.Request));
+            foreach hash<auto> types in ({"first": "t:TextEntity", "second": "xs:ENTITY"},
+                    {"first": "xs:ENTITY", "second": "xs:int"}) {
+                WebService invalid = service(types.first, "", typed, types.second);
+                WSMessageHelper failure(invalid);
+                assertThrows("XSD-SAMPLE-ERROR", \failure.getMessage(), (invalid.messages.Request,));
+            }
+        }
+    }
+
+    private records() {
+        foreach string extra in ('<xs:complexType name="Record"><xs:simpleContent>
+                <xs:extension base="t:EntityText"><xs:attribute name="label" type="xs:string" use="required"/>
+                </xs:extension></xs:simpleContent></xs:complexType>',
+                '<xs:complexType name="Record"><xs:attribute name="image" type="xs:ENTITY" default="photo"/>
+                </xs:complexType>',
+                '<xs:complexType name="Record"><xs:sequence><xs:element name="item" type="xs:ENTITY" maxOccurs="3"/>
+                </xs:sequence></xs:complexType>') {
+            WebService original = service("t:Record", extra);
+            foreach WebService ws in (original, Serializable::deserialize(original.serialize())) {
+                WSMessageHelper helper(ws);
+                assertThrows("XSD-SAMPLE-ERROR", \helper.getMessage(), (ws.messages.Request,));
+                assertThrows("XSD-SAMPLE-ERROR", \helper.getXmlMessage(), (ws.messages.Request,));
+            }
+        }
+    }
+
+    private validValues() {
+        WebService ws = service("t:TextEntity");
+        XsdElement element = ws.getElement(Uri, "value");
+        foreach hash<auto> opts in ({}, {"comments": True}, {"choices": True}) {
+            WSMessageHelper helper(ws, opts);
+            hash<auto> sample = helper.getMessage(element, opts.comments ? "catalog reference" : NOTHING);
+            assertEq("abc", sample.value.typeCode() == NT_HASH ? sample.value."^value^" : sample.value);
+            element.serializeValue(ws.nsc.copy(), sample.value, True, "value", "example");
+        }
+        WSMessageHelper detached(ws);
+        assertThrows("MESSAGE-ERROR", \detached.getMessage(), ("unknown message",));
+        ws.idocmap.Invoice = element;
+        *hash<ExceptionInfo> failure;
+        try {
+            detached.getMessage("unknown message");
+        } catch (hash<ExceptionInfo> ex) {
+            failure = ex;
+        }
+        assertTrue(index(failure.desc, "unknown message") >= 0);
+        assertTrue(index(failure.desc, "Invoice") >= 0);
+        remove ws;
+        assertEq("abc", detached.getMessage(element).value);
+        WebService entity = service("xs:ENTITY");
+        WSMessageHelper description(entity, {"choices": True});
+        assertEq("abc", description.getMessage(entity.messages.Request).value);
+        assertThrows("SOAP-SERIALIZATION-ERROR", \entity.getElement(Uri, "value").serializeValue(),
+            (entity.nsc, "abc", True, "value", "example"));
+    }
+
+    private occurrences() {
+        WebService ws = service("t:Record", '<xs:complexType name="Record"><xs:sequence>
+            <xs:element name="item" type="xs:int" minOccurs="2" maxOccurs="3"/>
+            </xs:sequence></xs:complexType>');
+        WSMessageHelper limited(ws, {"max_items": 1});
+        assertThrows("XSD-SAMPLE-ERROR", \limited.getMessage(), (ws.messages.Request,));
+        foreach int count in (2, 3) {
+            hash<auto> sample = new WSMessageHelper(ws, {"max_items": count}).getMessage(ws.messages.Request);
+            assertEq(count, sample.value.item.size());
+            assertEq(123, sample.value.item[0]);
+        }
+    }
+
+    private qnames() {
+        WebService original = service("t:Category", '<xs:simpleType name="Category"><xs:restriction base="xs:QName">'
+            '<xs:enumeration xmlns:p="urn:catalog" value="p:Invoice"/></xs:restriction></xs:simpleType>');
+        foreach WebService ws in (original, Serializable::deserialize(original.serialize())) {
+            hash<auto> before = ws.nsc.getOutputNamespaceHash(NOTHING);
+            WSMessageHelper helper(ws);
+            XsdQNameValue value = helper.getMessage(ws.messages.Request).value;
+            assertEq("urn:catalog", value.getNamespaceUri());
+            assertEq("Invoice", value.getLocalName());
+            assertTrue(value === ws.messages.Request.getDataProviderType().acceptsValue({"body": value}).body);
+            assertEq(before, ws.nsc.getOutputNamespaceHash(NOTHING));
+        }
+    }
+
+    private concurrency() {
+        WebService ws = service("t:Record", '<xs:complexType name="Record"><xs:sequence>'
+            '<xs:element name="item" type="xs:string"/></xs:sequence></xs:complexType>');
+        XsdComplexType record = ws.findType(make_qname(Uri, "Record"));
+        ConcurrentSampleProbe probe(ws.nsc);
+        record.elementmap.item.type = probe;
+        BarrierSampleHelper helper(ws);
+        Qore::Thread::Queue results();
+        Qore::Thread::Counter running();
+        on_exit {
+            for (int index = 0; index < 4; ++index) {
+                helper.proceed.push(True);
+            }
+            assertEq(0, running.waitForZero(30s));
+        }
+        for (int index = 0; index < 4; ++index) {
+            running.inc();
+            background sub(int worker) {
+                on_exit running.dec();
+                try {
+                    @assert(helper.getMessage(ws.messages.Request).value.item == "abc");
+                    results.push(worker);
+                } catch (hash<ExceptionInfo> ex) {
+                    results.push(ex);
+                }
+            }(index);
+        }
+        for (int index = 0; index < 4; ++index) {
+            helper.ready.get(30s);
+        }
+        for (int index = 0; index < 4; ++index) {
+            helper.proceed.push(True);
+        }
+        hash<string, bool> seen();
+        for (int index = 0; index < 4; ++index) {
+            auto result = results.get(30s);
+            assertEq(NT_INT, result.typeCode());
+            assertFalse(exists seen{result});
+            seen{result} = True;
+        }
+        assertEq(4, probe.calls.size());
+        hash<string, bool> threads();
+        for (int index = 0; index < 4; ++index) {
+            int tid = probe.calls.get(30s);
+            assertFalse(exists threads{tid});
+            threads{tid} = True;
+        }
+    }
+
+    private subclassHooks() {
+        WebService ws = service("t:Record", '<xs:complexType name="Record"><xs:sequence>'
+            '<xs:element name="item" type="xs:int"/></xs:sequence></xs:complexType>');
+        CustomSampleHelper helper(ws);
+        assertEq("42", helper.getMessage(ws.messages.Request).value.item);
+        helper.invalid = True;
+        assertThrows("XSD-SAMPLE-ERROR", \helper.getMessage(), (ws.messages.Request,));
+        helper.invalid = False;
+        assertEq("42", helper.getMessage(ws.messages.Request).value.item);
+        assertEq(123, new WSMessageHelper(ws).getMessage(ws.messages.Request).value.item);
+        WebService entity = service("t:Record", '<xs:complexType name="Record"><xs:sequence>'
+            '<xs:element name="item" type="xs:ENTITY"/></xs:sequence></xs:complexType>');
+        CustomSampleHelper interrupted(entity);
+        XsdComplexType record = entity.findType(make_qname(Uri, "Record"));
+        foreach string error in ("CONTROLLED-ERROR", "THREAD-CANCELLED") {
+            interrupted.error = error;
+            assertThrows(error, \interrupted.getMessage(), (entity.messages.Request,));
+            interrupted.error = NOTHING;
+            interrupted.use_default = True;
+            assertThrows("XSD-SAMPLE-ERROR", \interrupted.getMessage(), (record.elementmap.item,));
+        }
+    }
+
+    private callbacks() {
+        WebService ws = service("t:Record", '<xs:complexType name="Record"><xs:sequence>
+            <xs:element name="item" type="xs:string" maxOccurs="3"/>
+            </xs:sequence></xs:complexType>');
+        XsdComplexType record = ws.findType(make_qname(Uri, "Record"));
+        SampleInstanceProbe probe(ws.nsc);
+        record.elementmap.item.type = probe;
+        WebService inner = service("t:TextEntity");
+        probe.nested = new WSMessageHelper(inner);
+        probe.nested_element = inner.getElement(Uri, "value");
+        WSMessageHelper helper(ws);
+        assertEq(("abc", "abc", "abc"), helper.getMessage(ws.messages.Request).value.item);
+        assertEq(3, probe.calls);
+        foreach string error in ("CONTROLLED-ERROR", "THREAD-CANCELLED", "SOAP-SERIALIZATION-ERROR") {
+            probe.error = error;
+            assertThrows(error == "SOAP-SERIALIZATION-ERROR" ? "XSD-SAMPLE-ERROR" : error,
+                \helper.getMessage(), (ws.messages.Request,));
+            probe.error = NOTHING;
+            assertEq(("abc", "abc", "abc"), helper.getMessage(ws.messages.Request).value.item);
+        }
+        Program program(PO_MODERN);
+        SandboxManager manager();
+        on_exit manager.clearInterrupt();
+        program.setSandboxManager(manager);
+        program.parse("%modern\nsub execute(code<nothing()> work) { work(); }\n",
+            get_script_dir() + "/sample-instance-interrupt.qr");
+        probe.manager = manager;
+        code<nothing()> work = sub() { helper.getMessage(ws.messages.Request); };
+        *hash<ExceptionInfo> failure;
+        try {
+            program.callFunction("execute", work);
+        } catch (hash<ExceptionInfo> ex) {
+            failure = ex;
+        }
+        manager.clearInterrupt();
+        probe.manager = NOTHING;
+        assertEq("PROGRAM-INTERRUPTED", failure.err);
+        assertEq(("abc", "abc", "abc"), helper.getMessage(ws.messages.Request).value.item);
+    }
+}
+
+class SampleInstanceProbe inherits XsdBaseType {
+    public {
+        int calls = 0;
+        *string error;
+        *WSMessageHelper nested;
+        *XsdElement nested_element;
+        *SandboxManager manager;
+    }
+    constructor(Namespaces namespaces) : XsdBaseType("string", namespaces) {
+    }
+    auto serializeValue(Namespaces namespaces, auto value, *softbool omitType) {
+        ++calls;
+        if (nested) {
+            @assert(nested.getMessage(nested_element).value == "abc");
+        }
+        if (manager) {
+            manager.requestInterrupt();
+        }
+        if (error) {
+            throw error, "controlled sample validation failure";
+        }
+        return XsdBaseType::serializeValue(namespaces, value, omitType);
+    }
+}
+
+class CustomSampleHelper inherits WSMessageHelper {
+    public {
+        bool invalid = False;
+        bool use_default = False;
+        *string error;
+    }
+    constructor(WebService ws) : WSMessageHelper(ws) {
+    }
+    hash<auto> getMessage(XsdElement element, *softlist<auto> comments) {
+        if (element.name == "item") {
+            if (error) {
+                throw error, "controlled nested generation failure";
+            }
+            if (!use_default) {
+                return {"item": invalid ? "!" : "42"};
+            }
+        }
+        return WSMessageHelper::getMessage(element, comments);
+    }
+}
+
+class BarrierSampleHelper inherits WSMessageHelper {
+    public {
+        Qore::Thread::Queue ready();
+        Qore::Thread::Queue proceed();
+    }
+    constructor(WebService ws) : WSMessageHelper(ws) {
+    }
+    hash<auto> getMessage(XsdElement element, *softlist<auto> comments) {
+        if (element.name == "item") {
+            ready.push(gettid());
+            proceed.get(30s);
+        }
+        return WSMessageHelper::getMessage(element, comments);
+    }
+}
+
+class ConcurrentSampleProbe inherits XsdBaseType {
+    public { Qore::Thread::Queue calls(); }
+    constructor(Namespaces namespaces) : XsdBaseType("string", namespaces) {
+    }
+    auto serializeValue(Namespaces namespaces, auto value, *softbool omitType) {
+        calls.push(gettid());
+        return XsdBaseType::serializeValue(namespaces, value, omitType);
+    }
+}

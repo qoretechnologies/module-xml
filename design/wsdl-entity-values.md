@@ -59,9 +59,11 @@ instance rebinds the same prefix. Output validation uses a private namespace
 registry. Nilled standalone elements register the instance namespace before
 writing the nil attribute; omitted/nilled ENTITY values have no selected name.
 
-Generated native values pass the same serialization checks before becoming a
-SOAP message. A candidate requiring an unavailable declaration raises
-`SOAP-SERIALIZATION-ERROR`; retained XML generation uses the same error category.
+Generated native values pass the same instance checks before returning from
+normal `WSMessageHelper::getMessage()` calls. A candidate requiring an unavailable
+declaration raises `XSD-SAMPLE-ERROR`; retained XML generation can report this
+before constructing XML. See [sample validation](wsdl-sample-instances.md) for
+bounded generation and the existing explanatory choices option.
 Datatype-only sample generation does not invent declarations.
 
 For example, a legacy contract might accept an unparsed image name or an integer

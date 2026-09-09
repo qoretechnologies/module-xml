@@ -80,6 +80,8 @@ module WSDL {
     @section wsdlrelnotes WSDL Module Release Notes
 
     @subsection wsdl_0_5_8 WSDL v0.5.8
+    - native message examples validate their generated instances before returning values; rejected candidates
+      raise XSD-SAMPLE-ERROR, while the choices option retains its explanatory output
     - complete message providers validate supplied part values against their schema instance requirements,
       preserving field metadata, optional/soft copies, namespace ownership and Serializable reconstruction
     - element, attribute and WSDL part conversion enforces ENTITY/ENTITIES document declarations
@@ -23866,8 +23868,45 @@ public class WebService inherits WSDL::XsdSchema {
     }
 }
 
+class XsdSampleCallContext {
+    public {
+        WSMessageHelper helper;
+        XsdElement element;
+        bool consumed = False;
+    }
+
+    constructor(WSMessageHelper helper, XsdElement element) {
+        self.helper = helper;
+        self.element = element;
+    }
+
+    static bool consume(WSMessageHelper helper, XsdElement element) {
+        if (!SampleCallContext || SampleCallContext.consumed || SampleCallContext.helper !== helper
+                || SampleCallContext.element !== element) {
+            return False;
+        }
+        SampleCallContext.consumed = True;
+        return True;
+    }
+}
+
+thread_local *XsdSampleCallContext SampleCallContext;
+
 #! helper class implementing sample message generation
-/** This is the class for generating sample SOAP messages based on a WSDL file
+/** This is the class for generating sample SOAP messages based on a WSDL file.
+
+    @par Example
+    For a parsed catalog service with a string product-code request, generate a native request example:
+    @code
+    WSOperation lookup = catalog.getBindingOperation("Soap", "lookup");
+    WSMessageHelper examples(catalog);
+    auto sample = examples.getMessage(lookup.input);
+    printf("Catalog request: %Y\n", sample);
+    @endcode
+
+    @note Generation checks the candidate with the existing schema instance conversion. If bounded generation
+    cannot produce a valid candidate, provide a suitable example explicitly. The choices option produces
+    explanatory alternatives; retained XML generation still performs its XML checks.
 */
 public class WSMessageHelper {
     private {
@@ -23885,7 +23924,8 @@ public class WSMessageHelper {
     /** @param ws the object representing the WSDL
         @param opts an optional hash of options with the following possible keys:
         - \c "comments": (bool) generate comments as values with ^comment^ key, default: False
-        - \c "choices": (bool) generate choices as sub hashes ^choices^ key, default: False
+        - \c "choices": (bool) generate explanatory alternatives as sub hashes ^choices^ key, default: False;
+          these descriptions are not complete serializable instances
         - \c "max_items" (int): max.number of array elements to output, default: 3
     **/
     constructor(WebService ws, *hash<auto> opts) {
@@ -24093,10 +24133,59 @@ public class WSMessageHelper {
     }
 
     private hash<auto> getFieldMessage(string field, XsdElement elem, *softlist<auto> comments) {
+        # Preserve nested public-method overrides. Only this intended child call
+        # defers validation to the root; reentrant calls receive their own check.
+        *XsdSampleCallContext previous = SampleCallContext;
+        on_exit SampleCallContext = previous;
+        SampleCallContext = new XsdSampleCallContext(self, elem);
         return {field: getMessage(elem, comments){elem.name}};
     }
 
+    #! generates a native example for an element declaration
+    /** @param elem the element declaration
+        @param comments optional explanatory comments
+        @return the native example keyed by the element name
+        @throw XSD-SAMPLE-ERROR the generated candidate fails the element's schema instance requirements
+        @note With the choices option, the result describes all alternatives and is not a serializable instance.
+    */
     hash<auto> getMessage(XsdElement elem, *softlist<auto> comments) {
+        bool nested = XsdSampleCallContext::consume(self, elem);
+        hash<auto> result = buildElementMessage(elem, comments);
+        if (!nested && !opts.choices) {
+            Namespaces namespaces = elem.type.nsc.copy();
+            XsdQNameOutputScope output_scope(namespaces);
+            try {
+                elem.serializeValue(namespaces, result{elem.name}, True, elem.name, "generated example");
+            } catch (hash<ExceptionInfo> ex) {
+                if (ex.err == SOAP_SERIALIZATION_ERROR) {
+                    rethrow "XSD-SAMPLE-ERROR", sprintf("cannot construct a valid instance example for element %Y: %s",
+                        elem.getExpandedName(), ex.desc), ex.arg;
+                }
+                rethrow;
+            }
+        }
+        return result;
+    }
+
+    private auto getTypeMessage(XsdAbstractType type) {
+        auto value = getTypeInfo(type).value;
+        if (!opts.choices) {
+            Namespaces namespaces = type.nsc.copy();
+            XsdQNameOutputScope output_scope(namespaces);
+            try {
+                XsdDocumentValueHelper::serializeValue(type, namespaces, value, True);
+            } catch (hash<ExceptionInfo> ex) {
+                if (ex.err == SOAP_SERIALIZATION_ERROR) {
+                    rethrow "XSD-SAMPLE-ERROR", sprintf("cannot construct a valid instance example for type %Y: %s",
+                        type.getName(), ex.desc), ex.arg;
+                }
+                rethrow;
+            }
+        }
+        return value;
+    }
+
+    private hash<auto> buildElementMessage(XsdElement elem, *softlist<auto> comments) {
         hash<auto> vi = getTypeInfo(elem.type);
         auto val;
 
@@ -24211,11 +24300,15 @@ public class WSMessageHelper {
     /** @param name message name
 
         @return a hash representing message
+        @throw MESSAGE-ERROR the name does not identify a known element
+        @throw XSD-SAMPLE-ERROR the generated candidate fails the element's schema instance requirements
     */
     hash<auto> getMessage(string name) {
         *XsdElement e = ws.idocmap{name};
-        if (!e)
-            throw "MESSAGE-ERROR", sprintf("cannot map message %y to a known element; known elements: %y", ws.idocmap.keys());
+        if (!e) {
+            throw "MESSAGE-ERROR", sprintf("cannot map message %Y to a known element; known elements: %Y",
+                name, ws.idocmap.keys());
+        }
         return getMessage(e);
     }
 
@@ -24223,7 +24316,8 @@ public class WSMessageHelper {
     /** @param msg the message containing element-based parts
         @return one immutable XML value for each part
         @throw MESSAGE-ERROR a part is type-based rather than element-based
-        @throw SOAP-SERIALIZATION-ERROR generated content fails existing schema checks
+        @throw XSD-SAMPLE-ERROR a native generated candidate fails schema instance requirements
+        @throw SOAP-SERIALIZATION-ERROR generated XML content fails existing schema checks
         @note Ordinary getMessage() calls keep their native representations. The returned values can
         be used with element-based literal SOAP bindings and explicit XML provider types.
         @since %WSDL 0.5.8
@@ -24263,21 +24357,25 @@ public class WSMessageHelper {
     /** @param msg WSMessage object
 
         @return the existing single-part sample, or a hash keyed by every part name for a multipart message
+        @throw XSD-SAMPLE-ERROR a generated candidate fails its part's schema instance requirements
+        @note The choices option produces explanatory alternatives instead of a complete instance.
     */
     auto getMessage(WSMessage msg) {
         if (msg.pmap.size() > 1) {
             hash<auto> result();
             foreach string part in (keys msg.pmap) {
                 hash<ArgInfo> arg = msg.args{msg.pmap{part}};
-                result{part} = arg.element ? getMessage(arg.element){arg.element.name} : getTypeInfo(arg.type).value;
+                result{part} = arg.element ? getMessage(arg.element){arg.element.name} : getTypeMessage(arg.type);
             }
             return result;
         }
         auto t = msg.args.firstValue();
-        if (t.element)
+        if (t.element) {
             return getMessage(t.element);
-        if (t.type)
-            return getTypeInfo(t.type).value;
+        }
+        if (t.type) {
+            return getTypeMessage(t.type);
+        }
     }
 }
 }
