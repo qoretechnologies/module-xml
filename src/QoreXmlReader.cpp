@@ -453,7 +453,7 @@ QoreValue QoreXmlReader::getXmlData(ExceptionSink* xsink, const QoreEncoding* da
         }
         rc = read(xsink);
 
-        if (min_depth > 0 && QoreXmlReader::depth() < min_depth) {
+        if (rc == 1 && min_depth > 0 && QoreXmlReader::depth() < min_depth) {
             rc = 0;
             break;
         }

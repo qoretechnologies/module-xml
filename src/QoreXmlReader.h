@@ -316,10 +316,13 @@ public:
 
         int rc = read();
         if (rc == -1) {
-            if (!*xsink)
+            if (!*xsink) {
                 xsink->raiseExceptionArg("PARSE-XML-EXCEPTION", xml ? new QoreStringNode(*xml) : 0, "cannot parse XML string");
+            }
         }
-        return rc;
+        // Schema callbacks can reject a value while libxml2 still returns a
+        // node or ordinary EOF. Conversion must retain ownership on that path.
+        return *xsink ? -1 : rc;
     }
 
     // returns 1 = OK, 0 = no more nodes to read, -1 = error

@@ -5073,3 +5073,46 @@ leap-second policy remain next criteria, followed by all P4–P9 requirements.
 Final source/artifact/test/report hashes are in `/tmp/wsdl-p3-39-final-manifest.json`.
 The exact report comparison is `/tmp/wsdl-p3-39-final-report-comparison.json`;
 all original corpus hashes, input verdicts and every non-QName case are unchanged.
+
+
+P3-39 was committed as `a0d57a1` on `develop`, without pushing.
+
+## P3-40 — Native ENTITY/ENTITIES validation
+
+The native increment is implemented and verified. The four original corpus
+families still need WSDL document-context integration: their eight messages lack
+unparsed-entity declarations and are invalid. Native standalone XML now accepts
+correct declarations and rejects undeclared/parsed/parameter names, with ordered
+union selection, typed enumeration/list values and first declaration bindings.
+Built-in list minimums are inherited and contradictory effective length bounds
+fail schema construction.
+
+The reader also propagates schema callback errors when libxml2 reports a node or
+ordinary EOF, preserving ownership of partial conversion results. GDB identified
+invalid ENTITY defaults as the source of the original 336-byte leak. The expanded
+pre-fix test reproduced 21,840 leaked bytes; the final eight-case suite is clean
+under Valgrind, as is the native 78-site allocation-failure test. The existing
+isolated core DWARF diagnostic remains recorded for P9 without suppression.
+
+The final gate passes 90 Qore suites / 937 cases / 35,897 reported assertions.
+ENTITY's eight cases / 753 assertions pass on Debug and Release and in all four
+execution modes. Four independent Python methods cover 5,679 documents, 39,753
+native verdicts, 432 schema constructions and external-resource/DOCTYPE policy.
+Nine exact Xerces inherited-minimum false acceptances are independently root
+caused; native rejection remains mandatory. Provider tests (22), survey tests
+(15), oracle protocol tests (7), resource/URI tests (18), native probes and the
+executed example pass. Builds and Doxygen have no warnings/errors.
+
+The complete both-version corpus report is exactly unchanged. WSDL source SHA-256
+remains `46bd191122fb85d5d5c2160fb0e63dacd0bc122ab1868a09370dbccc27e44091`.
+See [native evidence](entity-native-evidence.md), the
+[implemented design](../../design/xml-entity-validation.md), and the
+[62-item audit](audits/P3-40-entity-native.md): 21 Pass / 41 N/A / 0 Fail.
+Exact source/artifact/log hashes are in `/tmp/wsdl-p3-40-final-manifest.json`.
+The reproducible fixture inventory is `/tmp/wsdl-p3-40-final-fixtures.json`, SHA-256
+`7ea2cfba6ff302d0bd98da0cebc0c13a1fde684ee7e79e8d4a3dc036ab40a383`.
+
+P3 remains active. WSDL ENTITY/ENTITIES conversion/provider/sample behavior is
+next; standalone XML declarations must not relax SOAP's DOCTYPE prohibition.
+The dateTime/time leap-second decision remains unanswered. No decision or scope
+reduction is inferred; all P4–P9 requirements remain in scope.

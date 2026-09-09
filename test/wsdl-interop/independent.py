@@ -87,6 +87,20 @@ def run(jobs: list[SchemaJob], resources: dict[str, bytes] | None = None) -> dic
     rejected; input schemas/documents are never rewritten. Worker stderr is fatal.
     Compilation uses all javac lint checks with warnings treated as errors.
     """
+    return _run(jobs, resources, "XsdOracle")
+
+
+def run_entity_documents(jobs: list[SchemaJob]) -> dict:
+    """Validate standalone ENTITY documents through the pinned DOM oracle.
+
+    Internal DTD declarations populate document context. External entities and
+    external DTD loading remain disabled; schema documents still prohibit DTDs.
+    This entry point does not change the SOAP oracle's DOCTYPE policy.
+    """
+    return _run(jobs, None, "XsdEntityOracle")
+
+
+def _run(jobs: list[SchemaJob], resources: dict[str, bytes] | None, worker: str) -> dict:
     if not jobs:
         raise ValueError("no independent oracle jobs")
     resources = resources or {}
@@ -122,7 +136,8 @@ def run(jobs: list[SchemaJob], resources: dict[str, bytes] | None = None) -> dic
         input_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
         classpath = os.pathsep.join(artifacts + [temporary])
         compile_result = subprocess.run(["javac", "-Xlint:all", "-Werror", "-cp", classpath,
-                                         "-d", temporary, str(ROOT / "XsdOracle.java")],
+                                         "-d", temporary, str(ROOT / "XsdOracle.java"),
+                                         str(ROOT / "XsdEntityOracle.java")],
                                         capture_output=True, text=True, check=True, timeout=30)
         if compile_result.stdout or compile_result.stderr:
             raise RuntimeError(f"oracle compilation diagnostics: {compile_result.stdout}{compile_result.stderr}")
@@ -130,7 +145,7 @@ def run(jobs: list[SchemaJob], resources: dict[str, bytes] | None = None) -> dic
         # Xerces exposes the conforming count as a JVM property read during type initialization.
         process = subprocess.run(["java", "-Xmx256m",
                                  "-Dorg.apache.xerces.impl.dv.xs.useCodePointCountForStringLength=true",
-                                 "-cp", classpath, "XsdOracle", str(input_file)],
+                                 "-cp", classpath, worker, str(input_file)],
                                  capture_output=True, text=True, check=True, timeout=60)
         if process.stderr:
             raise RuntimeError(f"oracle worker diagnostics: {process.stderr}")

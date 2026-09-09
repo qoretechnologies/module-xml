@@ -146,6 +146,8 @@ add_executable(qore-xml-namespace-probe EXCLUDE_FROM_ALL cmake/libxml2-namespace
 target_link_libraries(qore-xml-namespace-probe PRIVATE ${QORE_XML_LIBXML2_TARGET})
 add_executable(qore-xml-uri-allocation EXCLUDE_FROM_ALL test/cmake/libxml2_uri_allocation.c)
 target_link_libraries(qore-xml-uri-allocation PRIVATE ${QORE_XML_LIBXML2_TARGET})
+add_executable(qore-xml-entity-allocation EXCLUDE_FROM_ALL test/cmake/libxml2_entity_allocation.c)
+target_link_libraries(qore-xml-entity-allocation PRIVATE ${QORE_XML_LIBXML2_TARGET})
 add_executable(qore-xml-float-test EXCLUDE_FROM_ALL test/xsd-float.cpp src/XsdFloat.cpp)
 target_link_libraries(qore-xml-float-test PRIVATE ${QORE_LIBRARY})
 qore_user_modules("${QMOD}")

@@ -5,6 +5,7 @@
 #include "libxml2-qname-probe.h"
 #include "libxml2-uri-probe.h"
 #include "libxml2-schema-uri-probe.h"
+#include "libxml2-entity-probe.h"
 
 static int check_namespace(const char* source, const char* expected) {
     xmlTextReaderPtr reader = xmlReaderForMemory(source, (int)strlen(source), NULL, "UTF-8", 0);
@@ -40,12 +41,13 @@ int main(void) {
         int qnames = check_qname_values();
         int unions = check_qname_unions();
         int uris = check_uri_values();
+        int entities = check_entity_values();
         uris |= check_schema_uri_values();
         uris |= check_schema_uri_hints();
-        result |= qnames | unions | uris;
-        printf("libxml2 headers=%s runtime=%s namespace_identity=%s qname_values=%s qname_unions=%s uri_identity=%s\n",
+        result |= qnames | unions | uris | entities;
+        printf("libxml2 headers=%s runtime=%s namespace_identity=%s qname_values=%s qname_unions=%s uri_identity=%s entity_values=%s\n",
             LIBXML_DOTTED_VERSION, xmlParserVersion, result ? "FAIL" : "PASS", qnames ? "FAIL" : "PASS",
-            unions ? "FAIL" : "PASS", uris ? "FAIL" : "PASS");
+            unions ? "FAIL" : "PASS", uris ? "FAIL" : "PASS", entities ? "FAIL" : "PASS");
     }
     xmlCleanupParser();
     return result;

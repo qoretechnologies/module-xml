@@ -49,6 +49,8 @@ add_executable(probe "{REPO}/cmake/libxml2-namespace-probe.c")
 target_link_libraries(probe PRIVATE ${{QORE_XML_LIBXML2_TARGET}})
 add_executable(catalog-cleanup "{REPO}/test/cmake/libxml2_catalog_cleanup.c")
 target_link_libraries(catalog-cleanup PRIVATE ${{QORE_XML_LIBXML2_TARGET}})
+add_executable(entity-allocation "{REPO}/test/cmake/libxml2_entity_allocation.c")
+target_link_libraries(entity-allocation PRIVATE ${{QORE_XML_LIBXML2_TARGET}})
 install(TARGETS probe RUNTIME DESTINATION bin)
 ''')
         source = os.environ.get("XML_LIBXML2_SOURCE")
@@ -70,6 +72,8 @@ include("{REPO}/cmake/QoreXmlLibXml2QNameFix.cmake")
 qore_xml_fix_libxml2_qnames("{cls.source}" "${{CMAKE_CURRENT_BINARY_DIR}}/libxml")
 include("{REPO}/cmake/QoreXmlLibXml2UriFix.cmake")
 qore_xml_fix_libxml2_uris("{cls.source}" "${{CMAKE_CURRENT_BINARY_DIR}}/libxml")
+include("{REPO}/cmake/QoreXmlLibXml2EntityFix.cmake")
+qore_xml_fix_libxml2_entities("{cls.source}" "${{CMAKE_CURRENT_BINARY_DIR}}/libxml")
 ''')
         cls.fixed = cls.root / "fixed/build-debug"
         cls.run_command(["cmake", "-S", fixed_project, "-B", cls.fixed, "-DCMAKE_BUILD_TYPE=Debug",
@@ -99,6 +103,7 @@ qore_xml_fix_libxml2_uris("{cls.source}" "${{CMAKE_CURRENT_BINARY_DIR}}/libxml")
         self.assertIn("runtime=21504", output)
         self.assertIn("qname_unions=PASS", output)
         self.assertIn("uri_identity=PASS", output)
+        self.assertIn("entity_values=PASS", output)
         stage = self.root / "stage"
         self.run_command(["cmake", "--install", self.root / "bundled", "--prefix", stage])
         self.assertEqual(["bin/probe", "share/licenses/qore-xml/libxml2-NOTICES.txt"],
@@ -145,6 +150,49 @@ qore_xml_fix_libxml2_qnames("{self.source}" "${{CMAKE_CURRENT_BINARY_DIR}}/libxm
                 output = self.configure("changed-uri-" + filename, "-DQORE_XML_LIBXML2_PROVIDER=BUNDLED",
                                         f"-DFETCHCONTENT_SOURCE_DIR_QORE_XML_LIBXML2={source}", success=False)
                 self.assertIn(f"Unexpected libxml2 {filename}; cannot apply URI fixes", output)
+
+    def test_qname_uri_backport_without_entity_fix_is_rejected(self):
+        project = self.root / "entity-broken/source"
+        project.mkdir(parents=True)
+        (project / "CMakeLists.txt").write_text(f'''cmake_minimum_required(VERSION 3.18...3.31)
+project(entity_broken_fixture C)
+add_subdirectory("{self.source}" libxml)
+include("{REPO}/cmake/QoreXmlLibXml2QNameFix.cmake")
+qore_xml_fix_libxml2_qnames("{self.source}" "${{CMAKE_CURRENT_BINARY_DIR}}/libxml")
+include("{REPO}/cmake/QoreXmlLibXml2UriFix.cmake")
+qore_xml_fix_libxml2_uris("{self.source}" "${{CMAKE_CURRENT_BINARY_DIR}}/libxml")
+''')
+        build = self.root / "entity-broken/build-debug"
+        self.run_command(["cmake", "-S", project, "-B", build, "-DCMAKE_BUILD_TYPE=Debug",
+                          "-DBUILD_SHARED_LIBS=ON", "-DLIBXML2_WITH_PROGRAMS=OFF",
+                          "-DLIBXML2_WITH_TESTS=OFF", "-DLIBXML2_WITH_PYTHON=OFF"])
+        self.run_command(["cmake", "--build", build, "--target", "LibXml2", "-j4"])
+        libraries = list((build / "libxml").glob("libxml2.so")) + list((build / "libxml").glob("libxml2.dylib"))
+        self.assertEqual(1, len(libraries))
+        options = [f"-DLIBXML2_LIBRARY={libraries[0]}", f"-DLIBXML2_INCLUDE_DIR={self.fixed_include}",
+                   f"-DFETCHCONTENT_SOURCE_DIR_QORE_XML_LIBXML2={self.source}"]
+        output = self.configure("entity-broken-auto", "-DQORE_XML_LIBXML2_PROVIDER=AUTO", *options)
+        self.assertIn("using private static libxml2 2.15.4", output)
+        probe = (self.root / "entity-broken-auto/system-libxml2/namespace-probe.log").read_text()
+        for label in ("qname_values", "qname_unions", "uri_identity"):
+            self.assertIn(label + "=PASS", probe)
+        self.assertIn("entity_values=FAIL", probe)
+        self.configure("entity-broken-system", "-DQORE_XML_LIBXML2_PROVIDER=SYSTEM", *options, success=False)
+
+    def test_entity_fixes_preserve_sources_and_reconfigure(self):
+        import hashlib
+        hashes = {"xmlschemas.c": "bed8bfbfd61a2025b67b7a0e4d05ce50093e7a6bb5e43a3ebac343b8df4329a7",
+                  "xmlschemastypes.c": "08cac7d1dbdb617688ac5b36ab6fee75f634e5bf0372aa0e6569a0bebe3b0c8f"}
+        replacements = self.root / "bundled/_deps/qore_xml_libxml2-build/qore-entity-fix"
+        times = {name: (replacements / name).stat().st_mtime_ns for name in hashes}
+        self.configure("bundled", "-DQORE_XML_LIBXML2_PROVIDER=BUNDLED",
+                       f"-DFETCHCONTENT_SOURCE_DIR_QORE_XML_LIBXML2={self.source}")
+        for name, expected in hashes.items():
+            self.assertEqual(expected, hashlib.sha256((self.source / name).read_bytes()).hexdigest())
+            self.assertEqual(times[name], (replacements / name).stat().st_mtime_ns)
+        self.run_command(["cmake", "--build", self.root / "bundled", "--target", "entity-allocation", "-j4"])
+        self.assertIn("ENTITY allocation and cancellation cleanup: PASS",
+                      self.run_command([self.root / "bundled/entity-allocation"]))
 
     def test_catalog_error_cleanup(self):
         import hashlib

@@ -15,6 +15,9 @@ import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
 import javax.xml.XMLConstants;
+import javax.xml.parsers.DocumentBuilder;
+import javax.xml.parsers.DocumentBuilderFactory;
+import javax.xml.transform.dom.DOMSource;
 import javax.xml.transform.sax.SAXSource;
 import javax.xml.validation.Schema;
 import javax.xml.validation.SchemaFactory;
@@ -188,12 +191,34 @@ public final class XsdOracle {
         return Base64.getEncoder().encodeToString(value.getBytes(StandardCharsets.UTF_8));
     }
 
+    // Standalone ENTITY tests need the containing document's unparsed entities.
+    // DOM preserves first declarations, including parsed declarations absent
+    // from the JAXP ValidatorHandler's unparsedEntityDecl-only view.
+    private static DOMSource entitySource(byte[] data, Diagnostics diagnostics) throws Exception {
+        DocumentBuilderFactory factory = new org.apache.xerces.jaxp.DocumentBuilderFactoryImpl();
+        factory.setNamespaceAware(true);
+        factory.setFeature(XMLConstants.FEATURE_SECURE_PROCESSING, true);
+        factory.setFeature("http://xml.org/sax/features/external-general-entities", false);
+        factory.setFeature("http://xml.org/sax/features/external-parameter-entities", false);
+        factory.setFeature("http://apache.org/xml/features/nonvalidating/load-external-dtd", false);
+        DocumentBuilder builder = factory.newDocumentBuilder();
+        builder.setErrorHandler(diagnostics);
+        builder.setEntityResolver((publicId, systemId) -> {
+            throw new SAXException("external entity unavailable offline: " + systemId);
+        });
+        return new DOMSource(builder.parse(new ByteArrayInputStream(data), "urn:wsdl-interop:entity-payload"));
+    }
+
     private static void result(String stage, String id, String status, String error, Diagnostics diagnostics) {
         System.out.println(stage + "\t" + id + "\t" + status + "\t" + encoded(error)
                            + "\t" + String.join(",", diagnostics.warnings));
     }
 
     public static void main(String[] args) throws Exception {
+        run(args, false);
+    }
+
+    static void run(String[] args, boolean entityDocuments) throws Exception {
         if (args.length != 1) {
             throw new IllegalArgumentException("XsdOracle MANIFEST.tsv");
         }
@@ -270,7 +295,11 @@ public final class XsdOracle {
                     validator.setResourceResolver(resolver);
                     validator.setErrorHandler(diagnostics);
                     try {
-                        validator.validate(source(data, "urn:wsdl-interop:payload", diagnostics));
+                        if (entityDocuments) {
+                            validator.validate(entitySource(data, diagnostics));
+                        } else {
+                            validator.validate(source(data, "urn:wsdl-interop:payload", diagnostics));
+                        }
                         result("V", fields[2], "valid", "", diagnostics);
                     } catch (SAXException | IllegalArgumentException error) {
                         result("V", fields[2], "invalid", error.toString(), diagnostics);
