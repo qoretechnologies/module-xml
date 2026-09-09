@@ -3095,3 +3095,66 @@ and [repetition behavior](https://www.pcre.org/current/doc/html/pcre2pattern.htm
 explain the backend limits. Grammar translation alone does not close them.
 Remaining primitive/date/IEEE/binary/QName/entity/XML-RPC work and all P4-P9
 criteria remain in scope; P3 is not complete.
+
+### P3-19: structural repetition counts beyond PCRE compilation limits
+
+P3-18 is committed as 9b7ebe4. The reduced large literal/group and arbitrary
+finite-count cases fail on that baseline because of PCRE's count field and
+compiled-size limits. WSDL now retains exact decimal bounds in immutable
+structural patterns when PCRE compilation cannot represent valid XSD grammar.
+Ordinary anchored PCRE strings remain accepted, including old provider metadata.
+Source-only reconstruction validates and rebuilds transient nodes. Matching
+uses per-call stacks/caches, input-derived width bounds, nullable padding and
+explicit character-set operations. Long repeated literals compare bounded UTF-8
+segments; grammar parsing indexes Unicode characters once.
+
+The initial eight cases have six schema errors on P3-18. Final source and AOT
+pass fourteen cases / 476 assertions. All 63 affected XML suites pass 736 cases
+/ 14971 assertions; SOAP intentionally checks three failed assertions within
+passing cases. AOT and documentation builds are clean. No C++ changed and no
+additional Valgrind is required. Main Qore develop remains clean at 3e2f47be0;
+there was nothing further to commit there and no push, installation or rebuild.
+
+The independent matrix defines 48 actual SOAP contracts and 24 original
+schemas, with 512 input and 224 emitted binding documents, 2432 consumer result
+rows and 1136 accepted provider/example documents. Original overflowing-count
+schema rejections remain visible for both validators; 1616 original Xerces
+document outcomes are explicitly unreachable. Each receives an additional
+mandatory check by both validators through a separately identified schema
+with equivalent membership for the asserted domain of at most 16 characters.
+The original large literal/group schemas validate normally. No payload bytes,
+production outcomes or original fixtures are altered. The direct structural
+matrix adds 16764 exhaustive small-language results against Python plus 292
+Unicode/class results, covering original and reconstructed objects.
+
+The complete normative argument, exact validator source paths/hashes, bounded
+reference proof and preliminary diagnostics are in regex-counts-evidence.md.
+The audit fixed trailing-empty split semantics for open counts, large-value
+processing overhead, cancellation in the literal fast path and repeated Unicode
+prefix scans. Existing 60/90-second SOAP worker deadlines remain unchanged.
+The Unicode sample assertion was corrected to expect its valid Greek candidate.
+The exploratory Xerces INT_MAX worker exhausted its heap before a verdict;
+its exact stack/output is preserved and is not acceptance evidence.
+
+Both-version survey and strict coverage match P3-18 outside version fields:
+89 selected WSDLs / 756 directions, zero selected failures and 220 broad tracked
+failures. Final frozen Python discovery runs 146 methods in 571.099 seconds
+with exactly the same 33 tracked P4/P5/P6 failure signatures, no new failures
+and no errors. All four new repetition methods pass. Code and test hashes
+remain unchanged throughout the run; the full 62-item audit has no failed items.
+
+WSDL SHA-256: 68535d23496662e516943d479686464b448afee2e3521aebc7df42bff6d24476.
+Native XML remains 8ec5487ebe937450478fc856e5c02114e5cf9ffaf9201cf70d052907b40f2e12.
+Evidence prefix: /tmp/wsdl-p3-19-, including frozen-hashes, exact-checks,
+aot-unit, aot-frozen, docs-frozen, exact-survey/coverage and frozen-python.
+The full checklist is audits/P3-19-regex-counts.md.
+
+A separate existing regex execution limitation is reduced in
+/tmp/wsdl-p3-20-backtracking-probe.qr: `(a|aa)+|a+b` must accept 100 `a`
+characters followed by `b`, but PCRE reaches its match limit before evaluating
+the successful alternative. The other reduced nested-repeat/alternative cases
+have the same cause. A copied, unmodified P3-18 module produces byte-identical
+results in backtracking-baseline.log, so this is not a P3-19 regression.
+This remaining execution-limit requirement is the next P3 increment; it is not
+counted as fixed. Primitive/date/IEEE/binary/QName/entity/XML-RPC and all P4-P9
+criteria remain in scope. P3 acceptance is not complete.

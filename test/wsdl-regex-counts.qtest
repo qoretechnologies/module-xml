@@ -1,0 +1,237 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires xml
+%requires ../qlib/WSDL.qm
+%exec-class RegexCountsTest
+
+class RegexCountsTest inherits QUnit::Test {
+    constructor() : Test("XSD regex repetition counts", "1.0") {
+        addTestCase("Literal counts beyond the backend integer field", \literalCount());
+        addTestCase("Repeated groups beyond compiled bytecode size", \groupCount());
+        addTestCase("Arbitrary finite upper bounds preserve the empty string", \upperBounds());
+        addTestCase("Nullable atoms pad arbitrary minimum repetitions", \nullableCounts());
+        addTestCase("Large nonnullable minima reject short strings without expansion", \largeMinima());
+        addTestCase("Large counts retain Unicode and character-set semantics", \characterSets());
+        addTestCase("Leading zeroes do not change a count", \leadingZeroes());
+        addTestCase("Reversed arbitrary-size bounds remain schema errors", \invalidBounds());
+        addTestCase("Structural grammar and deep nesting", \structuralGrammar());
+        addTestCase("Compiled source and legacy provider metadata", \metadata());
+        addTestCase("Boolean, numeric, list and union providers retain large counts", \providers());
+        addTestCase("Large-count examples are valid or explicitly unavailable", \samples());
+        addTestCase("Matching cancellation leaves the pattern reusable", \cancellation());
+        addTestCase("Concurrent matches use independent state", \concurrency());
+        set_return_value(main());
+    }
+
+    private static XsdSchema schema(string pattern) {
+        return new XsdSchema('<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
+            <xs:simpleType name="Value"><xs:restriction base="xs:string"><xs:pattern value="'
+            + pattern + '"/></xs:restriction></xs:simpleType></xs:schema>', {"async_only": True});
+    }
+
+    private check(string pattern, list<string> valid, list<string> invalid) {
+        XsdSchema original = schema(pattern);
+        foreach XsdSchema definition in (original, Serializable::deserialize(original.serialize())) {
+            XsdAbstractType type = definition.findType("Value");
+            AbstractDataProviderType provider = Serializable::deserialize(type.getDataProviderType().serialize());
+            foreach string value in (valid) {
+                assertEq(value, type.deserializeValue("value", definition.getTypeMap(), NOTHING, value));
+                assertEq(value, type.serializeValue(definition.nsc, value, True));
+                assertEq(value, provider.acceptsValue(value));
+            }
+            foreach string value in (invalid) {
+                assertThrows("SOAP-DESERIALIZATION-ERROR", \type.deserializeValue(),
+                    ("value", definition.getTypeMap(), NOTHING, value));
+                assertThrows("SOAP-SERIALIZATION-ERROR", \type.serializeValue(), (definition.nsc, value, True));
+                assertThrows("RUNTIME-TYPE-ERROR", \provider.acceptsValue(), (value,));
+            }
+        }
+    }
+
+    private literalCount() {
+        check("a{65536}", (strmul("a", 65536),), ("", strmul("a", 65535), strmul("a", 65537)));
+    }
+    private groupCount() {
+        check("(ab){32768}", (strmul("ab", 32768),), ("", strmul("ab", 32767), strmul("ab", 32768) + "a"));
+    }
+    private upperBounds() {
+        check("a{0,999999999999999999999999999999999999}", ("", "a", "aaa"), ("b", "aab"));
+        check("((a|b){2}){0,999999999999999999999999999999999999}", ("", "ab", "baab"), ("a", "aba", "ac"));
+    }
+    private nullableCounts() {
+        check("(a?){999999999999999999999999999999999999}", ("", "a", "aaa"), ("b", "aab"));
+        check("(){999999999999999999999999999999999999}", ("",), ("a",));
+        check("((a|aaa)?){999999999999999999999999999999999999}", ("", "a", "aa", "aaaaa"), ("b", "ab"));
+    }
+    private largeMinima() {
+        check("a{999999999999999999999999999999999999}", (), ("", "a", "aaa"));
+        check("(ab|c){999999999999999999999999999999999999,}", (), ("", "ab", "cc"));
+    }
+    private characterSets() {
+        check("(Α中𐀀){65536}", (strmul("Α中𐀀", 65536),),
+            (strmul("Α中𐀀", 65535), strmul("Α中𐀀", 65535) + "Α中a"));
+        XsdCompiledPattern accents("é{65536}");
+        assertTrue(accents.matches(convert_encoding(strmul("é", 65536), "ISO-8859-1")));
+        assertFalse(accents.matches(strmul("é", 65535) + "a"));
+        check("[a-z-[a-z-[aeiou]]]{0,999999999999999999999999999999}", ("", "a", "aeiou"), ("b", "ab"));
+        check("(Α|中|𐀀){1,999999999999999999999999999999}", ("Α", "中𐀀Α"), ("", "a", "中a"));
+    }
+    private leadingZeroes() {
+        check("a{" + strmul("0", 1000) + "1}", ("a",), ("", "aa"));
+    }
+    private invalidBounds() {
+        assertThrows("XSD-SIMPLETYPE-ERROR", \schema(),
+            ("a{999999999999999999999999999999999999,999999999999999999999999999999999998}",));
+    }
+    private structuralGrammar() {
+        string long_literal = strmul("Α中𐀀", 2048);
+        assertEq(long_literal, XsdRegexHelper::toPcre(long_literal));
+        XsdCompiledPattern long_pattern(long_literal);
+        assertTrue(long_pattern.matches(long_literal));
+        assertFalse(long_pattern.matches(long_literal + "a"));
+        foreach string invalid in ("[]", "[a-z-[b]c]", "(?:a)", "a++", "a{2,1}", "a{,2}", "(", '\p{Cs}') {
+            assertThrows("XSD-REGEX-ERROR", sub (string value) { new XsdCompiledPattern(value); }, (invalid,));
+        }
+        foreach string pattern in ("a{0,}", "a{2,}", "(a|aaa){2}", "(a?){2}") {
+            XsdCompiledPattern compiled(pattern);
+            assertEq(regex("aaaa", "\\A(?:" + pattern + ")\\z"), compiled.matches("aaaa"));
+            assertFalse(compiled.matches("aaaab"));
+        }
+        string pattern = strmul("(", 2000) + "a" + strmul(")", 2000);
+        check(pattern, ("a",), ("", "b", "aa"));
+        pattern = "[a]";
+        for (int depth = 0; depth < 2000; ++depth) {
+            pattern = "[a-[" + pattern.substr(1) + "]";
+        }
+        check(pattern, ("a",), ("b", ""));
+    }
+
+    private metadata() {
+        XsdCompiledPattern pattern("a{0,999999999999999999999999}");
+        hash<SerializationInfo> original = pattern.serializeToData();
+        assertEq({"source": pattern.getSource()}, original._index."0"._class_data."WSDL::XsdCompiledPattern");
+        foreach auto bad in (NOTHING, 7, ("a",), "[]", "a{2,1}") {
+            hash<SerializationInfo> corrupt = original;
+            corrupt._index."0"._class_data."WSDL::XsdCompiledPattern".source = bad;
+            assertThrows("DESERIALIZATION-ERROR", \Serializable::deserialize(), (corrupt,));
+            assertTrue(Serializable::deserialize(original).matches("aaa"));
+        }
+        # PCRE strings serialized by previous WSDL versions remain accepted unchanged.
+        XsdSizedRestrictionDataType legacy(<XsdSizedFacetInfo>{"name": "legacy", "kind": "string",
+            "white_space": "preserve", "patterns": ('\A(?:a+)\z',)}, AbstractDataProviderType::get(SoftStringType));
+        AbstractDataProviderType restored = Serializable::deserialize(legacy.serialize());
+        assertEq("aaa", restored.acceptsValue("aaa"));
+        assertThrows("RUNTIME-TYPE-ERROR", \restored.acceptsValue(), ("b",));
+    }
+
+    private providers() {
+        string many = "999999999999999999999999";
+        foreach hash<auto> row in (
+                {"base": '<xs:restriction base="xs:boolean"/>', "pattern": "1{1," + many + "}",
+                    "valid": "1", "invalid": "0", "value": "1"},
+                {"base": '<xs:restriction base="xs:integer"/>', "pattern": "0{0," + many + "}9",
+                    "valid": "009", "invalid": "8", "value": "009"},
+                {"base": '<xs:list itemType="xs:integer"/>', "pattern": "0{0," + many + "}1 2",
+                    "valid": "001 2", "invalid": "2 1", "value": ("001", "2")},
+                {"base": '<xs:union memberTypes="xs:integer xs:string"/>', "pattern": "0{0," + many + "}9",
+                    "valid": "009", "invalid": "A", "value": "009"}) {
+            XsdSchema original('<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
+                <xs:simpleType name="Base">' + row.base + '</xs:simpleType>
+                <xs:simpleType name="Value"><xs:restriction base="Base"><xs:pattern value="' + row.pattern
+                + '"/></xs:restriction></xs:simpleType></xs:schema>', {"async_only": True});
+            foreach XsdSchema definition in (original, Serializable::deserialize(original.serialize())) {
+                XsdAbstractType type = definition.findType("Value");
+                AbstractDataProviderType provider = Serializable::deserialize(type.getDataProviderType().serialize());
+                assertEq(row.value, type.deserializeValue("value", definition.getTypeMap(), NOTHING, row.valid));
+                assertEq(row.valid, type.serializeValue(definition.nsc, row.value, True));
+                assertEq(row.value, provider.acceptsValue(row.value));
+                assertThrows("SOAP-DESERIALIZATION-ERROR", \type.deserializeValue(),
+                    ("value", definition.getTypeMap(), NOTHING, row.invalid));
+                assertThrows("RUNTIME-TYPE-ERROR", \provider.acceptsValue(),
+                    (row.value.typeCode() == NT_LIST ? row.invalid.split(" ") : row.invalid,));
+                AbstractDataProviderType optional = Serializable::deserialize(provider.getOrNothingType().serialize());
+                assertNothing(optional.acceptsValue(NOTHING));
+                assertEq(row.value, optional.acceptsValue(row.value));
+            }
+        }
+    }
+
+    private samples() {
+        foreach string pattern in ("a{0,999999999999999999999999}", "(){999999999999999999999999}",
+                "(a?){999999999999999999999999}") {
+            assertEq("", XsdRegexHelper::getSampleValue(pattern));
+            XsdSchema definition = schema(pattern);
+            XsdSimpleType type = cast<XsdSimpleType>(definition.findType("Value"));
+            string sample = type.getPatternSample();
+            assertEq("", sample);
+            assertEq(sample, type.getDataProviderType().acceptsValue(sample));
+        }
+        assertNothing(XsdRegexHelper::getSampleValue("a{65536}"));
+        XsdSchema definition = schema("a{65536}");
+        assertThrows("XSD-SAMPLE-ERROR", \definition.findType("Value").getSampleValue(), ("unused",));
+    }
+
+    private cancellation() {
+        SandboxManager manager();
+        on_exit manager.clearInterrupt();
+        Program program(PO_NEW_STYLE | PO_STRICT_ARGS | PO_REQUIRE_TYPES);
+        program.setSandboxManager(manager);
+        program.parse("%modern\n%requires ../qlib/WSDL.qm\n"
+            "bool sub matchPattern(XsdCompiledPattern pattern, SandboxManager manager, bool cancel) {\n"
+            "    if (cancel) { manager.requestInterrupt(); }\n"
+            "    return pattern.matches(\"aaa\");\n"
+            "}\n", get_script_dir() + "/wsdl-count-interrupt.qr");
+        XsdCompiledPattern pattern("a{0,999999999999999999999999}");
+        *hash<ExceptionInfo> error;
+        try {
+            program.callFunction("matchPattern", pattern, manager, True);
+        } catch (hash<ExceptionInfo> ex) {
+            error = ex;
+        }
+        manager.clearInterrupt();
+        assertEq("PROGRAM-INTERRUPTED", error.err);
+        assertTrue(program.callFunction("matchPattern", pattern, manager, False));
+        assertFalse(pattern.matches("b"));
+    }
+
+    private concurrency() {
+        XsdCompiledPattern pattern("(a|aaa){0,999999999999999999999999}");
+        Qore::Thread::Queue ready();
+        Qore::Thread::Queue start();
+        Qore::Thread::Queue results();
+        Qore::Thread::Counter running();
+        on_exit {
+            for (int i = 0; i < 4; ++i) {
+                start.push(True);
+            }
+            assertEq(0, running.waitForZero(30s));
+        }
+        for (int i = 0; i < 4; ++i) {
+            running.inc();
+            background sub () {
+                on_exit running.dec();
+                try {
+                    ready.push(True);
+                    start.get(30s);
+                    bool accepted = pattern.matches("aaaaa");
+                    bool rejected = !pattern.matches("aaaab");
+                    results.push({"accepted": accepted, "rejected": rejected});
+                } catch (hash<ExceptionInfo> ex) {
+                    results.push({"error": ex});
+                }
+            }();
+        }
+        for (int i = 0; i < 4; ++i) {
+            ready.get(30s);
+        }
+        for (int i = 0; i < 4; ++i) {
+            start.push(True);
+        }
+        for (int i = 0; i < 4; ++i) {
+            assertEq({"accepted": True, "rejected": True}, results.get(30s));
+        }
+    }
+}

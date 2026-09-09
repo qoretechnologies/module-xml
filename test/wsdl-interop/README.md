@@ -16,8 +16,16 @@ grammar, Unicode class complements, ranges, nested subtraction and bounded
 example generation. The independent matrix exercises 156 real SOAP contracts
 and exact values through reconstructed providers. Original validator defects
 and separately identified equivalent schemas are documented in
-[regex-classes-evidence.md](regex-classes-evidence.md). Backend compilation
-limits remain tracked P3 work; passing this matrix does not close the phase.
+[regex-classes-evidence.md](regex-classes-evidence.md). Repetition compilation
+limits are covered by the following matrix; neither matrix alone closes P3.
+
+`test/wsdl-regex-counts.qtest` and `test_regex_counts.py` cover valid
+repetitions beyond PCRE compilation limits. They exercise exact large values,
+nullable atoms, deep grammar, original/reconstructed structural patterns,
+provider metadata, cancellation and real bindings in both directions.
+[Repetition evidence](regex-counts-evidence.md) describes the independent
+validators' count limits and separately identified length-bounded references.
+The `XsdPatternConstraint` metadata union preserves existing PCRE strings.
 
 ## Sources and intended coverage
 

@@ -665,10 +665,61 @@ retain their supplied examples. Every returned sample is checked; failure to
 find a candidate remains `NOTHING` at the helper or `XSD-SAMPLE-ERROR` at the
 type/example API. Cancellation and unexpected errors propagate.
 
-PCRE compilation/matching limits remain distinct from XSD grammar. Translation
-does not establish support for arbitrary repetition counts or nesting depths;
-the remaining backend-limit work is tracked in the execution record. See
+PCRE translation remains available as an API; its return value still has the
+backend's compilation/matching limits. Schema pattern compilation now uses the
+structural representation below for valid expressions PCRE cannot compile. See
 `test/wsdl-regex-classes.qtest`, `test_regex_classes.py`, and
 [regex evidence](../test/wsdl-interop/regex-classes-evidence.md).
 The independent boundary matrix checks every start/end and adjacent code point
 of all 326 normative character ranges against both pinned validators.
+
+
+Valid XSD repetitions are not restricted to PCRE's 65535 count field or compiled
+bytecode size. `XsdPatternConstraint` is a typed union of the existing anchored
+PCRE string and the immutable `XsdCompiledPattern`. Ordinary patterns retain
+the string representation. On a backend compilation failure after XSD grammar
+validation, the pattern stores its source and builds a structural program.
+Boolean, numeric, string, builtin-list, list and union provider constraints use
+the same dispatch as schema serialization and deserialization. Older serialized
+PCRE strings remain valid metadata; unsupported objects are rejected.
+
+The structural object serializes only original source, never an arbitrary graph.
+Reconstruction validates source and builds fresh transient nodes before publishing
+the program. Malformed metadata raises `DESERIALIZATION-ERROR`. Internal nodes
+are immutable, have only earlier children, and contain character predicates,
+sequences, alternatives, repetitions and explicit character-set operations.
+The existing XSD grammar parser emits them with explicit parse stacks, so deep
+groups and nested subtraction do not use the Qore call stack.
+
+Repetition bounds are canonical decimal strings. Minimum consumed widths saturate
+at input length plus one. Counts are compared with those input-derived limits
+before conversion to native integers. A nonnullable atom needs at least one
+character per useful iteration; impossible minima fail immediately. Nullable
+atoms can pad any minimum with empty iterations. Their matcher ignores zero
+progress and retains the earliest visit to each offset, which leaves at least
+as much maximum-count budget as a later visit. Nonnullable variable-width atoms
+preserve attainable count/offset states, including gaps between possible counts.
+
+Matching uses per-call stacks and memoized endpoint sets for each node/start
+position. Sequence joins and alternation unions preserve every possible endpoint.
+Character-set predicates use iterative Boolean evaluation and cache results per
+node/character. Flat groups of character predicates are scanned directly instead
+of allocating a frame and cache entry for every character. A root repetition
+of literal text checks the exact input-derived count and compares bounded UTF-8
+byte segments, preserving cancellation without rescanning Unicode prefixes. For example, a fixed
+record pattern `[a-z]{65536}` needs work proportional to the supplied record,
+without expanding 65536 regex instructions. General ambiguous expressions can
+require polynomial endpoint storage and processing; Qore sandbox deadlines and
+cancellation apply. No mutable match state is shared or serialized.
+
+`wsdl-regex-counts.qtest` covers large literal/group counts, arbitrary bounds,
+nullable padding, Unicode, 2000-level groups/subtractions, corrupted metadata,
+legacy providers, each affected provider family, bounded examples, cancellation
+recovery and concurrent use. `test_regex_counts.py` directly compares 66 small
+expression languages against Python full matching over all binary strings of
+length zero through six, for original and reconstructed patterns. It also drives
+Unicode/set cases through the structural object even when PCRE could compile
+them. Real SOAP bindings and reconstructed element/message providers exercise
+large counts with exact lexical comparisons. Independent validator limitations
+and the explicit bounded reference schemas are recorded in
+[repetition evidence](../test/wsdl-interop/regex-counts-evidence.md).
