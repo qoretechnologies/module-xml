@@ -3878,3 +3878,83 @@ still awaiting the previously requested explicit policy answer; no answer or
 approval has been inferred. Continue independent P3 binary/QName/entity/XML-RPC
 requirements while that decision is pending. All P4-P9 ownership and acceptance
 criteria remain open; this increment is not final interoperability acceptance.
+
+## P3-27 — Strict binary lexical/native conversion
+
+P3-26 is committed as `6218d07`. Main Qore is clean on `develop`, eight commits
+ahead of origin; the latest request to commit uncommitted main-repository work
+requires no further commit. No Qore files, shared build, installation or push are
+part of this increment. The isolated calendar-prerequisite runtime stays frozen.
+
+Binary reductions exposed permissive base64 padding/unused-bit acceptance,
+rejection of valid whitespace between padding characters, coercion of empty
+unrelated native categories to empty octets, and raw-string whitespace loss before
+serialization. `XsdBinaryLexicalHelper` now validates complete XSD hex/base64
+grammar, converts encoded characters to ASCII before native decoding, and keeps
+raw serializer string bytes intact. `XsdBinaryDataType` retains encoded-text
+validation, requiredness and binary output through optionality, reconstruction
+and enclosing providers. Required omission and present empty content stay distinct.
+
+The fixed input contract is documented in `design/wsdl-binary-values.md`: serializer
+strings are raw bytes; decoder/provider strings are encoded XML text. Both native
+and string representations preserve bytes without rounding or normalization of
+raw data. Full binary facet/finite-choice and collection identity acceptance is
+the following P3 increment, not a completed criterion here.
+
+All **74 affected Qore suites, 810 cases / 30,683 assertions** pass, with no new
+warnings or test-case errors. The soap suite retains its separately documented
+baseline assertion accounting. New binary suites contribute **10 cases / 1,005
+assertions**, including native categories, every final base64 pad-bit alternative,
+all 256 octets, 64 KiB values, UTF-16 encoded XML text, raw UTF-8/UTF-16/ISO-8859-1
+bytes, metadata rejection, list/union fallback, interruption/reuse, and real HTTP
+requests/responses through original and reconstructed SOAP 1.1/1.2 bindings.
+Log: `/tmp/wsdl-p3-27-binary-final-suites.log` and adjacent per-suite logs.
+
+The two new suites also pass **80 cases / 8,040 assertions** across AST/IR/JIT/
+tiered × UTC/Europe-Prague, and another **10 / 1,005** using local compiled
+modules. The design example runs with no output. WSDL/SoapDataProvider/SoapClient/
+SoapHandler qmods and WSDL Qdx/Doxygen rebuild without warnings/errors.
+Evidence: `/tmp/wsdl-p3-27-binary-modes.log`, `binary-aot.log` and
+`binary-build-docs.log` under the same `/tmp/wsdl-p3-27-` prefix.
+
+The three new Python methods pass in **26.923 seconds**. Exact Python byte
+decoding/re-encoding, Xerces and both libxml2 versions retain the three precise
+MIME-tolerance discrepancies in `binary-validator-defects.json`. The input matrix
+requires exactly 36 libxml2 false positives and zero Xerces disagreements;
+all generated/reconstructed outputs validate. Native private 2.15.4 reproduces
+the same three verdicts with empty stderr. Root causes and normative sources are
+in `binary-values-evidence.md`; no Qore verdict is waived. The larger affected
+Python regression set and final audit are recorded below when complete.
+
+Both-version survey counts and all **168 broad failure signatures** are unchanged.
+Strict coverage remains **116 WSDLs / 1,120 directions**, zero selected failures;
+current reports now carry WSDL source SHA256
+`97e23ea13f0eec165955786dd6185fdd4297da22684ef57641cca1b5ab98e843`.
+`/tmp/wsdl-p3-27-binary-report-comparison.json` records empty added/removed sets,
+unchanged original corpus/catalog hashes and preserved broader diagnostics.
+
+Following binary reductions are retained in
+`/tmp/wsdl-p3-28-binary-facet-baseline.log`: binary enumerations compare a native
+binary to authored text, pattern paths call unsupported `string(binary)`, and
+unrestricted detached providers lose those facets. P3-28 owns lexical retention,
+byte identity, inherited restrictions, fields/fixed values, lists/unions and
+checked samples. The leap-second policy question remains unanswered; no approval
+is inferred and dateTime/time behavior is unchanged. P4-P9 remain open.
+
+### P3-27 final commit gate
+
+The affected Python set completes **40 methods in 284.852 seconds**, with exactly
+the two known P6 selected-binding-version failure signatures and no new failures,
+errors or warnings. All new binary and affected size/list/union methods pass.
+Evidence: `/tmp/wsdl-p3-27-binary-python-affected.log` and
+`binary-python-comparison.json` under the same prefix. This is the affected
+subset; the prior full-discovery baseline is not claimed as a current run.
+
+The full 62-item audit is **20 Pass, 42 N/A, 0 Fail**, recorded in
+`audits/P3-27-binary-values.md`. No implementation/test files changed after final
+verification. The complete intended file and built-artifact hashes are retained
+in `/tmp/wsdl-p3-27-binary-final-hashes.json` before commit. The frozen Debug
+core and native XML qmod match the previously recorded tested hashes; there are
+no C++ changes requiring Valgrind. This completes the independently testable
+lexical/native binary increment; remaining binary restrictions and all other
+open P3-P9 criteria stay in scope.

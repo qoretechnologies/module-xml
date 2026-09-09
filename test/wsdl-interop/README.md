@@ -865,3 +865,17 @@ See [duration facet evidence](duration-facets-evidence.md) for the exact validat
 disagreements. The strict corpus selection includes `DurationElement` and
 `DurationAttribute` with independent duration-value assertions. The selection is
 116 WSDLs and 1,120 message directions; all broader P4/P5/P6 findings remain visible.
+
+## Binary lexical values
+
+Run `wsdl-binary-values.qtest` and `wsdl-binary-consumers.qtest` with debugging
+enabled, plus `python3 test/wsdl-interop/test_binary_values.py -v`. Strict binary
+conversion rejects malformed padding, nonzero unused bits and non-XML whitespace,
+accepts XML whitespace between base64 characters, and preserves raw string bytes
+when serializing. `XsdBinaryDataType` validates encoded XML strings and returns
+octets, including through optional copies and reconstructed providers.
+See [the public input contract](../../design/wsdl-binary-values.md) and
+[binary validator evidence](binary-values-evidence.md). Actual SOAP 1.1/1.2 HTTP
+exchanges and independent binding matrices check exact bytes in both directions,
+attributes, simple content, repeated values, providers and examples. Remaining
+binary facet/choice/collection identity acceptance is tracked in P3.

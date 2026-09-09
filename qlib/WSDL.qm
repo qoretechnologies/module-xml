@@ -80,6 +80,10 @@ module WSDL {
     @section wsdlrelnotes WSDL Module Release Notes
 
     @subsection wsdl_0_5_8 WSDL v0.5.8
+    - hexBinary and base64Binary decoding validates complete XSD lexical forms, including base64 padding
+      positions and unused bits; XML whitespace between base64 characters is accepted
+    - binary serialization preserves raw string bytes, including whitespace and the string's original encoding;
+      added \c XsdBinaryDataType for validated encoded-text conversion, optionality and provider reconstruction
     - duration bounds and enumerations use the XSD four-reference-date relation with exact Gregorian arithmetic
       and arbitrary decimal fractions; fixed attributes, finite choices, lists and unions share this value identity
     - added \c XsdDurationRestrictionDataType, \c XsdDurationFacetInfo and \c XsdDurationDataField;
@@ -3458,6 +3462,233 @@ class XsdDurationValueHelper {
 
 }
 
+class XsdBinaryLexicalHelper {
+    static bool isType(string builtin) {
+        return builtin == "hexBinary" || builtin == "base64Binary";
+    }
+
+    static string lexical(string builtin, string value, string error) {
+        @assert(isType(builtin));
+        string text = XsdSimpleType::normalizeWhiteSpace(value, "collapse");
+        bool invalid;
+        if (builtin == "hexBinary") {
+            invalid = text =~ /[^0-9a-fA-F]/;
+        } else {
+            invalid = text =~ /[^A-Za-z0-9+\/= ]/;
+        }
+        if (invalid) {
+            throw error, sprintf("invalid %s alphabet in %Y", builtin, value);
+        }
+        # XML encodings describe characters, not encoded octets. Native decoders
+        # receive the validated ASCII alphabet even when input text uses UTF-16.
+        string compact = convert_encoding(text, "ASCII");
+        if (builtin == "hexBinary") {
+            if (compact.size() % 2) {
+                throw error, "hexBinary requires exactly two hexadecimal digits per octet";
+            }
+        } else {
+            compact =~ s/ //g;
+            if (compact.size() % 4) {
+                throw error, "base64Binary requires complete four-character encoding units";
+            }
+            int padding = compact.endsWith("==") ? 2 : compact.endsWith("=") ? 1 : 0;
+            string data = compact.substr(0, compact.size() - padding);
+            if (data =~ /=/ || (padding == 2 && data[data.size() - 1] !~ /[AQgw]/)
+                    || (padding == 1 && data[data.size() - 1] !~ /[AEIMQUYcgkosw048]/)) {
+                throw error, "base64Binary has misplaced padding or nonzero unused bits";
+            }
+        }
+        return text;
+    }
+
+    static binary decode(string builtin, auto value, string error) {
+        if (value.typeCode() == NT_BINARY) {
+            return value;
+        }
+        # A present empty XML scalar can arrive without a text node. Provider
+        # requiredness is checked before calling this wire-value conversion.
+        if (!exists value) {
+            return binary();
+        }
+        if (value.typeCode() != NT_STRING) {
+            throw error, sprintf("type %Y requires encoded XML text or binary octets; got %Y", builtin, value.type());
+        }
+        string text = convert_encoding(lexical(builtin, value, error), "ASCII");
+        if (builtin == "base64Binary") {
+            text =~ s/ //g;
+        }
+        return text.empty() ? binary() : builtin == "hexBinary" ? parse_hex_string(text) : parse_base64_string(text);
+    }
+
+    static string encode(string builtin, auto value, string error) {
+        @assert(isType(builtin));
+        if (!exists value) {
+            return "";
+        }
+        if (value.typeCode() != NT_BINARY && value.typeCode() != NT_STRING) {
+            throw error, sprintf("type %Y serializes binary octets or raw string bytes; got %Y", builtin, value.type());
+        }
+        # Preserve the existing raw-string input convention. Whitespace belongs
+        # to those bytes; it is not XML lexical whitespace until after encoding.
+        return builtin == "hexBinary" ? make_hex_string(value) : make_base64_string(value);
+    }
+}
+
+#! provider validating encoded XML binary text before decoding octets
+/** Encoded strings follow the complete XSD hexBinary or base64Binary grammar, including base64 padding bits.
+    Native binary values retain every octet. XML whitespace and character encoding are handled before decoding.
+    @par Example
+    A base64 attachment fragment \c "A A = =" decodes to one zero octet; \c "AB==" rejects nonzero padding bits.
+    @since %WSDL 0.5.8
+*/
+public class XsdBinaryDataType inherits AbstractDataProviderType {
+    private {
+        string datatype;
+        bool optional;
+    }
+
+    #! constructs a binary provider with an explicit XML encoding
+    /** @param datatype hexBinary or base64Binary
+        @param optional whether NOTHING is accepted
+        @throw WSDL-ERROR unknown binary encoding
+    */
+    constructor(string datatype, bool optional = False) {
+        if (!XsdBinaryLexicalHelper::isType(datatype)) {
+            throw WSDL_ERROR, sprintf("unknown XML binary encoding %Y", datatype);
+        }
+        self.datatype = datatype;
+        self.optional = optional;
+    }
+
+    private:internal deserializeMembers(hash<auto> members) {
+        if (members.datatype.typeCode() != NT_STRING || !XsdBinaryLexicalHelper::isType(members.datatype)
+                || members.optional.typeCode() != NT_BOOLEAN) {
+            throw "DESERIALIZATION-ERROR", "binary provider requires an XML encoding and boolean optionality";
+        }
+        datatype = members.datatype;
+        optional = members.optional;
+    }
+
+    #! returns the XSD builtin underlying this provider
+    /** @return hexBinary or base64Binary */
+    string getBuiltinName() {
+        return datatype;
+    }
+
+    #! returns the provider type name
+    /** @return the XML encoding name with an optionality prefix when appropriate */
+    string getName() {
+        return (optional ? "*" : "") + "xsd:" + datatype;
+    }
+
+    #! requires validation before conversion by an enclosing list
+    /** @return NOTHING */
+    *Type getValueType() {
+    }
+
+    #! returns the exact output category
+    /** @return NT_BINARY */
+    int getBaseTypeCode() {
+        return NT_BINARY;
+    }
+
+    #! returns the native output category name
+    /** @return binary */
+    string getBaseTypeName() {
+        return "binary";
+    }
+
+    #! returns no item type for an atomic binary value
+    /** @return NOTHING */
+    *AbstractDataProviderType getElementType() {
+    }
+
+    #! returns no record fields for an atomic binary value
+    /** @return NOTHING */
+    *hash<string, AbstractDataField> getFields() {
+    }
+
+    #! requires validation of every supplied binary value
+    /** @return an empty map */
+    *hash<string, bool> getDirectTypeHash() {
+        return {};
+    }
+
+    #! reports accepted native categories
+    /** @param simple request simplified names
+        @return string/binary, plus nothing for optional types
+    */
+    hash<string, bool> getAcceptTypeHash(*bool simple) {
+        hash<string, bool> result = {"string": True, "binary": True};
+        if (optional) {
+            result.nothing = True;
+        }
+        return result;
+    }
+
+    #! reports exact output categories
+    /** @param simple request simplified names
+        @return binary, plus nothing for optional types
+    */
+    hash<string, bool> getReturnTypeHash(*bool simple) {
+        hash<string, bool> result = {"binary": True};
+        if (optional) {
+            result.nothing = True;
+        }
+        return result;
+    }
+
+    #! validates encoded text and returns its exact octets
+    /** @param value encoded XML text or native binary octets
+        @return binary data, or NOTHING for optional omission
+        @throw MISSING-VALUE-ERROR a required value is absent
+        @throw RUNTIME-TYPE-ERROR invalid encoded text or unsupported native category
+    */
+    auto acceptsValue(auto value) {
+        if (!exists value) {
+            if (optional) {
+                return;
+            }
+            throw "MISSING-VALUE-ERROR", sprintf("a %s value must be supplied", datatype);
+        }
+        return XsdBinaryLexicalHelper::decode(datatype, value, "RUNTIME-TYPE-ERROR");
+    }
+
+    #! returns whether a binary value must be supplied
+    /** @return True for mandatory providers */
+    bool isMandatory() {
+        return !optional;
+    }
+
+    #! returns whether omission is allowed
+    /** @return True for optional providers */
+    bool isOrNothingType() {
+        return optional;
+    }
+
+    #! creates the optional equivalent
+    /** @return an optional binary value provider */
+    AbstractDataProviderType getOrNothingType() {
+        if (optional) {
+            return self;
+        }
+        XsdBinaryDataType result = self.copy();
+        result.optional = True;
+        return result;
+    }
+
+    #! creates the mandatory equivalent
+    /** @return a mandatory binary value provider */
+    AbstractDataProviderType getMandatoryType() {
+        if (!optional) {
+            return self;
+        }
+        XsdBinaryDataType result = self.copy();
+        result.optional = False;
+        return result;
+    }
+}
+
 class XsdDurationLexicalHelper {
     static string lexical(auto value, string error) {
         if (value.typeCode() == NT_DATE) {
@@ -5325,6 +5556,8 @@ class XsdNumericFacetHelper {
             supplied = cast<XsdIeeeDataType>(provider).getBuiltinName();
         } else if (provider instanceof XsdNumericRestrictionDataType) {
             supplied = cast<XsdNumericRestrictionDataType>(provider).getBuiltinName();
+        } else if (provider instanceof XsdBinaryDataType) {
+            supplied = cast<XsdBinaryDataType>(provider).getBuiltinName();
         } else if (provider instanceof XsdDurationDataType || provider instanceof XsdDurationRestrictionDataType) {
             supplied = "duration";
         } else if (provider instanceof XsdCalendarDataType) {
@@ -6966,7 +7199,7 @@ public class XsdBaseType inherits WSDL::XsdAbstractType {
             val = name == "anyType" ? val."^value^" : XsdScalarTextHelper::value(val, SOAP_SERIALIZATION_ERROR);
         }
         # issue #5411: apply "whiteSpace" processing to the lexical value
-        if (val.typeCode() == NT_STRING) {
+        if (val.typeCode() == NT_STRING && !XsdBinaryLexicalHelper::isType(name)) {
             val = XsdSimpleType::normalizeWhiteSpace(val, getWhiteSpace());
         }
         *string type;
@@ -7019,11 +7252,8 @@ public class XsdBaseType inherits WSDL::XsdAbstractType {
                 break;
 
             case "base64Binary":
-                val = make_base64_string(val);
-                break;
-
             case "hexBinary":
-                val = make_hex_string(val);
+                val = XsdBinaryLexicalHelper::encode(type, val, SOAP_SERIALIZATION_ERROR);
                 break;
 
             case "binary":
@@ -7202,18 +7432,8 @@ public class XsdBaseType inherits WSDL::XsdAbstractType {
                     XsdDecimalLexicalHelper::lexical(val, SOAP_DESERIALIZATION_ERROR));
 
             case "base64Binary":
-                if (val.typeCode() == NT_BINARY) {
-                    return val;
-                } else {
-                    return val.empty() ? binary() : decodeBinary(type, val);
-                }
-
             case "hexBinary":
-                if (val.typeCode() == NT_BINARY) {
-                    return val;
-                } else {
-                    return val.empty() ? binary() : decodeBinary(type, val);
-                }
+                return XsdBinaryLexicalHelper::decode(type, val, SOAP_DESERIALIZATION_ERROR);
 
             case "binary":
                 # used for HTTP binding only
@@ -7253,17 +7473,6 @@ public class XsdBaseType inherits WSDL::XsdAbstractType {
         }
     }
 
-    private static binary decodeBinary(string type, string value) {
-        try {
-            return type == "base64Binary" ? parse_base64_string(value) : parse_hex_string(value);
-        } catch (hash<ExceptionInfo> ex) {
-            if (ex.err == "BASE64-PARSE-ERROR" || ex.err == "PARSE-HEX-ERROR") {
-                rethrow SOAP_DESERIALIZATION_ERROR, ex.desc, ex.arg;
-            }
-            rethrow;
-        }
-    }
-
     #! maps scalar types without dedicated validators to their soft provider equivalents
     /** Integer, boolean and IEEE providers validate their XML lexical spaces before conversion.
         Other scalar providers use soft equivalents to accept convertible input values.
@@ -7294,6 +7503,9 @@ public class XsdBaseType inherits WSDL::XsdAbstractType {
         }
         if (name == "duration") {
             return new XsdDurationDataType();
+        }
+        if (XsdBinaryLexicalHelper::isType(name)) {
+            return new XsdBinaryDataType(name);
         }
         if (XsdIntegerLexicalHelper::Types{name}) {
             return new XsdIntegerDataType(name);
@@ -12682,7 +12894,9 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
         }
 
         # issue #5411: "whiteSpace" processing is applied to the lexical value before it is validated
-        val = applyWhiteSpace(val);
+        if (!XsdBinaryLexicalHelper::isType(getFacetKind())) {
+            val = applyWhiteSpace(val);
+        }
         # Validate facets before serialization
         validateFacets(val, "serialize");
 

@@ -1,0 +1,229 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires xml
+%requires ../qlib/WSDL.qm
+%exec-class BinaryValuesTest
+
+class InterruptBinaryProvider inherits XsdBinaryDataType {
+    public {
+        bool interrupt = True;
+    }
+
+    constructor() : XsdBinaryDataType("base64Binary") {
+    }
+
+    auto acceptsValue(auto value) {
+        if (interrupt) {
+            throw "PROGRAM-INTERRUPTED", "binary item conversion interrupted";
+        }
+        return XsdBinaryDataType::acceptsValue(value);
+    }
+}
+
+class BinaryValuesTest inherits QUnit::Test {
+    constructor() : Test("XSD binary lexical values", "1.0") {
+        addTestCase("Binary grammar and XML whitespace preserve octets", \valid());
+        addTestCase("All base64 unused-bit alternatives are checked", \padding());
+        addTestCase("Invalid encodings and native categories reject", \invalid());
+        addTestCase("Raw string serialization preserves every source byte", \rawBytes());
+        addTestCase("Large values and all octets retain exact contents", \large());
+        addTestCase("Optional and reconstructed providers retain validation", \providers());
+        addTestCase("Malformed metadata and incompatible provider bases reject", \metadata());
+        addTestCase("Native lists and union fallback validate binary inputs", \collections());
+        addTestCase("Cancellation propagates and list conversion recovers", \cancellation());
+        set_return_value(main());
+    }
+
+    private static XsdBaseType base(string builtin) {
+        return new Namespaces({}).getBaseType(builtin);
+    }
+
+    private check(string builtin, auto lexical, binary expected) {
+        XsdBaseType type = base(builtin);
+        assertEq(expected, type.deserializeValue("value", {}, NOTHING, lexical));
+        AbstractDataProviderType original = type.getDataProviderType();
+        foreach AbstractDataProviderType provider in (original, Serializable::deserialize(original.serialize()),
+                original.getOrNothingType().getMandatoryType()) {
+            assertEq(expected, provider.acceptsValue(lexical));
+            assertEq((expected,), new ListDataType(provider).acceptsValue((lexical,)));
+        }
+        string encoded = type.serializeValue(new Namespaces({}), expected, True);
+        assertEq(expected, type.deserializeValue("value", {}, NOTHING, encoded));
+    }
+
+    private valid() {
+        foreach string builtin in ("hexBinary", "base64Binary") {
+            check(builtin, "", binary());
+            check(builtin, " \t\r\n", binary());
+            check(builtin, <0009ff>, <0009ff>);
+            assertEq(binary(), base(builtin).deserializeValue("value", {}, NOTHING, NOTHING));
+            assertEq(binary(), base(builtin).deserializeValue("value", {}, NOTHING, {}));
+        }
+        foreach string text in ("00fF", "00FF", " \t00ff\r\n") {
+            check("hexBinary", text, <00ff>);
+            foreach string encoding in ("UTF-16LE", "UTF-16BE", "ISO-8859-1") {
+                check("hexBinary", convert_encoding(text, encoding), <00ff>);
+            }
+        }
+        foreach string text in ("AA==", "A A = =", "\tA\rA\n=\t=\r\n", "  AA== ") {
+            check("base64Binary", text, <00>);
+            foreach string encoding in ("UTF-16LE", "UTF-16BE", "ISO-8859-1") {
+                check("base64Binary", convert_encoding(text, encoding), <00>);
+            }
+        }
+        check("base64Binary", "AAk=", <0009>);
+        check("base64Binary", "AAkJ", <000909>);
+        check("base64Binary", " / / 8 = ", <ffff>);
+        check("base64Binary", "////", <ffffff>);
+    }
+
+    private padding() {
+        string alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        for (int index = 0; index < 64; ++index) {
+            foreach int count in (1, 2) {
+                string lexical = (count == 1 ? "AA" : "A") + alphabet[index] + strmul("=", count);
+                bool valid = !(index % (count == 1 ? 4 : 16));
+                if (valid) {
+                    binary expected = parse_hex_string(sprintf(count == 1 ? "00%02x" : "%02x",
+                        index / (count == 1 ? 4 : 16)));
+                    check("base64Binary", lexical, expected);
+                } else {
+                    XsdBaseType type = base("base64Binary");
+                    AbstractDataProviderType provider = type.getDataProviderType();
+                    assertThrows("SOAP-DESERIALIZATION-ERROR", \type.deserializeValue(), ("value", {}, NOTHING, lexical));
+                    assertThrows("RUNTIME-TYPE-ERROR", \provider.acceptsValue(), (lexical,));
+                }
+            }
+        }
+    }
+
+    private invalid() {
+        foreach string builtin in ("hexBinary", "base64Binary") {
+            XsdBaseType type = base(builtin);
+            AbstractDataProviderType provider = type.getDataProviderType();
+            list<string> invalid = builtin == "hexBinary"
+                ? ("0", "000", "0x00", "gg", "00 ff", "0\t0", "00\u00a0", "\u000000", "００", "éé")
+                : ("A", "AA", "AAA", "AA===", "AAAA=", "====", "AA==AA==", "=AAA", "A=AA", "AA=A",
+                    "AA-_=", "!?", "AA==\u00a0", "AA==\v", "AA==\u0000", "éé==", "ＡＡ==");
+            foreach string text in (invalid) {
+                assertThrows("SOAP-DESERIALIZATION-ERROR", \type.deserializeValue(), ("value", {}, NOTHING, text));
+                assertThrows("RUNTIME-TYPE-ERROR", \provider.acceptsValue(), (text,));
+                assertEq(binary(), provider.acceptsValue(""));
+            }
+            foreach auto input in (NULL, True, 0, 1, 0.0, 1.2n, (), date("2000-01-01Z")) {
+                assertThrows("SOAP-DESERIALIZATION-ERROR", \type.deserializeValue(), ("value", {}, NOTHING, input));
+                assertThrows("SOAP-SERIALIZATION-ERROR", \type.serializeValue(), (new Namespaces({}), input, True));
+                assertThrows("RUNTIME-TYPE-ERROR", \provider.acceptsValue(), (input,));
+            }
+            assertThrows("RUNTIME-TYPE-ERROR", \provider.acceptsValue(), ({},));
+        }
+    }
+
+    private rawBytes() {
+        foreach string builtin in ("hexBinary", "base64Binary") {
+            XsdSchema schema('<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" targetNamespace="urn:binary">
+                <xs:simpleType name="Base"><xs:restriction base="xs:' + builtin + '"/></xs:simpleType></xs:schema>',
+                {"async_only": True});
+            foreach XsdAbstractType type in (base(builtin), schema.findType(make_qname("urn:binary", "Base"))) {
+                foreach string source in (" a\tb ", "\u0000\r\n\t", "é", convert_encoding("é", "ISO-8859-1"),
+                        convert_encoding(" A\tB ", "UTF-16LE")) {
+                    binary expected = source.toBinary();
+                    string encoded = type.serializeValue(new Namespaces({}), source, True);
+                    assertEq(expected, type.deserializeValue("value", {}, NOTHING, encoded));
+                }
+            }
+        }
+        assertEq("2061096220", base("hexBinary").serializeValue(new Namespaces({}), " a\tb ", True));
+        assertEq("IGEJYiA=", base("base64Binary").serializeValue(new Namespaces({}), " a\tb ", True));
+    }
+
+    private large() {
+        string hex;
+        for (int value = 0; value < 256; ++value) {
+            hex += sprintf("%02x", value);
+        }
+        binary octets = parse_hex_string(hex);
+        check("hexBinary", hex, octets);
+        string encoded = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJygpKissLS4vMDEyMzQ1Njc4OTo7PD0+P0BB"
+            + "QkNERUZHSElKS0xNTk9QUVJTVFVWV1hZWltcXV5fYGFiY2RlZmdoaWprbG1ub3BxcnN0dXZ3eHl6e3x9fn+AgYKD"
+            + "hIWGh4iJiouMjY6PkJGSk5SVlpeYmZqbnJ2en6ChoqOkpaanqKmqq6ytrq+wsbKztLW2t7i5uru8vb6/wMHCw8TF"
+            + "xsfIycrLzM3Oz9DR0tPU1dbX2Nna29zd3t/g4eLj5OXm5+jp6uvs7e7v8PHy8/T19vf4+fr7/P3+/w==";
+        check("base64Binary", encoded, octets);
+        binary zeros = strmul("\u0000", 65536).toBinary();
+        check("hexBinary", strmul("00", 65536), zeros);
+        check("base64Binary", strmul("AAAA", 21845) + "AA==", zeros);
+    }
+
+    private providers() {
+        foreach string builtin in ("hexBinary", "base64Binary") {
+            AbstractDataProviderType original = base(builtin).getDataProviderType();
+            foreach AbstractDataProviderType provider in (original, Serializable::deserialize(original.serialize()),
+                    original.getOrNothingType().getMandatoryType()) {
+                assertEq("xsd:" + builtin, provider.getName());
+                assertEq(builtin, cast<XsdBinaryDataType>(provider).getBuiltinName());
+                assertEq(NOTHING, provider.getValueType());
+                assertEq(NT_BINARY, provider.getBaseTypeCode());
+                assertEq("binary", provider.getBaseTypeName());
+                assertEq({"string": True, "binary": True}, provider.getAcceptTypeHash(True));
+                assertEq({"binary": True}, provider.getReturnTypeHash(True));
+                assertEq({}, provider.getDirectTypeHash());
+                assertTrue(provider.isMandatory());
+                assertThrows("MISSING-VALUE-ERROR", \provider.acceptsValue(), (NOTHING,));
+                AbstractDataProviderType optional = provider.getOrNothingType();
+                assertEq(NOTHING, optional.acceptsValue(NOTHING));
+                assertEq(binary(), optional.acceptsValue(""));
+                assertEq({"binary": True, "nothing": True}, optional.getReturnTypeHash(True));
+                assertEq(binary(), Serializable::deserialize(optional.serialize()).acceptsValue(""));
+            }
+        }
+    }
+
+    private metadata() {
+        foreach string builtin in ("hexBinary", "base64Binary") {
+            XsdBinaryDataType original(builtin);
+            foreach auto invalid in ("binary", 1, NOTHING) {
+                hash<SerializationInfo> state = original.serializeToData();
+                state._index."0"._class_data."WSDL::XsdBinaryDataType".datatype = invalid;
+                assertThrows("DESERIALIZATION-ERROR", \Serializable::deserialize(), (state,));
+            }
+            hash<SerializationInfo> state = original.serializeToData();
+            state._index."0"._class_data."WSDL::XsdBinaryDataType".optional = "yes";
+            assertThrows("DESERIALIZATION-ERROR", \Serializable::deserialize(), (state,));
+            assertThrows("XSD-SIMPLETYPE-ERROR", sub() {
+                new XsdDurationRestrictionDataType(<XsdDurationFacetInfo>{"name": "Delay", "base_name": "duration"}, original);
+            });
+            assertEq(binary(), Serializable::deserialize(original.serialize()).acceptsValue(""));
+        }
+    }
+
+    private collections() {
+        XsdSchema original('<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" targetNamespace="urn:binary">
+            <xs:simpleType name="Items"><xs:list itemType="xs:base64Binary"/></xs:simpleType>
+            <xs:simpleType name="Either"><xs:union memberTypes="xs:base64Binary xs:string"/></xs:simpleType>
+            </xs:schema>', {"async_only": True});
+        foreach XsdSchema schema in (original, Serializable::deserialize(original.serialize())) {
+            XsdAbstractType items = schema.findType(make_qname("urn:binary", "Items"));
+            assertEq((<00>, <0000>), items.deserializeValue("value", {}, NOTHING, "AA== AAA="));
+            assertThrows("SOAP-DESERIALIZATION-ERROR", \items.deserializeValue(), ("value", {}, NOTHING, "AB== AAA="));
+            AbstractDataProviderType provider = Serializable::deserialize(items.getDataProviderType().serialize());
+            assertEq((<00>, <0000>), provider.acceptsValue(("AA==", "AAA=")));
+            assertThrows("RUNTIME-TYPE-ERROR", \provider.acceptsValue(), (("AB==", "AAA="),));
+            XsdAbstractType either = schema.findType(make_qname("urn:binary", "Either"));
+            assertEq("AB==", either.deserializeValue("value", {}, NOTHING, "AB=="));
+            assertEq("AA===", either.getDataProviderType().acceptsValue("AA==="));
+        }
+    }
+
+    private cancellation() {
+        InterruptBinaryProvider item();
+        ListDataType provider(item);
+        assertThrows("PROGRAM-INTERRUPTED", \provider.acceptsValue(), (("AA==",),));
+        item.interrupt = False;
+        assertEq((<00>,), provider.acceptsValue(("AA==",)));
+        assertThrows("RUNTIME-TYPE-ERROR", \provider.acceptsValue(), (("AB==",),));
+        assertEq((<00>,), provider.acceptsValue(("AA==",)));
+    }
+}
