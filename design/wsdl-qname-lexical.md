@@ -34,11 +34,12 @@ AbstractDataProviderType field = name_type.getDataProviderType();
 # field.acceptsValue("customer:address:city") raises RUNTIME-TYPE-ERROR.
 ```
 
-These scalar APIs return strings. Lexical acceptance alone does not establish a
-prefix binding or namespace-based value equality. General message namespace
-identity, QName enumeration equivalence and prefix allocation are not supplied
-by this lexical validator. The existing `XsdXmlValue` representation retains
-namespace context for callers that need the XML infoset.
+Lexical checks are followed by namespace resolution. Unbound prefixes reject;
+namespace-qualified values use `XsdQNameValue`, while unambiguous local and
+implicit `xml` names retain strings. QName enumeration choices compare expanded
+identity independently of lexical pattern checks. See [the value and namespace
+contract](wsdl-qname-values.md) for SOAP scopes, detached providers, union text
+and complete standalone XML serialization.
 
 Normative sources: [XSD 1.0 QName](https://www.w3.org/TR/xmlschema-2/#QName),
 [the referenced 1999 QName grammar](https://www.w3.org/TR/1999/REC-xml-names-19990114/#NT-QName),

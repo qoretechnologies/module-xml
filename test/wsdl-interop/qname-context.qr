@@ -1,0 +1,138 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../../qlib"
+%requires xml
+%requires ../../qlib/WSDL.qm
+%try-module json
+%define NoJson
+%endtry
+
+%ifdef NoJson
+throw "MISSING-MODULE", "the QName context matrix requires json";
+%else
+auto sub describe_value(auto value) {
+    if (value instanceof XsdXmlValue) {
+        return {"kind": "xml", "xml": value.getXml()};
+    }
+    if (value instanceof XsdQNameValue) {
+        return {"kind": "qname", "uri": value.getNamespaceUri(), "local": value.getLocalName(),
+            "lexical": value.getLexicalValue()};
+    }
+    if (value instanceof XsdScopedLexicalValue) {
+        return {"kind": "scoped", "lexical": value.getLexicalValue(), "bindings": value.getNamespaceBindings()};
+    }
+    if (value.typeCode() == NT_LIST) {
+        list<auto> result();
+        foreach auto item in (value) {
+            push result, describe_value(item);
+        }
+        return result;
+    }
+    if (value.typeCode() == NT_HASH) {
+        hash<auto> result();
+        foreach string key in (keys value) {
+            result{key} = describe_value(value{key});
+        }
+        return result;
+    }
+    return value;
+}
+
+if (ARGV.size() != 1) {
+    throw "USAGE", "qname-context.qr MANIFEST.json";
+}
+hash<auto> manifest = parse_json(ReadOnlyFile::readTextFile(ARGV[0]));
+foreach hash<auto> item in (manifest.cases) {
+    WebService original(item.wsdl, {"async_only": True});
+    int copy = 0;
+    foreach WebService ws in (original, Serializable::deserialize(original.serialize())) {
+        WSOperation operation = ws.getBindingOperation(item.binding, "submit");
+        # Reuse each independently reconstructed provider across values so state
+        # leakage and error recovery are exercised without rebuilding metadata per row.
+        hash<string, hash<string, AbstractDataProviderType>> providers();
+        foreach bool response in (False, True) {
+            WSMessage message = response ? operation.output : operation.input;
+            AbstractDataProviderType element_type = message.args.firstValue().element.getDataProviderType();
+            AbstractDataProviderType message_type = message.getDataProviderType();
+            providers{response ? "response" : "request"} = {"element": element_type,
+                "element-restored": Serializable::deserialize(element_type.serialize()), "message": message_type,
+                "message-restored": Serializable::deserialize(message_type.serialize())};
+        }
+        foreach hash<auto> input in (item.inputs) {
+            hash<auto> row = {"name": input.name, "copy": copy, "stage": "decode"};
+            auto value;
+            try {
+                auto xml = parse_xml(input.xml);
+                value = input.response ? operation.deserializeResponse(xml, item.binding)
+                    : operation.deserializeRequest(xml, item.binding);
+                row.value = describe_value(value);
+            } catch (hash<ExceptionInfo> ex) {
+                row.err = ex.err;
+                row.desc = ex.desc;
+            }
+            printf("%s\n", make_json(row));
+            if (row.err) {
+                continue;
+            }
+            WSMessage message = input.response ? operation.output : operation.input;
+            hash<ArgInfo> part = message.args.firstValue();
+            foreach string consumer in ("native", "element", "element-restored", "message", "message-restored", "retained", "retained-restored") {
+                row = {"name": input.name, "copy": copy, "stage": consumer};
+                try {
+                    auto argument = value;
+                    if (consumer.startsWith("retained")) {
+                        argument = new XsdXmlValue(input.payload);
+                        if (consumer == "retained-restored") {
+                            argument = Serializable::deserialize(argument.serialize());
+                        }
+                    } else if (consumer != "native") {
+                        bool whole_message = consumer.startsWith("message");
+                        AbstractDataProviderType provider = providers{input.response ? "response" : "request"}{consumer};
+                        auto converted = provider.acceptsValue(whole_message ? {part.name: value} : value);
+                        argument = whole_message ? converted{part.name} : converted;
+                    }
+                    row.value = describe_value(argument);
+                    hash<auto> wire = input.response ? operation.serializeResponse(argument, NOTHING, NOTHING,
+                        NOTHING, NOTHING, NOTHING, item.binding) : operation.serializeRequest(argument, NOTHING,
+                        NOTHING, NOTHING, NOTHING, NOTHING, item.binding);
+                    row.xml = wire.body;
+                    if (argument instanceof XsdXmlValue) {
+                        row.source_xml = argument.getXml();
+                        auto xml = parse_xml(wire.body);
+                        row.value = describe_value(input.response ? operation.deserializeResponse(xml, item.binding)
+                            : operation.deserializeRequest(xml, item.binding));
+                    }
+                } catch (hash<ExceptionInfo> ex) {
+                    row.err = ex.err;
+                    row.desc = ex.desc;
+                }
+                printf("%s\n", make_json(row));
+            }
+        }
+        foreach bool response in (False, True) {
+            WSMessage message = response ? operation.output : operation.input;
+            foreach string kind in ("native", "xml") {
+                hash<auto> row = {"name": item.name + "-sample-" + (response ? "response" : "request"),
+                    "copy": copy, "stage": "sample-" + kind};
+                try {
+                    WSMessageHelper helper(ws);
+                    auto sample = kind == "native" ? helper.getMessage(message) : helper.getXmlMessage(message);
+                    hash<auto> wire = response ? operation.serializeResponse(sample, NOTHING, NOTHING, NOTHING,
+                        NOTHING, NOTHING, item.binding) : operation.serializeRequest(sample, NOTHING, NOTHING,
+                        NOTHING, NOTHING, NOTHING, item.binding);
+                    auto xml = parse_xml(wire.body);
+                    row.value = describe_value(response ? operation.deserializeResponse(xml, item.binding)
+                        : operation.deserializeRequest(xml, item.binding));
+                    row.xml = wire.body;
+                } catch (hash<ExceptionInfo> ex) {
+                    row.err = ex.err;
+                    row.desc = ex.desc;
+                }
+                printf("%s\n", make_json(row));
+            }
+        }
+        ++copy;
+    }
+}
+%endif

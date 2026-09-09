@@ -80,6 +80,12 @@ module WSDL {
     @section wsdlrelnotes WSDL Module Release Notes
 
     @subsection wsdl_0_5_8 WSDL v0.5.8
+    - QName values retain instance namespace identity through SOAP elements, attributes, lists, unions,
+      detached providers and reconstruction; field choices compare namespace URI and local name
+    - added \c XsdQNameFacetInfo, \c XsdQNameRestrictionDataType and \c XsdQNameDataField;
+      inherited lexical patterns remain effective independently of namespace-equivalent enumeration choices
+    - added immutable \c XsdScopedLexicalValue for union text whose selected member depends on namespace context,
+      and \c XsdSchema::serializeXmlValue() for complete standalone elements with QName-valued content
     - XSD 1.0 union composition uses the member definitions of nested unions without inheriting
       restrictions on those nested unions; atomic/list member restrictions and restrictions on the
       resulting union remain effective, with shared dependency graphs retained without expansion
@@ -2296,6 +2302,10 @@ class XsdScalarValueHelper {
             return provider.valueKey(left) == provider.valueKey(right);
         }
         if (base instanceof XsdBaseType) {
+            if (base.name == "QName") {
+                return XsdQNameValueHelper::resolve(left, "XSD-SIMPLETYPE-ERROR").equals(
+                    XsdQNameValueHelper::resolve(right, "XSD-SIMPLETYPE-ERROR"));
+            }
             if (XsdCalendarLexicalHelper::isType(base.name)) {
                 return XsdCalendarLexicalHelper::key(base.name, left, "XSD-SIMPLETYPE-ERROR")
                     == XsdCalendarLexicalHelper::key(base.name, right, "XSD-SIMPLETYPE-ERROR");
@@ -4730,7 +4740,8 @@ class XsdNameLexicalHelper {
 #! an immutable QName value retaining namespace identity and XML spelling
 /** A prefix is a lexical alias; the namespace URI and local name identify the value.
     The original normalized text is retained for pattern restrictions.
-    @note This explicit value API does not yet replace ordinary WSDL scalar conversion or allocate XML prefixes.
+    @note Namespace-qualified WSDL values use this representation. Serialization preserves the lexical spelling
+    for pattern facets and declares the corresponding namespace in the containing XML element.
     @par Example
     \c XsdQNameValue("urn:catalog", "c:Product") identifies Product in the catalog namespace.
     @since %WSDL 0.5.8
@@ -4822,6 +4833,726 @@ public final class XsdQNameValue inherits Serializable {
     }
 }
 
+# Instance QName bindings are scoped independently of declaration registries.
+thread_local *hash<string, string> QNameInputNamespaces;
+
+class XsdQNameNamespaceScope {
+    private {
+        hash<string, string> previous();
+        list<string> added();
+        *hash<string, string> caller;
+        bool root;
+        bool active = False;
+    }
+    constructor(*hash<auto> attributes, bool root = False) {
+        hash<string, string> declared = XsdBase::getElementNamespaces(attributes);
+        self.root = root || !exists QNameInputNamespaces;
+        if (self.root) {
+            caller = QNameInputNamespaces;
+        }
+        on_error {
+            restore();
+        }
+        active = True;
+        if (self.root) {
+            QNameInputNamespaces = {"xml": "http://www.w3.org/XML/1998/namespace"};
+        }
+        foreach string prefix in (keys declared) {
+            if (QNameInputNamespaces{prefix} == declared{prefix}) {
+                continue;
+            }
+            if (QNameInputNamespaces.hasKey(prefix)) {
+                previous{prefix} = QNameInputNamespaces{prefix};
+            } else {
+                push added, prefix;
+            }
+            QNameInputNamespaces{prefix} = declared{prefix};
+        }
+    }
+    destructor() {
+        restore();
+    }
+    private restore() {
+        if (!active) {
+            return;
+        }
+        active = False;
+        if (root) {
+            QNameInputNamespaces = caller;
+        } else {
+            foreach string prefix in (keys previous) {
+                QNameInputNamespaces{prefix} = previous{prefix};
+            }
+            foreach string prefix in (added) {
+                remove QNameInputNamespaces{prefix};
+            }
+        }
+    }
+}
+
+# Preserve data spellings and rewrite conflicting structural prefixes.
+# Retain namespace-bearing values until a complete XML element tree is available.
+thread_local *Namespaces QNameOutputNamespaces;
+
+class XsdQNameOutputScope {
+    private {
+        *Namespaces previous;
+        bool active = False;
+    }
+    constructor(Namespaces namespaces) {
+        previous = QNameOutputNamespaces;
+        on_error {
+            restore();
+        }
+        active = True;
+        QNameOutputNamespaces = namespaces;
+    }
+    static bool retains(Namespaces namespaces) {
+        return QNameOutputNamespaces === namespaces;
+    }
+    destructor() {
+        restore();
+    }
+    private restore() {
+        if (active) {
+            active = False;
+            QNameOutputNamespaces = previous;
+        }
+    }
+}
+
+# Retained XML stays byte-for-byte intact, while its validated native values inform
+# envelope namespace allocation about QName alternatives that require unbound prefixes.
+class XsdQNameXmlFragment {
+    private {
+        XsdXmlValue value;
+        auto native;
+    }
+    constructor(XsdXmlValue value, auto native) {
+        self.value = value;
+        self.native = native;
+    }
+    auto getNativeValue() {
+        return native;
+    }
+    string getXml() {
+        return value.getXml();
+    }
+}
+
+# Internal lexical text retained until output namespace allocation.
+class XsdQNameOutputText {
+    public {
+        list<auto> items;
+    }
+    constructor(list<auto> items) {
+        self.items = items;
+    }
+    string getLexicalValue() {
+        list<string> tokens();
+        foreach auto item in (items) {
+            push tokens, (item instanceof XsdQNameValue || item instanceof XsdScopedLexicalValue) ? item.getLexicalValue() : string(item);
+        }
+        return tokens.join(" ");
+    }
+    auto standalone() {
+        hash<string, string> bindings();
+        foreach auto item in (items) {
+            if (item instanceof XsdScopedLexicalValue) {
+                hash<string, string> required = item.getNamespaceBindings();
+                foreach string prefix in (keys required) {
+                    if (bindings.hasKey(prefix) && bindings{prefix} != required{prefix}) {
+                        throw SOAP_SERIALIZATION_ERROR, "list items require conflicting namespace bindings";
+                    }
+                    bindings{prefix} = required{prefix};
+                }
+            } else if (item instanceof XsdQNameValue && item.getPrefix() != "xml") {
+                string prefix = item.getPrefix();
+                string uri = item.getNamespaceUri();
+                if (bindings.hasKey(prefix) && bindings{prefix} != uri) {
+                    throw SOAP_SERIALIZATION_ERROR, "QName list items require conflicting namespace bindings";
+                }
+                bindings{prefix} = uri;
+            }
+        }
+        hash<auto> attributes();
+        foreach auto item in (items) {
+            if (!(item instanceof XsdScopedLexicalValue)) {
+                continue;
+            }
+            hash<string, string> required = item.getNamespaceBindings();
+            foreach string token in (XsdListValueHelper::tokens(item.getLexicalValue())) {
+                int colon = token.find(":");
+                if (colon > 0) {
+                    string prefix = token.substr(0, colon);
+                    if (!required.hasKey(prefix) && bindings.hasKey(prefix)) {
+                        throw SOAP_SERIALIZATION_ERROR, sprintf("a list item binds prefix %Y required unbound by another item", prefix);
+                    }
+                }
+            }
+        }
+        foreach string prefix in (keys bindings) {
+            if (prefix || bindings{prefix}) {
+                attributes{prefix ? "xmlns:" + prefix : "xmlns"} = bindings{prefix};
+            }
+        }
+        return attributes ? {"^value^": getLexicalValue(), "^attributes^": attributes} : getLexicalValue();
+    }
+}
+
+class XsdQNameXmlOutputHelper {
+    private {
+        hash<string, bool> reserved();
+        hash<string, bool> forbidden();
+        hash<string, string> generated();
+        int next = 0;
+        bool needed = False;
+    }
+    hash<auto> prepare(hash<auto> tree) {
+        reserve(tree);
+        if (!needed) {
+            return tree;
+        }
+        hash<string, string> input = {"xml": "http://www.w3.org/XML/1998/namespace"};
+        hash<string, string> output = input;
+        return children(tree, \input, \output);
+    }
+    private reserve(auto value) {
+        if (value instanceof XsdQNameXmlFragment) {
+            needed = True;
+            reserve(value.getNativeValue());
+        } else if (value instanceof XsdScopedLexicalValue) {
+            needed = True;
+            hash<string, string> bindings = value.getNamespaceBindings();
+            foreach string token in (XsdListValueHelper::tokens(value.getLexicalValue())) {
+                int colon = token.find(":");
+                if (colon > 0) {
+                    string prefix = token.substr(0, colon);
+                    reserved{prefix} = True;
+                    if (!bindings.hasKey(prefix) && prefix != "xml") {
+                        forbidden{prefix} = True;
+                    }
+                }
+            }
+        } else if (value instanceof XsdQNameOutputText) {
+            needed = True;
+            reserve(value.items);
+        } else if (value instanceof XsdQNameValue) {
+            needed = True;
+            reserved{value.getPrefix()} = True;
+        } else if (value.typeCode() == NT_HASH) {
+            foreach string key in (keys value) {
+                if (key.startsWith("xmlns:")) {
+                    reserved{key.substr(6)} = True;
+                }
+                reserve(key);
+                reserve(value{key});
+            }
+        } else if (value.typeCode() == NT_LIST) {
+            foreach auto child in (value) {
+                reserve(child);
+            }
+        } else if (value.typeCode() == NT_STRING) {
+            foreach string prefix in (value =~ x/(qoreqname[0-9]+):/g) {
+                reserved{prefix} = True;
+            }
+        }
+    }
+    private string fresh(string uri) {
+        if (!generated.hasKey(uri)) {
+            string prefix;
+            do {
+                prefix = "qoreqname" + next++;
+            } while (reserved{prefix});
+            reserved{prefix} = True;
+            generated{uri} = prefix;
+        }
+        return generated{uri};
+    }
+    private static bind(auto value, reference<hash<string, string>> data) {
+        if (value instanceof XsdScopedLexicalValue) {
+            hash<string, string> bindings = value.getNamespaceBindings();
+            foreach string prefix in (keys bindings) {
+                if (data.hasKey(prefix) && data{prefix} != bindings{prefix}) {
+                    throw SOAP_SERIALIZATION_ERROR, "scoped values require conflicting bindings on one XML element";
+                }
+                data{prefix} = bindings{prefix};
+            }
+            return;
+        }
+        if (value instanceof XsdQNameOutputText) {
+            foreach auto item in (value.items) {
+                if (item instanceof XsdQNameValue || item instanceof XsdScopedLexicalValue) {
+                    bind(item, \data);
+                }
+            }
+            return;
+        }
+        string prefix = value.getPrefix();
+        string uri = value.getNamespaceUri();
+        if (data.hasKey(prefix) && data{prefix} != uri) {
+            throw SOAP_SERIALIZATION_ERROR, "QName values require conflicting bindings on one XML element";
+        }
+        data{prefix} = uri;
+    }
+    private static hash<auto> attributeHash(auto value) {
+        if (value.typeCode() != NT_HASH || !exists value."^attributes^") {
+            return {};
+        }
+        if (value."^attributes^".typeCode() != NT_HASH) {
+            throw SOAP_SERIALIZATION_ERROR, "XML attributes must be a hash";
+        }
+        return value."^attributes^";
+    }
+    private string name(string lexical, bool attribute, hash<string, string> input,
+            hash<string, string> data, reference<hash<auto>> attributes) {
+        list<string> parts = lexical.split(":");
+        if (parts.size() > 2 || (select parts, !Namespaces::isNCName($1))) {
+            throw SOAP_SERIALIZATION_ERROR, sprintf("invalid XML output name %Y", lexical);
+        }
+        string prefix = parts.size() == 2 ? parts[0] : "";
+        string uri = prefix ? input{prefix} ?? "" : (attribute ? "" : input{""} ?? "");
+        if (prefix && !uri) {
+            throw SOAP_SERIALIZATION_ERROR, sprintf("unbound XML output prefix %Y", prefix);
+        }
+        if (attribute && !prefix) {
+            return lexical;
+        }
+        if ((data.hasKey(prefix) && data{prefix} != uri) || (prefix && forbidden{prefix})) {
+            if (!uri) {
+                throw SOAP_SERIALIZATION_ERROR, "an unqualified element cannot have a nonempty QName default namespace";
+            }
+            prefix = fresh(uri);
+        }
+        if (prefix != "xml") {
+            attributes{prefix ? "xmlns:" + prefix : "xmlns"} = uri;
+        }
+        return (prefix ? prefix + ":" : "") + parts[-1];
+    }
+    private hash<auto> children(hash<auto> tree, reference<hash<string, string>> input,
+            reference<hash<string, string>> output) {
+        hash<auto> result();
+        foreach string key in (keys tree) {
+            if (key.startsWith("^") || key.startsWith(".")) {
+                if (tree{key} instanceof XsdQNameXmlFragment) {
+                    checkFragmentContext(tree{key}.getNativeValue(), output);
+                    result{key} = tree{key}.getXml();
+                } else {
+                    result{key} = tree{key};
+                }
+                continue;
+            }
+            list<auto> values = tree{key}.typeCode() == NT_LIST ? tree{key} : (tree{key},);
+            foreach auto value in (values) {
+                list<auto> row = node(key, value, \input, \output);
+                string output_name = row[0];
+                if (result.hasKey(output_name)) {
+                    if (result{output_name}.typeCode() != NT_LIST) {
+                        result{output_name} = (result{output_name},);
+                    }
+                    result{output_name} += (row[1],);
+                } else {
+                    result{output_name} = tree{key}.typeCode() == NT_LIST ? (row[1],) : row[1];
+                }
+            }
+        }
+        return result;
+    }
+    private static checkFragmentContext(auto value, hash<string, string> output) {
+        if (value instanceof XsdScopedLexicalValue) {
+            hash<string, string> required = value.getNamespaceBindings();
+            foreach string token in (XsdListValueHelper::tokens(value.getLexicalValue())) {
+                int colon = token.find(":");
+                if (colon > 0) {
+                    string prefix = token.substr(0, colon);
+                    if (!required.hasKey(prefix) && output.hasKey(prefix)) {
+                        throw SOAP_SERIALIZATION_ERROR, sprintf("an ancestor binds prefix %Y required unbound by retained XML", prefix);
+                    }
+                }
+            }
+        } else if (value.typeCode() == NT_HASH) {
+            foreach auto child in (value.iterator()) {
+                checkFragmentContext(child, output);
+            }
+        } else if (value.typeCode() == NT_LIST) {
+            foreach auto child in (value) {
+                checkFragmentContext(child, output);
+            }
+        }
+    }
+    private list<auto> node(string key, auto value, reference<hash<string, string>> input,
+            reference<hash<string, string>> output) {
+        hash<auto> original = attributeHash(value);
+        hash<string, string> declared = XsdBase::getElementNamespaces(original);
+        hash<string, string> previous();
+        list<string> added();
+        on_exit {
+            foreach string prefix in (keys previous) {
+                input{prefix} = previous{prefix};
+            }
+            foreach string prefix in (added) {
+                remove input{prefix};
+            }
+        }
+        foreach string prefix in (keys declared) {
+            if (input.hasKey(prefix)) {
+                previous{prefix} = input{prefix};
+            } else {
+                push added, prefix;
+            }
+            input{prefix} = declared{prefix};
+        }
+        auto scalar = value.typeCode() == NT_HASH ? value."^value^" : value;
+        hash<string, string> data();
+        if ((scalar instanceof XsdQNameValue || scalar instanceof XsdQNameOutputText || scalar instanceof XsdScopedLexicalValue)) {
+            bind(scalar, \data);
+        }
+        foreach auto attribute_value in (original.iterator()) {
+            if ((attribute_value instanceof XsdQNameValue || attribute_value instanceof XsdQNameOutputText || attribute_value instanceof XsdScopedLexicalValue)) {
+                bind(attribute_value, \data);
+            }
+        }
+        hash<auto> attributes = original;
+        foreach string attribute in (keys attributes) {
+            if (attribute.startsWith("xmlns:") && forbidden{attribute.substr(6)}) {
+                remove attributes{attribute};
+            }
+        }
+        hash<auto> rewritten();
+        foreach string attribute in (keys original) {
+            if (attribute == "xmlns" || attribute.startsWith("xmlns:")) {
+                continue;
+            }
+            string output_name = name(attribute, True, input, data, \attributes);
+            auto converted = original{attribute};
+            if ((converted instanceof XsdQNameValue || converted instanceof XsdQNameOutputText || converted instanceof XsdScopedLexicalValue)) {
+                converted = converted.getLexicalValue();
+            } else {
+                list<string> parts = attribute.split(":");
+                if (parts.size() == 2 && input{parts[0]} == XSI_NS && parts[1] == "type") {
+                    converted = name(string(converted), False, input, data, \attributes);
+                } else if (parts.size() == 2 && input{parts[0]} == SOAP_ENCODING && parts[1] == "arrayType") {
+                    string lexical = string(converted);
+                    int bracket = lexical.find("[");
+                    converted = name(bracket < 0 ? lexical : lexical.substr(0, bracket), False,
+                        input, data, \attributes) + (bracket < 0 ? "" : lexical.substr(bracket));
+                }
+            }
+            rewritten{output_name} = converted;
+        }
+        foreach string attribute in (keys original) {
+            if (attribute != "xmlns" && !attribute.startsWith("xmlns:")) {
+                remove attributes{attribute};
+            }
+        }
+        attributes += rewritten;
+        string suffix = (key =~ x/(\^[0-9]+)$/)[0] ?? "";
+        string local_key = suffix ? key.substr(0, key.length() - suffix.length()) : key;
+        string output_name = name(local_key, False, input, data, \attributes) + suffix;
+        foreach string prefix in (keys data) {
+            if (prefix != "xml") {
+                attributes{prefix ? "xmlns:" + prefix : "xmlns"} = data{prefix};
+            }
+        }
+        # Restore only this node's output declarations; copying all inherited
+        # bindings at every depth would grow quadratically for distinct prefixes.
+        hash<string, string> output_previous();
+        list<string> output_added();
+        on_exit {
+            foreach string prefix in (keys output_previous) {
+                output{prefix} = output_previous{prefix};
+            }
+            foreach string prefix in (output_added) {
+                remove output{prefix};
+            }
+        }
+        hash<string, string> output_declarations = XsdBase::getElementNamespaces(attributes);
+        foreach string prefix in (keys output_declarations) {
+            if (output.hasKey(prefix)) {
+                output_previous{prefix} = output{prefix};
+            } else {
+                push output_added, prefix;
+            }
+            output{prefix} = output_declarations{prefix};
+        }
+        list<auto> pending_context();
+        push pending_context, scalar;
+        foreach auto contextual_attribute in (original.iterator()) {
+            push pending_context, contextual_attribute;
+        }
+        while (pending_context) {
+            auto contextual = pop pending_context;
+            if (contextual instanceof XsdQNameOutputText) {
+                pending_context += contextual.items;
+                continue;
+            }
+            if (contextual instanceof XsdScopedLexicalValue) {
+                hash<string, string> required = contextual.getNamespaceBindings();
+                foreach string token in (XsdListValueHelper::tokens(contextual.getLexicalValue())) {
+                    int colon = token.find(":");
+                    string prefix = colon > 0 ? token.substr(0, colon) : "";
+                    if (prefix && !required.hasKey(prefix) && output.hasKey(prefix)) {
+                        throw SOAP_SERIALIZATION_ERROR, sprintf("an ancestor binds prefix %Y required unbound by a union value", prefix);
+                    }
+                }
+            }
+        }
+        hash<auto> result();
+        if (value.typeCode() == NT_HASH) {
+            result = children(value, \input, \output);
+            if ((scalar instanceof XsdQNameValue || scalar instanceof XsdQNameOutputText || scalar instanceof XsdScopedLexicalValue)) {
+                result."^value^" = scalar.getLexicalValue();
+            }
+        } else {
+            result."^value^" = (scalar instanceof XsdQNameValue || scalar instanceof XsdQNameOutputText || scalar instanceof XsdScopedLexicalValue) ? scalar.getLexicalValue() : scalar;
+        }
+        result."^attributes^" = attributes;
+        return (output_name, result);
+    }
+}
+
+class XsdQNameContextHelper {
+    # Capture only bindings mentioned by potential QName tokens and the default namespace.
+    static hash<string, string> capture(string lexical, Namespaces namespaces) {
+        hash<string, string> input = namespaces.getInputNamespaceState().input;
+        hash<string, string> captured = {"": namespaces.getDefaultNs() ?? ""};
+        foreach string token in (XsdListValueHelper::tokens(lexical)) {
+            int colon = token.find(":");
+            if (colon > 0) {
+                string prefix = token.substr(0, colon);
+                if (input.hasKey(prefix)) {
+                    captured{prefix} = input{prefix};
+                }
+            }
+        }
+        return captured;
+    }
+    static hash<auto> attributes(hash<string, string> bindings) {
+        hash<auto> result();
+        foreach string prefix in (keys bindings) {
+            result{prefix ? "xmlns:" + prefix : "xmlns"} = bindings{prefix};
+        }
+        return result;
+    }
+}
+
+#! Lexical scalar text whose interpretation depends on XML namespace bindings
+/** A union can select a string member because a prefix is unbound, or because its
+    binding excludes an earlier QName restriction. This immutable value retains
+    the original text and namespace context needed to preserve that selection.
+    @par Example
+    A union field containing \c "category:Legacy" can retain an unbound \c category prefix
+    while another field in the same SOAP message declares it for a QName value.
+    @note Bindings apply to this value. Independent provider calls retain their own namespace context.
+    @since %WSDL 0.5.8
+*/
+public final class XsdScopedLexicalValue inherits Serializable {
+    private {
+        string lexical;
+        hash<string, string> namespaces;
+    }
+    #! constructs lexical text with its explicit namespace context
+    /** @param lexical XML character text, preserving whitespace
+        @param namespaces prefix-to-URI bindings; absent prefixes remain unbound and the empty key is the default
+        @throw XSD-SCOPED-VALUE-ERROR invalid XML characters or namespace bindings
+    */
+    constructor(string lexical, hash<string, string> namespaces) {
+        initialize(lexical, namespaces, "XSD-SCOPED-VALUE-ERROR");
+    }
+    private initialize(auto lexical, auto namespaces, string error) {
+        if (lexical.typeCode() != NT_STRING
+                || lexical =~ /[^\x{9}\x{A}\x{D}\x{20}-\x{D7FF}\x{E000}-\x{FFFD}\x{10000}-\x{10FFFF}]/) {
+            throw error, "a scoped lexical value requires XML character text";
+        }
+        hash<string, string> checked = XsdQNameValueHelper::bindings(namespaces, error);
+        self.lexical = lexical;
+        self.namespaces = checked;
+    }
+    private:internal deserializeMembers(hash<auto> members) {
+        initialize(members.lexical, members.namespaces, "DESERIALIZATION-ERROR");
+    }
+    #! returns the retained lexical spelling
+    /** @return the original XML character text */
+    string getLexicalValue() {
+        return lexical;
+    }
+    #! returns a copy of the namespace context
+    /** @return explicit bindings and the implicit xml prefix */
+    hash<string, string> getNamespaceBindings() {
+        return namespaces;
+    }
+}
+
+thread_local *hash<string, string> QNameSerializationNamespaces;
+thread_local *Namespaces QNameSerializationNamespaceOwner;
+
+class XsdScopedLexicalContext {
+    private {
+        *hash<string, string> previous;
+        *Namespaces previous_owner;
+        *XsdQNameNamespaceScope input_scope;
+        bool active = False;
+    }
+    constructor(auto value, *Namespaces namespaces) {
+        if (!(value instanceof XsdScopedLexicalValue)) {
+            return;
+        }
+        input_scope = new XsdQNameNamespaceScope(
+            XsdQNameContextHelper::attributes(value.getNamespaceBindings()), True);
+        if (!namespaces) {
+            return;
+        }
+        previous = QNameSerializationNamespaces;
+        previous_owner = QNameSerializationNamespaceOwner;
+        on_error {
+            restore();
+        }
+        active = True;
+        QNameSerializationNamespaces = value.getNamespaceBindings();
+        QNameSerializationNamespaceOwner = namespaces;
+    }
+    static hash<string, string> serializationBindings(Namespaces namespaces, auto attributes = NOTHING) {
+        if (exists attributes && attributes.typeCode() != NT_HASH) {
+            throw SOAP_SERIALIZATION_ERROR, "XML attributes must be a hash";
+        }
+        hash<string, string> result = QNameSerializationNamespaceOwner === namespaces ? QNameSerializationNamespaces
+            : namespaces.getInputNamespaceState().input;
+        try {
+            result += XsdBase::getElementNamespaces(attributes);
+        } catch (hash<ExceptionInfo> ex) {
+            if (ex.err != SOAP_DESERIALIZATION_ERROR) {
+                rethrow;
+            }
+            throw SOAP_SERIALIZATION_ERROR, ex.desc;
+        }
+        return result;
+    }
+    destructor() {
+        restore();
+    }
+    private restore() {
+        if (active) {
+            active = False;
+            QNameSerializationNamespaces = previous;
+            QNameSerializationNamespaceOwner = previous_owner;
+        }
+        remove input_scope;
+    }
+}
+
+hashdecl XsdScopedSchemaMember {
+    XsdAbstractType type;
+    bool items = False;
+}
+
+hashdecl XsdScopedProviderMember {
+    AbstractDataProviderType type;
+    bool items = False;
+}
+
+class XsdScopedLexicalHelper {
+    static *string inputText(auto value) {
+        auto scalar = value.typeCode() == NT_HASH ? value."^value^" : value;
+        return scalar.typeCode() == NT_STRING ? scalar : NOTHING;
+    }
+
+    private static bool eligible(*string text, bool items) {
+        if (!exists text) {
+            return True;
+        }
+        list<string> lexicals = items ? XsdListValueHelper::tokens(text)
+            : (XsdSimpleType::normalizeWhiteSpace(text, "collapse"),);
+        foreach string lexical in (lexicals) {
+            if (XsdPatternConstraintHelper::matches(lexical, XsdNameLexicalHelper::QNamePattern)) {
+                return True;
+            }
+        }
+        return False;
+    }
+
+    static bool schema(XsdAbstractType type, *string text) {
+        list<hash<XsdScopedSchemaMember>> pending = (<XsdScopedSchemaMember>{"type": type},);
+        hash<string, bool> visited();
+        while (pending) {
+            hash<XsdScopedSchemaMember> frame = pop pending;
+            XsdAbstractType current = frame.type;
+            string key = current.uniqueHash() + (frame.items ? ":items" : ":scalar");
+            if (visited{key}) {
+                continue;
+            }
+            visited{key} = True;
+            if (current instanceof XsdBaseType && current.name == "QName" && eligible(text, frame.items)) {
+                return True;
+            }
+            if (current instanceof XsdSimpleType) {
+                XsdSimpleType simple = cast<XsdSimpleType>(current);
+                if (simple.type) {
+                    push pending, <XsdScopedSchemaMember>{"type": simple.type, "items": frame.items};
+                }
+                if (simple.listItemType) {
+                    push pending, <XsdScopedSchemaMember>{"type": simple.listItemType, "items": True};
+                }
+                foreach XsdAbstractType member in (simple.unionTypes) {
+                    push pending, <XsdScopedSchemaMember>{"type": member, "items": frame.items};
+                }
+            }
+        }
+        return False;
+    }
+
+    static bool provider(AbstractDataProviderType type, *string text) {
+        list<hash<XsdScopedProviderMember>> pending = (<XsdScopedProviderMember>{"type": type},);
+        hash<string, bool> visited();
+        while (pending) {
+            hash<XsdScopedProviderMember> frame = pop pending;
+            AbstractDataProviderType current = frame.type;
+            string key = current.uniqueHash() + (frame.items ? ":items" : ":scalar");
+            if (visited{key}) {
+                continue;
+            }
+            visited{key} = True;
+            if (current instanceof XsdQNameDataType && eligible(text, frame.items)) {
+                return True;
+            }
+            if (current instanceof UnionDataType) {
+                foreach AbstractDataProviderType member in (cast<UnionDataType>(current).types) {
+                    push pending, <XsdScopedProviderMember>{"type": member, "items": frame.items};
+                }
+            } else {
+                *AbstractDataProviderType item = current.getElementType();
+                if (item) {
+                    push pending, <XsdScopedProviderMember>{"type": item, "items": True};
+                }
+            }
+        }
+        return False;
+    }
+    # Only the member receiving this value inherits its lexical context. Independent
+    # conversions invoked by a custom provider keep their own namespace bindings.
+    static auto providerInput(AbstractDataProviderType provider, auto value,
+            hash<string, string> namespaces) {
+        if (value.typeCode() == NT_STRING
+                && (provider instanceof XsdQNameDataType || provider instanceof UnionDataType)) {
+            return new XsdScopedLexicalValue(value, namespaces);
+        }
+        return value;
+    }
+
+    static hash<string, string> usedBindings(string text, *hash<string, string> bindings) {
+        hash<string, string> result = {"": bindings{""} ?? ""};
+        foreach string token in (XsdListValueHelper::tokens(text)) {
+            int colon = token.find(":");
+            if (colon > 0) {
+                string prefix = token.substr(0, colon);
+                if (bindings.hasKey(prefix)) {
+                    result{prefix} = bindings{prefix};
+                }
+            }
+        }
+        return result;
+    }
+}
+
 class XsdQNameValueHelper {
     static hash<string, string> bindings(auto input, string error) {
         if (input.typeCode() != NT_HASH) {
@@ -4848,6 +5579,9 @@ class XsdQNameValueHelper {
     }
 
     static XsdQNameValue resolve(auto value, string error, *hash<string, string> bindings) {
+        if (value instanceof XsdScopedLexicalValue) {
+            return resolve(value.getLexicalValue(), error, value.getNamespaceBindings());
+        }
         if (value instanceof XsdQNameValue) {
             return value;
         }
@@ -4877,8 +5611,8 @@ class XsdQNameValueHelper {
 #! provider converting QName text with an explicit namespace context
 /** Namespace-qualified text returns immutable XsdQNameValue objects. No-namespace text and the implicit
     xml prefix retain their string representation. Existing XsdQNameValue inputs retain their object representation.
-    @note Construct this provider with the namespace context of its lexical input. Ordinary WSDL schema
-    providers continue to use their existing conversion path until scoped QName conversion is integrated.
+    @note Construct this provider with the namespace context of its lexical input. WSDL decoding supplies
+    the instance's context; detached providers accept explicit QName values or bindings supplied by the caller.
     @par Example
     A catalog field constructed with \c {"c": "urn:catalog"} converts \c "c:Product" to its namespace/local value.
     @since %WSDL 0.5.8
@@ -4985,7 +5719,7 @@ public class XsdQNameDataType inherits AbstractDataProviderType {
     }
 
     #! resolves and converts a QName value
-    /** @param value lexical QName text, a string-convertible scalar or an XsdQNameValue
+    /** @param value lexical QName text, a string-convertible scalar, XsdQNameValue or XsdScopedLexicalValue
         @return a retained QName object, an unambiguous native string or optional omission
         @throw MISSING-VALUE-ERROR a required value is absent
         @throw RUNTIME-TYPE-ERROR invalid QName text, an unbound prefix or an unsupported native category
@@ -5002,7 +5736,25 @@ public class XsdQNameDataType inherits AbstractDataProviderType {
             # conversion could reinterpret under a provider's default namespace.
             return value;
         }
-        return XsdQNameValueHelper::native(XsdQNameValueHelper::resolve(value, "RUNTIME-TYPE-ERROR", namespaces));
+        if (value instanceof XsdScopedLexicalValue) {
+            # A scoped absence of a default namespace is part of the selected value.
+            # Keep it explicit when another provider could interpret native text differently.
+            return XsdQNameValueHelper::resolve(value, "RUNTIME-TYPE-ERROR");
+        }
+        return XsdQNameValueHelper::native(XsdQNameValueHelper::resolve(value, "RUNTIME-TYPE-ERROR",
+            namespaces));
+    }
+
+    #! Returns a provider copy using an explicit context for lexical QName inputs
+    /** @param namespaces prefix-to-URI bindings, including an optional empty default prefix
+        @return a copy retaining this provider's restrictions and optionality
+        @throw XSD-SIMPLETYPE-ERROR invalid bindings
+    */
+    XsdQNameDataType withNamespaceBindings(hash<string, string> namespaces) {
+        hash<string, string> checked = XsdQNameValueHelper::bindings(namespaces, "XSD-SIMPLETYPE-ERROR");
+        XsdQNameDataType result = self.copy();
+        result.namespaces = checked;
+        return result;
     }
 
     #! returns whether a value is required
@@ -5111,13 +5863,214 @@ hashdecl XsdListConversionInfo {
     *hash<XsdUnionValueIdentity> identity;
 }
 
+#! QName restriction metadata with resolved enumeration values
+/** Enumeration values retain declaration identity and spelling; patterns apply to instance text.
+    @since %WSDL 0.5.8
+*/
+public hashdecl XsdQNameFacetInfo {
+    #! Declared type name
+    string name;
+    #! Compiled alternatives at this derivation step
+    *list<XsdPatternConstraint> patterns;
+    #! Resolved enumeration literals, retaining namespace identity and spelling
+    *list<XsdQNameValue> enumeration;
+}
+
+class XsdQNameFacetHelper {
+    static string key(XsdQNameValue value) {
+        return sprintf("%d:%s%s", value.getNamespaceUri().length(), value.getNamespaceUri(), value.getLocalName());
+    }
+
+    static *hash<string, bool> check(hash<XsdQNameFacetInfo> facets, XsdQNameDataType base, string error) {
+        if (facets.name.empty()) {
+            throw error, "a QName restriction requires a diagnostic name";
+        }
+        if (exists facets.enumeration && !facets.enumeration) {
+            throw error, "a QName enumeration requires at least one value";
+        }
+        if (exists facets.patterns && !facets.patterns) {
+            throw error, "a QName pattern restriction requires at least one pattern";
+        }
+        foreach XsdPatternConstraint pattern in (facets.patterns) {
+            try {
+                bool matched = XsdPatternConstraintHelper::matches("", pattern);
+            } catch (hash<ExceptionInfo> ex) {
+                if (ex.err != "REGEX-ERROR" && ex.err != "REGEX-COMPILATION-ERROR") {
+                    rethrow;
+                }
+                throw error, sprintf("invalid compiled QName pattern: %s", ex.desc);
+            }
+        }
+        *hash<string, bool> values;
+        if (exists facets.enumeration) {
+            values = {};
+        }
+        foreach XsdQNameValue allowed in (facets.enumeration) {
+            try {
+                base.acceptsValue(allowed);
+            } catch (hash<ExceptionInfo> ex) {
+                if (ex.err != "RUNTIME-TYPE-ERROR") {
+                    rethrow;
+                }
+                throw error, sprintf("QName enumeration value %Y is outside the base restriction: %s",
+                    allowed.getLexicalValue(), ex.desc);
+            }
+            values{key(allowed)} = True;
+        }
+        return values;
+    }
+
+    static validate(hash<XsdQNameFacetInfo> facets, *hash<string, bool> values, XsdQNameValue value, string error) {
+        if (facets.patterns) {
+            bool matched = False;
+            foreach XsdPatternConstraint pattern in (facets.patterns) {
+                if (XsdPatternConstraintHelper::matches(value.getLexicalValue(), pattern)) {
+                    matched = True;
+                    break;
+                }
+            }
+            if (!matched) {
+                throw error, sprintf("QName value %Y does not match the patterns of %Y", value.getLexicalValue(),
+                    facets.name);
+            }
+        }
+        if (exists values && !values{key(value)}) {
+            throw error, sprintf("QName value {%s}%s is outside the enumeration of %Y", value.getNamespaceUri(),
+                value.getLocalName(), facets.name);
+        }
+    }
+}
+
+#! A QName provider preserving pattern spellings and enumeration identities
+/** Enumeration choices compare namespace URI and local name; every inherited pattern
+    applies to the supplied lexical spelling. Optional copies retain the same restrictions.
+    @par Example
+    A catalog type enumerated as \c "p:Product" also accepts \c "c:Product" with the
+    same namespace URI, provided its lexical patterns permit the alias.
+    @since %WSDL 0.5.8
+*/
+public class XsdQNameRestrictionDataType inherits XsdQNameDataType {
+    private {
+        hash<XsdQNameFacetInfo> facets;
+        XsdQNameDataType base;
+        transient *hash<string, bool> enumeration;
+        transient bool chain_validated = False;
+    }
+
+    #! constructs a QName restriction with exact enumeration membership
+    /** @param facets the resolved patterns and enumeration values
+        @param base the provider validating inherited restrictions
+        @throw XSD-SIMPLETYPE-ERROR invalid facets, an out-of-base choice or a cyclic base graph
+    */
+    constructor(hash<XsdQNameFacetInfo> facets, XsdQNameDataType base)
+            : XsdQNameDataType(base.getNamespaceBindings(), base.isOrNothingType()) {
+        self.facets = facets;
+        self.base = base;
+        checkBaseGraph("XSD-SIMPLETYPE-ERROR");
+        enumeration = XsdQNameFacetHelper::check(facets, base, "XSD-SIMPLETYPE-ERROR");
+    }
+
+    private:internal deserializeMembers(hash<auto> members) {
+        if (!(members.base instanceof XsdQNameDataType)) {
+            throw "DESERIALIZATION-ERROR", "a QName restriction requires a QName base provider";
+        }
+        if (members.facets.typeCode() != NT_HASH || members.facets.name.typeCode() != NT_STRING) {
+            throw "DESERIALIZATION-ERROR", "a QName restriction requires named facet metadata";
+        }
+        foreach string key in ("patterns", "enumeration") {
+            if (!exists members.facets{key}) {
+                continue;
+            }
+            if (members.facets{key}.typeCode() != NT_LIST) {
+                throw "DESERIALIZATION-ERROR", sprintf("QName %s metadata must be a list", key);
+            }
+            foreach auto value in (members.facets{key}) {
+                if (key == "enumeration" ? !(value instanceof XsdQNameValue)
+                        : (value.typeCode() != NT_STRING && !(value instanceof XsdCompiledPattern))) {
+                    throw "DESERIALIZATION-ERROR", sprintf("invalid QName %s entry", key);
+                }
+            }
+        }
+        hash<XsdQNameFacetInfo> restored = new hash<XsdQNameFacetInfo>(members.facets);
+        facets = restored;
+        base = members.base;
+        checkBaseGraph("DESERIALIZATION-ERROR");
+        enumeration = XsdQNameFacetHelper::check(restored, base, "DESERIALIZATION-ERROR");
+    }
+
+    # Indexed reconstruction must resolve a complete acyclic base before facet checks
+    # can call it; a cyclic forward reference must not invoke an unfinished provider.
+    private checkBaseGraph(string error) {
+        hash<string, bool> visited();
+        *XsdQNameDataType current = self;
+        while (current instanceof XsdQNameRestrictionDataType) {
+            if (current !== self && cast<XsdQNameRestrictionDataType>(current).chain_validated) {
+                break;
+            }
+            string key = current.uniqueHash();
+            if (visited{key}) {
+                throw error, "cyclic QName restriction provider metadata";
+            }
+            visited{key} = True;
+            current = cast<XsdQNameRestrictionDataType>(current).base;
+            if (!current) {
+                throw error, "uninitialized or cyclic QName restriction base metadata";
+            }
+        }
+        chain_validated = True;
+    }
+
+    #! returns the restriction name with its optionality prefix
+    /** @return the XSD provider name */
+    string getName() {
+        return (isOrNothingType() ? "*" : "") + "xsd:" + facets.name;
+    }
+
+    #! validates every base restriction without recursive provider calls
+    /** @param input lexical text, an explicit QName or a retained lexical context
+        @return the QName value or optional omission; unambiguous local/xml names retain native strings
+        @throw MISSING-VALUE-ERROR a required value is omitted
+        @throw RUNTIME-TYPE-ERROR invalid QName text, namespace identity or a restriction facet
+        @throw XSD-SIMPLETYPE-ERROR cyclic provider metadata
+    */
+    auto acceptsValue(auto input) {
+        if (!exists input) {
+            return XsdQNameDataType::acceptsValue(input);
+        }
+        XsdQNameValue value = XsdQNameValueHelper::resolve(input, "RUNTIME-TYPE-ERROR", getNamespaceBindings());
+        list<XsdQNameRestrictionDataType> restrictions();
+        XsdQNameRestrictionDataType current = self;
+        hash<string, bool> visited();
+        while (True) {
+            string key = current.uniqueHash();
+            if (visited{key}) {
+                throw "XSD-SIMPLETYPE-ERROR", "cyclic QName restriction provider metadata";
+            }
+            visited{key} = True;
+            push restrictions, current;
+            if (Class::getClass(current.base).getPathName() != "WSDL::XsdQNameRestrictionDataType") {
+                # Preserve a custom base provider's callback and error behavior.
+                current.base.acceptsValue(value);
+                break;
+            }
+            current = cast<XsdQNameRestrictionDataType>(current.base);
+        }
+        while (restrictions) {
+            current = pop restrictions;
+            XsdQNameFacetHelper::validate(current.facets, current.enumeration, value, "RUNTIME-TYPE-ERROR");
+        }
+        return input instanceof XsdQNameValue || input instanceof XsdScopedLexicalValue
+            ? value : XsdQNameValueHelper::native(value);
+    }
+}
+
 class XsdListValueHelper {
     const TextTypes = {"string": True, "normalizedString": True, "token": True, "language": True,
         "Name": True, "NCName": True, "NMTOKEN": True, "ID": True, "IDREF": True, "ENTITY": True,
         "anyURI": True};
 
     static bool supports(string builtin) {
-        return builtin == "boolean" || builtin == "duration" || XsdNumericFacetHelper::isType(builtin)
+        return builtin == "QName" || builtin == "boolean" || builtin == "duration" || XsdNumericFacetHelper::isType(builtin)
             || XsdBinaryLexicalHelper::isType(builtin) || XsdCalendarLexicalHelper::isType(builtin) || TextTypes{builtin};
     }
 
@@ -5174,6 +6127,7 @@ class XsdListValueHelper {
             if (category != "string" && category != "int" && category != "number"
                     && category != "float" && category != "bool"
                     && !((category == "binary" || category == "object") && XsdBinaryLexicalHelper::isType(item.builtin))
+                    && !(category == "object" && item.builtin == "QName")
                     && !(category == "date" && XsdCalendarLexicalHelper::isType(item.builtin))) {
                 throw error, sprintf("invalid atomic list item output category %Y", category);
             }
@@ -5182,6 +6136,15 @@ class XsdListValueHelper {
                 || (item.builtin == "normalizedString" && item.white_space == "preserve")) {
             throw error, "list item whitespace metadata weakens its builtin rule";
         }
+    }
+
+    static list<auto> retainedTokens(list<auto> values, list<string> tokens) {
+        @assert(values.size() == tokens.size());
+        list<auto> result();
+        foreach string token in (tokens) {
+            push result, (values[$#] instanceof XsdQNameValue || values[$#] instanceof XsdScopedLexicalValue) ? values[$#] : token;
+        }
+        return result;
     }
 
     static list<string> tokens(string lexical) {
@@ -5207,7 +6170,9 @@ class XsdListValueHelper {
             string lexical;
             try {
                 converted = item.provider.acceptsValue(input);
-                if (input.typeCode() == NT_STRING) {
+                if (item.builtin == "QName") {
+                    lexical = converted instanceof XsdQNameValue ? converted.getLexicalValue() : string(converted);
+                } else if (input.typeCode() == NT_STRING) {
                     lexical = XsdSimpleType::normalizeWhiteSpace(input, item.white_space);
                     builtin.deserializeValue("item", new hash<string, XsdAbstractType>(), NOTHING, lexical);
                 } else {
@@ -5293,7 +6258,10 @@ class XsdListValueHelper {
         }
         string key = "";
         foreach string token in (converted.tokens) {
-            if (item.builtin == "decimal" || XsdIntegerLexicalHelper::Types{item.builtin}) {
+            if (item.builtin == "QName") {
+                XsdQNameValue value = XsdQNameValueHelper::resolve(converted.values[$#], error);
+                token = sprintf("%d:%s%s", value.getNamespaceUri().length(), value.getNamespaceUri(), value.getLocalName());
+            } else if (item.builtin == "decimal" || XsdIntegerLexicalHelper::Types{item.builtin}) {
                 token = XsdDecimalLexicalHelper::canonical(token);
             } else if (item.builtin == "boolean") {
                 token = XsdBooleanLexicalHelper::decode(token, error) ? "true" : "false";
@@ -5931,7 +6899,7 @@ public class XsdListRestrictionDataType inherits AbstractDataProviderType {
                 throw "RUNTIME-TYPE-ERROR", sprintf("list value for %Y is outside its enumeration", facets.name);
             }
         }
-        return facets.patterns ? lexical.tokens : converted;
+        return facets.patterns ? XsdListValueHelper::retainedTokens(converted, lexical.tokens) : converted;
     }
 
     #! returns whether omission is allowed
@@ -7199,6 +8167,143 @@ public class XsdNumericDataField inherits QoreDataField {
     }
 }
 
+#! a QName field comparing finite choices by XSD value
+/** Choices retain their display text while equivalent namespace/local names share one key.
+    @par Example
+    A catalog field enumerated as \c "p:Name" accepts an alias with the same namespace URI and local name.
+    @since %WSDL 0.5.8
+*/
+public class XsdQNameDataField inherits QoreDataField {
+    private static hash<auto> withoutChoices(hash<auto> info) {
+        remove info.allowed_values;
+        remove info.element_allowed_values;
+        return info;
+    }
+
+    #! constructs a QName field with exact finite choices
+    /** @param info the ordinary QoreDataField field properties
+        @throw XSD-SIMPLETYPE-ERROR invalid QName choice text
+    */
+    constructor(hash<auto> info) : QoreDataField(XsdQNameDataField::withoutChoices(info)) {
+        if (exists info.allowed_values) {
+            setAllowedValues(info.allowed_values, info.allowed_values_creatable);
+        }
+        if (exists info.element_allowed_values) {
+            setElementAllowedValues(info.element_allowed_values, info.element_allowed_values_creatable);
+        }
+    }
+
+    private:internal deserializeMembers(hash<auto> members) {
+        # Finite choices are authoritative; serialized membership maps are derived data.
+        try {
+            if (exists allowed_values) {
+                setAllowedValues(allowed_values, allowed_values_creatable);
+            } else {
+                remove allowed_values_map;
+            }
+            if (exists element_allowed_values) {
+                setElementAllowedValues(element_allowed_values, element_allowed_values_creatable);
+            } else {
+                remove element_allowed_values_map;
+            }
+        } catch (hash<ExceptionInfo> ex) {
+            if (ex.err != "XSD-SIMPLETYPE-ERROR") {
+                rethrow;
+            }
+            throw "DESERIALIZATION-ERROR", ex.desc;
+        }
+    }
+
+    #! sets QName choices without applying this restriction's lexical patterns to facet declarations
+    /** @param choices QName values or AllowedValueInfo entries
+        @param creatable whether this field permits values outside its finite choices
+        @return this field
+        @throw XSD-SIMPLETYPE-ERROR invalid QName choice text
+        @note The provider still enforces its own schema enumeration, even if creatable is True.
+    */
+    AbstractDataField setAllowedValues(list<auto> choices, *bool creatable) {
+        list<hash<AllowedValueInfo>> resolved = resolveChoices(choices);
+        hash<string, bool> value_map = map {valueKey($1.value): True}, resolved;
+        allowed_values = resolved;
+        allowed_values_map = value_map;
+        allowed_values_creatable = creatable ?? False;
+        return self;
+    }
+
+    #! sets exact QName choices for repeated elements
+    /** @param choices QName values or AllowedValueInfo entries for each element
+        @param creatable whether element values outside these choices are permitted
+        @return this field
+        @throw XSD-SIMPLETYPE-ERROR invalid QName choice text
+    */
+    AbstractDataField setElementAllowedValues(list<auto> choices, *bool creatable) {
+        list<hash<AllowedValueInfo>> resolved = resolveChoices(choices);
+        hash<string, bool> value_map = map {valueKey($1.value): True}, resolved;
+        element_allowed_values = resolved;
+        element_allowed_values_map = value_map;
+        element_allowed_values_creatable = creatable ?? False;
+        return self;
+    }
+
+    private list<hash<AllowedValueInfo>> resolveChoices(list<auto> choices) {
+        list<hash<AllowedValueInfo>> resolved();
+        foreach auto choice in (choices) {
+            hash<AllowedValueInfo> entry = choice.typeCode() == NT_HASH
+                ? new hash<AllowedValueInfo>(choice)
+                : <AllowedValueInfo>{"value": choice,
+                    "display_name": resolveChoice(choice).getLexicalValue()};
+            resolved += entry;
+        }
+        return resolved;
+    }
+
+    private XsdQNameValue resolveChoice(auto value) {
+        AbstractDataProviderType type = getType();
+        *AbstractDataProviderType atomic = type instanceof XsdQNameDataType ? type : type.getElementType();
+        if (!(atomic instanceof XsdQNameDataType)) {
+            throw "XSD-SIMPLETYPE-ERROR", "a QName field requires a QName provider or QName item provider";
+        }
+        return XsdQNameValueHelper::resolve(value, "XSD-SIMPLETYPE-ERROR",
+            cast<XsdQNameDataType>(atomic).getNamespaceBindings());
+    }
+
+    private string valueKey(auto value) {
+        return XsdQNameFacetHelper::key(resolveChoice(value));
+    }
+
+    #! validates the type and compares finite choices in the QName value space
+    /** @param value a native QName value or XML lexical spelling
+        @return the provider's validated value with retained lexical information
+        @throw FIELD-VALUE-ERROR the QName value is outside the field's finite choices
+        @throw RUNTIME-TYPE-ERROR the underlying type rejects the value
+        @throw MISSING-VALUE-ERROR a required value is omitted
+    */
+    auto acceptsValue(auto value) {
+        if (!exists value && exists (auto default_value = getDefaultValue())) {
+            value = default_value;
+        }
+        on_error {
+            rethrow $1.err, sprintf("%s (while setting field %Y)", $1.desc, getName()), $1.arg;
+        }
+        value = getType().acceptsValue(value);
+        if (exists value && allowed_values && !allowed_values_creatable) {
+            if (!allowed_values_map{valueKey(value)}) {
+                throw "FIELD-VALUE-ERROR", sprintf("field %Y does not accept QName value %Y; allowed values: %Y",
+                    getName(), value, map $1.value, allowed_values);
+            }
+        }
+        if (exists value && element_allowed_values && !element_allowed_values_creatable) {
+            foreach auto item in (value) {
+                if (!element_allowed_values_map{valueKey(item)}) {
+                    throw "FIELD-VALUE-ERROR", sprintf("field %Y does not accept QName element value %Y",
+                        getName(), item);
+                }
+            }
+        }
+        return value;
+    }
+}
+
 #! a duration field comparing finite choices by XSD value
 /** Choices retain their display text while equivalent durations share an exact four-reference-date key.
     @par Example
@@ -7871,8 +8976,9 @@ class XsdDataFieldHelper {
     }
 
     private static string displayScalar(auto value) {
-        if (value instanceof XsdBinaryValue) {
-            return cast<XsdBinaryValue>(value).getLexicalValue();
+        if (value instanceof XsdBinaryValue || value instanceof XsdQNameValue
+                || value instanceof XsdScopedLexicalValue) {
+            return value.getLexicalValue();
         }
         return value.typeCode() == NT_BINARY ? make_hex_string(value) : string(value);
     }
@@ -7913,6 +9019,9 @@ class XsdDataFieldHelper {
         }
         if (schema instanceof XsdBaseType && XsdBinaryLexicalHelper::isType(schema.name)) {
             return new XsdBinaryDataField(info, schema.name);
+        }
+        if (schema instanceof XsdBaseType && schema.name == "QName") {
+            return new XsdQNameDataField(info);
         }
         if (schema instanceof XsdBaseType && schema.name == "boolean") {
             return new XsdBooleanDataField(info);
@@ -7982,6 +9091,36 @@ public class XsdBaseType inherits WSDL::XsdAbstractType {
         @throw SOAP-SERIALIZATION-ERROR the value cannot be converted to this builtin
     */
     auto serializeValue(Namespaces nsc, auto val, *softbool omitType) {
+        if (name == "QName") {
+            hash<string, string> bindings = XsdScopedLexicalContext::serializationBindings(nsc,
+                val.typeCode() == NT_HASH ? val."^attributes^" : NOTHING);
+            XsdQNameValue value = XsdQNameValueHelper::resolve(
+                XsdScalarTextHelper::value(val, SOAP_SERIALIZATION_ERROR), SOAP_SERIALIZATION_ERROR, bindings);
+            hash<auto> result();
+            if (val.typeCode() == NT_HASH) {
+                foreach string key in (keys val) {
+                    if (key.startsWith("^comment")) {
+                        result{key} = val{key};
+                    }
+                }
+            }
+            auto lexical = XsdQNameOutputScope::retains(nsc) ? value : value.getLexicalValue();
+            hash<auto> attributes();
+            if (!XsdQNameOutputScope::retains(nsc) && value.getPrefix() != "xml" && value.getNamespaceUri()) {
+                attributes{value.getPrefix() ? "xmlns:" + value.getPrefix() : "xmlns"} = value.getNamespaceUri();
+            }
+            if (!omitType) {
+                attributes."xsi:type" = ons + ":QName";
+            }
+            if (attributes) {
+                result."^attributes^" = attributes;
+            }
+            if (result) {
+                result."^value^" = lexical;
+                return result;
+            }
+            return lexical;
+        }
         *hash<auto> comments;
         if (val.typeCode() == NT_HASH) {
             if (name == "anySimpleType" && val.hasKey("^attributes^")) {
@@ -8151,6 +9290,7 @@ public class XsdBaseType inherits WSDL::XsdAbstractType {
         @throw SOAP-DESERIALIZATION-ERROR the value cannot be converted to this builtin
     */
     auto deserializeValue(string en, hash<string, XsdAbstractType> tmap, *hash<auto> mrh, auto val) {
+        XsdQNameNamespaceScope qname_scope(val.typeCode() == NT_HASH ? val."^attributes^" : NOTHING);
         string type;
         if (val.typeCode() == NT_HASH) {
             if (name != "anyType") {
@@ -8184,6 +9324,10 @@ public class XsdBaseType inherits WSDL::XsdAbstractType {
         }
         if (XsdBuiltinListHelper::isType(type)) {
             return XsdBuiltinListHelper::lexical(type, val, SOAP_DESERIALIZATION_ERROR);
+        }
+        if (type == "QName") {
+            return XsdQNameValueHelper::native(XsdQNameValueHelper::resolve(val,
+                SOAP_DESERIALIZATION_ERROR, QNameInputNamespaces));
         }
         if (XsdNameLexicalHelper::isType(type)) {
             return XsdNameLexicalHelper::lexical(type, val, SOAP_DESERIALIZATION_ERROR);
@@ -8289,6 +9433,9 @@ public class XsdBaseType inherits WSDL::XsdAbstractType {
         Text providers apply the builtin whitespace rule; builtin token lists require at least one item.
     */
     AbstractDataProviderType getDataProviderType() {
+        if (name == "QName") {
+            return new XsdQNameDataType();
+        }
         # XSD booleans need a type that parses string values according to the XSD boolean lexical space; a plain
         # "softbool" would convert the string "false" to True
         if (name == "boolean") {
@@ -8530,6 +9677,7 @@ public class XsdArrayType inherits WSDL::XsdAbstractType {
     }
 
     auto deserializeValue(string en, hash<string, XsdAbstractType> tmap, *hash<auto> mrh, auto val) {
+        XsdQNameNamespaceScope qname_scope(val.typeCode() == NT_HASH ? val."^attributes^" : NOTHING);
         switch (name) {
             case "binary": {
                 if (val.typeCode() != NT_BINARY) {
@@ -8610,6 +9758,7 @@ public class XsdAttribute inherits WSDL::XsdTypedData {
 
     private {
         auto constraintValue;
+        transient *hash<string, string> constraintNamespaces;
         bool constraints_resolved = False;
     }
 
@@ -8654,6 +9803,9 @@ public class XsdAttribute inherits WSDL::XsdTypedData {
         }
         defaultLexical = aa.default;
         fixedLexical = aa.fixed;
+        if (exists defaultLexical || exists fixedLexical) {
+            constraintNamespaces = XsdQNameContextHelper::capture(fixedLexical ?? defaultLexical, nsc);
+        }
         if (aa.ref) {
             refInfo = nsc.getTypeHash(aa.ref);
             name = refInfo.val;
@@ -8707,15 +9859,23 @@ public class XsdAttribute inherits WSDL::XsdTypedData {
         if (!exists defaultLexical && !exists fixedLexical && declaration) {
             defaultLexical = declaration.defaultLexical;
             fixedLexical = declaration.fixedLexical;
+            constraintValue = declaration.constraintValue;
         }
-        if (hasValueConstraint()) {
+        on_exit {
+            remove constraintNamespaces;
+        }
+        if (hasValueConstraint() && (!declaration || exists own_default || exists own_fixed)) {
             if (XsdTypeDerivationHelper::isIdDerived(type)) {
                 throw WSDL_ERROR, sprintf("ID-derived attribute %Y cannot have a default or fixed constraint", name);
             }
             try {
+                XsdQNameNamespaceScope declaration_scope(XsdQNameContextHelper::attributes(constraintNamespaces ?? {}), True);
                 constraintValue = type.deserializeValue(name, new hash<string, XsdAbstractType>(), NOTHING,
                     fixedLexical ?? defaultLexical);
             } catch (hash<ExceptionInfo> ex) {
+                if (ex.err == "PROGRAM-INTERRUPTED" || ex.err == "THREAD-CANCELLED") {
+                    rethrow;
+                }
                 throw WSDL_ERROR, sprintf("invalid value constraint for attribute %Y: %s: %s", name, ex.err, ex.desc);
             }
         }
@@ -8820,8 +9980,8 @@ public class XsdAttribute inherits WSDL::XsdTypedData {
     auto serializeAttributeValue(Namespaces nsc, auto val) {
         auto serialized = type.serializeValue(nsc, val, True);
         if (exists fixedLexical) {
-            auto lexical = serialized.typeCode() == NT_HASH ? serialized."^value^" : serialized;
-            auto typed = type.deserializeValue(name, new hash<string, XsdAbstractType>(), NOTHING, string(lexical));
+            auto wire = serialized instanceof XsdQNameOutputText ? serialized.standalone() : serialized;
+            auto typed = type.deserializeValue(name, new hash<string, XsdAbstractType>(), NOTHING, wire);
             checkFixedValue(typed, SOAP_SERIALIZATION_ERROR);
         }
         return serialized;
@@ -9558,16 +10718,19 @@ hashdecl XsdUnionTrialResult {
     # The selected leaf member controls normalization before union-owned patterns.
     *string white_space;
     bool owner = False;
+    bool namespace_sensitive = False;
 }
 
 class XsdUnionTrialContext {
     public {
         auto input;
+        *hash<string, string> namespace_bindings;
         hash<string, bool> active();
         hash<string, hash<XsdUnionTrialResult>> results();
     }
-    constructor(auto input) {
+    constructor(auto input, *hash<string, string> namespace_bindings) {
         self.input = input;
+        self.namespace_bindings = namespace_bindings;
     }
 }
 
@@ -9682,7 +10845,7 @@ class XsdUnionValueHelper {
         "Name": True, "NCName": True, "NMTOKEN": True, "ID": True, "IDREF": True, "ENTITY": True};
 
     static bool supports(string builtin) {
-        return XsdNumericFacetHelper::isType(builtin) || builtin == "boolean" || builtin == "duration" || builtin == "hexBinary"
+        return builtin == "QName" || XsdNumericFacetHelper::isType(builtin) || builtin == "boolean" || builtin == "duration" || builtin == "hexBinary"
             || builtin == "base64Binary" || StringFamily{builtin} || XsdBuiltinListHelper::isType(builtin)
             || XsdCalendarLexicalHelper::isType(builtin);
     }
@@ -9768,6 +10931,9 @@ class XsdUnionValueHelper {
 
     static auto listInput(auto value, string error, *hash<XsdUnionListInfo> info) {
         value = XsdScalarTextHelper::value(value, error);
+        if (value instanceof XsdQNameOutputText) {
+            value = value.items;
+        }
         if (info && value.typeCode() == NT_LIST) {
             foreach auto item in (value) {
                 if (!exists item) {
@@ -9788,11 +10954,16 @@ class XsdUnionValueHelper {
         if (input.typeCode() != NT_LIST) {
             input = exists input ? (input,) : ();
         }
+        *hash<string, string> bindings = info.item.builtin == "QName" && converted.typeCode() == NT_HASH
+            ? XsdBase::getElementNamespaces(converted."^attributes^") : NOTHING;
         converted = listInput(converted, error);
         list<string> values();
         foreach auto item in (input) {
-            hash<XsdUnionValueIdentity> identity = atomicIdentity(info.item, item,
-                converted.typeCode() == NT_LIST ? converted[$#] : converted, error);
+            auto converted_item = converted.typeCode() == NT_LIST ? converted[$#] : converted;
+            if (exists bindings) {
+                converted_item = XsdQNameValueHelper::resolve(converted_item, error, bindings);
+            }
+            hash<XsdUnionValueIdentity> identity = atomicIdentity(info.item, item, converted_item, error);
             push values, key(identity);
         }
         return <XsdUnionValueIdentity>{"family": "list", "value": values};
@@ -9838,7 +11009,7 @@ class XsdUnionValueHelper {
         bool known_lexical = True;
         foreach hash<XsdUnionTrialResult> item in (items) {
             if (!exists item.value || (!item.value.strp() && item.value.typeCode() != NT_BINARY
-                    && !(item.value instanceof XsdBinaryValue))) {
+                    && !(item.value instanceof XsdBinaryValue) && !(item.value instanceof XsdQNameValue) && !(item.value instanceof XsdScopedLexicalValue))) {
                 throw "RUNTIME-TYPE-ERROR", "a list item union must produce an atomic value";
             }
             *string token = item.value.typeCode() == NT_STRING ? item.value : item.lexical;
@@ -9855,6 +11026,9 @@ class XsdUnionValueHelper {
     }
 
     static string key(hash<XsdUnionValueIdentity> identity) {
+        if (identity.family == "QName") {
+            return sprintf("QName:%d:%s%s", identity.value[0].length(), identity.value[0], identity.value[1]);
+        }
         if (identity.family == "list") {
             list<string> parts();
             foreach string item in (identity.value) {
@@ -9894,6 +11068,13 @@ class XsdUnionValueHelper {
     static *hash<XsdUnionValueIdentity> atomicIdentity(hash<XsdUnionAtomicInfo> info, auto input, auto converted,
             string error) {
         string builtin = info.builtin;
+        if (builtin == "QName") {
+            auto scalar = XsdScalarTextHelper::value(converted, error);
+            hash<string, string> bindings = converted.typeCode() == NT_HASH
+                ? XsdBase::getElementNamespaces(converted."^attributes^") : info.provider ? {} : QNameInputNamespaces ?? {};
+            XsdQNameValue value = XsdQNameValueHelper::resolve(scalar, error, bindings);
+            return <XsdUnionValueIdentity>{"family": "QName", "value": (value.getNamespaceUri(), value.getLocalName())};
+        }
         if (builtin == "duration") {
             return <XsdUnionValueIdentity>{"family": builtin, "value": XsdDurationValueHelper::key(
                 XsdScalarTextHelper::value(input, error), error)};
@@ -9957,11 +11138,27 @@ class XsdUnionValueHelper {
 
     static string text(auto value, string error) {
         value = XsdScalarTextHelper::value(value, error);
+        if (value instanceof XsdQNameValue || value instanceof XsdQNameOutputText || value instanceof XsdScopedLexicalValue) {
+            return value.getLexicalValue();
+        }
         return value.typeCode() == NT_FLOAT || value.typeCode() == NT_NUMBER
             ? value.toStringRoundTrip() : string(value);
     }
 
     static auto xmlValue(auto value, *Namespaces namespaces) {
+        auto scalar = XsdScalarTextHelper::value(value, SOAP_SERIALIZATION_ERROR);
+        if (scalar instanceof XsdQNameValue) {
+            hash<auto> result();
+            if (value.typeCode() == NT_HASH) {
+                result = value;
+            }
+            result."^value^" = scalar.getLexicalValue();
+            result."^attributes^" += XsdQNameContextHelper::attributes({scalar.getPrefix(): scalar.getNamespaceUri()});
+            return result;
+        }
+        if (scalar instanceof XsdQNameOutputText) {
+            return scalar.standalone();
+        }
         string lexical = text(value, SOAP_SERIALIZATION_ERROR);
         if (value.typeCode() == NT_HASH) {
             value."^value^" = lexical;
@@ -9992,7 +11189,9 @@ hashdecl XsdSchemaUnionTrialResult inherits XsdUnionTrialResult {
 class XsdSchemaUnionTrialContext {
     public {
         hash<string, string> selected_white_spaces();
+        hash<string, bool> namespace_sensitive();
         auto input;
+        *hash<string, string> namespace_bindings;
         *Namespaces namespaces;
         *bool omit_type;
         *string element_name;
@@ -10004,6 +11203,7 @@ class XsdSchemaUnionTrialContext {
     }
     constructor(auto input) {
         self.input = input;
+        namespace_bindings = QNameInputNamespaces;
     }
 }
 
@@ -10044,7 +11244,7 @@ public class UnionDataType inherits AbstractDataProviderType {
         transient hash<string, hash<XsdUnionAtomicInfo>> atomic_types();
         transient hash<string, hash<XsdUnionListInfo>> list_types();
         *list<XsdPatternConstraint> patterns;
-        *list<string> enumeration;
+        *list<auto> enumeration;
     }
 
     public {
@@ -10086,7 +11286,7 @@ public class UnionDataType inherits AbstractDataProviderType {
         types = (base,);
         atomic_members = (NOTHING,);
         patterns = restriction.pcre_patterns;
-        enumeration = restriction.enumValues ? keys restriction.enumValues : NOTHING;
+        enumeration = restriction.getUnionEnumerationValues();
     }
 
     private indexAtomicMembers() {
@@ -10196,7 +11396,8 @@ public class UnionDataType inherits AbstractDataProviderType {
                 throw "DESERIALIZATION-ERROR", sprintf("union %s metadata requires a non-empty list", key);
             }
             foreach auto value in (members{key}) {
-                if (value.typeCode() != NT_STRING && (key != "patterns" || !(value instanceof XsdCompiledPattern))) {
+                if (value.typeCode() != NT_STRING && !(key == "patterns" && value instanceof XsdCompiledPattern)
+                        && !(key == "enumeration" && value instanceof XsdScopedLexicalValue)) {
                     throw "DESERIALIZATION-ERROR", sprintf("invalid union %s value", key);
                 }
                 if (key == "patterns") {
@@ -10217,7 +11418,7 @@ public class UnionDataType inherits AbstractDataProviderType {
             throw "DESERIALIZATION-ERROR", "union restriction facets require one union base provider";
         }
         indexAtomicMembers();
-        foreach string allowed in (enumeration) {
+        foreach auto allowed in (enumeration) {
             try {
                 cast<UnionDataType>(types[0]).trialValue(allowed);
             } catch (hash<ExceptionInfo> ex) {
@@ -10405,13 +11606,18 @@ public class UnionDataType inherits AbstractDataProviderType {
     }
 
     private hash<XsdUnionTrialResult> trialValue(auto value) {
+        *hash<string, string> namespace_bindings;
+        if (value instanceof XsdScopedLexicalValue) {
+            namespace_bindings = value.getNamespaceBindings();
+            value = value.getLexicalValue();
+        }
         *XsdUnionTrialContext caller = UnionTrialContext;
-        bool owner = !exists caller || !XsdUnionInputHelper::sameInput(caller.input, value);
+        bool owner = !exists caller || !XsdUnionInputHelper::sameInput(caller.namespace_bindings, namespace_bindings) || !XsdUnionInputHelper::sameInput(caller.input, value);
         on_exit if (owner) {
             UnionTrialContext = caller;
         }
         if (owner) {
-            UnionTrialContext = new XsdUnionTrialContext(value);
+            UnionTrialContext = new XsdUnionTrialContext(value, namespace_bindings);
         }
         string key = self.uniqueHash();
         if (UnionTrialContext.results.hasKey(key)) {
@@ -10427,6 +11633,7 @@ public class UnionDataType inherits AbstractDataProviderType {
         }
         UnionTrialContext.active{key} = True;
         on_exit remove UnionTrialContext.active{key};
+        bool namespace_sensitive = False;
         foreach AbstractDataProviderType t in (types) {
             *hash<XsdUnionTrialResult> result;
             *hash<XsdUnionAtomicInfo> info = atomic_types{t.uniqueHash()};
@@ -10440,8 +11647,18 @@ public class UnionDataType inherits AbstractDataProviderType {
                 if (capture) {
                     ProviderUnionItemCapture = new XsdProviderUnionItemCapture(t.getElementType());
                 }
-                auto converted = t.acceptsValue(list_info
-                    ? XsdUnionValueHelper::listInput(value, "RUNTIME-TYPE-ERROR", list_info) : value);
+                auto member_input = list_info
+                    ? XsdUnionValueHelper::listInput(value, "RUNTIME-TYPE-ERROR", list_info) : value;
+                if (exists namespace_bindings) {
+                    if (list_info && member_input.typeCode() == NT_LIST) {
+                        AbstractDataProviderType item_type = t.getElementType();
+                        member_input = map XsdScopedLexicalHelper::providerInput(item_type, $1,
+                            namespace_bindings), member_input;
+                    } else {
+                        member_input = XsdScopedLexicalHelper::providerInput(t, member_input, namespace_bindings);
+                    }
+                }
+                auto converted = t.acceptsValue(member_input);
                 result = UnionTrialContext.results{t.uniqueHash()};
                 if (!result) {
                     result = <XsdUnionTrialResult>{"accepted": True, "value": converted};
@@ -10475,6 +11692,7 @@ public class UnionDataType inherits AbstractDataProviderType {
                         && ex.err != "FIELD-VALUE-ERROR") {
                     rethrow;
                 }
+                namespace_sensitive = namespace_sensitive || XsdScopedLexicalHelper::provider(t, XsdScopedLexicalHelper::inputText(value));
                 continue;
             }
             @assert(result);
@@ -10489,6 +11707,7 @@ public class UnionDataType inherits AbstractDataProviderType {
                 rethrow;
             }
             checked.owner = owner;
+            checked.namespace_sensitive = checked.namespace_sensitive || namespace_sensitive;
             UnionTrialContext.results{key} = checked;
             return checked;
         }
@@ -10514,16 +11733,23 @@ public class UnionDataType inherits AbstractDataProviderType {
             if (!matched) {
                 rejectValue(value);
             }
-            result.value = result.identity && XsdBinaryLexicalHelper::isType(result.identity.family)
-                ? new XsdBinaryValue(result.identity.family, lexical) : lexical;
+            if (result.identity && result.identity.family == "list" && result.value.typeCode() == NT_LIST
+                    && XsdScopedLexicalHelper::provider(self, NOTHING)) {
+                result.value = XsdListValueHelper::retainedTokens(result.value, XsdListValueHelper::tokens(lexical));
+            } else {
+                result.value = result.identity && XsdBinaryLexicalHelper::isType(result.identity.family)
+                    ? new XsdBinaryValue(result.identity.family, lexical)
+                    : result.identity && result.identity.family == "QName"
+                        ? new XsdQNameValue(result.identity.value[0], lexical) : lexical;
+            }
             result.lexical = lexical;
         }
         if (enumeration) {
-            foreach string allowed in (enumeration) {
+            foreach auto allowed in (enumeration) {
                 @assert(types.size() == 1 && types[0] instanceof UnionDataType);
                 hash<XsdUnionTrialResult> candidate = cast<UnionDataType>(types[0]).trialValue(allowed);
                 if (result.identity && candidate.identity
-                        ? XsdUnionValueHelper::same(result.identity, candidate.identity) : lexical === allowed) {
+                        ? XsdUnionValueHelper::same(result.identity, candidate.identity) : lexical === XsdUnionValueHelper::text(allowed, "RUNTIME-TYPE-ERROR")) {
                     return;
                 }
             }
@@ -10532,6 +11758,16 @@ public class UnionDataType inherits AbstractDataProviderType {
     }
 
     private auto preserveValue(auto input, hash<XsdUnionTrialResult> result) {
+        if (input instanceof XsdScopedLexicalValue) {
+            return result.namespace_sensitive
+                && (!result.identity || (result.identity.family != "QName" && result.identity.family != "list"))
+                ? input : result.value;
+        }
+        if (result.namespace_sensitive && input.typeCode() == NT_STRING
+                && (!result.identity || result.identity.family != "QName")) {
+            return new XsdScopedLexicalValue(input,
+                XsdScopedLexicalHelper::usedBindings(input, NOTHING));
+        }
         if (!result.identity || (input.typeCode() != NT_STRING && input.typeCode() != NT_LIST)
                 || (result.value.typeCode() == NT_STRING && result.value === input)) {
             return result.value;
@@ -12599,6 +13835,8 @@ public class XsdRegexHelper {
 
 #! a literal's namespace identity, captured before its declaration scope is restored
 hashdecl XsdQNameDeclarationLiteral {
+    string original;
+    hash<string, string> namespaces;
     string lexical;
     *string namespace_uri;
 }
@@ -12671,7 +13909,8 @@ class XsdFacetDeclarationHelper {
                     string prefix = colon < 0 ? "" : lexical.substr(0, colon);
                     *string uri = prefix == "xml" ? "http://www.w3.org/XML/1998/namespace"
                         : prefix ? nsc.getInputNamespaceState().input{prefix} : (nsc.getDefaultNs() ?? "");
-                    push literals, <XsdQNameDeclarationLiteral>{"lexical": lexical, "namespace_uri": uri};
+                    push literals, <XsdQNameDeclarationLiteral>{"lexical": lexical, "namespace_uri": uri,
+                        "original": attributes.value, "namespaces": XsdQNameContextHelper::capture(attributes.value, nsc)};
                 }
             }
         }
@@ -12820,6 +14059,8 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
         hash<string, bool> fixedFacets;
         transient *list<hash<XsdQNameDeclarationLiteral>> pendingQNameEnumeration;
         *hash<string, hash<string, bool>> qnameEnumValues;
+        *list<XsdQNameValue> qnameEnumeration;
+        *list<XsdScopedLexicalValue> scopedUnionEnumeration;
         *hash<string, bool> stringEnumValues;
         *hash<XsdListItemInfo> listItemValueInfo;
         *list<list<auto>> listEnumValues;
@@ -13065,7 +14306,14 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
             throw "XSD-SIMPLETYPE-ERROR", "union restrictions permit only pattern and enumeration facets";
         }
         if (kind == "union" && type && enumValues) {
-            foreach string lexical in (keys enumValues) {
+            if (exists pendingQNameEnumeration && XsdScopedLexicalHelper::schema(type)) {
+                list<XsdScopedLexicalValue> retained();
+                foreach hash<XsdQNameDeclarationLiteral> literal in (pendingQNameEnumeration) {
+                    push retained, new XsdScopedLexicalValue(literal.original, literal.namespaces);
+                }
+                scopedUnionEnumeration = retained;
+            }
+            foreach auto lexical in (getUnionEnumerationValues()) {
                 try {
                     cast<XsdSimpleType>(type).deserializeUnion("enumeration", new hash<string, XsdAbstractType>(),
                         NOTHING, lexical);
@@ -13086,10 +14334,12 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
         validateWhitespaceDeclaration(kind);
         listItemValueInfo = listItemType ? XsdListValueHelper::describe(listItemType)
             : type instanceof XsdSimpleType ? cast<XsdSimpleType>(type).listItemValueInfo : NOTHING;
-        if (listItemValueInfo && type && enumValues) {
+        if (listItemValueInfo && type && enumValues && exists pendingQNameEnumeration) {
             list<list<auto>> values();
             hash<string, bool> value_keys();
-            foreach string lexical in (keys enumValues) {
+            foreach hash<XsdQNameDeclarationLiteral> literal in (pendingQNameEnumeration) {
+                string lexical = literal.original;
+                XsdQNameNamespaceScope declaration_scope(XsdQNameContextHelper::attributes(literal.namespaces), True);
                 try {
                     *XsdSchemaUnionItemCapture caller = SchemaUnionListCapture;
                     on_exit SchemaUnionListCapture = caller;
@@ -13133,11 +14383,32 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
         }
     }
 
+    private XsdQNameValue validateQNameValue(auto input, *hash<string, string> bindings, string error) {
+        XsdQNameValue value = XsdQNameValueHelper::resolve(XsdScalarTextHelper::value(input, error), error, bindings);
+        *XsdSimpleType ancestor = self;
+        while (ancestor) {
+            if ((ancestor.patterns && !ancestor.matchesAnyPattern(value.getLexicalValue()))
+                    || (exists ancestor.qnameEnumValues
+                        && !ancestor.qnameEnumValues{value.getNamespaceUri()}{value.getLocalName()})) {
+                throw error, sprintf("QName value %Y is outside simpleType %Y", value.getLexicalValue(), name);
+            }
+            ancestor = ancestor.type instanceof XsdSimpleType ? cast<XsdSimpleType>(ancestor.type) : NOTHING;
+        }
+        return value;
+    }
+
+    #! Returns enumeration literals with their declaration context when QName members require it
+    /** @return scoped lexical values for contextual union declarations, ordinary strings otherwise */
+    *list<auto> getUnionEnumerationValues() {
+        return scopedUnionEnumeration ?? (enumValues ? keys enumValues : NOTHING);
+    }
+
     private validateQNameDeclaration() {
         if (!exists pendingQNameEnumeration) {
             return;
         }
         hash<string, hash<string, bool>> values();
+        list<XsdQNameValue> retained();
         foreach hash<XsdQNameDeclarationLiteral> literal in (pendingQNameEnumeration) {
             string lexical = XsdNameLexicalHelper::lexical("QName", literal.lexical, "XSD-SIMPLETYPE-ERROR");
             if (!exists literal.namespace_uri) {
@@ -13158,8 +14429,10 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
                 ancestor = ancestor.type instanceof XsdSimpleType ? cast<XsdSimpleType>(ancestor.type) : NOTHING;
             }
             values{value.getNamespaceUri()}{value.getLocalName()} = True;
+            push retained, value;
         }
         qnameEnumValues = values;
+        qnameEnumeration = retained;
     }
 
     #! identifies list values through restriction and union derivation
@@ -13416,11 +14689,8 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
             return new UnionDataType(self);
         }
         if (kind == "QName") {
-            # QName length facets do not constrain values. Patterns constrain normalized lexical text;
-            # namespace-based enumeration identity is separate from the string-valued provider facets.
-            return new XsdSizedRestrictionDataType(<XsdSizedFacetInfo>{"name": name, "kind": "string",
-                "white_space": "collapse", "name_type": "QName", "patterns": pcre_patterns},
-                type.getDataProviderType());
+            return new XsdQNameRestrictionDataType(<XsdQNameFacetInfo>{"name": name, "patterns": pcre_patterns,
+                "enumeration": qnameEnumeration}, cast<XsdQNameDataType>(type.getDataProviderType()));
         }
         if (kind == "boolean") {
             return new XsdBooleanRestrictionDataType(<XsdBooleanFacetInfo>{"name": name,
@@ -13664,6 +14934,25 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
     }
 
     *list<auto> getAllowedValues() {
+        if (getFacetKind() == "QName") {
+            *XsdSimpleType ancestor = self;
+            while (ancestor) {
+                if (exists ancestor.qnameEnumeration) {
+                    list<auto> choices();
+                    hash<string, hash<string, bool>> seen();
+                    foreach XsdQNameValue literal in (ancestor.qnameEnumeration) {
+                        *XsdQNameValue candidate = getQNameChoice(literal);
+                        if (candidate && !seen{candidate.getNamespaceUri()}{candidate.getLocalName()}) {
+                            push choices, candidate;
+                            seen{candidate.getNamespaceUri()}{candidate.getLocalName()} = True;
+                        }
+                    }
+                    return choices;
+                }
+                ancestor = ancestor.type instanceof XsdSimpleType ? cast<XsdSimpleType>(ancestor.type) : NOTHING;
+            }
+            return;
+        }
         if (getBinaryBaseName()) {
             *XsdSimpleType ancestor = self;
             while (ancestor) {
@@ -13725,11 +15014,14 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
         }
         # enumeration values are stored as hash keys and are therefore always strings; convert them to the value
         # type of the restricted type, otherwise numeric, boolean, and date enumerations are reported as strings
+        if (getFacetKind() == "union") {
+            return map getEnumValue($1), getUnionEnumerationValues();
+        }
         return map getEnumValue($1), keys enumValues;
     }
 
     #! returns the enumeration value converted to the value type of the restricted type
-    private auto getEnumValue(string val) {
+    private auto getEnumValue(auto val) {
         if (!type) {
             return val;
         }
@@ -13745,6 +15037,25 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
     }
 
     auto serializeValue(Namespaces nsc, auto val, *softbool omitType) {
+        *XsdScopedLexicalContext lexical_scope;
+        if (val instanceof XsdScopedLexicalValue) {
+            lexical_scope = new XsdScopedLexicalContext(val, nsc);
+            val = val.getLexicalValue();
+        }
+        if (getFacetKind() == "QName") {
+            hash<string, string> bindings = XsdScopedLexicalContext::serializationBindings(nsc,
+                val.typeCode() == NT_HASH ? val."^attributes^" : NOTHING);
+            auto serialized = type.serializeValue(nsc, validateQNameValue(val, bindings, SOAP_SERIALIZATION_ERROR), omitType);
+            hash<auto> retained_comments();
+            if (val.typeCode() == NT_HASH) {
+                foreach string key in (keys val) {
+                    if (key.startsWith("^comment")) {
+                        retained_comments{key} = val{key};
+                    }
+                }
+            }
+            return XsdScalarTextHelper::withComments(retained_comments, serialized);
+        }
         *hash<auto> rh;
         if (val.typeCode() == NT_HASH) {
             foreach string k in (keys val) {
@@ -13772,17 +15083,16 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
             if (capture_owner) {
                 SchemaUnionListCapture = new XsdSchemaUnionItemCapture(target);
             }
-            string lexical = string(type.serializeValue(nsc, val, omitType));
-            list<string> items = XsdListValueHelper::tokens(lexical);
+            auto serialized = type.serializeValue(nsc, val, omitType);
+            auto text = XsdScalarTextHelper::value(serialized, SOAP_SERIALIZATION_ERROR);
+            string lexical = text instanceof XsdQNameOutputText ? text.getLexicalValue() : string(text);
+            list<auto> items = listItemValueInfo.builtin == "QName" ? (val.typeCode() == NT_LIST ? val : (val,))
+                : XsdListValueHelper::tokens(lexical);
             validateFacets(items, "serialize", lexical);
             if (!enumerationAccepts(items, listItemValueInfo.union_item ? SchemaUnionListCapture.identity : NOTHING)) {
                 throw SOAP_SERIALIZATION_ERROR, sprintf("list value for %Y is outside its enumeration", name);
             }
-            if (rh) {
-                rh."^value^" = lexical;
-                return rh;
-            }
-            return lexical;
+            return XsdScalarTextHelper::withComments(rh, serialized);
         }
 
         if (getFacetKind() == "boolean") {
@@ -13810,6 +15120,12 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
         if (getFacetKind() == "union") {
             hash<XsdSchemaUnionTrialResult> result = serializeUnion(nsc, val, omitType);
             auto converted = result.owner && !SchemaUnionValueProbe ? preserveUnionLexical(nsc, val, result) : result.value;
+            if (XsdQNameOutputScope::retains(nsc) && result.namespace_sensitive && val.typeCode() == NT_STRING
+                    && (!result.identity || result.identity.family != "QName")) {
+                converted = new XsdScopedLexicalValue(XsdUnionValueHelper::text(converted, SOAP_SERIALIZATION_ERROR),
+                    XsdScopedLexicalHelper::usedBindings(val,
+                        XsdScopedLexicalContext::serializationBindings(nsc)));
+            }
             if (SchemaUnionItemCapture && SchemaUnionItemCapture.target === self) {
                 SchemaUnionItemCapture.identity = result.identity;
             }
@@ -13853,8 +15169,13 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
     # A cached ordinary rejection is local to one value and its complete conversion
     # context. Unexpected failures and cancellation always unwind to the caller.
     private hash<XsdSchemaUnionTrialResult> serializeUnion(Namespaces nsc, auto val, *softbool omitType) {
+        *XsdScopedLexicalContext lexical_scope;
+        if (val instanceof XsdScopedLexicalValue) {
+            lexical_scope = new XsdScopedLexicalContext(val, nsc);
+            val = val.getLexicalValue();
+        }
         *XsdSchemaUnionTrialContext caller = SchemaUnionSerializeContext;
-        bool owner = !caller || caller.namespaces !== nsc || caller.omit_type !== omitType
+        bool owner = !caller || !XsdUnionInputHelper::sameInput(caller.namespace_bindings, QNameInputNamespaces) || caller.namespaces !== nsc || caller.omit_type !== omitType
             || !XsdUnionInputHelper::sameInput(caller.input, val);
         on_exit if (owner) {
             SchemaUnionSerializeContext = caller;
@@ -13872,6 +15193,7 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
         trial.active{identity} = True;
         on_exit remove trial.active{identity};
         list<string> rejected();
+        bool namespace_sensitive = False;
         foreach XsdAbstractType member in (unionTypes ? unionTypes : (type,)) {
             string key = member.uniqueHash();
             if (!trial.results.hasKey(key)) {
@@ -13886,6 +15208,7 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
                             : XsdUnionValueHelper::atomicIdentity(member, val, value, SOAP_SERIALIZATION_ERROR));
                     trial.results{key} = <XsdSchemaUnionTrialResult>{"accepted": True, "value": value,
                         "identity": member_identity,
+                        "namespace_sensitive": trial.namespace_sensitive{key} ?? False,
                         "white_space": trial.selected_white_spaces{key} ?? member.getWhiteSpace()};
                 } catch (hash<ExceptionInfo> ex) {
                     if (ex.err != SOAP_SERIALIZATION_ERROR) {
@@ -13900,7 +15223,7 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
                 auto lexical = XsdScalarTextHelper::value(val, SOAP_SERIALIZATION_ERROR);
                 if (lexical.typeCode() != NT_STRING
                         || (result.identity && XsdBinaryLexicalHelper::isType(result.identity.family))) {
-                    lexical = string(XsdScalarTextHelper::value(result.value, SOAP_SERIALIZATION_ERROR));
+                    lexical = XsdUnionValueHelper::text(result.value, SOAP_SERIALIZATION_ERROR);
                 }
                 lexical = normalizeWhiteSpace(lexical, result.white_space ?? "preserve");
                 validateUnionFacets(lexical, result.identity, "serialize");
@@ -13912,8 +15235,11 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
                     trial.identities{identity} = result.identity;
                 }
                 result.owner = owner;
+                result.namespace_sensitive = result.namespace_sensitive || namespace_sensitive;
+                trial.namespace_sensitive{identity} = result.namespace_sensitive;
                 return result;
             }
+            namespace_sensitive = namespace_sensitive || XsdScopedLexicalHelper::schema(member, XsdScopedLexicalHelper::inputText(val));
             rejected += result.rejection;
         }
         throw SOAP_SERIALIZATION_ERROR, sprintf("value %Y cannot be serialized with union types for %Y: %Y", val, name, rejected);
@@ -13942,8 +15268,14 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
     }
 
     private static auto withUnionLexical(auto value, string lexical) {
+        if (value instanceof XsdQNameValue) {
+            return new XsdQNameValue(value.getNamespaceUri(), lexical);
+        }
+        if (value instanceof XsdQNameOutputText && value.getLexicalValue() == lexical) {
+            return value;
+        }
         if (value.typeCode() == NT_HASH) {
-            value."^value^" = lexical;
+            value."^value^" = withUnionLexical(value."^value^", lexical);
             return value;
         }
         return lexical;
@@ -13951,8 +15283,16 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
 
     private hash<XsdSchemaUnionTrialResult> deserializeUnion(string en, hash<string, XsdAbstractType> tmap,
             *hash<auto> mrh, auto val) {
+        *XsdScopedLexicalContext lexical_scope;
+        if (val instanceof XsdScopedLexicalValue) {
+            lexical_scope = new XsdScopedLexicalContext(val, NOTHING);
+            val = val.getLexicalValue();
+        }
+        # Internal value-preservation probes also enter here directly. Establish
+        # their namespace context before creating a shared member trial cache.
+        XsdQNameNamespaceScope qname_scope(val.typeCode() == NT_HASH ? val."^attributes^" : NOTHING);
         *XsdSchemaUnionTrialContext caller = SchemaUnionDeserializeContext;
-        bool owner = !caller || caller.element_name !== en || caller.type_map !== tmap
+        bool owner = !caller || !XsdUnionInputHelper::sameInput(caller.namespace_bindings, QNameInputNamespaces) || caller.element_name !== en || caller.type_map !== tmap
             || !XsdUnionInputHelper::sameInput(caller.references, mrh)
             || !XsdUnionInputHelper::sameInput(caller.input, val);
         on_exit if (owner) {
@@ -13972,6 +15312,7 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
         trial.active{identity} = True;
         on_exit remove trial.active{identity};
         list<string> rejected();
+        bool namespace_sensitive = False;
         foreach XsdAbstractType member in (unionTypes ? unionTypes : (type,)) {
             string key = member.uniqueHash();
             if (!trial.results.hasKey(key)) {
@@ -13984,6 +15325,7 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
                             : XsdUnionValueHelper::atomicIdentity(member, val, value, SOAP_DESERIALIZATION_ERROR));
                     trial.results{key} = <XsdSchemaUnionTrialResult>{"accepted": True, "value": value,
                         "identity": member_identity,
+                        "namespace_sensitive": trial.namespace_sensitive{key} ?? False,
                         "white_space": trial.selected_white_spaces{key} ?? member.getWhiteSpace()};
                 } catch (hash<ExceptionInfo> ex) {
                     if (ex.err != SOAP_DESERIALIZATION_ERROR) {
@@ -13995,20 +15337,33 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
             }
             hash<XsdSchemaUnionTrialResult> result = trial.results{key};
             if (result.accepted) {
-                string lexical = string(XsdScalarTextHelper::value(val, SOAP_DESERIALIZATION_ERROR));
+                string lexical = XsdUnionValueHelper::text(val, SOAP_DESERIALIZATION_ERROR);
                 lexical = normalizeWhiteSpace(lexical, result.white_space ?? "preserve");
                 validateUnionFacets(lexical, result.identity, "deserialize");
                 trial.selected_white_spaces{identity} = result.white_space ?? "preserve";
                 if (patterns) {
-                    result.value = result.identity && XsdBinaryLexicalHelper::isType(result.identity.family)
-                        ? new XsdBinaryValue(result.identity.family, lexical) : lexical;
+                    if (result.identity && result.identity.family == "list" && result.value.typeCode() == NT_LIST
+                            && XsdScopedLexicalHelper::schema(self, NOTHING)) {
+                        # QName-capable collections need per-item context, including a stable
+                        # empty-list representation. Other patterned unions retain their string contract.
+                        result.value = XsdListValueHelper::retainedTokens(result.value,
+                            XsdListValueHelper::tokens(lexical));
+                    } else {
+                        result.value = result.identity && XsdBinaryLexicalHelper::isType(result.identity.family)
+                            ? new XsdBinaryValue(result.identity.family, lexical)
+                            : result.identity && result.identity.family == "QName"
+                                ? new XsdQNameValue(result.identity.value[0], lexical) : lexical;
+                    }
                 }
                 if (result.identity) {
                     trial.identities{identity} = result.identity;
                 }
                 result.owner = owner;
+                result.namespace_sensitive = result.namespace_sensitive || namespace_sensitive;
+                trial.namespace_sensitive{identity} = result.namespace_sensitive;
                 return result;
             }
+            namespace_sensitive = namespace_sensitive || XsdScopedLexicalHelper::schema(member, XsdScopedLexicalHelper::inputText(val));
             rejected += result.rejection;
         }
         throw SOAP_DESERIALIZATION_ERROR, sprintf("value %Y cannot be deserialized with union types for %Y in element %Y: %Y",
@@ -14021,11 +15376,11 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
             return;
         }
         string error = operation == "serialize" ? SOAP_SERIALIZATION_ERROR : SOAP_DESERIALIZATION_ERROR;
-        foreach string allowed in (keys enumValues) {
+        foreach auto allowed in (getUnionEnumerationValues()) {
             hash<XsdSchemaUnionTrialResult> candidate = cast<XsdSimpleType>(type).deserializeUnion("enumeration",
                 new hash<string, XsdAbstractType>(), NOTHING, allowed);
             if (identity && candidate.identity ? XsdUnionValueHelper::same(identity, candidate.identity)
-                    : lexical === allowed) {
+                    : lexical === XsdUnionValueHelper::text(allowed, error)) {
                 return;
             }
         }
@@ -14034,10 +15389,15 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
 
     private auto preserveUnionValue(string en, hash<string, XsdAbstractType> tmap, *hash<auto> mrh, auto input,
             hash<XsdSchemaUnionTrialResult> result) {
+        auto lexical = XsdScalarTextHelper::value(input, SOAP_DESERIALIZATION_ERROR);
+        if (result.namespace_sensitive && lexical.typeCode() == NT_STRING
+                && (!result.identity || (result.identity.family != "QName" && result.identity.family != "list"))) {
+            return new XsdScopedLexicalValue(lexical,
+                XsdScopedLexicalHelper::usedBindings(lexical, QNameInputNamespaces));
+        }
         if (!result.identity) {
             return result.value;
         }
-        auto lexical = XsdScalarTextHelper::value(input, SOAP_DESERIALIZATION_ERROR);
         if (lexical.typeCode() != NT_STRING || (result.value.typeCode() == NT_STRING && result.value === lexical)) {
             return result.value;
         }
@@ -14055,7 +15415,7 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
                 rethrow;
             }
             return result.identity.family == "list" && result.value.typeCode() == NT_LIST
-                ? XsdListValueHelper::tokens(lexical) : lexical;
+                ? XsdListValueHelper::retainedTokens(result.value, XsdListValueHelper::tokens(lexical)) : lexical;
         }
         if (encoded.typeCode() == NT_STRING && encoded === lexical) {
             return result.value;
@@ -14071,7 +15431,7 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
             }
         }
         return result.identity.family == "list" && result.value.typeCode() == NT_LIST
-            ? XsdListValueHelper::tokens(lexical) : lexical;
+            ? XsdListValueHelper::retainedTokens(result.value, XsdListValueHelper::tokens(lexical)) : lexical;
     }
 
     private static string unionRejection(XsdAbstractType member, hash<ExceptionInfo> ex) {
@@ -14084,8 +15444,15 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
 
     #! Serialize a list type value as space-separated string
     private auto serializeList(Namespaces nsc, auto val, *softbool omitType, *hash<auto> rh) {
-        bool capture = (exists SchemaUnionSerializeContext || exists SchemaUnionListCapture)
-            && XsdUnionValueHelper::schemaUnionItem(listItemType);
+        bool retain_output = XsdQNameOutputScope::retains(nsc);
+        XsdQNameOutputScope output_scope(nsc);
+        # The resolved schema already identifies QName items. Building a detached
+        # provider here would reconstruct the complete item graph on every output.
+        bool qname_items = listItemType instanceof XsdBaseType ? listItemType.name == "QName"
+            : listItemType instanceof XsdSimpleType && cast<XsdSimpleType>(listItemType).getFacetKind() == "QName";
+        list<auto> retained_items();
+        bool has_qnames = False;
+        bool capture = XsdUnionValueHelper::schemaUnionItem(listItemType);
         *XsdSchemaUnionItemCapture caller_capture = SchemaUnionItemCapture;
         on_exit if (capture) {
             SchemaUnionItemCapture = caller_capture;
@@ -14108,10 +15475,21 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
                 SchemaUnionItemCapture = new XsdSchemaUnionItemCapture(listItemType);
             }
             string lexical;
-            if (item.typeCode() == NT_STRING) {
+            auto retained;
+            if (qname_items) {
+                auto serialized = listItemType.serializeValue(nsc, item, True);
+                retained = XsdScalarTextHelper::value(serialized, SOAP_SERIALIZATION_ERROR);
+                @assert(retained instanceof XsdQNameValue);
+                has_qnames = True;
+                lexical = retained.getLexicalValue();
+            } else if (item.typeCode() == NT_STRING) {
                 lexical = normalizeWhiteSpace(item, listItemType.getWhiteSpace());
                 try {
-                    listItemType.deserializeValue(name, new hash<string, XsdAbstractType>(), NOTHING, lexical);
+                    auto decoded = listItemType.deserializeValue(name, new hash<string, XsdAbstractType>(), NOTHING, lexical);
+                    if (decoded instanceof XsdQNameValue || decoded instanceof XsdScopedLexicalValue) {
+                        retained = decoded;
+                        has_qnames = True;
+                    }
                 } catch (hash<ExceptionInfo> ex) {
                     if (ex.err != SOAP_DESERIALIZATION_ERROR) {
                         rethrow;
@@ -14120,11 +15498,22 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
                 }
             } else {
                 auto serialized = listItemType.serializeValue(nsc, item, True);
-                lexical = string(serialized.typeCode() == NT_HASH && serialized.hasKey("^value^")
-                    ? serialized."^value^" : serialized);
+                auto scalar = XsdScalarTextHelper::value(serialized, SOAP_SERIALIZATION_ERROR);
+                if (scalar instanceof XsdQNameValue || scalar instanceof XsdScopedLexicalValue) {
+                    retained = scalar;
+                    has_qnames = True;
+                    lexical = scalar.getLexicalValue();
+                } else {
+                    lexical = string(scalar);
+                }
+            }
+            if (!exists retained && capture && SchemaUnionItemCapture.identity.family == "QName") {
+                retained = new XsdQNameValue(SchemaUnionItemCapture.identity.value[0], lexical);
+                has_qnames = True;
             }
             XsdListValueHelper::checkToken(lexical, SOAP_SERIALIZATION_ERROR);
             serializedItems += lexical;
+            push retained_items, exists retained ? retained : lexical;
             if (capture) {
                 push identities, SchemaUnionItemCapture.identity;
             }
@@ -14140,11 +15529,12 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
                 SchemaUnionListCapture.identity = identity;
             }
         }
-        if (rh) {
-            rh."^value^" = result;
-            return rh;
+        auto output = result;
+        if (has_qnames) {
+            XsdQNameOutputText text(retained_items);
+            output = retain_output ? text : text.standalone();
         }
-        return result;
+        return XsdScalarTextHelper::withComments(rh, output);
     }
 
     #! returns the \c whiteSpace processing that applies to this type
@@ -14435,27 +15825,60 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
         return rv;
     }
 
-    private string getQNameSample(auto default_value) {
-        list<auto> candidates = (default_value,);
+    private *XsdQNameValue getQNameChoice(XsdQNameValue literal) {
+        list<XsdQNameValue> candidates = (literal,);
         *XsdSimpleType ancestor = self;
         while (ancestor) {
-            foreach string choice in (keys ancestor.enumValues) {
-                push candidates, choice;
+            foreach string pattern in (ancestor.patterns) {
+                *string sample = XsdRegexHelper::getSampleValue(pattern, 1);
+                if (!exists sample) {
+                    continue;
+                }
+                int colon = sample.find(":");
+                string lexical = (colon < 0 ? "" : sample.substr(0, colon + 1)) + literal.getLocalName();
+                try {
+                    push candidates, new XsdQNameValue(literal.getNamespaceUri(), lexical);
+                } catch (hash<ExceptionInfo> ex) {
+                    if (ex.err != "XSD-QNAME-VALUE-ERROR") {
+                        rethrow;
+                    }
+                }
             }
             ancestor = ancestor.type instanceof XsdSimpleType ? cast<XsdSimpleType>(ancestor.type) : NOTHING;
         }
-        # Deprecated QName length facets must not truncate or enlarge a lexical name.
+        foreach XsdQNameValue candidate in (candidates) {
+            if (acceptsSample(candidate)) {
+                return candidate;
+            }
+        }
+    }
+
+    private auto getQNameSample(auto default_value) {
+        list<auto> candidates();
+        push candidates, default_value;
+        candidates += getAllowedValues() ?? ();
         *string patterned = getPatternSample(1);
         if (exists patterned) {
-            push candidates, patterned;
+            try {
+                string lexical = XsdNameLexicalHelper::lexical("QName", patterned, "XSD-QNAME-VALUE-ERROR");
+                int colon = lexical.find(":");
+                string uri = colon < 0 ? "" : lexical.substr(0, colon) == "xml"
+                    ? "http://www.w3.org/XML/1998/namespace" : "urn:qore:example";
+                push candidates, new XsdQNameValue(uri, lexical);
+            } catch (hash<ExceptionInfo> ex) {
+                if (ex.err != "XSD-QNAME-VALUE-ERROR") {
+                    rethrow;
+                }
+            }
         }
         push candidates, "abc";
         foreach auto candidate in (candidates) {
             if (acceptsSample(candidate)) {
-                return deserializeValue(name, new hash<string, XsdAbstractType>(), NOTHING, candidate);
+                return XsdQNameValueHelper::native(validateQNameValue(candidate,
+                    nsc.getInputNamespaceState().input, "XSD-SAMPLE-ERROR"));
             }
         }
-        throw "XSD-SAMPLE-ERROR", sprintf("cannot construct a QName example satisfying the lexical restrictions "
+        throw "XSD-SAMPLE-ERROR", sprintf("cannot construct a QName example satisfying the restrictions "
             "of %Y; supply a valid example", name);
     }
 
@@ -14574,10 +15997,10 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
         if (acceptsSample(default_value)) {
             return default_value;
         }
-        list<string> candidates();
+        list<auto> candidates();
         *XsdSimpleType ancestor = self;
         while (ancestor) {
-            foreach string lexical in (keys ancestor.enumValues) {
+            foreach auto lexical in (ancestor.getUnionEnumerationValues()) {
                 push candidates, lexical;
             }
             ancestor = ancestor.type instanceof XsdSimpleType ? cast<XsdSimpleType>(ancestor.type) : NOTHING;
@@ -14586,7 +16009,7 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
         if (exists patterned) {
             push candidates, patterned;
         }
-        foreach string lexical in (candidates) {
+        foreach auto lexical in (candidates) {
             try {
                 auto candidate = deserializeValue(name, new hash<string, XsdAbstractType>(), NOTHING, lexical);
                 if (acceptsSample(candidate)) {
@@ -15027,9 +16450,19 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
     }
 
     auto deserializeValue(string en, hash<string, XsdAbstractType> tmap, *hash<auto> mrh, auto val) {
+        *XsdScopedLexicalContext lexical_scope;
+        if (val instanceof XsdScopedLexicalValue) {
+            lexical_scope = new XsdScopedLexicalContext(val, NOTHING);
+            val = val.getLexicalValue();
+        }
+        XsdQNameNamespaceScope qname_scope(val.typeCode() == NT_HASH ? val."^attributes^" : NOTHING);
         # Handle list type deserialization
         if (val.typeCode() == NT_HASH && val.hasKey("^attributes^")) {
             XsdBase::validateSimpleAttributes(val."^attributes^", name);
+        }
+        if (getFacetKind() == "QName") {
+            return XsdQNameValueHelper::native(validateQNameValue(val, QNameInputNamespaces,
+                SOAP_DESERIALIZATION_ERROR));
         }
         if (listItemType) {
             return deserializeList(en, tmap, mrh, val);
@@ -15037,7 +16470,9 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
 
         if (getFacetKind() == "union") {
             hash<XsdSchemaUnionTrialResult> result = deserializeUnion(en, tmap, mrh, val);
-            auto converted = result.owner && !SchemaUnionValueProbe ? preserveUnionValue(en, tmap, mrh, val, result) : result.value;
+            bool item_boundary = SchemaUnionItemCapture && SchemaUnionItemCapture.target === self;
+            auto converted = (result.owner || item_boundary) && !SchemaUnionValueProbe
+                ? preserveUnionValue(en, tmap, mrh, val, result) : result.value;
             if (SchemaUnionItemCapture && SchemaUnionItemCapture.target === self) {
                 SchemaUnionItemCapture.identity = result.identity;
             }
@@ -15090,7 +16525,7 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
             if (!enumerationAccepts(value, listItemValueInfo.union_item ? SchemaUnionListCapture.identity : NOTHING)) {
                 throw SOAP_DESERIALIZATION_ERROR, sprintf("list value for %Y is outside its enumeration", name);
             }
-            return patterns ? XsdListValueHelper::tokens(lexical) : value;
+            return patterns ? XsdListValueHelper::retainedTokens(value, XsdListValueHelper::tokens(lexical)) : value;
         }
 
         if (getFacetKind() == "boolean") {
@@ -17120,6 +18555,7 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
     }
 
     auto deserializeValue(string en, hash<string, XsdAbstractType> tmap, *hash<auto> mrh, auto oval) {
+        XsdQNameNamespaceScope qname_scope(oval.typeCode() == NT_HASH ? oval."^attributes^" : NOTHING);
         #printf("XsdComplexType::deserialize() name: %y val: %y required: %y\n", getName(), oval, required);
         if (exists array)
             return array.deserializeValue(en, tmap, mrh, oval);
@@ -17933,11 +19369,12 @@ public class WSMessage inherits WSDL::XsdNamedData {
                         "retained XML values require an element-based literal SOAP part";
                 }
                 XsdSoapXmlHelper::validate(val, SOAP_SERIALIZATION_ERROR);
-                arg.element.validateXmlValue(val, nsc, tmap);
+                auto native = arg.element.validateXmlValue(val, nsc, tmap);
                 XsdSoapXmlHelper::mergeContext(\xml_attributes, cast<XsdXmlValue>(val).getInheritedXmlAttributes());
                 # Headers are serialized in separate calls and merged, so the marker must include
                 # both message and part identity rather than a per-call numeric index.
-                rh{sprintf("^xml^%d:%s:%s", name.length(), name, p)} = cast<XsdXmlValue>(val).getXml();
+                rh{sprintf("^xml^%d:%s:%s", name.length(), name, p)} = XsdQNameOutputScope::retains(nsc)
+                    ? new XsdQNameXmlFragment(cast<XsdXmlValue>(val), native) : cast<XsdXmlValue>(val).getXml();
                 continue;
             }
             # Handle multipart attachments - if this part is defined as a multipart content part
@@ -18423,7 +19860,9 @@ public class SoapBinding inherits WSDL::OperationalBinding {
 
         MultiPartRelatedMessage mpm;
 
-        rv.body = make_xml(serializeSoapMessage(op, msg, h, header, nsh, request, soap12, \mpm, faultmsg), xml_opts, enc);
+        XsdQNameOutputScope output_scope(op.nsc);
+        XsdQNameXmlOutputHelper output();
+        rv.body = make_xml(output.prepare(serializeSoapMessage(op, msg, h, header, nsh, request, soap12, \mpm, faultmsg)), xml_opts, enc);
 
         string ct = WSDLLib::getSoapMimeType12(soap12);
 
@@ -18719,12 +20158,14 @@ public class SoapBinding inherits WSDL::OperationalBinding {
         XsdBase::inheritAttributeNamespaces(\o);
         WSDL::XsdBase::removeNS2(\o);
         WSDL::XsdBase::removeNS2(\o.Envelope);
+        XsdQNameNamespaceScope envelope_scope(o.Envelope."^attributes^", True);
         hash<string, string> envelope_namespaces = XsdBase::getElementNamespaces(o.Envelope."^attributes^");
         hash<auto> hrv;
 
         *BindingMessageDescription bmd = self{io};
 
         if (bmd && bmd.hasHeaders()) {
+            XsdQNameNamespaceScope header_scope(o.Envelope.Header."^attributes^");
             *hash<auto> header = XsdScalarTextHelper::elementContent(o.Envelope.Header, "SOAP Header");
             if (header) {
                 header = XsdBase::expandElementNamespaces(header, envelope_namespaces);
@@ -18740,6 +20181,7 @@ public class SoapBinding inherits WSDL::OperationalBinding {
             #printf("DEBUG: Deserialized SOAP headers: %N\n", hrv);
         }
 
+        XsdQNameNamespaceScope body_scope(o.Envelope.Body."^attributes^");
         *hash<auto> body = XsdScalarTextHelper::elementContent(o.Envelope.Body, "SOAP Body");
 
         if (!op{io}) {
@@ -18807,6 +20249,7 @@ public class SoapBinding inherits WSDL::OperationalBinding {
                 string mname = (request ? op.output_name : op.input_name) ?? (op.name + (request ? "" : "Response"));
                 if (!msgh{mname})
                     throw SOAP_DESERIALIZATION_ERROR, sprintf("missing %s message name %y as top-level element; got elements: %y", io, mname, keys msgh);
+                XsdQNameNamespaceScope rpc_scope(msgh{mname}."^attributes^");
                 msgh = XsdScalarTextHelper::elementContent(remove msgh{mname}, "SOAP RPC wrapper");
                 XsdBase::removeNS2(\msgh);
                 msgh -= (".ns", "ns");
@@ -21052,6 +22495,44 @@ public class XsdSchema inherits WSDL::XsdBase {
         return validateXmlValue(new XsdXmlValue(xml));
     }
 
+    #! serializes a native value as one complete global XML element
+    /** @param namespace_uri the global element namespace, or an empty string
+        @param local_name the global element's local name
+        @param value the native value accepted by the element's schema type
+        @return an immutable XML value with its complete namespace context
+        @throw WSDL-ERROR the global element does not exist
+        @throw SOAP-SERIALIZATION-ERROR invalid content or conflicting lexical namespace requirements
+        @note Unlike low-level serializeValue() fragments, the complete element lets output
+        processing preserve QName attributes, list items and scoped union member selection.
+        The schema's shared namespace registry is unchanged.
+        @par Example
+        Serialize a catalog record whose category is an XsdQNameValue before storing or sending
+        its XML outside a SOAP envelope.
+        @since %WSDL 0.5.8
+    */
+    XsdXmlValue serializeXmlValue(string namespace_uri, string local_name, auto value) {
+        *XsdElement element = getElement(namespace_uri, local_name);
+        if (!element) {
+            throw WSDL_ERROR, sprintf("no global element declaration %Y", type_qname(namespace_uri, local_name));
+        }
+        Namespaces namespaces = nsc.copy();
+        XsdQNameOutputScope output_scope(namespaces);
+        auto serialized = element.serializeValue(namespaces, value, True, local_name, local_name);
+        hash<auto> content();
+        if (serialized.typeCode() == NT_HASH) {
+            content += serialized;
+        } else {
+            content."^value^" = serialized;
+        }
+        string root = element.getXmlName(namespaces);
+        content."^attributes^" += namespaces.getOutputNamespaceHash(NOTHING);
+        if (!namespace_uri) {
+            content."^attributes^".xmlns = "";
+        }
+        XsdQNameXmlOutputHelper output();
+        return new XsdXmlValue(make_xml(output.prepare({root: content})));
+    }
+
     #! returns an opt-in provider type for a retained XML element
     /** @param namespace_uri the global element namespace, or an empty string
         @param local_name the global element's local name
@@ -22466,6 +23947,7 @@ public class WSMessageHelper {
     hash<string, XsdXmlValue> getXmlMessage(WSMessage msg) {
         hash<string, XsdXmlValue> result();
         Namespaces namespaces = ws.nsc.copy();
+        XsdQNameOutputScope output_scope(namespaces);
         foreach string part in (keys msg.pmap) {
             hash<ArgInfo> arg = msg.args{msg.pmap{part}};
             if (!arg.element) {
@@ -22485,7 +23967,8 @@ public class WSMessageHelper {
             if (element.getExpandedName() == type_qname("", element.name)) {
                 content."^attributes^".xmlns = "";
             }
-            XsdXmlValue value(make_xml({root: content}));
+            XsdQNameXmlOutputHelper output();
+            XsdXmlValue value(make_xml(output.prepare({root: content})));
             element.validateXmlValue(value, namespaces, ws.getTypeMap());
             result{part} = value;
         }

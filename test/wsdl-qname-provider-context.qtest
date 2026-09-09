@@ -1,0 +1,205 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires ../qlib/WSDL.qm
+%exec-class QNameProviderContextTest
+
+class ReentrantQNameMember inherits XsdBooleanDataType {
+    public {
+        XsdQNameDataType independent = new XsdQNameDataType({"p": "urn:inner"});
+        *string observed;
+        *string error;
+        *UnionDataType nested;
+    }
+    auto acceptsValue(auto value) {
+        observed = independent.acceptsValue("p:Name").getNamespaceUri();
+        if (nested) {
+            @assert(nested.acceptsValue("p:Name").getNamespaceUri() == "urn:inner");
+        }
+        if (error) {
+            throw error, "injected provider failure";
+        }
+        return value;
+    }
+}
+
+class QNameScopeBarrier inherits XsdBaseType {
+    public {
+        Qore::Thread::Queue ready();
+        Qore::Thread::Queue proceed();
+    }
+    constructor(Namespaces namespaces) : XsdBaseType("QName", namespaces) {
+    }
+    auto deserializeValue(string en, hash<string, XsdAbstractType> types, *hash<auto> references, auto value) {
+        ready.push({"tid": gettid(), "cancel": value == "p:Fail"});
+        proceed.get(30s);
+        return XsdBaseType::deserializeValue(en, types, references, value);
+    }
+}
+
+class QNameProviderContextTest inherits QUnit::Test {
+    constructor() : Test("QName provider scope and selected values", "1.0") {
+        addTestCase("Reentrant callbacks keep independent namespaces and recover after errors", \reentrant());
+        addTestCase("Scoped nested unions and lists keep selected typed values", \selections());
+        addTestCase("Record field choices accept namespace aliases after reconstruction", \fields());
+        addTestCase("Concurrent instance scopes unwind after success and cancellation", \concurrentScopes());
+        set_return_value(main());
+    }
+
+    private concurrentScopes() {
+        XsdSchema schema('<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
+            <xs:simpleType name="Either"><xs:union memberTypes="xs:QName xs:string"/></xs:simpleType>
+            <xs:complexType name="Record"><xs:sequence><xs:element name="first" type="xs:QName"/>
+            <xs:element name="second" type="Either"/></xs:sequence></xs:complexType>
+            <xs:element name="Record" type="Record"/></xs:schema>', {"async_only": True});
+        XsdComplexType record = cast<XsdComplexType>(schema.findType("Record"));
+        XsdAbstractType direct = record.elementmap.first.type;
+        QNameScopeBarrier barrier(schema.nsc);
+        record.elementmap.first.type = barrier;
+        Qore::Thread::Queue results();
+        Qore::Thread::Counter running();
+        on_exit {
+            for (int index = 0; index < 4; ++index) {
+                barrier.proceed.push(True);
+            }
+            assertEq(0, running.waitForZero(30s));
+        }
+        for (int index = 0; index < 4; ++index) {
+            running.inc();
+            background sub(int worker) {
+                on_exit running.dec();
+                hash<auto> result();
+                result.index = worker;
+                try {
+                    auto value = {"first": worker == 3 ? "p:Fail" : "p:Name", "second": "p:Name",
+                        "^attributes^": {"xmlns:p": "urn:worker:" + worker}};
+                    result.value = record.deserializeValue("Record", schema.getTypeMap(), NOTHING, value);
+                } catch (hash<ExceptionInfo> ex) {
+                    clear_thread_cancel();
+                    result.error = ex.err;
+                }
+                try {
+                    auto value = direct.deserializeValue("value", schema.getTypeMap(), NOTHING, "p:Name");
+                    result.leaked = value;
+                } catch (hash<ExceptionInfo> ex) {
+                    result.after = ex.err;
+                }
+                results.push(result);
+            }(index);
+        }
+        int cancelled_tid;
+        for (int index = 0; index < 4; ++index) {
+            hash<auto> ready = barrier.ready.get(30s);
+            if (ready.cancel) {
+                cancelled_tid = ready.tid;
+            }
+        }
+        assertTrue(cancelled_tid > 0);
+        assertTrue(cancel_thread(cancelled_tid, "cancel inside a retained QName namespace scope"));
+        for (int index = 0; index < 4; ++index) {
+            barrier.proceed.push(True);
+        }
+        hash<string, bool> seen();
+        for (int index = 0; index < 4; ++index) {
+            hash<auto> result = results.get(30s);
+            assertFalse(exists seen{result.index});
+            seen{result.index} = True;
+            assertEq("SOAP-DESERIALIZATION-ERROR", result.after);
+            assertFalse(exists result.leaked);
+            if (result.index == 3) {
+                assertEq("THREAD-CANCELLED", result.error);
+            } else {
+                assertFalse(exists result.error);
+                foreach string key in ("first", "second") {
+                    assertEq("urn:worker:" + result.index, result.value{key}.getNamespaceUri());
+                    assertEq("Name", result.value{key}.getLocalName());
+                }
+            }
+        }
+    }
+
+    private reentrant() {
+        XsdSchema schema('<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
+          <xs:simpleType name="Value"><xs:union memberTypes="xs:QName xs:string"/></xs:simpleType>
+        </xs:schema>', {"async_only": True});
+        UnionDataType provider = cast<UnionDataType>(schema.findType(make_qname("", "Value")).getDataProviderType());
+        ReentrantQNameMember member();
+        provider.types = (member,);
+        XsdScopedLexicalValue input("p:Name", {"p": "urn:outer"});
+        provider.acceptsValue(input);
+        assertTrue(member.observed == "urn:inner");
+        assertTrue(member.independent.acceptsValue("p:Name").getNamespaceUri() == "urn:inner");
+        member.nested = cast<UnionDataType>(schema.findType(make_qname("", "Value")).getDataProviderType()).copy();
+        member.nested.types = (member.independent,);
+        provider.acceptsValue(input);
+        foreach string error in ("TEST-CANCELLED", "OBJECT-ALREADY-DELETED", "RUNTIME-TYPE-ERROR") {
+            member.error = error;
+            *hash<ExceptionInfo> observed;
+            try {
+                provider.acceptsValue(input);
+            } catch (hash<ExceptionInfo> ex) {
+                observed = ex;
+            }
+            assertTrue(observed.err == error);
+            assertTrue(member.observed == "urn:inner");
+            assertTrue(member.independent.acceptsValue("p:Name").getNamespaceUri() == "urn:inner");
+            member.error = NOTHING;
+            provider.acceptsValue(input);
+        }
+
+    }
+
+    private selections() {
+        XsdSchema scoped('<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:p="urn:allowed">
+          <xs:simpleType name="QNameOnly"><xs:restriction base="xs:QName"><xs:enumeration value="p:Name"/></xs:restriction></xs:simpleType>
+          <xs:simpleType name="Atom"><xs:union memberTypes="QNameOnly xs:string"/></xs:simpleType>
+          <xs:simpleType name="Items"><xs:list itemType="Atom"/></xs:simpleType>
+          <xs:simpleType name="ItemsUnion"><xs:union memberTypes="Items xs:int"/></xs:simpleType>
+          <xs:simpleType name="QNameItems"><xs:list itemType="QNameOnly"/></xs:simpleType>
+          <xs:simpleType name="QNameItemsUnion"><xs:union memberTypes="QNameItems xs:int"/></xs:simpleType>
+        </xs:schema>', {"async_only": True});
+        foreach XsdSchema source in (scoped, Serializable::deserialize(scoped.serialize())) {
+            foreach string name in ("Atom", "ItemsUnion", "QNameItemsUnion") {
+                AbstractDataProviderType original = source.findType(make_qname("", name)).getDataProviderType();
+                foreach AbstractDataProviderType candidate in (original, Serializable::deserialize(original.serialize())) {
+                    XsdScopedLexicalValue lexical("p:Name", {"p": "urn:allowed"});
+                    auto value = candidate.acceptsValue(lexical);
+                    if (name == "Atom") {
+                        assertTrue(value instanceof XsdQNameValue);
+                        assertTrue(value.getNamespaceUri() == "urn:allowed");
+                    } else {
+                        assertTrue(value.typeCode() == NT_LIST);
+                        assertTrue(value.size() == 1);
+                        assertTrue(value[0] instanceof XsdQNameValue);
+                        assertTrue(value[0].getNamespaceUri() == "urn:allowed");
+                    }
+                }
+            }
+        }
+    }
+
+    private fields() {
+        foreach string base in ("xs:QName", "Either") {
+            XsdSchema schema('<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:p="urn:catalog">
+              <xs:simpleType name="Either"><xs:union memberTypes="xs:QName xs:string"/></xs:simpleType>
+              <xs:simpleType name="Choice"><xs:restriction base="' + base + '"><xs:enumeration value="p:Name"/></xs:restriction></xs:simpleType>
+              <xs:complexType name="Record"><xs:sequence><xs:element name="value" type="Choice"/><xs:element name="items" type="Choice" maxOccurs="3"/></xs:sequence></xs:complexType>
+            </xs:schema>', {"async_only": True});
+            foreach XsdSchema source in (schema, Serializable::deserialize(schema.serialize())) {
+                AbstractDataProviderType provider = source.findType(make_qname("", "Record")).getDataProviderType();
+                foreach AbstractDataProviderType candidate in (provider, Serializable::deserialize(provider.serialize())) {
+                    XsdQNameValue value("urn:catalog", "a:Name");
+                    auto result = candidate.acceptsValue({"value": value, "items": (value, value)});
+                    assertTrue(result.value.equals(value));
+                    assertEq(2, result.items.size());
+                    assertTrue(result.items[0].equals(value));
+                    assertTrue(result.items[1].equals(value));
+                    assertThrows("RUNTIME-TYPE-ERROR", \candidate.acceptsValue(),
+                        ({"value": new XsdQNameValue("urn:other", "a:Name"), "items": (value,)},));
+                }
+            }
+        }
+    }
+}

@@ -1,0 +1,275 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires xml
+%requires ../qlib/WSDL.qm
+%exec-class QNameSchemaXmlTest
+
+class ReentrantQNameSchemaMember inherits XsdBaseType {
+    public {
+        Namespaces independent(new hash<auto>());
+        *string observed;
+        *string error;
+    }
+    constructor(Namespaces source) : XsdBaseType("string", source) {
+        independent.addNamespaces({"xmlns:p": "urn:inner"});
+    }
+    auto serializeValue(Namespaces namespaces, auto value, *softbool omitType) {
+        auto encoded = independent.getBaseType("QName").serializeValue(independent, "p:Name", True);
+        observed = encoded."^attributes^"."xmlns:p";
+        if (error) {
+            throw error, "injected failure during a scoped schema conversion";
+        }
+        return value;
+    }
+}
+
+class QNameSchemaXmlTest inherits QUnit::Test {
+    const Source = '<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:t="urn:catalog" xmlns:p="urn:values"
+        targetNamespace="urn:catalog" elementFormDefault="qualified">
+      <xs:simpleType name="Either"><xs:union memberTypes="xs:QName xs:string"/></xs:simpleType>
+      <xs:simpleType name="Items"><xs:list itemType="t:Either"/></xs:simpleType>
+      <xs:complexType name="Record"><xs:sequence><xs:element name="name" type="xs:QName"/>
+        <xs:element name="items" type="t:Items"/></xs:sequence>
+        <xs:attribute name="category" type="xs:QName" use="required"/>
+        <xs:attribute name="fixed" type="xs:QName" fixed="p:Fixed"/>
+      </xs:complexType>
+      <xs:complexType name="Content"><xs:simpleContent><xs:extension base="xs:QName">
+        <xs:attribute name="category" type="xs:QName" use="required"/>
+      </xs:extension></xs:simpleContent></xs:complexType>
+      <xs:element name="Record" type="t:Record"/><xs:element name="Content" type="t:Content"/>
+      <xs:element name="Name" type="xs:QName"/><xs:element name="Items" type="t:Items"/>
+    </xs:schema>';
+
+    constructor() : Test("Standalone schema XML with QName values", "1.0") {
+        addTestCase("Complete records retain QName attributes and scoped list values", \records());
+        addTestCase("Scalar and simple-content roots retain namespace identity", \scalar());
+        addTestCase("Failed output leaves the schema namespace registry unchanged", \recovery());
+        addTestCase("Reentrant schema serialization isolates namespace registries and unwinds errors", \reentrant());
+        addTestCase("Patterned unions preserve QName list items and original token spellings", \patternedLists());
+        addTestCase("Deep output restores distinct namespace bindings across sibling trees", \deep());
+        addTestCase("Standalone lists reject bindings that change another item's selected member", \listConflicts());
+        set_return_value(main());
+    }
+
+    private reentrant() {
+        XsdSchema schema('<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:p="urn:caller">
+            <xs:simpleType name="Value"><xs:union memberTypes="xs:QName xs:string"/></xs:simpleType>
+            <xs:simpleType name="Name"><xs:restriction base="xs:QName"/></xs:simpleType>
+            <xs:element name="Value" type="Value"/>
+        </xs:schema>', {"async_only": True});
+        XsdSimpleType type = cast<XsdSimpleType>(schema.findType("Value"));
+        ReentrantQNameSchemaMember member(schema.nsc);
+        type.unionTypes = (member,);
+        XsdScopedLexicalValue value("p:Name", {"p": "urn:outer"});
+        type.serializeValue(schema.nsc, value, True);
+        assertEq("urn:inner", member.observed);
+        schema.serializeXmlValue("", "Value", value);
+        assertEq("urn:inner", member.observed);
+        foreach string error in ("TEST-CANCELLED", "OBJECT-ALREADY-DELETED", "RUNTIME-TYPE-ERROR") {
+            member.error = error;
+            assertThrows(error, \type.serializeValue(), (schema.nsc, value, True));
+            assertEq("urn:inner", member.observed);
+            assertThrows(error, \schema.serializeXmlValue(), ("", "Value", value));
+            assertEq("urn:inner", member.observed);
+            member.error = NOTHING;
+            type.serializeValue(schema.nsc, value, True);
+            assertEq("urn:inner", member.observed);
+            foreach XsdAbstractType qname in (schema.nsc.getBaseType("QName"), schema.findType("Name")) {
+                auto encoded = qname.serializeValue(schema.nsc, "p:Name", True);
+                assertEq("urn:caller", encoded."^attributes^"."xmlns:p");
+                encoded = qname.serializeValue(schema.nsc, value, True);
+                assertEq("urn:outer", encoded."^attributes^"."xmlns:p");
+            }
+        }
+    }
+
+    private patternedLists() {
+        string source = '<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
+            <xs:simpleType name="Names"><xs:list itemType="xs:QName"/></xs:simpleType>
+            <xs:simpleType name="Either"><xs:union memberTypes="Names xs:int"/></xs:simpleType>
+            <xs:simpleType name="Value"><xs:restriction base="Either"><xs:pattern value="(p:Name p:Other)?"/></xs:restriction></xs:simpleType>
+            <xs:simpleType name="AnyValue"><xs:restriction base="Either"><xs:pattern value=".*"/></xs:restriction></xs:simpleType>
+            <xs:element name="Value" type="Value"/></xs:schema>';
+        XsdSchema original(source, {"async_only": True});
+        foreach XsdSchema schema in (original, Serializable::deserialize(original.serialize())) {
+            auto original_provider = schema.findType("AnyValue").getDataProviderType();
+            foreach AbstractDataProviderType candidate in (original_provider,
+                    Serializable::deserialize(original_provider.serialize()), original_provider.getOrNothingType()) {
+                assertEq(("Name", "Other"), candidate.acceptsValue(("Name", "Other")));
+                assertEq((), candidate.acceptsValue(()));
+                auto scoped = candidate.acceptsValue(new XsdScopedLexicalValue("p:Name p:Other", {"p": "urn:catalog"}));
+                assertEq(NT_LIST, scoped.typeCode());
+                assertEq(2, scoped.size());
+                assertEq("urn:catalog", scoped[0].getNamespaceUri());
+                assertEq("urn:catalog", scoped[1].getNamespaceUri());
+                assertThrows("RUNTIME-TYPE-ERROR", \candidate.acceptsValue(), (("Name", "bad:name:again"),));
+            }
+            XsdAbstractType type = schema.findType("Value");
+            auto value = type.deserializeValue("Value", schema.getTypeMap(), NOTHING,
+                {"^value^": " p:Name\tp:Other ", "^attributes^": {"xmlns:p": "urn:catalog"}});
+            assertEq(NT_LIST, value.typeCode());
+            assertEq(2, value.size());
+            assertEq("Name", value[0].getLocalName());
+            assertEq("Other", value[1].getLocalName());
+            foreach XsdQNameValue item in (value) {
+                assertEq("urn:catalog", item.getNamespaceUri());
+            }
+            foreach string name in ("Either", "Value") {
+                auto fragment = schema.findType(name).serializeValue(schema.nsc, value, True);
+                assertEq("p:Name p:Other", fragment."^value^");
+                assertEq("urn:catalog", fragment."^attributes^"."xmlns:p");
+                XmlDoc standalone(make_xml({"Value": fragment}));
+                standalone.validateSchema(source);
+            }
+            auto provider = type.getDataProviderType();
+            foreach AbstractDataProviderType candidate in (provider, Serializable::deserialize(provider.serialize())) {
+                auto converted = candidate.acceptsValue(value);
+                XsdXmlValue output = schema.serializeXmlValue("", "Value", converted);
+                XmlDoc document(output.getXml());
+                document.validateSchema(source);
+                assertEq("p:Name p:Other", output.getElementData()."^value^");
+                assertEq("urn:catalog", output.getElementData()."^attributes^"."xmlns:p");
+                auto decoded = type.deserializeValue("Value", schema.getTypeMap(), NOTHING, output.getElementData());
+                assertTrue(decoded[0].equals(value[0]));
+                assertTrue(decoded[1].equals(value[1]));
+            }
+            auto empty = type.deserializeValue("Value", schema.getTypeMap(), NOTHING, "");
+            assertEq(NT_LIST, empty.typeCode());
+            assertEq(0, empty.size());
+            XmlDoc empty_xml(schema.serializeXmlValue("", "Value", empty).getXml());
+            empty_xml.validateSchema(source);
+            assertThrows("SOAP-DESERIALIZATION-ERROR", \type.deserializeValue(),
+                ("Value", schema.getTypeMap(), NOTHING, "p:Name p:Other"));
+            assertThrows("SOAP-DESERIALIZATION-ERROR", \type.deserializeValue(),
+                ("Value", schema.getTypeMap(), NOTHING, "5"));
+            assertThrows("SOAP-SERIALIZATION-ERROR", \schema.serializeXmlValue(),
+                ("", "Value", (new XsdQNameValue("urn:catalog", "a:Name"), new XsdQNameValue("urn:catalog", "a:Other"))));
+        }
+    }
+
+    private deep() {
+        string source = '<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:t="urn:tree"
+            targetNamespace="urn:tree" elementFormDefault="qualified">
+            <xs:simpleType name="Label"><xs:union memberTypes="xs:QName xs:string"/></xs:simpleType>
+            <xs:complexType name="Node"><xs:sequence><xs:element name="name" type="xs:QName"/>
+            <xs:element name="label" type="t:Label"/><xs:element name="child" type="t:Node" minOccurs="0"/>
+            </xs:sequence><xs:attribute name="category" type="xs:QName" use="required"/></xs:complexType>
+            <xs:complexType name="Forest"><xs:sequence><xs:element name="tree" type="t:Node" maxOccurs="2"/>
+            </xs:sequence></xs:complexType><xs:element name="Forest" type="t:Forest"/></xs:schema>';
+        XsdSchema schema(source, {"async_only": True});
+        hash<auto> tree();
+        for (int level = 127; level >= 0; --level) {
+            hash<auto> node();
+            node.name = new XsdQNameValue("urn:node:" + level, "p" + level + ":Name");
+            node.label = new XsdScopedLexicalValue("missing" + level + ":Text", {});
+            node."^attributes^" = {"category": new XsdQNameValue("urn:category:" + level, "p" + level + ":Category")};
+            if (tree) {
+                node.child = tree;
+            }
+            tree = node;
+        }
+        XsdXmlValue output = schema.serializeXmlValue("urn:tree", "Forest", {"tree": (tree, tree)});
+        XmlDoc document(output.getXml());
+        document.validateSchema(source);
+        XsdElement root = schema.getElement("urn:tree", "Forest");
+        auto decoded = root.deserializeValue(schema.getTypeMap(), NOTHING, output.getElementData(), True);
+        assertEq(2, decoded.tree.size());
+        foreach hash<auto> root_node in (decoded.tree) {
+            *hash<auto> node = root_node;
+            for (int level = 0; level < 128; ++level) {
+                assertEq("urn:node:" + level, node.name.getNamespaceUri());
+                assertEq("urn:category:" + level, node."^attributes^".category.getNamespaceUri());
+                assertEq("missing" + level + ":Text", node.label.getLexicalValue());
+                assertFalse(node.label.getNamespaceBindings().hasKey("missing" + level));
+                node = node.child;
+            }
+            assertFalse(exists node);
+        }
+    }
+
+    private listConflicts() {
+        XsdSchema original(Source, {"async_only": True});
+        foreach XsdSchema schema in (original, Serializable::deserialize(original.serialize())) {
+            XsdAbstractType type = schema.findType("Items");
+            XsdScopedLexicalValue text("p:Text", {});
+            XsdQNameValue conflicting("urn:catalog", "p:Name");
+            foreach list<auto> value in ((text, conflicting), (conflicting, text)) {
+                assertThrows("SOAP-SERIALIZATION-ERROR", \type.serializeValue(), (schema.nsc, value, True));
+                assertThrows("SOAP-SERIALIZATION-ERROR", \schema.serializeXmlValue(), ("urn:catalog", "Items", value));
+                assertEq("p:Text", text.getLexicalValue());
+                assertFalse(text.getNamespaceBindings().hasKey("p"));
+            }
+            auto output = type.serializeValue(schema.nsc,
+                (text, new XsdQNameValue("urn:catalog", "alias:Name")), True);
+            auto decoded = type.deserializeValue("Items", schema.getTypeMap(), NOTHING, output);
+            assertTrue(decoded[0] instanceof XsdScopedLexicalValue);
+            assertEq("p:Text", decoded[0].getLexicalValue());
+            assertFalse(decoded[0].getNamespaceBindings().hasKey("p"));
+            assertEq("urn:catalog", decoded[1].getNamespaceUri());
+        }
+    }
+
+    private validate(XsdSchema schema, XsdXmlValue output) {
+        XmlDoc xml(output.getXml());
+        xml.validateSchema(Source);
+        assertEq("urn:catalog", output.getNamespaceUri());
+        assertTrue(schema.validateXmlValue(output) === output);
+    }
+
+    private records() {
+        XsdSchema original(Source, {"async_only": True});
+        foreach XsdSchema schema in (original, Serializable::deserialize(original.serialize())) {
+            XsdQNameValue category("urn:category", "ns:Category");
+            XsdQNameValue name("urn:names", "ns:Name");
+            XsdQNameValue item("urn:items", "ns:Item");
+            XsdScopedLexicalValue text("missing:Text", {});
+            hash<auto> value = {"name": name, "items": (item, text), "^attributes^": {"category": category}};
+            XsdXmlValue output = schema.serializeXmlValue("urn:catalog", "Record", value);
+            validate(schema, output);
+            hash<auto> data = output.getElementData();
+            XsdElement element = schema.getElement("urn:catalog", "Record");
+            auto decoded = element.deserializeValue(schema.getTypeMap(), NOTHING, data, True);
+            assertTrue(decoded.name.equals(name));
+            assertTrue(decoded."^attributes^".category.equals(category));
+            assertTrue(decoded."^attributes^".fixed.equals(new XsdQNameValue("urn:values", "p:Fixed")));
+            assertEq(2, decoded.items.size());
+            assertTrue(decoded.items[0].equals(item));
+            assertTrue(decoded.items[1] instanceof XsdScopedLexicalValue);
+            assertEq("missing:Text", decoded.items[1].getLexicalValue());
+            assertFalse(decoded.items[1].getNamespaceBindings().hasKey("missing"));
+            assertTrue(value.name === name);
+            assertTrue(value.items[1] === text);
+        }
+    }
+
+    private scalar() {
+        XsdSchema schema(Source, {"async_only": True});
+        XsdQNameValue name("urn:values", "p:Name");
+        XsdXmlValue output = schema.serializeXmlValue("urn:catalog", "Name", name);
+        validate(schema, output);
+        XsdElement element = schema.getElement("urn:catalog", "Name");
+        assertTrue(element.deserializeValue(schema.getTypeMap(), NOTHING, output.getElementData(), True).equals(name));
+        output = schema.serializeXmlValue("urn:catalog", "Content", {"^value^": name,
+            "^attributes^": {"category": new XsdQNameValue("urn:other", "a:Category")}});
+        validate(schema, output);
+        element = schema.getElement("urn:catalog", "Content");
+        auto value = element.deserializeValue(schema.getTypeMap(), NOTHING, output.getElementData(), True);
+        assertTrue(value."^value^".equals(name));
+        assertEq("urn:other", value."^attributes^".category.getNamespaceUri());
+    }
+
+    private recovery() {
+        XsdSchema schema(Source, {"async_only": True});
+        auto before = schema.nsc.getOutputNamespaceHash(NOTHING);
+        assertThrows("WSDL-ERROR", \schema.serializeXmlValue(), ("urn:catalog", "Missing", "Name"));
+        assertThrows("SOAP-SERIALIZATION-ERROR", \schema.serializeXmlValue(), ("urn:catalog", "Name", "unbound:Name"));
+        assertThrows("SOAP-SERIALIZATION-ERROR", \schema.serializeXmlValue(), ("urn:catalog", "Record", {}));
+        assertEq(before, schema.nsc.getOutputNamespaceHash(NOTHING));
+        XsdXmlValue output = schema.serializeXmlValue("urn:catalog", "Name", new XsdQNameValue("", "Local"));
+        validate(schema, output);
+        assertEq(before, schema.nsc.getOutputNamespaceHash(NOTHING));
+    }
+}

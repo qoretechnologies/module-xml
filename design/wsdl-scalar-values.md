@@ -527,6 +527,10 @@ item spellings in a native list. For example, with a list of strings restricted 
 booleans as `true false` would instead select the string list. Unambiguous native
 values and the existing `xs:integer` spelling policy are preserved. Whole-union
 patterns retain the lexical string after the selected list member collapses XML whitespace.
+QName-capable patterned collections retain native lists of token spellings and
+namespace-bearing values instead, including empty lists. A single string cannot
+preserve the independent namespace identity of each item; the QName value contract
+describes the additive representations.
 
 Detached metadata follows member reordering and pruning. Restoration checks list
 shape, exact list/item provider identities, mandatory items and atomic spelling

@@ -4934,3 +4934,142 @@ without warnings/errors. The full audit is 19 Pass / 43 N/A / 0 Fail; see
 [union composition evidence](union-composition-evidence.md). No C++ changes or
 native rebuild were needed. Final hashes are recorded in
 `/tmp/wsdl-p3-38-composition-final-manifest.json`.
+
+P3-38 was committed as `2fd307f` on `develop`, without pushing.
+
+## P3-39 — QName instance and detached-provider integration (in progress)
+
+The 21 prototype layers have been integrated into uncommitted `qlib/WSDL.qm`.
+The prototype rebuild remains pinned to `/tmp/wsdl-p3-39-base-WSDL.qm` (P3-38)
+and must not overwrite production: subsequent fixes now live in the working tree.
+The exact prototype lineage is `/tmp/wsdl-p3-39-prototype-manifest.json`.
+
+The scoped list output layers preserve retained string-fallback values through
+lists and nested unions. QName field choices now compare namespace URI/local
+identity, including repeated values and reconstructed fields. Their display
+spelling remains lexical, and provider patterns apply independently.
+
+A reduced custom-provider callback demonstrated that ambient serialization
+namespace state overrode an independent QName provider's explicit bindings.
+The prototype now passes retained lexical context directly to the intended QName
+or union member, including list items; callbacks retain their own namespaces.
+Selected QName and list results retain their actual typed values. Tests exercise
+independent nested calls, cancellation/error propagation, recovery and schema/
+provider reconstruction. The reproducer and before/after logs are
+`/tmp/wsdl-p3-39-provider-scope.qr` and `/tmp/wsdl-p3-39-provider-context-types-*`.
+
+Inspection of the scratch runner found that it reported child-suite failures
+without failing its own process. It now asserts every result. Three regressions
+in union normalization were traced to an internal deserialization probe creating
+its trial cache before establishing namespace context. A nested call then used
+an independent cache and lost the selected primitive identity. Establishing that
+context at the probe entry fixes all ten existing list/union/attribute suites;
+the exact results are in `/tmp/wsdl-p3-39-regressions-context.log`.
+
+Provider metadata tests reproduced recursive conversion of a cyclic QName base
+and trusting a stale serialized field-membership index. Reconstruction now
+rejects cyclic bases and rebuilds field indexes from their authoritative choices.
+QName restriction conversion traverses deep built-in chains iteratively and
+indexes enumeration identity. The new scratch qtest
+`/tmp/wsdl-p3-39-provider-hardening.qtest` passes six cases / 63 assertions,
+including a 600-level chain, aliases, defaults, repeated choices, atomic failed
+updates, malformed metadata and reconstruction. Full-suite verification against
+the rebuilt prototype is running through `/tmp/wsdl-p3-39-scratch-full-gate.py`;
+its result is not inferred from the targeted tests.
+
+The previous 96 scoped inputs / 96 outputs and five fallback/composition wire
+matrices pass after the provider-context change. Final integrated coverage,
+namespace-conflict handling, standalone output contracts, malformed metadata
+corner cases, documentation, full audit and commit remain outstanding. P3 is
+still active, and P4-P9 have not started. The leap-second decision remains
+pending; no answer or scope approval is inferred.
+
+
+The integrated context matrix now passes 144 scoped inputs (124 valid) and 80
+ordered fallback inputs (48 valid), original/reconstructed services, five native/
+detached provider paths and both SOAP versions/directions. Every output is checked
+for expanded QName values and retained unbound prefixes. Six native validation
+paths and pinned Xerces assess the inputs and outputs. Logs are
+`/tmp/wsdl-p3-39-qname-scoped-matrix.log` and
+`/tmp/wsdl-p3-39-qname-fallback-matrix.log`.
+
+Additional root causes fixed in production: union field choices now convert
+enumerations with their declaration scopes; schema serialization scopes are bound
+to the intended `Namespaces` object so independent callbacks keep their registry;
+and list-item union conversions preserve lexical context at the item boundary even
+when sharing their caller's trial cache. Retained list tokens keep QName/scoped
+objects if a value-preservation probe needs original spellings. Focused callback,
+thread barrier, cancellation, field alias and reconstruction tests pass. The new
+standalone `XsdSchema::serializeXmlValue()` returns a complete retained element,
+including QName attributes and simple content.
+
+A pinned Xerces schema warning is separately adjudicated: the 2.12.2
+`XSDAbstractTraverser.checkEnumerationAndLengthInconsistency()` final branch uses
+Java string length on list enumeration text. XSD 1.0 Part 2 section 4.3.1.3 requires
+list item count. The matrix asserts this exact single `FacetsContradict` warning
+for its one restricted-list schema; document verdicts and all native paths remain
+mandatory. Source jar: Maven `xercesImpl-2.12.2-sources.jar`, preserved locally as
+`/tmp/wsdl-p3-39-xerces-sources.jar`. No production validation is weakened.
+
+The first integrated 88-suite gate is running. New scoped-value integrity tests
+pass 3 cases / 52 assertions. Example generation exposed discarded declaration
+bindings in `getUnionSample()`; the reduced native/retained-XML sample matrix is
+being fixed and added to the permanent matrix before final verification. No P3-39
+commit or final audit has occurred. The main Qore checkout is clean at `4e049e0d8`;
+no core change or push was made during this integration step.
+
+
+### P3-39 final integration audit and verification
+
+Production is now authoritative; do not rebuild the old prototype over it.
+Further audit reductions fixed output-retention leakage into independent schema
+callbacks, retained XML's unbound-prefix requirements during envelope allocation,
+union enumeration samples, patterned QName-capable lists, standalone QName-list
+union identity and standalone list binding conflicts. New scope maps restore
+node-local declarations, and list serialization identifies QName items from the
+resolved schema without constructing detached provider graphs.
+
+The new standalone suite passes seven cases / 1,206 assertions, including two
+128-level sibling trees with distinct bound and unbound prefixes and conflicts
+in both list-item orders. Provider-context, provider-facet and scoped-value suites
+pass 4/122, 7/87 and 3/52 cases/assertions respectively. All four suites pass in
+AST, IR, JIT and tiered modes on source SHA-256
+`46bd191122fb85d5d5c2160fb0e63dacd0bc122ab1868a09370dbccc27e44091`.
+Three documented examples execute; Doxygen builds without warnings/errors.
+
+Independent existing QName lexical/value/declaration and union-composition tests
+pass eight Python methods. Survey tests pass 15 methods, normative tests five,
+and corpus tests fourteen. Coverage tests run fourteen methods with exactly the
+two unchanged P6 selected-binding-version assertion failures; the new QName
+mutation check and strict selection pass. No skip or expected-failure annotation
+was introduced. The final 89-suite XML gate passes 929 cases / 35,144 reported assertions on the
+above source, with no warnings or failures.
+
+The enlarged all-scoped worker reached its 300-second deadline. A reduced
+patterned-list contract produced 296 identical rows in AST (79.26 seconds) and
+JIT (69.44 seconds); removing redundant provider construction reduced the AST
+run to 48.45 seconds with identical results. These are Debug diagnostic timings
+under concurrent load, not Release benchmarks. The permanent matrix now bounds
+each scoped worker to one schema shape while retaining both binding versions,
+all values, seven consumers, reused/reconstructed providers and examples. Its
+full 4,072-outcome / 3,776-document rerun passes both methods in 306.276 seconds;
+`/tmp/wsdl-p3-39-final-context.log` records the complete result. All Xerces and six
+native-path verdicts, expanded values and retained-XML assertions pass.
+
+Updated current reports add QNameElement and QNameAttribute to the strict gate:
+122 descriptions / 1,156 directions, 1,060 passing exact-value checks and zero
+failed/missing/skipped checks. Raw output rejections are 42 (four fewer), including
+four valid-input invalid outputs (four fewer). Bidirectional coverage has exactly
+160 broader failure signatures, eight fewer QName output-schema failures and no
+new signature. The full audit is in `audits/P3-39-qname-context.md`, with all 62 checklist items resolved: 20 Pass / 42 N/A / 0 Fail. See `qname-context-evidence.md` for root causes,
+public contracts, matrix counts and exact Xerces warning adjudication.
+
+The generated fixture inventory is `/tmp/wsdl-p3-39-final-fixtures.json`, SHA-256
+`a51d5d278a0c2d6c47b2b37bd77451b841f756c71c4bb0a54eaf0b0b2eaae68b`.
+The main Qore checkout was rechecked clean at `4e049e0d8`; no Qore commit or push
+was required. P3 remains active; ENTITY/ENTITIES and the unresolved dateTime/time
+leap-second policy remain next criteria, followed by all P4–P9 requirements.
+
+Final source/artifact/test/report hashes are in `/tmp/wsdl-p3-39-final-manifest.json`.
+The exact report comparison is `/tmp/wsdl-p3-39-final-report-comparison.json`;
+all original corpus hashes, input verdicts and every non-QName case are unchanged.

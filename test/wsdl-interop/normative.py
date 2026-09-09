@@ -58,8 +58,8 @@ def same_number(datatype: str, expected: str, actual: str) -> bool:
             and Decimal(expected.strip()) == Decimal(actual.strip()))
 
 
-def select_value(payload: etree._Element, assertion: dict) -> str:
-    """Select one scalar using expanded element/attribute names, independent of prefix spelling."""
+def select_element(payload: etree._Element, assertion: dict) -> etree._Element:
+    """Select exactly one element by expanded names, retaining its namespace context."""
     path = assertion["elements"]
     if not isinstance(path, list) or not path or payload.tag != path[0]:
         raise ValueError("normative assertion has a missing or wrong root element")
@@ -68,14 +68,20 @@ def select_value(payload: etree._Element, assertion: dict) -> str:
         nodes = [child for node in nodes for child in node if child.tag == name]
     if len(nodes) != 1:
         raise ValueError("normative assertion must select exactly one element")
+    return nodes[0]
+
+
+def select_value(payload: etree._Element, assertion: dict) -> str:
+    """Select one scalar using expanded element/attribute names, independent of prefix spelling."""
+    node = select_element(payload, assertion)
     if "attribute" in assertion:
-        value = nodes[0].get(assertion["attribute"])
+        value = node.get(assertion["attribute"])
         if value is None:
             raise ValueError("normative assertion attribute is absent")
         return value
-    if any(isinstance(child.tag, str) for child in nodes[0]):
+    if any(isinstance(child.tag, str) for child in node):
         raise ValueError("normative assertion selected complex content")
-    return nodes[0].text or ""
+    return node.text or ""
 
 
 def check_assertions(payload: etree._Element, assertions: list[dict]) -> list[dict]:

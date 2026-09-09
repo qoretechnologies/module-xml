@@ -93,6 +93,45 @@ class CoverageTest(unittest.TestCase):
                 result = coverage.value_checks(left, right, [{"elements": ["value"], "datatype": datatype}])
                 self.assertEqual(valid, result["ok"], result)
 
+    def test_qname_value_assertions_preserve_expanded_names_and_scope(self):
+        for left_scope, left_text, right_scope, right_text, valid in (
+                ({"p": "urn:catalog"}, " p:Name ", {"q": "urn:catalog"}, "q:Name", True),
+                ({"p": "urn:catalog"}, "p:Name", {"p": "urn:other"}, "p:Name", False),
+                ({"p": "urn:catalog"}, "p:Name", {"p": "urn:catalog"}, "p:Other", False),
+                ({None: "urn:catalog"}, "Name", {"q": "urn:catalog"}, "q:Name", True),
+                ({None: "urn:catalog"}, "Name", {}, "Name", False),
+                ({None: ""}, "Name", {}, "Name", True),
+                ({}, "xml:lang", {"xml": "http://www.w3.org/XML/1998/namespace"}, "xml:lang", True),
+                ({"p": "urn:%63atalog"}, "p:Name", {"p": "urn:catalog"}, "p:Name", False),
+                ({"p": "URN:catalog"}, "p:Name", {"p": "urn:catalog"}, "p:Name", False),
+                ({}, "missing:Name", {}, "missing:Name", False),
+                ({}, "a:b:c", {}, "a:b:c", False),
+                ({}, "", {}, "", False),
+                ({}, "0name", {}, "0name", False),
+                ({}, "a\u00a0b", {}, "a\u00a0b", False)):
+            for attribute in (False, True):
+                with self.subTest(left=left_text, right=right_text, attribute=attribute, valid=valid):
+                    left = etree.Element("{urn:record}value", nsmap=left_scope)
+                    right = etree.Element("{urn:record}value", nsmap=right_scope)
+                    assertion = {"elements": ["{urn:record}value"], "datatype": "QName"}
+                    if attribute:
+                        assertion["attribute"] = "category"
+                        left.set("category", left_text)
+                        right.set("category", right_text)
+                    else:
+                        left.text, right.text = left_text, right_text
+                    self.assertEqual(valid, coverage.value_checks(left, right, [assertion])["ok"])
+        left = etree.fromstring(b'<outer xmlns:p="urn:wrong"><value xmlns:p="urn:catalog">p:Name</value></outer>')
+        right = etree.fromstring(b'<outer xmlns:q="urn:catalog"><value>q:Name</value></outer>')
+        assertion = {"elements": ["outer", "value"], "datatype": "QName"}
+        self.assertTrue(coverage.value_checks(left, right, [assertion])["ok"])
+        right.append(etree.fromstring(b'<value xmlns:q="urn:catalog">q:Name</value>'))
+        self.assertFalse(coverage.value_checks(left, right, [assertion])["ok"])
+        _, records = coverage.prepare(self.root, self.source)
+        name = next(iter(records["BooleanElement"]["messages"]))
+        selection = {"format": 1, "cases": {"BooleanElement": {"messages": {name: [assertion]}}}}
+        coverage.validate_selection(selection, records)
+
     def test_list_value_assertions_detect_item_and_order_changes(self):
         for item_type, before, after, valid in (
                 ("string", " A\tB ", "A B", True),
@@ -391,7 +430,7 @@ class CoverageTest(unittest.TestCase):
         self.assertEqual("", process.stderr)
         report = json.loads(output.read_text())
         self.assertEqual([], report["selected_failures"])
-        self.assertEqual({"wsdls": 120, "message_directions": 1148}, report["selected_scope"])
+        self.assertEqual({"wsdls": 122, "message_directions": 1156}, report["selected_scope"])
         self.assertEqual(293, len(report["cases"]))
         self.assertEqual(2272, sum(len(c["messages"]) for c in report["cases"]))
         for stage, counts in report["stage_accounting"]["counts"].items():
@@ -401,6 +440,11 @@ class CoverageTest(unittest.TestCase):
         # Harness assertions verify retained failures, not conformance passes for broken functionality.
         self.assertGreater(len(report["failures"]), 0)
         by_name = {c["case"]: c for c in report["cases"]}
+        for name in ("QNameElement", "QNameAttribute"):
+            for message in by_name[name]["messages"]:
+                self.assertEqual([], message["failures"], message)
+                self.assertTrue(message["values"]["ok"], message)
+            self.assertEqual("P5", by_name[name]["implementation_phase"])
         for name in ("NegativeIntegerElement", "NonNegativeIntegerElement", "DecimalAttribute",
                      "DecimalElement", "DecimalSimpleTypePattern", "IntSimpleTypePattern",
                      "IntegerSimpleTypePattern", "LongSimpleTypePattern", "ShortSimpleTypePattern",

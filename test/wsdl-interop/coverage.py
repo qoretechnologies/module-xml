@@ -73,6 +73,19 @@ def prepare(root: Path, source: dict) -> tuple[list[dict], dict]:
     return cases, records
 
 
+def qname_value(node: etree._Element, text: str) -> tuple[str, str]:
+    """Resolve a schema-validated QName in its containing element's namespace context."""
+    lexical = " ".join(re.findall(r"[^ \t\r\n]+", text))
+    parts = lexical.split(":")
+    if len(parts) > 2 or any(not part or etree.QName(part).namespace for part in parts):
+        raise ValueError("invalid QName value")
+    prefix, local = parts if len(parts) == 2 else (None, parts[0])
+    uri = "http://www.w3.org/XML/1998/namespace" if prefix == "xml" else node.nsmap.get(prefix, "")
+    if prefix and not uri:
+        raise ValueError("unbound QName value prefix")
+    return uri, local
+
+
 def value_checks(expected: etree._Element, actual: etree._Element, assertions: list[dict]) -> dict:
     """Check declared scalar values independently, using expanded paths and exact arithmetic."""
     if not assertions:
@@ -83,7 +96,11 @@ def value_checks(expected: etree._Element, actual: etree._Element, assertions: l
             before = normative.select_value(expected, assertion)
             after = normative.select_value(actual, assertion)
             datatype = assertion["datatype"]
-            if datatype == "boolean":
+            if datatype == "QName":
+                before = qname_value(normative.select_element(expected, assertion), before)
+                after = qname_value(normative.select_element(actual, assertion), after)
+                valid = before == after
+            elif datatype == "boolean":
                 values = {"true": True, "1": True, "false": False, "0": False}
                 before, after = before.strip(" \t\r\n"), after.strip(" \t\r\n")
                 valid = before in values and after in values and values[before] == values[after]
@@ -159,7 +176,7 @@ def validate_selection(selection: dict, records: dict) -> None:
             for assertion in assertions:
                 if (not isinstance(assertion, dict) or not isinstance(assertion.get("elements"), list)
                         or not assertion["elements"] or any(not isinstance(s, str) for s in assertion["elements"])
-                        or assertion.get("datatype") not in {"list", "boolean", "string", "normalizedString", "token", "decimal", "float", "double", "duration", "hexBinary", "base64Binary",
+                        or assertion.get("datatype") not in {"QName", "list", "boolean", "string", "normalizedString", "token", "decimal", "float", "double", "duration", "hexBinary", "base64Binary",
                             *calendar_reference.FORMATS, *normative.UNSIGNED_MAX, *normative.INTEGER_BOUNDS}
                         or ("attribute" in assertion and not isinstance(assertion["attribute"], str))):
                     raise ValueError("malformed strict value assertion")

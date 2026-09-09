@@ -951,8 +951,8 @@ They compare namespace/local identity for their local and implicitly bound `xml`
 names and independently validate output. Local HTTP tests exercise SoapClient
 and SoapHandler, attributes, lists, union fallback and rejection recovery.
 See [the lexical contract](../../design/wsdl-qname-lexical.md) and
-[evidence](qname-lexical-evidence.md). General QName namespace context,
-enumeration identity and output prefix handling remain open requirements.
+[evidence](qname-lexical-evidence.md). The [QName value contract](../../design/wsdl-qname-values.md) describes instance
+namespace scopes, expanded enumeration identity and structural output prefixes.
 
 ## Detached schema namespace ownership
 
@@ -987,8 +987,8 @@ verify ordered enumeration identity, cover nested unions and lists, and check
 invalid input and cancellation recovery. CMake probes both DOM and streaming
 validation and rejects partial backports that still have this defect.
 See [the native design](../../design/xml-qname-validation.md) and
-[independent evidence](qname-union-validator-evidence.md). General WSDL QName
-instance/output integration remains a separate open P3 criterion.
+[independent evidence](qname-union-validator-evidence.md). The WSDL context matrix below checks the corresponding instance and provider
+integration.
 
 
 ## Native reader cursor values
@@ -998,3 +998,26 @@ cursor conversion, sibling boundaries, mixed content/grouping, document
 hashes, errors, partial stream failure and cancellation. The QName union
 validator matrix also checks both cursor methods for all 300 documents,
 including exact scalar/empty results. See [the reader contract and example](../../design/xml-reader-values.md).
+
+
+## QName instance scopes and consumers
+
+Run `qore --enable-debug` with `wsdl-qname-provider-context.qtest`,
+`wsdl-qname-provider-facets.qtest`, `wsdl-qname-schema-output.qtest`,
+`wsdl-scoped-lexical-values.qtest` and `wsdl-qname-consumers.qtest` under `test/`.
+Run `python3 test/wsdl-interop/test_qname_context.py -v` for independent XML
+and typed-value checks through both bindings and directions, detached element/
+message providers, reconstruction, and native/retained-XML examples.
+
+The matrix includes ancestor bindings, local shadowing, default resets, QName
+aliases, ordered QName/string fallback, enumerations and lists. One pinned Xerces
+schema warning is asserted as a validator defect: its preliminary enumeration/
+length comparison counts characters instead of list items. Every document verdict
+and all six native validation paths remain required. P5 data-prefix remapping for
+native values assembled with conflicting spellings remains tracked in the plan;
+current conversion reports conflicting data bindings explicitly. Each scoped worker
+handles one schema shape, including both bindings, with a bounded deadline. The
+complete inventory is 296 inputs, 4,072 consumer outcomes and 3,776 independently
+validated documents. The strict corpus now includes QNameElement and QNameAttribute
+with expanded-name checks: 122 descriptions / 1,156 directions. See
+[context evidence](qname-context-evidence.md) and [the full audit](audits/P3-39-qname-context.md).
