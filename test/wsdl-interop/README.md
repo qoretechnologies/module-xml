@@ -128,6 +128,13 @@ builds the offline native behavior and allocation-failure checks. Run those
 executables under Valgrind as well as the affected Qore suites. Set `QORE_EXEC_MODE`
 to run the Python resource/URI tests in AST, IR, JIT or tiered mode (default: JIT).
 
+XSD 1.0 union composition has separate scalar and interoperability checks:
+`qore -b --enable-debug test/wsdl-union-composition.qtest` and
+`python3 test/wsdl-interop/test_union_composition.py -v`. They distinguish direct
+restrictions from nested union member composition while preserving primitive
+selection, list constraints, shared graphs and detached provider behavior. See
+[the implemented design](../../design/xsd-union-composition.md).
+
 ## Fixture provenance
 
 The first P2 increment covers declaration-local namespaces, distinct no-namespace

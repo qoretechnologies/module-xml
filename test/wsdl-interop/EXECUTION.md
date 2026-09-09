@@ -4889,3 +4889,48 @@ Final hashes are in `/tmp/wsdl-p3-37-final-manifest.json`. The earlier oracle lo
 failure caused by overlapping a module relink is retained in its log; the completed
 build's URI/QName oracle and corpus reruns pass. P3 remains active; the next work
 resumes QName/list/union WSDL provider, sample, reconstruction and wire integration.
+
+P3-37 was committed as `1442c65` on develop without pushing.
+
+## P3-38 — XSD 1.0 nested union composition
+
+Resuming the QName prototype reproduced a list-of-unions output failure: scoped
+lexical objects were coerced to strings before namespace allocation. The scratch
+fix now preserves those objects through list output, pattern retention and final
+binding checks. Its direct, list, restricted-list and union-of-list wire cases each
+pass eight inputs and four valid outputs against Xerces and all six native paths.
+The earlier 96 scoped QName/list/union inputs and their 96 outputs, provider/choice
+checks and nine existing scratch regression suites also pass. This larger QName
+implementation remains in scratch and is not part of the current production diff.
+
+A nested-union variant exposed an independent production composition error.
+XSD 1.0 Part 2 section 4.1.2.3 replaces an explicit union member with that union's
+member definitions. Restrictions on the nested union do not carry into the outer
+union. Xerces correctly accepted a case the initial scratch expectation marked
+invalid; that expectation is preserved in its failed diagnostic log, not used to
+weaken validation. A reduced numeric example shows production Qore falling through
+from the wrongly restricted integer member to double for `2` and rejecting `true`.
+
+The production fix resolves and validates the full dependency first, then references
+the original union definition during composition. Shared nodes retain declaration
+order without exponential member expansion. Direct restricted uses, atomic/list
+member constraints and restrictions on the composed union remain effective.
+The temporary resolution map is cleared on success and failure. The new qtest
+passes four cases / 108 assertions in AST, IR, JIT and tiered modes. Its 32-level
+shared graph preserves identity and bounded provider serialization.
+
+The two independent Python methods pass five definitions / 37 lexical cases across
+15 schema shapes, 444 request/response inputs, 252 valid outputs and 2,608 detached
+consumer outcomes (1,584 valid outputs including examples). Every source/output is
+checked by pinned Xerces and independent libxml2. Named/inline composition,
+primitive order, retained outer/list constraints and negative errors are covered.
+The full 85-suite gate passes 906 cases / 33,429 reported assertions without warnings.
+Corpus comparison, final audit and commit are recorded below when complete.
+
+Final raw and strict corpus reports retain every P3-37 result, with only the WSDL
+source hash changed. Survey unit tests pass 15 methods, and coverage unit tests
+retain exactly the two P6-selected-binding-version failures. Documentation builds
+without warnings/errors. The full audit is 19 Pass / 43 N/A / 0 Fail; see
+[union composition evidence](union-composition-evidence.md). No C++ changes or
+native rebuild were needed. Final hashes are recorded in
+`/tmp/wsdl-p3-38-composition-final-manifest.json`.

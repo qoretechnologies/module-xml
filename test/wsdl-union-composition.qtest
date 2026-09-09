@@ -1,0 +1,138 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires xml
+%requires ../qlib/WSDL.qm
+%exec-class UnionCompositionTest
+
+class UnionCompositionTest inherits QUnit::Test {
+    constructor() : Test("XSD 1.0 union composition", "1.0") {
+        addTestCase("Union composition replaces a restricted union by its members", \members());
+        addTestCase("Atomic, list and outer restrictions remain effective", \restrictions());
+        addTestCase("Shared union composition preserves order without graph expansion", \shared());
+        addTestCase("Invalid dependencies fail before composition and allow recovery", \invalid());
+        set_return_value(main());
+    }
+
+    private static XsdSchema schema() {
+        return new XsdSchema('<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
+            <xs:simpleType name="Base"><xs:union memberTypes="xs:int xs:boolean"/></xs:simpleType>
+            <xs:simpleType name="Restricted"><xs:restriction base="Base"><xs:pattern value="0[0-9]+"/>
+                <xs:enumeration value="01"/></xs:restriction></xs:simpleType>
+            <xs:simpleType name="Outer"><xs:union memberTypes="Restricted xs:double"/></xs:simpleType>
+        </xs:schema>', {"async_only": True});
+    }
+
+    private members() {
+        XsdSchema original = schema();
+        foreach XsdSchema definition in (original, Serializable::deserialize(original.serialize())) {
+            XsdAbstractType outer = definition.findType(make_qname("", "Outer"));
+            auto value = outer.deserializeValue("value", definition.getTypeMap(), NOTHING, "2");
+            assertEq(NT_INT, value.typeCode());
+            assertEq(2, value);
+            assertEq(True, outer.deserializeValue("value", definition.getTypeMap(), NOTHING, "true"));
+            assertEq("true", outer.serializeValue(definition.nsc, "true", True));
+            AbstractDataProviderType provider = outer.getDataProviderType();
+            assertEq(True, provider.acceptsValue("true"));
+            assertEq(NT_INT, provider.acceptsValue("2").typeCode());
+            XsdAbstractType restricted = definition.findType(make_qname("", "Restricted"));
+            AbstractDataProviderType restricted_provider = restricted.getDataProviderType();
+            assertEq("01", restricted.deserializeValue("value", definition.getTypeMap(), NOTHING, "01"));
+            foreach string invalid in ("2", "true", "1") {
+                assertThrows("SOAP-DESERIALIZATION-ERROR", \restricted.deserializeValue(),
+                    ("value", definition.getTypeMap(), NOTHING, invalid));
+                assertThrows("SOAP-SERIALIZATION-ERROR", \restricted.serializeValue(), (definition.nsc, invalid, True));
+                assertThrows("RUNTIME-TYPE-ERROR", \restricted_provider.acceptsValue(), (invalid,));
+            }
+        }
+    }
+
+    private restrictions() {
+        XsdSchema original('<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
+            <xs:simpleType name="Number"><xs:restriction base="xs:int"><xs:minInclusive value="10"/></xs:restriction></xs:simpleType>
+            <xs:simpleType name="Items"><xs:list itemType="Number"/></xs:simpleType>
+            <xs:simpleType name="Pair"><xs:restriction base="Items"><xs:length value="2"/></xs:restriction></xs:simpleType>
+            <xs:simpleType name="Base"><xs:union memberTypes="Number Pair xs:boolean"/></xs:simpleType>
+            <xs:simpleType name="Restricted"><xs:restriction base="Base"><xs:enumeration value="10"/></xs:restriction></xs:simpleType>
+            <xs:simpleType name="Outer"><xs:union memberTypes="Restricted"/></xs:simpleType>
+            <xs:simpleType name="Final"><xs:restriction base="Outer"><xs:pattern value="11|true"/>
+                <xs:enumeration value="11"/><xs:enumeration value="true"/></xs:restriction></xs:simpleType>
+        </xs:schema>', {"async_only": True});
+        foreach XsdSchema definition in (original, Serializable::deserialize(original.serialize())) {
+            XsdAbstractType outer = definition.findType(make_qname("", "Outer"));
+            AbstractDataProviderType provider = outer.getDataProviderType();
+            foreach AbstractDataProviderType candidate in (provider, Serializable::deserialize(provider.serialize())) {
+                assertEq(11, candidate.acceptsValue("11"));
+                assertEq((10, 11), candidate.acceptsValue("10 11"));
+                assertEq(True, candidate.acceptsValue("true"));
+                foreach string bad in ("2", "9 10", "10 11 12", "bad") {
+                    assertThrows("RUNTIME-TYPE-ERROR", \candidate.acceptsValue(), (bad,));
+                }
+            }
+            foreach string bad in ("2", "9 10", "10 11 12", "bad") {
+                assertThrows("SOAP-DESERIALIZATION-ERROR", \outer.deserializeValue(),
+                    ("value", definition.getTypeMap(), NOTHING, bad));
+                assertThrows("SOAP-SERIALIZATION-ERROR", \outer.serializeValue(), (definition.nsc, bad, True));
+            }
+            XsdAbstractType final_type = definition.findType(make_qname("", "Final"));
+            assertEq("11", final_type.serializeValue(definition.nsc, "11", True));
+            assertEq("true", final_type.serializeValue(definition.nsc, "true", True));
+            foreach string bad in ("10", "12", "false", "10 11") {
+                assertThrows("SOAP-DESERIALIZATION-ERROR", \final_type.deserializeValue(),
+                    ("value", definition.getTypeMap(), NOTHING, bad));
+            }
+        }
+    }
+
+    private shared() {
+        string source = '<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
+            <xs:simpleType name="Base"><xs:union memberTypes="xs:boolean xs:int"/></xs:simpleType>
+            <xs:simpleType name="Restricted"><xs:restriction base="Base"><xs:pattern value="0[0-9]+"/></xs:restriction></xs:simpleType>';
+        string previous = "Restricted";
+        for (int index = 0; index < 32; ++index) {
+            string name = "Level" + index;
+            source += sprintf('<xs:simpleType name="%s"><xs:union memberTypes="%s %s"/></xs:simpleType>',
+                name, previous, previous);
+            previous = name;
+        }
+        source += '</xs:schema>';
+        XsdSchema original(source, {"async_only": True});
+        foreach XsdSchema definition in (original, Serializable::deserialize(original.serialize())) {
+            XsdAbstractType outer = definition.findType(make_qname("", previous));
+            assertEq(True, outer.deserializeValue("value", definition.getTypeMap(), NOTHING, "1"));
+            assertEq("true", outer.serializeValue(definition.nsc, "1", True));
+            AbstractDataProviderType provider = outer.getDataProviderType();
+            assertEq(True, provider.acceptsValue("1"));
+            assertEq(2, provider.acceptsValue("2"));
+            assertTrue(provider.serializeToData()._index.size() < 1000);
+            XsdSimpleType top = cast<XsdSimpleType>(outer);
+            assertEq(2, top.unionTypes.size());
+            assertTrue(top.unionTypes[0] === top.unionTypes[1]);
+            assertThrows("SOAP-DESERIALIZATION-ERROR", \outer.deserializeValue(),
+                ("value", definition.getTypeMap(), NOTHING, "bad"));
+        }
+    }
+
+    private invalid() {
+        foreach string declarations in (
+                '<xs:simpleType name="Base"><xs:union memberTypes="xs:int xs:boolean"/></xs:simpleType>
+                    <xs:simpleType name="Bad"><xs:restriction base="Base"><xs:enumeration value="bad"/></xs:restriction></xs:simpleType>
+                    <xs:simpleType name="Outer"><xs:union memberTypes="Bad"/></xs:simpleType>',
+                '<xs:simpleType name="A"><xs:union memberTypes="B"/></xs:simpleType>
+                    <xs:simpleType name="B"><xs:union memberTypes="A"/></xs:simpleType>') {
+            *hash<ExceptionInfo> failure;
+            try {
+                XsdSchema bad('<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">' + declarations
+                    + '</xs:schema>', {"async_only": True});
+            } catch (hash<ExceptionInfo> ex) {
+                failure = ex;
+            }
+            assertEq($# ? "WSDL-ERROR" : "XSD-SIMPLETYPE-ERROR", failure.err);
+            XsdSchema recovered = schema();
+            XsdAbstractType outer = recovered.findType(make_qname("", "Outer"));
+            assertEq(True, outer.deserializeValue("value", recovered.getTypeMap(), NOTHING, "true"));
+        }
+    }
+}
