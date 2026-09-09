@@ -153,19 +153,10 @@ void QoreXmlReader::processOpts(const QoreHashNode* opts, ExceptionSink* xsink) 
                 return;
 
 #ifdef HAVE_XMLTEXTREADERSETSCHEMA
-            QoreStringValueHelper xsd(n);
-            std::unique_ptr<QoreXmlSchemaContext> schema(new QoreXmlSchemaContext(**xsd, xsink));
-            if (*xsink)
-                return;
-
-            int rc = setSchema(schema->getSchema());
-            if (rc < 0) {
-                xsink->raiseException("XSD-VALIDATION-ERROR", "XML schema could not be validated");
+            schemaValidate(*n.get<const QoreStringNode>(), SchemaSource::Text, xsink);
+            if (*xsink) {
                 return;
             }
-
-            val = schema.release();
-            //printd(5, "QoreXmlReader::processOpts() set schema %p\n", val);
             continue;
 #else
             xsink->raiseException("MISSING-FEATURE-ERROR", "the libxml2 version used to compile the xml module did not support the xmlTextReaderSetSchema() function, XSD validation is not available; for maximum portability, use the constant Option::HAVE_PARSEXMLWITHSCHEMA to check if this function is implemented before using XSD validation functionality");
@@ -181,6 +172,51 @@ void QoreXmlReader::processOpts(const QoreHashNode* opts, ExceptionSink* xsink) 
         return;
     }
 }
+
+#ifdef HAVE_XMLTEXTREADERSETSCHEMA
+void QoreXmlReader::schemaValidate(const QoreString& xsd, SchemaSource source, ExceptionSink* xsink) {
+    setExceptionContext(xsink);
+    if (qore_check_cancel(xsink, "XML schema validation")) {
+        return;
+    }
+    if (tree_reader || xmlTextReaderReadState(reader) != XML_TEXTREADER_MODE_INITIAL) {
+        xsink->raiseException("XMLREADER-XSD-ERROR", "XSD validation must be attached to a string or stream reader "
+            "before its first read");
+        return;
+    }
+    std::unique_ptr<QoreXmlSchemaContext> schema;
+    if (source == SchemaSource::Text) {
+        schema.reset(new QoreXmlSchemaContext(xsd, xsink));
+    } else {
+        Utf8StringHelper location(xsd, xsink);
+        if (*xsink) {
+            return;
+        }
+        if (memchr(location.c_str(), 0, location.size())) {
+            xsink->raiseException("XMLREADER-XSD-ERROR", "an XSD schema location cannot contain a NUL character");
+            return;
+        }
+        schema.reset(new QoreXmlSchemaContext(QoreXmlSchemaFilePath, location.c_str(), xsink));
+    }
+    if (*xsink) {
+        return;
+    }
+    // A resource callback can reenter this reader while compiling the candidate.
+    if (xmlTextReaderReadState(reader) != XML_TEXTREADER_MODE_INITIAL) {
+        xsink->raiseException("XMLREADER-XSD-ERROR", "the reader started reading while the replacement schema "
+            "was being compiled");
+        return;
+    }
+    int status = setSchema(schema->getSchema());
+    // The native validation context can retain the candidate even if allocating
+    // its SAX plug fails. Keep that schema alive until the context is released.
+    delete val;
+    val = schema.release();
+    if (status < 0 && !*xsink) {
+        xsink->raiseException("XMLREADER-XSD-ERROR", "could not attach the compiled XSD schema to the reader");
+    }
+}
+#endif
 
 QoreHashNode* QoreXmlReader::parseXmlData(const QoreEncoding* data_ccsid, int pflags, ExceptionSink* xsink) {
     if (read(xsink) != 1)

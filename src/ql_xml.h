@@ -6,7 +6,7 @@
 
     Qore Programming Language
 
-    Copyright 2003 - 2022 Qore Technologies, s.r.o.
+    Copyright 2003 - 2026 Qore Technologies, s.r.o.
 
     This library is free software; you can redistribute it and/or
     modify it under the terms of the GNU Lesser General Public
@@ -27,6 +27,7 @@
 #define _QORE_QL_XML_H
 
 #include <libxml/xmlschemas.h>
+#include <libxml/parser.h>
 #include <libxml/relaxng.h>
 
 #include <qore/Qore.h>
@@ -49,6 +50,26 @@ DLLLOCAL const char* get_xml_element_type_name(int t);
 DLLLOCAL const char* get_xml_node_type_name(int t);
 
 #ifdef HAVE_XMLTEXTREADERSETSCHEMA
+#if LIBXML_VERSION >= 21400
+DLLLOCAL xmlParserErrors qoreXmlSchemaResourceLoader(void* context, const char* url, const char* public_id,
+    xmlResourceType type, xmlParserInputFlags flags, xmlParserInput** output);
+#endif
+
+// Scoped exception context for the module's registered external-resource callbacks.
+// Nested schema compilation restores the outer parser's context on every exit.
+extern thread_local ExceptionSink* qore_xml_schema_resource_xsink;
+class QoreXmlSchemaResourceScope {
+public:
+    explicit QoreXmlSchemaResourceScope(ExceptionSink* xsink)
+            : previous(qore_xml_schema_resource_xsink) {
+        qore_xml_schema_resource_xsink = xsink;
+    }
+    ~QoreXmlSchemaResourceScope() {
+        qore_xml_schema_resource_xsink = previous;
+    }
+private:
+    ExceptionSink* previous;
+};
 // Tag struct used to dispatch the file-path constructor of QoreXmlSchemaContext.
 // Selecting the file-based parsing path at the type level keeps the API explicit and
 // avoids the ambiguity of an overloaded const char*/QoreString constructor pair.

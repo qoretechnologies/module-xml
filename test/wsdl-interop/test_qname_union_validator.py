@@ -83,6 +83,10 @@ class QNameUnionValidatorTest(unittest.TestCase):
         artifacts = Path(tempfile.mkdtemp(prefix="xml-qname-union-validator-"))
         manifest = artifacts / "fixtures.json"
         manifest.write_text(json.dumps({"rows": rows}, indent=2) + "\n")
+        schemas = Path(str(manifest) + ".schemas")
+        schemas.mkdir()
+        for name, job in jobs.items():
+            (schemas / (name + ".xsd")).write_bytes(job.schema)
         process = subprocess.run(["qore", "-b", "--enable-debug", ROOT / "qname-union-validator.qr", manifest],
                                  text=True, capture_output=True, timeout=120)
         self.assertEqual(0, process.returncode, process.stderr)
@@ -97,7 +101,7 @@ class QNameUnionValidatorTest(unittest.TestCase):
                 verdict = independent["documents"][row["name"]]
                 self.assertEqual(row["valid"], verdict["ok"], verdict)
                 self.assertEqual([], verdict["warnings"])
-                for method in ("parse", "reader", "cursor", "grouped"):
+                for method in ("parse", "reader", "cursor", "grouped", "attached-text", "attached-file"):
                     self.assertEqual(row["valid"], result[method], result)
                     if not row["valid"]:
                         self.assertEqual("PARSE-XML-EXCEPTION", result[method + "_error"])
@@ -108,6 +112,8 @@ class QNameUnionValidatorTest(unittest.TestCase):
                     self.assertEqual(row["attribute"], result["attribute"])
                     self.assertEqual(row["text"] or None, result["cursor_value"])
                     self.assertEqual(row["text"] or None, result["grouped_value"])
+                    self.assertEqual(row["text"] or None, result["attached-text_value"])
+                    self.assertEqual(row["text"] or None, result["attached-file_value"])
                 validator = validators[row["group"]]
                 ok = validator.validate(etree.fromstring(row["xml"].encode()))
                 errors = [error.type_name for error in validator.error_log]

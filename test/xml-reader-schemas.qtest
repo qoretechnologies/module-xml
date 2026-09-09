@@ -1,0 +1,450 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires Util
+%requires xml
+%exec-class XmlReaderSchemasTest
+
+class ReaderSchemaFaultStream inherits InputStream {
+    private {
+        binary bytes;
+        int offset = 0;
+        string failure;
+        SandboxManager manager;
+    }
+    public {
+        int calls = 0;
+    }
+
+    constructor(string schema, string failure, SandboxManager manager) {
+        bytes = binary(schema);
+        self.failure = failure;
+        self.manager = manager;
+    }
+    *binary read(int limit) {
+        ++calls;
+        if (failure == "oversize") {
+            binary result = binary("x");
+            while (result.size() <= limit) {
+                result += result;
+            }
+            return result;
+        }
+        if (failure == "empty") {
+            return NOTHING;
+        }
+        if (calls > 1 && failure == "error") {
+            throw "SCHEMA-STREAM-TEST-ERROR", "schema stream failed after a partial read";
+        }
+        if (calls > 1 && failure == "cancel") {
+            manager.requestInterrupt();
+        }
+        if (offset == bytes.size()) {
+            return NOTHING;
+        }
+        binary result = bytes.substr(offset, min(limit, 32));
+        offset += result.size();
+        return result;
+    }
+    int peek() {
+        return offset == bytes.size() ? -1 : bytes[offset];
+    }
+}
+
+class ReaderSchemaCallback inherits AbstractXmlIoInputCallback {
+    public {
+        string action = "memory";
+        int calls = 0;
+        int nested = 0;
+        string schema;
+        *string nestedSchema;
+        *SandboxManager manager;
+        *XmlReader target;
+        *InputStream suppliedStream;
+    }
+    constructor(string schema) {
+        self.schema = schema;
+    }
+    *InputStream open(string location) {
+        ++calls;
+        if (action == "mutate") {
+            if (location == "outer.xsd") {
+                target.schemaValidateString('<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">'
+                    '<xs:include schemaLocation="inner.xsd"/></xs:schema>');
+            } else {
+                @assert(target.read());
+            }
+        }
+        if (action == "error") {
+            throw "SCHEMA-RESOURCE-TEST-ERROR", location;
+        }
+        if (action == "cancel") {
+            manager.requestInterrupt();
+        }
+        if (action == "fallback") {
+            return NOTHING;
+        }
+        if (nestedSchema) {
+            string inner = nestedSchema;
+            nestedSchema = NOTHING;
+            XmlReader reader(new StringInputStream("<value>7</value>"), {"xsd": inner, "xml_input_io": self});
+            while (reader.read()) {
+            }
+            @assert(reader.isValid());
+            ++nested;
+        }
+        return suppliedStream ?? new StringInputStream(schema);
+    }
+}
+
+class XmlReaderSchemasTest inherits QUnit::Test {
+    private {
+        string integerSchema = schema("int");
+        string stringSchema = schema("string");
+        string schemaPath;
+    }
+
+    constructor() : QUnit::Test("XML reader schema attachment", "1.0") {
+        addTestCase("Text schemas validate strings and streams without changing values", \textSchemas());
+        addTestCase("File and URI schemas retain relative import resolution", \fileSchemas());
+        addTestCase("Replacement schemas own their validation state", \replacement());
+        addTestCase("Invalid replacements preserve the previous schema", \failedReplacement());
+        addTestCase("Invalid initial schemas allow a corrected attachment", \initialFailure());
+        addTestCase("Started and tree readers reject attachment without mutation", \readerState());
+        addTestCase("Attachment cancellation preserves the previous schema", \cancellation());
+        addTestCase("Schema text and locations handle encodings and embedded NUL", \encodings());
+        addTestCase("All schema file loads enforce parse restrictions and path policy", \filesystemPolicy());
+        addTestCase("Memory callbacks work in a sandbox and fallback remains checked", \callbackPolicy());
+        addTestCase("Nested callbacks restore outer parsing state", \nestedCallbacks());
+        addTestCase("Resource streams preserve partial errors, enforce bounds and clean up interruption", \streamFailures());
+        set_return_value(main());
+    }
+
+    private static string schema(string type) {
+        return '<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">'
+            '<xs:element name="value" type="xs:' + type + '"/></xs:schema>';
+    }
+
+    globalSetUp() {
+        schemaPath = tmp_location() + "/xml-reader-schema-" + get_random_string() + ".xsd";
+        File file();
+        file.open2(schemaPath, O_CREAT | O_EXCL | O_WRONLY, 0600);
+        file.write(integerSchema);
+    }
+
+    globalTearDown() {
+        unlink(schemaPath);
+    }
+
+    private static bool consume(XmlReader reader) {
+        while (reader.read()) {
+        }
+        return reader.isValid();
+    }
+
+    textSchemas() {
+        foreach bool stream in (False, True) {
+            foreach string lexical in ("17", "-2147483648", "2147483647", "+00017", " 17 ") {
+                string xml = "<value>" + lexical + "</value>";
+                XmlReader reader(stream ? new StringInputStream(xml) : xml);
+                reader.schemaValidateString(integerSchema);
+                assertTrue(reader.read());
+                assertEq(lexical, reader.toQore());
+                assertFalse(reader.read());
+                assertTrue(reader.isValid());
+            }
+            foreach string lexical in ("", "17x", "2147483648", "-2147483649", "1.0") {
+                string xml = "<value>" + lexical + "</value>";
+                XmlReader reader(stream ? new StringInputStream(xml) : xml);
+                reader.schemaValidateString(integerSchema);
+                assertThrows("PARSE-XML-EXCEPTION", \consume(), reader);
+            }
+        }
+    }
+
+    fileSchemas() {
+        foreach string location in (schemaPath, "file://" + schemaPath) {
+            XmlReader valid("<value>17</value>");
+            valid.schemaValidate(xsd_schema: location);
+            assertTrue(consume(valid));
+            XmlReader invalid("<value>wrong</value>");
+            invalid.schemaValidate(location);
+            assertThrows("PARSE-XML-EXCEPTION", \consume(), invalid);
+        }
+        string path = realpath(get_script_dir() + "/multi-file-xsd-main.xsd");
+        foreach string location in (path, "file://" + path) {
+            foreach bool valid in (True, False) {
+                XmlReader reader('<m:Order xmlns:m="http://qoretechnologies.com/test/main">'
+                    '<m:Id>' + (valid ? "QT-42" : "wrong") + '</m:Id><m:Qty>3</m:Qty></m:Order>');
+                reader.schemaValidate(location);
+                if (valid) {
+                    assertTrue(consume(reader));
+                } else {
+                    assertThrows("PARSE-XML-EXCEPTION", \consume(), reader);
+                }
+            }
+        }
+    }
+
+    replacement() {
+        foreach bool valid in (True, False) {
+            XmlReader reader(new StringInputStream(valid ? "<value>17</value>" : "<value>wrong</value>"), {"xsd": stringSchema});
+            foreach int iteration in (0 .. 19) {
+                reader.schemaValidateString(schema(iteration % 2 ? "int" : "string"));
+                reader.schemaValidate(schemaPath);
+            }
+            if (valid) {
+                assertTrue(consume(reader));
+            } else {
+                assertThrows("PARSE-XML-EXCEPTION", \consume(), reader);
+            }
+            XmlReader permissive(new StringInputStream("<value>wrong</value>"), {"xsd": integerSchema});
+            permissive.schemaValidateString(xsd_schema: stringSchema);
+            assertTrue(consume(permissive));
+        }
+    }
+
+    failedReplacement() {
+        foreach bool valid in (True, False) {
+            foreach bool fromFile in (True, False) {
+                XmlReader reader(new StringInputStream(valid ? "<value>17</value>" : "<value>wrong</value>"), {"xsd": integerSchema});
+                if (fromFile) {
+                    assertThrows("XSD-SYNTAX-ERROR", \reader.schemaValidate(), schemaPath + ".missing");
+                } else {
+                    foreach string invalid in ("", "<", "<not-schema/>", schema("missingType")) {
+                        assertThrows("XSD-SYNTAX-ERROR", \reader.schemaValidateString(), invalid);
+                    }
+                }
+                if (valid) {
+                    assertTrue(consume(reader));
+                } else {
+                    assertThrows("PARSE-XML-EXCEPTION", \consume(), reader);
+                }
+            }
+        }
+    }
+
+    initialFailure() {
+        XmlReader reader("<value>17</value>");
+        assertThrows("XSD-SYNTAX-ERROR", \reader.schemaValidateString(), "<not-schema/>");
+        assertThrows("XSD-SYNTAX-ERROR", \reader.schemaValidate(), schemaPath + ".missing");
+        reader.schemaValidateString(integerSchema);
+        assertTrue(consume(reader));
+    }
+
+    readerState() {
+        foreach bool tree in (False, True) {
+            foreach bool started in (False, True) {
+                if (!tree && !started) {
+                    continue;
+                }
+                XmlReader reader(tree ? new XmlDoc("<value>17</value>") : "<value>17</value>");
+                if (started) {
+                    assertTrue(reader.read());
+                }
+                foreach string text in (integerSchema, "<not-schema/>") {
+                    assertThrows("XMLREADER-XSD-ERROR", \reader.schemaValidateString(), text);
+                }
+                foreach string path in (schemaPath, schemaPath + ".missing") {
+                    assertThrows("XMLREADER-XSD-ERROR", \reader.schemaValidate(), path);
+                }
+                if (!started) {
+                    assertTrue(reader.read());
+                }
+                assertEq("17", reader.toQore());
+                assertFalse(reader.read());
+                assertThrows("XMLREADER-XSD-ERROR", \reader.schemaValidateString(), integerSchema);
+            }
+        }
+    }
+
+    cancellation() {
+        SandboxManager manager();
+        on_exit {
+            manager.clearInterrupt();
+        }
+        Program program(PO_NEW_STYLE | PO_STRICT_ARGS | PO_REQUIRE_TYPES);
+        program.setSandboxManager(manager);
+        program.parse("%modern\n%requires xml\n"
+            "nothing sub attach(XmlReader reader, string xsd) { reader.schemaValidateString(xsd); }\n", "schema_cancel");
+        foreach bool valid in (True, False) {
+            XmlReader reader(new StringInputStream(valid ? "<value>17</value>" : "<value>wrong</value>"), {"xsd": integerSchema});
+            *hash<ExceptionInfo> error;
+            manager.requestInterrupt();
+            try {
+                program.callFunction("attach", reader, stringSchema);
+            } catch (hash<ExceptionInfo> ex) {
+                error = ex;
+            }
+            manager.clearInterrupt();
+            assertEq("PROGRAM-INTERRUPTED", error.err);
+            if (valid) {
+                assertTrue(consume(reader));
+            } else {
+                assertThrows("PARSE-XML-EXCEPTION", \consume(), reader);
+            }
+        }
+    }
+
+    encodings() {
+        foreach string encoding in ("UTF-8", "UTF-16LE", "UTF-16BE", "ISO-8859-1") {
+            XmlReader reader("<value>17</value>");
+            reader.schemaValidateString(convert_encoding(integerSchema, encoding));
+            assertTrue(consume(reader));
+            XmlReader fileReader("<value>17</value>");
+            fileReader.schemaValidate(convert_encoding(schemaPath, encoding));
+            assertTrue(consume(fileReader));
+        }
+        foreach string suffix in ("-café.xsd", "-中文 space.xsd") {
+            string path = schemaPath + suffix;
+            File file();
+            file.open2(path, O_CREAT | O_EXCL | O_WRONLY, 0600);
+            file.write(integerSchema);
+            file.close();
+            on_exit {
+                unlink(path);
+            }
+            foreach string encoding in ("UTF-8", "UTF-16LE", "UTF-16BE") {
+                XmlReader unicodeReader("<value>17</value>");
+                unicodeReader.schemaValidate(convert_encoding(path, encoding));
+                assertTrue(consume(unicodeReader));
+            }
+        }
+        XmlReader reader(new StringInputStream("<value>wrong</value>"), {"xsd": integerSchema});
+        assertThrows("XMLREADER-XSD-ERROR", \reader.schemaValidate(), schemaPath + "\0ignored");
+        assertThrows("XSD-SYNTAX-ERROR", \reader.schemaValidateString(), integerSchema + "\0ignored");
+        assertThrows("PARSE-XML-EXCEPTION", \consume(), reader);
+    }
+    private static Program loader(*SandboxManager manager, int restrictions) {
+        Program program(PO_NEW_STYLE | PO_STRICT_ARGS | PO_REQUIRE_TYPES | restrictions);
+        if (manager) {
+            program.setSandboxManager(manager);
+        }
+        program.parse("%modern\n%requires xml\n"
+            "bool sub load(string xml, string xsd, int source, *AbstractXmlIoInputCallback callback) {\n"
+            "    if (source == 2) { XmlDoc doc(xml); doc.validateSchema(xsd); return True; }\n"
+            "    if (source == 3) {\n"
+            "        XmlReader reader(new StringInputStream(xml), {\"xsd\": xsd, \"xml_input_io\": callback});\n"
+            "        while (reader.read()) {}\n"
+            "        return reader.isValid();\n"
+            "    }\n"
+            "    XmlReader reader(xml);\n"
+            "    if (source == 0) { reader.schemaValidate(xsd); } else { reader.schemaValidateString(xsd); }\n"
+            "    while (reader.read()) {}\n"
+            "    return reader.isValid();\n"
+            "}\n", "schema_resource_loader");
+        return program;
+    }
+
+    private static string including(string location) {
+        return '<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">'
+            '<xs:include schemaLocation="' + location + '"/></xs:schema>';
+    }
+
+    filesystemPolicy() {
+        SandboxManager manager();
+        Program denied = loader(manager, 0);
+        Program restricted = loader(NOTHING, PO_NO_FILESYSTEM | PO_NO_NETWORK);
+        foreach Program program in (denied, restricted) {
+            string error = program === denied ? "FILESYSTEM-ACCESS-DENIED" : "ILLEGAL-FILESYSTEM-ACCESS";
+            foreach string location in (schemaPath, "file://" + schemaPath, "file://localhost" + schemaPath,
+                    "file:" + schemaPath, "file://" + replace(schemaPath, "/tmp/", "/%74mp/")) {
+                assertThrows(error, \program.callFunction(), ("load", "<value>17</value>", location, 0));
+                foreach int source in (1, 2) {
+                    assertThrows(error, \program.callFunction(), ("load", "<value>17</value>", including(location), source));
+                }
+            }
+            assertTrue(program.callFunction("load", "<value>17</value>", integerSchema, 1));
+            assertTrue(program.callFunction("load", "<value>17</value>", integerSchema, 2));
+        }
+        manager.addFilesystemAllowedPath(schemaPath, QSEC_READ);
+        assertTrue(denied.callFunction("load", "<value>17</value>", schemaPath, 0));
+        assertTrue(denied.callFunction("load", "<value>17</value>", including("file://" + schemaPath), 1));
+        string path = realpath(get_script_dir() + "/multi-file-xsd-main.xsd");
+        manager.addFilesystemAllowedPath(path, QSEC_READ);
+        assertThrows("FILESYSTEM-ACCESS-DENIED", \denied.callFunction(), ("load", "<value/>", path, 0));
+        assertTrue(denied.callFunction("load", "<value>17</value>", schemaPath, 0));
+    }
+
+    callbackPolicy() {
+        SandboxManager manager();
+        Program program = loader(manager, PO_NO_FILESYSTEM | PO_NO_NETWORK);
+        ReaderSchemaCallback callback(integerSchema);
+        string xsd = including(schemaPath);
+        assertTrue(program.callFunction("load", "<value>17</value>", xsd, 3, callback));
+        assertEq(1, callback.calls);
+        callback.action = "error";
+        assertThrows("SCHEMA-RESOURCE-TEST-ERROR", \program.callFunction(),
+            ("load", "<value>17</value>", xsd, 3, callback));
+        callback.action = "fallback";
+        assertThrows("ILLEGAL-FILESYSTEM-ACCESS", \program.callFunction(),
+            ("load", "<value>17</value>", xsd, 3, callback));
+        callback.manager = manager;
+        callback.action = "cancel";
+        *hash<ExceptionInfo> error;
+        try {
+            program.callFunction("load", "<value>17</value>", xsd, 3, callback);
+        } catch (hash<ExceptionInfo> ex) {
+            error = ex;
+        }
+        manager.clearInterrupt();
+        assertEq("PROGRAM-INTERRUPTED", error.err);
+        callback.action = "memory";
+        assertTrue(program.callFunction("load", "<value>17</value>", xsd, 3, callback));
+        assertEq(5, callback.calls);
+    }
+
+    nestedCallbacks() {
+        ReaderSchemaCallback callback(integerSchema);
+        callback.nestedSchema = including("inner.xsd");
+        XmlReader reader(new StringInputStream("<value>17</value>"),
+            {"xsd": including("outer.xsd"), "xml_input_io": callback});
+        assertTrue(consume(reader));
+        assertEq(2, callback.calls);
+        assertEq(1, callback.nested);
+        callback.action = "error";
+        Program program = loader(NOTHING, 0);
+        assertThrows("SCHEMA-RESOURCE-TEST-ERROR", \program.callFunction(),
+            ("load", "<value>17</value>", including("error.xsd"), 3, callback));
+        callback.action = "memory";
+        callback.nestedSchema = including("recovered-inner.xsd");
+        XmlReader recovered(new StringInputStream("<value>17</value>"),
+            {"xsd": including("recovered-outer.xsd"), "xml_input_io": callback});
+        assertTrue(consume(recovered));
+        assertEq(2, callback.nested);
+        XmlReader target(new StringInputStream("<value>17</value>"), {"xsd": integerSchema});
+        callback.target = target;
+        callback.action = "mutate";
+        assertThrows("XMLREADER-XSD-ERROR", \program.callFunction(),
+            ("load", "<value>17</value>", including("outer.xsd"), 3, callback));
+        assertEq("17", target.toQore());
+        assertFalse(target.read());
+        assertTrue(target.isValid());
+    }
+
+    streamFailures() {
+        SandboxManager manager();
+        Program program = loader(manager, PO_NO_FILESYSTEM | PO_NO_NETWORK);
+        ReaderSchemaCallback callback(integerSchema);
+        hash<string, string> failures = {"oversize": "XML-INPUT-STREAM-ERROR", "empty": "XSD-SYNTAX-ERROR",
+            "error": "SCHEMA-STREAM-TEST-ERROR", "cancel": "PROGRAM-INTERRUPTED"};
+        foreach string failure in (keys failures) {
+            ReaderSchemaFaultStream stream(integerSchema, failure, manager);
+            callback.suppliedStream = stream;
+            *hash<ExceptionInfo> error;
+            try {
+                program.callFunction("load", "<value>17</value>", including("stream.xsd"), 3, callback);
+            } catch (hash<ExceptionInfo> ex) {
+                error = ex;
+            }
+            manager.clearInterrupt();
+            assertEq(failures{failure}, error.err, error.desc);
+            assertTrue(stream.calls >= (failure == "error" || failure == "cancel" ? 2 : 1));
+            callback.suppliedStream = new ReaderSchemaFaultStream(integerSchema, "", manager);
+            assertTrue(program.callFunction("load", "<value>17</value>", including("recovered.xsd"), 3, callback));
+        }
+    }
+
+}

@@ -4604,3 +4604,117 @@ to user steering; this increment does not change schema attachment. General
 WSDL QName namespace/provider/list/union integration remains in scratch,
 followed by ENTITY/ENTITIES, dateTime/time policy and the other P3 criteria.
 No answer is inferred for the pending leap-second decision. P4-P9 have not begun.
+
+## P3-36 — Reader schema attachment and resource state (in progress)
+
+The compatible API correction preserves `XmlReader::schemaValidate()` as a
+file/URI method and adds `schemaValidateString()` for XSD text. Its prior
+string documentation contradicted the actual libxml2 file/URI call. The
+optional API preference was presented to the user; work proceeds with the
+stated compatible default, without treating silence as approval of a workaround
+or of the outstanding leap-second decision.
+
+The retained failing reproducer `/tmp/wsdl-p3-36-attach-baseline.qr` attaches an
+integer schema, tries a missing replacement, then reads invalid integer content.
+The old native API detached the first schema before parsing the replacement and
+reported the invalid XML as valid. The new implementation compiles a candidate
+first, checks reader state again after resource callbacks, and owns any candidate
+retained by a native context even if allocating its SAX plug fails. Started/tree
+readers reject attachment; reader destruction releases the native context before
+its schema. Constructor text schemas use the same attachment path.
+
+A separate reproducer `/tmp/wsdl-p3-36-schema-sandbox-baseline.qr` proved that
+native schema file loading bypassed both PO_NO_FILESYSTEM and a deny-all
+filesystem policy. The shared compiler now provides a scoped resource exception
+context; callbacks enforce file/URI policy and block fallback after exceptions.
+Callback streams belong to individual resources, allowing nested compilation and
+restoration of the outer context. HTTP resource loading uses Qore's checked
+transport and retains the final redirect URI as the base of relative imports.
+The libxml2 >=2.14 path uses its per-schema resource loader; an isolated older
+library compatibility harness is being checked separately. Production CMake still
+rejects the unpatched installed libxml2.
+
+The initial native regression is `test/xml-reader-schemas.qtest`: 11 cases /
+173 assertions, including strings/streams, replacement success/failure, reader
+boundaries, UTF encodings, NUL rejection, policy, callback fallback/cancellation,
+nested parsing and reentrant advancement of the target reader. Independent HTTP
+coverage is `test_schema_resources.py` plus `schema-resource-loader.qr`: five
+methods for redirects/import bases, preserved ISO-8859-1 bytes, schema/document
+rejections, denied destinations and recovery. This test fixture sets
+XML_CATALOG_FILES to the empty string so host catalog configuration cannot affect
+the independent server or the network-policy assertions; production catalog
+loading is not disabled and remains subject to filesystem policy.
+
+### Core prerequisite: HTTP/1 response persistence
+
+The independent HTTP/1.0 server exposed a core transport bug: response parsing
+ignored the HTTP version when deciding connection persistence and matched a
+Connection field only when its entire value was `close`. A redirect could reuse
+a nonpersistent connection and fail with HTTP1-CONNECTION-CLOSED. The separately
+audited core fix applies RFC 9112 section 9.3, parsing comma-separated/repeated
+options and giving close precedence. The native connection is marked closed
+before the response future becomes available, using its existing dispatch path.
+
+The isolated core is Debug with `/usr` prefix and no installation. Its current
+SHA-256 is `8fe8c3c1bc4b1c09eddb76f0001cdba50f98be6ea3dcabe3f4e92b05e8eadd6b`,
+superseding the frozen P3-35 core only for this increment. The implementation
+SHA-256 is `3c6855a2660fa6766f740ff6410711db0f7c392be5976f4f8c482b3b49f55e5d`.
+The new core regression has four cases / 111 assertions and passes AST, IR, JIT
+and tiered modes. Its deterministic server keeps a nonpersistent socket open
+until the client closes, detecting prohibited reuse without a FIN timing race.
+The existing HTTPClient suite reports 256 assertions (22 completed cases and two
+existing proxy/HTTP3 prerequisite skips; 63 assertions run before the HTTP3 skip).
+Existing HttpClientIo redirects pass seven cases / 16 assertions; all five
+independent schema HTTP methods pass. The full core audit is 25 Pass / 37 N/A /
+0 Fail in `examples/test/qore/classes/HTTPClient/audits/http1-persistence.md`.
+
+Valgrind with Qore JIT enabled and the authorized PCRE2 interpreter test setting
+reports zero errors and zero definite/indirect/possible lost bytes. Alongside the
+known DWARF-reader warning, a system SSSD warning remains a P9 environment finding:
+`fstat(-1)` is called by `libnss_sss.so.2` during the c-ares service-name lookup for
+socket bind. `/tmp/wsdl-p3-36-core-http-fstat.strace` records the syscall stack
+through `sss_cli_check_socket`, `getservbyname_r`, and
+`QoreCaresAddrInfoResolver::start`. Neither warning is suppressed or counted as a
+clean environment check. This does not close the P9 environment requirements.
+
+Core logs/manifests are `/tmp/wsdl-p3-36-core-final-*`. Core files copied into the
+main develop checkout match the tested isolated source; concurrent AsyncIoController
+and WebSocketHandler work is excluded. Core commit `1b357c9bd` is on the main repository's develop branch, without pushing.
+The 84-suite XML gate (901 cases / 33,303 reported assertions) and both-version
+corpus reports show no regressions; all previous suite results and both corpus
+reports are structurally identical to P3-35. Native XML gates, final documentation, full audit
+and commit remain pending; P3 and the overall P1-P9 plan are still open.
+
+
+### P3-36 final native gates
+
+The final implementation and [evidence](xml-reader-schemas-evidence.md) include
+HTTPS certificate verification, catalog policy, a legacy FTP peer, partial-stream
+failure/interruption and buffer-bound tests. The attachment suite is now 12 cases /
+191 assertions, with 96 cases / 1,528 assertions across four modes and two timezones.
+The full 84-suite gate reports 902 cases / 33,321 assertions; both-version raw and
+strict corpus reports remain structurally identical to P3-35. All 300 independent
+QName union documents pass both new attachment paths with exact values. The Python
+coverage run retains exactly the two P6-selected-binding-version failures.
+
+Affected native Valgrind tests pass 51 cases / 914 assertions with zero errors and
+zero definite/indirect/possible lost bytes. The additional same-process HTTP batch
+also has zero memory errors/loss. Known unsuppressed DWARF/SSSD warnings and the
+unchanged native local-file loader's blocking-I/O review remain explicitly P9 work.
+Debug/Release builds and docs pass without warnings/errors; the final attachment
+and HTTP matrix pass the Release module and the isolated old-libxml2 compatibility
+build. The full native audit is 26 Pass / 36 N/A / 0 Fail.
+
+Core TLS prerequisite `8bbe7eed1` corrects only the default debug logging level,
+retaining caught exceptions and certificate verification. Its three independent
+TLS cases pass all four modes and Valgrind. It was committed on the main core
+repository's develop branch without pushing, after the separate 62-item audit.
+The frozen core for this increment is now
+`e7445dbdfd81e79f053c78cb9e60b77c368eaa04a619f9093014091ae4bda8da`.
+
+The independently reproduced raw-schemaLocation anyURI failure is retained in
+[schema-uri-findings.json](schema-uri-findings.json) and assigned to the next P3
+native-URI increment, alongside the offline oracle's Java URI/file-key issues.
+A direct libxml2 C probe proves this failure exists without Qore. The valid raw
+source is not rewritten or counted as passing. P3 is not complete; the WSDL QName,
+list/union, provider, sample and wire integration work also remains active.

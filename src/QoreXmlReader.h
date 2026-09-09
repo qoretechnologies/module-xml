@@ -40,43 +40,40 @@
 
 class XmlIoInputCallbackHelper {
 public:
-    DLLLOCAL XmlIoInputCallbackHelper(const QoreHashNode* opts, ExceptionSink* xs) : xsink(xs) {
-        assert(!xml_io_callback);
-
+    DLLLOCAL XmlIoInputCallbackHelper(const QoreHashNode* opts, ExceptionSink* xs)
+            : previous(xml_io_callback), xsink(xs) {
+        xml_io_callback = nullptr;
         bool found = false;
-        QoreValue v = opts->getKeyValueExistence("xml_input_io", found);
-        if (found) {
-            if (v.getType() != NT_OBJECT) {
-                xsink->raiseException("XMLREADER-XSD-ERROR", "expecting type 'object' with option 'xml_input_io'; got type '%s' instead", v.getTypeName());
-                return;
-            }
-            const QoreObject* obj = v.get<const QoreObject>();
-            xml_io_callback = static_cast<AbstractXmlIoInputCallback*>(obj->getReferencedPrivateData(CID_ABSTRACTXMLIOINPUTCALLBACK, xsink));
-            if (*xsink) {
-                assert(!xml_io_callback);
-                return;
-            }
-            if (!xml_io_callback) {
-                assert(!*xsink);
-                xsink->raiseException("XMLREADER-XSD-ERROR", "expecting an object of class 'AbstractXmlIoInputCallback' with option 'xml_input_io'; got class '%s' instead", obj->getClassName());
-                return;
-            }
-            xml_io_callback->setExceptionContext(xsink);
-            //printd(5, "XmlIoInputCallbackHelper::XmlIoInputCallbackHelper() set xml_io_vallback: %p\n", xml_io_callback);
+        QoreValue value = opts->getKeyValueExistence("xml_input_io", found);
+        if (!found) {
+            return;
+        }
+        if (value.getType() != NT_OBJECT) {
+            xsink->raiseException("XMLREADER-XSD-ERROR", "expecting an AbstractXmlIoInputCallback object with "
+                "option 'xml_input_io'; got type '%s' instead", value.getTypeName());
+            return;
+        }
+        const QoreObject* object = value.get<const QoreObject>();
+        xml_io_callback = static_cast<AbstractXmlIoInputCallback*>(
+            object->getReferencedPrivateData(CID_ABSTRACTXMLIOINPUTCALLBACK, xsink));
+        if (!*xsink && !xml_io_callback) {
+            xsink->raiseException("XMLREADER-XSD-ERROR", "expecting an AbstractXmlIoInputCallback object with "
+                "option 'xml_input_io'; got class '%s' instead", object->getClassName());
         }
     }
 
     DLLLOCAL ~XmlIoInputCallbackHelper() {
-        if (xml_io_callback) {
-            //printd(5, "XmlIoInputCallbackHelper::~XmlIoInputCallbackHelper() clearing xml_io_vallback: %p\n", xml_io_callback);
-            xml_io_callback->clearExceptionContext();
-            xml_io_callback->deref(xsink);
-            xml_io_callback = nullptr;
+        AbstractXmlIoInputCallback* current = xml_io_callback;
+        xml_io_callback = previous;
+        if (current) {
+            current->deref(xsink);
         }
     }
 
 private:
+    AbstractXmlIoInputCallback* previous;
     ExceptionSink* xsink;
+
 };
 
 class QoreXmlReader {
@@ -87,6 +84,8 @@ protected:
     int fd = -1;
     ReferenceHolder<InputStream> inputStream;
     AbstractXmlValidator* val = nullptr;
+    bool tree_reader = false;
+    bool schema_attachment_failed = false;
 
     static void qore_xml_error_func(QoreXmlReader* xr, const char* msg, xmlParserSeverities severity, xmlTextReaderLocatorPtr locator) {
         if (severity == XML_PARSER_SEVERITY_VALIDITY_WARNING
@@ -166,6 +165,7 @@ protected:
     DLLLOCAL void init(xmlDocPtr doc, ExceptionSink* xsink) {
         assert(!xml);
         assert(!reader);
+        tree_reader = true;
         reader = xmlReaderWalker(doc);
         if (!reader) {
             xsink->raiseException("XML-READER-ERROR", "could not create XML reader");
@@ -261,14 +261,16 @@ protected:
 
     DLLLOCAL void reset() {
         //printd(5, "QoreXmlReader::reset() reader: %p val: %p fd: %d\n", reader, val, fd);
-        if (val) {
-            delete val;
-            val = nullptr;
-        }
         if (reader) {
             xmlFreeTextReader(reader);
             reader = nullptr;
         }
+        if (val) {
+            delete val;
+            val = nullptr;
+        }
+        tree_reader = false;
+        schema_attachment_failed = false;
         if (fd >= 0) {
             close(fd);
             fd = -1;
@@ -278,6 +280,8 @@ protected:
     }
 
 public:
+    enum class SchemaSource { Location, Text };
+
     DLLLOCAL QoreXmlReader(const QoreString* n_xml, int options, ExceptionSink* xsink) : xs(xsink), inputStream(xsink) {
         init(n_xml, options, nullptr, xsink);
     }
@@ -337,7 +341,8 @@ public:
 
     // returns 1 = OK, 0 = no more nodes to read, -1 = error
     DLLLOCAL int read() {
-        return xmlTextReaderRead(reader);
+        // An allocation/attachment failure must not permit an unvalidated read.
+        return schema_attachment_failed ? -1 : xmlTextReaderRead(reader);
     }
 
     // returns 1 = OK, 0 = no more nodes to read, -1 = error
@@ -471,7 +476,9 @@ public:
 #ifdef HAVE_XMLTEXTREADERSETSCHEMA
     DLLLOCAL int setSchema(xmlSchemaPtr schema) {
         //printd(5, "QoreXmlReader::setSchema() reader: %p schema: %p\n", reader, schema);
-        return xmlTextReaderSetSchema(reader, schema);
+        int status = xmlTextReaderSetSchema(reader, schema);
+        schema_attachment_failed = status < 0;
+        return status;
     }
 #endif
 
@@ -602,10 +609,7 @@ public:
 #endif
 
 #ifdef HAVE_XMLTEXTREADERSETSCHEMA
-    DLLLOCAL void schemaValidate(const char* xsd, ExceptionSink* xsink) {
-        if (xmlTextReaderSchemaValidate(reader, xsd))
-            xsink->raiseException("XMLREADER-XSD-ERROR", "an error occurred setting the W3C XSD schema for validation; this function must be called before the first call to XmlReader::read()");
-    }
+    DLLLOCAL void schemaValidate(const QoreString& xsd, SchemaSource source, ExceptionSink* xsink);
 #endif
 
     DLLLOCAL QoreHashNode* parseXmlData(const QoreEncoding* data_ccsid, int pflags, ExceptionSink* xsink);
