@@ -59,7 +59,7 @@ class StructuralRegexTest(unittest.TestCase):
     def test_structural_unicode_and_character_classes(self):
         definitions = []
         for case in classes.definitions():
-            # This test drives the structural object directly, including patterns normally handled by PCRE.
+            # This test drives the structural object directly, including ordinary and counted expressions.
             if case.name in {'regex-inherited', 'regex-alternatives'}:
                 continue
             wrapper = '<root xmlns:xs="http://www.w3.org/2001/XMLSchema">' + case.facets + '</root>'

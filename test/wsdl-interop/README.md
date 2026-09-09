@@ -775,3 +775,13 @@ A failed survey worker now includes bounded stderr in its exception message,
 while retaining its full captured output and CalledProcessError compatibility.
 `test_survey.py` verifies real child failure, cleanup, bounded rendering and
 unchanged timeout/cancellation behavior. Worker errors remain hard failures.
+
+Pattern execution checks in `../wsdl-regex-execution.qtest` and
+`test_regex_execution.py` cover ambiguous alternatives, nullable closures,
+count-state gaps, large inputs, cancellation/reuse and shared immutable programs.
+New constraints retain XSD source and avoid full-expression PCRE limits. Both
+actual SOAP bindings/directions and reconstructed providers preserve exact
+strings and reject invalid inputs with the expected category. The named libxml2
+execution limit remains recorded as unassessed; original Xerces checks and
+separate language-equivalent schemas assess every affected document.
+See [execution evidence](regex-execution-evidence.md).

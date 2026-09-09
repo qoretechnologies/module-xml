@@ -1,0 +1,138 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires xml
+%requires ../qlib/WSDL.qm
+%exec-class RegexExecutionTest
+
+class RegexExecutionTest inherits QUnit::Test {
+    constructor() : Test("XSD regex execution semantics", "1.0") {
+        addTestCase("Ambiguous first alternatives do not hide valid later alternatives", \alternatives());
+        addTestCase("Nested closures preserve acceptance and rejection", \closures());
+        addTestCase("Count minima preserve gaps before dominance pruning", \minimumGaps());
+        addTestCase("Large ambiguous inputs remain bounded by their contents", \largeInputs());
+        addTestCase("Ordinary reconstructed patterns retain source and cancellation", \sourceAndCancellation());
+        addTestCase("Concurrent state sets remain local to each match", \concurrency());
+        set_return_value(main());
+    }
+
+    private static XsdSchema schema(string pattern) {
+        return new XsdSchema('<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
+            <xs:simpleType name="Value"><xs:restriction base="xs:string"><xs:pattern value="'
+            + pattern + '"/></xs:restriction></xs:simpleType></xs:schema>', {"async_only": True});
+    }
+
+    private check(string pattern, list<string> valid, list<string> invalid) {
+        XsdSchema original = schema(pattern);
+        foreach XsdSchema definition in (original, Serializable::deserialize(original.serialize())) {
+            XsdAbstractType type = definition.findType("Value");
+            AbstractDataProviderType provider = Serializable::deserialize(type.getDataProviderType().serialize());
+            foreach string value in (valid) {
+                assertEq(value, type.deserializeValue("value", definition.getTypeMap(), NOTHING, value));
+                assertEq(value, type.serializeValue(definition.nsc, value, True));
+                assertEq(value, provider.acceptsValue(value));
+            }
+            foreach string value in (invalid) {
+                assertThrows("SOAP-DESERIALIZATION-ERROR", \type.deserializeValue(),
+                    ("value", definition.getTypeMap(), NOTHING, value));
+                assertThrows("SOAP-SERIALIZATION-ERROR", \type.serializeValue(), (definition.nsc, value, True));
+                assertThrows("RUNTIME-TYPE-ERROR", \provider.acceptsValue(), (value,));
+            }
+        }
+    }
+
+    private alternatives() {
+        string prefix = strmul("a", 100);
+        check("(a|aa)+|a+b", (prefix + "b", prefix), (prefix + "c", ""));
+        check("((a|aa)+b|a+c)", (prefix + "b", prefix + "c"), (prefix + "d", prefix, ""));
+    }
+
+    private closures() {
+        string prefix = strmul("a", 100);
+        check("(a+)+b|a+c", (prefix + "b", prefix + "c"), (prefix + "d", prefix));
+        check("(a*)+", ("", "a", prefix), ("b", prefix + "b"));
+        check("(a+)*", ("", "a", prefix), ("b", prefix + "b"));
+        check("(a*)*", ("", "a", prefix), ("b", prefix + "b"));
+    }
+
+    private minimumGaps() {
+        check("(a|aaa){2}", ("aa", "aaaa", "aaaaaa"), ("", "a", "aaa", "aaaaa", "aaaaaaa"));
+        check("(a|aaa){2,3}", ("aa", "aaa", "aaaa", "aaaaa", "aaaaaa", "aaaaaaa", "aaaaaaaaa"),
+            ("", "a", "aaaaaaaa", "aaaaaaaaaa"));
+        check("(a{2}){1,2}", ("aa", "aaaa"), ("a", "aaa", "aaaaa"));
+    }
+
+    private largeInputs() {
+        string prefix = strmul("a", 10000);
+        check("(a|aa)+|a+b", (prefix + "b",), (prefix + "c",));
+        check("(a+)+b|a+c", (prefix + "c",), (prefix + "d",));
+    }
+
+    private sourceAndCancellation() {
+        XsdSchema original = schema("(a|aa)+|a+b");
+        foreach XsdSchema definition in (original, Serializable::deserialize(original.serialize())) {
+            XsdSimpleType type = cast<XsdSimpleType>(definition.findType("Value"));
+            assertTrue(type.pcre_patterns[0] instanceof XsdCompiledPattern);
+            assertEq("(a|aa)+|a+b", cast<XsdCompiledPattern>(type.pcre_patterns[0]).getSource());
+        }
+        SandboxManager manager();
+        on_exit manager.clearInterrupt();
+        Program program(PO_NEW_STYLE | PO_STRICT_ARGS | PO_REQUIRE_TYPES);
+        program.setSandboxManager(manager);
+        program.parse("%modern\n%requires ../qlib/WSDL.qm\n"
+            "bool sub runPattern(XsdCompiledPattern pattern, SandboxManager manager, bool cancel) {\n"
+            "    if (cancel) { manager.requestInterrupt(); }\n"
+            "    return pattern.matches(\"aaab\");\n"
+            "}\n", get_script_dir() + "/wsdl-execution-interrupt.qr");
+        XsdCompiledPattern pattern("(a|aa)+|a+b");
+        *hash<ExceptionInfo> error;
+        try {
+            program.callFunction("runPattern", pattern, manager, True);
+        } catch (hash<ExceptionInfo> ex) {
+            error = ex;
+        }
+        manager.clearInterrupt();
+        assertEq("PROGRAM-INTERRUPTED", error.err);
+        assertTrue(program.callFunction("runPattern", pattern, manager, False));
+        assertFalse(pattern.matches("aaac"));
+    }
+    private concurrency() {
+        XsdCompiledPattern pattern("(a|aa)+|a+b");
+        Qore::Thread::Queue ready();
+        Qore::Thread::Queue start();
+        Qore::Thread::Queue results();
+        Qore::Thread::Counter running();
+        on_exit {
+            for (int i = 0; i < 4; ++i) {
+                start.push(True);
+            }
+            assertEq(0, running.waitForZero(30s));
+        }
+        for (int i = 0; i < 4; ++i) {
+            running.inc();
+            background sub () {
+                on_exit running.dec();
+                try {
+                    ready.push(True);
+                    start.get(30s);
+                    bool accepted = pattern.matches("aaaab");
+                    bool rejected = !pattern.matches("aaaac");
+                    results.push({"accepted": accepted, "rejected": rejected});
+                } catch (hash<ExceptionInfo> ex) {
+                    results.push({"error": ex});
+                }
+            }();
+        }
+        for (int i = 0; i < 4; ++i) {
+            ready.get(30s);
+        }
+        for (int i = 0; i < 4; ++i) {
+            start.push(True);
+        }
+        for (int i = 0; i < 4; ++i) {
+            assertEq({"accepted": True, "rejected": True}, results.get(30s));
+        }
+    }
+}

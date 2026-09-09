@@ -80,8 +80,9 @@ module WSDL {
     @section wsdlrelnotes WSDL Module Release Notes
 
     @subsection wsdl_0_5_8 WSDL v0.5.8
-    - valid XSD patterns exceeding PCRE compilation limits retain exact repetition counts and use a structural
-      matcher; reconstructed schemas and providers preserve these constraints and legacy PCRE strings
+    - XSD patterns use structural matching with exact repetition counts and state sets for ordinary closures,
+      avoiding backend compilation and backtracking limits; reconstructed schemas and providers retain the
+      original expressions, and older serialized PCRE constraints remain readable
     - XSD patterns validate their own grammar and translate Unicode character-class unions, complements,
       ranges and nested subtraction consistently; the wildcard excludes both carriage return and newline
     - regex sample generation bounds repetition before native integer conversion and checks a bounded
@@ -7685,6 +7686,102 @@ hashdecl XsdRegexNode {
     *string high = "1";
     bool nullable = False;
 }
+# Thompson fragments use two states per grammar node; numeric bounds are never expanded.
+hashdecl XsdRegexState {
+    int atom = -1;
+    list<int> next();
+}
+hashdecl XsdRegexFrontier {
+    list<int> states();
+    bool accepted = False;
+}
+class XsdRegexAutomaton {
+    public {
+        list<hash<XsdRegexState>> states();
+        int start;
+        int end;
+    }
+    static *XsdRegexAutomaton compile(list<hash<XsdRegexNode>> nodes, int root) {
+        foreach hash<XsdRegexNode> node in (nodes) {
+            if (node.kind == XRN_REPEAT && ((node.low != "0" && node.low != "1")
+                    || (exists node.high && node.high != "0" && node.high != "1"))) {
+                return;
+            }
+        }
+        return new XsdRegexAutomaton(nodes, root);
+    }
+    private constructor(list<hash<XsdRegexNode>> nodes, int root) {
+        start = 2 * root;
+        end = start + 1;
+        foreach hash<XsdRegexNode> node in (nodes) {
+            int first = states.size();
+            int last = first + 1;
+            push states, <XsdRegexState>{};
+            push states, <XsdRegexState>{};
+            switch (node.kind) {
+                case XRN_CHARACTER:
+                case XRN_SET_UNION:
+                case XRN_SET_NOT:
+                case XRN_SET_DIFFERENCE:
+                    states[first].atom = first / 2;
+                    states[first].next = (last,);
+                    break;
+                case XRN_EMPTY:
+                    states[first].next = (last,);
+                    break;
+                case XRN_ALTERNATIVE:
+                    foreach int child in (node.children) {
+                        push states[first].next, 2 * child;
+                        push states[2 * child + 1].next, last;
+                    }
+                    break;
+                case XRN_SEQUENCE:
+                    int previous = first;
+                    foreach int child in (node.children) {
+                        push states[previous].next, 2 * child;
+                        previous = 2 * child + 1;
+                    }
+                    push states[previous].next, last;
+                    break;
+                case XRN_REPEAT:
+                    int child = 2 * node.children[0];
+                    if (node.high != "0") {
+                        push states[first].next, child;
+                        push states[child + 1].next, last;
+                        if (!exists node.high) {
+                            push states[child + 1].next, child;
+                        }
+                    }
+                    if (node.low == "0") {
+                        push states[first].next, last;
+                    }
+                    break;
+            }
+        }
+    }
+    hash<XsdRegexFrontier> closure(list<int> seeds) {
+        hash<XsdRegexFrontier> result();
+        hash<string, bool> seen();
+        while (seeds) {
+            int state = pop seeds;
+            string key = state.toString();
+            if (seen.hasKey(key)) {
+                continue;
+            }
+            seen{key} = True;
+            if (state == end) {
+                result.accepted = True;
+            } else if (states[state].atom >= 0) {
+                push result.states, state;
+            } else {
+                seeds += states[state].next;
+            }
+        }
+        result.states = sort(result.states);
+        return result;
+    }
+}
+
 class XsdRegexMatchFrame {
     public {
         int node;
@@ -7715,14 +7812,14 @@ class XsdRegexMatchFrame {
             }
         }
     }
-    addNext(list<int> points, bool nullable, int start) {
+    addNext(list<int> points, bool prune, int start) {
         foreach int point in (points) {
             string key = point.toString();
-            if ((nullable && (point == start || visited.hasKey(key))) || next_seen.hasKey(key)) {
+            if ((prune && (point == start || visited.hasKey(key))) || next_seen.hasKey(key)) {
                 continue;
             }
             next_seen{key} = True;
-            if (nullable) {
+            if (prune) {
                 visited{key} = True;
             }
             push next, point;
@@ -7879,7 +7976,41 @@ class XsdRegexMatcher {
         return digits.length() > bound.length() || (digits.length() == bound.length() && (digits <=> bound) > 0)
             ? limit : digits.toInt();
     }
-    bool matches(int root) {
+    private bool matchesAutomaton(XsdRegexAutomaton automaton) {
+        list<hash<XsdRegexFrontier>> frontiers = (automaton.closure((automaton.start,)),);
+        hash<string, int> sets = {
+            (frontiers[0].accepted ? "1:" : "0:") + frontiers[0].states.join(","): 0,
+        };
+        hash<string, int> transitions();
+        int current = 0;
+        # Cache only transitions reached by this input. Immutable grammar state is shared;
+        # frontiers, character results and cancellation state remain local to the call.
+        foreach string value in (chars) {
+            string key = current.toString() + ":" + value;
+            if (!transitions.hasKey(key)) {
+                list<int> seeds();
+                foreach int state in (frontiers[current].states) {
+                    if (character(automaton.states[state].atom, value)) {
+                        seeds += automaton.states[state].next;
+                    }
+                }
+                hash<XsdRegexFrontier> next = automaton.closure(seeds);
+                string signature = (next.accepted ? "1:" : "0:") + next.states.join(",");
+                if (!sets.hasKey(signature)) {
+                    sets{signature} = frontiers.size();
+                    push frontiers, next;
+                }
+                transitions{key} = sets{signature};
+            }
+            current = transitions{key};
+        }
+        return frontiers[current].accepted;
+    }
+
+    bool matches(int root, *XsdRegexAutomaton automaton) {
+        if (automaton) {
+            return matchesAutomaton(automaton);
+        }
         list<XsdRegexMatchFrame> work = (new XsdRegexMatchFrame(root, 0),);
         while (work) {
             XsdRegexMatchFrame frame = work[-1];
@@ -7966,7 +8097,11 @@ class XsdRegexMatcher {
                 push work, new XsdRegexMatchFrame(child, start);
                 continue;
             }
-            frame.addNext(cache{child_key}, node.kind == XRN_REPEAT && nodes[child].nullable, start);
+            # Once the lower bound is satisfied, an earlier visit leaves at least as much
+            # remaining count budget as a later visit to the same offset. Before that point,
+            # preserve distinct count states: attainable counts can have gaps.
+            frame.addNext(cache{child_key}, node.kind == XRN_REPEAT
+                && (nodes[child].nullable || frame.count + 1 >= frame.low), start);
             ++frame.index;
         }
         foreach int end in (cache{sprintf("%d:0", root)}) {
@@ -7991,6 +8126,7 @@ class XsdRegexProgram {
         list<XsdRegexParseFrame> frames = (new XsdRegexParseFrame(),);
         int root;
         *string repeated_literal;
+        *XsdRegexAutomaton automaton;
     }
 
     int makeCharacter(string pattern, *string literal = NOTHING) {
@@ -8053,6 +8189,13 @@ class XsdRegexProgram {
         if (exists high) {
             high = XsdIntegerLexicalHelper::canonical(high);
         }
+        # Pure closure identities hold for every language, including nullable atoms.
+        # General bounded counts are deliberately retained: their attainable totals may have gaps.
+        if (!exists high && (low == "0" || low == "1") && nodes[child].kind == XRN_REPEAT
+                && !exists nodes[child].high && (nodes[child].low == "0" || nodes[child].low == "1")) {
+            low = low == "0" || nodes[child].low == "0" ? "0" : "1";
+            child = nodes[child].children[0];
+        }
         push nodes, <XsdRegexNode>{"kind": XRN_REPEAT, "children": (child,), "low": low, "high": high,
             "nullable": low == "0" || nodes[child].nullable};
         push frame.pieces, nodes.size() - 1;
@@ -8063,6 +8206,7 @@ class XsdRegexProgram {
         branch();
         root = group(XRN_ALTERNATIVE, frames[0].branches);
         frames = ();
+        automaton = XsdRegexAutomaton::compile(nodes, root);
         if (nodes[root].kind == XRN_REPEAT) {
             hash<XsdRegexNode> atom = nodes[nodes[root].children[0]];
             if (atom.kind == XRN_CHARACTER) {
@@ -8115,7 +8259,7 @@ class XsdRegexProgram {
             }
         }
         XsdRegexMatcher matcher(nodes, value);
-        return matcher.matches(root);
+        return matcher.matches(root, automaton);
     }
 
     private int group(XsdRegexNodeKind kind, list<int> children) {
@@ -8207,15 +8351,6 @@ public typedef XsdPatternConstraint = union<string, XsdCompiledPattern>;
 
 class XsdPatternConstraintHelper {
     static XsdPatternConstraint compile(string source) {
-        string pcre = "\\A(?:" + XsdRegexHelper::toPcre(source) + ")\\z";
-        try {
-            bool empty = regex("", pcre);
-            return pcre;
-        } catch (hash<ExceptionInfo> ex) {
-            if (ex.err != "REGEX-ERROR" && ex.err != "REGEX-COMPILATION-ERROR") {
-                rethrow;
-            }
-        }
         return new XsdCompiledPattern(source);
     }
 
@@ -9748,8 +9883,8 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
         */
         *list<string> patterns;
         #! compiled \c pattern facets, matched against the whole value
-        /** Ordinary patterns retain their anchored PCRE strings. Valid XSD patterns exceeding backend compilation
-            limits use immutable XsdCompiledPattern objects. Compilation happens once per restriction.
+        /** New constraints use immutable XsdCompiledPattern objects retaining the original XSD source.
+            Older serialized anchored PCRE strings remain readable. Compilation happens once per restriction.
 
             @since %WSDL 0.5.8
         */
@@ -9844,7 +9979,7 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
                 } else {
                     patterns = (r.pattern."^attributes^".value,);
                 }
-                # Compile XSD patterns once, retaining structural counts when PCRE cannot represent the expression.
+                # Compile the original XSD source once, independently of PCRE repetition/backtracking limits.
                 if (patterns) {
                     try {
                         pcre_patterns = map XsdPatternConstraintHelper::compile($1), patterns;
@@ -10802,10 +10937,9 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
     }
 
     #! returns @ref True if the value matches the given XSD pattern in its entirety
-    /** issue #5411: XSD patterns must match the entire value; the pattern is wrapped in a non-capturing group so
-        that a top-level alternation is anchored as a whole (ex: "a|b" must become "^(?:a|b)$" and not "^a|b$",
-        which matches any value starting with "a" or ending with "b"). Expressions outside PCRE compilation
-        limits use XsdCompiledPattern with the same whole-value semantics; see @ref WSDL::XsdRegexHelper
+    /** issue #5411: XSD patterns match the entire value, including all top-level alternatives. For example,
+        "a|b" accepts only "a" or "b". New expressions use XsdCompiledPattern; older anchored PCRE metadata
+        retains the same boundary requirement. See @ref WSDL::XsdRegexHelper.
 
         @since %WSDL 0.5.8
     */

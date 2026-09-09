@@ -37,8 +37,8 @@ corruption, all affected provider families, concurrent reuse and cancellation
 recovery are covered by `test/wsdl-regex-counts.qtest`.
 
 The actual-binding matrix defines eight datatype restrictions, 24 schemas and
-48 separate SOAP 1.1/1.2 contracts. Request/response paths check 512 original
-input documents and 224 emitted documents. Reconstructed element/message
+48 separate SOAP 1.1/1.2 contracts. Request/response paths check 384 original
+input documents and 168 emitted documents. Reconstructed element/message
 providers produce 2,432 result rows, including rejection and example outcomes;
 1,136 accepted provider/example documents are independently checked. The matrix
 requires exact lexical strings and correct error categories, including original
@@ -101,7 +101,7 @@ Let `N` be the original 24-digit bound:
 | `((a\|b){2}){0,N}` | `((a\|b){2}){0,8}` | Each outer iteration consumes exactly two characters. |
 | `(Α\|中\|𐀀){1,N}` | `(Α\|中\|𐀀){1,16}` | Each iteration consumes one Unicode character. |
 
-The two test methods add 18 reference schemas each and 1,616 document
+The two test methods add 18 reference schemas each and 1,464 document
 assessments in total. Every reference document must have the expected verdict
 in both validators. Exact Qore input/output assertions still apply to the
 original large-count expressions. No `unreachable` result is substituted for
@@ -124,3 +124,11 @@ The final execution and full 62-item audit are recorded in EXECUTION.md and
 `audits/P3-19-regex-counts.md`. Passing these repetition checks does not establish
 P3 acceptance: remaining regex execution, primitive/date/IEEE/binary/QName/
 entity/XML-RPC work and P4-P9 requirements retain their scope.
+
+Accounting correction during P3-20 review: the binding harness emits one
+repeated payload per value, whereas consumer variants also test two list sizes.
+An instrumented run records 384 binding input and 168 binding output documents,
+1136 consumer documents, and 456 + 1008 bounded-reference documents. The original
+P3-19 record mistakenly used consumer variant multiplicity for binding counts.
+The corrected figures above do not change test coverage or outcomes; exact
+records are in `/tmp/wsdl-p3-20-repetition-accounting.json`.

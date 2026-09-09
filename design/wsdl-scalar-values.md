@@ -311,9 +311,10 @@ defects and the Xerces code-point-count setting are documented in
 `test/wsdl-interop/sized-facets-adjudication.md`. The element-choice setter requires
 the core DataProvider fix in commit `cbb8aceb2`.
 
-Compiled XSD patterns use PCRE's absolute `\A` and `\z` assertions. A trailing
-newline is part of a preserved string and cannot be ignored by a `$` end anchor.
-Sample verification uses the same absolute boundaries. Native scalar inputs to
+Compiled XSD patterns match the entire input; translated legacy PCRE strings use
+absolute `\A` and `\z` assertions. A trailing newline is part of a preserved
+string and cannot be ignored by a `$` end anchor. Sample verification uses the
+same complete-value requirement. Native scalar inputs to
 list serialization count as one item, following its existing singleton conversion.
 NOTHING used as an empty list must satisfy the same zero-item constraints.
 
@@ -666,8 +667,8 @@ find a candidate remains `NOTHING` at the helper or `XSD-SAMPLE-ERROR` at the
 type/example API. Cancellation and unexpected errors propagate.
 
 PCRE translation remains available as an API; its return value still has the
-backend's compilation/matching limits. Schema pattern compilation now uses the
-structural representation below for valid expressions PCRE cannot compile. See
+backend's compilation/matching limits. Schema pattern compilation uses the
+structural representation below for every new constraint. See
 `test/wsdl-regex-classes.qtest`, `test_regex_classes.py`, and
 [regex evidence](../test/wsdl-interop/regex-classes-evidence.md).
 The independent boundary matrix checks every start/end and adjacent code point
@@ -676,9 +677,9 @@ of all 326 normative character ranges against both pinned validators.
 
 Valid XSD repetitions are not restricted to PCRE's 65535 count field or compiled
 bytecode size. `XsdPatternConstraint` is a typed union of the existing anchored
-PCRE string and the immutable `XsdCompiledPattern`. Ordinary patterns retain
-the string representation. On a backend compilation failure after XSD grammar
-validation, the pattern stores its source and builds a structural program.
+PCRE string and the immutable `XsdCompiledPattern`. New constraints always store
+the original source and build a structural program after XSD grammar validation.
+Matching does not depend on full-expression PCRE compilation or backtracking.
 Boolean, numeric, string, builtin-list, list and union provider constraints use
 the same dispatch as schema serialization and deserialization. Older serialized
 PCRE strings remain valid metadata; unsupported objects are rejected.
@@ -698,9 +699,20 @@ character per useful iteration; impossible minima fail immediately. Nullable
 atoms can pad any minimum with empty iterations. Their matcher ignores zero
 progress and retains the earliest visit to each offset, which leaves at least
 as much maximum-count budget as a later visit. Nonnullable variable-width atoms
-preserve attainable count/offset states, including gaps between possible counts.
+preserve attainable count/offset states until the minimum is met, including gaps
+between possible counts. After the minimum is met, earlier visits dominate later
+visits as well. Pure closure identities collapse nested stars and pluses;
+general bounded repetitions remain intact.
 
-Matching uses per-call stacks and memoized endpoint sets for each node/start
+Expressions whose repetition bounds are zero/one or unbounded compile to Thompson
+fragments, with two states per grammar node. Character-set nodes remain atomic
+predicates. Epsilon closure uses an explicit stack and deduplicates states, so
+nullable cycles terminate. Matching advances state sets for each code point and
+caches only state-set/character transitions reached by that input. The graph is
+immutable after construction; subsets, transitions and predicate results are
+local to the match. Numeric counts are never expanded into graph copies.
+
+General counted matching uses per-call stacks and memoized endpoint sets for each node/start
 position. Sequence joins and alternation unions preserve every possible endpoint.
 Character-set predicates use iterative Boolean evaluation and cache results per
 node/character. Flat groups of character predicates are scanned directly instead
@@ -723,3 +735,15 @@ them. Real SOAP bindings and reconstructed element/message providers exercise
 large counts with exact lexical comparisons. Independent validator limitations
 and the explicit bounded reference schemas are recorded in
 [repetition evidence](../test/wsdl-interop/regex-counts-evidence.md).
+
+Ordinary ambiguous expressions such as `(a|aa)+|a+b` accept a long run of `a`
+followed by `b`, even when a backtracking backend would exhaust its match budget
+on the first alternative. `wsdl-regex-execution.qtest` checks both validity
+outcomes through reconstructed schemas and providers, count holes, 10,000-character
+inputs, interruption/reuse and synchronized concurrent matches.
+`test_regex_execution.py` covers actual SOAP contracts, examples and exhaustive
+small-language comparisons. See [execution evidence](../test/wsdl-interop/regex-execution-evidence.md)
+for the independent validator limit and separate equivalent schemas. Legacy
+serialized PCRE strings retain their backend behavior because they do not carry
+the original XSD source; reconstructing new source-retaining constraints rebuilds
+the structural program.

@@ -3116,9 +3116,9 @@ additional Valgrind is required. Main Qore develop remains clean at 3e2f47be0;
 there was nothing further to commit there and no push, installation or rebuild.
 
 The independent matrix defines 48 actual SOAP contracts and 24 original
-schemas, with 512 input and 224 emitted binding documents, 2432 consumer result
+schemas, with 384 input and 168 emitted binding documents, 2432 consumer result
 rows and 1136 accepted provider/example documents. Original overflowing-count
-schema rejections remain visible for both validators; 1616 original Xerces
+schema rejections remain visible for both validators; 1464 original Xerces
 document outcomes are explicitly unreachable. Each receives an additional
 mandatory check by both validators through a separately identified schema
 with equivalent membership for the asserted domain of at most 16 characters.
@@ -3158,3 +3158,72 @@ results in backtracking-baseline.log, so this is not a P3-19 regression.
 This remaining execution-limit requirement is the next P3 increment; it is not
 counted as fixed. Primitive/date/IEEE/binary/QName/entity/XML-RPC and all P4-P9
 criteria remain in scope. P3 acceptance is not complete.
+
+### P3-20: structural XSD execution without backend backtracking limits
+
+P3-19 is committed as 549a0e3. The existing ordinary-pattern failure is now
+fixed: new constraints always retain source and execute structurally. Zero/one
+and unbounded closures use Thompson state sets with per-input transition caches.
+General counted matching prunes dominated states after meeting the minimum;
+count gaps remain preserved before it. Pure closure identities collapse nested
+stars/pluses. No numeric bound is expanded into a compiled graph. Legacy
+serialized PCRE strings remain readable with their existing backend behavior.
+
+The source regression passes six cases / 348 assertions, including both
+conversion directions, detached reconstructed providers, 10,000-character
+inputs, invalid suffixes, count holes, cancellation/reuse and synchronized
+concurrent calls. All 64 affected XML suites pass 742 cases / 15319 assertions;
+SOAP intentionally checks three failed assertions inside passing test cases.
+AOT and documentation builds are clean. This XML increment changes no C++.
+The independent Qore prerequisite described below has its own Valgrind and
+62-item audit. No push, installation or main-checkout build was performed.
+
+The independent execution matrix covers 30 schemas / 60 actual SOAP contracts,
+540 binding input and 264 emitted documents, plus 3360 consumer result rows and
+1888 accepted provider/example documents. Two exhaustive language methods add
+15240 original/reconstructed verdicts against Python over all binary strings
+of length zero through six. All four final independent methods pass in 72.313
+seconds. The existing four repetition methods pass as well.
+
+libxml2 reports its internal backtracking limit on 48 invalid original binding
+documents. The direct private-2.15.4 probe returns the named -6 limit code;
+2.12.10 and 2.15.4 share the 10-million saved-state guard. These are unassessed
+original libxml2 results. Original Xerces results remain mandatory, and 668
+separately identified globally equivalent schema/document jobs must agree in
+both validators. No original payload, fixture, validator or limit is modified.
+The proof, exact accounting, source hashes and probe are documented in
+regex-execution-evidence.md.
+
+P3-19's narrative document counts were corrected after instrumenting actual
+jobs: 384 binding inputs, 168 outputs and 1464 bounded-reference documents,
+not 512, 224 and 1616. Repeated payload values had been incorrectly counted
+as documents. Tests already checked exact job identities; their outcomes and
+completeness did not change. The two existing binding/provider methods were
+rerun successfully, and the correction is explicit in regex-counts-evidence.md.
+
+Both-version survey and strict coverage match P3-19 outside version fields:
+89 selected WSDLs / 756 directions, zero selected failures and 220 broad tracked
+failures. Final frozen Python discovery completes 150 methods in 686.339 seconds
+with the same 33 tracked P4/P5/P6 failure signatures, zero errors and unchanged
+source/test hashes. AOT execution passes the three regex suites (32 cases / 1812
+assertions); four direct language methods check 32296 original/reconstructed
+verdicts. The full 62-item audit has no failed items and is recorded in
+audits/P3-20-regex-execution.md. WSDL SHA-256 is
+767dc84affb55d4800155e443d927a078e7dac3ec7269faf64e497b40ec69274.
+Native XML remains 8ec5487ebe937450478fc856e5c02114e5cf9ffaf9201cf70d052907b40f2e12.
+Evidence prefix: /tmp/wsdl-p3-20-. Primitive/date/IEEE/binary/QName/entity/XML-RPC
+work and all P4-P9 criteria remain open; P3 acceptance is not complete.
+
+The IEEE preflight found a separate existing core defect: `q_strtod()` returned
+an uninitialized double when its stream sentry reached EOF on empty/whitespace
+input. Valgrind traces the undefined read to that local variable. Qore develop
+commit **9dab82749** initializes the result to zero and adds a three-case / 322-
+assertion regression. Five suites pass across AST/IR/JIT/tiered (116 cases / 3628
+assertions); affected Valgrind runs have zero errors and no lost allocations
+using the previously authorized PCRE2 interpreter test switch. Its full 62-item
+audit is examples/test/qore/vars/audits/empty-float-conversion.md in Qore.
+Main Qore is clean after this commit and was not pushed or rebuilt. The isolated
+Debug runtime used for final XML verification now has SHA-256
+c8b0739f796b93c0f056cbf2a37050d6902de45c3e9361ed3565754ac5549afb.
+The existing Valgrind DWARF reader warning remains tracked for P9. This core
+prerequisite does not implement XSD float/double lexical or binary32 semantics.
