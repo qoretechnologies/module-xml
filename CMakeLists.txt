@@ -89,6 +89,7 @@ set(QPP_SRC
 
 set(CPP_SRC
     src/xml-module.cpp
+    src/XsdFloat.cpp
     src/QoreXmlRpcReader.cpp
     src/QoreXmlReader.cpp
 )
@@ -143,6 +144,8 @@ set(_xml_external_doc_tags "${TAGFILES}")
 qore_external_binary_module(${module_name} "${VERSION_MAJOR}.${VERSION_MINOR}.${VERSION_PATCH}" ${QORE_XML_LIBXML2_TARGET})
 add_executable(qore-xml-namespace-probe EXCLUDE_FROM_ALL cmake/libxml2-namespace-probe.c)
 target_link_libraries(qore-xml-namespace-probe PRIVATE ${QORE_XML_LIBXML2_TARGET})
+add_executable(qore-xml-float-test EXCLUDE_FROM_ALL test/xsd-float.cpp src/XsdFloat.cpp)
+target_link_libraries(qore-xml-float-test PRIVATE ${QORE_LIBRARY})
 qore_user_modules("${QMOD}")
 install(PROGRAMS ${SCRIPTS} DESTINATION bin)
 

@@ -5,6 +5,7 @@ AUTOMAKE_OPTIONS = foreign
 SUBDIRS = src
 
 noinst_HEADERS = src/QC_XmlDoc.h \
+	src/XsdFloat.h \
 	src/QC_XmlNode.h \
 	src/QC_XmlReader.h \
 	src/QC_XmlRpcClient.h \

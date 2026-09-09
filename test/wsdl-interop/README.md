@@ -11,6 +11,14 @@ See [PLAN.md](PLAN.md) for the phased implementation plan, acceptance checks, an
 of the recorded findings and validator disagreements to the work needed to resolve them.
 See [EXECUTION.md](EXECUTION.md) for implementation progress and commit/audit evidence.
 
+`test/xsd-float.qtest`, the native `qore-xml-float-test` CMake target and
+`test_ieee_conversion.py` cover strict native IEEE conversion, direct binary32
+rounding, exact native number boundaries, signed zero, cancellation and floating-point
+environment restoration. The three Python methods check 3,144 conversions with
+an integer-rational reference. See the [implemented native conversion design](../../design/xml-ieee-conversion.md).
+WSDL scalar/provider/facet integration remains the next P3 increment; these
+primitive conversion tests alone do not close the IEEE WSDL requirement.
+
 `test/wsdl-regex-classes.qtest` and `test_regex_classes.py` cover XSD regex
 grammar, Unicode class complements, ranges, nested subtraction and bounded
 example generation. The independent matrix exercises 156 real SOAP contracts

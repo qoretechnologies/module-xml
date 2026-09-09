@@ -3227,3 +3227,68 @@ Debug runtime used for final XML verification now has SHA-256
 c8b0739f796b93c0f056cbf2a37050d6902de45c3e9361ed3565754ac5549afb.
 The existing Valgrind DWARF reader warning remains tracked for P9. This core
 prerequisite does not implement XSD float/double lexical or binary32 semantics.
+
+### P3-21: native IEEE conversion prerequisite
+
+P3-20 is committed as c15ff25. The new binary-module convert_xsd_float API
+validates complete XSD lexical input and rounds directly to binary32 or binary64.
+Its native result is a Qore float, carrying binary32 values exactly. The native
+helper is independently testable; WSDL scalar/provider/facet integration is the
+next increment and is not counted as fixed by this prerequisite.
+
+The preflight in /tmp/wsdl-p3-21-float-preflight.qr reduces the existing WSDL
+errors: float 16777217 remains 16777217, binary32 midpoints are first rounded
+to binary64, 1e-50 stays nonzero, 3.5e38 stays finite, and malformed/empty text
+reaches permissive Qore conversion. The separate empty-input core defect was
+already fixed in 9dab82749; no further Qore changes were needed here.
+
+Finite text uses direct target-precision classic-locale stream extraction under
+a saved/restored nearest-rounding environment. Native binary32 conversion uses
+at most 31 exact midpoint comparisons against the original value, including
+arbitrary-precision numbers and integers above binary64's exact integer range.
+It never applies the display rounding heuristic or formats a native value as an
+intermediate decimal approximation. Input scans support cooperative cancellation.
+The API preserves signed zero, subnormals, infinities and NaN, and rejects complete
+invalid lexical strings and unsupported native types before conversion.
+
+The double exponent typo in the published XSD text is resolved by the working
+group's recorded decision in W3C R-214 / issue 2206: the integer-significand
+exponent interval is -1074 through 971. The implemented native design, rounding
+proof and authoritative references are in design/xml-ieee-conversion.md.
+
+The public regression passes five cases / 597 assertions in AST, IR, JIT and
+tiered modes (20 cases / 2388 assertions). The native harness passes 1380 checks
+over all four standard rounding directions, pre-existing floating-point flags,
+classic/comma C++ locales, cancellation and recovery. Three Python methods compare
+3144 results with an independent integer-rational oracle: 1248 decimal strings,
+816 exact native number/integer inputs and 1080 native binary64 inputs.
+
+The review fixed two test ownership issues: NaN-boxed large integer temporaries
+need ValueHolder, and closure completion with detached workers is not a native
+thread join. The concurrency test now owns a thread pool with deterministic
+teardown. The locale facet uses stack ownership on exceptional exits. Production
+overflow handling accepts either standard-library infinity or clamped overflow
+reporting. No suppression, delay, timing retry or precision heuristic was added.
+Final native C++ and AST/IR Valgrind checks have zero errors and no lost
+allocations. Qore runs use -b --enable-debug and the already approved PCRE2
+interpreter test control; the existing DWARF reader warning remains tracked in P9.
+
+All 64 existing XML suites pass 742 cases / 15319 assertions; together with the
+new public regression this is 65 suites / 747 cases / 15916 assertions. SOAP
+intentionally checks three failed assertions within passing cases. Native,
+AOT and final documentation builds are clean; the combined compilation unit
+also passes syntax compilation. Both-version survey and strict coverage are
+unchanged outside version fields: 89 selected WSDLs / 756 directions, zero
+selected failures and 220 tracked broad failures. The preceding full Python
+150-method / 33 tracked later-phase failure baseline is not relabeled as a new
+run; this increment runs its three new methods and both corpus drivers.
+
+The full 62-item audit has 25 Pass, 37 N/A and no failed items in
+audits/P3-21-native-ieee.md. Final native XML SHA-256:
+e5f15836d1d3b1577d223fcff29fa59ce916192c229cac579eb3343ed3c0ac02.
+Debug core remains c8b0739f796b93c0f056cbf2a37050d6902de45c3e9361ed3565754ac5549afb.
+Evidence prefix /tmp/wsdl-p3-21- includes reviewed checks/corpus/build-docs,
+lifecycle checks, cpp-owned-locale checks, unity syntax and final hashes.
+Main Qore remains clean on develop at 9dab82749. Nothing was pushed or installed,
+and its shared build was not touched. All remaining P3 and P4-P9 criteria remain
+in scope; P3 acceptance is not complete.

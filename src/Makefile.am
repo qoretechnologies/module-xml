@@ -16,7 +16,7 @@ if COND_SINGLE_COMPILATION_UNIT
 single-compilation-unit.cpp: $(GENERATED_SOURCES)
 XML_SOURCES = single-compilation-unit.cpp
 else
-XML_SOURCES = xml-module.cpp QoreXmlReader.cpp QoreXmlRpcReader.cpp
+XML_SOURCES = xml-module.cpp QoreXmlReader.cpp QoreXmlRpcReader.cpp XsdFloat.cpp
 nodist_xml_la_SOURCES = $(GENERATED_SOURCES)
 endif
 

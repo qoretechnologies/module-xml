@@ -6,6 +6,7 @@
 #include "QC_FileSaxIterator.cpp"
 #include "QC_InputStreamSaxIterator.cpp"
 #include "ql_xml.cpp"
+#include "XsdFloat.cpp"
 #include "qc_option.cpp"
 #include "xml-module.cpp"
 #include "QoreXmlReader.cpp"
