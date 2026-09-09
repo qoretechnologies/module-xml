@@ -5116,3 +5116,86 @@ P3 remains active. WSDL ENTITY/ENTITIES conversion/provider/sample behavior is
 next; standalone XML declarations must not relax SOAP's DOCTYPE prohibition.
 The dateTime/time leap-second decision remains unanswered. No decision or scope
 reduction is inferred; all P4–P9 requirements remain in scope.
+
+P3-40 was committed as `abd5785` on `develop`, without pushing. The main Qore
+checkout was rechecked clean on `develop` at `4e049e0d8`; no core commit was needed.
+
+## P3-41 — WSDL ENTITY document-context integration (preflight)
+
+The initial reduction is `/tmp/wsdl-p3-41-preflight.py`, with generated contracts
+and results below `/tmp/wsdl-p3-41-preflight`. It exercises actual SOAP 1.1 and
+1.2 bindings, both directions, reconstructed services/message providers, scalar,
+simple-content/attribute and repeated-element shapes, and generated examples.
+Pinned Xerces independently validates each emitted payload. No WSDL production
+change has been made yet.
+
+The implementation must keep XSD datatype/facet checks distinct from containing-
+document constraints. Schema enumeration/default compilation and detached lexical
+value operations cannot invent an instance DTD. A selected ENTITY member must
+retain its document constraint even though its primitive value identity is a
+string; a failed context check must not redirect an ordered union to a later
+string member. The existing `XsdUnionTrialResult` and list-item capture mechanisms
+retain primitive identity but currently discard this selected-type obligation.
+SOAP and retained XML document entry points must enforce their document context;
+trial rejection, cached member selection, provider metadata/comparisons, callbacks
+and sample generation need independent recovery/selection tests.
+
+### P3-41 implementation and verification
+
+The preflight completed with 336 schema-invalid outputs, 192 datatype rejections
+and 240 valid outputs among 768 outcomes. The implemented increment retains
+ENTITY obligations independently of primitive identity and checks them after
+selected datatype/facet conversion at element, attribute, array and WSDL part
+boundaries. It includes typed RPC parts and complete/retained XML. Pure datatype
+provider operations and schema enumeration compilation retain their existing
+contracts; message-provider instance validation and native sample selection are
+next integration criteria, not claimed complete by this increment.
+
+The nil regression was root caused to emitting `xsi:nil` without registering the
+instance namespace in standalone output. Review also caught a prospective default
+regression: revalidating lexical defaults in instance namespaces would reinterpret
+QName prefixes. The fixed `getInstanceDefaultValue()` checks the already compiled
+value using a private output registry, retaining declaration identity. New tests
+cover QName/string defaults, reconstruction and rebound prefixes.
+
+The final Qore gate passes 92 suites / 948 cases / 36,146 reported assertions.
+The nine-case ENTITY value suite passes 185 assertions in AST, IR, JIT and tiered
+modes; the two-case local HTTP/RPC suite passes 64 assertions. The independent
+matrix exercises 72 actual SOAP binding contracts, both directions, reconstructed
+services and providers, retained XML and examples: 2,880 outbound outcomes with
+888 valid outputs; 9,216 inbound/consumer outcomes with 7,392 independent document
+verdicts (6,528 valid / 864 invalid). Every schema, diagnostic, repeated occurrence,
+value and reachable stage is checked. The example and Doxygen build pass.
+
+The strict gate now covers 126 descriptions / 1,172 directions with no selected
+failure and all 1,060 value checks passing. Exactly sixteen broader ENTITY failure
+signatures disappear, leaving 144. Raw output rejections fall from 42 to 34 because
+the eight original invalid messages are now rejected during decoding. All 2,399
+non-ENTITY raw rows, all 289 non-ENTITY coverage cases and all corpus hashes are
+unchanged. `/tmp/wsdl-p3-41-comparison.json` records the exact comparison.
+
+Survey tests pass fifteen methods. Coverage tests run fourteen methods with only
+the same two P6 binding-version assertions failing (request/response SOAP 1.1
+through the mixed-description fixture). No skips or expected failures were added.
+The HTTP invalid-callback-output case additionally reduces the P7 fault-origin
+issue: `SoapHandler::makeSoapFaultResponse()` unconditionally selects Sender/Client,
+including for server serialization failures. `/tmp/wsdl-p3-41-fault-reduction.log`
+records both versions. This follows the plan's explicit later-phase ownership;
+the ENTITY suite verifies rejection/recovery without claiming fault conformance.
+
+See [the design](../../design/wsdl-entity-values.md),
+[evidence](entity-wsdl-evidence.md) and [full audit](audits/P3-41-entity-wsdl.md).
+No C++ changed and no new Valgrind run is required. The main Qore checkout remains
+clean on `develop` at `4e049e0d8`, with no core commit or push needed.
+
+The leap-second question was presented again while independent P3 work continued:
+follow XSD 1.0 with retained leap-second text, or explicitly approve rejection as
+an interoperability limitation. No answer or limitation is inferred. P3 remains
+active, followed by every P4–P9 requirement.
+
+Final fixture inventory: `/tmp/wsdl-p3-41-final-fixtures.json`, SHA-256
+`72779be7ef62588dd0caed4d665bde317af9dc23ac30ac00ada9699ae5e9731e`, preserving 72 WSDLs and twelve manifest/result files under
+`/tmp/wsdl-p3-41-complete-artifacts`. The final independent run passes in 127.262
+seconds; see `/tmp/wsdl-p3-41-completeness-final.log`. Source, artifact and log
+hashes are in `/tmp/wsdl-p3-41-final-manifest.json`. The full audit resolves all
+62 checks: 19 Pass / 43 N/A / 0 Fail.

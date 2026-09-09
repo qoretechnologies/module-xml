@@ -1,0 +1,150 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires xml
+%requires ../qlib/WSDL.qm
+%requires ../qlib/SoapClient.qm
+%requires ../qlib/SoapHandler.qm
+%requires HttpServer
+%exec-class EntityConsumersTest
+
+class EntityConsumerCallback {
+    public {
+        Queue requests();
+        Queue responses();
+    }
+
+    hash<auto> call(hash<auto> cx, hash<auto> request) {
+        requests.push(request);
+        return responses.pop(30000);
+    }
+}
+
+class EntityConsumersTest inherits QUnit::Test {
+    constructor() : Test("ENTITY instance SOAP consumers", "1.0") {
+        addTestCase("Actual SOAP bindings enforce selected ENTITY constraints over HTTP", \httpValues());
+        addTestCase("RPC literal type-based parts enforce instance constraints", \rpcValues());
+        set_return_value(main());
+    }
+
+    private WebService service(string version, bool rpc = False) {
+        string description = '<w:definitions xmlns:w="http://schemas.xmlsoap.org/wsdl/"
+            xmlns:t="urn:entity-consumers" xmlns:s="http://schemas.xmlsoap.org/wsdl/soap'
+            + (version == "12" ? "12" : "") + '/" targetNamespace="urn:entity-consumers"><w:types>
+            <xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" targetNamespace="urn:entity-consumers">
+            <xs:simpleType name="Either"><xs:union memberTypes="xs:ENTITY xs:int"/></xs:simpleType>
+            <xs:simpleType name="Text"><xs:union memberTypes="xs:string xs:ENTITY"/></xs:simpleType>
+            <xs:simpleType name="Items"><xs:list itemType="t:Either"/></xs:simpleType>
+            <xs:complexType name="Note"><xs:simpleContent><xs:extension base="t:Either">
+            <xs:attribute name="caption" type="t:Text" use="required"/></xs:extension></xs:simpleContent></xs:complexType>
+            <xs:complexType name="Record"><xs:sequence>
+            <xs:element name="value" type="t:Either"/><xs:element name="items" type="t:Items"/>
+            <xs:element name="text" type="t:Text"/><xs:element name="note" type="t:Note"/>
+            <xs:element name="absent" type="xs:ENTITY" minOccurs="0"/>
+            </xs:sequence><xs:attribute name="tag" type="t:Either" use="required"/>
+            </xs:complexType><xs:element name="Submit" type="t:Record"/><xs:element name="Reply" type="t:Record"/>
+            </xs:schema></w:types><w:message name="In"><w:part name="body" element="t:Submit"/></w:message>
+            <w:message name="Out"><w:part name="body" element="t:Reply"/></w:message>
+            <w:portType name="Port"><w:operation name="submit"><w:input message="t:In"/>
+            <w:output message="t:Out"/></w:operation></w:portType><w:binding name="Soap" type="t:Port">
+            <s:binding style="document" transport="http://schemas.xmlsoap.org/soap/http"/>
+            <w:operation name="submit"><s:operation soapAction="urn:submit"/><w:input><s:body use="literal"/>
+            </w:input><w:output><s:body use="literal"/></w:output></w:operation></w:binding>
+            <w:service name="Service"><w:port name="Port" binding="t:Soap"><s:address location="http://example.invalid/"/>
+            </w:port></w:service></w:definitions>';
+        if (rpc) {
+            description =~ s/element="t:Submit"/type="t:Either"/;
+            description =~ s/element="t:Reply"/type="t:Either"/;
+            description =~ s/style="document"/style="rpc"/;
+            description =~ s/use="literal"/use="literal" namespace="urn:entity-consumers"/g;
+        }
+        return new WebService(description, {"async_only": True});
+    }
+
+    private hash<auto> record(bool response) {
+        return {"absent": NOTHING, "value": response ? 18 : 17, "items": (17, 18), "text": "photo",
+            "note": {"^value^": 19, "^attributes^": {"caption": "photo"}},
+            "^attributes^": {"tag": response ? 20 : 21}};
+    }
+
+    private check(hash<auto> actual, bool response) {
+        assertEq(record(response), actual);
+    }
+
+    private httpValues() {
+        foreach string version in ("11", "12") {
+            WebService original = service(version);
+            foreach WebService ws in (original, Serializable::deserialize(original.serialize())) {
+                HttpServer server();
+                on_exit server.stop();
+                SoapHandler handler(new PermissiveAuthenticator());
+                server.setDefaultHandler("soap", handler);
+                EntityConsumerCallback callback();
+                handler.addMethod(ws, ws.getBindingOperation("Soap", "submit"), \callback.call(), NOTHING,
+                    NOTHING, NOTHING, "Service", NOTHING, NOTHING, "Soap");
+                server.addListener(0);
+                string url = sprintf("http://127.0.0.1:%d/Service", server.getListenerInfo(0).port);
+                SoapClient client({"wsdl": ws, "url": url, "timeout": 30000, "connect_timeout": 30000});
+                callback.responses.push(record(True));
+                check(client.callOperation("submit", record(False)), True);
+                check(callback.requests.pop(30000), False);
+                hash<auto> invalid = record(False);
+                invalid.value = "photo";
+                assertThrows("SOAP-SERIALIZATION-ERROR", \client.callOperation(), ("submit", invalid));
+                invalid = record(False);
+                invalid."^attributes^" = {"tag": "photo"};
+                assertThrows("SOAP-SERIALIZATION-ERROR", \client.callOperation(), ("submit", invalid));
+                invalid = record(False);
+                invalid.items = (17, "photo");
+                assertThrows("SOAP-SERIALIZATION-ERROR", \client.callOperation(), ("submit", invalid));
+                invalid = record(False);
+                invalid.note = {"^value^": "photo", "^attributes^": {"caption": "photo"}};
+                assertThrows("SOAP-SERIALIZATION-ERROR", \client.callOperation(), ("submit", invalid));
+                # Server-side output validation must reject an undeclared ENTITY too.
+                callback.responses.push(invalid);
+                assertThrows("SOAP-SERVER-FAULT-RESPONSE", \client.callOperation(), ("submit", record(False)));
+                check(callback.requests.pop(30000), False);
+                callback.responses.push(record(True));
+                check(client.callOperation("submit", record(False)), True);
+                check(callback.requests.pop(30000), False);
+            }
+        }
+    }
+
+    private rpcValues() {
+        foreach string version in ("11", "12") {
+            WebService original = service(version, True);
+            foreach WebService ws in (original, Serializable::deserialize(original.serialize())) {
+                WSOperation op = ws.getBindingOperation("Soap", "submit");
+                foreach bool response in (False, True) {
+                    hash<auto> argument = {"body": 17};
+                    hash<auto> wire = response ? op.serializeResponse(argument, NOTHING, NOTHING, NOTHING,
+                        NOTHING, NOTHING, "Soap") : op.serializeRequest(argument, NOTHING, NOTHING, NOTHING,
+                        NOTHING, NOTHING, "Soap");
+                    auto decoded = response ? op.deserializeResponse(parse_xml(wire.body), "Soap")
+                        : op.deserializeRequest(parse_xml(wire.body), "Soap");
+                    assertEq(17, decoded);
+                    *hash<ExceptionInfo> error;
+                    try {
+                        if (response) {
+                            op.serializeResponse({"body": "photo"}, NOTHING, NOTHING, NOTHING, NOTHING, NOTHING, "Soap");
+                        } else {
+                            op.serializeRequest({"body": "photo"}, NOTHING, NOTHING, NOTHING, NOTHING, NOTHING, "Soap");
+                        }
+                    } catch (hash<ExceptionInfo> ex) {
+                        error = ex;
+                    }
+                    assertEq("SOAP-SERIALIZATION-ERROR", error.err);
+                    wire.body =~ s/>17</>photo</;
+                    if (response) {
+                        assertThrows("SOAP-DESERIALIZATION-ERROR", \op.deserializeResponse(), (parse_xml(wire.body), "Soap"));
+                    } else {
+                        assertThrows("SOAP-DESERIALIZATION-ERROR", \op.deserializeRequest(), (parse_xml(wire.body), "Soap"));
+                    }
+                }
+            }
+        }
+    }
+}

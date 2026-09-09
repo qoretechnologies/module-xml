@@ -430,7 +430,7 @@ class CoverageTest(unittest.TestCase):
         self.assertEqual("", process.stderr)
         report = json.loads(output.read_text())
         self.assertEqual([], report["selected_failures"])
-        self.assertEqual({"wsdls": 122, "message_directions": 1156}, report["selected_scope"])
+        self.assertEqual({"wsdls": 126, "message_directions": 1172}, report["selected_scope"])
         self.assertEqual(293, len(report["cases"]))
         self.assertEqual(2272, sum(len(c["messages"]) for c in report["cases"]))
         for stage, counts in report["stage_accounting"]["counts"].items():
@@ -440,6 +440,14 @@ class CoverageTest(unittest.TestCase):
         # Harness assertions verify retained failures, not conformance passes for broken functionality.
         self.assertGreater(len(report["failures"]), 0)
         by_name = {c["case"]: c for c in report["cases"]}
+        for name in ("ENTITYElement", "ENTITYAttribute", "ENTITIESElement", "ENTITIESAttribute"):
+            self.assertEqual(4, len(by_name[name]["messages"]))
+            for message in by_name[name]["messages"]:
+                self.assertFalse(message["source_valid"])
+                self.assertEqual([], message["failures"], message)
+                self.assertTrue(message["rejection_passed"], message)
+                self.assertEqual("SOAP-DESERIALIZATION-ERROR", message["deserialize"]["err"])
+                self.assertIsNone(message["serialize"])
         for name in ("QNameElement", "QNameAttribute"):
             for message in by_name[name]["messages"]:
                 self.assertEqual([], message["failures"], message)

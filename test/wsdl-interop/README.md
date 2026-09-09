@@ -336,8 +336,8 @@ each direction. The worker explicitly selects that binding and operation. Every 
 retained and independently checked with libxml2 and Xerces. Output envelope versions are checked against
 the selected binding; the W3C SOAP 1.2 inputs still exercise a SOAP 1.1 contract.
 
-`--strict` requires the explicit [strict-selection.json](strict-selection.json) to pass: 114 WSDLs,
-including all 14 source-invalid descriptions, and 1,100 selected message/direction combinations. Positive
+`--strict` requires the explicit [strict-selection.json](strict-selection.json) to pass: 126 WSDLs,
+including all 14 source-invalid descriptions, and 1,172 selected message/direction combinations. Positive
 cases require independent exact-value assertions; negative cases require the intended exception category.
 Missing, duplicate, stale, malformed or unclassified entries fail. This selection is deliberately named
 and bounded; it does not turn known implementation failures elsewhere into passing conformance tests.
@@ -1030,3 +1030,24 @@ complete inventory is 296 inputs, 4,072 consumer outcomes and 3,776 independentl
 validated documents. The strict corpus now includes QNameElement and QNameAttribute
 with expanded-name checks: 122 descriptions / 1,156 directions. See
 [context evidence](qname-context-evidence.md) and [the full audit](audits/P3-39-qname-context.md).
+
+## ENTITY values at WSDL document boundaries
+
+Run `qore --enable-debug` with `test/wsdl-entity-values.qtest` and
+`test/wsdl-entity-consumers.qtest`, plus
+`python3 test/wsdl-interop/test_entity_wsdl.py -v` using the local modules.
+The tests cover selected ENTITY constraints in elements, attributes, simple
+content, lists/unions, defaults, retained XML and typed RPC parts. They include
+both actual SOAP bindings/directions, reconstructed consumers, local HTTP,
+reentrant callbacks, interruption and concurrent recovery.
+
+The independent matrix checks 2,880 outbound and 9,216 inbound/consumer outcomes.
+It validates every emitted payload and original valid/invalid input with pinned
+Xerces, including exact preserved content and attribute values. Set
+`WSDL_ENTITY_ARTIFACT_DIR` to preserve generated WSDLs, manifests and worker rows.
+The four original ENTITY/ENTITIES families are mandatory expected rejections in
+the strict gate: 126 descriptions and 1,172 selected message directions.
+Datatype-only providers and schema facet comparison retain their lexical value
+contract; document conversion enforces the selected member's declaration requirement.
+See [the public contract](../../design/wsdl-entity-values.md) and
+[execution evidence](entity-wsdl-evidence.md).
