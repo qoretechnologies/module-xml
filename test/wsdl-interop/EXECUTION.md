@@ -4219,3 +4219,99 @@ attributes, lists/unions and ordinary SOAP input/output, preserving both value
 identity and lexical restrictions. ENTITY/ENTITIES, dateTime/time policy and
 other remaining P3 criteria remain in scope. The pending leap-second question
 has no inferred answer. P4-P9 have not begun.
+
+
+## P3-31 — QName enumeration declaration scopes and recursive JIT storage
+
+P3-30 is committed as `42046f7`. This increment captures each enumeration
+literal's namespace identity at its own declaration scope, retains duplicate
+spellings with different bindings through late base resolution, and validates
+QName grammar, bound prefixes, inherited patterns and inherited enumeration
+membership. Temporary captures are released on success and failure. Nested
+namespace/local indexes compare exact identities. Whole-schema reconstruction
+repeats these checks from retained source documents.
+
+The [implemented contract](../../design/wsdl-qname-values.md) and
+[declaration evidence](qname-declarations-evidence.md) distinguish these schema
+checks from ordinary QName instance/provider/wire conversion, which remains
+open. The new independent matrix has **66 declarations / 198 schemas / 396
+actual SOAP 1.1 and 1.2 binding contracts**, including atomic, forward-reference
+and simple-content models. Xerces-J 2.12.2 and libxml2 2.12.10 agree except for
+three precisely asserted `xmlns:Name` declaration verdicts. The XML Infoset's
+exclusion of `xmlns` from in-scope namespaces and pinned Xerces bytecode establish
+that validator defect. Fixture hashes and original results are retained under
+`/tmp/wsdl-p3-31-declaration-fixtures.json` and `declaration-oracles.json` with
+that prefix; no upstream fixture was changed.
+
+The JIT mode matrix initially exposed a core defect after enough schema parses
+promoted `XsdSchema::parseTypes` to native code. Its closure-backed `schema`
+loop local reused the caller's binding during recursive include processing,
+so the outer parse visited the child declarations twice. LLVM closure loads and
+stores omitted instantiation of callee-owned locals; AOT already performed it.
+A reduced native regression and LLVM dump establish the root cause. The fix is
+committed in main Qore develop as **`f135ddac7`**, with no push or installation.
+Tests preserve their original order and keep JIT enabled.
+
+The core increment passes its **62-item audit: 19 Pass / 43 N/A / 0 Fail**,
+recorded in Qore's `examples/test/ir/audits/recursive-closure-locals.md`.
+The new core suite passes **3 cases / 28 assertions**, with deterministic native
+compilation completion, all four execution modes and source-stripped AOT.
+Six affected existing suites pass, including JITSmoke and typed foreach; five
+QUnit summaries total **194 cases / 5,237 assertions**. The native driver and
+Qore scenario under `qore -b --enable-debug --exec-mode=jit` both pass Valgrind
+with **zero errors and zero definite/indirect/possible loss**, without
+suppressions. The authorized `QORE_PCRE2_NO_JIT=1` is used; the existing core
+DWARF-reader warning remains tracked for P9. Core evidence uses the
+`/tmp/wsdl-p3-31-core-*` and `recursive-*` prefixes. Other developers' main-Qore
+history and work were preserved, and the main checkout is clean after commit.
+
+Against the corrected isolated Debug core, **79 XML Qore suites / 853 cases /
+31,947 assertions** pass. The soap suite retains its documented 1,031 total /
+1,028 succeeded assertion accounting, with all 20 cases passing. All QName
+suites pass **248 cases / 5,816 assertions** across AST/IR/JIT/tiered and
+UTC/Europe-Prague. Compiled modules pass **31 cases / 727 assertions** and the
+complete design example runs without output. WSDL, SoapDataProvider, SoapClient
+and SoapHandler qmods and WSDL Qdx/Doxygen build without warnings or errors.
+Logs: `/tmp/wsdl-p3-31-declaration-gate-core-fixed.log`,
+`declaration-modes-core-fixed.log`, `declaration-aot-core-fixed.log`, and
+`declaration-build-final.log` under that prefix; corresponding JSON reports
+retain all suite summaries.
+
+The final affected Python gate completes **55 methods in 369.185 seconds**.
+Exactly the two known P6 selected-binding-version assertions remain failing,
+with no new failures, errors or warning diagnostics. Complete signatures and
+comparison are in `/tmp/wsdl-p3-31-declaration-python-core-fixed.log` and
+`declaration-python-comparison-core-fixed.json` under that prefix.
+Both corpus reports differ from P3-30 only in WSDL source hash: strict coverage
+remains **120 WSDLs / 1,148 message directions**, zero selected failures, and all
+**168 broad failure signatures** remain unchanged. The repo's current reports
+are refreshed; complete comparison is
+`/tmp/wsdl-p3-31-declaration-report-comparison-core-fixed.json`.
+
+The XML increment's full audit is **20 Pass / 42 N/A / 0 Fail**:
+[audits/P3-31-qname-declarations.md](audits/P3-31-qname-declarations.md).
+WSDL SHA256 remains
+`1cb5abba5c8c177722e65c55778f87bda6c76eeee98d1bdb9e36dd084d527f26`.
+The corrected isolated Debug core is
+`745c1da619df1407bda9d75442c9012551a67c91ca4e3c4ab4a6834da5be0b8f`;
+XML's native qmod remains
+`0b205d392e45a9c50f01aec6026ce3e325a1a23b5ee9f6c598eb170055ea45fd`.
+The final declaration inputs were frozen in
+`/tmp/wsdl-p3-31-declaration-source-hashes-final.json`.
+
+The additional full QName declaration JIT Valgrind run passes all **13 cases /
+114 assertions**, with **zero errors and zero definite/indirect/possible loss**,
+without suppressions. It uses `qore -b --enable-debug --exec-mode=jit` and the
+previously authorized PCRE2 interpreter setting. The known core DWARF-reader
+warning remains a P9 environment finding. The first attempt reached its
+240-second deadline before cleanup; its forced-termination leak summary is
+superseded by `/tmp/wsdl-p3-31-declarations-valgrind-jit-complete.log`.
+
+P3 remains active. A separately reduced pre-existing lifetime defect makes
+`findType(...).serializeToData()` access a deleted `XsdAbstractType::nsc`; it also
+fails against unchanged P3-30. A scratch ownership correction demonstrates
+successful reconstruction and identifies the builtin namespace/type-cache cycle
+that its cleanup tests must cover. This is next, before ordinary QName
+wire/provider integration. ENTITY/ENTITIES, dateTime/time policy and other P3
+criteria remain in scope. The leap-second question has no inferred answer;
+P4-P9 have not begun.

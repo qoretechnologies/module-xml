@@ -178,6 +178,8 @@ module WSDL {
       normalized enumeration, pattern and count facets in schema conversion, providers and generated examples
     - added immutable \c XsdQNameValue namespace/local identities and explicit-context \c XsdQNameDataType
       providers with lexical retention, reserved-binding validation and Serializable reconstruction
+    - QName enumeration declarations retain each literal's namespace scope, reject unbound prefixes and
+      invalid inherited restrictions, and preserve distinct values with identical prefix spellings
     - Name, NCName, NMTOKEN and their derived name types validate the XSD 1.0 Unicode character productions;
       builtin list items and regular-expression name escapes use the same character rules
     - builtin date and binary parse failures use SOAP validation errors so union selection can try later members
@@ -12588,13 +12590,20 @@ public class XsdRegexHelper {
 
 }
 
+#! a literal's namespace identity, captured before its declaration scope is restored
+hashdecl XsdQNameDeclarationLiteral {
+    string lexical;
+    *string namespace_uri;
+}
+
 #! Validate facet declarations before constructing their value-space constraints.
 class XsdFacetDeclarationHelper {
     const Names = {"minInclusive": True, "maxInclusive": True, "minExclusive": True, "maxExclusive": True,
         "length": True, "minLength": True, "maxLength": True, "totalDigits": True, "fractionDigits": True,
         "whiteSpace": True, "pattern": True, "enumeration": True};
 
-    static hash<string, bool> validate(hash<auto> restriction, Namespaces nsc) {
+    static hash<string, bool> validate(hash<auto> restriction, Namespaces nsc,
+            reference<*list<hash<XsdQNameDeclarationLiteral>>> literals) {
         hash<string, bool> fixed();
         foreach string facet in (keys restriction) {
             if (facet == "annotation" || facet == "simpleType" || facet == "ns" || facet == "^attributes^") {
@@ -12646,6 +12655,16 @@ class XsdFacetDeclarationHelper {
                     if (value != "preserve" && value != "replace" && value != "collapse") {
                         throw "XSD-SIMPLETYPE-ERROR", sprintf("invalid whiteSpace facet %Y", attributes.value);
                     }
+                }
+                if (facet == "enumeration") {
+                    # The base may be resolved later. Retain every literal, including equal
+                    # spellings with different bindings, without copying complete namespace maps.
+                    string lexical = XsdSimpleType::normalizeWhiteSpace(attributes.value, "collapse");
+                    int colon = lexical.find(":");
+                    string prefix = colon < 0 ? "" : lexical.substr(0, colon);
+                    *string uri = prefix == "xml" ? "http://www.w3.org/XML/1998/namespace"
+                        : prefix ? nsc.getInputNamespaceState().input{prefix} : (nsc.getDefaultNs() ?? "");
+                    push literals, <XsdQNameDeclarationLiteral>{"lexical": lexical, "namespace_uri": uri};
                 }
             }
         }
@@ -12792,6 +12811,8 @@ class XsdFacetGrammarHelper {
 public class XsdSimpleType inherits WSDL::XsdAbstractType {
     private {
         hash<string, bool> fixedFacets;
+        transient *list<hash<XsdQNameDeclarationLiteral>> pendingQNameEnumeration;
+        *hash<string, hash<string, bool>> qnameEnumValues;
         *hash<string, bool> stringEnumValues;
         *hash<XsdListItemInfo> listItemValueInfo;
         *list<list<auto>> listEnumValues;
@@ -12897,7 +12918,7 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
 
             WSDL::XsdBase::removeNS(\r);
 
-            fixedFacets = XsdFacetDeclarationHelper::validate(r, nsc);
+            fixedFacets = XsdFacetDeclarationHelper::validate(r, nsc, \pendingQNameEnumeration);
 
             # Parse enumeration facet
             if (r.enumeration) {
@@ -13009,6 +13030,7 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
     }
 
     finalizeResolved() {
+        on_exit remove pendingQNameEnumeration;
         if (!type && unionTypes) {
             dataType = new UnionDataType(unionTypes);
         }
@@ -13029,9 +13051,7 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
         }
         string kind = getFacetKind();
         if (kind == "QName" && type) {
-            foreach string lexical in (keys enumValues) {
-                string checked = XsdNameLexicalHelper::lexical("QName", lexical, "XSD-SIMPLETYPE-ERROR");
-            }
+            validateQNameDeclaration();
         }
         if (kind == "union" && (exists minInclusive || exists minExclusive
                 || exists maxInclusive || exists maxExclusive)) {
@@ -13104,6 +13124,35 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
             }
             stringEnumValues = values;
         }
+    }
+
+    private validateQNameDeclaration() {
+        if (!exists pendingQNameEnumeration) {
+            return;
+        }
+        hash<string, hash<string, bool>> values();
+        foreach hash<XsdQNameDeclarationLiteral> literal in (pendingQNameEnumeration) {
+            string lexical = XsdNameLexicalHelper::lexical("QName", literal.lexical, "XSD-SIMPLETYPE-ERROR");
+            if (!exists literal.namespace_uri) {
+                throw "XSD-SIMPLETYPE-ERROR", sprintf("unbound prefix in QName enumeration %Y for %Y", lexical, name);
+            }
+            int colon = lexical.find(":");
+            string prefix = colon < 0 ? "" : lexical.substr(0, colon);
+            XsdQNameValue value = XsdQNameValueHelper::resolve(lexical, "XSD-SIMPLETYPE-ERROR",
+                {prefix: literal.namespace_uri});
+            *XsdSimpleType ancestor = type instanceof XsdSimpleType ? cast<XsdSimpleType>(type) : NOTHING;
+            while (ancestor) {
+                if ((ancestor.patterns && !ancestor.matchesAnyPattern(lexical))
+                        || (exists ancestor.qnameEnumValues
+                            && !ancestor.qnameEnumValues{value.getNamespaceUri()}{value.getLocalName()})) {
+                    throw "XSD-SIMPLETYPE-ERROR", sprintf("QName enumeration %Y for %Y is outside base type %Y",
+                        lexical, name, ancestor.name);
+                }
+                ancestor = ancestor.type instanceof XsdSimpleType ? cast<XsdSimpleType>(ancestor.type) : NOTHING;
+            }
+            values{value.getNamespaceUri()}{value.getLocalName()} = True;
+        }
+        qnameEnumValues = values;
     }
 
     #! identifies list values through restriction and union derivation

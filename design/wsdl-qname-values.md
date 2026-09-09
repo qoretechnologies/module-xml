@@ -1,6 +1,35 @@
-# Explicit QName values and providers
+# QName values and declaration validation
 
 Copyright (C) 2026 Qore Technologies, s.r.o.
+
+## Enumeration declaration validation
+
+QName enumeration literals capture their namespace URI while the facet's XML
+namespace scope is active. Every literal is retained until the base type has
+resolved, including duplicate spellings with different namespace bindings.
+Captured state contains the normalized lexical text and one URI, rather than a
+copy of all in-scope namespaces. Temporary declarations are released after
+finalization, including when validation raises an exception.
+
+Finalization validates the QName grammar and requires a bound prefix. It checks
+each literal against every inherited pattern and enumeration. Namespace/local
+identity uses nested hash keys, with no prefix comparison or URI normalization.
+The new restriction's own pattern applies to instances; it does not constrain
+the spelling used to declare that restriction's enumeration values. Deprecated
+QName length facets do not measure the spelling.
+
+Whole `XsdSchema` objects retain their original schema sources and reparse them
+during Serializable reconstruction. The declaration checks therefore apply to
+reconstructed schemas and subsequent additions. Existing ordinary instance conversion is unchanged by this
+declaration validation increment; namespace-aware wire conversion remains open.
+
+For example, a base enumeration declared as `a:Product` with `a` bound to
+`urn:catalog` permits a derived enumeration `b:Product` with the same URI.
+Rebinding `b` to `urn:other` rejects the derived schema. If the base additionally
+requires the lexical pattern `a:Product`, the alias spelling does not satisfy
+that inherited pattern.
+
+## Explicit values and providers
 
 `XsdQNameValue` retains a namespace URI, a local name, and the normalized QName
 spelling. `equals()` compares the URI and local name exactly. Prefix aliases,

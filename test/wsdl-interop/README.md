@@ -11,6 +11,12 @@ See [PLAN.md](PLAN.md) for the phased implementation plan, acceptance checks, an
 of the recorded findings and validator disagreements to the work needed to resolve them.
 See [EXECUTION.md](EXECUTION.md) for implementation progress and commit/audit evidence.
 
+`test/wsdl-qname-declarations.qtest` and `test_qname_declarations.py` validate
+QName enumeration declaration scopes and inherited restrictions. The independent
+matrix covers 198 schemas and 396 SOAP binding contracts, including simple content
+and forward references. See [declaration evidence](qname-declarations-evidence.md)
+for the QName rules and the precisely classified Xerces reserved-prefix result.
+
 `test/wsdl-qname-values.qtest` and `test_qname_values.py` exercise explicit QName
 values and namespace-aware detached providers, including reconstructed records,
 lists, cancellation and concurrent copies. The independent matrix checks 336
