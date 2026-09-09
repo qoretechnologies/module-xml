@@ -520,10 +520,47 @@ Requirements: [element representation](https://www.w3.org/TR/xmlschema-1/#src-el
 [complex-type rule 5](https://www.w3.org/TR/xmlschema-1/#ct-props-correct), and
 [boolean whitespace](https://www.w3.org/TR/xmlschema-2/#rf-whiteSpace).
 
-ID ancestry follows the resolved type objects directly. It does not dereference
-the type's borrowed namespace context, which can have expired after an imported
-source context or an owning schema was destroyed. This also keeps detached
-attribute constraints usable without extending namespace-object lifetimes.
+ID ancestry follows the resolved type objects directly. It does not need a
+namespace lookup to inspect the already resolved base type.
+
+## Declaration namespace ownership
+
+Each `XsdAbstractType` owns its declaration `Namespaces` object. A type returned
+by `XsdSchema::findType()` remains usable after its schema leaves scope, including
+types parsed from incremental additions, imports and chameleon includes. Elements
+and attributes retain that context through their resolved type. Sibling source
+documents keep their own input prefix bindings and target namespace; retaining a
+type does not merge those input scopes.
+
+The namespace registry caches builtin types, so a cached builtin and its registry
+form a reference cycle. Qore's cycle collector releases this graph when its last
+external owner leaves scope, including during exception and cancellation cleanup.
+Directly constructed builtins retain their registry without requiring a cache entry.
+Raw `Serializable` reconstruction preserves indexed references and cycles; a
+reconstructed graph owns an independent namespace registry. Whole-schema
+reconstruction continues to use the retained schema documents.
+
+For example, a consumer can retain a quantity type and reconstruct it
+independently of the original schema:
+
+```qore
+%modern
+%requires WSDL
+XsdSchema schema('<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"
+    targetNamespace="urn:orders"><xs:simpleType name="Quantity">
+    <xs:restriction base="xs:int"><xs:minInclusive value="1"/></xs:restriction>
+    </xs:simpleType></xs:schema>', {"async_only": True});
+XsdAbstractType quantity = schema.findType(make_qname("urn:orders", "Quantity"));
+remove schema;
+XsdAbstractType restored = Serializable::deserialize(quantity.serialize());
+@assert(restored.nsc.getTargetNamespaceUri() == "urn:orders");
+@assert(restored.serializeValue(restored.nsc, 12, True) == 12);
+```
+
+Namespace mutation remains subject to the existing public API's synchronization
+requirements. Concurrent consumers can reconstruct independent graphs; sharing a
+type does not make concurrent namespace mutation safe. The scoped
+`NamespacePrefixHelper` continues to borrow its registry for the enclosing call.
 
 ## Unwrapped document arguments
 

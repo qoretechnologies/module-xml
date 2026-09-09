@@ -921,3 +921,15 @@ and SoapHandler, attributes, lists, union fallback and rejection recovery.
 See [the lexical contract](../../design/wsdl-qname-lexical.md) and
 [evidence](qname-lexical-evidence.md). General QName namespace context,
 enumeration identity and output prefix handling remain open requirements.
+
+## Detached schema namespace ownership
+
+Run `qore --enable-debug test/wsdl-namespace-ownership.qtest` to verify that
+types, elements and attributes retain their declaration namespaces after the
+schema leaves scope. Tests cover incremental additions, nested imports/includes,
+raw and binary reconstruction, provider constraints, failed additions,
+serialization errors, cancellation, concurrent copies and cycle cleanup.
+See [the ownership contract](../../design/wsdl-schema-identity.md#declaration-namespace-ownership)
+and [regression evidence](namespace-ownership-evidence.md). Existing independent
+binding matrices continue to check schema validity and preserved values in both
+SOAP versions and directions.

@@ -1,0 +1,283 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires xml
+%requires ../qlib/WSDL.qm
+%exec-class NamespaceOwnershipTest
+
+class TrackedNamespaces inherits Namespaces {
+    private {
+        Qore::Thread::Counter released;
+    }
+    constructor(Qore::Thread::Counter released) : Namespaces({}) {
+        self.released = released;
+    }
+    destructor() {
+        released.inc();
+    }
+}
+
+class NamespaceOwnershipTest inherits Test {
+    constructor() : Test("Detached schema namespace ownership", "1.0") {
+        addTestCase("Standalone types retain namespaces after the schema leaves scope", \detached());
+        addTestCase("Builtin namespace cache cycles retain live values and then release", \cycles());
+        addTestCase("Raw reconstructed types retain constraints and namespace identity", \reconstruction());
+        addTestCase("Sibling schemas preserve independent namespace contexts", \siblings());
+        addTestCase("Nested chameleon includes keep their own declaration contexts", \includes());
+        addTestCase("Imported types retain nested declaration contexts", \imports());
+        addTestCase("Direct builtin construction retains namespaces without a cache cycle", \directBuiltin());
+        addTestCase("Failed additions preserve existing detached namespaces", \rollback());
+        addTestCase("Detached elements and attributes preserve typed conversion", \elementDeclarations());
+        addTestCase("Raw QName declaration metadata preserves all namespace identities", \qnameMetadata());
+        addTestCase("Failed builtin construction and cyclic exception cleanup release contexts", \failedLifetime());
+        addTestCase("Cancellation unwinds a newly created builtin namespace cycle", \cancellation());
+        addTestCase("Concurrent reconstruction uses independent namespace registries", \concurrency());
+        set_return_value(main());
+    }
+    private static string document(string uri, string prefix_uri = "urn:lexical") {
+        return '<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:t="' + uri
+            + '" xmlns:p="' + prefix_uri + '" targetNamespace="' + uri + '">
+            <xs:simpleType name="Value"><xs:restriction base="xs:int"><xs:minInclusive value="0"/>
+            <xs:maxInclusive value="10"/></xs:restriction></xs:simpleType>
+            <xs:element name="value" type="t:Value"/>
+            <xs:attribute name="code" type="t:Value"/></xs:schema>';
+    }
+    private static XsdAbstractType type(string uri = "urn:owner") {
+        XsdSchema schema(document(uri), {"async_only": True});
+        return schema.findType(make_qname(uri, "Value"));
+    }
+    private detached() {
+        XsdAbstractType value = type();
+        assertEq("urn:owner", value.nsc.getTargetNamespaceUri());
+        assertEq("urn:lexical", value.nsc.getInputNamespaceUri("p"));
+        assertEq(7, value.serializeValue(value.nsc, 7, True));
+        assertThrows("SOAP-SERIALIZATION-ERROR", \value.serializeValue(), (value.nsc, 11, True));
+        assertEq(7, value.getDataProviderType().acceptsValue(7));
+    }
+    private static XsdBaseType builtin(Qore::Thread::Counter released) {
+        TrackedNamespaces registry(released);
+        return registry.getBaseType("int");
+    }
+    private cycles() {
+        Qore::Thread::Counter released();
+        for (int i = 0; i < 8; ++i) {
+            {
+                XsdBaseType value = builtin(released);
+                assertEq(i, released.getCount());
+                assertEq(12, value.serializeValue(value.nsc, 12, True));
+            }
+            assertEq(i + 1, released.getCount());
+        }
+    }
+    private reconstruction() {
+        XsdAbstractType original = type();
+        foreach XsdAbstractType value in (Serializable::deserialize(original.serialize()),
+                Serializable::deserialize(original.serializeToData())) {
+            assertEq("Value", value.name);
+            assertEq("urn:owner", value.nsc.getTargetNamespaceUri());
+            assertEq("urn:lexical", value.nsc.getInputNamespaceUri("p"));
+            assertEq(7, value.serializeValue(value.nsc, 7, True));
+            assertThrows("SOAP-SERIALIZATION-ERROR", \value.serializeValue(), (value.nsc, 11, True));
+        }
+    }
+    private siblings() {
+        XsdSchema schema(document("urn:first", "urn:one"), {"async_only": True});
+        XsdAbstractType first = schema.findType(make_qname("urn:first", "Value"));
+        schema.addSchemaString(document("urn:second", "urn:two"));
+        XsdAbstractType second = schema.findType(make_qname("urn:second", "Value"));
+        remove schema;
+        assertEq("urn:first", first.nsc.getTargetNamespaceUri());
+        assertEq("urn:second", second.nsc.getTargetNamespaceUri());
+        assertEq("urn:one", first.nsc.getInputNamespaceUri("p"));
+        assertEq("urn:two", second.nsc.getInputNamespaceUri("p"));
+        assertEq(3, first.serializeValue(first.nsc, 3, True));
+        assertEq(4, second.serializeValue(second.nsc, 4, True));
+    }
+    private includes() {
+        string common = '<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:p="urn:inner">
+            <xs:simpleType name="Value"><xs:restriction base="xs:int"/></xs:simpleType></xs:schema>';
+        string outer = '<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:p="urn:outer"
+            targetNamespace="urn:included"><xs:include schemaLocation="common.xsd"/></xs:schema>';
+        XsdSchema schema(outer, {"async_only": True, "def_path": "https://example.invalid/",
+            "xsd_cache": {"https://example.invalid/common.xsd": common}});
+        XsdAbstractType value = schema.findType(make_qname("urn:included", "Value"));
+        remove schema;
+        assertEq("urn:included", value.nsc.getTargetNamespaceUri());
+        assertEq("urn:inner", value.nsc.getInputNamespaceUri("p"));
+        assertEq(5, value.serializeValue(value.nsc, 5, True));
+        XsdAbstractType copy = Serializable::deserialize(value.serialize());
+        assertEq("urn:inner", copy.nsc.getInputNamespaceUri("p"));
+    }
+    private rollback() {
+        XsdSchema schema(document("urn:first", "urn:one"), {"async_only": True});
+        XsdAbstractType first = schema.findType(make_qname("urn:first", "Value"));
+        string bad = regex_subst(document("urn:second", "urn:two"), 'value="10"', 'value="-1"');
+        assertThrows("XSD-SIMPLETYPE-ERROR", \schema.addSchemaString(), (bad,));
+        assertEq("urn:one", first.nsc.getInputNamespaceUri("p"));
+        assertEq(9, first.serializeValue(first.nsc, 9, True));
+        assertFalse(exists schema.findType(make_qname("urn:second", "Value")));
+        schema.addSchemaString(document("urn:second", "urn:two"));
+        assertEq("urn:two", schema.findType(make_qname("urn:second", "Value")).nsc.getInputNamespaceUri("p"));
+    }
+    private imports() {
+        string included = regex_subst(document("urn:imported", "urn:inner"),
+            'targetNamespace="urn:imported"', '');
+        string imported = '<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:p="urn:middle"
+            targetNamespace="urn:imported"><xs:include schemaLocation="inner.xsd"/></xs:schema>';
+        string outer = '<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:p="urn:outer"
+            targetNamespace="urn:outer"><xs:import namespace="urn:imported" schemaLocation="imported.xsd"/>
+            </xs:schema>';
+        XsdSchema schema(outer, {"async_only": True, "def_path": "https://example.invalid/",
+            "xsd_cache": {"https://example.invalid/imported.xsd": imported,
+                "https://example.invalid/inner.xsd": included}});
+        XsdAbstractType original = schema.findType(make_qname("urn:imported", "Value"));
+        remove schema;
+        foreach XsdAbstractType value in (original, Serializable::deserialize(original.serialize())) {
+            assertEq("urn:imported", value.nsc.getTargetNamespaceUri());
+            assertEq("urn:inner", value.nsc.getInputNamespaceUri("p"));
+            assertEq(5, value.serializeValue(value.nsc, 5, True));
+            assertThrows("SOAP-SERIALIZATION-ERROR", \value.serializeValue(), (value.nsc, -1, True));
+        }
+    }
+    private directBuiltin() {
+        Qore::Thread::Counter released();
+        {
+            TrackedNamespaces registry(released);
+            XsdBaseType value("int", registry);
+            remove registry;
+            assertEq(0, released.getCount());
+            assertEq(6, value.serializeValue(value.nsc, 6, True));
+            # The test-only Counter deliberately cannot be serialized; failure must retain ownership.
+            assertThrows("SERIALIZATION-ERROR", \value.serializeToData());
+            assertEq(0, released.getCount());
+            assertEq(7, value.serializeValue(value.nsc, 7, True));
+        }
+        assertEq(1, released.getCount());
+        XsdBaseType original("int", new Namespaces({}));
+        XsdBaseType restored = Serializable::deserialize(original.serializeToData());
+        remove original;
+        assertEq(6, restored.serializeValue(restored.nsc, 6, True));
+    }
+    private elementDeclarations() {
+        XsdSchema schema(document("urn:element"), {"async_only": True});
+        XsdElement original = schema.getElement("urn:element", "value");
+        XsdAttribute attribute = schema.getAttribute("urn:element", "code");
+        remove schema;
+        foreach XsdElement value in (original, Serializable::deserialize(original.serialize())) {
+            assertEq("urn:element", value.type.nsc.getTargetNamespaceUri());
+            assertEq("{urn:element}value", value.getExpandedName());
+            AbstractDataProviderType provider = value.getDataProviderType();
+            assertEq(8, provider.acceptsValue(8));
+            assertThrows("RUNTIME-TYPE-ERROR", \provider.acceptsValue(), (11,));
+        }
+        XsdAttribute restored = Serializable::deserialize(attribute.serialize());
+        assertEq("urn:element", restored.type.nsc.getTargetNamespaceUri());
+        assertEq(9, restored.getValue("9"));
+        assertThrows("SOAP-DESERIALIZATION-ERROR", \restored.getValue(), ("11",));
+    }
+    private qnameMetadata() {
+        XsdSchema schema('<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
+            <xs:simpleType name="Value"><xs:restriction base="xs:QName">
+            <xs:enumeration xmlns:p="urn:one" value="p:Name"/>
+            <xs:enumeration xmlns:p="urn:two" value="p:Name"/>
+            </xs:restriction></xs:simpleType></xs:schema>', {"async_only": True});
+        XsdAbstractType value = schema.findType(make_qname("", "Value"));
+        remove schema;
+        hash<SerializationInfo> state = value.serializeToData();
+        string index = state._index."0"._class_data."WSDL::XsdSimpleType".qnameEnumValues._index;
+        hash<auto> identities = state._index{index}._members;
+        assertEq(("urn:one", "urn:two"), sort(keys identities));
+        foreach string uri in (keys identities) {
+            assertEq({"Name": True}, state._index{identities{uri}._index}._members);
+        }
+        XsdAbstractType restored = Serializable::deserialize(state);
+        assertEq(state, restored.serializeToData());
+    }
+    private static throwWithBuiltin(Qore::Thread::Counter released, bool malformed) {
+        TrackedNamespaces registry(released);
+        XsdBaseType value = registry.getBaseType(malformed ? "not-a-builtin" : "int");
+        @assert(value.name == "int");
+        throw "OWNERSHIP-TEST-ERROR", "exception after the builtin cycle is created";
+    }
+    private failedLifetime() {
+        Qore::Thread::Counter released();
+        assertThrows("WSDL-ERROR", \throwWithBuiltin(), (released, True));
+        assertEq(1, released.getCount());
+        assertThrows("OWNERSHIP-TEST-ERROR", \throwWithBuiltin(), (released, False));
+        assertEq(2, released.getCount());
+    }
+    private cancellation() {
+        Program program(PO_MODERN);
+        SandboxManager manager();
+        on_exit manager.clearInterrupt();
+        program.setSandboxManager(manager);
+        program.parse("%modern\nsub execute(code<nothing()> work) { work(); }\n",
+            get_script_dir() + "/namespace-ownership-interrupt.qr");
+        Qore::Thread::Counter released();
+        code<nothing()> work = sub() {
+            TrackedNamespaces registry(released);
+            XsdBaseType value = registry.getBaseType("int");
+            manager.requestInterrupt();
+            value.serializeValue(value.nsc, 8, True);
+        };
+        *hash<ExceptionInfo> error;
+        try {
+            program.callFunction("execute", work);
+        } catch (hash<ExceptionInfo> ex) {
+            error = ex;
+        }
+        manager.clearInterrupt();
+        assertEq("PROGRAM-INTERRUPTED", error.err);
+        assertEq(1, released.getCount());
+        XsdAbstractType recovered = type();
+        assertEq(4, recovered.serializeValue(recovered.nsc, 4, True));
+    }
+    private concurrency() {
+        XsdAbstractType original = type();
+        Qore::Thread::Queue ready();
+        Qore::Thread::Queue start();
+        Qore::Thread::Queue results();
+        Qore::Thread::Counter running();
+        on_exit {
+            for (int i = 0; i < 4; ++i) {
+                start.push(True);
+            }
+            assertEq(0, running.waitForZero(30s));
+        }
+        for (int i = 0; i < 4; ++i) {
+            running.inc();
+            background sub(int index) {
+                on_exit running.dec();
+                try {
+                    ready.push(True);
+                    start.get(30s);
+                    XsdAbstractType value = Serializable::deserialize(original.serialize());
+                    value.nsc.addNamespaces({"xmlns:private": "urn:worker:" + index});
+                    results.push((index, value.nsc.getInputNamespaceUri("private"),
+                        value.serializeValue(value.nsc, index, True)));
+                } catch (hash<ExceptionInfo> ex) {
+                    results.push({"error": ex});
+                }
+            }(i);
+        }
+        for (int i = 0; i < 4; ++i) {
+            ready.get(30s);
+        }
+        for (int i = 0; i < 4; ++i) {
+            start.push(True);
+        }
+        hash<string, bool> seen();
+        for (int i = 0; i < 4; ++i) {
+            auto result = results.get(30s);
+            assertEq(NT_LIST, result.typeCode());
+            int index = result[0];
+            assertFalse(exists seen{index});
+            seen{index} = True;
+            assertEq((index, "urn:worker:" + index, index), result);
+        }
+        assertThrows("WSDL-NAMESPACE-ERROR", \original.nsc.getInputNamespaceUri(), ("private",));
+    }
+
+}

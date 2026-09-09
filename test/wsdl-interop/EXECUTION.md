@@ -4315,3 +4315,68 @@ that its cleanup tests must cover. This is next, before ordinary QName
 wire/provider integration. ENTITY/ENTITIES, dateTime/time policy and other P3
 criteria remain in scope. The leap-second question has no inferred answer;
 P4-P9 have not begun.
+
+## P3-32 — Declaration namespace ownership
+
+P3-31 is committed as `d5985db`. The two `XsdAbstractType` constructors now own
+rather than weakly reference their declaration namespace registry. Temporary
+registries created for schema additions and imports therefore remain usable
+through detached types, elements and attributes. No namespace map, conversion
+rule, native source or Qore source is changed in this increment. The main Qore
+checkout is clean on develop at `f135ddac7`, ahead ten commits, with no push.
+
+The [ownership contract](../../design/wsdl-schema-identity.md#declaration-namespace-ownership)
+and [regression evidence](namespace-ownership-evidence.md) document component
+lifetime, indexed reconstruction and the builtin-cache cycle. The new suite
+passes **13 cases / 105 assertions**; **12 cases fail against exact previous
+source**, demonstrating deleted contexts and premature cleanup. It covers
+nested imports/chameleon includes, sibling scope isolation, detached providers,
+raw/binary reconstruction, QName declaration identities, failure/retry,
+serialization errors, cancellation and deterministic concurrent copies.
+Destructor-counted tests prove live ownership and cycle release, including
+exception and interruption cleanup. The complete documentation example passes.
+
+All **80 Qore suites / 866 cases / 32,052 assertions** pass. The soap suite
+retains its previously documented 1,031 total / 1,028 succeeded assertion
+accounting, with all twenty cases passing. Five affected suites pass **352
+cases / 6,656 assertions** across AST/IR/JIT/tiered and UTC/Europe-Prague;
+compiled modules pass **44 cases / 832 assertions**. WSDL, SoapDataProvider,
+SoapClient and SoapHandler qmods and WSDL Qdx/Doxygen build without warnings
+or errors. Gate, mode, compiled and build logs use
+`/tmp/wsdl-p3-32-ownership-{gate,modes,aot,build}.log`; the first three have
+corresponding JSON summaries.
+
+The affected Python gate completes **55 methods in 400.364 seconds**, retaining
+exactly the two previously tracked P6 selected-binding-version assertions.
+There are no new failures, errors or warning diagnostics; exact comparison is
+`/tmp/wsdl-p3-32-ownership-python-comparison.json`. Existing independent matrices
+exercise actual SOAP 1.1/1.2 bindings, both directions, original/reconstructed
+consumers and preserved scalar values. Both corpus reports differ from P3-31
+only in WSDL source hash: **120 selected WSDLs / 1,148 directions**, zero selected
+failures, and **168 unchanged broad failure signatures**. Full comparison is
+`/tmp/wsdl-p3-32-ownership-report-comparison.json`; current repo reports are
+refreshed without changing original fixtures or findings.
+
+The complete new ownership suite under `qore -b --enable-debug --exec-mode=jit`
+passes Valgrind with **zero errors and zero definite/indirect/possible loss**,
+without suppressions. The authorized `QORE_PCRE2_NO_JIT=1` is used; Qore JIT stays
+enabled. The existing core DWARF-reader warning remains recorded for P9.
+Log: `/tmp/wsdl-p3-32-ownership-valgrind.log`. The full
+[audit](audits/P3-32-namespace-ownership.md) is **20 Pass / 42 N/A / 0 Fail**.
+
+Final WSDL SHA256 is
+`b2618ceffda47428e2d9042e4ad3410d631c6bc676666dc615d357759f43d417`;
+the frozen Debug core remains
+`745c1da619df1407bda9d75442c9012551a67c91ca4e3c4ab4a6834da5be0b8f`.
+Final intended-file hashes are in `/tmp/wsdl-p3-32-ownership-manifest.json`.
+No push or installation was performed.
+
+Next: ordinary QName instance/provider/list/union/fixed/default conversion and
+output namespace preservation. A new reduced baseline in
+`/tmp/wsdl-p3-33-qname-wire-baseline/` contains four actual SOAP contracts and
+24 documents with agreeing libxml2/Xerces validity verdicts. It reproduces the
+remaining lexical-only conversion and enumeration failures; complete inputs,
+outputs and hashes are retained. Architecture notes are in
+`/tmp/wsdl-p3-33-qname-integration-preflight.md`. ENTITY/ENTITIES, dateTime/time
+policy and all remaining P3 criteria remain open. The pending leap-second
+question has no inferred answer. P4-P9 have not begun.
