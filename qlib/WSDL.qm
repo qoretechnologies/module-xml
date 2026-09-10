@@ -80,6 +80,8 @@ module WSDL {
     @section wsdlrelnotes WSDL Module Release Notes
 
     @subsection wsdl_0_5_8 WSDL v0.5.8
+    - complex types and named groups expose ordered XsdParticle construction metadata, retaining declaration
+      positions, whole-particle counts, resolved group references and base-before-extension order
     - literal SOAP values retain schema-defined id, href and root attributes; reference resolution runs only
       with an encoded body context, so scalar attributes reach normal schema validation
     - time/dateTime validate XML grammar before conversion; missing timezones, arbitrary fractions,
@@ -16996,6 +16998,311 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
     }
 }
 
+# The general XML data view groups equally named children. Keep the ordered view only
+# inside XSD compositors; other WSDL/schema consumers retain their grouped interfaces.
+class XsdSchemaSource {
+    static hash<auto> parse(string xml) {
+        return convert(parse_xml(xml, XPF_PRESERVE_ORDER), "", {});
+    }
+
+    private static auto convert(auto value, string name, hash<string, string> namespaces) {
+        if (value.typeCode() == NT_LIST) {
+            return map convert($1, name, namespaces), value;
+        }
+        if (value.typeCode() != NT_HASH) {
+            return value;
+        }
+        foreach string key in (keys value."^attributes^") {
+            if (key == "xmlns") {
+                namespaces{""} = value."^attributes^"{key};
+            } else if (key =~ /^xmlns:/) {
+                namespaces{substr(key, 6)} = value."^attributes^"{key};
+            }
+        }
+        list<string> qname = name.split(":");
+        string local = qname[qname.size() - 1] ?? "";
+        string uri = namespaces{qname.size() == 2 ? qname[0] : ""} ?? "";
+        bool ordered = uri == XSD_NS && (local == "sequence" || local == "choice" || local == "all");
+        hash<auto> result();
+        foreach string key in (keys value) {
+            if (key =~ /^\^/) {
+                result{key} = value{key};
+                continue;
+            }
+            string child_name = key.split("^")[0];
+            auto child = convert(value{key}, child_name, namespaces);
+            string output_key = ordered ? key : child_name;
+            if (!result.hasKey(output_key)) {
+                result{output_key} = child;
+            } else {
+                # Explicit wrapping preserves NOTHING for repeated empty declarations.
+                if (result{output_key}.typeCode() != NT_LIST) {
+                    result{output_key} = (result{output_key},);
+                }
+                result{output_key} += child.typeCode() == NT_LIST ? child : (child,);
+            }
+        }
+        return result;
+    }
+}
+
+hashdecl XsdParticleDeclaration {
+    string kind;
+    *hash<auto> data;
+}
+
+class XsdParticleSource {
+    # Read before namespace stripping: two aliases of the XSD namespace can occur
+    # on either side of a different compositor and must not be grouped together.
+    static list<hash<XsdParticleDeclaration>> children(*hash<auto> data) {
+        list<hash<XsdParticleDeclaration>> result();
+        foreach string key in (keys data) {
+            if (key =~ /^\^/) {
+                continue;
+            }
+            list<string> qname = key.split("^")[0].split(":");
+            string kind = qname[qname.size() - 1];
+            if (kind != "sequence" && kind != "choice" && kind != "all" && kind != "group"
+                    && kind != "element" && kind != "any") {
+                continue;
+            }
+            list<auto> values = data{key}.typeCode() == NT_LIST ? data{key} : (data{key},);
+            foreach auto value in (values) {
+                if (exists value && value.typeCode() != NT_HASH) {
+                    throw WSDL_ERROR, sprintf("invalid %s particle declaration", kind);
+                }
+                push result, <XsdParticleDeclaration>{"kind": kind, "data": value};
+            }
+        }
+        return result;
+    }
+}
+
+#! XSD particle term kinds
+/** @since %WSDL 0.5.8 */
+public enum XsdParticleKind : string {
+    #! An element declaration
+    Element = "element",
+    #! An element wildcard
+    Any = "any",
+    #! An ordered sequence
+    Sequence = "sequence",
+    #! Alternative particles
+    Choice = "choice",
+    #! Unordered element members
+    All = "all",
+    #! A named model group reference
+    Group = "group",
+}
+
+hashdecl XsdParticleVisit {
+    XsdParticle node;
+    bool leaving = False;
+}
+
+#! An ordered XSD particle declaration with its own occurrence range
+/** The particle retains group references and each individual declaration position. Element
+    objects are shared with the schema's field metadata; occurrence constraints belong to the
+    particle itself. This is schema construction metadata, independent of native value projection.
+
+    @par Example: inspect the order of an invoice's content
+    @code{.py}
+    XsdSchema schema("<xs:schema xmlns:xs='http://www.w3.org/2001/XMLSchema'>"
+        "<xs:complexType name='Invoice'><xs:sequence><xs:element name='number' type='xs:string'/>"
+        "<xs:choice><xs:element name='card' type='xs:string'/><xs:element name='transfer' type='xs:string'/>"
+        "</xs:choice></xs:sequence></xs:complexType></xs:schema>");
+    XsdComplexType invoice = cast<XsdComplexType>(schema.findType("Invoice"));
+    list<XsdParticle> content = invoice.getParticle().getChildren();
+    @assert(content[0].getElement().name == "number");
+    @assert(content[1].getKind() == XsdParticleKind::Choice);
+    @endcode
+
+    @note Add and resolve schema documents before sharing their metadata between threads.
+    @since %WSDL 0.5.8
+*/
+public final class XsdParticle inherits Qore::Serializable {
+    private {
+        const hash<string, XsdParticleKind> Kinds = {
+            "element": XsdParticleKind::Element, "any": XsdParticleKind::Any,
+            "sequence": XsdParticleKind::Sequence, "choice": XsdParticleKind::Choice,
+            "all": XsdParticleKind::All, "group": XsdParticleKind::Group,
+        };
+        XsdParticleKind kind;
+        string minimum;
+        *string maximum;
+        *XsdElement element;
+        *string group;
+        *XsdParticle group_definition;
+        list<XsdParticle> children();
+        transient bool groups_resolved = False;
+    }
+
+    #! constructs a particle in its schema declaration context
+    /** @param kind the schema term kind
+        @param data the ordered XML declaration data
+        @param nsc the declaration's namespace context
+        @param unresolved the schema's late resolution queue
+        @param usedocns the local element qualification default
+        @throw WSDL-ERROR an invalid term, occurrence range or missing declaration
+        @throw XSD-ELEMENT-ERROR an element minimum exceeding its maximum
+        @throw WSDL-NAMESPACE-ERROR an invalid declaration QName
+        @note Schema clients normally obtain these objects from getParticle() on a type or group.
+    */
+    constructor(string kind, *hash<auto> data, Namespaces nsc,
+            XsdLateResolverHelper unresolved, bool usedocns) {
+        if (!Kinds.hasKey(kind)) {
+            throw WSDL_ERROR, sprintf("invalid particle term %Y", kind);
+        }
+        self.kind = Kinds{kind};
+        NamespacePrefixHelper scope(nsc, data."^attributes^");
+        minimum = count(data."^attributes^".minOccurs ?? "1");
+        string limit = XsdSimpleType::normalizeWhiteSpace(data."^attributes^".maxOccurs ?? "1", "collapse");
+        maximum = limit == "unbounded" ? NOTHING : count(limit);
+        if (exists maximum && XsdIntegerLexicalHelper::compare(minimum, maximum) > 0) {
+            throw kind == "element" ? "XSD-ELEMENT-ERROR" : WSDL_ERROR,
+                sprintf("%s particle minOccurs %s exceeds maxOccurs %s", kind, minimum, maximum);
+        }
+        if (kind == "element") {
+            if (!data) {
+                throw WSDL_ERROR, "element declaration requires name or ref";
+            }
+            # The component parser receives normalized XSD occurrence values, including
+            # whitespace around 'unbounded'; the original document remains unchanged.
+            if (exists data."^attributes^".minOccurs) {
+                data."^attributes^".minOccurs = minimum;
+            }
+            if (exists data."^attributes^".maxOccurs) {
+                data."^attributes^".maxOccurs = maximum ?? "unbounded";
+            }
+            element = new XsdElement(data, nsc, NOTHING, unresolved, usedocns);
+        } else if (kind == "group") {
+            if (!data."^attributes^".ref) {
+                throw WSDL_ERROR, "group reference requires ref";
+            }
+            hash<auto> identity = nsc.getTypeHash(data."^attributes^".ref);
+            group = type_qname(identity.uri, identity.val);
+        } else if (kind != "any") {
+            foreach hash<XsdParticleDeclaration> child in (XsdParticleSource::children(data)) {
+                push children, new XsdParticle(child.kind, child.data, nsc, unresolved, usedocns);
+            }
+        }
+    }
+
+    private static string count(string value) {
+        value = XsdSimpleType::normalizeWhiteSpace(value, "collapse");
+        if (value !~ /\A(?:\+?[0-9]+|-0+)\z/) {
+            throw WSDL_ERROR, sprintf("invalid particle occurrence count %Y", value);
+        }
+        value =~ s/^[+-]?0*//;
+        return value ? value : "0";
+    }
+
+    private:internal deserializeMembers(hash<auto> members) {
+        string term = string(members.kind);
+        if (!Kinds.hasKey(term) || members.minimum.typeCode() != NT_STRING
+                || members.minimum !~ /\A(?:0|[1-9][0-9]*)\z/
+                || (exists members.maximum && (members.maximum.typeCode() != NT_STRING
+                    || members.maximum !~ /\A(?:0|[1-9][0-9]*)\z/
+                    || XsdIntegerLexicalHelper::compare(members.minimum, members.maximum) > 0))
+                || members.children.typeCode() != NT_LIST
+                || ((term == "element") != (members.element instanceof XsdElement))
+                || (exists members.element && !(members.element instanceof XsdElement))
+                || (exists members.group_definition && !(members.group_definition instanceof XsdParticle))
+                || (term == "group" ? (members.group.typeCode() != NT_STRING || !members.group)
+                    : (exists members.group || exists members.group_definition))
+                || ((term == "element" || term == "group" || term == "any") && members.children)) {
+            throw "DESERIALIZATION-ERROR", "invalid serialized XSD particle";
+        }
+        foreach auto child in (members.children) {
+            if (!(child instanceof XsdParticle) || child === self) {
+                throw "DESERIALIZATION-ERROR", "invalid serialized XSD particle child";
+            }
+        }
+        kind = Kinds{term};
+        minimum = members.minimum;
+        maximum = members.maximum;
+        element = members.element;
+        group = members.group;
+        group_definition = members.group_definition;
+        children = members.children;
+    }
+
+    private constructor(list<XsdParticle> children) {
+        kind = XsdParticleKind::Sequence;
+        minimum = maximum = "1";
+        self.children = children;
+    }
+
+    #! combines base and extension content in schema order
+    /** @param base the base type's particle, if any
+        @param extension the extension's particle, if any
+        @return a sequence containing both particles, or the sole nonempty argument
+    */
+    static *XsdParticle concatenate(*XsdParticle base, *XsdParticle extension) {
+        return base && extension ? new XsdParticle((base, extension)) : base ?? extension;
+    }
+
+    #! resolves named group references without expanding their declarations
+    /** @param groups the schema's checked named model groups
+        @throw WSDL-ERROR a missing or cyclic group reference
+        @note Called during schema construction, before sharing a schema between threads.
+    */
+    resolveGroups(hash<string, XsdGroup> groups) {
+        list<hash<XsdParticleVisit>> pending = (<XsdParticleVisit>{"node": self},);
+        hash<string, bool> visiting();
+        while (pending) {
+            hash<XsdParticleVisit> visit = pop pending;
+            XsdParticle node = visit.node;
+            if (visit.leaving) {
+                node.groups_resolved = True;
+                delete visiting{node.uniqueHash()};
+                continue;
+            }
+            if (node.groups_resolved) {
+                continue;
+            }
+            if (visiting{node.uniqueHash()}) {
+                throw WSDL_ERROR, "cyclic particle child graph";
+            }
+            visiting{node.uniqueHash()} = True;
+            if (node.group) {
+                *XsdGroup target = groups{node.group};
+                if (!target) {
+                    throw WSDL_ERROR, sprintf("undefined group reference %Y", node.group);
+                }
+                target.resolveNestedGroups(groups);
+                node.group_definition = target.getParticle();
+            }
+            push pending, <XsdParticleVisit>{"node": node, "leaving": True};
+            foreach XsdParticle child in (node.children) {
+                push pending, <XsdParticleVisit>{"node": child};
+            }
+        }
+    }
+
+    #! returns the term kind
+    /** @return element, any, sequence, choice, all, or group */
+    XsdParticleKind getKind() { return kind; }
+    #! returns the minimum number of occurrences of this whole particle
+    /** @return an exact nonnegative integer in decimal notation */
+    string getMinOccurs() { return minimum; }
+    #! returns the maximum number of occurrences of this whole particle
+    /** @return an exact nonnegative integer in decimal notation, or NOTHING for unbounded */
+    *string getMaxOccurs() { return maximum; }
+    #! returns this position's element declaration
+    /** @return the shared schema element, or NOTHING for another term kind */
+    *XsdElement getElement() { return element; }
+    #! returns the namespace-qualified named group reference
+    /** @return the expanded group identity, or NOTHING for another term kind */
+    *string getGroupReference() { return group; }
+    #! returns the resolved named model group
+    /** @return the referenced group's particle after schema construction, or NOTHING for another term kind */
+    *XsdParticle getGroupDefinition() { return group_definition; }
+    #! returns direct child particles in declaration order
+    /** @return a copy-on-write list; a group reference is retained as a reference */
+    list<XsdParticle> getChildren() { return children; }
+}
+
 hashdecl XsdEmptiabilityInfo {
     bool optional = False;
     bool absent = False;
@@ -17039,7 +17346,6 @@ class XsdEmptiabilityHelper {
 
     static hash<XsdEmptiabilityInfo> parse(*hash<auto> data, Namespaces nsc, string kind = "sequence") {
         NamespacePrefixHelper scope(nsc, data."^attributes^");
-        WSDL::XsdBase::removeNS(\data);
         hash<XsdEmptiabilityInfo> result = <XsdEmptiabilityInfo>{
             "optional": zeroOccurs(data."^attributes^".minOccurs),
             "absent": zeroOccurs(data."^attributes^".maxOccurs),
@@ -17053,14 +17359,8 @@ class XsdEmptiabilityHelper {
             hash<auto> identity = nsc.getTypeHash(data."^attributes^".ref);
             result.ref = type_qname(identity.uri, identity.val);
         } else if (!result.terminal) {
-            foreach string key in (keys data) {
-                if (key == "sequence" || key == "choice" || key == "all" || key == "group"
-                        || key == "element" || key == "any") {
-                    # Empty compositors are represented as NOTHING, but remain a child of a choice.
-                    foreach *hash<auto> child in (data{key} ?? (NOTHING,)) {
-                        result.children += parse(child, nsc, key);
-                    }
-                }
+            foreach hash<XsdParticleDeclaration> child in (XsdParticleSource::children(data)) {
+                result.children += parse(child.data, nsc, child.kind);
             }
         }
         return result;
@@ -17137,6 +17437,7 @@ public class XsdGroup inherits WSDL::XsdNamedData, Qore::Serializable {
     }
 
     private {
+        XsdParticle particle;
         list<string> nestedGroupRefs();
         list<string> elementGroupRefs();
         list<XsdElement> declaredElements();
@@ -17178,51 +17479,34 @@ public class XsdGroup inherits WSDL::XsdNamedData, Qore::Serializable {
         }
         contentModel = g.hasKey("sequence") ? "sequence" : (g.hasKey("choice") ? "choice" : "all");
         *hash<auto> content = g{contentModel};
-        parseContent(content, nsc, unresolved, usedocns, True);
+        particle = new XsdParticle(contentModel, content, nsc, unresolved, usedocns);
+        parseContent(particle, True);
     }
 
-    private parseContent(*hash<auto> content, Namespaces nsc, XsdLateResolverHelper unresolved,
-            bool usedocns, bool present) {
-        NamespacePrefixHelper compositor(nsc, content."^attributes^");
-        WSDL::XsdBase::removeNS(\content);
-        present = present && !XsdElementConsistencyHelper::isAbsent(content);
-        foreach string kind in (keys content) {
-            if (kind == "element") {
-                if (!content.element) {
-                    throw WSDL_ERROR, "element declaration requires name or ref";
-                }
-                foreach auto e in (content.element) {
-                    if (e.typeCode() != NT_HASH) {
-                        throw WSDL_ERROR, "element declaration requires name or ref";
-                    }
-                    XsdElement elem(e, nsc, NOTHING, unresolved, usedocns);
-                    groupElements{elem.getExpandedName()} = elem;
-                    if (present && !XsdElementConsistencyHelper::isAbsent(e)) {
-                        declaredElements += elem;
-                    }
-                }
-            } else if (kind == "sequence" || kind == "choice" || kind == "all") {
-                foreach *hash<auto> nested in (content{kind}) {
-                    parseContent(nested, nsc, unresolved, usedocns, present);
-                }
-            } else if (kind == "group") {
-                if (!content.group) {
-                    throw WSDL_ERROR, "group reference requires ref";
-                }
-                foreach hash<auto> nested in (content.group) {
-                    if (!nested."^attributes^".ref) {
-                        throw WSDL_ERROR, "group reference requires ref";
-                    }
-                    NamespacePrefixHelper reference_scope(nsc, nested."^attributes^");
-                    hash<auto> identity = nsc.getTypeHash(nested."^attributes^".ref ?? "");
-                    string key = type_qname(identity.uri, identity.val);
-                    nestedGroupRefs += key;
-                    if (present && !XsdElementConsistencyHelper::isAbsent(nested)) {
-                        elementGroupRefs += key;
-                    }
-                }
+    private parseContent(XsdParticle node, bool present) {
+        present = present && node.getMaxOccurs() != "0";
+        if (node.getKind() == "element") {
+            XsdElement elem = node.getElement();
+            groupElements{elem.getExpandedName()} = elem;
+            if (present) {
+                declaredElements += elem;
+            }
+        } else if (node.getKind() == "group") {
+            string key = node.getGroupReference();
+            nestedGroupRefs += key;
+            if (present) {
+                elementGroupRefs += key;
             }
         }
+        foreach XsdParticle child in (node.getChildren()) {
+            parseContent(child, present);
+        }
+    }
+
+    #! returns the ordered model group declaration
+    /** @return the group's compositor, preserving references and whole-particle counts */
+    XsdParticle getParticle() {
+        return particle;
     }
 
     #! resolves nested group identities before consumers use their elements
@@ -17254,6 +17538,7 @@ public class XsdGroup inherits WSDL::XsdNamedData, Qore::Serializable {
         foreach string key in (elementGroupRefs) {
             XsdElementConsistencyHelper::merge(\declarations, (map $1, groups{key}.getElementDeclarations().iterator()));
         }
+        particle.resolveGroups(groups);
         elementDeclarations = declarations;
         groupElements = XsdElementFieldHelper::getFieldMap(merged_elements, XsdElementFieldHelper::getFieldNames(merged_elements));
         resolved = True;
@@ -17795,6 +18080,7 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
     private {
         #! type of complexType object
         string cx_type;
+        *XsdParticle particle;
         bool finalizing = False;
         *hash<auto> simpleRestriction;
         *hash<auto> simpleRestrictionNamespaces;
@@ -17808,7 +18094,6 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
         list<XsdElement> declared_elements();
         list<string> element_group_refs();
         hash<string, XsdElement> element_declarations();
-        bool declarations_present = True;
         *hash<XsdAttributeWildcardInfo> local_attribute_wildcard;
         *hash<XsdAttributeWildcardInfo> attribute_wildcard;
 
@@ -17877,13 +18162,15 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
                         auto sa = seq.element."^attributes^";
                         # according to https://access.redhat.com/documentation/en-US/Fuse_ESB/4.4.1/html/Writing_WSDL_Contracts/files/WSDLDefiningArrays.html
                         # if defining an element of an array, the element's maxOccurs attribute must be set to "unbounded"
-                        if (sa.maxOccurs != "unbounded") {
+                        if (XsdSimpleType::normalizeWhiteSpace(sa.maxOccurs ?? "", "collapse") != "unbounded") {
                             throw WSDL_ERROR, sprintf("array elements must have maxOccurs = \"unbounded\"; array type %y has maxOccurs = %y",
                                 aa.arrayType, sa.maxOccurs);
                         }
                         arrayType = aa.arrayType;
 
-                        elementmap = parseElements(seq.element, unresolved, nsc);
+                        particle = new XsdParticle("sequence", d.restriction.sequence, nsc, unresolved, usedocns);
+                        collectParticleDeclarations(particle, unresolved);
+                        parseModelGroup(particle, False);
                         cx_type = XET_SEQUENCE;
                     } else {
                         NamespacePrefixHelper attribute_scope(nsc, array_declaration);
@@ -17970,6 +18257,14 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
         }
     }
 
+    #! returns the ordered content particle of this complex type
+    /** @return the declared content model, or NOTHING for empty or simple content
+        @note Particle counts are independent of the legacy native field projection.
+    */
+    *XsdParticle getParticle() {
+        return particle;
+    }
+
     *list<auto> getAllowedValues() {
         if (simpleType) {
             return simpleType.getAllowedValues();
@@ -17995,6 +18290,8 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
         finalizing = True;
         on_exit finalizing = False;
         on_success finalized = True;
+        *XsdParticle original_particle = particle;
+        on_error particle = original_particle;
         hash<string, XsdAttribute> original_attributes = attrs;
         on_error attrs = original_attributes;
         bool original_mixed = mixed;
@@ -18090,6 +18387,7 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
                 attrs = mergeInheritedAttributeUses(base);
                 if (extension) {
                     content_emptiable = content_emptiable && base.content_emptiable;
+                    particle = XsdParticle::concatenate(base.particle, particle);
                     if (content_empty) {
                         mixed = base.mixed;
                         content_empty = base.content_empty;
@@ -18158,6 +18456,9 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
             }
         }
         element_declarations = declarations;
+        if (particle) {
+            particle.resolveGroups(groupMap ?? {});
+        }
         finalizeElementFields();
         attribute_wildcard = wildcard;
     }
@@ -18290,15 +18591,19 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
                 d.keys());
 
         string k = d.firstKey();
+        if (k == "all" || k == "choice" || k == "sequence" || k == "group") {
+            particle = new XsdParticle(k, d{k}, nsc, unresolved, usedocns);
+            collectParticleDeclarations(particle, unresolved);
+        }
         if (k == "all") {
             cx_type = XET_ALL;
             # issue #5410: model groups can be nested
-            parseModelGroup(d.all, unresolved, nsc, False);
+            parseModelGroup(particle, False);
             setGroupFlags();
         } else if (k == "choice") {
             cx_type = XET_CHOICE;
             # issue #5410: an alternative in a choice can be a nested model group with more than one element
-            alternatives = getChoiceAlternatives(d.choice, unresolved, nsc);
+            alternatives = getChoiceAlternatives(particle);
             map elementmap += $1, alternatives;
             foreach XsdElement elem in (elementmap.iterator()) {
                 if (elem.isRequired()) {
@@ -18315,204 +18620,98 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
         } else if (k == "sequence") {
             cx_type = XET_SEQUENCE;
             # issue #5410: model groups can be nested
-            parseModelGroup(d.sequence, unresolved, nsc, False);
+            parseModelGroup(particle, False);
             setGroupFlags();
         } else if (k == "group") {
             # Handle top-level group reference
             cx_type = XET_SEQUENCE;  # Groups typically expand to sequences
-            parseGroupReferences(\d, unresolved, nsc);
+
         } else {
             throw "XSD-COMPLEXTYPE-ERROR", sprintf("unknown keys in %y", d);
         }
     }
 
-    #! parses a \c sequence or \c all model group, including any nested model groups
-    /** @param mg the model group to parse
-        @param unresolved the container for types that must be resolved after parsing
-        @param nsc the namespace container
-        @param optional if the model group itself is optional, in which case none of its members can be required
-
-        Elements declared in nested model groups belong to the enclosing model group, so they are added to the
-        element map of this complexType; \c choice blocks are added to the choice collection, and \c group references are
-        registered for resolution in finalize().
-
-        @note the XML parser does not preserve the relative order of elements with different names, therefore the
-        keys of the model group are processed in the order in which they first appear in the schema
-
-        @since %WSDL 0.5.8
-    */
-    private parseModelGroup(*hash<auto> mg, XsdLateResolverHelper unresolved, Namespaces nsc, bool optional) {
-        bool previous_present = declarations_present;
-        on_exit declarations_present = previous_present;
-        declarations_present = declarations_present && !XsdElementConsistencyHelper::isAbsent(mg);
-        # an empty model group (ex: "<xs:sequence/>") is parsed as NOTHING
-        if (!mg) {
-            return;
-        }
-        NamespacePrefixHelper compositor(nsc, mg."^attributes^");
-        WSDL::XsdBase::removeNS(\mg);
-        foreach string k in (keys mg) {
-            switch (k) {
-                case "element": {
-                    elementmap += parseElements(mg.element, unresolved, nsc, True, optional);
-                    break;
+    # Build the legacy field view from the ordered component graph. No second element
+    # construction may occur here: anonymous types and forward references have identity.
+    private parseModelGroup(XsdParticle model, bool optional) {
+        optional = optional || model.getMinOccurs() == "0";
+        foreach XsdParticle node in (model.getChildren()) {
+            string kind = node.getKind();
+            if (kind == "element") {
+                XsdElement elem = node.getElement();
+                elementmap{elem.getExpandedName()} = elem;
+                if (!optional && elem.isRequired()) {
+                    required = True;
                 }
-
-                case "choice": {
-                    foreach hash<auto> ch in (mg.choice) {
-                        addChoiceBlock(ch, unresolved, nsc, optional);
-                    }
-                    break;
+            } else if (kind == "choice") {
+                list<hash<string, XsdElement>> alts = getChoiceAlternatives(node);
+                hash<string, XsdElement> fields();
+                map fields += $1, alts;
+                if (fields) {
+                    choices += <ChoiceInfo>{"elementmap": fields,
+                        "required": !optional && node.getMinOccurs() != "0", "alternatives": alts};
                 }
-
-                case "sequence":
-                case "all": {
-                    foreach hash<auto> nested in (mg{k}) {
-                        parseModelGroup(nested, unresolved, nsc,
-                            optional || XsdComplexType::isOptionalGroup(nested));
-                    }
-                    break;
-                }
-
-                case "group": {
-                    parseGroupReferences(\mg, unresolved, nsc);
-                    break;
-                }
-
-                case "any": {
-                    foreach auto wildcard in (mg.any.typeCode() == NT_LIST ? mg.any : (mg.any,)) {
-                        if (declarations_present && !XsdElementConsistencyHelper::isAbsent(wildcard)) {
-                            has_element_wildcard = True;
-                        }
-                    }
-                    anyAttribute = True;
-                    break;
-                }
+            } else if (kind == "sequence" || kind == "all") {
+                parseModelGroup(node, optional);
+            } else if (kind == "any") {
+                anyAttribute = True;
             }
         }
     }
 
-    #! adds a \c choice block declared in a model group to the choice collection
-    /** @since %WSDL 0.5.8
-    */
-    private addChoiceBlock(*hash<auto> ch, XsdLateResolverHelper unresolved, Namespaces nsc, bool optional) {
-        list<hash<string, XsdElement>> alts = getChoiceAlternatives(ch, unresolved, nsc);
-        hash<string, XsdElement> h();
-        map h += $1, alts;
-        if (h) {
-            choices += <ChoiceInfo>{
-                "elementmap": h,
-                "required": !optional && ch."^attributes^".minOccurs > 0,
-                "alternatives": alts,
-            };
-        }
-    }
-
-    #! returns the alternatives of a \c choice model group
-    /** Each direct \c element child is an alternative on its own; each nested model group is a single alternative
-        made up of all the elements declared in it.
-
-        @note elements contributed by a \c group reference are merged into the element map in finalize() and
-        therefore do not belong to any single alternative
-
-        @since %WSDL 0.5.8
-    */
-    private list<hash<string, XsdElement>> getChoiceAlternatives(*hash<auto> ch, XsdLateResolverHelper unresolved,
-            Namespaces nsc) {
-        bool previous_present = declarations_present;
-        on_exit declarations_present = previous_present;
-        declarations_present = declarations_present && !XsdElementConsistencyHelper::isAbsent(ch);
-        list<hash<string, XsdElement>> rv();
-        # an empty choice (ex: "<xs:choice/>") is parsed as NOTHING
-        if (!ch) {
-            return rv;
-        }
-        NamespacePrefixHelper compositor(nsc, ch."^attributes^");
-        WSDL::XsdBase::removeNS(\ch);
-        foreach string k in (keys ch) {
-            switch (k) {
-                case "element": {
-                    if (!ch.element) {
-                        throw WSDL_ERROR, "element declaration requires name or ref";
-                    }
-                    foreach auto e in (ch.element) {
-                        rv += parseElements(e, unresolved, nsc, False);
-                    }
-                    break;
-                }
-
-                case "sequence":
-                case "all":
-                case "choice": {
-                    foreach hash<auto> nested in (ch{k}) {
-                        hash<string, XsdElement> h = flattenModelGroup(nested, unresolved, nsc);
-                        if (h) {
-                            rv += h;
-                        }
-                    }
-                    break;
-                }
-
-                case "group": {
-                    parseGroupReferences(\ch, unresolved, nsc);
-                    break;
-                }
+    private list<hash<string, XsdElement>> getChoiceAlternatives(XsdParticle choice) {
+        list<hash<string, XsdElement>> result();
+        foreach XsdParticle child in (choice.getChildren()) {
+            hash<string, XsdElement> fields = flattenModelGroup(child);
+            if (fields) {
+                push result, fields;
             }
         }
-        return rv;
+        return result;
+    }
+
+    private hash<string, XsdElement> flattenModelGroup(XsdParticle node) {
+        hash<string, XsdElement> result();
+        list<XsdParticle> pending = (node,);
+        while (pending) {
+            XsdParticle current = pop pending;
+            if (current.getKind() == "element") {
+                XsdElement elem = current.getElement();
+                result{elem.getExpandedName()} = elem;
+            }
+            list<XsdParticle> children = current.getChildren();
+            for (int index = children.size() - 1; index >= 0; --index) {
+                push pending, children[index];
+            }
+        }
+        return result;
+    }
+
+    private collectParticleDeclarations(XsdParticle node, XsdLateResolverHelper unresolved, bool present = True) {
+        present = present && node.getMaxOccurs() != "0";
+        if (node.getKind() == "element") {
+            if (present) {
+                declared_elements += node.getElement();
+            }
+        } else if (node.getKind() == "group") {
+            string identity = node.getGroupReference();
+            unresolved.addGroupRef(self, identity, int(node.getMinOccurs()),
+                exists node.getMaxOccurs() ? int(node.getMaxOccurs()) : -1);
+            if (present) {
+                element_group_refs += identity;
+            }
+        } else if (node.getKind() == "any" && present) {
+            has_element_wildcard = True;
+        }
+        foreach XsdParticle child in (node.getChildren()) {
+            collectParticleDeclarations(child, unresolved, present);
+        }
     }
 
     #! identifies a list-valued simple-content type
     /** @return True when one simple-content value is represented by a native list */
     bool hasNativeListValue() {
         return simpleType ? simpleType.hasNativeListValue() : False;
-    }
-
-    #! returns all elements declared in a model group, including any nested model groups
-    /** @since %WSDL 0.5.8
-    */
-    private hash<string, XsdElement> flattenModelGroup(*hash<auto> mg, XsdLateResolverHelper unresolved,
-            Namespaces nsc) {
-        bool previous_present = declarations_present;
-        on_exit declarations_present = previous_present;
-        declarations_present = declarations_present && !XsdElementConsistencyHelper::isAbsent(mg);
-        hash<string, XsdElement> rv();
-        # an empty model group (ex: "<xs:sequence/>") is parsed as NOTHING
-        if (!mg) {
-            return rv;
-        }
-        NamespacePrefixHelper compositor(nsc, mg."^attributes^");
-        WSDL::XsdBase::removeNS(\mg);
-        foreach string k in (keys mg) {
-            switch (k) {
-                case "element": {
-                    rv += parseElements(mg.element, unresolved, nsc, False);
-                    break;
-                }
-
-                case "sequence":
-                case "all":
-                case "choice": {
-                    foreach hash<auto> nested in (mg{k}) {
-                        rv += flattenModelGroup(nested, unresolved, nsc);
-                    }
-                    break;
-                }
-
-                case "group": {
-                    parseGroupReferences(\mg, unresolved, nsc);
-                    break;
-                }
-            }
-        }
-        return rv;
-    }
-
-    #! returns @ref True if the model group is declared with \c minOccurs="0"
-    /** @since %WSDL 0.5.8
-    */
-    private static bool isOptionalGroup(*hash<auto> mg) {
-        return exists mg."^attributes^".minOccurs && !mg."^attributes^".minOccurs.toInt();
     }
 
     #! sets the "nillable" and "requires_value" flags after the model group has been parsed
@@ -18525,44 +18724,6 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
         if (required && !nillable) {
             requires_value = True;
         }
-    }
-
-    #! Parse group references within a content model element
-    /** Group references are stored and resolved during the finalize() phase,
-        where the group's elements are merged into this complex type's element map.
-        minOccurs/maxOccurs on the group ref are captured and applied to elements.
-    */
-    private parseGroupReferences(reference<hash<auto>> content, XsdLateResolverHelper unresolved, Namespaces nsc) {
-        if (content.hasKey("group") && !content.group) {
-            throw WSDL_ERROR, "group reference requires ref";
-        }
-        foreach hash<auto> g in (content.group) {
-            *hash<auto> attrs = g."^attributes^";
-            *string groupRef = attrs.ref;
-            if (!groupRef) {
-                throw WSDL_ERROR, "group reference requires ref";
-            }
-            NamespacePrefixHelper reference_scope(nsc, attrs);
-            hash<auto> identity = nsc.getTypeHash(groupRef ?? "");
-            if (groupRef) {
-                # Parse occurrence constraints (defaults: minOccurs=1, maxOccurs=1)
-                int minOccurs = exists attrs.minOccurs ? int(attrs.minOccurs) : 1;
-                int maxOccurs;
-                if (attrs.maxOccurs == "unbounded") {
-                    maxOccurs = -1;
-                } else if (exists attrs.maxOccurs) {
-                    maxOccurs = int(attrs.maxOccurs);
-                } else {
-                    maxOccurs = 1;
-                }
-                # Store group reference with occurrence info for resolution during finalization
-                unresolved.addGroupRef(self, type_qname(identity.uri, identity.val), minOccurs, maxOccurs);
-                if (declarations_present && !XsdElementConsistencyHelper::isAbsent(g)) {
-                    element_group_refs += type_qname(identity.uri, identity.val);
-                }
-            }
-        }
-        delete content.group;
     }
 
     private parseAttributes(reference d, XsdLateResolverHelper unresolved, Namespaces nsc) {
@@ -18643,32 +18804,6 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
     */
     bool isEmpty() {
         return !elementmap && !choices && !simpleType && !has_element_wildcard;
-    }
-
-    private hash<string, XsdElement> parseElements(softlist<auto> el, XsdLateResolverHelper unresolved,
-            Namespaces nsc, bool for_object = True, bool optional = False) {
-        #printf("DEBUG: XsdComplexType::parseElements(%y)\n", el);
-        hash<string, XsdElement> h();
-        if (!el) {
-            throw WSDL_ERROR, "element declaration requires name or ref";
-        }
-        foreach auto e in (el) {
-            if (e.typeCode() != NT_HASH) {
-                throw WSDL_ERROR, "element declaration requires name or ref";
-            }
-            XsdElement elem(e, nsc, NOTHING, unresolved, usedocns);
-            if (declarations_present && !XsdElementConsistencyHelper::isAbsent(e)) {
-                declared_elements += elem;
-            }
-            h{elem.getExpandedName()} = elem;
-
-            # issue #5410: elements declared in an optional model group can never be required
-            if (for_object && !optional && !required && elem.isRequired()) {
-                required = True;
-            }
-        }
-
-        return h;
     }
 
     AbstractDataProviderType getDataProviderType() {
@@ -22806,7 +22941,7 @@ public class XsdSchema inherits WSDL::XsdBase {
     */
     addSchemaString(string xsd) {
         validateSchemaRoot(xsd, "XSD-ERROR");
-        hash<auto> h = parse_xml(xsd);
+        hash<auto> h = XsdSchemaSource::parse(xsd);
         validateSchemaGrammar(xsd);
         if (h.size() != 1) {
             throw "XSD-ERROR", sprintf("expecting a single root element in XSD; got: %y", h.keys());
@@ -23349,8 +23484,7 @@ public class XsdSchema inherits WSDL::XsdBase {
         }
 
         validateSchemaRoot(xsd, WSDL_ERROR);
-        # parse XML to Qore data structure ignoring XML element order
-        hash<auto> xh = parse_xml(xsd);
+        hash<auto> xh = XsdSchemaSource::parse(xsd);
         validateSchemaGrammar(xsd);
 
         # parse namespace definitions in schema attributes
@@ -23974,7 +24108,7 @@ public class WebService inherits WSDL::XsdSchema {
     /** @since %WSDL 0.4
     */
     private:internal doInit(string str, *hash<auto> opts) {
-        hash<auto> h = parse_xml(str);
+        hash<auto> h = XsdSchemaSource::parse(str);
         validateSchemaGrammar(str);
 
         # save WSDL text

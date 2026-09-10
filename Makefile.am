@@ -57,10 +57,12 @@ EXTRA_DIST = COPYING.LGPL COPYING.MIT AUTHORS README \
 	RELEASE-NOTES \
     CMakeLists.txt \
     cmake/QoreXmlLibXml2.cmake cmake/QoreXmlLibXml2CatalogFix.cmake cmake/QoreXmlLibXml2QNameFix.cmake \
-    cmake/QoreXmlLibXml2UriFix.cmake \
+    cmake/QoreXmlLibXml2UriFix.cmake cmake/QoreXmlLibXml2EntityFix.cmake \
+    cmake/QoreXmlLibXml2OccursFix.cmake cmake/libxml2-occurs.inc \
     cmake/system-libxml2/CMakeLists.txt \
     cmake/libxml2-namespace-probe.c cmake/libxml2-qname-probe.h \
     cmake/libxml2-uri-probe.h cmake/libxml2-schema-uri-probe.h \
+    cmake/libxml2-entity-probe.h cmake/libxml2-occurs-probe.h \
     cmake/libxml2-NOTICES.txt \
 	src/QC_XmlDoc.qpp \
 	src/QC_XmlNode.qpp \

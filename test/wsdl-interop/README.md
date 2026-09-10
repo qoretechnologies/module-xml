@@ -2,6 +2,15 @@
 
 Copyright (C) 2026 Qore Technologies, s.r.o. The W3C fixtures retain their original copyright notices.
 
+Particle construction checks run with `qore -b --enable-debug test/wsdl-particle-model.qtest`
+and `python3 test/wsdl-interop/test_particle_model.py -v`. Native occurrence validation
+uses `test/xml-particle-counts.qtest` and `test/wsdl-interop/test_particle_counts.py`.
+Both Python matrices accept `QORE_EXEC_MODE=ast|ir|jit|tiered` and use local modules.
+See [the ordered model](../../design/wsdl-particles.md),
+[native correction](../../design/xml-particle-counts.md), and
+[independent evidence](particle-counts-evidence.md). P4 runtime matching and
+serialization acceptance remain in progress.
+
 The W3C XML Schema Databinding collection is a useful independent source of WSDL 1.1 descriptions,
 XSDs, and SOAP messages. Running it against this module exposed defects that the existing tests missed.
 The small regression suite runs offline in the normal `test/*.qtest` CI loop. The larger survey is a

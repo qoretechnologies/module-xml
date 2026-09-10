@@ -39,6 +39,7 @@ else()
     include("${_qore_xml_libxml2_cmake_dir}/QoreXmlLibXml2QNameFix.cmake")
     include("${_qore_xml_libxml2_cmake_dir}/QoreXmlLibXml2UriFix.cmake")
     include("${_qore_xml_libxml2_cmake_dir}/QoreXmlLibXml2EntityFix.cmake")
+    include("${_qore_xml_libxml2_cmake_dir}/QoreXmlLibXml2OccursFix.cmake")
 
     function(qore_xml_fetch_libxml2)
         # Normal variables are scoped to this function; do not overwrite the
@@ -73,6 +74,7 @@ else()
         qore_xml_fix_libxml2_qnames("${qore_xml_libxml2_SOURCE_DIR}" "${qore_xml_libxml2_BINARY_DIR}")
         qore_xml_fix_libxml2_uris("${qore_xml_libxml2_SOURCE_DIR}" "${qore_xml_libxml2_BINARY_DIR}")
         qore_xml_fix_libxml2_entities("${qore_xml_libxml2_SOURCE_DIR}" "${qore_xml_libxml2_BINARY_DIR}")
+        qore_xml_fix_libxml2_occurs("${qore_xml_libxml2_SOURCE_DIR}" "${qore_xml_libxml2_BINARY_DIR}")
         # Neither upstream tools nor headers/libraries belong in our install.
         set_property(DIRECTORY "${qore_xml_libxml2_SOURCE_DIR}" PROPERTY EXCLUDE_FROM_ALL TRUE)
         set_target_properties(LibXml2 PROPERTIES POSITION_INDEPENDENT_CODE ON C_VISIBILITY_PRESET hidden)

@@ -5556,3 +5556,78 @@ No P4 implementation preceded this acceptance.
 The [P3-47 full audit](audits/P3-47-acceptance.md) records 5 Pass / 57 N/A /
 0 Fail across all 62 checks. Final phase-boundary reruns again pass the required
 Qore interoperability suite and all 15 survey harness methods.
+
+## P4-01 — Ordered construction and native occurrence counts (2026-09-10)
+
+P3 acceptance is committed as `66fa548`. The first P4 increment constructs one
+ordered particle graph for complex types and named groups. It retains declaration
+positions before namespace stripping, shared element/type identity, complete
+occurrence strings, empty compositors, named references and base-before-extension
+order. Reconstruction covers complete schemas and detached types. The implemented
+[model contract](../../design/wsdl-particles.md) separates declaration counts from
+the existing native field adapters; runtime matching remains the next P4 criterion.
+
+Independent occurrence tests exposed two libxml2 defects: digit-only count parsing
+and a zero-count local declaration becoming a consuming automaton transition.
+Checked build-tree corrections address both causes, and the provider runtime probe
+rejects partial backports missing either correction. The downloaded archive is
+unchanged. The [native contract](../../design/xml-particle-counts.md) records the
+retained native integer capacity and cancellation boundaries. Autotools distributions
+now include the occurrence inputs and two previously missing ENTITY inputs.
+
+The final affected gate passes **101 Qore suites / 1,020 cases / 43,196 reported
+assertions**, including the native IEEE suite. The three deliberately caught
+comparator assertions in soap.qtest retain their documented accounting; all 20
+cases pass. The model suite passes 10 cases / 1,854 assertions and native count
+suite 4 / 597 in AST, IR, JIT and tiered modes. Existing compositor and SOAP array
+context suites pass 8 / 57 and 9 / 46 in each mode. Independent matrices pass all
+four modes with 80 model rows, 12 expected construction errors and 880 native
+validation rows. Their completeness checks prevent missing/extra results.
+
+The [independent evidence](particle-counts-evidence.md) records the two corrected
+libxml2 defects and two Xerces-J lexical defects. Original signed schemas and
+separately named canonical derivatives are both tested. The exact Xerces false
+acceptances and unreachable document stages remain explicit; native tests assert
+the normative results rather than adopting a validator mistake.
+
+The provider integration suite passes 23 methods; the added source-distribution
+check passes separately, for 24 total methods. The native runtime probe passes
+all namespace/QName/URI/ENTITY/occurrence checks. Valgrind passes the probe, native
+count suite and existing reader-schema suite (12 cases / 191 assertions), with
+zero errors, zero definite/indirect/possible loss and no suppressions. Qore runs use
+the previously authorized `QORE_PCRE2_NO_JIT=1`; Qore JIT remains enabled. The
+initial run with PCRE2 JIT reproduced its known uninitialized-load diagnostic and
+is retained as a failed run, not counted as passing. The known core DWARF warning
+remains assigned to P9.
+
+The affected WSDL/native Doxygen targets and extracted invoice example pass
+without warnings. A broader `docs` build reports 22 independent cross-reference/
+parameter warnings, recorded as failing diagnostics in
+[P9-documentation-diagnostics.json](P9-documentation-diagnostics.json). They include
+missing external tags and a link to the removed XmlRpcConnection constructor-info
+API; the P9 complete documentation gate must resolve every record. No warning is
+suppressed and no full-documentation success is claimed.
+
+All **2,411 baseline both-version survey rows** and their counts/inputs are
+identical to P3 acceptance. The additional catalog-enabled diagnostic has 2,415
+rows and no unassessed inputs; its different dependency configuration is not used
+to claim an implementation improvement. The complete adjudicated coverage uses
+the catalog and retains all **144 failure records**, including 76 owned by P4.
+All **130 descriptions / 1,260 selected directions** still pass. The four known
+nested-choice runtime failures are reproduced unchanged. All 15 survey harness
+methods pass. Current reports identify the final WSDL source hash.
+
+Logs use `/tmp/wsdl-p4-01-`; the committed
+[validation inventory](P4-01-validation.json) records exact source/runtime hashes
+and the complete Qore suite inventory. A final documentation-only exception entry
+was followed by the model suite, affected docs and both corpus reports against
+the final source. Both repositories were fetched again: XML has no incoming
+develop commits; main Qore is clean and synchronized at `a9dd15fe3`, containing
+the independently committed schema and container-type fixes. XML tests use the
+isolated, previously verified Debug prerequisite runtime recorded in the inventory.
+Nothing was installed globally or pushed.
+
+The [full P4-01 audit](audits/P4-01-particle-construction.md) resolves every one of
+the 62 checklist items with zero Fail. P1/P2/P3 remain complete. P4 ordered runtime
+matching/serialization, whole-group semantics, ambiguity checks, consistent field
+metadata and samples remain in progress; P5-P9 retain their full authorized scope.

@@ -16,6 +16,19 @@ import unittest
 REPO = Path(__file__).resolve().parents[2]
 
 
+class SourceDistributionTest(unittest.TestCase):
+    def test_native_dependency_inputs_are_distributed(self):
+        makefile = (REPO / "Makefile.am").read_text().replace("\\\n", " ")
+        declarations = [line.partition("=")[2] for line in makefile.splitlines()
+                        if line.startswith("EXTRA_DIST =")]
+        self.assertEqual(1, len(declarations))
+        distributed = set(declarations[0].split())
+        inputs = {str(path.relative_to(REPO)) for path in (REPO / "cmake").rglob("*")
+                  if path.is_file() and path.suffix in (".cmake", ".c", ".h", ".inc", ".txt")}
+        self.assertTrue(inputs)
+        self.assertEqual(set(), inputs - distributed, "CMake dependency input missing from source archive")
+
+
 class LibXml2ProviderTest(unittest.TestCase):
     @classmethod
     def run_command(cls, args, *, success=True):
@@ -74,6 +87,8 @@ include("{REPO}/cmake/QoreXmlLibXml2UriFix.cmake")
 qore_xml_fix_libxml2_uris("{cls.source}" "${{CMAKE_CURRENT_BINARY_DIR}}/libxml")
 include("{REPO}/cmake/QoreXmlLibXml2EntityFix.cmake")
 qore_xml_fix_libxml2_entities("{cls.source}" "${{CMAKE_CURRENT_BINARY_DIR}}/libxml")
+include("{REPO}/cmake/QoreXmlLibXml2OccursFix.cmake")
+qore_xml_fix_libxml2_occurs("{cls.source}" "${{CMAKE_CURRENT_BINARY_DIR}}/libxml")
 ''')
         cls.fixed = cls.root / "fixed/build-debug"
         cls.run_command(["cmake", "-S", fixed_project, "-B", cls.fixed, "-DCMAKE_BUILD_TYPE=Debug",
@@ -104,6 +119,7 @@ qore_xml_fix_libxml2_entities("{cls.source}" "${{CMAKE_CURRENT_BINARY_DIR}}/libx
         self.assertIn("qname_unions=PASS", output)
         self.assertIn("uri_identity=PASS", output)
         self.assertIn("entity_values=PASS", output)
+        self.assertIn("occurs_values=PASS", output)
         stage = self.root / "stage"
         self.run_command(["cmake", "--install", self.root / "bundled", "--prefix", stage])
         self.assertEqual(["bin/probe", "share/licenses/qore-xml/libxml2-NOTICES.txt"],
@@ -178,6 +194,36 @@ qore_xml_fix_libxml2_uris("{self.source}" "${{CMAKE_CURRENT_BINARY_DIR}}/libxml"
             self.assertIn(label + "=PASS", probe)
         self.assertIn("entity_values=FAIL", probe)
         self.configure("entity-broken-system", "-DQORE_XML_LIBXML2_PROVIDER=SYSTEM", *options, success=False)
+
+    def test_count_backport_detection_and_reconfigure(self):
+        project = self.root / "occurs-broken/source"
+        project.mkdir(parents=True)
+        fixed = (self.root / "fixed/source/CMakeLists.txt").read_text()
+        fixed = fixed.replace(f'include("{REPO}/cmake/QoreXmlLibXml2OccursFix.cmake")\n', "")
+        fixed = fixed.replace(f'qore_xml_fix_libxml2_occurs("{self.source}" '
+                              '"${CMAKE_CURRENT_BINARY_DIR}/libxml")\n', "")
+        (project / "CMakeLists.txt").write_text(fixed)
+        build = self.root / "occurs-broken/build-debug"
+        self.run_command(["cmake", "-S", project, "-B", build, "-DCMAKE_BUILD_TYPE=Debug",
+                          "-DBUILD_SHARED_LIBS=ON", "-DLIBXML2_WITH_PROGRAMS=OFF",
+                          "-DLIBXML2_WITH_TESTS=OFF", "-DLIBXML2_WITH_PYTHON=OFF"])
+        self.run_command(["cmake", "--build", build, "--target", "LibXml2", "-j4"])
+        libraries = list((build / "libxml").glob("libxml2.so")) + list((build / "libxml").glob("libxml2.dylib"))
+        self.assertEqual(1, len(libraries))
+        options = [f"-DLIBXML2_LIBRARY={libraries[0]}", f"-DLIBXML2_INCLUDE_DIR={self.fixed_include}",
+                   f"-DFETCHCONTENT_SOURCE_DIR_QORE_XML_LIBXML2={self.source}"]
+        output = self.configure("occurs-broken-auto", "-DQORE_XML_LIBXML2_PROVIDER=AUTO", *options)
+        self.assertIn("using private static libxml2 2.15.4", output)
+        probe = (self.root / "occurs-broken-auto/system-libxml2/namespace-probe.log").read_text()
+        for label in ("qname_values", "qname_unions", "uri_identity", "entity_values"):
+            self.assertIn(label + "=PASS", probe)
+        self.assertIn("occurs_values=FAIL", probe)
+        self.configure("occurs-broken-system", "-DQORE_XML_LIBXML2_PROVIDER=SYSTEM", *options, success=False)
+        replacement = self.root / "bundled/_deps/qore_xml_libxml2-build/qore-occurs-fix/xmlschemas.c"
+        stamp = replacement.stat().st_mtime_ns
+        self.configure("bundled", "-DQORE_XML_LIBXML2_PROVIDER=BUNDLED",
+                       f"-DFETCHCONTENT_SOURCE_DIR_QORE_XML_LIBXML2={self.source}")
+        self.assertEqual(stamp, replacement.stat().st_mtime_ns)
 
     def test_entity_fixes_preserve_sources_and_reconfigure(self):
         import hashlib

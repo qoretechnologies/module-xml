@@ -1,0 +1,270 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires xml
+%requires ../qlib/WSDL.qm
+%exec-class ParticleModelTest
+
+class ParticleModelTest inherits QUnit::Test {
+    private {
+        const Xsd = "http://www.w3.org/2001/XMLSchema";
+        const Ns = "urn:particles";
+    }
+
+    constructor() : Test("Ordered schema particle construction", "1.0") {
+        addTestCase("Alternating declarations retain source order and shared element identity", \order());
+        addTestCase("Whole particle counts and empty alternatives survive reconstruction", \counts());
+        addTestCase("Named groups retain reference positions and resolved definitions", \groups());
+        addTestCase("Extensions append base content and restrictions retain their own model", \derivation());
+        addTestCase("Imported and chameleon schemas preserve compositor order", \imports());
+        addTestCase("Invalid declarations fail without corrupting existing particle graphs", \invalid());
+        addTestCase("Broad and deeply nested models preserve every position", \largeModels());
+        addTestCase("Occurrence whitespace and negative zero use XSD lexical rules", \countLexical());
+        addTestCase("Malformed particle snapshots reject and valid snapshots remain reusable", \snapshots());
+        addTestCase("Interrupted schema construction leaves earlier particles usable", \cancellation());
+        set_return_value(main());
+    }
+
+    private string schema(string body, *string ns = Ns) {
+        return sprintf('<xs:schema xmlns:xs="%s" xmlns:t="%s" %s>%s</xs:schema>', Xsd, Ns,
+            exists ns ? sprintf('targetNamespace="%s"', ns) : "", body);
+    }
+
+    private XsdComplexType record(XsdSchema s, string name = "Record", string ns = Ns) {
+        return cast<XsdComplexType>(s.findType(make_qname(ns, name)));
+    }
+
+    private list<string> labels(XsdParticle particle) {
+        return map $1.getKind() == XsdParticleKind::Element ? $1.getElement().name : string($1.getKind()),
+            particle.getChildren();
+    }
+
+    order() {
+        foreach string alias in ("xs", "alias") {
+            XsdSchema source(schema(sprintf('<xs:complexType name="Record"><xs:sequence xmlns:alias="%s">
+                <xs:element name="a" type="xs:int"/><xs:element name="b" type="xs:int"/>
+                <xs:choice><xs:element name="c" type="xs:string"/><xs:element name="d" type="xs:string"/>
+                </xs:choice><%s:element name="e"><xs:simpleType><xs:restriction base="xs:boolean"/>
+                </xs:simpleType></%s:element><xs:sequence><xs:element ref="t:global"/></xs:sequence>
+                <xs:element name="f" type="t:Later"/></xs:sequence></xs:complexType>
+                <xs:element name="global" type="xs:string"/><xs:simpleType name="Later">
+                <xs:restriction base="xs:int"/></xs:simpleType>', Xsd, alias, alias)));
+            foreach XsdSchema s in (source, Serializable::deserialize(source.serialize())) {
+                XsdComplexType type = record(s);
+                XsdParticle root = type.getParticle();
+                assertEq(XsdParticleKind::Sequence, root.getKind());
+                assertEq(("a", "b", "choice", "e", "sequence", "f"), labels(root));
+                list<XsdParticle> children = root.getChildren();
+                assertTrue(children[0].getElement() === type.elementmap.a);
+                assertTrue(children[3].getElement() === type.elementmap.e);
+                assertTrue(children[2].getChildren()[0].getElement() === type.choices[0].elementmap.c);
+                assertEq("Later", children[5].getElement().type.name);
+                assertEq("string", children[4].getChildren()[0].getElement().type.name);
+                pop children;
+                assertEq(6, root.getChildren().size());
+                XsdComplexType copy = Serializable::deserialize(type.serialize());
+                assertEq(labels(root), labels(copy.getParticle()));
+                assertTrue(copy.getParticle().getChildren()[0].getElement() === copy.elementmap.a);
+            }
+        }
+    }
+
+    counts() {
+        string huge = "1" + strmul("0", 80);
+        XsdSchema source(schema(sprintf('<xs:complexType name="Record"><xs:sequence minOccurs="+000"
+            maxOccurs="%s"><xs:sequence minOccurs="2" maxOccurs="3"><xs:element name="a" type="xs:int"/>
+            </xs:sequence><xs:choice minOccurs="0" maxOccurs="unbounded"><xs:sequence/>
+            <xs:sequence/><xs:element name="b" type="xs:string"/><xs:sequence/></xs:choice>
+            </xs:sequence></xs:complexType><xs:complexType name="All"><xs:all minOccurs="0">
+            <xs:element name="unused" type="xs:string" minOccurs="0" maxOccurs="0"/>
+            <xs:element name="flag" type="xs:boolean" minOccurs="0"/></xs:all></xs:complexType>', huge)));
+        foreach XsdSchema s in (source, Serializable::deserialize(source.serialize())) {
+            XsdParticle root = record(s).getParticle();
+            assertEq("0", root.getMinOccurs());
+            assertEq(huge, root.getMaxOccurs());
+            XsdParticle sequence = root.getChildren()[0];
+            assertEq("2", sequence.getMinOccurs());
+            assertEq("3", sequence.getMaxOccurs());
+            assertEq("1", sequence.getChildren()[0].getMinOccurs());
+            assertEq("1", sequence.getChildren()[0].getMaxOccurs());
+            XsdParticle choice = root.getChildren()[1];
+            assertEq("0", choice.getMinOccurs());
+            assertEq(NOTHING, choice.getMaxOccurs());
+            assertEq(("sequence", "sequence", "b", "sequence"), labels(choice));
+            assertEq(0, choice.getChildren()[0].getChildren().size());
+            assertEq(0, choice.getChildren()[1].getChildren().size());
+            assertEq(0, choice.getChildren()[3].getChildren().size());
+            XsdParticle all = record(s, "All").getParticle();
+            assertEq(XsdParticleKind::All, all.getKind());
+            assertEq("0", all.getMinOccurs());
+            assertEq(("unused", "flag"), labels(all));
+            assertEq("0", all.getChildren()[0].getMaxOccurs());
+        }
+    }
+
+    groups() {
+        XsdSchema source(schema('<xs:complexType name="Record"><xs:sequence>
+            <xs:group ref="t:Outer" minOccurs="0" maxOccurs="2"/><xs:element name="between" type="xs:string"/>
+            <xs:group xmlns:g="urn:particles" ref="g:Outer"/></xs:sequence></xs:complexType>
+            <xs:group name="Outer"><xs:sequence><xs:element name="before" type="xs:int"/>
+            <xs:group ref="t:Inner"/><xs:element name="after" type="xs:int"/></xs:sequence></xs:group>
+            <xs:group name="Inner"><xs:choice><xs:element name="yes" type="xs:boolean"/>
+            <xs:element name="no" type="xs:boolean"/></xs:choice></xs:group>'));
+        foreach XsdSchema s in (source, Serializable::deserialize(source.serialize())) {
+            XsdParticle root = record(s).getParticle();
+            assertEq(("group", "between", "group"), labels(root));
+            XsdParticle first = root.getChildren()[0];
+            XsdParticle last = root.getChildren()[2];
+            assertEq("0", first.getMinOccurs());
+            assertEq("2", first.getMaxOccurs());
+            assertEq("1", last.getMinOccurs());
+            assertEq("1", last.getMaxOccurs());
+            assertEq("{urn:particles}Outer", first.getGroupReference());
+            assertTrue(first.getGroupDefinition() === last.getGroupDefinition());
+            XsdParticle outer = first.getGroupDefinition();
+            assertEq(("before", "group", "after"), labels(outer));
+            assertEq("1", outer.getChildren()[0].getMinOccurs());
+            assertEq("1", outer.getChildren()[0].getMaxOccurs());
+            assertEq(("yes", "no"), labels(outer.getChildren()[1].getGroupDefinition()));
+        }
+    }
+
+    derivation() {
+        XsdSchema source(schema('<xs:complexType name="Record"><xs:complexContent><xs:extension base="t:Base">
+            <xs:sequence><xs:element name="c" type="xs:int"/></xs:sequence></xs:extension></xs:complexContent>
+            </xs:complexType><xs:complexType name="Restricted"><xs:complexContent><xs:restriction base="t:Base">
+            <xs:sequence><xs:element name="a" type="xs:int"/></xs:sequence></xs:restriction></xs:complexContent>
+            </xs:complexType><xs:complexType name="Base"><xs:sequence><xs:element name="a" type="xs:int"/>
+            <xs:element name="b" type="xs:int" minOccurs="0"/></xs:sequence></xs:complexType>'));
+        foreach XsdSchema s in (source, Serializable::deserialize(source.serialize())) {
+            XsdParticle root = record(s).getParticle();
+            assertEq(("sequence", "sequence"), labels(root));
+            assertTrue(root.getChildren()[0] === record(s, "Base").getParticle());
+            assertEq(("a", "b"), labels(root.getChildren()[0]));
+            assertEq(("c",), labels(root.getChildren()[1]));
+            assertEq(("a",), labels(record(s, "Restricted").getParticle()));
+        }
+    }
+
+    imports() {
+        string body = '<xs:complexType name="Record"><xs:sequence><xs:element name="a" type="xs:int"/>
+            <xs:sequence><xs:element name="b" type="xs:int"/></xs:sequence>
+            <xs:element name="c" type="xs:int"/></xs:sequence></xs:complexType>';
+        foreach bool include in (False, True) {
+            string source = schema(body, include ? NOTHING : "urn:imported");
+            XsdSchema s(schema(include ? '<xs:include schemaLocation="http://example.invalid/fields.xsd"/>'
+                : '<xs:import namespace="urn:imported" schemaLocation="http://example.invalid/fields.xsd"/>'),
+                {"async_only": True, "xsd_cache": {"http://example.invalid/fields.xsd": source}});
+            foreach XsdSchema copy in (s, Serializable::deserialize(s.serialize())) {
+                assertEq(("a", "sequence", "c"), labels(record(copy, "Record", include ? Ns : "urn:imported").getParticle()));
+            }
+        }
+    }
+
+    invalid() {
+        XsdSchema s(schema('<xs:complexType name="Existing"><xs:sequence><xs:element name="a" type="xs:int"/>
+            </xs:sequence></xs:complexType>'));
+        XsdParticle existing = record(s, "Existing").getParticle();
+        foreach string body in (
+            '<xs:sequence minOccurs="2" maxOccurs="1"/>',
+            '<xs:sequence minOccurs="-1"/>',
+            '<xs:sequence maxOccurs="1.0"/>',
+            '<xs:sequence><xs:element/></xs:sequence>',
+            '<xs:sequence><xs:group ref="t:Missing"/></xs:sequence>',
+            '<xs:sequence><xs:group/></xs:sequence>') {
+            assertThrows("WSDL-ERROR", \s.addSchemaString(), (schema(sprintf('<xs:complexType name="Invalid">%s</xs:complexType>', body)),));
+            assertTrue(existing === record(s, "Existing").getParticle());
+            assertEq(("a",), labels(existing));
+        }
+        s.addSchemaString(schema('<xs:complexType name="Record"><xs:sequence><xs:element name="b" type="xs:int"/>
+            </xs:sequence></xs:complexType>'));
+        assertEq(("b",), labels(record(s).getParticle()));
+    }
+
+    largeModels() {
+        string wide;
+        for (int i = 0; i < 500; ++i) {
+            wide += sprintf('<xs:element name="v%d" type="xs:int"/><xs:sequence/>', i);
+        }
+        XsdSchema s(schema('<xs:complexType name="Record"><xs:sequence>' + wide + '</xs:sequence></xs:complexType>'));
+        list<XsdParticle> children = record(s).getParticle().getChildren();
+        assertEq(1000, children.size());
+        for (int i = 0; i < 500; ++i) {
+            assertEq(sprintf("v%d", i), children[i * 2].getElement().name);
+            assertEq(XsdParticleKind::Sequence, children[i * 2 + 1].getKind());
+            assertEq(0, children[i * 2 + 1].getChildren().size());
+        }
+        XsdSchema deep(schema('<xs:complexType name="Record">' + strmul('<xs:sequence>', 80)
+            + '<xs:element name="leaf" type="xs:int"/>' + strmul('</xs:sequence>', 80) + '</xs:complexType>'));
+        XsdParticle current = record(deep).getParticle();
+        for (int i = 0; i < 80; ++i) {
+            assertEq(XsdParticleKind::Sequence, current.getKind());
+            assertEq(1, current.getChildren().size());
+            current = current.getChildren()[0];
+        }
+        assertEq("leaf", current.getElement().name);
+    }
+
+    countLexical() {
+        XsdSchema s(schema('<xs:complexType name="Record"><xs:sequence minOccurs=" -000 " maxOccurs=" unbounded ">
+            <xs:element name="a" type="xs:int" minOccurs=" +000 " maxOccurs=" unbounded "/>
+            </xs:sequence></xs:complexType>'));
+        XsdParticle root = record(s).getParticle();
+        assertEq("0", root.getMinOccurs());
+        assertEq(NOTHING, root.getMaxOccurs());
+        assertEq("0", root.getChildren()[0].getMinOccurs());
+        assertEq(NOTHING, root.getChildren()[0].getMaxOccurs());
+        assertEq(0, record(s).elementmap.a.minOccurs);
+        assertEq(-1, record(s).elementmap.a.maxOccurs);
+        assertThrows("XSD-ELEMENT-ERROR", \s.addSchemaString(), (schema('<xs:complexType name="Invalid">
+            <xs:sequence><xs:element name="a" minOccurs="2" maxOccurs="1"/></xs:sequence></xs:complexType>'),));
+    }
+
+    snapshots() {
+        XsdSchema s(schema('<xs:complexType name="Record"><xs:sequence/></xs:complexType>'));
+        XsdParticle original = record(s).getParticle();
+        foreach hash<auto> changes in (
+            {"minimum": "-1"}, {"minimum": "01"}, {"minimum": "1\n"}, {"minimum": 1},
+            {"maximum": "-1"}, {"maximum": "unbounded"}, {"maximum": "0"}, {"minimum": NOTHING},
+            {"children": NOTHING}, {"group": "unexpected"}, {"element": "invalid"}) {
+            hash<SerializationInfo> state = original.serializeToData();
+            state._index."0"._class_data."WSDL::XsdParticle" += changes;
+            assertThrows("DESERIALIZATION-ERROR", \Serializable::deserialize(), (state,));
+            XsdParticle restored = Serializable::deserialize(original.serialize());
+            assertEq(XsdParticleKind::Sequence, restored.getKind());
+            assertEq("1", restored.getMinOccurs());
+            assertEq("1", restored.getMaxOccurs());
+            assertEq(0, restored.getChildren().size());
+        }
+    }
+
+    cancellation() {
+        SandboxManager manager();
+        on_exit manager.clearInterrupt();
+        Program program(PO_NEW_STYLE | PO_STRICT_ARGS | PO_REQUIRE_TYPES);
+        program.setSandboxManager(manager);
+        program.parse("%modern\n%requires ../qlib/WSDL.qm\n"
+            "nothing sub addSchema(XsdSchema schema, string source, SandboxManager manager, bool cancel) {\n"
+            "    if (cancel) { manager.requestInterrupt(); }\n"
+            "    schema.addSchemaString(source);\n"
+            "}\n", get_script_dir() + "/particle-interrupt.qr");
+        XsdSchema s(schema('<xs:complexType name="Existing"><xs:sequence/></xs:complexType>'));
+        XsdParticle previous = record(s, "Existing").getParticle();
+        string source = schema('<xs:complexType name="Record"><xs:sequence><xs:element name="a" type="xs:int"/>
+            </xs:sequence></xs:complexType>');
+        *hash<ExceptionInfo> error;
+        try {
+            program.callFunction("addSchema", s, source, manager, True);
+        } catch (hash<ExceptionInfo> ex) {
+            error = ex;
+        }
+        manager.clearInterrupt();
+        assertEq("PROGRAM-INTERRUPTED", error.err);
+        assertTrue(previous === record(s, "Existing").getParticle());
+        program.callFunction("addSchema", s, source, manager, False);
+        assertEq(("a",), labels(record(s).getParticle()));
+    }
+}
