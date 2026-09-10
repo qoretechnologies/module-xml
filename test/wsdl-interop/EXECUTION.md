@@ -5631,3 +5631,61 @@ The [full P4-01 audit](audits/P4-01-particle-construction.md) resolves every one
 the 62 checklist items with zero Fail. P1/P2/P3 remain complete. P4 ordered runtime
 matching/serialization, whole-group semantics, ambiguity checks, consistent field
 metadata and samples remain in progress; P5-P9 retain their full authorized scope.
+
+## P4-02 — Bounded ordered particle recognition (2026-09-10)
+
+P4-01 is committed as `47d14ea`. `XsdParticle::matchesElementNames()` now checks
+complete ordered child-name sequences against whole nested particle counts. It
+shares the tested scalar regex matcher through a typed expanded-name predicate;
+there is no surrogate character encoding or expansion of large declared counts.
+Shared group graphs keep independent caller continuations. All groups retain their
+own permutation/required-member rules. Element wildcard metadata captures its
+namespace constraint in the declaration context and survives reconstruction.
+
+The [implemented design](../../design/wsdl-particles.md) documents the polynomial
+bounds, empty-language distinction, zero-component omission and thread/cancellation
+contract. The new structural API does not yet replace message field adapters or
+perform UPA, value, nil or dynamic-type checks. Those remain explicit P4/P5 work;
+no corpus failure has been reclassified as passing by this increment.
+
+The final affected gate passes **102 Qore suites / 1,031 cases / 43,488 reported
+assertions**, including the new matcher suite's 11 cases / 292 assertions. The
+existing soap.qtest comparator accounting is unchanged: three intentional caught
+negative assertions and all 20 cases passing. Matching, model and affected regex
+suites pass in AST, IR, JIT and tiered modes. The independent matching matrix
+passes all four modes with **11 schema families / 270 documents / 22 actual SOAP
+binding contracts / 2,160 worker rows per mode**, covering each bound input/output
+root and original/reconstructed graphs. Fixed inventory checks prevent missing or
+extra rows. Existing independent regex execution, count and character-class
+matrices pass all 11 methods; no scalar regression or timeout remains.
+
+The [independent evidence](particle-matching-evidence.md) records exactly two
+libxml2 zero-count false acceptances and one Xerces empty-choice false acceptance.
+The Qore predicate rejects all three under the normative XSD 1.0 rules. The
+independent implementations remain unchanged. Focused tests also cover 81-digit
+counts, finite count gaps, 10,000 input names, 1,000 positions, 80 nested repeats,
+shared group DAGs, malformed reconstruction, invalid all placement, cancellation
+and four concurrent calls. All test processes have bounded completion deadlines.
+
+The affected Doxygen target and updated invoice example pass without warnings.
+This increment changes Qore code only; the native module/library hashes are
+unchanged and new Valgrind runs are not required. The final source/runtime hashes
+and complete suite inventory are in [P4-02-validation.json](P4-02-validation.json).
+Logs use `/tmp/wsdl-p4-02-`.
+
+All **2,411 baseline survey rows**, original inputs, counts, **144 coverage failure
+records**, 293 case records and both-direction stage accounting are identical to
+P4-01. The current reports update only the WSDL source fingerprint. All **130
+selected descriptions / 1,260 directions** pass strict coverage. The four existing
+nested-choice runtime failures and 22 independent P9 documentation warnings stay
+recorded as failing diagnostics.
+
+Both remotes were fetched: no incoming develop commit remained. Qore develop is
+synchronized at `a9dd15fe3`, including the pushed container-type fix. Subsequent
+uncommitted core type-system work appeared while this audit ran and is preserved
+for the active parallel developer. XML tests continue to use the isolated tested
+Debug runtime identified in the inventory. Nothing was installed or pushed.
+
+The [full audit](audits/P4-02-particle-matching.md) resolves all 62 checks with zero
+Fail. P4 ambiguity validation, ordered message conversion, field metadata and
+sample generation remain in progress. P5-P9 retain their complete original scope.

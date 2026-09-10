@@ -11,6 +11,12 @@ See [the ordered model](../../design/wsdl-particles.md),
 [independent evidence](particle-counts-evidence.md). P4 runtime matching and
 serialization acceptance remain in progress.
 
+`test/wsdl-particle-matching.qtest` and `test/wsdl-interop/test_particle_matching.py`
+exercise the bounded child-name recognizer, including complete counts, empty/absent
+groups, shared references, wildcard namespaces and all permutations. See the
+[matching evidence](particle-matching-evidence.md) for independently asserted
+validator defects and the precise separation from pending message conversion.
+
 The W3C XML Schema Databinding collection is a useful independent source of WSDL 1.1 descriptions,
 XSDs, and SOAP messages. Running it against this module exposed defects that the existing tests missed.
 The small regression suite runs offline in the normal `test/*.qtest` CI loop. The larger survey is a

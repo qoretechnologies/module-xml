@@ -58,6 +58,8 @@ XsdComplexType invoice = cast<XsdComplexType>(schema.findType("Invoice"));
 list<XsdParticle> content = invoice.getParticle().getChildren();
 @assert(content[0].getElement().name == "number");
 @assert(content[1].getKind() == XsdParticleKind::Choice);
+@assert(invoice.getParticle().matchesElementNames(("{}number", "{}card")));
+@assert(!invoice.getParticle().matchesElementNames(("{}card", "{}number")));
 ```
 
 Run `qore -b --enable-debug test/wsdl-particle-model.qtest` and
@@ -65,3 +67,56 @@ Run `qore -b --enable-debug test/wsdl-particle-model.qtest` and
 The independent matrix inspects actual SOAP 1.1/1.2 bound parts in both directions.
 See [occurrence evidence](../test/wsdl-interop/particle-counts-evidence.md) for
 native validation and the independent validator disagreements.
+
+## Recognition of ordered child names
+
+`matchesElementNames()` accepts expanded child names in document order and returns
+whether the complete sequence belongs to the particle's language. It checks whole
+sequence/choice/group counts, finite count gaps, nullable repetition, all-group
+permutations and wildcard namespace admission. It rejects malformed expanded names
+with `XSD-PARTICLE-ERROR`, and unresolved/cyclic groups or invalid XSD 1.0 all
+placement with `WSDL-ERROR`. It does not perform element value, nil, dynamic-type,
+wildcard declaration or schema ambiguity validation. Message conversion still has
+its separate field adapters until the P4 integration is complete.
+
+Element wildcards now retain their resolved namespace and processing constraints.
+`getWildcard()` exposes the existing `XsdAttributeWildcardInfo` representation;
+element and attribute wildcards share that namespace algebra. This captures
+`##targetNamespace` in the declaring schema, independently of later bindings.
+Serializable restoration validates the wildcard's presence, constraint and
+processing mode. Shared graph references survive reconstruction.
+
+Compilation builds a postorder graph without expanding occurrence values or named
+group definitions. It preserves the distinction between an empty language and an
+empty sequence: a required empty choice cannot match any input. A zero-count child
+declaration contributes no component, including no epsilon alternative to a choice.
+An empty sequence inside a choice is a real alternative that accepts empty input.
+
+The structural regex matcher has a typed token-predicate entry point. Particle
+matching supplies expanded names directly, so the number of distinct schema names
+is not limited by an artificial character encoding. Ordinary zero/one/unbounded
+repetition uses the existing Thompson state-set matcher when the compiled graph
+is a tree. Shared group graphs use memoized node/start endpoint sets, preserving
+each caller's continuation; a shared Thompson fragment would conflate them.
+
+General finite counts use the existing endpoint matcher. Input length bounds
+every iteration count before integer conversion. Nullable terms can pad minimum
+counts without advancing input; positive-progress endpoint sets still preserve
+exact attainable counts and their gaps. All groups use a direct name-set check,
+with each required member present once, each optional member at most once, and
+whole-group optionality applied only to the empty input.
+
+For `m` grammar nodes/edges and `n` input names, compilation requires `O(m)` storage.
+Ordinary state-set recognition is polynomial in `m` and `n`, caching only transitions
+encountered by the input. General counted matching stores at most `O(m n²)` endpoints;
+`O(m n⁴)` is a conservative upper bound for its joins and count frontiers. QName
+comparison adds the cost of the name strings. These are input-dependent polynomial
+bounds, with no exponential backtracking or expansion of declared numeric values.
+All mutable match state is local to a call, and Qore cancellation checks remain
+active in the loops. Tests cover 10,000 names, 1,000 declaration positions,
+80 nested exact repetitions and a shared group DAG whose expanded size is 32,768.
+
+Run `qore -b --enable-debug test/wsdl-particle-matching.qtest` and
+`python3 test/wsdl-interop/test_particle_matching.py -v` with local modules selected.
+The [matching evidence](../test/wsdl-interop/particle-matching-evidence.md) records
+the independent empty-choice and zero-count validator differences.

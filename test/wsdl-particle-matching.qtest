@@ -1,0 +1,258 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires xml
+%requires ../qlib/WSDL.qm
+%exec-class ParticleMatchingTest
+
+class ParticleMatchingTest inherits QUnit::Test {
+    constructor() : Test("Bounded ordered particle recognition", "1.0") {
+        addTestCase("Whole sequence counts require complete groups", \sequences());
+        addTestCase("Nested and repeated choices retain their language", \choices());
+        addTestCase("Empty and absent particles have distinct languages", \empty());
+        addTestCase("Finite and nullable counts remain exact without expansion", \counts());
+        addTestCase("Shared named groups preserve independent continuations", \groups());
+        addTestCase("All groups accept permutations and enforce whole optionality", \all());
+        addTestCase("Wildcard namespace predicates preserve expanded identity", \wildcards());
+        addTestCase("Invalid all placement and restored wildcard state reject", \invalidModels());
+        addTestCase("Malformed names and interrupted calls permit reuse", \errorCases());
+        addTestCase("Large and deep inputs use bounded recognition", \large());
+        addTestCase("Concurrent calls retain independent matcher state", \concurrency());
+        set_return_value(main());
+    }
+
+    private XsdParticle model(string content, string declarations = "") {
+        XsdSchema schema('<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:t="urn:particles"
+            targetNamespace="urn:particles">' + declarations + '<xs:complexType name="Record">'
+            + content + '</xs:complexType></xs:schema>');
+        XsdComplexType record = cast<XsdComplexType>(schema.findType("Record"));
+        return record.getParticle();
+    }
+
+    private string element(string name, string counts = "") {
+        return sprintf('<xs:element name="%s" type="xs:string" %s/>', name, counts);
+    }
+
+    private bool accepts(XsdParticle particle, string text) {
+        return particle.matchesElementNames(map "{}" + $1, text.splitChars());
+    }
+
+    private check(XsdParticle particle, list<string> valid, list<string> invalid) {
+        foreach XsdParticle instance in (particle, Serializable::deserialize(particle.serialize())) {
+            foreach string text in (valid) {
+                assertTrue(accepts(instance, text), text);
+            }
+            foreach string text in (invalid) {
+                assertFalse(accepts(instance, text), text);
+            }
+        }
+    }
+
+    sequences() {
+        check(model('<xs:sequence minOccurs="0" maxOccurs="2">' + element("a") + element("b") + '</xs:sequence>'),
+            ("", "ab", "abab"), ("a", "b", "ba", "aabb", "aba", "ababab"));
+        check(model('<xs:sequence>' + element("a") + '<xs:sequence minOccurs="0">'
+            + element("b") + element("c") + '</xs:sequence>' + element("d") + '</xs:sequence>'),
+            ("ad", "abcd"), ("abd", "acd", "adb", "a", ""));
+    }
+
+    choices() {
+        check(model('<xs:sequence><xs:choice><xs:sequence>' + element("a") + element("b")
+            + '</xs:sequence><xs:sequence>' + element("c") + '<xs:choice>' + element("d") + element("e")
+            + '</xs:choice></xs:sequence></xs:choice>' + element("f") + '</xs:sequence>'),
+            ("abf", "cdf", "cef"), ("af", "cf", "cdef", "abcf", "fab", ""));
+        check(model('<xs:choice minOccurs="2" maxOccurs="3">' + element("a") + element("b") + '</xs:choice>'),
+            ("aa", "ab", "ba", "bb", "aaa", "aab", "aba", "abb", "baa", "bab", "bba", "bbb"),
+            ("", "a", "b", "abab", "ac", "abc"));
+    }
+
+    empty() {
+        check(model('<xs:choice/>'), (), ("", "a"));
+        check(model('<xs:choice minOccurs="0"/>'), ("",), ("a",));
+        check(model('<xs:sequence/>'), ("",), ("a",));
+        check(model('<xs:choice><xs:sequence/>' + element("a") + '</xs:choice>'), ("", "a"), ("aa", "b"));
+        check(model('<xs:choice>' + element("a", 'minOccurs="0" maxOccurs="0"') + element("b") + '</xs:choice>'),
+            ("b",), ("", "a", "ab"));
+        check(model('<xs:choice><xs:sequence minOccurs="0" maxOccurs="0"/>' + element("b") + '</xs:choice>'),
+            ("b",), ("", "a"));
+        check(model('<xs:sequence minOccurs="0" maxOccurs="0">' + element("a") + '</xs:sequence>'),
+            ("",), ("a",));
+    }
+
+    counts() {
+        check(model('<xs:sequence minOccurs="2" maxOccurs="3">' + element("a", 'minOccurs="2" maxOccurs="2"')
+            + '</xs:sequence>'), ("aaaa", "aaaaaa"), ("", "aa", "aaa", "aaaaa", "aaaaaaa"));
+        string huge = "1" + strmul("0", 80);
+        check(model(sprintf('<xs:sequence minOccurs="%s" maxOccurs="%s">', huge, huge)
+            + element("a", 'minOccurs="0"') + '</xs:sequence>'), ("", "a", "aaaaa"), ("b", "aab"));
+        check(model(sprintf('<xs:sequence minOccurs="%s" maxOccurs="%s">', huge, huge)
+            + element("a") + '</xs:sequence>'), (), ("", "a", "aaaaa"));
+        check(model('<xs:sequence minOccurs="2" maxOccurs="unbounded">' + element("a") + element("b")
+            + '</xs:sequence>'), ("abab", "ababab", "abababab"), ("", "ab", "ababa", "aababb"));
+    }
+
+    groups() {
+        string declarations = '<xs:group name="Fields"><xs:sequence>' + element("a") + element("b")
+            + '</xs:sequence></xs:group>';
+        check(model('<xs:sequence><xs:group ref="t:Fields" minOccurs="1" maxOccurs="2"/>' + element("c")
+            + '<xs:group ref="t:Fields"/></xs:sequence>', declarations),
+            ("abcab", "ababcab"), ("ab", "abc", "cab", "ababcabab", "aabcb"));
+        string dag = '<xs:group name="G0"><xs:sequence>' + element("a") + '</xs:sequence></xs:group>';
+        for (int index = 1; index <= 15; ++index) {
+            dag += sprintf('<xs:group name="G%d"><xs:sequence><xs:group ref="t:G%d"/>'
+                '<xs:group ref="t:G%d"/></xs:sequence></xs:group>', index, index - 1, index - 1);
+        }
+        XsdParticle compact = model('<xs:group ref="t:G15"/>', dag);
+        assertFalse(accepts(compact, "a"));
+    }
+
+    all() {
+        check(model('<xs:all minOccurs="0">' + element("a") + element("b")
+            + element("c", 'minOccurs="0"') + element("d", 'minOccurs="0" maxOccurs="0"') + '</xs:all>'),
+            ("", "ab", "ba", "abc", "acb", "bac", "bca", "cab", "cba"),
+            ("a", "b", "c", "aab", "abb", "abd", "abcd"));
+        check(model('<xs:group ref="t:All" minOccurs="0"/>', '<xs:group name="All"><xs:all>'
+            + element("a") + element("b") + '</xs:all></xs:group>'), ("", "ab", "ba"), ("a", "bb"));
+        check(model('<xs:group ref="t:All" minOccurs="0" maxOccurs="0"/>', '<xs:group name="All"><xs:all>'
+            + element("a") + '</xs:all></xs:group>'), ("",), ("a",));
+    }
+
+    wildcards() {
+        foreach string constraint in ("##any", "##other", "##local ##targetNamespace urn:foreign") {
+            XsdParticle particle = model(sprintf('<xs:sequence><xs:any namespace="%s" minOccurs="1" maxOccurs="2"'
+                ' processContents="lax"/></xs:sequence>', constraint));
+            foreach XsdParticle instance in (particle, Serializable::deserialize(particle.serialize())) {
+                assertFalse(instance.matchesElementNames(()));
+                assertTrue(instance.matchesElementNames(("{urn:foreign}item",)));
+                assertEq(constraint != "##other", instance.matchesElementNames(("{}item",)));
+                assertEq(constraint != "##other", instance.matchesElementNames(("{urn:particles}item",)));
+                assertEq(constraint != "##local ##targetNamespace urn:foreign",
+                    instance.matchesElementNames(("{urn:unlisted}item",)));
+                assertFalse(instance.matchesElementNames(("{urn:foreign}a", "{urn:foreign}b", "{urn:foreign}c")));
+            }
+        }
+        XsdParticle names = model('<xs:sequence>' + element("a") + '</xs:sequence>');
+        assertFalse(names.matchesElementNames(("{urn:foreign}a",)));
+    }
+
+    errorCases() {
+        XsdParticle particle = model('<xs:sequence>' + element("a") + '</xs:sequence>');
+        foreach string name in ("a", "{urn:x}", "{}a:b", "{}1a", "{urn:x}a b") {
+            assertThrows("XSD-PARTICLE-ERROR", \particle.matchesElementNames(), ((name,),));
+        }
+        assertTrue(accepts(particle, "a"));
+        SandboxManager manager();
+        on_exit manager.clearInterrupt();
+        Program program(PO_NEW_STYLE | PO_STRICT_ARGS | PO_REQUIRE_TYPES);
+        program.setSandboxManager(manager);
+        program.parse("%modern\n%requires ../qlib/WSDL.qm\n"
+            "bool sub match(XsdParticle particle, SandboxManager manager, bool cancel) {\n"
+            "    if (cancel) { manager.requestInterrupt(); }\n"
+            "    return particle.matchesElementNames((\"{}a\",));\n"
+            "}\n", get_script_dir() + "/particle-match-cancellation.qr");
+        *hash<ExceptionInfo> error;
+        try {
+            program.callFunction("match", particle, manager, True);
+        } catch (hash<ExceptionInfo> ex) {
+            error = ex;
+        }
+        manager.clearInterrupt();
+        assertEq("PROGRAM-INTERRUPTED", error.err);
+        assertTrue(program.callFunction("match", particle, manager, False));
+    }
+
+    private bool matchesEmpty(string content, string declarations) {
+        return model(content, declarations).matchesElementNames(());
+    }
+
+    invalidModels() {
+        string group = '<xs:group name="All"><xs:all>' + element("a") + '</xs:all></xs:group>';
+        foreach string content in ('<xs:sequence><xs:group ref="t:All"/></xs:sequence>',
+                '<xs:choice><xs:group ref="t:All"/></xs:choice>',
+                '<xs:group ref="t:All" maxOccurs="2"/>',
+                '<xs:all>' + element("a") + element("a") + '</xs:all>') {
+            assertThrows("WSDL-ERROR", \matchesEmpty(), (content, group));
+        }
+        XsdParticle wildcard = model('<xs:sequence><xs:any processContents="skip"/></xs:sequence>').getChildren()[0];
+        hash<SerializationInfo> state = wildcard.serializeToData();
+        state._index."0"._class_data."WSDL::XsdParticle".wildcard = NOTHING;
+        assertThrows("DESERIALIZATION-ERROR", \Serializable::deserialize(), (state,));
+        assertTrue(wildcard.matchesElementNames(("{urn:invoice}line",)));
+        XsdParticle sequence = model('<xs:sequence><xs:sequence><xs:any processContents="skip"/>'
+            '</xs:sequence></xs:sequence>');
+        state = sequence.serializeToData();
+        string children = state._index."0"._class_data."WSDL::XsdParticle".children._index;
+        string nested = state._index{children}._elements[0]._index;
+        string nested_children = state._index{nested}._class_data."WSDL::XsdParticle".children._index;
+        state._index{nested_children}._elements = ({"_index": "0"},);
+        XsdParticle cyclic = Serializable::deserialize(state);
+        assertThrows("WSDL-ERROR", \cyclic.matchesElementNames(), ((),));
+        XsdParticle reference = model('<xs:group ref="t:All"/>', group);
+        state = reference.serializeToData();
+        remove state._index."0"._class_data."WSDL::XsdParticle".group_definition;
+        XsdParticle unresolved = Serializable::deserialize(state);
+        assertThrows("WSDL-ERROR", \unresolved.matchesElementNames(), ((),));
+    }
+
+    large() {
+        string declarations;
+        list<string> names();
+        for (int index = 0; index < 1000; ++index) {
+            string name = "v" + index.toString();
+            declarations += element(name);
+            push names, "{}" + name;
+        }
+        XsdParticle sequence = model('<xs:sequence>' + declarations + '</xs:sequence>');
+        assertTrue(sequence.matchesElementNames(names));
+        names[500] = "{}v501";
+        assertFalse(sequence.matchesElementNames(names));
+        XsdParticle repeated = model('<xs:choice minOccurs="0" maxOccurs="unbounded">'
+            + element("a") + element("b") + '</xs:choice>');
+        assertTrue(accepts(repeated, strmul("ab", 5000)));
+        assertFalse(accepts(repeated, strmul("ab", 5000) + "c"));
+        XsdParticle deep = model(strmul('<xs:sequence minOccurs="2" maxOccurs="2">', 80)
+            + element("a") + strmul('</xs:sequence>', 80));
+        assertFalse(accepts(deep, "a"));
+    }
+
+    concurrency() {
+        XsdParticle particle = model('<xs:sequence minOccurs="2" maxOccurs="4">'
+            + element("a") + element("b") + '</xs:sequence>');
+        Qore::Thread::Queue ready();
+        Qore::Thread::Queue start();
+        Qore::Thread::Queue results();
+        Qore::Thread::Counter running();
+        on_exit {
+            for (int index = 0; index < 4; ++index) {
+                start.push(True);
+            }
+            assertEq(0, running.waitForZero(30s));
+        }
+        for (int index = 0; index < 4; ++index) {
+            running.inc();
+            background sub () {
+                on_exit running.dec();
+                try {
+                    ready.push(True);
+                    start.get(30s);
+                    results.push({"accepted": particle.matchesElementNames(("{}a", "{}b", "{}a", "{}b")),
+                        "rejected": !particle.matchesElementNames(("{}a", "{}b", "{}a"))});
+                } catch (hash<ExceptionInfo> ex) {
+                    results.push({"error": ex});
+                }
+            }();
+        }
+        for (int index = 0; index < 4; ++index) {
+            ready.get(30s);
+        }
+        for (int index = 0; index < 4; ++index) {
+            start.push(True);
+        }
+        for (int index = 0; index < 4; ++index) {
+            assertEq({"accepted": True, "rejected": True}, results.get(30s));
+        }
+    }
+}
