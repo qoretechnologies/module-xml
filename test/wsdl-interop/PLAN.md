@@ -2,7 +2,7 @@
 
 Copyright (C) 2026 Qore Technologies, s.r.o.
 
-Status: P1 corpus/adjudication and P2 schema/representation acceptance are complete on `develop`; P3 is in progress.
+Status: P1 corpus/adjudication, P2 schema/representation and P3 scalar acceptance are complete on `develop`; P4 is next.
 See [EXECUTION.md](EXECUTION.md) for acceptance evidence and remaining implementation criteria.
 Prepared 2026-09-07 after `cc13171` on `develop`.
 Keep proposals here; put durable implementation details in `design/` only after implementation.

@@ -10,6 +10,8 @@ diagnostic tool with explicit failures and coverage limits, not a conformance ce
 See [PLAN.md](PLAN.md) for the phased implementation plan, acceptance checks, and a complete mapping
 of the recorded findings and validator disagreements to the work needed to resolve them.
 See [EXECUTION.md](EXECUTION.md) for implementation progress and commit/audit evidence.
+P3 scalar acceptance is complete; its [acceptance matrix](P3-acceptance.md) and
+[requirement/test/commit register](P3-acceptance.json) retain the remaining P4-P9 failures and scope.
 
 `test/wsdl-scalar-consumers.qtest` checks exact scalar values through actual SOAP
 1.1/1.2 HTTP exchanges, including invalid-value recovery and encoded reference

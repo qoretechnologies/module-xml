@@ -5509,3 +5509,50 @@ The [P3-46 audit](audits/P3-46-literal-attributes.md) resolves all 62 items:
 18 Pass / 44 N/A / 0 Fail. Final source and runtime hashes are recorded in
 `/tmp/wsdl-p3-46-final-manifest.json`. No C++ changed and no native installation
 or push was performed. Next: consolidate the full P3 acceptance matrix.
+
+
+## P3-47 — Phase acceptance (2026-09-10)
+
+P3-46 is committed as `defff2c`. The complete scalar phase now passes its
+acceptance criteria; [P3-acceptance.md](P3-acceptance.md) contains the reviewed
+matrix, and [P3-acceptance.json](P3-acceptance.json) records all 43 original
+families, ten criterion groups, 49 audit fingerprints/commit records and the
+complete final test inventory. The original findings remain unchanged.
+
+The final committed-source gate passes 99 Qore suites / 1,006 successful cases /
+40,743 reported assertions, plus 1,380 standalone native IEEE checks. This adds
+the native IEEE suite to the 98-suite P3-46 gate. All three caught comparator
+negatives in soap.qtest remain documented; all its cases pass. The final Python
+inventory runs 69 files / 249 methods. Only four explicitly assigned diagnostic
+files fail, with all 33 failure records identical to the prior inventory: four
+P4 choice failures, one aggregate P5 wildcard-example failure, two P6 selected
+binding/version failures, and 26 P6 header/body/RPC records. There are no new
+errors, warnings, skips, or missing/duplicate files.
+
+The regex suite passed alone with its unchanged 90-second worker deadline before
+the rest of the final inventory ran in parallel. The initial parallel timeout is
+retained as evidence; it was not accepted as a passing result or hidden by changing
+the test. The final long QName matrix passes both methods in 407.943 seconds.
+Final logs/manifests use `/tmp/wsdl-p3-final-`; the precise runtime hashes are in
+the committed register. All final Python Qore invocations use -b via a temporary
+invocation wrapper, and debugging remains enabled.
+
+All 2,411 both-version survey rows, their counts, and the 144 both-direction
+coverage failure identities remain unchanged. The current reports now identify
+the final WSDL source fingerprint. Every original P3 family is strictly selected;
+130 descriptions / 1,260 message directions pass the strict gate. Eight original
+P2-labelled runtime content failures retain the P5 owner established at P2
+acceptance. P4 has 76 corpus records; the remaining 60 are labelled P5. Actual
+SOAP 1.1/1.2 binding and HTTP scalar coverage comes from the authored matrices,
+not from changing the envelope namespace in the W3C archive.
+
+Both repositories were fetched again: no further remote develop commits were
+pending, main Qore remained clean, and no push was performed. P1/P2/P3 are complete.
+P4 is the next implementation phase; P4-P9 retain their complete original scope.
+The initial P4 read-only review identified loss of declaration order at schema
+parsing plus split element/choice emission and flattened group occurrence metadata.
+No P4 implementation preceded this acceptance.
+
+The [P3-47 full audit](audits/P3-47-acceptance.md) records 5 Pass / 57 N/A /
+0 Fail across all 62 checks. Final phase-boundary reruns again pass the required
+Qore interoperability suite and all 15 survey harness methods.
