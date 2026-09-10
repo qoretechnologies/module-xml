@@ -1,0 +1,296 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires xml
+%requires ../qlib/WSDL.qm
+%exec-class TemporalValuesTest
+
+class InterruptTemporalProvider inherits XsdCalendarDataType {
+    public {
+        bool interrupt = True;
+    }
+
+    constructor(string builtin) : XsdCalendarDataType(builtin) {
+    }
+
+    auto acceptsValue(auto value) {
+        if (interrupt) {
+            throw "PROGRAM-INTERRUPTED", "temporal provider interrupted";
+        }
+        return XsdCalendarDataType::acceptsValue(value);
+    }
+}
+
+class TemporalValuesTest inherits QUnit::Test {
+    constructor() : Test("Exact XSD dateTime and time", "1.0") {
+        addTestCase("Strict clock grammar and lossless native or lexical representation", \valid());
+        addTestCase("Invalid lexical forms and native categories fail before conversion", \invalid());
+        addTestCase("Enumeration compares exact fractions, midnight and timezone identity", \enumeration());
+        addTestCase("Leap seconds preserve equivalent instants and next-minute distinctions", \leaps());
+        addTestCase("Bounds use exact fractions and partial timezone ordering", \bounds());
+        addTestCase("Patterns retain the original spelling across providers and reconstruction", \patterns());
+        addTestCase("Temporal list and union metadata preserves exact item identities", \collections());
+        addTestCase("Fixed and default attributes preserve exact clocks and timezone absence", \fixedValues());
+        addTestCase("Malformed metadata rejects and interrupted conversion recovers", \metadata());
+        set_return_value(main());
+    }
+
+    private static XsdBaseType base(string builtin) {
+        return new Namespaces({}).getBaseType(builtin);
+    }
+
+    private static XsdAbstractType element(string builtin, string facets) {
+        string schema = '<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" targetNamespace="urn:temporal">'
+            + '<xs:simpleType name="Value"><xs:restriction base="xs:' + builtin
+            + '">' + facets + '</xs:restriction></xs:simpleType></xs:schema>';
+        return new XsdSchema(schema).findType(make_qname("urn:temporal", "Value"));
+    }
+
+    private valid() {
+        foreach string builtin in ("dateTime", "time") {
+            XsdBaseType type = base(builtin);
+            foreach string clock in ("00:00:00", "12:34:56.123456", "23:59:59.0000001",
+                    "12:34:56.123456789012345678901234567890", "24:00:00", "24:00:00.000000000") {
+                foreach string suffix in ("", "Z", "+00:00", "-00:00", "+14:00", "-14:00", "+05:30") {
+                    string text = (builtin == "dateTime" ? "2026-12-31T" : "") + clock + suffix;
+                    auto value = type.deserializeValue("value", {}, NOTHING, " \t" + text + "\r\n");
+                    assertEq(text, type.serializeValue(new Namespaces({}), text, True));
+                    bool native = boolean(suffix) && (clock !~ /(?:0000001|123456789)/);
+                    assertEq(native ? NT_DATE : NT_STRING, value.typeCode(), text);
+                    if (!native) {
+                        assertEq(text, value);
+                        assertEq(text, type.serializeValue(new Namespaces({}), value, True));
+                    } else {
+                        assertEq(clock.startsWith("24:") ? "00:00:00" : clock.substr(0, 8),
+                            value.format("HH:mm:SS"));
+                        if (builtin == "dateTime" && clock.startsWith("24:")) {
+                            assertEq("2027-01-01", value.format("YYYY-MM-DD"));
+                        }
+                    }
+                    foreach AbstractDataProviderType provider in (type.getDataProviderType(),
+                            Serializable::deserialize(type.getDataProviderType().serialize())) {
+                        assertEq(value, provider.acceptsValue(text));
+                        assertEq(value, provider.getOrNothingType().acceptsValue(text));
+                        assertEq(NOTHING, provider.getOrNothingType().acceptsValue(NOTHING));
+                        assertEq(NT_ALL, provider.getBaseTypeCode());
+                        assertTrue(provider.getReturnTypeHash().string && provider.getReturnTypeHash().date);
+                    }
+                }
+            }
+        }
+        foreach string year in ("12345", "-0001", "2147483648", "-2147483649", "1" + strmul("0", 1000)) {
+            string text = year + "-12-31T23:59:59.123456789Z";
+            assertEq(text, base("dateTime").deserializeValue("value", {}, NOTHING, text));
+        }
+        assertEq("0001-01-01", base("dateTime").deserializeValue("value", {}, NOTHING,
+            "-0001-12-31T24:00:00Z").format("YYYY-MM-DD"));
+    }
+
+    private invalid() {
+        foreach string builtin in ("dateTime", "time") {
+            XsdBaseType type = base(builtin);
+            AbstractDataProviderType provider = type.getDataProviderType();
+            string prefix = builtin == "dateTime" ? "2026-01-01T" : "";
+            list<auto> values = ("", " ", NOTHING, True, 123, 1.5, (), {}, <00>, 1s, -1s);
+            foreach string clock in ("1:00:00", "00:0:00", "00:00:0", "00:00", "25:00:00",
+                    "00:60:00", "00:00:61", "24:01:00", "24:00:01", "24:00:00.0000001",
+                    "12:00:00.", "12:00:00.1e2", "12:00:00z", "12:00:00ZZ", "12:00:00+14:01",
+                    "12:00:00-14:01", "12:00:00+00:60", "12:00:00+15:00", "12:00:00+0100",
+                    "12:00:00Ztail", "12:00:00 Z", "12:00:00\u00a0", "１２:00:00") {
+                push values, prefix + clock;
+            }
+            foreach auto value in (values) {
+                assertThrows("SOAP-SERIALIZATION-ERROR", \type.serializeValue(), (new Namespaces({}), value, True));
+                assertThrows("SOAP-DESERIALIZATION-ERROR", \type.deserializeValue(), ("value", {}, NOTHING, value));
+                assertThrows(exists value ? "RUNTIME-TYPE-ERROR" : "MISSING-VALUE-ERROR",
+                    \provider.acceptsValue(), (value,));
+            }
+        }
+        XsdBaseType date_time = base("dateTime");
+        XsdBaseType time = base("time");
+        foreach string text in ("2026-01-01", "0000-01-01T00:00:00Z", "-0000-01-01T00:00:00Z",
+                "+2026-01-01T00:00:00Z", "02026-01-01T00:00:00Z", "2026-02-29T00:00:00Z",
+                "2026-04-31T00:00:00Z", "2026-01-01t00:00:00Z", "2026-01-01 00:00:00Z") {
+            assertThrows("SOAP-DESERIALIZATION-ERROR", \date_time.deserializeValue(),
+                ("value", {}, NOTHING, text));
+        }
+        assertThrows("SOAP-DESERIALIZATION-ERROR", \time.deserializeValue(),
+            ("value", {}, NOTHING, "2026-01-01T00:00:00Z"));
+    }
+
+    private accepts(string builtin, string allowed, string equivalent) {
+        XsdAbstractType root = element(builtin, "<xs:enumeration value=\"" + allowed + "\"/>");
+        foreach XsdAbstractType copy in (root, Serializable::deserialize(root.serialize())) {
+            auto decoded = copy.deserializeValue("value", {}, NOTHING, equivalent);
+            auto encoded = copy.serializeValue(new Namespaces({}), decoded, True);
+            assertEq(decoded, copy.deserializeValue("value", {}, NOTHING, encoded));
+            assertEq(decoded, copy.getDataProviderType().acceptsValue(equivalent));
+        }
+    }
+
+    private enumeration() {
+        accepts("dateTime", "2026-01-01T00:00:00.123456789Z", "2026-01-01T05:30:00.123456789000+05:30");
+        accepts("dateTime", "2027-01-01T00:00:00Z", "2026-12-31T24:00:00.000Z");
+        accepts("dateTime", "0001-01-01T00:00:00Z", "-0001-12-31T24:00:00Z");
+        accepts("time", "01:00:00Z", "23:00:00-02:00");
+        accepts("time", "23:00:00Z", "01:00:00+02:00");
+        accepts("time", "00:00:00Z", "24:00:00Z");
+        accepts("time", "00:00:00", "24:00:00.000");
+    }
+
+    private leaps() {
+        accepts("dateTime", "1998-12-31T23:59:60Z", "1998-12-31T22:59:60-01:00");
+        accepts("dateTime", "1998-12-31T23:59:60.123456789Z", "1999-01-01T05:29:60.123456789000+05:30");
+        accepts("time", "23:59:60Z", "22:59:60-01:00");
+        # An inappropriate leap date is assigned to the following minute by Appendix D.1.
+        accepts("dateTime", "2026-02-01T00:00:00.5Z", "2026-01-31T23:59:60.5Z");
+        accepts("dateTime", "2026-02-01T00:00:00.5", "2026-01-31T23:59:60.5");
+        accepts("dateTime", "1998-12-31T22:59:60.5", "1998-12-31T22:59:60.5000");
+        accepts("dateTime", "1999-01-01T05:29:60.5", "1999-01-01T05:29:60.5000");
+        XsdAbstractType root = element("dateTime", "<xs:enumeration value=\"1998-12-31T23:59:60Z\"/>");
+        assertThrows("SOAP-DESERIALIZATION-ERROR", \root.deserializeValue(),
+            ("value", {}, NOTHING, "1999-01-01T00:00:00Z"));
+        foreach string value in ("1998-12-31T23:59:60Z", "1999-01-01T05:29:60+05:30") {
+            assertEq(value, base("dateTime").deserializeValue("value", {}, NOTHING, value));
+        }
+    }
+
+    private bounds() {
+        XsdAbstractType root = element("dateTime", "<xs:minExclusive value=\"2026-01-01T00:00:00.123456789Z\"/>"
+            + "<xs:maxExclusive value=\"2026-01-01T00:00:00.123456791Z\"/>");
+        string inside = "2026-01-01T00:00:00.12345679Z";
+        auto sample = cast<XsdSimpleType>(root).getSampleValue(NOTHING);
+        assertEq(sample, root.deserializeValue("value", {}, NOTHING, sample));
+        assertEq(inside, root.deserializeValue("value", {}, NOTHING, inside));
+        foreach string outside in ("2026-01-01T00:00:00.123456789Z", "2026-01-01T00:00:00.123456791Z",
+                "2026-01-01T00:00:00.12345679") {
+            assertThrows("SOAP-DESERIALIZATION-ERROR", \root.deserializeValue(), ("value", {}, NOTHING, outside));
+        }
+        XsdAbstractType partial = element("dateTime", "<xs:minInclusive value=\"2026-01-01T00:00:00Z\"/>");
+        assertThrows("SOAP-DESERIALIZATION-ERROR", \partial.deserializeValue(),
+            ("value", {}, NOTHING, "2026-01-01T14:00:00"));
+        assertEq("2026-01-01T14:00:00.0000001", partial.deserializeValue("value", {}, NOTHING,
+            "2026-01-01T14:00:00.0000001"));
+        foreach hash<auto> row in (
+                {"facet": "minInclusive", "bound": "00:00:00Z", "valid": "14:00:00.0000001", "invalid": "14:00:00"},
+                {"facet": "maxInclusive", "bound": "23:00:00Z", "valid": "08:59:59.9999999", "invalid": "09:00:00"}) {
+            XsdAbstractType clock = element("time", "<xs:" + row.facet + " value=\"" + row.bound + "\"/>");
+            foreach AbstractDataProviderType provider in (clock.getDataProviderType(),
+                    Serializable::deserialize(clock.getDataProviderType().serialize())) {
+                assertEq(row.valid, provider.acceptsValue(row.valid));
+                assertThrows("RUNTIME-TYPE-ERROR", \provider.acceptsValue(), (row.invalid,));
+                assertThrows("SOAP-DESERIALIZATION-ERROR", \clock.deserializeValue(),
+                    ("value", {}, NOTHING, row.invalid));
+            }
+        }
+    }
+
+    private patterns() {
+        foreach string builtin in ("dateTime", "time") {
+            string text = (builtin == "dateTime" ? "2026-01-01T" : "") + "12:34:56.123456000+00:00";
+            XsdAbstractType root = element(builtin, "<xs:pattern value=\".*123456000[+]00:00\"/>");
+            auto decoded = root.deserializeValue("value", {}, NOTHING, text);
+            assertEq(text, decoded);
+            assertEq(text, root.serializeValue(new Namespaces({}), decoded, True));
+            assertEq(text, root.getDataProviderType().acceptsValue(text));
+            auto generated = cast<XsdSimpleType>(root).getSampleValue("bad");
+            assertEq(generated, root.deserializeValue("value", {}, NOTHING, generated));
+        }
+    }
+
+    private collections() {
+        foreach string builtin in ("time", "dateTime") {
+            string prefix = builtin == "dateTime" ? "2026-12-31T" : "";
+            string value = prefix + "12:00:00.123456789Z";
+            string alias = prefix + "17:30:00.123456789000+05:30";
+            string other = prefix + "12:00:00.123456788Z";
+            XsdSchema original('<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:t="urn:temporal"
+                targetNamespace="urn:temporal"><xs:simpleType name="Items"><xs:list itemType="xs:' + builtin
+                + '"/></xs:simpleType><xs:simpleType name="Selected"><xs:restriction base="t:Items">'
+                + '<xs:enumeration value="' + value + ' ' + prefix + '13:00:00"/>'
+                + '</xs:restriction></xs:simpleType><xs:simpleType name="Either"><xs:union memberTypes="xs:'
+                + builtin + ' xs:string"/></xs:simpleType><xs:simpleType name="OnlyClock">'
+                + '<xs:restriction base="t:Either"><xs:enumeration value="' + value + '"/>'
+                + '</xs:restriction></xs:simpleType><xs:simpleType name="Lists">'
+                + '<xs:union memberTypes="t:Selected xs:string"/></xs:simpleType></xs:schema>');
+            foreach XsdSchema schema in (original, Serializable::deserialize(original.serialize())) {
+                foreach string name in ("Selected", "Lists", "OnlyClock") {
+                    XsdAbstractType type = schema.findType(make_qname("urn:temporal", name));
+                    string text = alias + (name == "OnlyClock" ? "" : " " + prefix + "13:00:00");
+                    auto decoded = type.deserializeValue("value", {}, NOTHING, text);
+                    auto input = name == "Selected" ? text.split(" ") : text;
+                    foreach AbstractDataProviderType provider in (type.getDataProviderType(),
+                            Serializable::deserialize(type.getDataProviderType().serialize())) {
+                        assertEq(decoded, provider.acceptsValue(input));
+                        assertEq(decoded, provider.getOrNothingType().acceptsValue(input));
+                        if (name != "Lists") {
+                            assertThrows("RUNTIME-TYPE-ERROR", \provider.acceptsValue(),
+                                (name == "OnlyClock" ? other : (other, prefix + "13:00:00"),));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private fixedValues() {
+        foreach string builtin in ("dateTime", "time") {
+            string prefix = builtin == "dateTime" ? "2026-12-31T" : "";
+            string fixed = prefix + "12:00:00.123456789Z";
+            string alias = prefix + "17:30:00.123456789000+05:30";
+            string local = prefix + "13:00:00";
+            XsdSchema original('<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" targetNamespace="urn:temporal">'
+                + '<xs:complexType name="Record"><xs:attribute name="clock" type="xs:' + builtin + '" fixed="'
+                + fixed + '"/><xs:attribute name="local" type="xs:' + builtin + '" fixed="' + local
+                + '"/><xs:attribute name="fallback" type="xs:' + builtin + '" default="' + local
+                + '"/></xs:complexType></xs:schema>');
+            foreach XsdSchema schema in (original, Serializable::deserialize(original.serialize())) {
+                XsdAbstractType type = schema.findType(make_qname("urn:temporal", "Record"));
+                hash<auto> input = {"^attributes^": {"clock": alias, "local": local}};
+                hash<auto> decoded = type.deserializeValue("value", {}, NOTHING, input);
+                assertEq(alias, decoded."^attributes^".clock);
+                assertEq(local, decoded."^attributes^".local);
+                assertEq(local, decoded."^attributes^".fallback);
+                AbstractDataProviderType provider = Serializable::deserialize(type.getDataProviderType().serialize());
+                assertEq(decoded, provider.acceptsValue(input));
+                AbstractDataField field = provider.getFields()."^attributes^".getType().getFields().clock;
+                assertTrue(field instanceof XsdCalendarDataField);
+                assertEq(alias, field.acceptsValue(alias));
+                assertThrows("FIELD-VALUE-ERROR", \field.acceptsValue(), (prefix + "12:00:00.123456788Z",));
+                foreach hash<auto> changed in ({"local": local + "Z"}, {"clock": prefix + "12:00:00.123456788Z"}) {
+                    hash<auto> invalid = {"^attributes^": input."^attributes^" + changed};
+                    assertThrows("SOAP-DESERIALIZATION-ERROR", \type.deserializeValue(),
+                        ("value", {}, NOTHING, invalid));
+                    assertThrows("SOAP-SERIALIZATION-ERROR", \type.serializeValue(), (new Namespaces({}), invalid, True));
+                    assertThrows("RUNTIME-TYPE-ERROR", \provider.acceptsValue(), (invalid,));
+                }
+                assertEq(decoded, type.deserializeValue("value", {}, NOTHING,
+                    type.serializeValue(new Namespaces({}), decoded, True)));
+            }
+        }
+    }
+
+    private metadata() {
+        foreach string builtin in ("dateTime", "time") {
+            string prefix = builtin == "dateTime" ? "2026-12-31T" : "";
+            hash<XsdCalendarFacetInfo> facets = <XsdCalendarFacetInfo>{"name": "Value", "base_name": builtin,
+                "bounds": {"minInclusive": prefix + "12:00:00.123456789Z"}};
+            XsdCalendarRestrictionDataType original(facets, new XsdCalendarDataType(builtin));
+            hash<SerializationInfo> state = original.serializeToData();
+            string index = state._index."0"._class_data."WSDL::XsdCalendarRestrictionDataType".facets._index;
+            state._index{index}._members.base_name = builtin == "time" ? "dateTime" : "time";
+            assertThrows("DESERIALIZATION-ERROR", \Serializable::deserialize(), (state,));
+            string value = prefix + "12:00:00.123456790Z";
+            assertEq(value, Serializable::deserialize(original.serialize()).acceptsValue(value));
+            InterruptTemporalProvider base(builtin);
+            XsdCalendarRestrictionDataType interrupted(facets, base);
+            assertThrows("PROGRAM-INTERRUPTED", \interrupted.acceptsValue(), (value,));
+            base.interrupt = False;
+            assertEq(value, interrupted.acceptsValue(value));
+            assertThrows("RUNTIME-TYPE-ERROR", \interrupted.acceptsValue(), (prefix + "12:00:00Z",));
+            assertEq(value, interrupted.acceptsValue(value));
+        }
+    }
+}

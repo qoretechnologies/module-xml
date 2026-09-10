@@ -1,0 +1,202 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires xml
+%requires ../qlib/WSDL.qm
+%requires ../qlib/SoapClient.qm
+%requires ../qlib/SoapHandler.qm
+%requires HttpServer
+%exec-class TimeOutputTest
+
+class TimeOutputCallback {
+    public {
+        Queue requests();
+        Queue responses();
+    }
+
+    hash<auto> call(hash<auto> cx, hash<auto> request) {
+        requests.push(request);
+        return responses.pop(30000);
+    }
+}
+
+class TimeOutputTest inherits QUnit::Test {
+    constructor() : Test("Native XSD time output", "1.0") {
+        addTestCase("Native clock projection preserves microseconds and explicit offsets", \nativeValues());
+        addTestCase("Time output rejects durations and non-XSD offsets with recovery", \invalidValues());
+        addTestCase("Actual SOAP bindings retain time fields over local HTTP", \httpValues());
+        addTestCase("Unzoned XML time remains unzoned through native conversion", \unzoned());
+        addTestCase("Lossless temporal strings cross real SOAP bindings in both directions", \httpLexicalValues());
+        set_return_value(main());
+    }
+
+    private static XsdBaseType timeType() {
+        return new Namespaces({}).getBaseType("time");
+    }
+
+    private nativeValues() {
+        XsdBaseType type = timeType();
+        foreach int offset in (-50400, -12600, 0, 19800, 50400) {
+            TimeZone zone(offset);
+            string suffix = offset ? sprintf("%s%02d:%02d", offset < 0 ? "-" : "+",
+                abs(offset) / 3600, (abs(offset) % 3600) / 60) : "Z";
+            foreach int micros in (0, 1, 999, 1000, 1001, 123456, 999999) {
+                string clock = sprintf("23:59:59.%06d", micros);
+                date value = zone.date("2026-09-10T" + clock);
+                string text = type.serializeValue(new Namespaces({}), value, True);
+                assertEq(clock + suffix, text);
+                date recovered = type.deserializeValue("time", {}, NOTHING, text);
+                assertEq(offset, recovered.getUtcOffset());
+                assertEq(clock, recovered.format("HH:mm:SS.us"));
+                assertEq("2026-09-10", value.format("YYYY-MM-DD"));
+                foreach AbstractDataProviderType provider in (type.getDataProviderType(),
+                        Serializable::deserialize(type.getDataProviderType().serialize())) {
+                    assertEq(text, type.serializeValue(new Namespaces({}), provider.acceptsValue(value), True));
+                }
+            }
+        }
+        foreach string day in ("-0001-01-01", "0000-01-01", "2147483647-12-31") {
+            date value = new TimeZone(0).date(day + "T01:02:03.000004");
+            assertEq("01:02:03.000004Z", type.serializeValue(new Namespaces({}), value, True));
+        }
+        foreach hash<auto> row in (
+                {"zone": "Europe/Prague", "at": "2026-07-01T12:00:00.123456", "offset": "+02:00"},
+                {"zone": "Europe/Prague", "at": "2026-01-01T12:00:00.123456", "offset": "+01:00"},
+                {"zone": "America/New_York", "at": "2026-07-01T12:00:00.123456", "offset": "-04:00"}) {
+            date value = new TimeZone(row.zone).date(row.at);
+            assertEq("12:00:00.123456" + row.offset, type.serializeValue(new Namespaces({}), value, True));
+        }
+    }
+
+    private invalidValues() {
+        XsdBaseType type = timeType();
+        foreach auto value in (1s, 25h, -1s, new TimeZone(1).date("2026-09-10"),
+                new TimeZone(-1).date("2026-09-10"), new TimeZone(50460).date("2026-09-10"),
+                new TimeZone(-50460).date("2026-09-10")) {
+            assertThrows("SOAP-SERIALIZATION-ERROR", \type.serializeValue(), (new Namespaces({}), value, True));
+            assertEq("01:02:03.000004Z", type.serializeValue(new Namespaces({}),
+                new TimeZone(0).date("2026-09-10T01:02:03.000004"), True));
+        }
+    }
+
+    private unzoned() {
+        XsdBaseType type = timeType();
+        foreach string text in ("00:00:00", "12:34:56.123456") {
+            auto value = type.deserializeValue("clock", {}, NOTHING, text);
+            string output = type.serializeValue(new Namespaces({}), value, True);
+            assertFalse(boolean(output =~ /(?:Z|[+-][0-9]{2}:[0-9]{2})\z/),
+                "an absent XML timezone must not become the program's implicit offset");
+        }
+    }
+
+    private WebService service(string version, string builtin = "time") {
+        string description = '<w:definitions xmlns:w="http://schemas.xmlsoap.org/wsdl/"
+            xmlns:t="urn:time-output" xmlns:s="http://schemas.xmlsoap.org/wsdl/soap'
+            + (version == "12" ? "12" : "") + '/" targetNamespace="urn:time-output"><w:types>
+            <xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" targetNamespace="urn:time-output">
+            <xs:simpleType name="Times"><xs:list itemType="xs:time"/></xs:simpleType>
+            <xs:simpleType name="Either"><xs:union memberTypes="xs:time xs:string"/></xs:simpleType>
+            <xs:complexType name="Record"><xs:sequence>
+            <xs:element name="clock" type="xs:time"/><xs:element name="times" type="t:Times"/>
+            <xs:element name="either" type="t:Either"/></xs:sequence>
+            <xs:attribute name="deadline" type="xs:time" use="required"/></xs:complexType>
+            <xs:element name="Submit" type="t:Record"/><xs:element name="Reply" type="t:Record"/>
+            </xs:schema></w:types><w:message name="In"><w:part name="body" element="t:Submit"/></w:message>
+            <w:message name="Out"><w:part name="body" element="t:Reply"/></w:message>
+            <w:portType name="Port"><w:operation name="submit"><w:input message="t:In"/>
+            <w:output message="t:Out"/></w:operation></w:portType><w:binding name="Soap" type="t:Port">
+            <s:binding style="document" transport="http://schemas.xmlsoap.org/soap/http"/>
+            <w:operation name="submit"><s:operation soapAction="urn:submit"/><w:input><s:body use="literal"/>
+            </w:input><w:output><s:body use="literal"/></w:output></w:operation></w:binding>
+            <w:service name="Service"><w:port name="Port" binding="t:Soap"><s:address location="http://example.invalid/"/>
+            </w:port></w:service></w:definitions>';
+        return new WebService(replace(description, "xs:time", "xs:" + builtin), {"async_only": True});
+    }
+
+    private hash<auto> record(bool response) {
+        TimeZone zone(response ? -12600 : 19800);
+        date first = zone.date("1970-01-01T23:59:59.123456");
+        date second = new TimeZone(0).date("1970-01-01T00:00:00.000001");
+        return {"clock": first, "times": (first, second), "either": first,
+            "^attributes^": {"deadline": second}};
+    }
+
+    private check(hash<auto> actual, bool response) {
+        hash<auto> expected = record(response);
+        foreach string key in ("clock", "times", "either", "^attributes^") {
+            assertEq(expected{key}, actual{key});
+        }
+        assertEq(response ? -12600 : 19800, actual.clock.getUtcOffset());
+        assertEq("23:59:59.123456", actual.clock.format("HH:mm:SS.us"));
+        assertEq("00:00:00.000001", actual.times[1].format("HH:mm:SS.us"));
+        assertEq(0, actual.times[1].getUtcOffset());
+    }
+
+    private httpValues() {
+        foreach string version in ("11", "12") {
+            WebService original = service(version);
+            foreach WebService ws in (original, Serializable::deserialize(original.serialize())) {
+                HttpServer server();
+                on_exit server.stop();
+                SoapHandler handler(new PermissiveAuthenticator());
+                server.setDefaultHandler("soap", handler);
+                TimeOutputCallback callback();
+                handler.addMethod(ws, ws.getBindingOperation("Soap", "submit"), \callback.call(), NOTHING,
+                    NOTHING, NOTHING, "Service", NOTHING, NOTHING, "Soap");
+                server.addListener(0);
+                string url = sprintf("http://127.0.0.1:%d/Service", server.getListenerInfo(0).port);
+                SoapClient client({"wsdl": ws, "url": url, "timeout": 30000, "connect_timeout": 30000});
+                callback.responses.push(record(True));
+                check(client.callOperation("submit", record(False)), True);
+                check(callback.requests.pop(30000), False);
+                hash<auto> invalid = record(False);
+                invalid.clock = new TimeZone(50460).date("1970-01-01T12:00:00");
+                assertThrows("SOAP-SERIALIZATION-ERROR", \client.callOperation(), ("submit", invalid));
+                callback.responses.push(record(True));
+                check(client.callOperation("submit", record(False)), True);
+                check(callback.requests.pop(30000), False);
+            }
+        }
+    }
+
+    private static hash<auto> lexicalRecord(string text) {
+        return {"clock": text, "times": (text, text), "either": text, "^attributes^": {"deadline": text}};
+    }
+
+    private httpLexicalValues() {
+        foreach string builtin in ("time", "dateTime") {
+            foreach string version in ("11", "12") {
+                WebService original = service(version, builtin);
+                foreach WebService ws in (original, Serializable::deserialize(original.serialize())) {
+                    HttpServer server();
+                    on_exit server.stop();
+                    SoapHandler handler(new PermissiveAuthenticator());
+                    server.setDefaultHandler("soap", handler);
+                    TimeOutputCallback callback();
+                    handler.addMethod(ws, ws.getBindingOperation("Soap", "submit"), \callback.call(), NOTHING,
+                        NOTHING, NOTHING, "Service", NOTHING, NOTHING, "Soap");
+                    server.addListener(0);
+                    string url = sprintf("http://127.0.0.1:%d/Service", server.getListenerInfo(0).port);
+                    SoapClient client({"wsdl": ws, "url": url, "timeout": 30000, "connect_timeout": 30000});
+                    string prefix = builtin == "dateTime" ? "1998-12-31T" : "";
+                    foreach string clock in ("12:34:56", "12:34:56.1234567890123456789Z", "23:59:60Z") {
+                        string request = prefix + clock;
+                        string response = prefix + "22:59:60.123456789-01:00";
+                        callback.responses.push(lexicalRecord(response));
+                        assertEq(lexicalRecord(response), client.callOperation("submit", lexicalRecord(request)));
+                        assertEq(lexicalRecord(request), callback.requests.pop(30000));
+                    }
+                    assertThrows("SOAP-SERIALIZATION-ERROR", \client.callOperation(),
+                        ("submit", lexicalRecord(prefix + "24:00:00.0000001Z")));
+                    string recovery = prefix + "12:34:56.0000001Z";
+                    callback.responses.push(lexicalRecord(recovery));
+                    assertEq(lexicalRecord(recovery), client.callOperation("submit", lexicalRecord(recovery)));
+                    assertEq(lexicalRecord(recovery), callback.requests.pop(30000));
+                }
+            }
+        }
+    }
+
+}

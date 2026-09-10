@@ -5278,3 +5278,171 @@ See [verification evidence](sample-instances-evidence.md),
 [the full audit](audits/P3-43-sample-instances.md): 19 Pass / 43 N/A / 0 Fail.
 No native or main-Qore change, installation or push was made. Remaining P3 scalar
 criteria and P4-P9 are still open; this increment does not close the plan.
+
+P3-43 was committed as `77acb1b` on develop, without pushing.
+
+## P3-44 — Native time output and core offset prerequisite (in progress)
+
+Refreshing the temporal reduction on the current core confirms that dateTime
+already retains explicit offsets. Time output still writes only milliseconds
+and omits its offset. The new three-case native/HTTP reduction fails every case
+against P3-43, including an actual response changing
+`23:59:59.123456-03:30` into local `23:59:59.123000+01:00`.
+Source/log: `test/wsdl-time-output.qtest`, `/tmp/wsdl-p3-44-before.log`.
+
+An uncommitted formatter preserves all six native microsecond digits and an
+explicit XSD offset, rejecting durations and offsets outside whole minutes in
+the allowed range. Boundary testing exposed two core defects: date.getUtcOffset()
+uses the standard offset rather than the date's instant, and the timezone manager
+reserves the valid -1-second offset as an unset sentinel. The latter also loses
+that offset through serialization. Reductions and core tests are in
+`/tmp/wsdl-core-date/examples/test/qore/vars/date-utc-offset.qtest`, with initial
+failure logs `/tmp/wsdl-p3-44-core-before.log` and
+`/tmp/wsdl-p3-44-core-sentinel-before.log`.
+
+The isolated core now looks up date offsets by epoch and uses zero as the initial
+fallback until its reverse scan finds a standard type, without reserving an
+offset sentinel. A 54-byte authored TZif tests a standard offset of -1 second.
+The core build, final tests, Valgrind and full audit remain pending; no core change
+has yet been copied into the main checkout or committed. Native time output and
+its independent binding matrix also remain uncommitted until that prerequisite
+and all XML gates pass.
+
+The leap-second question now has an explicit normative conflict attached:
+[the XSD 1.0 value model](https://www.w3.org/TR/2004/REC-xmlschema-2-20041028/#dateTime)
+and its Appendix-E-based comparison algorithm disagree for equivalent leap-second
+offset spellings, as reduced in [the W3C issue report](https://lists.w3.org/Archives/Public/www-xml-schema-comments/2002AprJun/0043.html).
+The second-edition errata contain no Part 2 correction. The user was asked whether
+to preserve leap-second identity under the value model or approve rejection as
+an interoperability limitation. No answer is inferred. This independent native
+output increment does not decide that question or complete strict dateTime/time
+lexical, arbitrary-fraction and facet acceptance. P3 and P4-P9 remain open.
+
+### Core prerequisite committed; XML formatter needs the lossless input path
+
+Qore main develop now contains `49513fe97`, with a clean working tree and no
+push. Only the eight tested source/test/fixture/documentation files were copied
+from the isolated checkout. The new core suite passes five cases/611 assertions
+in AST/IR/JIT/tiered and AOT; the main-source copy also passes with the isolated
+runtime. The final union with the four existing suites contains 108 cases and
+42,416 reported assertions across 20 suite/mode runs. Both new/existing date
+suites have zero Valgrind errors and zero lost bytes. The known isolated-core
+DWARF-reader warning remains visible and unsuppressed. Focused documentation and
+the example pass; Python zoneinfo confirms the transition and authored-TZif
+expectations. All 62 core audit items resolve: 23 Pass / 39 N/A / 0 Fail.
+Core source/evidence: `examples/test/qore/vars/audits/date-utc-offset.md` in Qore;
+exact manifest `/tmp/wsdl-p3-44-core-final-manifest.json`. The new Debug library
+SHA-256 is `bc3501b6e25140bad2034d68f13f0c37aa5f7b3feb373e39d2ec4bd9dceae536`.
+
+The native-clock prototype passes its initial three-case/362-assertion suite in
+all four modes and its independent matrix (672 input/round-trip documents plus
+1,840 detached-consumer/example documents; 16.945 seconds). The 95-suite gate
+also passed before the additional regression below. These checks cover native
+values with explicit offsets; they do not establish absence preservation.
+
+Review of the full reports exposed a new regression for unzoned XML times. The
+legacy parser assigns the program's zone, and the corrected native formatter
+then writes that offset. The raw survey's 2,411 rows and all coverage counts/
+failure identities are unchanged, but the TimeAttribute and TimeElement emitted
+bodies reveal the changed timezone presence. Those values are not yet assessed
+by the strict temporal-value gate, so unchanged failure counts cannot validate
+this change. The new fourth case in `test/wsdl-time-output.qtest` now fails for
+that exact reason: `/tmp/wsdl-p3-44-unzoned-regression.log` (four cases, three pass,
+one error, 363 reported assertions). It is a required failure, without a skip or
+expected-failure annotation.
+
+The XML formatter, tests and draft implementation documentation remain
+uncommitted. They must be completed with the lossless temporal input/provider
+contract and re-audited before committing; no independent formatter acceptance
+is claimed. The leap-second interpretation is still awaiting the user's answer.
+
+### Leap-second interpretation approved; upstream integration
+
+On 2026-09-10 the user explicitly approved preserving leap-second values and
+timezone-equivalent identity. This resolves the pending question above; strict
+temporal work proceeds using that value model, with normative assertions for
+independent validators that cannot represent leap seconds.
+
+The user also requested remote develop updates. Both repositories fetched
+successfully: XML `eef38e7` fixes regular-file PROPFIND resource hashes; Qore
+`6aa122698` includes provider discovery/catalog updates and `2d329a7a0` fixes JIT
+code lifetime through module shutdown. Both merge cleanly with the local work;
+merge commits await integration checks and the full audit.
+
+### Remote updates integrated; strict temporal work active
+
+The XML merge is committed as `fe0f4a9` and Qore as `537b61514`, without pushes.
+XML's three WebDAV suites and WSDL interop pass 19 cases/317 assertions; the
+exported merge's entire both-version report matches committed counts, rows,
+inputs, scope and source/catalog hashes. Full XML merge audit: 16 Pass/46 N/A.
+Qore's integration passes 109 cases/1,751 assertions including AOT/JNI. The
+full JIT shutdown suite passes Valgrind (8 cases/42 assertions); separate
+per-process logs for the affected compiled module-delete callback show zero
+errors and zero lost bytes in every process. The existing DWARF-reader warning
+remains visible. Qore audit: 25 Pass/37 N/A; review corrected eight incoming test
+headers to local relative requirements. Both merge audits record all 62 checks.
+The refreshed isolated Debug libqore SHA-256 is
+`71b856d6290cfbc2b87b26da5e069fd795f9c11b3784d2ac1695930628a821b3`.
+
+The uncommitted XML helper now includes strict time/dateTime grammar, exact
+fraction strings, missing-zone preservation, midnight carry without year zero,
+and the approved leap-second value model. Providers use the shared calendar
+contract and preserve strings whenever native dates would lose information.
+New unit tests pass 6 cases/1,422 assertions before the latest floating-leap
+boundary additions; native/lossless HTTP tests pass 5 cases/436 assertions.
+The existing calendar value/facet suites pass (6/1,975 and 12/3,224).
+Bounded example generation now tries fixed builtin prefixes when a pattern
+leaves leading calendar/clock components unconstrained; every candidate is
+validated through all restrictions.
+
+A first independent matrix found binary64 seconds in both libxml2 and Xerces,
+confirmed by native source and `javap` on the pinned Xerces JAR. Both falsely
+accept distinct long-fraction enumeration values. Four exact reductions are
+retained in `temporal-validator-defects.json`; rational-value assertions and
+Java XMLGregorianCalendar's BigDecimal comparison separately distinguish them.
+The current matrix passes three methods: 1,296 input/round-trip documents,
+3,072 detached-consumer/example documents, and ten independent Java value
+comparisons. Both validators have 24 explicitly adjudicated false positives
+per builtin on inputs; none on the emitted consumer documents. These are
+validator limitations, not passing normative verdicts.
+
+The temporal change is still uncommitted. Remaining work includes broadening
+normative/independent leap-second and temporal partial-order coverage, auditing
+all scalar consumer paths and documentation, promoting exact temporal values
+into the strict corpus gate, and rerunning the final affected suites, both-version
+survey, coverage and complete commit audit. P3 is not closed; P4-P9 remain open.
+
+
+### P3-44 completed: strict dateTime/time values and output
+
+The temporal increment now validates lexical input before native conversion,
+retains timezone absence and exact fractions/years/leap seconds as necessary,
+compares facets and collection identities exactly, and preserves native output
+microseconds/offsets. The approved leap-second value interpretation is implemented.
+The [durable contract](../../design/wsdl-time-output.md),
+[verification evidence](temporal-values-evidence.md) and
+[full audit](audits/P3-44-temporal-values.md) describe the final behavior.
+
+Review fixed corrupted union metadata acceptance and zero-fraction ordering
+(Qore sorts empty strings last; fractional zero must sort before positive values).
+All 96 affected Qore suites pass: 980 successful cases / 38,536 reported assertions.
+Temporal tests pass 9/1,578, native/lossless HTTP tests 5/436, union/list identity
+10/231, all in AST/IR/JIT/tiered. Independent matrices assess 6,880 documents and
+718 seeded temporal boundaries, with exact rational/decimal comparisons. Four
+binary64 schema-validator false positives and one Java direct-time ordering
+limitation remain explicitly adjudicated; normative expectations are mandatory.
+Doxygen and the executable example pass. Full audit: 19 Pass / 43 N/A / 0 Fail.
+
+Strict selection now includes all dateTime/time element and attribute fixtures:
+130 WSDLs / 1,260 message directions, zero selected failures. Both-version survey
+rows/counts and all 144 diagnostic failure identities are unchanged. Fifteen
+survey tests pass; the fifteen coverage tests retain exactly the two previously
+tracked P6 binding-version failures. P3 phase acceptance is the next review;
+P4-P9 remain authorized and unfinished.
+
+A parallel pull --rebase moved main Qore develop from merge 537b61514 to 422e1ee14
+on top of remote 6aa122698. The UTC-offset fix and all seven affected native files
+remain identical to the tested snapshot, and the main tree is clean. That rebase
+removed the merge's eight test-header changes and audit from the current tree;
+they remain in the historical merge and isolated test snapshot. This XML work
+preserves that parallel history. No push or installation was performed.

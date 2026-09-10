@@ -1070,3 +1070,18 @@ Coverage includes element/type/multipart entry points, defaults, occurrence
 limits, explanatory options, QName identity, callback/recovery and concurrency.
 The independent ENTITY and QName context matrices exercise the same consumers.
 See [the generation contract](../../design/wsdl-sample-instances.md).
+
+## Exact dateTime and time values
+
+`qore -b --enable-debug test/wsdl-time-output.qtest` checks exact native clock
+projection, timezone bounds, daylight-saving offsets, reconstruction and both
+SOAP bindings over local HTTP. `python3 test/wsdl-interop/test_time_output.py -v`
+adds independently checked native element, simple-content/attribute and repeated
+values, detached providers and generated examples in both directions.
+`qore -b --enable-debug test/wsdl-temporal-values.qtest` and
+`python3 test/wsdl-interop/test_temporal_values.py -v` cover strict grammar,
+timezone absence, exact fractions, midnight, leap seconds, facets and reconstructed
+providers. Independent rational values detect changes hidden by binary64 schema
+validators; exact validator discrepancies remain in `temporal-validator-defects.json`.
+The strict corpus selection includes dateTime/time element and attribute values.
+See the [conversion contract](../../design/wsdl-time-output.md).

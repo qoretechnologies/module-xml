@@ -228,6 +228,33 @@ class CoverageTest(unittest.TestCase):
                 result = coverage.value_checks(left, right, [{'elements': ['value'], 'datatype': datatype}])
                 self.assertEqual(valid, result['ok'], result)
 
+    def test_temporal_value_assertions_detect_precision_timezone_and_leap_loss(self):
+        _, records = coverage.prepare(self.root, self.source)
+        file = next(iter(records['BooleanElement']['messages']))
+        for datatype, before, after, valid in (
+                ('dateTime', '2026-12-31T24:00:00Z', '2027-01-01T00:00:00Z', True),
+                ('dateTime', '-0001-12-31T24:00:00Z', '0001-01-01T00:00:00Z', True),
+                ('dateTime', '1998-12-31T23:59:60Z', '1998-12-31T22:59:60-01:00', True),
+                ('dateTime', '1998-12-31T23:59:60Z', '1999-01-01T00:00:00Z', False),
+                ('dateTime', '2026-01-01T12:00:00', '2026-01-01T12:00:00Z', False),
+                ('time', '23:00:00-02:00', '01:00:00Z', True),
+                ('time', '24:00:00', '00:00:00', True),
+                ('time', '12:00:00.1234567890123456789Z', '12:00:00.123456789012345678900Z', True),
+                ('time', '12:00:00.1234567890123456789Z', '12:00:00.1234567890123456790Z', False),
+                ('time', '12:00:00', '12:00:00Z', False),
+                ('time', '24:00:00.1Z', '24:00:00.1Z', False)):
+            for listed in (False, True):
+                with self.subTest(datatype=datatype, listed=listed, before=before):
+                    assertion = {'elements': ['value'], 'datatype': 'list' if listed else datatype}
+                    if listed:
+                        assertion['item_datatype'] = datatype
+                    coverage.validate_selection({'format': 1, 'cases': {
+                        'BooleanElement': {'messages': {file: [assertion]}}}}, records)
+                    left, right = etree.Element('value'), etree.Element('value')
+                    left.text, right.text = before, after
+                    result = coverage.value_checks(left, right, [assertion])
+                    self.assertEqual(valid, result['ok'], result)
+
     def test_ieee_value_assertions_detect_precision_and_sign_changes(self):
         for datatype, before, after, valid in (
                 ("float", "16777217", "16777216", True),
@@ -430,7 +457,7 @@ class CoverageTest(unittest.TestCase):
         self.assertEqual("", process.stderr)
         report = json.loads(output.read_text())
         self.assertEqual([], report["selected_failures"])
-        self.assertEqual({"wsdls": 126, "message_directions": 1172}, report["selected_scope"])
+        self.assertEqual({"wsdls": 130, "message_directions": 1260}, report["selected_scope"])
         self.assertEqual(293, len(report["cases"]))
         self.assertEqual(2272, sum(len(c["messages"]) for c in report["cases"]))
         for stage, counts in report["stage_accounting"]["counts"].items():
@@ -440,6 +467,12 @@ class CoverageTest(unittest.TestCase):
         # Harness assertions verify retained failures, not conformance passes for broken functionality.
         self.assertGreater(len(report["failures"]), 0)
         by_name = {c["case"]: c for c in report["cases"]}
+        for name, count in (("DateTimeElement", 24), ("DateTimeAttribute", 24),
+                            ("TimeElement", 20), ("TimeAttribute", 20)):
+            self.assertEqual(count, len(by_name[name]["messages"]))
+            for message in by_name[name]["messages"]:
+                self.assertEqual([], message["failures"], message)
+                self.assertTrue(message["values"]["ok"], message)
         for name in ("ENTITYElement", "ENTITYAttribute", "ENTITIESElement", "ENTITIESAttribute"):
             self.assertEqual(4, len(by_name[name]["messages"]))
             for message in by_name[name]["messages"]:

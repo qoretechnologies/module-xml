@@ -80,6 +80,12 @@ module WSDL {
     @section wsdlrelnotes WSDL Module Release Notes
 
     @subsection wsdl_0_5_8 WSDL v0.5.8
+    - time/dateTime validate XML grammar before conversion; missing timezones, arbitrary fractions,
+      extended years and leap seconds retain validated strings whenever native dates would lose information
+    - clock facets, fixed values, lists and unions compare exact decimal fractions and timezone identities;
+      midnight notation and pattern spellings survive provider reconstruction and generated examples
+    - native time output preserves microseconds and the represented date's UTC offset, rejecting durations
+      and offsets that cannot be represented by an XSD timezone; union metadata rejects conflicting providers
     - native message examples validate their generated instances before returning values; rejected candidates
       raise XSD-SAMPLE-ERROR, while the choices option retains its explanatory output
     - complete message providers validate supplied part values against their schema instance requirements,
@@ -4042,6 +4048,10 @@ hashdecl XsdCalendarValueInfo {
     string year = "2000";
     int month = 1;
     int day = 1;
+    int hour = 0;
+    int minute = 0;
+    int second = 0;
+    string fraction = "";
     *int offset;
 }
 
@@ -4050,19 +4060,27 @@ hashdecl XsdCalendarInstantInfo {
     int month;
     int day;
     int minute;
+    int second;
+    string fraction;
 }
 
 class XsdCalendarLexicalHelper {
-    const Types = {"date": True, "gYear": True, "gYearMonth": True,
+    const Types = {"dateTime": True, "time": True, "date": True, "gYear": True, "gYearMonth": True,
         "gMonthDay": True, "gMonth": True, "gDay": True};
-    const Formats = {"date": "YYYY-MM-DD", "gYear": "YYYY", "gYearMonth": "YYYY-MM",
+    const Formats = {"dateTime": "YYYY-MM-DDTHH:mm:SS.us", "time": "HH:mm:SS.us",
+        "date": "YYYY-MM-DD", "gYear": "YYYY", "gYearMonth": "YYYY-MM",
         "gMonthDay": "--MM-DD", "gMonth": "--MM", "gDay": "---DD"};
-    const Samples = {"date": "2000-01-01Z", "gYear": "2000Z", "gYearMonth": "2000-01Z",
+    const Samples = {"dateTime": "2000-01-01T12:00:00Z", "time": "12:00:00Z",
+        "date": "2000-01-01Z", "gYear": "2000Z", "gYearMonth": "2000-01Z",
         "gMonthDay": "--01-01Z", "gMonth": "--01Z", "gDay": "---01Z"};
     const MonthDays = (31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31);
 
     static bool isType(string builtin) {
         return boolean(Types{builtin});
+    }
+
+    static bool isComplete(string builtin) {
+        return builtin == "date" || builtin == "dateTime" || builtin == "time";
     }
 
     static string lexical(string builtin, auto value, string error) {
@@ -4081,7 +4099,7 @@ class XsdCalendarLexicalHelper {
             if (seconds % 60 || abs(seconds) > 50400) {
                 throw error, sprintf("type %Y requires a timezone in whole minutes within -14:00 to +14:00", builtin);
             }
-            value = value.format(Formats{builtin}) + (seconds
+            value = builtin == "dateTime" ? value.format("IF") : value.format(Formats{builtin}) + (seconds
                 ? sprintf("%s%02d:%02d", seconds < 0 ? "-" : "+", abs(seconds) / 3600, (abs(seconds) % 3600) / 60)
                 : "Z");
         }
@@ -4105,6 +4123,27 @@ class XsdCalendarLexicalHelper {
         }
         *list<string> fields;
         switch (builtin) {
+            case "dateTime":
+                fields = text =~ x/\A(-?[0-9]{4,})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2}):([0-9]{2})(?:\.([0-9]+))?\z/;
+                if (fields) {
+                    result.year = fields[0];
+                    result.month = int(fields[1]);
+                    result.day = int(fields[2]);
+                    result.hour = int(fields[3]);
+                    result.minute = int(fields[4]);
+                    result.second = int(fields[5]);
+                    result.fraction = fields[6] ?? "";
+                }
+                break;
+            case "time":
+                fields = text =~ x/\A([0-9]{2}):([0-9]{2}):([0-9]{2})(?:\.([0-9]+))?\z/;
+                if (fields) {
+                    result.hour = int(fields[0]);
+                    result.minute = int(fields[1]);
+                    result.second = int(fields[2]);
+                    result.fraction = fields[3] ?? "";
+                }
+                break;
             case "date":
                 fields = text =~ x/\A(-?[0-9]{4,})-([0-9]{2})-([0-9]{2})\z/;
                 if (fields) {
@@ -4158,6 +4197,18 @@ class XsdCalendarLexicalHelper {
                 || result.day > lastDay(result.year, result.month)) {
             throw error, sprintf("invalid Gregorian calendar date %Y for type %Y", result.lexical, builtin);
         }
+        # Decimal fractions are compared as strings; no native precision or rounding heuristic applies.
+        result.fraction =~ s/0+\z//;
+        if (result.hour > 24 || result.minute > 59 || result.second > 60
+                || (result.hour == 24 && (result.minute || result.second || result.fraction))) {
+            throw error, sprintf("invalid XML clock value %Y for type %Y", result.lexical, builtin);
+        }
+        if (result.hour == 24) {
+            result.hour = 0;
+            if (builtin == "dateTime") {
+                shiftDay(\result, 1);
+            }
+        }
         return result;
     }
 
@@ -4170,23 +4221,26 @@ class XsdCalendarLexicalHelper {
 
     static string key(string builtin, auto value, string error) {
         hash<XsdCalendarValueInfo> fields = parse(builtin, value, error);
-        hash<XsdCalendarInstantInfo> instant = normalize(fields, fields.offset ?? 0);
+        hash<XsdCalendarInstantInfo> instant = normalize(fields, fields.offset ?? 0, builtin);
         return (exists fields.offset ? "Z:" : "local:") + instant.year
-            + sprintf("-%02d-%02dT%04d", instant.month, instant.day, instant.minute);
+            + sprintf("-%02d-%02dT%04d:%02d.", instant.month, instant.day, instant.minute, instant.second)
+            + instant.fraction;
     }
 
     static *int compare(string builtin, auto left, auto right, string error) {
         hash<XsdCalendarValueInfo> lhs = parse(builtin, left, error);
         hash<XsdCalendarValueInfo> rhs = parse(builtin, right, error);
         if ((exists lhs.offset) == (exists rhs.offset)) {
-            return compareInstants(normalize(lhs, lhs.offset ?? 0), normalize(rhs, rhs.offset ?? 0));
+            return compareInstants(normalize(lhs, lhs.offset ?? 0, builtin), normalize(rhs, rhs.offset ?? 0, builtin));
         }
         # A missing timezone ranges from -14:00 through +14:00. Touching an
         # endpoint is indeterminate, as are overlapping possible UTC intervals.
-        if (compareInstants(normalize(lhs, lhs.offset ?? -840), normalize(rhs, rhs.offset ?? 840)) < 0) {
+        if (compareInstants(normalize(lhs, lhs.offset ?? -840, builtin, !exists lhs.offset),
+                normalize(rhs, rhs.offset ?? 840, builtin, !exists rhs.offset)) < 0) {
             return -1;
         }
-        if (compareInstants(normalize(lhs, lhs.offset ?? 840), normalize(rhs, rhs.offset ?? -840)) > 0) {
+        if (compareInstants(normalize(lhs, lhs.offset ?? 840, builtin, !exists lhs.offset),
+                normalize(rhs, rhs.offset ?? -840, builtin, !exists rhs.offset)) > 0) {
             return 1;
         }
     }
@@ -4199,27 +4253,92 @@ class XsdCalendarLexicalHelper {
         if (!relation) {
             relation = left.day <=> right.day;
         }
-        return relation ? relation : left.minute <=> right.minute;
+        if (!relation) {
+            relation = left.minute <=> right.minute;
+        }
+        if (!relation) {
+            relation = left.second <=> right.second;
+        }
+        if (relation) {
+            return relation;
+        }
+        # Qore sorts empty strings after nonempty strings. An omitted fraction is zero
+        # and must precede every positive fraction, independent of that string convention.
+        if (!left.fraction || !right.fraction) {
+            return boolean(left.fraction) <=> boolean(right.fraction);
+        }
+        # Nonempty fractions have no trailing zeros: lexical ordering is exact decimal ordering.
+        return left.fraction <=> right.fraction;
     }
 
-    private static hash<XsdCalendarInstantInfo> normalize(hash<XsdCalendarValueInfo> fields, int offset) {
+    private static hash<XsdCalendarInstantInfo> normalize(hash<XsdCalendarValueInfo> fields, int offset,
+            string builtin, bool interval_endpoint = False) {
         @assert(offset >= -840 && offset <= 840);
-        hash<XsdCalendarInstantInfo> instant = <XsdCalendarInstantInfo>{
-            "year": fields.year, "month": fields.month, "day": fields.day, "minute": -offset,
-        };
-        if (instant.minute < 0) {
-            instant.minute += 1440;
-            --instant.day;
-            if (!instant.day) {
-                --instant.month;
-                if (!instant.month) {
-                    instant.month = 12;
-                    instant.year = previousYear(instant.year);
-                }
-                instant.day = lastDay(instant.year, instant.month);
+        bool floating_leap = fields.second == 60 && !exists fields.offset && !interval_endpoint
+            && couldBeLeapSecond(builtin, fields);
+        int minute = fields.hour * 60 + fields.minute - offset;
+        if (minute < 0) {
+            minute += 1440;
+            shiftDay(\fields, -1);
+        } else if (minute >= 1440) {
+            minute -= 1440;
+            shiftDay(\fields, 1);
+        }
+        # Normalize only whole timezone minutes, preserving a leap second at a possible UTC
+        # quarter end. XSD 1.0 Appendix D.1 assigns inappropriate leap dates to the next minute.
+        if (fields.second == 60 && !floating_leap && (minute != 1439 || (builtin == "dateTime"
+                && (fields.month % 3 || fields.day != lastDay(fields.year, fields.month))))) {
+            fields.second = 0;
+            if (++minute == 1440) {
+                minute = 0;
+                shiftDay(\fields, 1);
             }
         }
+        if (builtin == "time" && !interval_endpoint) {
+            # Daily values have no date. The fixed anchor is used only for partial ordering.
+            fields.year = "2000";
+            fields.month = 1;
+            fields.day = 1;
+        }
+        hash<XsdCalendarInstantInfo> instant = <XsdCalendarInstantInfo>{
+            "year": fields.year, "month": fields.month, "day": fields.day, "minute": minute,
+            "second": fields.second, "fraction": fields.fraction,
+        };
         return instant;
+    }
+
+    private static bool couldBeLeapSecond(string builtin, hash<XsdCalendarValueInfo> fields) {
+        if (builtin == "time") {
+            return True;
+        }
+        if (builtin != "dateTime") {
+            return False;
+        }
+        int minute = fields.hour * 60 + fields.minute;
+        # An unknown offset can place this clock at 23:59 UTC on this or the previous
+        # date. Check only candidates within the normative whole-minute +/-14h range.
+        if (minute >= 599 && !(fields.month % 3) && fields.day == lastDay(fields.year, fields.month)) {
+            return True;
+        }
+        if (minute <= 839) {
+            shiftDay(\fields, -1);
+            return !(fields.month % 3) && fields.day == lastDay(fields.year, fields.month);
+        }
+        return False;
+    }
+
+    private static shiftDay(reference<hash<XsdCalendarValueInfo>> fields, int direction) {
+        @assert(direction == -1 || direction == 1);
+        fields.day += direction;
+        if (fields.day < 1) {
+            --fields.month;
+            adjustMonth(\fields);
+            fields.day = lastDay(fields.year, fields.month);
+        } else if (fields.day > lastDay(fields.year, fields.month)) {
+            fields.day = 1;
+            ++fields.month;
+            adjustMonth(\fields);
+        }
     }
 
     private static string previousYear(string year) {
@@ -4255,7 +4374,26 @@ class XsdCalendarLexicalHelper {
                 push candidates, render(builtin, offset);
             }
             hash<XsdCalendarValueInfo> adjacent = fields;
-            if (builtin == "gYear") {
+            if (builtin == "dateTime" || builtin == "time") {
+                int scale = fields.fraction.size() + 1;
+                string grid = XsdDurationIntegerHelper::add(
+                    XsdIntegerLexicalHelper::canonical(fields.fraction + "0"), string(direction));
+                if (grid[0] == "-") {
+                    adjacent.fraction = strmul("9", scale);
+                    if (--adjacent.second < 0) {
+                        adjacent.second = 59;
+                        if (--adjacent.minute < 0) {
+                            adjacent.minute = 59;
+                            if (--adjacent.hour < 0) {
+                                adjacent.hour = 23;
+                                shiftDay(\adjacent, -1);
+                            }
+                        }
+                    }
+                } else {
+                    adjacent.fraction = strmul("0", scale - grid.size()) + grid;
+                }
+            } else if (builtin == "gYear") {
                 adjacent.year = shiftYear(adjacent.year, direction);
             } else if (builtin == "gMonth" || builtin == "gYearMonth") {
                 adjacent.month += direction;
@@ -4316,6 +4454,13 @@ class XsdCalendarLexicalHelper {
         string year = (fields.year[0] == "-" ? "-" : "") + strmul("0", max(0, 4 - magnitude.size())) + magnitude;
         string text;
         switch (builtin) {
+            case "dateTime":
+                text = year + sprintf("-%02d-%02dT", fields.month, fields.day);
+                # fall through
+            case "time":
+                text += sprintf("%02d:%02d:%02d", fields.hour, fields.minute, fields.second)
+                    + (fields.fraction ? "." + fields.fraction : "");
+                break;
             case "date": text = year + sprintf("-%02d-%02d", fields.month, fields.day); break;
             case "gYear": text = year; break;
             case "gYearMonth": text = year + sprintf("-%02d", fields.month); break;
@@ -4334,20 +4479,24 @@ class XsdCalendarLexicalHelper {
         hash<XsdCalendarValueInfo> fields = parse(builtin, value, error);
         # Native dates always carry a timezone and have signed-int calendar components.
         # Partial calendar values and dates outside that lossless contract retain XML text.
-        if (builtin != "date" || !exists fields.offset
+        if (!isComplete(builtin) || !exists fields.offset || fields.second == 60 || fields.fraction.size() > 6
                 || XsdIntegerLexicalHelper::compare(fields.year, "-2147483648") < 0
                 || XsdIntegerLexicalHelper::compare(fields.year, "2147483647") > 0) {
             return fields.lexical;
         }
         TimeZone zone(fields.offset * 60);
-        return zone.date(fields.lexical);
+        # Render normalized midnight and remove insignificant fractional zeros before native parsing.
+        # Keep the historical 1970 anchor for native time values.
+        return zone.date(builtin == "time" ? "1970-01-01T" + render(builtin, fields) : render(builtin, fields));
     }
 }
 
-#! provider preserving calendar timezone absence and extended years
-/** Explicitly zoned dates within the native calendar range return native dates.
-    Other dates and partial calendars return validated XML strings. Absent XML timezones
-    are retained and never acquire the program's timezone.
+#! provider preserving calendar precision, timezone absence and extended years
+/** Explicitly zoned date/dateTime/time values return native dates when their year and fraction fit
+    the native representation and their second is below 60. Other values and partial calendars return
+    validated XML strings. Absent XML timezones never acquire the program's timezone.
+    @note Callers must accept date or string for complete calendar values. Native time values retain
+    the historical 1970-01-01 anchor, which is not part of the XML clock value.
     @par Example
     The date \c "2026-09-09" remains a string; \c "2026-09-09+05:30" returns a date with that offset.
     @since %WSDL 0.5.8
@@ -4402,13 +4551,13 @@ public class XsdCalendarDataType inherits AbstractDataProviderType {
     #! returns the output category
     /** @return NT_ALL for date/string output; NT_STRING for partial calendars */
     int getBaseTypeCode() {
-        return datatype == "date" ? NT_ALL : NT_STRING;
+        return XsdCalendarLexicalHelper::isComplete(datatype) ? NT_ALL : NT_STRING;
     }
 
     #! returns the native output category name
     /** @return all for date/string output; string for partial calendars */
     string getBaseTypeName() {
-        return datatype == "date" ? "all" : "string";
+        return XsdCalendarLexicalHelper::isComplete(datatype) ? "all" : "string";
     }
 
     #! returns NOTHING because a calendar scalar has no element type
@@ -4441,11 +4590,11 @@ public class XsdCalendarDataType inherits AbstractDataProviderType {
 
     #! returns the exact output alternatives
     /** @param simple request simplified names
-        @return string, date for complete dates, and nothing for optional types
+        @return string, date for date/dateTime/time, and nothing for optional types
     */
     hash<string, bool> getReturnTypeHash(*bool simple) {
         hash<string, bool> rv = {"string": True};
-        if (datatype == "date") {
+        if (XsdCalendarLexicalHelper::isComplete(datatype)) {
             rv.date = True;
         }
         if (optional) {
@@ -6956,6 +7105,8 @@ class XsdNumericFacetHelper {
             supplied = cast<XsdCalendarDataType>(provider).getBuiltinName();
         } else if (provider instanceof XsdCalendarRestrictionDataType) {
             supplied = cast<XsdCalendarRestrictionDataType>(provider).getBuiltinName();
+        } else if (provider instanceof XsdBooleanDataType || provider instanceof XsdBooleanRestrictionDataType) {
+            supplied = "boolean";
         }
         if (exists supplied && supplied != builtin) {
             throw error, sprintf("numeric provider builtin %Y does not match declared builtin %Y", supplied, builtin);
@@ -9180,18 +9331,12 @@ public class XsdBaseType inherits WSDL::XsdAbstractType {
                 break;
             }
             case "date":
-                break;
-
             case "dateTime":
-                val = convertDate(val, SOAP_SERIALIZATION_ERROR).format("IF");
+            case "time":
                 break;
 
             case "boolean":
                 val = XsdBooleanLexicalHelper::decode(val, SOAP_SERIALIZATION_ERROR) ? "true" : "false";
-                break;
-
-            case "time":
-                val = format_date("HH:mm:SS.ms", convertDate(val, SOAP_SERIALIZATION_ERROR));
                 break;
 
             case "base64Binary":
@@ -9366,12 +9511,6 @@ public class XsdBaseType inherits WSDL::XsdAbstractType {
                 }
                 return nsc.opt_empty_string_is_nothing ? val : string(val);
 
-            case "dateTime":
-                return convertDate(val, SOAP_DESERIALIZATION_ERROR);
-
-            case "time":
-                return convertDate("1970-01-01T" + val, SOAP_DESERIALIZATION_ERROR);
-
             case "boolean":
                 return XsdBooleanLexicalHelper::decode(val, SOAP_DESERIALIZATION_ERROR);
 
@@ -9407,17 +9546,6 @@ public class XsdBaseType inherits WSDL::XsdAbstractType {
                 }
                 throw SOAP_DESERIALIZATION_ERROR, sprintf("don't know how to handle type %y", name);
             }
-        }
-    }
-
-    private static date convertDate(auto value, string error) {
-        try {
-            return date(value);
-        } catch (hash<ExceptionInfo> ex) {
-            if (ex.err == "INVALID-DATE") {
-                rethrow error, ex.desc, ex.arg;
-            }
-            rethrow;
         }
     }
 
@@ -11552,6 +11680,7 @@ public class UnionDataType inherits AbstractDataProviderType {
                 || (info.builtin == "normalizedString" && info.white_space == "preserve")) {
             throw "DESERIALIZATION-ERROR", "union atomic whitespace metadata weakens its builtin rule";
         }
+        XsdNumericFacetHelper::checkProvider(info.builtin, info.provider, "DESERIALIZATION-ERROR");
     }
 
     private:internal hash<auto> serializeMembers(*hash<auto> members) {
@@ -16394,6 +16523,18 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
         *string patterned = getPatternSample();
         if (exists patterned) {
             push candidates, patterned;
+            string builtin = getCalendarBaseName();
+            string seed = XsdCalendarLexicalHelper::Samples{builtin};
+            seed = seed.substr(0, seed.size() - 1);
+            if (builtin == "dateTime" || builtin == "time") {
+                seed += ".";
+            }
+            # Regex generation may leave an unconstrained leading date/clock portion empty.
+            # Try prefixes of the fixed builtin example, validating each complete candidate.
+            # The longest seed is 20 ASCII characters, independent of schema/input size.
+            for (int size = 1; size <= seed.size(); ++size) {
+                push candidates, seed.substr(0, size) + patterned;
+            }
         }
         push candidates, XsdCalendarLexicalHelper::Samples{getCalendarBaseName()};
         foreach string candidate in (candidates) {
