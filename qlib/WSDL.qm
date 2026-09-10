@@ -80,6 +80,9 @@ module WSDL {
     @section wsdlrelnotes WSDL Module Release Notes
 
     @subsection wsdl_0_5_8 WSDL v0.5.8
+    - native message examples follow complete particle schedules, preserve list-valued child occurrences,
+      include typed complex parts, and support an explicit total-element generation budget
+    - shared group references retain their own occurrence limits without changing shared element declarations
     - ordered particles can generate bounded complete structural examples, retaining group counts,
       required suffixes and wildcard namespace constraints without expanding huge empty repetitions
     - native named-element serialization allocates complete particle groups and emits their ordered children,
@@ -10206,6 +10209,37 @@ public class XsdAttribute inherits WSDL::XsdTypedData {
 
 # Internal field indexing shared by element groups and complex types.
 class XsdElementFieldHelper {
+    # Index every active named declaration from the authoritative particle graph.
+    # Field aliases must include alternatives not selected by a particular sample.
+    static hash<string, XsdElement> getParticleDeclarations(XsdParticle particle,
+            *hash<string, hash<XsdParticleOccurrenceRange>> ranges) {
+        hash<string, XsdElement> result();
+        hash<string, bool> seen();
+        list<XsdParticle> pending = (particle,);
+        while (pending) {
+            XsdParticle node = pop pending;
+            if (node.getMaxOccurs() == "0" || seen{node.uniqueHash()}) {
+                continue;
+            }
+            seen{node.uniqueHash()} = True;
+            if (node.getKind() == XsdParticleKind::Element) {
+                string identity = node.getElement().getExpandedName();
+                if (ranges.hasKey(identity) && !result.hasKey(identity)) {
+                    result{identity} = node.getElement();
+                }
+            } else if (node.getKind() == XsdParticleKind::Group) {
+                @assert(node.getGroupDefinition());
+                push pending, node.getGroupDefinition();
+            } else {
+                list<XsdParticle> children = node.getChildren();
+                for (int index = children.size() - 1; index >= 0; --index) {
+                    push pending, children[index];
+                }
+            }
+        }
+        return result;
+    }
+
     # Provider shape belongs to the containing particle, not to the shared declaration.
     static AbstractDataProviderType getOccurrenceType(XsdElement element, bool optional, bool repeated) {
         AbstractDataProviderType result = element.type.getDataProviderType();
@@ -19872,7 +19906,7 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
             baseType = resolved_base;
         }
 
-        # Validate before legacy occurrence projections can mutate shared declarations.
+        # Resolve and validate the complete particle before projecting native fields.
         if (particle) {
             particle.resolveGroups(groupMap ?? {});
             particle.validateDeterminism();
@@ -19887,33 +19921,9 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
                     throw WSDL_ERROR, sprintf("undefined group reference %Y", groupRefInfo.ref);
                 }
                 grp.resolveNestedGroups(groupMap);
-                if (grp) {
-                    # Merge group elements into this complex type's element map
-                    # Apply group-level occurrence constraints to elements
-                    hash<string, XsdElement> groupElements = grp.getElements();
-                    if (groupRefInfo.minOccurs == 0) {
-                        # If the group ref has minOccurs=0, make all elements optional
-                        foreach string elemName in (keys groupElements) {
-                            XsdElement elem = groupElements{elemName};
-                            # Only make optional if not already optional
-                            if (elem.minOccurs > 0) {
-                                elem.minOccurs = 0;
-                            }
-                        }
-                    }
-                    if (groupRefInfo.maxOccurs == -1 || groupRefInfo.maxOccurs > 1) {
-                        # If the group ref allows multiple occurrences, set maxOccurs on elements
-                        foreach string elemName in (keys groupElements) {
-                            XsdElement elem = groupElements{elemName};
-                            if (groupRefInfo.maxOccurs == -1) {
-                                elem.maxOccurs = -1;
-                            } else if (elem.maxOccurs != -1) {
-                                elem.maxOccurs = max(elem.maxOccurs, groupRefInfo.maxOccurs);
-                            }
-                        }
-                    }
-                    elementmap += XsdElementFieldHelper::getExpandedMap(groupElements);
-                }
+                # Group occurrences belong to the reference particle. Reusing a
+                # group's declarations must not change their own min/max limits.
+                elementmap += XsdElementFieldHelper::getExpandedMap(grp.getElements());
             }
         }
         element_declarations = declarations;
@@ -20587,18 +20597,7 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
 
     # All native field adapters use only declarations present in the language.
     private hash<string, XsdElement> getParticleDeclarations(*hash<string, hash<XsdParticleOccurrenceRange>> ranges) {
-        hash<string, XsdElement> declarations = XsdElementFieldHelper::getExpandedMap(elementmap);
-        foreach hash<ChoiceInfo> choice in (choices) {
-            declarations += XsdElementFieldHelper::getExpandedMap(choice.elementmap);
-        }
-        declarations += element_declarations;
-        foreach string identity in (keys declarations) {
-            if (!ranges.hasKey(identity)) {
-                # Remove the local reference; delete would destroy the shared declaration.
-                remove declarations{identity};
-            }
-        }
-        return declarations;
+        return XsdElementFieldHelper::getParticleDeclarations(particle, ranges);
     }
 
     # Complete attribution selects every declaration before child conversion.
@@ -25867,16 +25866,88 @@ public class WebService inherits WSDL::XsdSchema {
     }
 }
 
+class XsdSampleBudget {
+    private { int maximum; }
+    public {
+        int remaining;
+        hash<string, bool> active_types();
+    }
+
+    constructor(int maximum) {
+        self.maximum = maximum;
+        remaining = maximum;
+    }
+
+    consume(int count) {
+        @assert(count >= 0);
+        if (count > remaining) {
+            throw "XSD-SAMPLE-ERROR", "generated example exceeds the max_elements budget";
+        }
+        remaining -= count;
+    }
+
+    # Check the converted XML data too: a public override may supply an entire
+    # subtree without calling the built-in generator for its children. Scalar
+    # list datatypes have already become lexical text at this boundary.
+    checkOutput(auto value) {
+        list<auto> pending();
+        push pending, value;
+        int available = maximum;
+        while (pending) {
+            auto node = pop pending;
+            if (node.typeCode() == NT_LIST && node) {
+                if (node.size() > available - pending.size()) {
+                    throw "XSD-SAMPLE-ERROR", "generated example exceeds the max_elements budget";
+                }
+                foreach auto item in (node) {
+                    push pending, item;
+                }
+                continue;
+            }
+            if (!available) {
+                throw "XSD-SAMPLE-ERROR", "generated example exceeds the max_elements budget";
+            }
+            --available;
+            if (node.typeCode() != NT_HASH) {
+                continue;
+            }
+            foreach string key in (keys node) {
+                if (key.startsWith("^xml^")) {
+                    string xml = node{key} instanceof XsdQNameXmlFragment ? node{key}.getXml() : node{key};
+                    XmlReader reader(xml);
+                    while (reader.read()) {
+                        if (reader.nodeType() == XML_NODE_TYPE_ELEMENT) {
+                            if (available <= pending.size()) {
+                                throw "XSD-SAMPLE-ERROR", "generated example exceeds the max_elements budget";
+                            }
+                            --available;
+                        }
+                    }
+                } else if (!key.startsWith("^")) {
+                    if (available <= pending.size()) {
+                        throw "XSD-SAMPLE-ERROR", "generated example exceeds the max_elements budget";
+                    }
+                    push pending, node{key};
+                }
+            }
+        }
+    }
+}
+
 class XsdSampleCallContext {
     public {
         WSMessageHelper helper;
-        XsdElement element;
+        *XsdElement element;
+        XsdSampleBudget budget;
+        bool one_occurrence;
         bool consumed = False;
     }
 
-    constructor(WSMessageHelper helper, XsdElement element) {
+    constructor(WSMessageHelper helper, *XsdElement element, XsdSampleBudget budget, bool one_occurrence = False) {
         self.helper = helper;
         self.element = element;
+        self.budget = budget;
+        self.one_occurrence = one_occurrence;
     }
 
     static bool consume(WSMessageHelper helper, XsdElement element) {
@@ -25917,6 +25988,7 @@ public class WSMessageHelper {
         "comments": False,
         "choices": False,
         "max_items": 3,
+        "max_elements": 10000,
     );
 
     #! creates the WebService object
@@ -25925,7 +25997,10 @@ public class WSMessageHelper {
         - \c "comments": (bool) generate comments as values with ^comment^ key, default: False
         - \c "choices": (bool) generate explanatory alternatives as sub hashes ^choices^ key, default: False;
           these descriptions are not complete serializable instances
-        - \c "max_items" (int): max.number of array elements to output, default: 3
+        - \c "max_items" (int): maximum nonempty repetitions of each particle, default: 3
+        - \c "max_elements" (int): maximum generated elements per message part, including its root; default: 10000
+        @throw WSDL-HELPER-ERROR an unknown option or a repetition/element limit that is not a positive integer
+        @note Instance examples check their converted output size, including values supplied by public overrides.
     **/
     constructor(WebService ws, *hash<auto> opts) {
         self.ws := ws;
@@ -25935,8 +26010,12 @@ public class WSMessageHelper {
            throw "WSDL-HELPER-ERROR", sprintf("unknown options %y (known values: %y)", keys h, keys DefaultOpts);
         }
         self.opts = DefaultOpts + opts;
-        if (self.opts.max_items < 1) {
+        if (self.opts.max_items.typeCode() != NT_INT || self.opts.max_items < 1) {
            throw "WSDL-HELPER-ERROR", sprintf("invalid 'max_items' value %y (condition: >=1)", self.opts.max_items);
+        }
+        if (self.opts.max_elements.typeCode() != NT_INT || self.opts.max_elements < 1) {
+            throw "WSDL-HELPER-ERROR", sprintf("invalid 'max_elements' value %Y (positive integer required)",
+                self.opts.max_elements);
         }
     }
 
@@ -26122,7 +26201,7 @@ public class WSMessageHelper {
 
     private hash<auto> getTypeInfo(XsdComplexType t) {
         hash<auto> res;
-        if (t.elementmap) {
+        if (t.elementmap || (t.getParticle() && !t.anyAttribute && !t.array)) {
             res.type = "hash";
         } else if (t.simpleType) {
             res = getTypeInfo(t.simpleType);
@@ -26131,12 +26210,13 @@ public class WSMessageHelper {
         return res;
     }
 
-    private hash<auto> getFieldMessage(string field, XsdElement elem, *softlist<auto> comments) {
+    private hash<auto> getFieldMessage(string field, XsdElement elem, *softlist<auto> comments,
+            bool one_occurrence = False) {
         # Preserve nested public-method overrides. Only this intended child call
         # defers validation to the root; reentrant calls receive their own check.
         *XsdSampleCallContext previous = SampleCallContext;
         on_exit SampleCallContext = previous;
-        SampleCallContext = new XsdSampleCallContext(self, elem);
+        SampleCallContext = new XsdSampleCallContext(self, elem, previous.budget, one_occurrence);
         return {field: getMessage(elem, comments){elem.name}};
     }
 
@@ -26144,17 +26224,24 @@ public class WSMessageHelper {
     /** @param elem the element declaration
         @param comments optional explanatory comments
         @return the native example keyed by the element name
-        @throw XSD-SAMPLE-ERROR the generated candidate fails the element's schema instance requirements
+        @throw XSD-SAMPLE-ERROR bounded generation cannot construct a candidate or its instance checks fail
         @note With the choices option, the result describes all alternatives and is not a serializable instance.
     */
     hash<auto> getMessage(XsdElement elem, *softlist<auto> comments) {
         bool nested = XsdSampleCallContext::consume(self, elem);
-        hash<auto> result = buildElementMessage(elem, comments);
+        *XsdSampleCallContext previous = SampleCallContext;
+        on_exit SampleCallContext = previous;
+        if (!nested) {
+            SampleCallContext = new XsdSampleCallContext(self, elem, new XsdSampleBudget(opts.max_elements));
+            SampleCallContext.consumed = True;
+        }
+        hash<auto> result = buildElementMessage(elem, comments, nested && SampleCallContext.one_occurrence);
         if (!nested && !opts.choices) {
             Namespaces namespaces = elem.type.nsc.copy();
             XsdQNameOutputScope output_scope(namespaces);
             try {
-                elem.serializeValue(namespaces, result{elem.name}, True, elem.name, "generated example");
+                auto converted = elem.serializeValue(namespaces, result{elem.name}, True, elem.name, "generated example");
+                SampleCallContext.budget.checkOutput(converted);
             } catch (hash<ExceptionInfo> ex) {
                 if (ex.err == SOAP_SERIALIZATION_ERROR) {
                     rethrow "XSD-SAMPLE-ERROR", sprintf("cannot construct a valid instance example for element %Y: %s",
@@ -26167,12 +26254,18 @@ public class WSMessageHelper {
     }
 
     private auto getTypeMessage(XsdAbstractType type) {
-        auto value = getTypeInfo(type).value;
+        *XsdSampleCallContext previous = SampleCallContext;
+        on_exit SampleCallContext = previous;
+        SampleCallContext = new XsdSampleCallContext(self, NOTHING, new XsdSampleBudget(opts.max_elements));
+        SampleCallContext.consumed = True;
+        SampleCallContext.budget.consume(1);
+        auto value = buildTypeValue(type);
         if (!opts.choices) {
             Namespaces namespaces = type.nsc.copy();
             XsdQNameOutputScope output_scope(namespaces);
             try {
-                XsdDocumentValueHelper::serializeValue(type, namespaces, value, True);
+                auto converted = XsdDocumentValueHelper::serializeValue(type, namespaces, value, True);
+                SampleCallContext.budget.checkOutput(converted);
             } catch (hash<ExceptionInfo> ex) {
                 if (ex.err == SOAP_SERIALIZATION_ERROR) {
                     rethrow "XSD-SAMPLE-ERROR", sprintf("cannot construct a valid instance example for type %Y: %s",
@@ -26184,26 +26277,128 @@ public class WSMessageHelper {
         return value;
     }
 
-    private hash<auto> buildElementMessage(XsdElement elem, *softlist<auto> comments) {
-        hash<auto> vi = getTypeInfo(elem.type);
-        auto val;
-
-        if (opts.comments) {
-            if (elem.minOccurs == 0) {
-                comments += "optional";
-            }
-            if (elem.minOccurs > 1) {
-                comments += sprintf("minOccurs:%d", elem.minOccurs);
-            }
-            if (elem.maxOccurs > 1 || elem.maxOccurs < 0) {
-                comments += sprintf("maxOccurs:%d", elem.maxOccurs);
+    private hash<auto> buildElementMessage(XsdElement elem, *softlist<auto> comments,
+            bool one_occurrence = False) {
+        if (!one_occurrence) {
+            if (opts.comments) {
+                if (elem.minOccurs == 0) {
+                    comments += "optional";
+                }
+                if (elem.minOccurs > 1) {
+                    comments += sprintf("minOccurs:%d", elem.minOccurs);
+                }
+                if (elem.maxOccurs > 1 || elem.maxOccurs < 0) {
+                    comments += sprintf("maxOccurs:%d", elem.maxOccurs);
+                }
             }
         }
-        if (vi.type) {
+        int count = one_occurrence ? 1 : elem.maxOccurs;
+        if (count == -1 || count > opts.max_items) {
+            count = opts.max_items;
+        }
+        if (!one_occurrence) {
+            SampleCallContext.budget.consume(count);
+        }
+        if (count != 1) {
+            list<auto> result();
+            for (int index = 0; index < count; ++index) {
+                *softlist<auto> item_comments = comments;
+                if (comments) {
+                    item_comments = (sprintf("#%d", index + 1),) + comments;
+                }
+                push result, buildTypeValue(elem.type, item_comments);
+            }
+            return {elem.name: result};
+        }
+        return {elem.name: buildTypeValue(elem.type, comments)};
+    }
+
+    private hash<auto> buildParticleValue(XsdComplexType type, bool empty) {
+        XsdParticle particle = type.getParticle();
+        *hash<string, hash<XsdParticleOccurrenceRange>> ranges = particle.getElementOccurrenceRanges();
+        hash<string, XsdElement> declarations = XsdElementFieldHelper::getParticleDeclarations(particle, ranges);
+        hash<string, string> fields = XsdElementFieldHelper::getFieldNames(declarations);
+        list<string> names = empty ? new list<string>()
+            : particle.getSampleElementNames(opts.max_items, SampleCallContext.budget.remaining);
+        hash<string, int> counts();
+        foreach string identity in (names) {
+            if (!declarations.hasKey(identity)) {
+                throw "XSD-SAMPLE-ERROR", sprintf("no native value candidate for wildcard element %Y", identity);
+            }
+            ++counts{identity};
+        }
+        # Select the same schedule as native serialization before generating any
+        # declaration-specific value. A flat record does not retain interleaving.
+        names = ();
+        foreach string identity in (keys ranges) {
+            for (int index = 0; index < counts{identity}; ++index) {
+                push names, identity;
+            }
+        }
+        *list<string> ordered = particle.orderElementNames(names);
+        @assert(exists ordered);
+        *list<XsdParticle> positions = particle.attributeElementNames(ordered);
+        @assert(exists positions);
+        SampleCallContext.budget.consume(ordered.size());
+        hash<string, list<auto>> values();
+        for (int index = 0; index < positions.size(); ++index) {
+            if (positions[index].getKind() != XsdParticleKind::Element) {
+                throw "XSD-SAMPLE-ERROR", "no native value candidate for a wildcard particle position";
+            }
+            string identity = ordered[index];
+            *list<string> comments;
+            if (opts.comments) {
+                comments = ();
+                if (ranges{identity}.minimum == "0") {
+                    push comments, "optional";
+                } else if (ranges{identity}.minimum != "1") {
+                    push comments, "minOccurs:" + ranges{identity}.minimum;
+                }
+                if (ranges{identity}.maximum != "1") {
+                    push comments, "maxOccurs:" + (ranges{identity}.maximum ?? "unbounded");
+                }
+                if (counts{identity} > 1) {
+                    push comments, sprintf("#%d", values{identity}.size() + 1);
+                }
+            }
+            if (!values.hasKey(identity)) {
+                values{identity} = new list<auto>();
+            }
+            push values{identity}, getFieldMessage(fields{identity}, positions[index].getElement(), comments,
+                True){fields{identity}};
+        }
+        hash<auto> result();
+        foreach string identity in (keys values) {
+            result{fields{identity}} = ranges{identity}.maximum == "1" ? values{identity}[0] : values{identity};
+        }
+        return result;
+    }
+
+    private auto buildTypeValue(XsdAbstractType type, *softlist<auto> comments) {
+        hash<auto> vi = getTypeInfo(type);
+        auto val;
+        *XsdComplexType complex = type instanceof XsdComplexType ? type : NOTHING;
+        bool named = complex && complex.getParticle() && !opts.choices && !complex.anyAttribute && !complex.array;
+        string key = complex ? complex.uniqueHash() : "";
+        bool recursive = key && SampleCallContext.budget.active_types{key};
+        if (recursive && (!named || !complex.getParticle().matchesElementNames(()))) {
+            throw "XSD-SAMPLE-ERROR", sprintf("cannot construct a finite recursive example for type %Y", type.name);
+        }
+        if (key && !recursive) {
+            SampleCallContext.budget.active_types{key} = True;
+        }
+        on_exit {
+            if (key && !recursive) {
+                delete SampleCallContext.budget.active_types{key};
+            }
+        }
+        if (named) {
+            val = buildParticleValue(complex, recursive);
+        } else if (vi.type) {
             if (vi.type == 'hash') {
                 val = {};
-                if (elem.type instanceof XsdComplexType) {
-                    XsdComplexType ct = cast<XsdComplexType>(elem.type);
+                if (type instanceof XsdComplexType) {
+                    XsdComplexType ct = cast<XsdComplexType>(type);
                     if (ct.isChoice()) {
                         # the complexType is a choice itself; only one of its members may be serialized
                         if (opts.choices) {
@@ -26253,8 +26448,8 @@ public class WSMessageHelper {
                 v{'^comment^'} = comments.join(';');
             }
             if (vi.attrs) {
-                foreach string name2 in (keys cast<XsdComplexType>(elem.type).attrs) {
-                    XsdAttribute attr = cast<XsdComplexType>(elem.type).attrs{name2};
+                foreach string name2 in (keys cast<XsdComplexType>(type).attrs) {
+                    XsdAttribute attr = cast<XsdComplexType>(type).attrs{name2};
                     if (attr.hasValueConstraint()) {
                         v{'^attributes^'}{name2} = attr.getDefaultValue();
                         continue;
@@ -26275,24 +26470,7 @@ public class WSMessageHelper {
         } else {
             v = val;
         }
-        *softint n = elem.maxOccurs;
-        if (n == -1 || n > opts.max_items) {
-            n = opts.max_items;
-        }
-        if (n > 1) {
-            list<auto> l;
-            int i = 1;
-            while (i <= n) {
-                if (comments) {
-                    v{'^comment^'} = (list(sprintf("#%d", i)) + comments).join(';');
-                }
-                push l, v;
-                i++;
-            }
-            return (elem.name: l);
-        } else {
-            return (elem.name: v);
-        }
+        return v;
     }
 
     #! prepare sample message

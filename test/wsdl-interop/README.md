@@ -1190,8 +1190,8 @@ See the [range and provider contract](../../design/wsdl-particles.md#exact-named
 These field bounds describe independent extrema; complete particle validation
 still enforces correlations, order, exclusivity and count gaps. The Qore runtime
 prerequisite `f1dd175f0` fixes absent optional soft-list values and collection
-defaults. Sample generation and removal of legacy shared group adjustments
-remain P4 work.
+defaults. Normal named-element samples now use complete particle schedules, and group
+finalization no longer changes shared element counts.
 
 ## Native particle ordering and emission
 
@@ -1222,5 +1222,17 @@ six child budgets. All 19,360 rows are required, including schema rejections and
 original/reconstructed generation errors. Set `QORE_EXEC_MODE` for AST, IR, JIT
 or tiered execution. See the [implemented structural API and resource bounds](../../design/wsdl-particles.md#bounded-structural-examples).
 
-This primitive is complete; integrating its schedules into `WSMessageHelper` and
-removing legacy shared-group count adjustments remain the next P4 increment.
+`WSMessageHelper` uses these schedules for normal named-element examples, including
+whole-group comments, list-valued child occurrences and typed complex parts. Its
+`max_elements` option bounds generated elements per part; root/reentrant scopes
+retain independent validation and budgets. Group finalization preserves shared
+declaration limits. See the [helper contract and shipment example](../../design/wsdl-sample-instances.md#complete-groups-and-bounded-construction).
+
+`python3 test/wsdl-interop/test_sample_particles.py -v` checks 208 explicit rows
+through both actual SOAP bindings and directions, before and after reconstruction,
+with and without comments. All 352 native/retained outputs receive independent
+schema validation and exact child-order/integer checks. The 32 expected generation
+errors request insufficient budgets; they are distinct from invalid XML or
+unsupported model classifications. The 19-case `wsdl-sample-instances.qtest` suite
+also checks callbacks, same-helper reentrancy, nested lists, recursive types,
+metadata reuse, option errors and complete override/fragment output budgets. Set `QORE_EXEC_MODE` for each execution mode.

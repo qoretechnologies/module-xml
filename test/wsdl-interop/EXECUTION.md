@@ -6265,3 +6265,56 @@ process completion after the remaining checks and runs in isolation. Early
 Both remotes were fetched and are already included. Main Qore is clean at
 `f1dd175f0`; nothing was installed or pushed. P5-P9 and the tracked builtin type
 wrapper identity defect retain their complete scope.
+
+## P4-12 — Complete native helper samples (complete)
+
+After P4-11 `f687c55`, normal `WSMessageHelper` samples use complete particle
+schedules, canonicalized and attributed exactly as native serialization before
+values are generated. Repeated groups retain every member, XSD list children
+retain occurrence boundaries, and typed complex parts include children and
+attributes. Active graph declarations provide consistent namespace aliases and
+schema field order across providers, encoding, decoding and examples. Group
+finalization no longer mutates shared element occurrence limits.
+
+The positive integer `max_elements` option defaults to 10000 per message part,
+including the root and nested children. Construction reserves positions before
+callbacks; converted output is counted before return, including whole override
+values and embedded fragments. The latter closes an audit reproduction where
+a five-element override passed a two-element budget. Root/reentrant contexts
+restore on failure/interruption; public nested overrides and exactly-once root
+validation remain intact. Recursive types terminate with permitted empty content
+or raise a precise sample error. No instance is truncated. See the
+[implemented contract and executed shipment example](../../design/wsdl-sample-instances.md#complete-groups-and-bounded-construction).
+
+Final source SHA-256: `30deed41e0db35384ed2d9a1ba2b502c9662112020bc781acf2290cad90f4548`.
+The [inventory](P4-12-validation.json) and
+[62-item audit](audits/P4-12-helper-particles.md) record:
+
+- 111 suites: 1133 cases/56558 reported assertions; the final seven added fragment
+  assertions raise the composed final count to 56565. Existing caught SOAP
+  comparator negatives remain intentional; no failing case or warning remains.
+- The final 19-case/243-assertion sample suite passes all four source modes and
+  explicit AOT. The 1186-variant qmod, affected docs, shipment example and all
+  15 survey harness methods pass without warnings.
+- Each mode passes 1000-model/15132-row independent ordering coverage, 248 value
+  rows/224 validated outputs, and 208 sample rows/352 validated outputs. All 32
+  expected sample errors request insufficient budgets. Both actual bindings,
+  directions, reconstruction and comments are included.
+- All 2443 diagnostic rows and strict ledger outcomes remain unchanged. The first
+  isolated final-source strict run passes 130 selected descriptions and 1260
+  directions; 92 broader failures and 904 unassessed value/infoset directions
+  remain visible. Original fixtures and historical findings are untouched.
+- All 62 audit items resolve: 19 Pass, 43 N/A, zero Fail. No C++ change or native
+  artifact change; no new Valgrind run, PCRE2 JIT disablement, install or push.
+
+Final evidence uses `/tmp/wsdl-p4-12-final-*`; the final five-mode supplement
+supersedes earlier sample rows after seven fragment assertions were added with
+no production change. Development `preaudit` and `audit` runs are superseded.
+Strict coverage starts from deterministic process completion after the gates.
+Both develop remotes were fetched and already included. Main Qore's concurrent
+AOT closure changes are preserved; this increment changes no main Qore files.
+
+P4 remains open. The [worker finding](p4-worker-order-finding.md) proves that
+24 remaining P4 failures come from the diagnostic caller's unordered XML hash.
+The next increment fixes that caller and expands strict value/order acceptance
+for all 13 P4-owned families. P5-P9 retain their complete required scope.
