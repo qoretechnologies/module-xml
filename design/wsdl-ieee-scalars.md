@@ -49,8 +49,8 @@ printf("%Y\n", precise_sensor.acceptsValue("16777217")); # 16777217.0
 `WSMessageHelper` supplies a numeric sample for both builtins. This also gives
 unrestricted derived types and lists a valid starting value. The scalar paths
 apply to elements, attributes, simple content, list items and individual union
-alternatives. This document does not describe IEEE restriction-facet or
-cross-member union identity rules; those are separate P3 implementation work.
+alternatives. [IEEE restriction facets and union identity](wsdl-ieee-facets.md)
+describe comparisons after target-precision conversion.
 
 `test/wsdl-ieee-scalars.qtest` covers direct APIs, requiredness, invalid metadata,
 reconstruction, native input boundaries and builtin type annotations. The

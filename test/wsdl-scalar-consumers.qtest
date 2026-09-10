@@ -1,0 +1,191 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires xml
+%requires ../qlib/WSDL.qm
+%requires ../qlib/SoapClient.qm
+%requires ../qlib/SoapHandler.qm
+%requires HttpServer
+%exec-class ScalarConsumersTest
+
+class ScalarConsumerCallback {
+    public {
+        Queue requests();
+        Queue responses();
+    }
+
+    hash<auto> call(hash<auto> cx, hash<auto> request) {
+        requests.push(request);
+        return responses.pop(30000);
+    }
+}
+
+class ScalarConsumersTest inherits QUnit::Test {
+    constructor() : Test("Exact scalar SOAP consumers", "1.0") {
+        addTestCase("SOAP 1.1 and 1.2 preserve exact scalar values over HTTP", \httpValues());
+        addTestCase("Scalar serialization failures preserve client and handler reuse", \httpErrors());
+        addTestCase("Encoded scalar references retain lookup and missing-target errors", \encodedReferences());
+        set_return_value(main());
+    }
+
+    private WebService service(string version) {
+        return new WebService('<w:definitions xmlns:w="http://schemas.xmlsoap.org/wsdl/"
+            xmlns:t="urn:scalar-consumers" xmlns:s="http://schemas.xmlsoap.org/wsdl/soap'
+            + (version == "12" ? "12" : "") + '/" targetNamespace="urn:scalar-consumers"><w:types>
+            <xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" targetNamespace="urn:scalar-consumers">
+            <xs:simpleType name="Pattern"><xs:restriction base="xs:decimal">
+              <xs:pattern value="009[.]00"/></xs:restriction></xs:simpleType>
+            <xs:simpleType name="Flags"><xs:list itemType="xs:boolean"/></xs:simpleType>
+            <xs:simpleType name="Either"><xs:union memberTypes="xs:boolean xs:int"/></xs:simpleType>
+            <xs:complexType name="Amount"><xs:simpleContent><xs:extension base="xs:decimal">
+              <xs:attribute name="id" type="xs:unsignedLong" use="required"/>
+            </xs:extension></xs:simpleContent></xs:complexType>
+            <xs:complexType name="Record"><xs:sequence>
+              <xs:element name="bounded" type="xs:int"/><xs:element name="unbounded" type="xs:integer"/>
+              <xs:element name="decimal" type="xs:decimal"/><xs:element name="single" type="xs:float"/>
+              <xs:element name="double" type="xs:double"/><xs:element name="zero" type="xs:double"/>
+              <xs:element name="special" type="xs:float"/><xs:element name="flag" type="xs:boolean"/>
+              <xs:element name="pattern" type="t:Pattern"/><xs:element name="flags" type="t:Flags"/>
+              <xs:element name="either" type="t:Either"/><xs:element name="token" type="xs:token"/>
+              <xs:element name="amount" type="t:Amount"/>
+            </xs:sequence><xs:attribute name="id" type="xs:unsignedLong" use="required"/>
+            </xs:complexType><xs:element name="Submit" type="t:Record"/><xs:element name="Reply" type="t:Record"/>
+            </xs:schema></w:types><w:message name="In"><w:part name="body" element="t:Submit"/></w:message>
+            <w:message name="Out"><w:part name="body" element="t:Reply"/></w:message>
+            <w:portType name="Port"><w:operation name="submit"><w:input message="t:In"/>
+            <w:output message="t:Out"/></w:operation></w:portType><w:binding name="Soap" type="t:Port">
+            <s:binding style="document" transport="http://schemas.xmlsoap.org/soap/http"/>
+            <w:operation name="submit"><s:operation soapAction="urn:submit"/><w:input><s:body use="literal"/>
+            </w:input><w:output><s:body use="literal"/></w:output></w:operation></w:binding>
+            <w:service name="Service"><w:port name="Port" binding="t:Soap"><s:address location="http://example.invalid/"/>
+            </w:port></w:service></w:definitions>', {"async_only": True});
+    }
+
+    private static hash<auto> record(bool response) {
+        string exact = response ? "-12345678901234567890.123456789012345678901"
+            : "0.00000000000000000000123456789012345678901";
+        string id = response ? "18446744073709551614" : "18446744073709551615";
+        return {"bounded": response ? "-2147483648" : "2147483647",
+            "unbounded": (response ? "-" : "") + "1" + strmul("0", 1000) + "1",
+            "decimal": exact, "single": response ? "-16777217" : "16777217",
+            "double": response ? "-9007199254740993" : "9007199254740993",
+            "zero": response ? "0" : "-0", "special": response ? "NaN" : "-INF",
+            "flag": response ? "1" : "false", "pattern": "009.00", "flags": ("false", "1", "0"),
+            "either": "01", "token": " \tA\r\nB  ",
+            "amount": {"^value^": exact, "^attributes^": {"id": id}}, "^attributes^": {"id": id}};
+    }
+
+    private sameFloat(float expected, auto actual) {
+        assertEq(NT_FLOAT, actual.typeCode());
+        assertEq(expected.toStringRoundTrip(), actual.toStringRoundTrip());
+    }
+
+    private check(hash<auto> actual, bool response) {
+        hash<auto> expected = record(response);
+        assertEq(response ? -2147483648 : 2147483647, actual.bounded);
+        assertEq(NT_INT, actual.bounded.typeCode());
+        foreach string name in ("unbounded", "decimal", "pattern", "either") {
+            assertEq(NT_STRING, actual{name}.typeCode());
+            assertEq(expected{name}, actual{name});
+        }
+        # These halfway integer inputs round to the even significand at the target precision.
+        sameFloat(response ? -16777216.0 : 16777216.0, actual.single);
+        sameFloat(response ? -9007199254740992.0 : 9007199254740992.0, actual.double);
+        sameFloat(response ? 0.0 : -0.0, actual.zero);
+        sameFloat(response ? @nan@ : -@inf@, actual.special);
+        assertEq(NT_BOOLEAN, actual.flag.typeCode());
+        assertEq(response, actual.flag);
+        assertEq((False, True, False), actual.flags);
+        assertEq("A B", actual.token);
+        assertEq(expected.amount, actual.amount);
+        assertEq(expected."^attributes^", actual."^attributes^");
+    }
+
+    private runHttp(bool errors) {
+        foreach string version in ("11", "12") {
+            WebService original = service(version);
+            foreach WebService ws in (original, Serializable::deserialize(original.serialize())) {
+                HttpServer server();
+                on_exit server.stop();
+                SoapHandler handler(new PermissiveAuthenticator());
+                server.setDefaultHandler("soap", handler);
+                ScalarConsumerCallback callback();
+                handler.addMethod(ws, ws.getBindingOperation("Soap", "submit"), \callback.call(), NOTHING,
+                    NOTHING, NOTHING, "Service", NOTHING, NOTHING, "Soap");
+                server.addListener(0);
+                string url = sprintf("http://127.0.0.1:%d/Service", server.getListenerInfo(0).port);
+                SoapClient client({"wsdl": ws, "url": url, "timeout": 30000, "connect_timeout": 30000});
+                if (errors) {
+                    foreach hash<auto> row in ({"field": "bounded", "value": "2147483648"},
+                            {"field": "unbounded", "value": "1tail"}, {"field": "decimal", "value": "1e2"},
+                            {"field": "single", "value": "+INF"}, {"field": "double", "value": "1e"},
+                            {"field": "flag", "value": "yes"}, {"field": "pattern", "value": "9"},
+                            {"field": "flags", "value": ("true", "wrong")},
+                            {"field": "either", "value": "2147483648"}) {
+                        hash<auto> invalid = record(False);
+                        invalid{row.field} = row.value;
+                        assertThrows("SOAP-SERIALIZATION-ERROR", \client.callOperation(), ("submit", invalid));
+                        invalid = record(True);
+                        invalid{row.field} = row.value;
+                        callback.responses.push(invalid);
+                        assertThrows("SOAP-SERVER-FAULT-RESPONSE", \client.callOperation(), ("submit", record(False)));
+                        check(callback.requests.pop(30000), False);
+                    }
+                }
+                callback.responses.push(record(True));
+                check(client.callOperation("submit", record(False)), True);
+                check(callback.requests.pop(30000), False);
+            }
+        }
+    }
+
+    private httpValues() {
+        runHttp(False);
+    }
+
+    private httpErrors() {
+        runHttp(True);
+    }
+
+    private encodedReferences() {
+        WebService original('<w:definitions xmlns:w="http://schemas.xmlsoap.org/wsdl/"
+            xmlns:t="urn:scalar-references" xmlns:xs="http://www.w3.org/2001/XMLSchema"
+            xmlns:s="http://schemas.xmlsoap.org/wsdl/soap/" targetNamespace="urn:scalar-references">
+            <w:message name="In"><w:part name="value" type="xs:int"/></w:message>
+            <w:message name="Out"><w:part name="value" type="xs:int"/></w:message>
+            <w:portType name="Port"><w:operation name="submit"><w:input message="t:In"/>
+            <w:output message="t:Out"/></w:operation></w:portType><w:binding name="Soap" type="t:Port">
+            <s:binding style="rpc" transport="http://schemas.xmlsoap.org/soap/http"/>
+            <w:operation name="submit"><s:operation soapAction="urn:submit"/>
+            <w:input><s:body use="encoded" namespace="urn:scalar-references"
+                encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"/></w:input>
+            <w:output><s:body use="encoded" namespace="urn:scalar-references"
+                encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"/></w:output>
+            </w:operation></w:binding><w:service name="Service"><w:port name="Port" binding="t:Soap">
+            <s:address location="http://example.invalid/"/></w:port></w:service></w:definitions>');
+        foreach WebService ws in (original, Serializable::deserialize(original.serialize())) {
+            WSOperation op = ws.getBindingOperation("Soap", "submit");
+            foreach bool response in (False, True) {
+                string wrapper = response ? "submitResponse" : "submit";
+                string xml = '<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"
+                    xmlns:t="urn:scalar-references"><s:Body><t:' + wrapper + '>
+                    <value href="#target"/></t:' + wrapper + '><number id="target">007</number>
+                    </s:Body></s:Envelope>';
+                auto value = response ? op.deserializeResponse(parse_xml(xml), "Soap")
+                    : op.deserializeRequest(parse_xml(xml), "Soap");
+                assertEq(7, value);
+                assertEq(NT_INT, value.typeCode());
+                string invalid = replace(xml, 'href="#target"', 'href="#missing"');
+                if (response) {
+                    assertThrows("INVALID-REFERENCE", \op.deserializeResponse(), (parse_xml(invalid), "Soap"));
+                    assertEq(7, op.deserializeResponse(parse_xml(xml), "Soap"));
+                } else {
+                    assertThrows("INVALID-REFERENCE", \op.deserializeRequest(), (parse_xml(invalid), "Soap"));
+                    assertEq(7, op.deserializeRequest(parse_xml(xml), "Soap"));
+                }
+            }
+        }
+    }
+}

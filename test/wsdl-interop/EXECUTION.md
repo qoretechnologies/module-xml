@@ -5476,3 +5476,36 @@ The two existing P6 binding-version tests remain diagnostic failures. P3 accepta
 review and all P4-P9 requirements remain in scope. The [full XML-RPC audit](audits/P3-45-xmlrpc-character-data.md) records
 25 Pass / 37 N/A / 0 Fail across all 62 checks. Next: finish the P3 acceptance
 review before implementing P4. The complete P1-P9 plan is not yet finished.
+
+## P3-46 — Literal scalar attributes and final HTTP integration
+
+XML-RPC increment P3-45 is committed as `cd684fc`. The P3 acceptance review
+confirmed strict selection of all 43 original P3 families, then added a focused
+numeric/boolean HTTP consumer matrix. Its first valid request exposed unconditional
+SOAP reference processing of ordinary literal `id` attributes. The binding and
+value helpers now require an encoded reference context before resolving references;
+literal values reach their schema unchanged. See the
+[implementation and evidence](literal-attributes-evidence.md).
+
+The new suite passes three cases / 1,336 assertions in all four execution modes,
+including 44 HTTP exchanges per mode, invalid client/handler values and recovery.
+The independent literal matrix checks 32 inputs and 20 outputs with both validators,
+also in all four modes. An old positive synthetic reference assertion used an
+RPC/literal contract; it now rejects that invalid input, while a separate actual
+RPC/encoded contract checks valid and missing references in both directions.
+
+The full affected gate passes 98 suites / 1,001 cases / 40,146 reported assertions.
+Doxygen, three executable examples, the both-version survey and strict coverage
+pass their gates. All 2,411 survey rows and 144 diagnostic failure identities are
+unchanged; all 1,260 strict message directions pass. The complete Python phase
+inventory initially ran 68 files / 248 methods and exposed the known P4/P5/P6
+diagnostics plus a 90-second regex-consumer deadline. That deadline is being
+investigated independently before P3 acceptance. Its unchanged 90-second worker
+deadline passes in an isolated rerun (three methods / 101.591 seconds total); the
+initial parallel timeout remains in the log. No phase completion is inferred
+from this increment. P4-P9 remain authorized and unfinished.
+
+The [P3-46 audit](audits/P3-46-literal-attributes.md) resolves all 62 items:
+18 Pass / 44 N/A / 0 Fail. Final source and runtime hashes are recorded in
+`/tmp/wsdl-p3-46-final-manifest.json`. No C++ changed and no native installation
+or push was performed. Next: consolidate the full P3 acceptance matrix.

@@ -403,8 +403,8 @@ for SOAP headers. Single-part example generation retains its previous shape.
 Tests: `test/wsdl-message-identity.qtest`, `test/wsdl-interop/message-identity.qr`
 and `test/wsdl-interop/test_message_identity.py`. The independent test checks
 160 element documents, including header/body placement, both SOAP versions,
-both directions and provider/example reconstruction. Its explicitly failing
-P3 lexical-rejection assertions remain visible in the execution record.
+both directions and provider/example reconstruction. Integer lexical-rejection
+assertions verify that namespace/part selection also reaches scalar validation.
 The namespace/part rules come from [WSDL 1.1 sections 2.3, 3.5 and 3.7](https://www.w3.org/TR/2001/NOTE-wsdl-20010315).
 
 ## Element declaration consistency

@@ -11,6 +11,12 @@ See [PLAN.md](PLAN.md) for the phased implementation plan, acceptance checks, an
 of the recorded findings and validator disagreements to the work needed to resolve them.
 See [EXECUTION.md](EXECUTION.md) for implementation progress and commit/audit evidence.
 
+`test/wsdl-scalar-consumers.qtest` checks exact scalar values through actual SOAP
+1.1/1.2 HTTP exchanges, including invalid-value recovery and encoded reference
+lookups. `test_literal_attributes.py` independently checks schema-defined `id`,
+`href` and `root` attributes in literal messages. See
+[the consumer evidence](literal-attributes-evidence.md).
+
 `test/wsdl-qname-declarations.qtest` and `test_qname_declarations.py` validate
 QName enumeration declaration scopes and inherited restrictions. The independent
 matrix covers 198 schemas and 396 SOAP binding contracts, including simple content

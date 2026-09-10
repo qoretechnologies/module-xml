@@ -2,6 +2,22 @@
 
 Copyright (C) 2026 Qore Technologies, s.r.o.
 
+Literal SOAP parts use their concrete schema, including attributes named `id`,
+`href` or `root`. Their spelling alone does not activate SOAP encoding. The
+binding supplies a reference context only for encoded bodies; standalone schema
+conversion and literal parts retain the attribute values for normal validation.
+For example, an `xs:unsignedLong` attribute `id="18446744073709551615"` remains
+that exact value, and an `xs:anyURI` attribute `href="#invoice"` remains a URI.
+An encoded accessor with `href="#invoice"` instead requires an existing target
+in its supplied SOAP reference map and raises `INVALID-REFERENCE` if it is absent.
+This follows [WSDL 1.1 section 3.5](https://www.w3.org/TR/2001/NOTE-wsdl-20010315#_soap:body).
+
+`test/wsdl-scalar-consumers.qtest` checks numeric, boolean, list/union and pattern
+values through both actual SOAP bindings over HTTP, with distinct request/response
+values, reconstructed service objects, invalid values and post-failure reuse.
+`test/wsdl-interop/test_literal_attributes.py` independently validates literal
+attribute values and namespace collisions before and after both message directions.
+
 `XsdBaseType` validates integer XML lexical forms before native conversion in
 both serialization directions. All thirteen integer builtins require ASCII
 digits; signed integer types permit one leading sign, while XSD 1.0 unsigned
@@ -51,9 +67,8 @@ auto value = orderNumber.acceptsValue("18446744073709551615");
 @assert(value == "18446744073709551615");
 ```
 
-Integer examples use negative values for negative/nonpositive types. General
-facets and the other scalar requirements retain their phase ownership in the
-interoperability execution plan. Retained XML values continue to use the additive
+Integer examples use negative values for negative/nonpositive types. Numeric
+facets and collection value rules are described below. Retained XML values use the additive
 public contract documented in `wsdl-xml-values.md`.
 
 `test/wsdl-integer-lexical.qtest` covers all integer builtins, invalid value types,
@@ -254,8 +269,8 @@ provider reconstruction, examples and failed-addition rollback. The independent
 `test_facet_declarations.py` matrix checks atomic and simple-content restrictions
 through both actual SOAP bindings and both directions, comparing exact Decimal
 values and expanded names. Its specification adjudication records compiler
-disagreements separately from production acceptance. Other scalar families retain
-their remaining P3 acceptance work.
+disagreements separately from production acceptance. The calendar, duration,
+binary, QName and IEEE designs describe the corresponding primitive value rules.
 
 ## Strings and length restrictions
 
