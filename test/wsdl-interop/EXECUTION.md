@@ -5956,3 +5956,55 @@ ordered WSDL conversion, field metadata and samples, including its four visible
 compositor runtime failures. P5–P9 retain the full original scope, supported-platform
 and mandatory Python/corpus/peer CI acceptance, and previously recorded P9
 documentation diagnostics.
+
+## P4-07 — Ordered terminal declaration projection (2026-09-10)
+
+P4-06 is committed as `b77835e`. `XsdParticle::attributeElementNames()` now returns
+one actual terminal declaration per ordered input child. Fixed boundaries retain
+distinct same-name declarations; shared group references retain caller continuation.
+Accepted empty content returns an empty list and rejected content returns `NOTHING`.
+The [implemented design](../../design/wsdl-particles.md) documents the public
+contract, executed invoice example and resource bounds.
+
+Common zero/one/unbounded trees use automaton predecessor traces with cached
+closures. General finite/shared graphs reuse memoized endpoint recognition and
+reconstruct one witness through predecessor frontiers. Nullable repetitions use
+positive progress; empty spans do not expand shared graphs. Numeric counts are
+not expanded or rounded. All mutable state is call-local. This projection selects
+declarations; value/nil/dynamic-type/wildcard validation remains with its consumers.
+
+The final gate passes **107 Qore suites / 1,075 cases / 54,512 reported assertions**,
+without warnings. The new attribution suite passes **eight cases / 10,150
+assertions** in AST, IR, JIT and tiered modes, and against the freshly compiled AOT
+WSDL module (**1,154 variants**). It covers fixed declaration identity, alternating
+nested groups, reconstruction, exact finite gaps, huge nullable counts, all,
+wildcards, 10,000 input names, a shared empty DAG, cancellation/reuse and four
+concurrent callers using deterministic queues and bounded cleanup.
+
+An independent complete marked-language oracle checks **1,000 generated models /
+42,630 construction and declaration-projection rows per mode**. It compares exact
+source-position paths for original and reconstructed graphs, including all finite
+words and deletion/replacement/prepend/append mutations. There are 765 valid and
+235 invalid schemas. Four deterministic 250-model batches, each bounded by 180
+seconds, retain every expected row; no model or failure is skipped. This replaces
+the insufficient aggregate AST worker deadline without changing runtime behavior.
+
+Both-version survey and coverage reports differ from P4-06 only in the WSDL source
+hash: **2,411 baseline rows**, original input/source hashes, **293 coverage cases**,
+**144 visible failure records** and all stage accounting remain unchanged. Strict
+coverage passes **130 descriptions / 1,260 message directions**. All 15 survey
+harness methods, affected WSDL documentation and two executed design examples pass.
+The [validation inventory](P4-07-validation.json) records source/binary hashes,
+complete suite summaries and per-mode oracle results. Logs use `/tmp/wsdl-p4-07-`.
+No native source or binary changed, so no new Valgrind run was required. Normal
+PCRE2 JIT remains enabled; no system installation or push was performed.
+
+The [full audit](audits/P4-07-ordered-terminal-projection.md) resolves all 62 checks:
+**19 Pass / 43 N/A / 0 Fail**. Both remotes were fetched. Main Qore was fast-forwarded
+from `cb90afb7b` to **`95bdf29f4`**, the ProviderIndex deferred-initialization fix;
+XML's remote `c1403ef` is already included. The isolated tested core remains
+identified by its unchanged binary hash. P4 continues with actual ordered value
+conversion, independent field cardinality metadata and particle-driven samples;
+its four compositor runtime failures remain visible. P5–P9 retain the full original
+scope, including mandatory Python/corpus/peer CI, supported platforms and the
+previously recorded documentation/debug-information diagnostics.

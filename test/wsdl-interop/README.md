@@ -1150,3 +1150,13 @@ remains unchanged. [P4-06's current report](P4-06-native-count-ranges.json) reco
 all 16 DOM/reader requirements passing, including the ambiguous schema rejected
 for attribution. Full phase status and broader remaining requirements are in
 [EXECUTION.md](EXECUTION.md).
+
+## Ordered value declaration attribution
+
+`wsdl-particle-attribution.qtest` checks declaration selection at fixed boundaries,
+repeated/alternating groups, wildcard/all terms, shared and reconstructed graphs,
+large inputs, cancellation and concurrent reuse. `test_particle_value_attribution.py`
+checks 1,000 complete finite models with 42,630 construction/attribution rows,
+including original/reconstructed graphs and invalid mutations. Every accepted
+child must select the position given by the independently enumerated marked
+language. See the [implemented matcher design](../../design/wsdl-particles.md#declaration-attribution-for-ordered-values).

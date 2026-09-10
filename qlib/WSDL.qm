@@ -80,6 +80,8 @@ module WSDL {
     @section wsdlrelnotes WSDL Module Release Notes
 
     @subsection wsdl_0_5_8 WSDL v0.5.8
+    - XsdParticle::attributeElementNames() identifies the terminal declaration for each ordered input child,
+      preserving fixed boundaries, group continuations and empty-content acceptance with bounded matching
     - schema construction rejects ambiguous ordered particles using exact counted-group attribution;
       XsdParticle::validateDeterminism() also checks reconstructed graphs without expanding group references
     - XsdParticle::matchesElementNames() checks ordered child names, complete group occurrence counts,
@@ -12437,6 +12439,18 @@ class XsdRegexSetFrame {
     }
 }
 
+# A positive-progress slice used to reconstruct terminal attribution.
+hashdecl XsdRegexSpan {
+    int node;
+    int start;
+    int end;
+}
+
+hashdecl XsdRegexTrace {
+    int atom;
+    int previous = -1;
+}
+
 class XsdRegexMatcher {
     private {
         list<hash<XsdRegexNode>> nodes;
@@ -12621,7 +12635,24 @@ class XsdRegexMatcher {
         if (automaton) {
             return matchesAutomaton(automaton);
         }
-        list<XsdRegexMatchFrame> work = (new XsdRegexMatchFrame(root, 0),);
+        return (hasEndpoint(matchEnds(root, 0), chars.size()));
+    }
+
+    private static bool hasEndpoint(list<int> ends, int expected) {
+        foreach int end in (ends) {
+            if (end == expected) {
+                return True;
+            }
+        }
+        return False;
+    }
+
+    private list<int> matchEnds(int root, int match_start) {
+        string root_key = sprintf("%d:%d", root, match_start);
+        if (cache.hasKey(root_key)) {
+            return cache{root_key};
+        }
+        list<XsdRegexMatchFrame> work = (new XsdRegexMatchFrame(root, match_start),);
         while (work) {
             XsdRegexMatchFrame frame = work[-1];
             hash<XsdRegexNode> node = nodes[frame.node];
@@ -12714,12 +12745,145 @@ class XsdRegexMatcher {
                 && (nodes[child].nullable || frame.count + 1 >= frame.low), start);
             ++frame.index;
         }
-        foreach int end in (cache{sprintf("%d:0", root)}) {
-            if (end == chars.size()) {
-                return True;
-            }
+        return cache{root_key};
+    }
+
+    private *list<int> attributeAutomaton(XsdRegexAutomaton automaton) {
+        hash<XsdRegexFrontier> initial = automaton.closure((automaton.start,));
+        if (!chars) {
+            return initial.accepted ? () : NOTHING;
         }
-        return False;
+        hash<string, int> frontier = map {$1.toString(): -1}, initial.states;
+        hash<string, hash<XsdRegexFrontier>> closures();
+        list<hash<XsdRegexTrace>> traces();
+        int accepted = -1;
+        foreach string value in (chars) {
+            hash<string, int> next();
+            accepted = -1;
+            foreach string key in (keys frontier) {
+                hash<XsdRegexState> state = automaton.states[key.toInt()];
+                if (!character(state.atom, value)) {
+                    continue;
+                }
+                int trace = traces.size();
+                push traces, <XsdRegexTrace>{"atom": state.atom, "previous": frontier{key}};
+                if (!closures.hasKey(key)) {
+                    closures{key} = automaton.closure(state.next);
+                }
+                hash<XsdRegexFrontier> closure = closures{key};
+                if (closure.accepted) {
+                    accepted = trace;
+                }
+                foreach int following in (closure.states) {
+                    string following_key = following.toString();
+                    if (!next.hasKey(following_key)) {
+                        next{following_key} = trace;
+                    }
+                }
+            }
+            frontier = next;
+        }
+        if (accepted < 0) {
+            return;
+        }
+        list<int> result = map -1, chars;
+        for (int index = chars.size() - 1; index >= 0; --index) {
+            @assert(accepted >= 0);
+            result[index] = traces[accepted].atom;
+            accepted = traces[accepted].previous;
+        }
+        @assert(accepted == -1);
+        return result;
+    }
+
+    # Return one terminal-node attribution for a complete token match. Endpoint
+    # sets are memoized; predecessor frontiers reconstruct one witness without
+    # recursively trying decompositions or enumerating declared occurrence counts.
+    *list<int> attribute(int root, *XsdRegexAutomaton automaton) {
+        if (automaton) {
+            return attributeAutomaton(automaton);
+        }
+        if (!(hasEndpoint(matchEnds(root, 0), chars.size()))) {
+            return;
+        }
+        list<int> result();
+        list<hash<XsdRegexSpan>> pending = (<XsdRegexSpan>{"node": root, "start": 0, "end": chars.size()},);
+        while (pending) {
+            hash<XsdRegexSpan> span = pop pending;
+            if (span.start == span.end) {
+                continue;
+            }
+            hash<XsdRegexNode> node = nodes[span.node];
+            if (node.kind == XRN_CHARACTER || node.kind == XRN_SET_UNION || node.kind == XRN_SET_NOT
+                    || node.kind == XRN_SET_DIFFERENCE) {
+                @assert(span.end == span.start + 1);
+                result[span.start] = span.node;
+                continue;
+            }
+            if (node.kind == XRN_ALTERNATIVE) {
+                bool found = False;
+                foreach int child in (node.children) {
+                    if (hasEndpoint(matchEnds(child, span.start), span.end)) {
+                        push pending, <XsdRegexSpan>{"node": child, "start": span.start, "end": span.end};
+                        found = True;
+                        break;
+                    }
+                }
+                @assert(found, "a matched alternative must retain a witness");
+                continue;
+            }
+            @assert(node.kind == XRN_SEQUENCE || node.kind == XRN_REPEAT);
+            int minimum = node.children.size();
+            int maximum = minimum;
+            bool repeat = node.kind == XRN_REPEAT;
+            if (repeat) {
+                int child = node.children[0];
+                maximum = (span.end - span.start) / max(widths[child], 1);
+                minimum = nodes[child].nullable ? 0 : bounded(node.low, maximum + 1);
+                if (exists node.high) {
+                    maximum = bounded(node.high, maximum);
+                }
+            }
+            list<int> frontier = (span.start,);
+            hash<string, int> predecessors();
+            int count = 0;
+            while (count < maximum) {
+                int child = node.children[repeat ? 0 : count];
+                hash<string, int> next();
+                foreach int begin in (frontier) {
+                    foreach int end in (matchEnds(child, begin)) {
+                        if (end > span.end || (repeat && end == begin)) {
+                            continue;
+                        }
+                        string key = end.toString();
+                        if (!next.hasKey(key)) {
+                            next{key} = end;
+                            predecessors{sprintf("%d:%d", count + 1, end)} = begin;
+                        }
+                    }
+                }
+                frontier = next.values();
+                ++count;
+                if (count >= minimum && hasEndpoint(frontier, span.end)) {
+                    break;
+                }
+                @assert(frontier, "a matched sequence/repetition must retain a witness");
+            }
+            @assert(count >= minimum && hasEndpoint(frontier, span.end));
+            int end = span.end;
+            while (count) {
+                string key = sprintf("%d:%d", count, end);
+                @assert(predecessors.hasKey(key));
+                int begin = predecessors{key};
+                push pending, <XsdRegexSpan>{"node": node.children[repeat ? 0 : count - 1],
+                    "start": begin, "end": end};
+                end = begin;
+                --count;
+            }
+            @assert(end == span.start);
+        }
+        @assert(result.size() == chars.size());
+        return result;
     }
 }
 
@@ -17385,6 +17549,21 @@ public final class XsdParticle inherits Qore::Serializable {
         return program.matches(names);
     }
 
+    #! identifies the terminal declaration for every child in a complete ordered match
+    /** @param names expanded child element names in document order
+        @return one particle per input child, an empty list for accepted empty content, or NOTHING if rejected
+        @throw WSDL-ERROR unresolved/cyclic groups or invalid XSD 1.0 all placement
+        @throw XSD-PARTICLE-ERROR a malformed expanded name
+        @note Complete schema attribution validation before using this conversion projection.
+        Repetition boundaries may differ while selecting the same declaration position.
+        Element values and wildcard processing still require their separate validation.
+        @since %WSDL 0.5.8
+    */
+    *list<XsdParticle> attributeElementNames(list<string> names) {
+        XsdParticleProgram program(self);
+        return program.attribute(names);
+    }
+
     #! validates XSD 1.0 unique particle attribution for this content model
     /** @throw WSDL-ERROR ambiguous particles, unresolved/cyclic groups or invalid all placement
         @note Occurrence counts are exact; repeated uses of one declaration do not themselves
@@ -17571,6 +17750,23 @@ class XsdParticleProgram {
         }
         XsdRegexMatcher matcher(nodes, names, \terminal());
         return matcher.matches(root, automaton);
+    }
+
+    *list<XsdParticle> attribute(list<string> names) {
+        foreach string name in (names) {
+            string uri = namespaceOf(name);
+        }
+        if (all) {
+            if (!matches(names)) {
+                return;
+            }
+            return map terminals{$1}, names;
+        }
+        XsdRegexMatcher matcher(nodes, names, \terminal());
+        *list<int> positions = matcher.attribute(root, automaton);
+        if (exists positions) {
+            return map terminals{$1.toString()}, positions;
+        }
     }
 
     validateDeterminism() {

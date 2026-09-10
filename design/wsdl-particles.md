@@ -189,3 +189,49 @@ References:
 - [Chen and Lu, Checking Determinism of Regular Expressions with Counting (2012)](https://lcs.ios.ac.cn/~chm/papers/dlt2012.pdf), sections 3, 4 and 6.
 - [Groz and Maneth, Efficient Testing and Matching of Deterministic Regular Expressions (2017)](https://www.pure.ed.ac.uk/ws/portalfiles/portal/32885322/jcss2017_3.pdf), section 3.4 and Algorithm 3.
 - [XSD 1.0 model-group component constraints](https://www.w3.org/TR/2004/REC-xmlschema-1-20041028/#cos-nonambig).
+
+## Declaration attribution for ordered values
+
+`attributeElementNames()` returns one terminal `XsdParticle` per input child in
+document order. An accepted empty input returns an empty list; rejection returns
+`NOTHING`. Complete schema attribution validation before using this projection.
+The returned objects retain the selected declaration's identity, including two
+distinct declarations with the same expanded name at a fixed count boundary.
+Repeated group uses can share their terminal declaration object while keeping
+their caller's continuation separate.
+
+For example, conversion can select the invoice number and payment declarations:
+
+```qore
+list<XsdParticle> positions = invoice.getParticle().attributeElementNames(("{}number", "{}card"));
+@assert(positions[0] === content[0]);
+@assert(positions[1] === content[1].getChildren()[0]);
+```
+
+Ordinary zero/one/unbounded models use the existing Thompson automaton. Each
+reachable state retains one predecessor trace for the consumed prefix; epsilon
+closures are cached per consuming state. An accepting trace is reconstructed
+iteratively after the last token. At most `O(m n)` trace records and `O(m²)` cached
+closure entries are retained for `m` states and `n` names; transition work is at
+most `O(m² n)`. No future-name lookahead changes the schema attribution rule.
+
+General finite counts and shared group graphs reuse the memoized endpoint
+matcher. Sequence/repetition frontiers record predecessor offsets, reconstruct
+one accepted decomposition, and then visit its child spans iteratively. Nullable
+terms use only positive-progress repetitions; empty spans need no terminal trace.
+Thus a shared empty graph is not expanded just to reconstruct empty iterations.
+The recognition bounds above also bound endpoint reconstruction; predecessor
+frontiers add at most quadratic input storage per active reconstruction, with no
+exponential retry or numeric-count expansion. All call state is private, and Qore
+cancellation remains active.
+
+The projection identifies declarations and wildcard namespace predicates. It does
+not itself convert values or enforce nil, dynamic types or wildcard processing.
+Those consumers use their own validation. The runtime field/sample integration
+remains separately tracked in the P4 execution record.
+
+Run `qore -b --enable-debug test/wsdl-particle-attribution.qtest` and
+`python3 test/wsdl-interop/test_particle_value_attribution.py -v`. The latter
+compares original and reconstructed graphs against complete marked languages and
+negative mutations, checking every returned declaration position rather than
+only whether the input was accepted.
