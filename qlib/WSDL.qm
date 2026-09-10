@@ -80,6 +80,11 @@ module WSDL {
     @section wsdlrelnotes WSDL Module Release Notes
 
     @subsection wsdl_0_5_8 WSDL v0.5.8
+    - explicit native type wrappers accept the declared simple type and equivalent canonical builtin definitions;
+      selected type annotations retain their own namespace independently of element qualification
+    - complex type selection resolves instance QNames before checking derived attributes; direct extensions
+      use resolved base components, and anonymous simple content never emits its base as its own type
+    - annotated scalar, repeated, list and complex simple-content values retain their attributes and value shape
     - native message examples follow complete particle schedules, preserve list-valued child occurrences,
       include typed complex parts, and support an explicit total-element generation budget
     - shared group references retain their own occurrence limits without changing shared element declarations
@@ -2212,7 +2217,19 @@ public class XsdAbstractType inherits WSDL::XsdNamedData {
         #printf("DEBUG: type %y ns: %y ons: %y\n", name, ns, ons);
     }
 
+    #! checks whether this explicit native type can replace the declared type
+    /** @param t the element's resolved declared type
+        @param ename the element name for diagnostics
+        @throw SOAP-SERIALIZATION-ERROR incompatible type components
+        @note Identity accepts the same component, including canonical builtin definitions in separate
+        registries. User-defined and custom conversion types require their resolved component identity.
+        @par Example
+        An invoice quantity can explicitly select its own integer datatype without bypassing range checks.
+    */
     checkExtends(XsdAbstractType t, string ename) {
+        if (XsdTypeDerivationHelper::sameType(self, t)) {
+            return;
+        }
         throw SOAP_SERIALIZATION_ERROR, sprintf("explicit type %y given for element %y, type %y, however the types are not compatible", name, ename, t.name);
     }
 
@@ -9325,7 +9342,7 @@ public class XsdBaseType inherits WSDL::XsdAbstractType {
                 attributes{value.getPrefix() ? "xmlns:" + value.getPrefix() : "xmlns"} = value.getNamespaceUri();
             }
             if (!omitType) {
-                attributes."xsi:type" = ons + ":QName";
+                attributes += XsdDocumentValueHelper::typeAttributes(self, nsc);
             }
             if (attributes) {
                 result."^attributes^" = attributes;
@@ -9482,9 +9499,7 @@ public class XsdBaseType inherits WSDL::XsdAbstractType {
                 return val;
         } else {
             return comments + {
-                "^attributes^": (
-                    "xsi:type": sprintf("%s:%s", ons, type),
-                ),
+                "^attributes^": XsdDocumentValueHelper::typeAttributes(self, nsc, type),
                 "^value^": val,
             };
         }
@@ -10544,6 +10559,19 @@ public class XsdElement inherits WSDL::XsdTypedData {
         }
     }
 
+    #! serializes the declared occurrence collection, optionally selecting an explicit type
+    /** @param nsc the output namespace registry
+        @param h native input, or a \c ^type^ / \c ^val^ wrapper
+        @param omitType omit implicit named type annotations
+        @param key the containing native field name for diagnostics
+        @param typename the containing type name for diagnostics
+        @return the converted value or collection with its XML metadata
+        @throw SOAP-SERIALIZATION-ERROR incompatible explicit type, invalid content or occurrence count
+        @note A wrapper selecting the declared type retains all value and occurrence checks. A list datatype
+        still uses an outer list for repeated element occurrences. Anonymous types cannot supply a type QName.
+        @par Example
+        Serialize two invoice quantities with the same explicit integer type and enforce their declared count.
+    */
     auto serializeValue(Namespaces nsc, auto h, *softbool omitType, string key, string typename) {
         return serializeOccurrences(nsc, h, omitType, key, typename, minOccurs, maxOccurs);
     }
@@ -10573,6 +10601,9 @@ public class XsdElement inherits WSDL::XsdTypedData {
         if (h."^type^" && h."^type^" instanceof XsdAbstractType && h.hasKey("^val^")) {
             XsdAbstractType ntype = cast<XsdAbstractType>(h."^type^");
             ntype.checkExtends(type, name);
+            if (XsdTypeDerivationHelper::sameType(ntype, type)) {
+                ntype = type;
+            }
             return serializeAsIntern(nsc, ntype, h."^val^", omitType, key, name, minimum, maximum);
         }
 
@@ -10601,7 +10632,7 @@ public class XsdElement inherits WSDL::XsdTypedData {
                 string instance_prefix = nsc.getOutputNamespacePrefix(XSI_NS);
                 hash<auto> rh = {instance_prefix + ":nil": "true"};
                 if ((!omitType || type != self.type) && type.hasRealName()) {
-                    rh += ("xsi:type": type.getNameWithNS());
+                    rh += XsdDocumentValueHelper::typeAttributes(type, nsc);
                 }
                 return ("^attributes^": rh);
             }
@@ -10615,25 +10646,19 @@ public class XsdElement inherits WSDL::XsdTypedData {
             throw SOAP_SERIALIZATION_ERROR, sprintf("missing element %y value for %s::%s (minOccurs: %d, type %y)", name, typename, key, minOccurs, type.getName());
         }
 
-        # NOTE: pf must be an untyped hash
-        hash pf;
-        if ((!omitType || type != self.type) && type.hasRealName())
-            pf = ("^attributes^": ("xsi:type": !usedocns ? type.getName() : type.getNameWithNS()));
+        *hash<auto> type_attributes;
+        # anyType's converter supplies the inferred runtime type itself.
+        if ((!omitType || type != self.type) && type.hasRealName()
+                && !(type instanceof XsdBaseType && type.name == "anyType")) {
+            type_attributes = XsdDocumentValueHelper::typeAttributes(type, nsc);
+        }
 
         if (tc == NT_LIST) {
             # For list types (XsdSimpleType with listItemType), the list value is passed
             # directly to the type's serialize() which handles it as a space-separated value
             if (is_list_type) {
                 # Let the list type handle the list value directly
-                auto rv = XsdDocumentValueHelper::serializeValue(type, nsc, h, omitType);
-                if (!pf) {
-                    return rv;
-                }
-                if (rv.typeCode() != NT_HASH) {
-                    pf."^value^" = rv;
-                    return pf;
-                }
-                return pf + rv;
+                return serializeTypedValue(type, nsc, h, omitType, type_attributes);
             }
 
             int len = h.size();
@@ -10649,27 +10674,33 @@ public class XsdElement inherits WSDL::XsdTypedData {
 
             list<auto> l = ();
             foreach auto e in (h) {
-                l += (pf + XsdDocumentValueHelper::serializeValue(type, nsc, e, omitType));
+                push l, serializeTypedValue(type, nsc, e, omitType, type_attributes);
             }
             return l;
         }
         if (minOccurs > 1)
             throw SOAP_SERIALIZATION_ERROR, sprintf("only one element passed to element %y of type %y, but minOccurs = %d", name, type.getName(), minOccurs);
 
-        #printf("DEBUG: element %y type %s: %y omitType: %y h: %y\n", name, type.className(), type.name, omitType, h);
-        # issue #2899: combine return value in a hash if necessary
-        auto rv = XsdDocumentValueHelper::serializeValue(type, nsc, h, omitType);
-        if (!pf) {
-            return rv;
+        return serializeTypedValue(type, nsc, h, omitType, type_attributes);
+    }
+
+    private auto serializeTypedValue(XsdAbstractType selected, Namespaces namespaces, auto value,
+            *softbool omitType, *hash<auto> type_attributes) {
+        # An anonymous simple type cannot be named by xsi:type. Its restriction
+        # base or union member must not be substituted for that anonymous component.
+        bool omit_selected_type = omitType || (selected instanceof XsdSimpleType && !selected.hasRealName());
+        auto converted = XsdDocumentValueHelper::serializeValue(selected, namespaces, value, omit_selected_type);
+        if (!type_attributes) {
+            return converted;
         }
-        if (rv.typeCode() != NT_HASH) {
-            pf."^value^" = rv;
-        } else {
-            foreach hash hh in (rv.pairIterator()) {
-                pf{hh.key} += hh.value;
-            }
+        if (converted.typeCode() != NT_HASH) {
+            return {"^value^": converted, "^attributes^": type_attributes};
         }
-        return pf;
+        # Restriction/list/union converters may delegate to another type. The
+        # element's selected component owns its annotation; retain all other
+        # attributes, comments and child content without concatenating metadata.
+        converted."^attributes^" += type_attributes;
+        return converted;
     }
 
     auto deserializeValue(hash<string, XsdAbstractType> tmap, *hash<auto> mrh, auto val, bool present) {
@@ -11280,6 +11311,13 @@ thread_local *XsdProviderUnionItemCapture ProviderUnionItemCapture;
 thread_local *Namespaces RetainedXmlValidationNamespaces;
 
 class XsdDocumentValueHelper {
+    static hash<auto> typeAttributes(XsdAbstractType type, Namespaces output, *string local_name) {
+        string uri = type.ons ? type.nsc.getOutputNamespaceUri(type.ons) : "";
+        string prefix = uri ? output.getOutputNamespacePrefix(uri) : "";
+        return {output.getOutputNamespacePrefix(XSI_NS) + ":type":
+            (prefix ? prefix + ":" : "") + (local_name ?? type.name)};
+    }
+
     static auto serializeValue(XsdAbstractType type, Namespaces nsc, auto value, *softbool omitType) {
         XsdDocumentValueCapture capture(type);
         auto converted = type.serializeValue(nsc, value, omitType);
@@ -19435,6 +19473,19 @@ class XsdTypeDerivationHelper {
         };
     }
 
+    # Every schema has the same builtin definitions. User components and custom
+    # conversion classes must retain their resolved object identity.
+    static bool sameType(XsdAbstractType first, XsdAbstractType second) {
+        if (first === second) {
+            return True;
+        }
+        return Class::getClass(first).getPathName() == "WSDL::XsdBaseType"
+            && Class::getClass(second).getPathName() == "WSDL::XsdBaseType"
+            && first.name == second.name && first.name != "binary" && XsdBaseType::BuiltinTypes{first.name}
+            && first.ons && second.ons && first.nsc.getOutputNamespaceUri(first.ons) == XSD_NS
+            && second.nsc.getOutputNamespaceUri(second.ons) == XSD_NS;
+    }
+
     static bool isDerived(XsdAbstractType derived, XsdAbstractType base) {
         XsdTypeDerivationHelper helper();
         return helper.check(derived, base);
@@ -20021,9 +20072,17 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
     }
 
     #! throws an exception if the types are not compatible
+    /** @param t the resolved declared type
+        @param ename the element name for diagnostics
+        @throw SOAP-SERIALIZATION-ERROR this component is neither identical nor an immediate extension
+        @note An extension is checked against its resolved base component, independently of local-name aliases.
+        @par Example
+        A shipment's explicit extension must refer to that shipment type, not a same-named unrelated type.
+    */
     checkExtends(XsdAbstractType t, string ename) {
-        if (extension == t.name || t == self)
+        if (t === self || (extension && baseType === t)) {
             return;
+        }
         throw SOAP_SERIALIZATION_ERROR, sprintf("explicit type %y given for element %y, type %y, however the types "
             "are not compatible%s", name, ename, t.name,
             extension ? sprintf("; %y extends %y", name, extension) : "");
@@ -20437,6 +20496,17 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
         return rv;
     }
 
+    #! serializes a complex value with this component's attributes and content
+    /** @param nsc the output namespace registry
+        @param h the native record or simple-content value
+        @param omitType omit this component's implicit type annotation
+        @return XML content and attributes
+        @throw SOAP-SERIALIZATION-ERROR invalid attributes, particle content or scalar value
+        @note Simple content contributes text and lexical namespace bindings; the containing complex type
+        owns its type annotation.
+        @par Example
+        A measured invoice quantity retains both its numeric text and required unit attribute.
+    */
     *hash<auto> serializeValue(Namespaces nsc, auto h, *softbool omitType) {
         if (array) {
             return array.serializeValue(nsc, h, omitType);
@@ -20482,7 +20552,14 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
 
         if (cx_type == XET_SIMPLE) {
             h = XsdScalarTextHelper::value(h, SOAP_SERIALIZATION_ERROR);
-            rh."^value^" = XsdDocumentValueHelper::serializeValue(simpleType, nsc, h, omitType);
+            # The containing complex type owns xsi:type. Its simple content is
+            # text with optional lexical namespace bindings, never a nested XML value.
+            auto content = XsdDocumentValueHelper::serializeValue(simpleType, nsc, h, True);
+            if (content.typeCode() == NT_HASH) {
+                rh += content;
+            } else {
+                rh."^value^" = content;
+            }
         } else if (cx_type != XET_NONE) {
             if (!mixed) {
                 h = XsdScalarTextHelper::elementContent(h, sprintf("element-only type %Y", getName()),
@@ -20581,7 +20658,7 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
 
         #printf("DEBUG name: %y desc: %y\n", name, descriptive_name);
         if (name && !omitType && !descriptive_name) {
-            rh."^attributes^" += ("xsi:type": nsc.getTargetNamespaceOutputPrefix() + ":" + name) + ah;
+            rh."^attributes^" += XsdDocumentValueHelper::typeAttributes(self, nsc) + ah;
         } else if (ah) {
             rh."^attributes^" += ah;
         }
@@ -20720,11 +20797,48 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
         }
     }
 
+    #! decodes complex content after selecting its explicitly named component
+    /** @param en the containing element name
+        @param tmap the resolved schema types indexed by expanded name
+        @param mrh SOAP reference values, when applicable
+        @param oval XML content with its instance namespace context
+        @return the native record or simple-content value
+        @throw SOAP-DESERIALIZATION-ERROR unresolved or incompatible type, invalid attributes or content
+        @note Instance type QNames resolve in the element's namespace scope before derived fields are checked.
+        @par Example
+        Decode a shipment extension's required tracking attribute using the selected extension's declaration.
+    */
     auto deserializeValue(string en, hash<string, XsdAbstractType> tmap, *hash<auto> mrh, auto oval) {
         XsdQNameNamespaceScope qname_scope(oval.typeCode() == NT_HASH ? oval."^attributes^" : NOTHING);
         #printf("XsdComplexType::deserialize() name: %y val: %y required: %y\n", getName(), oval, required);
         if (exists array)
             return array.deserializeValue(en, tmap, mrh, oval);
+
+        # Select the actual component before validating its fields or attributes.
+        # The instance's QName context is independent of the schema's prefixes.
+        hash<auto> instance_attributes = XsdBase::getExpandedAttributes(oval."^attributes^");
+        if (exists instance_attributes{type_qname(XSI_NS, "type")}) {
+            XsdQNameValue selected_name = XsdQNameValueHelper::resolve(
+                instance_attributes{type_qname(XSI_NS, "type")}, SOAP_DESERIALIZATION_ERROR,
+                QNameInputNamespaces);
+            string identity = type_qname(selected_name.getNamespaceUri(), selected_name.getLocalName());
+            string own_identity = type_qname(ons ? nsc.getOutputNamespaceUri(ons) : "", name);
+            if (!hasRealName() || identity != own_identity) {
+                *XsdAbstractType selected = tmap{identity};
+                if (!selected) {
+                    throw SOAP_DESERIALIZATION_ERROR, sprintf("unknown explicit type %Y for element %Y", identity, en);
+                }
+                try {
+                    selected.checkExtends(self, en);
+                } catch (hash<ExceptionInfo> ex) {
+                    if (ex.err == SOAP_SERIALIZATION_ERROR) {
+                        rethrow SOAP_DESERIALIZATION_ERROR, ex.desc, ex.arg;
+                    }
+                    rethrow;
+                }
+                return selected.deserializeValue(en, tmap, mrh, oval);
+            }
+        }
 
         if (!exists oval) {
             if (!required && !attrs) {
@@ -20793,26 +20907,6 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
 
         if (attr) {
             remove val."^attributes^";
-
-            # ensure types match
-            *string tn = attr."xsi:type";
-            if (exists tn) {
-                (*string ns, *string tname) = tn =~ x/(.*):(.*)/;
-                if (exists tname)
-                    tn = tname;
-                if (tn != name) {
-                    # check for compatible extension
-                    *XsdAbstractType t = tmap_try_get(tmap, tn);
-                    #printf("DEBUG: type provided %y: %y\n", tn, t.name);
-                    if (t) {
-                        t.checkExtends(self, en);
-                        return t.deserializeValue(en, tmap, mrh, oval);
-                    }
-
-                    throw SOAP_DESERIALIZATION_ERROR, sprintf("expecting ComplexType type %y for element %y, got %y",
-                        getName(), en, tn);
-                }
-            }
         }
 
         if (val.typeCode() == NT_HASH) {

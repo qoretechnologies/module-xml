@@ -1282,3 +1282,29 @@ and [Particle Validation Rules](https://www.w3.org/TR/xmlschema-1/#cvc-particle)
 Retained XML is required when an application needs the original interleaving of
 distinct field names. The existing P6 test for selecting between two SOAP
 bindings in one description remains a visible failure until that phase.
+
+### Native type identity and annotation checks
+
+`qore -b --enable-debug test/wsdl-type-identity.qtest` checks explicit native
+`^type^` / `^val^` wrappers for builtin, named, anonymous, list, union and complex
+types. It covers identity across canonical builtin registries, unrelated
+same-local-name components, both annotation settings, nil and empty values,
+complete occurrence limits, derived attributes, malformed/unbound instance type
+QNames, cancellation propagation, conversion counts and synchronized callers.
+Type annotations are independently schema-validated with `XmlReader`.
+
+`python3 test/wsdl-interop/test_type_identity.py -v` exercises both actual SOAP
+bindings, request and response processing, reconstructed services and reuse after
+invalid input. Its 224 explicit rows include 72 required serialization errors
+and 416 outputs checked by the pinned libxml2 and Xerces implementations, with
+separate exact native-value and expanded-type assertions. Full messages and
+detached schema outputs preserve data QName prefixes through final namespace
+allocation, including collisions with the selected type and instance-attribute
+prefixes on the same simple-content element. Non-QName rows additionally exercise low-level explicit annotations;
+the QName rows use the complete XML APIs required by their namespace-allocation
+contract. Set `QORE_EXEC_MODE` to `ast`, `ir`, `jit` or `tiered`.
+
+The implemented identity and immediate complex-dispatch rules are documented in
+[`design/wsdl-type-selection.md`](../../design/wsdl-type-selection.md). Full P5
+derivation controls, selected-type retention, wildcard/mixed/generic content,
+substitution groups and nil/default/fixed behavior remain required by the plan.

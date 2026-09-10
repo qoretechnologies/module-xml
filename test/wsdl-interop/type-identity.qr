@@ -1,0 +1,99 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../../qlib"
+%requires xml
+%requires ../../qlib/WSDL.qm
+%try-module json
+%define NoJson
+%endtry
+%ifdef NoJson
+throw "MISSING-MODULE", "type identity integration requires json";
+%else
+auto sub describe(auto value) {
+    if (value instanceof XsdQNameValue) {
+        return {"uri": value.getNamespaceUri(), "local": value.getLocalName()};
+    }
+    if (value.typeCode() == NT_HASH) {
+        hash<auto> result();
+        foreach string key in (keys value) {
+            result{key} = describe(value{key});
+        }
+        return result;
+    }
+    if (value.typeCode() == NT_LIST) {
+        list<auto> result();
+        foreach auto item in (value) {
+            push result, describe(item);
+        }
+        return result;
+    }
+    return value;
+}
+if (ARGV.size() != 1) {
+    throw "USAGE", "type-identity.qr CASES.json";
+}
+foreach hash<auto> input in (parse_json(ReadOnlyFile::readTextFile(ARGV[0]))) {
+    WebService original(input.wsdl, {"async_only": True});
+    foreach bool copy in (False, True) {
+        WebService ws = copy ? Serializable::deserialize(original.serialize()) : original;
+        WSOperation op = ws.getBindingOperation(input.binding, "submit");
+        foreach bool response in (False, True) {
+            WSMessage message = response ? op.output : op.input;
+            XsdElement root = message.args.firstValue().element;
+            XsdAbstractType selected = input.selected ? ws.findType(input.selected) : root.type;
+            foreach hash<auto> trial in (input.trials) {
+                hash<auto> row = {"case": input.name, "copy": copy, "response": response,
+                    "trial": trial.name, "error": ""};
+                try {
+                    auto value = trial.value;
+                    if (input.qname) {
+                        value{input.qname_field ?? "item"} = new XsdQNameValue("urn:data",
+                            (input.qname_prefix ?? "xsd") + ":Token");
+                    }
+                    if (input.wrap_children) {
+                        XsdComplexType record = cast<XsdComplexType>(selected);
+                        foreach XsdParticle terminal in (record.getParticle().getChildren()) {
+                            XsdElement child = terminal.getElement();
+                            auto supplied = value{child.name};
+                            if (child.maxOccurs != 1) {
+                                value{child.name} = map ("^type^": child.type, "^val^": $1), supplied;
+                            } else {
+                                value{child.name} = {"^type^": child.type, "^val^": supplied};
+                            }
+                        }
+                    }
+                    hash<auto> wrapped = {"^type^": selected, "^val^": value};
+                    row.xml = (response ? op.serializeResponse({"body": wrapped}, NOTHING, NOTHING, NOTHING,
+                        NOTHING, NOTHING, input.binding) : op.serializeRequest({"body": wrapped}, NOTHING,
+                        NOTHING, NOTHING, NOTHING, NOTHING, input.binding)).body;
+                    row.native = describe(response ? op.deserializeResponse(parse_xml(row.xml, XPF_PRESERVE_ORDER),
+                        input.binding) : op.deserializeRequest(parse_xml(row.xml, XPF_PRESERVE_ORDER), input.binding));
+                    # Complete schema output exercises the same wrapper with independent namespace allocation.
+                    row.detached = ws.serializeXmlValue(root.getNamespaceUri(), root.name, wrapped).getXml();
+                    if (!input.qname) {
+                        Namespaces output({});
+                        auto converted = root.serializeValue(output, wrapped, False, root.name, "test");
+                        hash<auto> content();
+                        if (converted.typeCode() == NT_HASH) {
+                            content = converted;
+                        } else {
+                            content."^value^" = converted;
+                        }
+                        string name = root.getXmlName(output);
+                        content."^attributes^" += output.getOutputNamespaceHash();
+                        row.annotated = make_xml({name: content});
+                    }
+                } catch (hash<ExceptionInfo> ex) {
+                    if (ex.err == "THREAD-CANCELLED" || ex.err == "PROGRAM-INTERRUPTED") {
+                        rethrow;
+                    }
+                    row.error = ex.err;
+                    row.description = ex.desc;
+                }
+                printf("%s\n", make_json(row));
+            }
+        }
+    }
+}
+%endif

@@ -1,0 +1,344 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires xml
+%requires ../qlib/WSDL.qm
+%exec-class TypeIdentityTest
+
+class InterruptIdentityType inherits XsdBaseType {
+    public {
+        *string error;
+        int calls = 0;
+    }
+    constructor(Namespaces namespaces) : XsdBaseType("int", namespaces) {
+    }
+    auto serializeValue(Namespaces namespaces, auto value, *softbool omitType) {
+        ++calls;
+        if (error) {
+            throw error, "interrupted explicit type conversion";
+        }
+        return XsdBaseType::serializeValue(namespaces, value, omitType);
+    }
+}
+
+class TypeIdentityTest inherits QUnit::Test {
+    private {
+        const Xsd = "http://www.w3.org/2001/XMLSchema";
+        const Xsi = "http://www.w3.org/2001/XMLSchema-instance";
+    }
+    constructor() : Test("Explicit XSD type identity", "1.0") {
+        addTestCase("Builtin identity preserves values and valid type annotations", \builtins());
+        addTestCase("Named simple types retain their own identity and facets", \simpleTypes());
+        addTestCase("Occurrence wrappers preserve complete counts and native lists", \occurrences());
+        addTestCase("Independent builtin contexts identify the same XSD component", \contexts());
+        addTestCase("Same local names do not authorize unrelated components", \unrelated());
+        addTestCase("Nil annotations use the selected type namespace", \nilValues());
+        addTestCase("Complex and simple content annotations retain attributes and children", \complexValues());
+        addTestCase("Complex wire type names resolve before derived attribute checks", \dynamicNames());
+        addTestCase("Explicit conversion propagates cancellation and permits reuse", \cancellation());
+        addTestCase("Concurrent wrappers leave declaration namespace registries unchanged", \concurrency());
+        addTestCase("Anonymous and generic types preserve legal annotation ownership", \anonymousValues());
+        set_return_value(main());
+    }
+    private string source(string type, string definitions = "", string attributes = "") {
+        return '<xs:schema xmlns:xs="' + Xsd + '">' + definitions
+            + '<xs:element name="value" type="' + type + '" ' + attributes + '/></xs:schema>';
+    }
+    private auto emit(XsdSchema schema, auto value, bool omit = True, *XsdAbstractType selected) {
+        XsdElement element = schema.getElement("", "value");
+        return element.serializeValue(schema.nsc.copy(), {"^type^": selected ?? element.type, "^val^": value},
+            omit, "value", "test");
+    }
+    private string document(XsdSchema schema, auto value, bool omit, *XsdAbstractType selected) {
+        XsdElement element = schema.getElement("", "value");
+        Namespaces output({});
+        auto content = element.serializeValue(output, {"^type^": selected ?? element.type, "^val^": value},
+            omit, "value", "test");
+        hash<auto> root();
+        if (content.typeCode() == NT_HASH) {
+            root = content;
+        } else {
+            root."^value^" = content;
+        }
+        root."^attributes^" += output.getOutputNamespaceHash();
+        return make_xml({"value": root});
+    }
+    private valid(string xml, string schema) {
+        XmlReader reader(xml);
+        reader.schemaValidateString(schema);
+        while (reader.read()) {
+        }
+    }
+    private check(string text, auto value, string lexical, string type) {
+        XsdSchema original(text);
+        foreach XsdSchema schema in (original, Serializable::deserialize(original.serialize())) {
+            foreach bool omit in (True, False) {
+                string xml = document(schema, value, omit);
+                valid(xml, text);
+                hash<auto> parsed = parse_xml(xml);
+                auto root = parsed.value;
+                assertEq(lexical, string(root.typeCode() == NT_HASH ? root."^value^" : root));
+                hash<auto> attributes = root."^attributes^" ?? {};
+                hash<string, string> bindings();
+                foreach string key in (keys attributes) {
+                    if (key.startsWith("xmlns:")) {
+                        bindings{key.substr(6)} = attributes{key};
+                    }
+                }
+                string instance = "";
+                foreach string key in (keys attributes) {
+                    list<string> parts = key.split(":");
+                    if (parts.size() == 2 && bindings{parts[0]} == Xsi && parts[1] == "type") {
+                        instance = attributes{key};
+                    }
+                }
+                if (omit) {
+                    assertEq("", instance);
+                } else {
+                    XsdQNameValue name = XsdQNameValue::fromLexical(instance, bindings);
+                    assertEq(type.startsWith("xs:") ? Xsd : "", name.getNamespaceUri());
+                    assertEq(type.startsWith("xs:") ? type.substr(3) : type, name.getLocalName());
+                }
+            }
+        }
+    }
+    builtins() {
+        foreach list<auto> row in (("xs:int", 17, "17"), ("xs:boolean", False, "false"),
+                ("xs:decimal", "123456789012345678901234567890.012300", "123456789012345678901234567890.012300"),
+                ("xs:string", "  kept \t text  ", "  kept \t text  "), ("xs:string", "", ""),
+                ("xs:anySimpleType", "  kept  ", "  kept  "), ("xs:token", " a\t b ", "a b"),
+                ("xs:integer", "999999999999999999999999999999999999", "999999999999999999999999999999999999"),
+                ("xs:unsignedLong", "18446744073709551615", "18446744073709551615"),
+                ("xs:float", "INF", "INF"), ("xs:double", "-INF", "-INF"),
+                ("xs:date", "2000-02-29Z", "2000-02-29Z"),
+                ("xs:hexBinary", new XsdBinaryValue("hexBinary", "00ff"), "00ff"),
+                ("xs:base64Binary", new XsdBinaryValue("base64Binary", "AP8="), "AP8="),
+                ("xs:NMTOKENS", " a  b ", "a b")) {
+            check(source(row[0]), row[1], row[2], row[0]);
+        }
+        foreach list<auto> row in (("xs:int", "2147483648"), ("xs:boolean", "yes"),
+                ("xs:decimal", "1e2"), ("xs:unsignedLong", "18446744073709551616"),
+                ("xs:float", "infinity"), ("xs:date", "2001-02-29"),
+                ("xs:hexBinary", {"child": 1}), ("xs:base64Binary", {"child": 1})) {
+            XsdSchema schema(source(row[0]));
+            foreach bool omit in (True, False) {
+                assertThrows("SOAP-SERIALIZATION-ERROR", \emit(), (schema, row[1], omit));
+            }
+        }
+    }
+    simpleTypes() {
+        foreach list<string> row in (("Small", '<xs:restriction base="xs:int"><xs:maxInclusive value="9"/>'
+                '</xs:restriction>', "7", "10"),
+                ("Tokens", '<xs:list itemType="xs:int"/>', "1 2", "1 x"),
+                ("Choice", '<xs:union memberTypes="xs:int xs:boolean"/>', "false", "invalid")) {
+            string text = source(row[0], '<xs:simpleType name="' + row[0] + '">' + row[1] + '</xs:simpleType>');
+            check(text, row[0] == "Tokens" ? (1, 2) : row[2], row[2], row[0]);
+            XsdSchema schema(text);
+            foreach bool omit in (True, False) {
+                assertThrows("SOAP-SERIALIZATION-ERROR", \emit(), (schema, row[3], omit));
+            }
+        }
+    }
+    occurrences() {
+        XsdSchema schema('<xs:schema xmlns:xs="' + Xsd + '"><xs:complexType name="Record"><xs:sequence>'
+            '<xs:element name="item" type="xs:int" minOccurs="2" maxOccurs="3"/>'
+            '</xs:sequence></xs:complexType></xs:schema>');
+        XsdElement child = cast<XsdComplexType>(schema.findType("Record")).getParticle().getChildren()[0].getElement();
+        foreach bool omit in (True, False) {
+            auto repeated = child.serializeValue(schema.nsc.copy(), {"^type^": child.type, "^val^": (1, 2)},
+                omit, "item", "Record");
+            assertEq(2, repeated.size());
+            assertEq("1", string(omit ? repeated[0] : repeated[0]."^value^"));
+            assertEq("2", string(omit ? repeated[1] : repeated[1]."^value^"));
+            auto single = child.serializeOccurrence(schema.nsc.copy(), {"^type^": child.type, "^val^": 3},
+                omit, "item", "Record");
+            assertEq("3", string(omit ? single : single."^value^"));
+            assertThrows("SOAP-SERIALIZATION-ERROR", \child.serializeValue(), (schema.nsc.copy(),
+                {"^type^": child.type, "^val^": (1, 2, 3, 4)}, omit, "item", "Record"));
+            assertThrows("SOAP-SERIALIZATION-ERROR", \child.serializeValue(), (schema.nsc.copy(),
+                {"^type^": child.type, "^val^": (1,)}, omit, "item", "Record"));
+        }
+        assertEq(2, child.minOccurs);
+        assertEq(3, child.maxOccurs);
+        string text = source("Tokens", '<xs:simpleType name="Tokens"><xs:list itemType="xs:int"/></xs:simpleType>');
+        check(text, (1, 2), "1 2", "Tokens");
+        check(text, (), "", "Tokens");
+    }
+    contexts() {
+        string text = source("xs:int");
+        XsdSchema first(text);
+        XsdSchema second('<s:schema xmlns:s="' + Xsd + '" targetNamespace="urn:other"/>');
+        XsdBaseType selected = second.nsc.getBaseType("int");
+        assertFalse(selected === first.getElement("", "value").type);
+        foreach bool omit in (True, False) {
+            valid(document(first, 17, omit, selected), text);
+            assertEq(emit(first, 17, omit), emit(first, 17, omit, selected));
+        }
+    }
+    unrelated() {
+        XsdSchema declared(source("xs:int"));
+        XsdSchema named(source("int", '<xs:simpleType name="int"><xs:restriction base="xs:string"/></xs:simpleType>'));
+        XsdBaseType wrong_namespace("int", new Namespaces({"xmlns:p": "urn:other"}), "p");
+        foreach XsdAbstractType selected in (named.findType("int"), wrong_namespace, declared.nsc.getBaseType("string")) {
+            assertThrows("SOAP-SERIALIZATION-ERROR", \emit(), (declared, 1, True, selected));
+        }
+        XsdSchema base(source("Base", '<xs:complexType name="Base"><xs:sequence><xs:element name="a"'
+            ' type="xs:int"/></xs:sequence></xs:complexType>'));
+        XsdSchema other('<xs:schema xmlns:xs="' + Xsd + '" xmlns:t="urn:other" targetNamespace="urn:other">'
+            '<xs:complexType name="Base"/><xs:complexType name="Derived"><xs:complexContent>'
+            '<xs:extension base="t:Base"/></xs:complexContent></xs:complexType></xs:schema>');
+        assertThrows("SOAP-SERIALIZATION-ERROR", \emit(), (base, {}, True, other.findType("Derived")));
+    }
+    nilValues() {
+        foreach string type in ("xs:int", "Named") {
+            string text = source(type, type == "Named" ? '<xs:simpleType name="Named"><xs:restriction'
+                ' base="xs:int"/></xs:simpleType>' : "", 'nillable="true"');
+            XsdSchema schema(text);
+            foreach bool omit in (True, False) {
+                string xml = document(schema, NOTHING, omit);
+                valid(xml, text);
+                assertEq("true", parse_xml(xml).value."^attributes^"."xsi:nil");
+            }
+        }
+    }
+    complexValues() {
+        foreach bool simple in (False, True) {
+            string attributes = '<xs:attribute name="unit" type="xs:string" use="required"/>';
+            string content = simple ? '<xs:simpleContent><xs:extension base="xs:int">' + attributes
+                + '</xs:extension></xs:simpleContent>' : '<xs:sequence><xs:element name="item" type="xs:int"/>'
+                    '</xs:sequence>' + attributes;
+            string text = source("Record", '<xs:complexType name="Record">' + content + '</xs:complexType>');
+            XsdSchema original(text);
+            foreach XsdSchema schema in (original, Serializable::deserialize(original.serialize())) {
+                foreach bool omit in (True, False) {
+                    hash<auto> value();
+                    value."^attributes^" = {"unit": "kg"};
+                    value{simple ? "^value^" : "item"} = 7;
+                    string xml = document(schema, value, omit);
+                    valid(xml, text);
+                    hash<auto> root = parse_xml(xml).value;
+                    assertEq("kg", root."^attributes^".unit);
+                    auto scalar = simple ? root."^value^" : root.item;
+                    assertEq("7", string(scalar.typeCode() == NT_HASH ? scalar."^value^" : scalar));
+                    assertEq(omit ? NOTHING : "Record", root."^attributes^"."xsi:type");
+                    assertThrows("SOAP-SERIALIZATION-ERROR", \document(), (schema,
+                        simple ? {"^value^": 7} : {"item": 7}, omit));
+                }
+            }
+        }
+    }
+    private auto decode(XsdSchema schema, string xml) {
+        hash<auto> parsed = XsdBase::expandElementNamespaces(parse_xml(xml, XPF_PRESERVE_ORDER));
+        return schema.getElement("urn:types", "value").deserializeValue(schema.getTypeMap(), NOTHING,
+            parsed.firstValue(), True);
+    }
+    dynamicNames() {
+        string text = '<xs:schema xmlns:xs="' + Xsd + '" xmlns:t="urn:types" targetNamespace="urn:types">'
+            '<xs:complexType name="Record"><xs:sequence><xs:element name="item" type="xs:int"/>'
+            '</xs:sequence></xs:complexType><xs:complexType name="Derived"><xs:complexContent>'
+            '<xs:extension base="t:Record"><xs:attribute name="unit" use="required"/></xs:extension>'
+            '</xs:complexContent></xs:complexType><xs:complexType name="Unrelated"/>'
+            '<xs:element name="value" type="t:Record"/></xs:schema>';
+        XsdSchema original(text);
+        string start = '<t:value xmlns:t="urn:types" xmlns:i="' + Xsi + '" xmlns:x="urn:wrong" i:type="';
+        foreach XsdSchema schema in (original, Serializable::deserialize(original.serialize())) {
+            assertEq({"item": 7}, decode(schema, start + 't:Record"><item>7</item></t:value>'));
+            string derived = start + 't:Derived" unit="kg"><item>7</item></t:value>';
+            valid(derived, text);
+            assertEq({"item": 7, "^attributes^": {"unit": "kg"}}, decode(schema, derived));
+            assertEq({"item": 7}, decode(schema, start + 'Record" xmlns="urn:types">'
+                '<item xmlns="">7</item></t:value>'));
+            foreach string selected in ("x:Record", "x:Derived", "t:Unrelated", "t:Missing", "missing:Record",
+                    "Record", "t:Record:extra", "", " t:Record extra ") {
+                assertThrows("SOAP-DESERIALIZATION-ERROR", \decode(),
+                    (schema, start + selected + '"><item>7</item></t:value>'));
+            }
+            assertThrows("SOAP-DESERIALIZATION-ERROR", \decode(),
+                (schema, start + 't:Derived"><item>7</item></t:value>'));
+            assertEq({"item": 7}, decode(schema, start + 't:Record"><item>7</item></t:value>'));
+        }
+    }
+    cancellation() {
+        XsdSchema schema(source("xs:int"));
+        InterruptIdentityType selected(schema.nsc);
+        XsdElement element = schema.getElement("", "value");
+        element.type = selected;
+        foreach string error in ("PROGRAM-INTERRUPTED", "THREAD-CANCELLED") {
+            selected.error = error;
+            assertThrows(error, \emit(), (schema, 7, True));
+            selected.error = NOTHING;
+            assertEq(7, emit(schema, 7));
+        }
+        assertEq(4, selected.calls);
+        assertThrows("SOAP-SERIALIZATION-ERROR", \emit(), (schema, 7, True, new InterruptIdentityType(schema.nsc)));
+        assertEq(4, selected.calls);
+        assertEq(7, emit(schema, 7));
+        assertEq(5, selected.calls);
+    }
+    concurrency() {
+        XsdSchema schema(source("xs:int"));
+        auto namespaces = schema.nsc.getOutputNamespaceHash();
+        Qore::Thread::Queue ready();
+        Qore::Thread::Queue start();
+        Qore::Thread::Queue results();
+        Qore::Thread::Counter running();
+        on_exit {
+            for (int index = 0; index < 4; ++index) {
+                start.push(True);
+            }
+            assertEq(0, running.waitForZero(30s));
+        }
+        for (int index = 0; index < 4; ++index) {
+            running.inc();
+            background sub() {
+                on_exit running.dec();
+                try {
+                    ready.push(True);
+                    start.get(30s);
+                    string xml = document(schema, 17, False);
+                    valid(xml, source("xs:int"));
+                    results.push({"xml": xml});
+                } catch (hash<ExceptionInfo> ex) {
+                    results.push({"error": ex});
+                }
+            }();
+        }
+        for (int index = 0; index < 4; ++index) {
+            assertTrue(ready.get(30s));
+        }
+        for (int index = 0; index < 4; ++index) {
+            start.push(True);
+        }
+        for (int index = 0; index < 4; ++index) {
+            hash<auto> row = results.get(30s);
+            assertEq(NOTHING, row.error);
+            assertEq("17", parse_xml(row.xml).value."^value^");
+        }
+        assertEq(namespaces, schema.nsc.getOutputNamespaceHash());
+    }
+    anonymousValues() {
+        string text = '<xs:schema xmlns:xs="' + Xsd + '"><xs:element name="value"><xs:simpleType>'
+            '<xs:restriction base="xs:int"><xs:maxInclusive value="9"/></xs:restriction>'
+            '</xs:simpleType></xs:element></xs:schema>';
+        XsdSchema original(text);
+        foreach XsdSchema schema in (original, Serializable::deserialize(original.serialize())) {
+            foreach bool omit in (True, False) {
+                string xml = document(schema, 7, omit);
+                valid(xml, text);
+                assertEq(NOTHING, parse_xml(xml).value."^attributes^"."xsi:type");
+                assertThrows("SOAP-SERIALIZATION-ERROR", \emit(), (schema, 10, omit));
+            }
+        }
+        text = source("xs:anyType");
+        XsdSchema generic(text);
+        foreach bool omit in (True, False) {
+            string xml = document(generic, 17, omit);
+            valid(xml, text);
+            hash<auto> root = parse_xml(xml).value;
+            assertEq("17", root."^value^");
+            assertEq("xsd:long", root."^attributes^"."xsi:type");
+        }
+    }
+}

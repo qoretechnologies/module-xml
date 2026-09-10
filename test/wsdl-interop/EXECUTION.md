@@ -6381,3 +6381,84 @@ runner diagnostic and the two retained P6 failures. P5 is next, including the
 wildcard/mixed/dynamic/nil semantics and the already tracked wildcard example
 failure. P6-P9 retain their complete agreed scope and outstanding environment/CI
 requirements. Concurrent main Qore development remains untouched.
+
+
+## P5-01 — Native type identity and annotation ownership (complete increment)
+
+Parent: `ca181ff` (P4 acceptance). P1-P4 remain complete; P5 is now in progress.
+The [native wrapper finding](p5-native-type-wrapper-finding.md) is resolved for
+component identity. Full P5 derivation, substitution and content acceptance are
+still required; no broader capability is declared complete by this increment.
+
+### Root causes and implemented behavior
+
+- The abstract compatibility check rejected the declaration's own simple type.
+  Identity now accepts the same resolved object and equivalent canonical XSD
+  builtin definitions across namespace registries; custom conversion classes and
+  foreign user components are not equated merely by name. Equivalent builtins
+  normalize to the declaration before ordinary conversion/count checks.
+- Element form incorrectly selected the namespace of `xsi:type`, and delegated
+  converters could overwrite the selected annotation. Owned type namespaces are
+  translated into the caller's output registry; metadata merges retain other
+  attributes, comments and occurrence/value boundaries. Anonymous simple types
+  cannot emit their base/member as their own type; existing scalar `anyType`
+  inference keeps its runtime annotation.
+- Annotated complex simple content nested a value hash inside `^value^` and
+  failed XML generation. The scalar and lexical bindings now contribute directly
+  to the containing complex element, which owns its type annotation.
+- Complex selection compared extension local names and validated base attributes
+  before dispatching an explicit type. Direct extensions compare resolved bases;
+  wire QNames resolve in the instance scope before derived attributes/content are
+  checked. Unknown, malformed, unbound and incompatible selections fail with the
+  deserialization error category. Scoped namespace state is restored on failure.
+
+Normative references: XSD 1.0 Structures [simple type identity, clause 1](https://www.w3.org/TR/2004/REC-xmlschema-1-20041028/#cos-st-derived-ok),
+[complex derivation and its component-identity note](https://www.w3.org/TR/2004/REC-xmlschema-1-20041028/#cos-ct-derived-ok),
+[Element Locally Valid](https://www.w3.org/TR/2004/REC-xmlschema-1-20041028/#cvc-elt)
+and section 3.14.7 builtin definitions; second-edition errata were consulted.
+The [implemented design](../../design/wsdl-type-selection.md) describes the
+native component contract, annotation ownership, namespace allocation and bounds.
+
+### Final verification and audit
+
+The [inventory](P5-01-validation.json) and [62-item audit](audits/P5-01-type-identity.md)
+record 19 Pass / 43 N/A / 0 Fail and exact hashes/commands:
+
+- Full Qore gate: 112 suites, 1144 cases, 56907 reported assertions; no warnings.
+  Three pre-existing, intentionally caught SOAP comparator negatives are recorded
+  within their successful suite and are not new failures.
+- Focused identity suite: 11 cases/342 assertions in AST, IR, JIT, tiered and AOT.
+  Tests include scalar precision, named/anonymous types, list/union/occurrence
+  boundaries, nil, complex/simple content, same-local-name collisions, derived
+  required attributes, invalid instance QNames, cancellation and synchronized reuse.
+- Final independent matrix: 224 rows, 72 required errors and 416 validated outputs
+  in each of the four source modes plus compiled WSDL. Actual SOAP 1.1/1.2 bindings,
+  both directions, reconstruction and post-error reuse are covered. Same-element
+  QName collisions remap both type and instance prefixes without changing values;
+  prefix spelling alone is not a conformance failure. Non-QName cases also force
+  low-level annotations; complete XML APIs handle QName namespace allocation.
+- 1189-variant AOT build, affected docs, executed invoice example, 16 survey harness
+  tests, complete QName context matrix and independent particle-value matrix pass.
+  Native XML/libqore hashes are unchanged; no C++ edits, new Valgrind run or install.
+- Both-version survey: all 2455 original current rows/counts unchanged. Isolated
+  strict ledger: all 142 descriptions/1376 directions retain their passing selected
+  outcomes; 68 broader failures remain unchanged. Value accounting remains
+  1264 ok / 0 failed / 196 unreachable / 812 unassessed / 0 missing / 0 skipped.
+
+The initial supplementary runner allowed only 240 seconds for a broad QName test
+whose recorded acceptance runtime was about seven minutes. That runner timeout
+and the dependent gate's missing inventory are preserved as failed orchestration,
+not passes. The corrected aggregate limit is 900 seconds, with unchanged internal
+300/180-second child limits; the final test passes in 360.851 seconds. A misspelled
+optional suite path was corrected and is superseded by the full 112-suite gate.
+
+Both remotes were fetched and had no incoming commits. The main Qore checkout is
+clean at `1c63ff2c5`, including the other developer's AOT module-lifetime fix and
+our earlier `f1dd175f0`/`72890415a` fixes. This increment makes no main Qore edits
+and performs no push. The isolated tested runtime remains identified by its
+artifact hashes, independently of that concurrent main checkout update.
+
+Next: retain/enforce per-schema and per-component `block`/`final` defaults and full
+resolved type derivation, then complete the remaining P5 content/substitution/nil
+and identity requirements. P6-P9, the known dual-binding diagnostic and broad
+P9 docs/debug-info findings retain their full plan ownership.
