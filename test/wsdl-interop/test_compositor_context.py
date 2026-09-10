@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Independent compositor namespace checks and a visible P4 choice diagnostic.
+"""Independent compositor namespace and nested-choice rejection checks.
 
 Copyright (C) 2026 Qore Technologies, s.r.o.
 """
@@ -95,7 +95,7 @@ class CompositorContextTest(unittest.TestCase):
             self.assertTrue(result["ok"], (name, result))
 
     def test_nested_choice_exclusivity_requirement_p4(self):
-        # P4 owns the flattened particle model. Keep the current incorrect acceptance visible.
+        # Whole-particle decoding rejects members from both nested alternatives.
         source = schema('''<xs:choice><xs:choice><xs:sequence>
           <xs:element name="flag" type="xs:boolean"/><xs:element name="count" type="xs:int"/>
           </xs:sequence><xs:element name="text" type="xs:string"/></xs:choice></xs:choice>''')

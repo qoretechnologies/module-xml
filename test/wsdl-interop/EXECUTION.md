@@ -6008,3 +6008,73 @@ conversion, independent field cardinality metadata and particle-driven samples;
 its four compositor runtime failures remain visible. P5–P9 retain the full original
 scope, including mandatory Python/corpus/peer CI, supported platforms and the
 previously recorded documentation/debug-information diagnostics.
+
+## P4-08 — Ordered child value conversion (2026-09-10)
+
+P4-07 is committed as `09f5f68`. Complex-content decoding now matches the complete
+ordered child-name word before projecting native fields. Each position uses its
+selected terminal declaration and converts one occurrence without mutating shared
+limits. Alternating groups, repeated list-valued/nil children, shared group
+continuations and extension ordering retain the existing native field contract.
+Ambiguous direct local names require expanded identities; malformed names, empty
+occurrence lists and unknown XML metadata are rejected. SOAP transport parsing
+preserves order, and optional inner content no longer makes a required wrapper
+optional.
+
+Retained `XsdXmlValue` validation checks decode/encode constraints per child and
+attribute while preserving original lexical text and order. A copied namespace
+registry belongs to a thread-local validation scope restored on exit. Custom
+encode checks remain active, with native reuse after failure and four concurrent
+callers covered. All four compositor runtime negatives are now correctly rejected.
+The original `SoapUiReq_1` remains unchanged and is tested as invalid: its extension
+members are out of order and its `issue3367` wrapper lacks required `i3367`. A
+separately identified derivative fixes only those two defects for the existing
+value assertions; provenance is recorded in the README.
+
+An AOT prerequisite surfaced when `XsdParticle::concatenate()` invoked its private
+typed-list constructor from `XsdComplexType` with member operands. The constructor
+was present but runtime overload selection used the unrelated caller's class.
+Qore **`72890415a`** records/restores the lexical class at constructor dispatch,
+including null global context. It was committed to main Qore `develop`, which is
+clean; nothing was pushed. Its full audit has **18 Pass / 44 N/A / 0 Fail**.
+All 13 affected core suites pass (nine QUnit suites: 83 cases/319 assertions, plus
+four standalone regression scripts), including AST/IR/JIT/tiered, stripped AOT
+O0/O3, access denial, exceptions/reuse and child Programs. The isolated debug
+runtime was synchronized with current native sources, including upstream container
+retyping/deferred-constant fixes; its git-version string identifies the old snapshot,
+so the inventory also records source parity and the actual tested binary hash.
+
+The final XML gate passes **108 suites / 1,087 cases / 54,665 reported assertions**
+without warnings. Per execution mode, particle values, XML consumers and element
+collisions pass **33 cases / 706 assertions**. The independent matrix checks
+**248 rows / 124 input verdicts / 112 outputs per mode**, covering original and
+reconstructed schemas, actual SOAP 1.1 and 1.2 bindings, both directions, exact
+native values and retained lexical order. The AOT WSDL build contains **1,157
+variants**, and its value suite passes **11 cases / 107 assertions**. That suite
+and the reduced core constructor scenario both have **zero Valgrind errors and
+zero lost bytes**, without suppressions. Qore debugging is enabled, signals are
+disabled for tests, and PCRE2 JIT is disabled only for Valgrind. Affected docs and
+three executed design examples pass; the survey harness has 15 passing methods
+and the compositor harness has two.
+
+The both-version baseline has **2,443 rows**, with all original input/source hashes
+preserved and no formerly passing-stage regression. **32 decoding failures now
+pass**; their newly reachable native serialization failures remain visible. The
+full coverage ledger still has **293 cases / 144 failures**, and strict coverage
+passes **130 descriptions / 1,260 directions**. Exactly 64 failure records move
+from decode to serialize: 44 P4, 16 P5, and four original P2 primary labels for
+`MixedComplexContent`, whose runtime ownership was already explicitly assigned
+P5. Current stage accounting has **860 unassessed value/infoset directions**.
+The strict aggregate worker initially exceeded its unchanged 60-second deadline
+under concurrent gate load. The complete unchanged command passed in isolation
+in 66.316 seconds including validators; no timeout, filter, case or criterion
+was changed. Both attempts remain in `/tmp/wsdl-p4-08-` logs.
+
+The [inventory](P4-08-validation.json) records complete suite summaries, mode and
+oracle counts, source/binary hashes, changed failure stages and the core commit.
+The [full XML audit](audits/P4-08-ordered-value-conversion.md) resolves all 62 checks:
+**19 Pass / 43 N/A / 0 Fail**. The known 22 broad documentation diagnostics and
+GCC/dependency debug-information diagnostics remain explicit P9 work. No install
+or push was performed. P4 continues with native particle serialization, independent
+field-cardinality metadata and particle-driven samples; P5-P9 retain the complete
+original scope.

@@ -63,6 +63,7 @@ class XmlConsumersTest inherits QUnit::Test {
         addTestCase("Validation preserves cancellation exceptions", \validationCancellation());
         addTestCase("SOAP containers require compatible inherited XML contexts", \contextConflicts());
         addTestCase("Explicit compatibility headers cannot replace retained context", \compatibilityContext());
+        addTestCase("Ordered repeated groups retain values through both SOAP bindings and HTTP", \orderedGroups());
         set_return_value(main());
     }
 
@@ -501,6 +502,58 @@ class XmlConsumersTest inherits QUnit::Test {
                 assertEq(7, native_result.count);
                 assertEq(True, native_result.flag);
                 assertEq("q:Account", native_result.Out.context);
+            }
+        }
+    }
+
+    orderedGroups() {
+        string model = '<xs:choice minOccurs="2" maxOccurs="4"><xs:sequence>'
+            '<xs:element name="count" type="xs:int"/><xs:element name="flag" type="xs:boolean"/>'
+            '</xs:sequence><xs:element name="label" type="xs:string"/></xs:choice>';
+        string input = '<count>009</count><flag>0</flag><label>middle</label><count>010</count><flag>1</flag>';
+        string output = '<label>first</label><count>007</count><flag>1</flag><label>last</label>';
+        foreach string version in ("11", "12") {
+            WebService original = service(version, model);
+            foreach WebService ws in (original, Serializable::deserialize(original.serialize())) {
+                WSOperation op = ws.getBindingOperation("Soap", "submit");
+                foreach bool response in (False, True) {
+                    string content = response ? output : input;
+                    string xml = send(op, response, value(response, content));
+                    list<string> expected = response ? ("first", "007", "1", "last")
+                        : ("009", "0", "middle", "010", "1");
+                    assertEq(expected, textValues(xml));
+                    XsdXmlValue retained = receive(op, response, xml).body.body;
+                    assertEq(expected, textValues(retained.getXml()));
+                    assertEq(expected, textValues(send(op, response, retained)));
+                    string invalid = replace(xml, '<flag>1</flag>', '');
+                    assertThrows("SOAP-DESERIALIZATION-ERROR", \receive(), (op, response, invalid));
+                }
+            }
+            foreach bool xml_handler in (False, True) {
+                WebService ws = service(version, model);
+                WSOperation op = ws.getBindingOperation("Soap", "submit");
+                HttpServer server();
+                on_exit server.stop();
+                SoapHandler handler(new PermissiveAuthenticator());
+                server.setDefaultHandler("soap", handler);
+                XmlConsumerCallback callback({"body": value(True, output)});
+                handler.addMethod(ws, op, \callback.call(), NOTHING, NOTHING, NOTHING, "Service", NOTHING,
+                    NOTHING, "Soap", NOTHING, xml_handler);
+                server.addListener(0);
+                string url = sprintf("http://127.0.0.1:%d/Service", server.getListenerInfo(0).port);
+                SoapClient client({"wsdl": ws, "url": url, "timeout": IoTimeoutMs, "connect_timeout": IoTimeoutMs});
+                hash<auto> request = {"body": value(False, input)};
+                hash<SoapXmlMessageInfo> result = client.callOperation("submit", request, {"xml_values": True});
+                auto observed = callback.observed.pop(IoTimeoutMs);
+                if (xml_handler) {
+                    assertEq(("009", "0", "middle", "010", "1"), textValues(observed.body.body.getXml()));
+                } else {
+                    assertEq({"count": (9, 10), "flag": (False, True), "label": "middle"}, observed);
+                }
+                assertEq(("first", "007", "1", "last"), textValues(result.body.body.getXml()));
+                hash<auto> native_result = client.callOperation("submit", request);
+                callback.observed.pop(IoTimeoutMs);
+                assertEq({"count": 7, "flag": True, "label": ("first", "last")}, native_result);
             }
         }
     }

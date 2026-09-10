@@ -377,8 +377,8 @@ each direction. The worker explicitly selects that binding and operation. Every 
 retained and independently checked with libxml2 and Xerces. Output envelope versions are checked against
 the selected binding; the W3C SOAP 1.2 inputs still exercise a SOAP 1.1 contract.
 
-`--strict` requires the explicit [strict-selection.json](strict-selection.json) to pass: 126 WSDLs,
-including all 14 source-invalid descriptions, and 1,172 selected message/direction combinations. Positive
+`--strict` requires the explicit [strict-selection.json](strict-selection.json) to pass: 130 WSDLs,
+including all 14 source-invalid descriptions, and 1,260 selected message/direction combinations. Positive
 cases require independent exact-value assertions; negative cases require the intended exception category.
 Missing, duplicate, stale, malformed or unclassified entries fail. This selection is deliberately named
 and bounded; it does not turn known implementation failures elsewhere into passing conformance tests.
@@ -401,9 +401,9 @@ values and Xerces checks every document. The already adjudicated old-libxml2
 decimals. Qore 3.0 supplies shortest round-trip native float/number formatting,
 while XML decimal text retains its precision and noncanonical spellings.
 
-[coverage-report.json](coverage-report.json) preserves the complete current ledger, including 196 failed
+[coverage-report.json](coverage-report.json) preserves the complete current ledger, including 144 failed
 requirements assigned to remaining phases. Its stage accounting includes unreachable, missing, skipped and
-unassessed work. In this run 1,268 value/infoset assessments remain unimplemented, explicitly counted as
+unassessed work. In this run 860 value/infoset assessments remain unimplemented, explicitly counted as
 unassessed. Successful schema validation is insufficient to close them. Exact numeric checks now pass
 all eight formerly failing decimal output cases. Decimal attributes, elements and retained decimal
 patterns belong to the strict gate, alongside all thirteen integer builtin families, including original
@@ -1160,3 +1160,15 @@ checks 1,000 complete finite models with 42,630 construction/attribution rows,
 including original/reconstructed graphs and invalid mutations. Every accepted
 child must select the position given by the independently enumerated marked
 language. See the [implemented matcher design](../../design/wsdl-particles.md#declaration-attribution-for-ordered-values).
+
+Ordered value integration is covered by `test/wsdl-particle-values.qtest` and
+`python3 test/wsdl-interop/test_particle_values.py -v`. The Python matrix checks
+whole optional/repeated sequences, alternating and nested choices, all-groups,
+missing members, wrong order and extra occurrences through actual SOAP 1.1/1.2
+bindings in both directions. It accounts for every original/reconstructed row,
+compares typed native values and retained lexical child order, and validates input
+and emitted payloads with pinned libxml2 and Xerces. `wsdl-xml-consumers.qtest`
+exercises these groups over local HTTP with native and retained XML consumers.
+The historical SoapUI request in `soap.qtest` is preserved as an invalid-order
+negative; its explicit derivative reverses the three inherited `issue560` children
+into base-first order and supplies the missing required nillable `i3367` child.

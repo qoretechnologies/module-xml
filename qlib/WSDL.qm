@@ -80,6 +80,9 @@ module WSDL {
     @section wsdlrelnotes WSDL Module Release Notes
 
     @subsection wsdl_0_5_8 WSDL v0.5.8
+    - SOAP decoding validates complete ordered particles and converts each child with its selected declaration;
+      retained XML validation preserves alternating groups while applying decode and encode value checks
+    - SOAP transport parsing preserves child order; optional inner groups no longer make required wrappers optional
     - XsdParticle::attributeElementNames() identifies the terminal declaration for each ordered input child,
       preserving fixed boundaries, group continuations and empty-content acceptance with bounded matching
     - schema construction rejects ambiguous ordered particles using exact counted-group attribution;
@@ -1150,7 +1153,7 @@ public class WSDLLib {
         } else if (WSDLLib::isSOAPMessage(msg) || WSDLLib::isMtomMessage(msg)) {
             hash<auto> xmldata;
             if (msg.body) {
-                xmldata = parse_xml(msg.body);
+                xmldata = parse_xml(msg.body, XPF_PRESERVE_ORDER);
             }
             if (msg.parts) {
                 # For MTOM messages, resolve xop:Include references
@@ -10360,9 +10363,6 @@ public class XsdElement inherits WSDL::XsdTypedData {
             type = new XsdSimpleType(e.simpleType ?? {}, nsc, unresolved, usedocns, sprintf("simpleType for element %Y", name));
         } else if (e.hasKey("complexType")) {
             type = new XsdComplexType(e.complexType, nsc, unresolved, usedocns, sprintf("complexType for element %Y", name));
-            if (!type.isRequired() && !exists a.minOccurs) {
-                minOccurs = 0;
-            }
             if (type.isNillable() && !exists a.nillable) {
                 nillable = True;
             }
@@ -10460,8 +10460,9 @@ public class XsdElement inherits WSDL::XsdTypedData {
         @param tmap the resolved schema type map
         @return the validated native value; the retained XML is not modified
         @throw SOAP-SERIALIZATION-ERROR wrong expanded root, forbidden DOCTYPE or rejected schema content
-        @note Checks both conversion paths: serialization can enforce constraints that decoding does not.
-        General scalar, particle and dynamic-type validation follows the same rules as native values.
+        @note Checks both value conversion paths for each ordered child: serialization can enforce constraints
+        that decoding does not. Complete particles are validated before native field projection; retained XML is
+        not regrouped through a flat record. General scalar and dynamic-type rules follow native conversion.
         @since %WSDL 0.5.8
     */
     auto validateXmlValue(XsdXmlValue value, Namespaces nsc, hash<string, XsdAbstractType> tmap) {
@@ -10482,11 +10483,13 @@ public class XsdElement inherits WSDL::XsdTypedData {
             # Comments do not participate in XSD content-model validation. Keep them in the carrier's
             # public view, while using the same comment-free parser projection as native SOAP decoding.
             hash<auto> expanded = XsdBase::expandElementNamespaces(parse_xml(value.getXml(), XPF_PRESERVE_ORDER));
-            auto native_value = deserializeValue(tmap, NOTHING, expanded{getExpandedName()}, True);
-            # Validation must not publish output-prefix allocations to the shared schema registry.
-            Namespaces validation_namespaces = nsc.copy();
-            serializeValue(validation_namespaces, native_value, True, name, name);
-            return native_value;
+            # Each ordered child receives both value-conversion checks in place.
+            # Re-encoding the flattened native record would group alternating
+            # occurrences and could reject a valid retained XML instance.
+            *Namespaces previous = RetainedXmlValidationNamespaces;
+            on_exit RetainedXmlValidationNamespaces = previous;
+            RetainedXmlValidationNamespaces = nsc.copy();
+            return deserializeValue(tmap, NOTHING, expanded{getExpandedName()}, True);
         } catch (hash<ExceptionInfo> ex) {
             if (ex.err == "PROGRAM-INTERRUPTED" || ex.err == "THREAD-CANCELLED") {
                 rethrow;
@@ -10599,6 +10602,27 @@ public class XsdElement inherits WSDL::XsdTypedData {
     }
 
     auto deserializeValue(hash<string, XsdAbstractType> tmap, *hash<auto> mrh, auto val, bool present) {
+        return deserializeOccurrences(tmap, mrh, val, present, minOccurs, maxOccurs);
+    }
+
+    #! decodes one XML child after its containing particle has checked occurrence constraints
+    /** @param tmap the resolved schema types
+        @param mrh SOAP reference values, if present
+        @param val one child's XML data value
+        @return the child's typed native value
+        @throw SOAP-DESERIALIZATION-ERROR invalid element content or nil/value constraints
+        @note The containing ordered particle validates counts. Shared declaration limits are not modified.
+        @par Example
+        After matching an invoice's ordered children, decode each quantity with its selected declaration;
+        two quantity positions can have different nillability even when their expanded name is the same.
+        @since %WSDL 0.5.8
+    */
+    auto deserializeOccurrence(hash<string, XsdAbstractType> tmap, *hash<auto> mrh, auto val) {
+        return deserializeOccurrences(tmap, mrh, val, True, 1, 1);
+    }
+
+    private auto deserializeOccurrences(hash<string, XsdAbstractType> tmap, *hash<auto> mrh, auto val,
+            bool present, int minOccurs, int maxOccurs) {
         #printf("XsdElement::deserialize() name: %y type: %y (nillable: %y) val: %y present: %y\n", name, type.getName(), type.isNillable(), val, present);
         *hash<auto> a = val."^attributes^";
         if (a)
@@ -11181,6 +11205,9 @@ thread_local *XsdProviderUnionItemCapture ProviderUnionItemCapture;
 
 # Conversion of an element/attribute value has an instance context. These APIs
 # cannot carry DTD declarations; detached simple-type operations remain datatype-only.
+# Scoped to retained XML validation; no namespace allocations reach shared schema state.
+thread_local *Namespaces RetainedXmlValidationNamespaces;
+
 class XsdDocumentValueHelper {
     static auto serializeValue(XsdAbstractType type, Namespaces nsc, auto value, *softbool omitType) {
         XsdDocumentValueCapture capture(type);
@@ -11194,6 +11221,13 @@ class XsdDocumentValueHelper {
         XsdDocumentValueCapture capture(type);
         auto converted = type.deserializeValue(name, tmap, references, value);
         capture.validate(value, converted, SOAP_DESERIALIZATION_ERROR);
+        if (RetainedXmlValidationNamespaces) {
+            *XsdComplexType complex_type = type instanceof XsdComplexType ? cast<XsdComplexType>(type) : NOTHING;
+            if (!complex_type || Class::getClass(complex_type).getPathName() != "WSDL::XsdComplexType"
+                    || !complex_type.getParticle() || complex_type.array) {
+                serializeValue(type, RetainedXmlValidationNamespaces, converted, True);
+            }
+        }
         return converted;
     }
 }
@@ -19957,6 +19991,10 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
 
         if (!exists oval) {
             if (!required && !attrs) {
+                if (particle && !particle.matchesElementNames(())) {
+                    throw SOAP_DESERIALIZATION_ERROR, sprintf("empty content does not match the complete "
+                        "particle of type %Y", name);
+                }
                 return;
             }
         }
@@ -19983,7 +20021,7 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
                 oval = {} + {"^value^": oval};
             }
         }
-        *hash<auto> val = mapExpandedElementNames(oval);
+        *hash<auto> val = particle ? oval : mapExpandedElementNames(oval);
         *hash<auto> attr = val."^attributes^";
 
         # attribute hash
@@ -20056,7 +20094,7 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
                 rh = sv;
             else
                 rh."^value^" = sv;
-        } else if (cx_type != XET_NONE) {
+        } else if (cx_type != XET_NONE || particle) {
             if (exists val && val.typeCode() != NT_HASH)
                 throw SOAP_DESERIALIZATION_ERROR, sprintf("cannot deserialize element %y type %y from qore type %y "
                     "(expecting hash)", en, getName(), val.type());
@@ -20067,7 +20105,9 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
                 val = XsdScalarTextHelper::elementContent(val, sprintf("element-only type %Y", getName()));
             }
 
-            if (cx_type == XET_SEQUENCE || cx_type == XET_ALL) {
+            if (particle) {
+                rh = deserializeParticle(tmap, mrh, val);
+            } else if (cx_type == XET_SEQUENCE || cx_type == XET_ALL) {
                 #printf("XsdComplexType::deserialize() name: %y val: %y required: %y\n", getName(), val, required);
                 # if we have one element
                 if (elementmap.size() == 1 && val.size() == 1
@@ -20105,12 +20145,117 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
         }
 
         if (ah) {
+            if (RetainedXmlValidationNamespaces && particle) {
+                foreach string field in (keys ah) {
+                    attrs{field}.serializeAttributeValue(RetainedXmlValidationNamespaces, ah{field});
+                }
+            }
             rh."^attributes^" = ah;
         }
         if (rh.size() == 1 && rh.hasKey("^value^")) {
             return rh."^value^";
         }
         return rh;
+    }
+
+    private hash<auto> deserializeParticle(hash<string, XsdAbstractType> tmap, *hash<auto> mrh,
+            *hash<auto> value) {
+        @assert(particle);
+        list<hash<string, XsdElement>> maps = (elementmap,);
+        foreach hash<ChoiceInfo> choice in (choices) {
+            push maps, choice.elementmap;
+        }
+        hash<string, string> fields = XsdElementFieldHelper::getFieldNames(maps);
+        hash<string, string> identities = map {$1.value: $1.key}, fields.pairIterator();
+        hash<string, bool> ambiguous_names();
+        foreach hash<string, XsdElement> declarations in (maps) {
+            foreach XsdElement element in (declarations.iterator()) {
+                if (fields{element.getExpandedName()} != element.name) {
+                    ambiguous_names{element.name} = True;
+                }
+            }
+        }
+        list<string> names();
+        list<string> field_names();
+        list<auto> values();
+        hash<auto> result();
+        foreach string key in (keys value) {
+            if (key =~ /^[\^.]/) {
+                if (mixed && key =~ /^\^(value|cdata)[0-9]*\^$/) {
+                    result{key} = value{key};
+                } else if (key !~ /^\^comment[0-9]*\^$/ && key != ".ns") {
+                    throw SOAP_DESERIALIZATION_ERROR, sprintf("invalid XML content metadata %Y for type %Y",
+                        key, name);
+                }
+                continue;
+            }
+            string identity = key;
+            identity =~ s/\^[0-9]+$//;
+            if (ambiguous_names{identity}) {
+                throw SOAP_DESERIALIZATION_ERROR, sprintf("ambiguous element name %Y in type %Y; "
+                    "use its namespace-expanded name", identity, name);
+            }
+            # Public component callers can still supply local field names. SOAP
+            # callers pass namespace-expanded XML names before reaching this method.
+            string field = identity;
+            identity = identities{identity} ?? (identity.startsWith("{") ? identity : type_qname("", identity));
+            field = fields{identity} ?? field;
+            list<auto> children = value{key}.typeCode() == NT_LIST ? value{key} : (value{key},);
+            if (!children) {
+                throw SOAP_DESERIALIZATION_ERROR, sprintf("empty XML occurrence list for element %Y", key);
+            }
+            foreach auto child in (children) {
+                push names, identity;
+                push field_names, field;
+                push values, child;
+            }
+        }
+        *list<XsdParticle> positions;
+        try {
+            positions = particle.attributeElementNames(names);
+        } catch (hash<ExceptionInfo> ex) {
+            if (ex.err != "XSD-PARTICLE-ERROR") {
+                rethrow;
+            }
+            throw SOAP_DESERIALIZATION_ERROR, sprintf("invalid XML child name in type %Y: %s", name, ex.desc);
+        }
+        if (!exists positions) {
+            throw SOAP_DESERIALIZATION_ERROR, sprintf("ordered child elements %Y do not match the complete "
+                "particle of type %Y", names, name);
+        }
+        # Preserve the existing absent native field contract; choice-only fields
+        # remain absent until selected. Actual group validity was checked above.
+        if (cx_type != XET_CHOICE && !result) {
+            foreach string field in (keys elementmap) {
+                result{field} = NOTHING;
+            }
+        }
+        hash<string, int> counts();
+        for (int index = 0; index < positions.size(); ++index) {
+            XsdParticle terminal = positions[index];
+            string field = field_names[index];
+            auto converted;
+            if (terminal.getKind() == XsdParticleKind::Element) {
+                converted = terminal.getElement().deserializeOccurrence(tmap, mrh, getValue(mrh, values[index]));
+            } else {
+                @assert(terminal.getKind() == XsdParticleKind::Any);
+                # Wildcard processing semantics remain separate from particle
+                # admission; retain the existing native XML data value here.
+                converted = values[index];
+            }
+            if (!counts{field}) {
+                result{field} = converted;
+            } else {
+                if (counts{field} == 1) {
+                    list<auto> occurrences();
+                    push occurrences, result{field};
+                    result{field} = occurrences;
+                }
+                push result{field}, converted;
+            }
+            ++counts{field};
+        }
+        return result;
     }
 
     #! matches namespace-resolved wire names to the existing public record fields

@@ -235,3 +235,57 @@ Run `qore -b --enable-debug test/wsdl-particle-attribution.qtest` and
 compares original and reconstructed graphs against complete marked languages and
 negative mutations, checking every returned declaration position rather than
 only whether the input was accepted.
+
+## Ordered value decoding and retained XML validation
+
+Complex-content decoding checks the complete ordered child-name list before
+projecting values into native fields. It expands contiguous occurrence lists and
+recognizes the XML parser's nonadjacent `name^N` keys. Each accepted position selects
+its actual terminal declaration and decodes exactly one occurrence. A repeated
+field accumulates values in an explicit `list<auto>`, preserving nil values and
+keeping an XSD list-valued child as one occurrence. The existing scalar/list and
+absent-field contracts remain in use; the native record is not an order carrier.
+SOAP transport parsing uses `XPF_PRESERVE_ORDER` so this check sees wire order.
+
+Group occurrence limits apply to complete words, independently of legacy mutable
+field counts. A required element remains required when its anonymous type has an
+optional or empty inner group: the empty wrapper still occupies one child position.
+Empty content is checked before taking the compatible empty-native-value path.
+Extension content follows inherited content, and expanded-name collisions retain
+the established public field names.
+
+`XsdXmlValue` retains the complete original element when grouped native fields
+cannot express interleaving. Its validator applies decode and encode value checks
+to individual children rather than re-encoding a flattened record. A thread-local
+validation scope owns a copied namespace registry and restores its caller on exit,
+including failures and interruption. Builtin complex particles validate their
+children and attributes in place; scalar, array and custom-type encode checks
+remain active. No validation namespace allocation reaches shared schema state.
+This avoids repeated whole-subtree conversion while preserving retained lexical
+text, expanded names and child order.
+
+The value checks add field indexing and accumulation linear in field/input size to
+the particle matching bounds. Mutable matching and validation state belongs to the
+call. The tests cover failure followed by native reuse, concurrent retained/native
+callers, reconstructed schemas and XML provider types, both actual SOAP bindings,
+both message directions and local SoapClient/SoapHandler exchanges.
+
+An invoice-like batch with alternating quantities and notes can use the explicit
+XML contract:
+
+```qore
+XsdSchema batch_schema("<xs:schema xmlns:xs='http://www.w3.org/2001/XMLSchema'>"
+    "<xs:element name='batch'><xs:complexType><xs:choice minOccurs='2' maxOccurs='unbounded'>"
+    "<xs:element name='quantity' type='xs:int'/><xs:element name='note' type='xs:string'/>"
+    "</xs:choice></xs:complexType></xs:element></xs:schema>");
+XsdXmlValue batch = batch_schema.getXmlValue("<batch><quantity>009</quantity>"
+    "<note>priority</note><quantity>010</quantity></batch>");
+@assert(batch.getChildValues()[2].getExpandedName() == "{}quantity");
+@assert(batch.getChildValues()[0].getElementData() == "009");
+```
+
+These rules implement XSD 1.0 [complex-content validity](https://www.w3.org/TR/2004/REC-xmlschema-1-20041028/#cvc-complex-type)
+and [particle validity](https://www.w3.org/TR/2004/REC-xmlschema-1-20041028/#cvc-particle).
+Native serialization, independent field-cardinality metadata and sample generation
+remain separately tracked P4 work. Wildcard processing, full mixed-content and
+dynamic-type rules remain P5 requirements.
