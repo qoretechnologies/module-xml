@@ -23,6 +23,10 @@ complete finite-prefix oracles and actual SOAP bindings. The [attribution eviden
 records validator disagreements and the still-failing native libxml2 requirements
 that must close before P4 acceptance.
 
+`test/xml-particle-identity.qtest` checks native DOM/reader schema position identity.
+The [native identity evidence](native-particle-identity-evidence.md) records provider
+selection, allocation cleanup and the remaining P4 attribution diagnostics.
+
 The W3C XML Schema Databinding collection is a useful independent source of WSDL 1.1 descriptions,
 XSDs, and SOAP messages. Running it against this module exposed defects that the existing tests missed.
 The small regression suite runs offline in the normal `test/*.qtest` CI loop. The larger survey is a

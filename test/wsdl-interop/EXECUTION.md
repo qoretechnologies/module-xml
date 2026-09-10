@@ -5752,3 +5752,67 @@ The [full audit](audits/P4-03-particle-attribution.md) resolves all 62 checks:
 field metadata and sample generation remain in progress; the four compositor
 runtime failures remain visible. P5-P9 keep their entire original scope, including
 the 22 separately recorded P9 documentation diagnostics.
+
+## P4-04 — Native particle-use identity (2026-09-10)
+
+P4-03 is committed as `17c5b40`. The private libxml2 provider now retains source
+particle-use identity while lowering content models to automaton transitions.
+Two references to one declaration and two uses of a shared group remain distinct;
+multiple emissions of one counted source position retain one identity. Callback
+declaration data remains unchanged. A compiler-local map keyed by parent use and
+particle address prevents atom equality/coalescing from erasing competing uses.
+All-group members, wildcard transitions, atom copies and substitution members use
+the same identity contract. Input/output source hashes pin both corrected C files,
+and upstream bytes are unchanged.
+
+The [implemented design](../../design/xml-particle-identity.md) documents identity,
+ownership and resource bounds with an executed shared-group example. Native
+[identity evidence](native-particle-identity-evidence.md) records root causes,
+provider behavior and the remaining findings. The final gate passes **104 Qore
+suites / 1,051 cases / 43,671 reported assertions**. The new native suite passes
+**six cases / 93 assertions** in AST, IR, JIT and tiered modes, including DOM and
+streaming schema error categories, global/group/substitution collisions, all and
+wildcard cases, repeated emission, content values, invalid integers, recovery and
+interruption. The existing native occurrence suite also passes all four modes.
+
+CMake's **nine-case particle identity probe** accepts complete system backports and
+rejects incomplete ones independently of their advertised version. All **26 provider
+and source-distribution tests** pass with zero compiler warnings, including offline
+fallback, cross-build verification, unexpected-source rejection, unchanged input
+hashes, stable reconfiguration and isolated install ownership. The private allocation
+fixture checks **327 fault points**, map growth, allocation-free re-entry, recovery
+and zero live allocations. Affected docs-module and the new example pass warning-free.
+
+Valgrind passes the identity and occurrence Qore suites and the standalone allocation
+fixture with **zero memory errors, zero definite/indirect/possible losses and zero
+suppressions**. The standalone test frees all heap blocks. The Qore runtime retains
+116,230 reachable bytes in LLVM/loader process-lifetime allocations; a first run
+classified those reachable blocks as errors, and its full stacks were inspected and
+retained. No lost allocation or invalid access was found. The existing isolated-core
+DWARF diagnostic stays P9-owned. Qore tests use `-b --enable-debug` with the previously
+authorized PCRE2 JIT testing switch under Valgrind. No system installation was made.
+
+The [12-schema native recheck](P4-04-native-attribution.json) now rejects duplicate
+choices correctly and retains **three failing P4 requirements**: exact-boundary and
+nested-count-2 require exact counter-feasibility analysis; empty-language-component
+requires checking present model-group constraints before unreachable-state removal.
+This refines P4-03's root-cause explanation of the latter: identity loss was one
+problem, but automaton reduction also removes the unreachable competing positions.
+The original four-failure record remains historical evidence. These three failures
+are assigned to the next P4 native counted-attribution/component increment and must
+close before P4 acceptance. Independent lxml/Xerces binaries and their discrepancy
+lists remain unchanged.
+
+Both corpus reports are completely identical to P4-03: **2,411 baseline rows**, all
+source/input hashes, **144 coverage failures**, 293 case records and stage accounting.
+All **130 selected descriptions / 1,260 message directions** pass strict coverage.
+The [validation inventory](P4-04-validation.json) records the changed native binary,
+checked C source hashes, unchanged WSDL/core binary hashes and complete suite list.
+Logs use `/tmp/wsdl-p4-04-`; the final provider artifacts are
+`/tmp/qore-xml-libxml2-test-uqe2ommw`.
+
+The [full audit](audits/P4-04-native-particle-identity.md) resolves all 62 checks:
+**20 Pass / 42 N/A / 0 Fail**. P4 continues with native counted attribution and
+component checks, then ordered message conversion, field metadata and samples.
+P5-P9 retain all original requirements, including the 22 separately recorded P9
+documentation diagnostics. No push was performed.

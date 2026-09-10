@@ -7,6 +7,7 @@
 #include "libxml2-schema-uri-probe.h"
 #include "libxml2-entity-probe.h"
 #include "libxml2-occurs-probe.h"
+#include "libxml2-particle-identity-probe.h"
 
 static int check_namespace(const char* source, const char* expected) {
     xmlTextReaderPtr reader = xmlReaderForMemory(source, (int)strlen(source), NULL, "UTF-8", 0);
@@ -44,12 +45,13 @@ int main(void) {
         int uris = check_uri_values();
         int entities = check_entity_values();
         int occurs = check_occurs_values();
+        int particles = check_particle_identity();
         uris |= check_schema_uri_values();
         uris |= check_schema_uri_hints();
-        result |= qnames | unions | uris | entities | occurs;
-        printf("libxml2 headers=%s runtime=%s namespace_identity=%s qname_values=%s qname_unions=%s uri_identity=%s entity_values=%s occurs_values=%s\n",
+        result |= qnames | unions | uris | entities | occurs | particles;
+        printf("libxml2 headers=%s runtime=%s namespace_identity=%s qname_values=%s qname_unions=%s uri_identity=%s entity_values=%s occurs_values=%s particle_identity=%s\n",
             LIBXML_DOTTED_VERSION, xmlParserVersion, result ? "FAIL" : "PASS", qnames ? "FAIL" : "PASS",
-            unions ? "FAIL" : "PASS", uris ? "FAIL" : "PASS", entities ? "FAIL" : "PASS", occurs ? "FAIL" : "PASS");
+            unions ? "FAIL" : "PASS", uris ? "FAIL" : "PASS", entities ? "FAIL" : "PASS", occurs ? "FAIL" : "PASS", particles ? "FAIL" : "PASS");
     }
     xmlCleanupParser();
     return result;

@@ -64,6 +64,8 @@ add_executable(catalog-cleanup "{REPO}/test/cmake/libxml2_catalog_cleanup.c")
 target_link_libraries(catalog-cleanup PRIVATE ${{QORE_XML_LIBXML2_TARGET}})
 add_executable(entity-allocation "{REPO}/test/cmake/libxml2_entity_allocation.c")
 target_link_libraries(entity-allocation PRIVATE ${{QORE_XML_LIBXML2_TARGET}})
+add_executable(particle-allocation "{REPO}/test/cmake/libxml2_particle_identity_allocation.c")
+target_link_libraries(particle-allocation PRIVATE ${{QORE_XML_LIBXML2_TARGET}})
 install(TARGETS probe RUNTIME DESTINATION bin)
 ''')
         source = os.environ.get("XML_LIBXML2_SOURCE")
@@ -89,6 +91,8 @@ include("{REPO}/cmake/QoreXmlLibXml2EntityFix.cmake")
 qore_xml_fix_libxml2_entities("{cls.source}" "${{CMAKE_CURRENT_BINARY_DIR}}/libxml")
 include("{REPO}/cmake/QoreXmlLibXml2OccursFix.cmake")
 qore_xml_fix_libxml2_occurs("{cls.source}" "${{CMAKE_CURRENT_BINARY_DIR}}/libxml")
+include("{REPO}/cmake/QoreXmlLibXml2ParticleIdentityFix.cmake")
+qore_xml_fix_libxml2_particle_identity("{cls.source}" "${{CMAKE_CURRENT_BINARY_DIR}}/libxml")
 ''')
         cls.fixed = cls.root / "fixed/build-debug"
         cls.run_command(["cmake", "-S", fixed_project, "-B", cls.fixed, "-DCMAKE_BUILD_TYPE=Debug",
@@ -120,6 +124,7 @@ qore_xml_fix_libxml2_occurs("{cls.source}" "${{CMAKE_CURRENT_BINARY_DIR}}/libxml
         self.assertIn("uri_identity=PASS", output)
         self.assertIn("entity_values=PASS", output)
         self.assertIn("occurs_values=PASS", output)
+        self.assertIn("particle_identity=PASS", output)
         stage = self.root / "stage"
         self.run_command(["cmake", "--install", self.root / "bundled", "--prefix", stage])
         self.assertEqual(["bin/probe", "share/licenses/qore-xml/libxml2-NOTICES.txt"],
@@ -199,6 +204,9 @@ qore_xml_fix_libxml2_uris("{self.source}" "${{CMAKE_CURRENT_BINARY_DIR}}/libxml"
         project = self.root / "occurs-broken/source"
         project.mkdir(parents=True)
         fixed = (self.root / "fixed/source/CMakeLists.txt").read_text()
+        fixed = fixed.replace(f'include("{REPO}/cmake/QoreXmlLibXml2ParticleIdentityFix.cmake")\n', "")
+        fixed = fixed.replace(f'qore_xml_fix_libxml2_particle_identity("{self.source}" '
+                              '"${CMAKE_CURRENT_BINARY_DIR}/libxml")\n', "")
         fixed = fixed.replace(f'include("{REPO}/cmake/QoreXmlLibXml2OccursFix.cmake")\n', "")
         fixed = fixed.replace(f'qore_xml_fix_libxml2_occurs("{self.source}" '
                               '"${CMAKE_CURRENT_BINARY_DIR}/libxml")\n', "")
@@ -224,6 +232,49 @@ qore_xml_fix_libxml2_uris("{self.source}" "${{CMAKE_CURRENT_BINARY_DIR}}/libxml"
         self.configure("bundled", "-DQORE_XML_LIBXML2_PROVIDER=BUNDLED",
                        f"-DFETCHCONTENT_SOURCE_DIR_QORE_XML_LIBXML2={self.source}")
         self.assertEqual(stamp, replacement.stat().st_mtime_ns)
+
+    def test_particle_identity_backport_and_cleanup(self):
+        import hashlib
+        project = self.root / "particle-broken/source"
+        project.mkdir(parents=True)
+        fixed = (self.root / "fixed/source/CMakeLists.txt").read_text()
+        fixed = fixed.replace(f'include("{REPO}/cmake/QoreXmlLibXml2ParticleIdentityFix.cmake")\n', "")
+        fixed = fixed.replace(f'qore_xml_fix_libxml2_particle_identity("{self.source}" '
+                              '"${CMAKE_CURRENT_BINARY_DIR}/libxml")\n', "")
+        (project / "CMakeLists.txt").write_text(fixed)
+        build = self.root / "particle-broken/build-debug"
+        self.run_command(["cmake", "-S", project, "-B", build, "-DCMAKE_BUILD_TYPE=Debug",
+                          "-DBUILD_SHARED_LIBS=ON", "-DLIBXML2_WITH_PROGRAMS=OFF",
+                          "-DLIBXML2_WITH_TESTS=OFF", "-DLIBXML2_WITH_PYTHON=OFF"])
+        self.run_command(["cmake", "--build", build, "--target", "LibXml2", "-j4"])
+        libraries = list((build / "libxml").glob("libxml2.so")) + list((build / "libxml").glob("libxml2.dylib"))
+        self.assertEqual(1, len(libraries))
+        options = [f"-DLIBXML2_LIBRARY={libraries[0]}", f"-DLIBXML2_INCLUDE_DIR={self.fixed_include}",
+                   f"-DFETCHCONTENT_SOURCE_DIR_QORE_XML_LIBXML2={self.source}"]
+        output = self.configure("particle-broken-auto", "-DQORE_XML_LIBXML2_PROVIDER=AUTO", *options)
+        self.assertIn("using private static libxml2 2.15.4", output)
+        probe = (self.root / "particle-broken-auto/system-libxml2/namespace-probe.log").read_text()
+        for label in ("qname_values", "qname_unions", "uri_identity", "entity_values", "occurs_values"):
+            self.assertIn(label + "=PASS", probe)
+        self.assertIn("particle_identity=FAIL", probe)
+        self.configure("particle-broken-system", "-DQORE_XML_LIBXML2_PROVIDER=SYSTEM", *options, success=False)
+        replacements = self.root / "bundled/_deps/qore_xml_libxml2-build/qore-particle-identity-fix"
+        stamps = {name: (replacements / name).stat().st_mtime_ns for name in ("xmlschemas.c", "xmlregexp.c")}
+        self.configure("bundled", "-DQORE_XML_LIBXML2_PROVIDER=BUNDLED",
+                       f"-DFETCHCONTENT_SOURCE_DIR_QORE_XML_LIBXML2={self.source}")
+        for name, stamp in stamps.items():
+            self.assertEqual(stamp, (replacements / name).stat().st_mtime_ns)
+        self.assertEqual("3b2ba46567d52d898864b9c3b7478066c25720cbb9ad69f5961f6b329cd64aaf",
+                         hashlib.sha256((self.source / "xmlregexp.c").read_bytes()).hexdigest())
+        self.run_command(["cmake", "--build", self.root / "bundled", "--target", "particle-allocation", "-j4"])
+        self.assertIn("Particle identity allocation cleanup: PASS",
+                      self.run_command([self.root / "bundled/particle-allocation"]))
+
+    def test_unknown_regexp_source_is_rejected(self):
+        override = self.qname_source_override("changed-regexp-source", "xmlregexp.c", fixed=False)
+        output = self.configure("changed-regexp-build", "-DQORE_XML_LIBXML2_PROVIDER=BUNDLED",
+                                f"-DFETCHCONTENT_SOURCE_DIR_QORE_XML_LIBXML2={override}", success=False)
+        self.assertIn("Unexpected libxml2 xmlregexp.c; cannot apply particle identity fix", " ".join(output.split()))
 
     def test_entity_fixes_preserve_sources_and_reconfigure(self):
         import hashlib
