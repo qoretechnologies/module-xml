@@ -196,7 +196,7 @@ XmlRpcClientIo client({"url": "http://localhost:8080/RPC2", "timeout": 30000});
           - \c faultCode: an integer fault code
           - \c faultString: a string error message
 
-        @throw XMLRPC-SERIALIZATION-ERROR empty member name in hash or cannot serialize type to XML-RPC
+        @throw XMLRPC-SERIALIZATION-ERROR invalid XML character or unsupported XML-RPC value type
         @throw PARSE-XMLRPC-RESPONSE-ERROR missing required element or other syntax error
         @throw PARSE-XMLRPC-ERROR syntax error parsing XML-RPC string
         @throw XMLRPCCLIENTIO-HTTP-ERROR HTTP error from server
@@ -223,7 +223,7 @@ hash<auto> result = client.call("method.name", arg1, arg2);
           - \c faultCode: an integer fault code
           - \c faultString: a string error message
 
-        @throw XMLRPC-SERIALIZATION-ERROR empty member name in hash or cannot serialize type to XML-RPC
+        @throw XMLRPC-SERIALIZATION-ERROR invalid XML character or unsupported XML-RPC value type
         @throw PARSE-XMLRPC-RESPONSE-ERROR missing required element or other syntax error
         @throw PARSE-XMLRPC-ERROR syntax error parsing XML-RPC string
         @throw XMLRPCCLIENTIO-HTTP-ERROR HTTP error from server
@@ -253,7 +253,7 @@ hash<auto> result = client.callArgs("method.name", arg_list);
         - \c params: will be present if the call completed normally
         - \c fault: will be present if the call is returning with error information
 
-        @throw XMLRPC-SERIALIZATION-ERROR empty member name in hash or cannot serialize type to XML-RPC
+        @throw XMLRPC-SERIALIZATION-ERROR invalid XML character or unsupported XML-RPC value type
         @throw PARSE-XMLRPC-RESPONSE-ERROR missing required element or other syntax error
         @throw PARSE-XMLRPC-ERROR syntax error parsing XML-RPC string
         @throw XMLRPCCLIENTIO-HTTP-ERROR HTTP error from server
@@ -284,7 +284,7 @@ hash<auto> result = client.callWithInfo(\info, "method.name", arg1, arg2);
         - \c params: will be present if the call completed normally
         - \c fault: will be present if the call is returning with error information
 
-        @throw XMLRPC-SERIALIZATION-ERROR empty member name in hash or cannot serialize type to XML-RPC
+        @throw XMLRPC-SERIALIZATION-ERROR invalid XML character or unsupported XML-RPC value type
         @throw PARSE-XMLRPC-RESPONSE-ERROR missing required element or other syntax error
         @throw PARSE-XMLRPC-ERROR syntax error parsing XML-RPC string
         @throw XMLRPCCLIENTIO-HTTP-ERROR HTTP error from server

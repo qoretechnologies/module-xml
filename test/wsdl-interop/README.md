@@ -1085,3 +1085,9 @@ providers. Independent rational values detect changes hidden by binary64 schema
 validators; exact validator discrepancies remain in `temporal-validator-defects.json`.
 The strict corpus selection includes dateTime/time element and attribute values.
 See the [conversion contract](../../design/wsdl-time-output.md).
+
+XML-RPC character data has dedicated native and independent HTTP checks:
+`qore -b --enable-debug test/xmlrpc-text.qtest` and
+`python3 test/wsdl-interop/test_xmlrpc_text.py -v`. They check exact strings,
+struct names, UTF-16 bytes, faults, integer boundaries and the separate CPython
+literal-CR marshaller defect. See [the value contract](../../design/xmlrpc-character-data.md).

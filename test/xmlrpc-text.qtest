@@ -1,0 +1,228 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%disable-warning deprecated
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires xml
+%requires ../qlib/XmlRpcHandler.qm
+%requires HttpServer
+%requires QUnit
+%exec-class XmlRpcTextTest
+
+class XmlRpcTextTest inherits QUnit::Test {
+    constructor() : Test("XML-RPC character data", "1.0") {
+        addTestCase("String serialization preserves CR and scalar whitespace", \strings());
+        addTestCase("Adjacent text, CDATA, comments and processing instructions retain character data", \chunks());
+        addTestCase("Struct names retain empty keys, whitespace and literal sentinel text", \members());
+        addTestCase("Untyped value strings retain whitespace in requests, responses and collections", \untyped());
+        addTestCase("Calls, responses and faults preserve strings in supported output encodings", \messages());
+        addTestCase("Non-character string content rejects with recovery", \invalid());
+        addTestCase("The full signed 32-bit range keeps the integer wire type", \integers());
+        addTestCase("Empty values and duplicate members keep collection boundaries and ownership", \boundaries());
+        addTestCase("Legacy wrappers retain values and requested encoding", \legacy());
+        addTestCase("Invalid XML characters and encodings fail before producing a document", \characters());
+        addTestCase("Cancellation and large character streams release partial values", \cancellation());
+        addTestCase("Malformed requests retain XML-RPC faults without an optional logger", \handlerErrors());
+        addTestCase("Trailing malformed XML cannot return a completed value", \trailing());
+        set_return_value(main());
+    }
+
+    private strings() {
+        foreach int flags in (0, XGF_ADD_FORMATTING, XGF_USE_NUMERIC_REFS,
+                XGF_ADD_FORMATTING | XGF_USE_NUMERIC_REFS) {
+            foreach string value in ("A\rB", "\r", " \t\r\n ", "", "A&B<", "α\r中") {
+                string xml = make_xmlrpc_value(value, flags);
+                assertFalse(xml.contains("\r"), "literal CR would be normalized by an independent XML parser");
+                assertEq(value, parse_xmlrpc_value(xml));
+            }
+        }
+    }
+
+    private chunks() {
+        foreach hash<string, string> row in (
+                {"xml": "A<![CDATA[B]]>C", "value": "ABC"},
+                {"xml": "A<!-- ignored -->B", "value": "AB"},
+                {"xml": " <![CDATA[\t]]><?ignored data?>&#13; ", "value": " \t\r "},
+                {"xml": "<![CDATA[]]>", "value": ""},
+                {"xml": "<!-- only comment -->", "value": ""}) {
+            assertEq(row.value, parse_xmlrpc_value("<string>" + row.xml + "</string>"));
+        }
+    }
+
+    private members() {
+        hash<string, string> expected = {"": "empty", " \t ": "spaces", "A\rB": "return", "!!empty-hash-key!!": "literal"};
+        foreach int flags in (0, XGF_ADD_FORMATTING) {
+            assertEq(expected, parse_xmlrpc_value(make_xmlrpc_value(expected, flags)));
+        }
+        assertEq({" \r ": "value"}, parse_xmlrpc_value('<struct><member><name> <![CDATA[]]>&#13; </name>'
+            + '<value><string>value</string></value></member></struct>'));
+    }
+
+    private untyped() {
+        foreach hash<string, string> row in ({"xml": " \t ", "value": " \t "}, {"xml": "&#13;", "value": "\r"},
+                {"xml": "A<![CDATA[B]]>C", "value": "ABC"}, {"xml": " <!-- ignored --> ", "value": "  "}) {
+            string value = "<value>" + row.xml + "</value>";
+            assertEq((row.value,), parse_xmlrpc_call('<methodCall><methodName>echo</methodName><params><param>'
+                + value + '</param></params></methodCall>').params);
+            assertEq(row.value, parse_xmlrpc_response('<methodResponse><params><param>' + value
+                + '</param></params></methodResponse>').params);
+            assertEq((row.value,), parse_xmlrpc_value('<array><data>' + value + '</data></array>'));
+            assertEq({"key": row.value}, parse_xmlrpc_value('<struct><member><name>key</name>' + value
+                + '</member></struct>'));
+        }
+        assertEq("x", parse_xmlrpc_response("<methodResponse><params><param><value> \n<string>x</string> \n"
+            + '</value></param></params></methodResponse>').params);
+    }
+
+    private messages() {
+        foreach string encoding in ("UTF-8", "ISO-8859-1", "UTF-16LE", "UTF-16BE") {
+            foreach int flags in (0, XGF_ADD_FORMATTING | XGF_USE_NUMERIC_REFS) {
+                string value = "é\r\n \t";
+                hash<string, string> record = {"é\r": value};
+                string call = make_xmlrpc_call("echo", (value, record), flags, encoding);
+                assertEq((value, record), parse_xmlrpc_call(call).params);
+                assertEq(record, parse_xmlrpc_response(make_xmlrpc_response(record, flags, encoding)).params);
+                hash<auto> fault = parse_xmlrpc_response(make_xmlrpc_fault(23, value, flags, encoding)).fault;
+                assertEq(23, fault.faultCode);
+                assertEq(value, fault.faultString);
+                assertEq(value, parse_xmlrpc_value(make_xmlrpc_value(value, flags, encoding)));
+            }
+        }
+    }
+
+    private invalid() {
+        foreach string xml in ("<string>A<int>1</int>B</string>", "<string><child/></string>",
+                "<string>unfinished", "<struct><member><name>A<int>1</int></name><value/></member></struct>") {
+            assertThrows(xml == "<string>unfinished" ? "PARSE-XML-EXCEPTION" : "PARSE-XMLRPC-ERROR",
+                \parse_xmlrpc_value(), (xml,));
+            assertEq(" \r ", parse_xmlrpc_value("<string> &#13; </string>"));
+        }
+    }
+
+    private boundaries() {
+        foreach string params in ("<params/>", "<params></params>", "<params><param/></params>",
+                "<params><param></param></params>") {
+            assertEq(NOTHING, parse_xmlrpc_response("<methodResponse>" + params + "</methodResponse>").params);
+        }
+        foreach string value in ("<value/>", "<value></value>") {
+            assertEq((NOTHING, "next"), parse_xmlrpc_value("<array><data>" + value
+                + "<value><string>next</string></value></data></array>"));
+            assertEq({"key": NOTHING, "next": "next"}, parse_xmlrpc_value("<struct><member><name>key</name>"
+                + value + "</member><member><name>next</name><value><string>next</string></value></member></struct>"));
+            assertEq((NOTHING, "next"), parse_xmlrpc_call("<methodCall><methodName>echo</methodName><params><param>"
+                + value + "</param><param><value><string>next</string></value></param></params></methodCall>").params);
+            assertEq(NOTHING, parse_xmlrpc_response("<methodResponse><params><param>" + value
+                + "</param></params></methodResponse>").params);
+        }
+        foreach string empty in ("<name/>", "<name></name>") {
+            assertEq({"": "next"}, parse_xmlrpc_value("<struct><member>" + empty
+                + "<value><string>old</string></value></member><member>" + empty
+                + "<value><string>next</string></value></member></struct>"));
+        }
+        assertEq({"key": {"child": "next"}}, parse_xmlrpc_value("<struct><member><name>key</name><value>"
+            + "<array><data><value><string>old</string></value></data></array></value></member>"
+            + "<member><name>key</name><value><struct><member><name>child</name><value><string>next</string>"
+            + "</value></member></struct></value></member></struct>"));
+    }
+
+    private legacy() {
+        foreach string encoding in ("UTF-8", "ISO-8859-1", "UTF-16LE", "UTF-16BE") {
+            string value = "é\r \t";
+            foreach string xml in (makeXMLRPCCallStringWithEncoding(encoding, "echo", value),
+                    makeFormattedXMLRPCCallStringWithEncoding(encoding, "echo", value),
+                    makeXMLRPCCallStringArgsWithEncoding(encoding, "echo", (value,)),
+                    makeFormattedXMLRPCCallStringArgsWithEncoding(encoding, "echo", (value,))) {
+                assertEq((value,), parse_xmlrpc_call(xml).params);
+            }
+            foreach string xml in (makeXMLRPCResponseStringWithEncoding(encoding, value),
+                    makeFormattedXMLRPCResponseStringWithEncoding(encoding, value)) {
+                assertEq(value, parse_xmlrpc_response(xml).params);
+            }
+        }
+        assertEq("echo", parse_xmlrpc_call("<methodCall><methodName>ec<![CDATA[ho]]><!--ignored-->"
+            + "</methodName><params/></methodCall>").methodName);
+        assertEq("é\r", parse_xmlrpc_call(make_xmlrpc_call("echo", "é\r", XGF_USE_NUMERIC_REFS)).params[0]);
+        assertTrue(make_xmlrpc_call("echo", "é\r", XGF_USE_NUMERIC_REFS).contains("&#233;"));
+    }
+
+    private characters() {
+        foreach string value in (chr(0), chr(1), chr(11), chr(31), <efbfbe>.toString("UTF-8"), <efbfbf>.toString("UTF-8")) {
+            assertThrows("XMLRPC-SERIALIZATION-ERROR", \make_xmlrpc_value(), (value,));
+            # Qore hash keys end at NUL; test forbidden characters that a key can retain.
+            if (value != chr(0)) {
+                assertThrows("XMLRPC-SERIALIZATION-ERROR", \make_xmlrpc_value(), ({value: "member"},));
+            }
+            assertThrows("XMLRPC-SERIALIZATION-ERROR", \make_xmlrpc_fault(), (23, value));
+            assertThrows("XMLRPC-SERIALIZATION-ERROR", \make_xmlrpc_call(), ("echo", (value,)));
+            assertEq("\r", parse_xmlrpc_value(make_xmlrpc_value("\r")));
+        }
+        assertThrows("ENCODING-CONVERSION-ERROR", \make_xmlrpc_value(), ("α", 0, "ISO-8859-1"));
+        assertThrows("ENCODING-CONVERSION-ERROR", \parse_xmlrpc_value(), ("<string>α</string>", "ISO-8859-1"));
+        assertEq("α", parse_xmlrpc_value(make_xmlrpc_value("α", XGF_USE_NUMERIC_REFS, "ISO-8859-1")));
+        foreach string encoding in ("UTF-16LE", "UTF-16BE") {
+            assertEq("é\r", parse_xmlrpc_value("<string>é&#13;</string>", encoding));
+        }
+    }
+
+    private cancellation() {
+        string xml = "<string>";
+        string expected = "";
+        for (int i = 0; i < 1000; ++i) {
+            xml += "a<![CDATA[b]]><!--ignored-->&#13;";
+            expected += "ab\r";
+        }
+        assertEq(expected, parse_xmlrpc_value(xml + "</string>"));
+        assertThrows("PARSE-XML-EXCEPTION", \parse_xmlrpc_value(), (xml + "</wrong>",));
+        SandboxManager manager();
+        on_exit manager.clearInterrupt();
+        Program program(PO_NEW_STYLE | PO_STRICT_ARGS | PO_REQUIRE_TYPES);
+        program.setSandboxManager(manager);
+        program.parse("%modern\n%requires xml\n"
+            "auto sub interrupted(SandboxManager manager, string kind) {\n"
+            "    manager.requestInterrupt();\n"
+            "    if (kind == \"parse\") { return parse_xmlrpc_value(\"<string> <![CDATA[x]]> </string>\"); }\n"
+            "    if (kind == \"fault\") { return make_xmlrpc_fault(23, \"before\\rafter\"); }\n"
+            "    return make_xmlrpc_value(kind == \"string\" ? \"before\\rafter\" : {\"key\": 12});\n"
+            "}\n", "xmlrpc_text_cancel");
+        foreach string kind in ("parse", "fault", "string", "struct") {
+            *hash<ExceptionInfo> error;
+            try {
+                program.callFunction("interrupted", manager, kind);
+            } catch (hash<ExceptionInfo> ex) {
+                error = ex;
+            }
+            manager.clearInterrupt();
+            assertEq("PROGRAM-INTERRUPTED", error.err);
+            assertEq("\r", parse_xmlrpc_value(make_xmlrpc_value("\r")));
+        }
+    }
+
+    private handlerErrors() {
+        XmlRpcHandler handler(new PermissiveAuthenticator(), ());
+        hash<auto> response = handler.handleRequest({}, {"method": "POST", "content-type": MimeTypeXml}, "<broken>");
+        assertEq(200, response.code);
+        hash<auto> fault = parse_xmlrpc_response(response.body).fault;
+        assertEq(XmlRpcHandler::XMLRPC_INVALID_XML, fault.faultCode);
+        assertEq("PARSE-XMLRPC-ERROR", fault.faultString);
+    }
+
+    private trailing() {
+        string separator = "<!--" + sprintf("%10000s", "space") + "-->";
+        foreach string xml in ("<string/>", "<string>text</string>", "<struct/>") {
+            assertEq(parse_xmlrpc_value(xml), parse_xmlrpc_value(xml + separator + "<?trailing ignored?>"));
+            assertThrows("PARSE-XML-EXCEPTION", \parse_xmlrpc_value(), (xml + separator + "<extra/>",));
+        }
+        assertThrows("PARSE-XML-EXCEPTION", \parse_xmlrpc_call(),
+            (make_xmlrpc_call("echo", ("text",)) + separator + "<extra/>",));
+        assertThrows("PARSE-XML-EXCEPTION", \parse_xmlrpc_response(),
+            (make_xmlrpc_response("text") + separator + "<extra/>",));
+    }
+
+    private integers() {
+        foreach int value in (-2147483648, -2147483647, 0, 2147483647) {
+            string xml = make_xmlrpc_value(value);
+            assertTrue(xml.startsWith("<i4>"));
+            assertEq(value, parse_xmlrpc_value(xml));
+        }
+    }
+}

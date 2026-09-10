@@ -5446,3 +5446,33 @@ remain identical to the tested snapshot, and the main tree is clean. That rebase
 removed the merge's eight test-header changes and audit from the current tree;
 they remain in the historical merge and isolated test snapshot. This XML work
 preserves that parallel history. No push or installation was performed.
+
+## P3-45 — XML-RPC character data and HTTP encoding prerequisite
+
+The deferred XML-RPC text work is implemented, tested and audited. See [the contract](../../design/xmlrpc-character-data.md) and
+[evidence](xmlrpc-text-evidence.md) for root causes, reference identities and tests.
+The new Qore suite passes 13 cases / 226 assertions in all four execution modes.
+Independent Expat/XML-RPC decoding checks 272 generated documents, with 34 actual
+HTTP value/fault exchanges. All affected native and peer Valgrind runs are clean.
+The current full gate passes 97 suites / 998 cases / 38,810 reported assertions;
+the existing three caught comparator-negative assertions remain documented in P1.
+
+Qore develop commit `38e8e0e52` fixes buffered request-body charset metadata and
+HTTP protocol fields inheriting a prior body charset. Its full 62-item audit is
+committed beside the new core test. The isolated Debug runtime matches the changed
+main source and passed 105 core cases / 987 assertions plus focused Valgrind.
+No main Qore changes remain from this work and nothing was pushed or installed.
+
+XML merge `aec7c38` integrates remote `c1403ef`. The remote anyAttribute scalar
+hash widening is retained. Positive text fixtures now declare mixed=true; a
+separate element-only wildcard fixture rejects text in both directions. Native
+XSD checks confirm that distinction. The merge's full audit is
+[audits/P3-45-remote-anyattribute.md](audits/P3-45-remote-anyattribute.md).
+Qore origin/develop remained at the already integrated `6aa122698`.
+
+All 2,411 survey rows and the 144 diagnostic failure records are unchanged;
+strict coverage remains 130 WSDLs / 1,260 directions with zero selected failures.
+The two existing P6 binding-version tests remain diagnostic failures. P3 acceptance
+review and all P4-P9 requirements remain in scope. The [full XML-RPC audit](audits/P3-45-xmlrpc-character-data.md) records
+25 Pass / 37 N/A / 0 Fail across all 62 checks. Next: finish the P3 acceptance
+review before implementing P4. The complete P1-P9 plan is not yet finished.

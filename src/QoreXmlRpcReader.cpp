@@ -4,7 +4,7 @@
 
     Qore Programming Language
 
-    Copyright (C) 2003 - 2025 Qore Technologies, s.r.o.
+    Copyright (C) 2003 - 2026 Qore Technologies, s.r.o.
 
     This library is free software; you can redistribute it and/or
     modify it under the terms of the GNU Lesser General Public
@@ -29,291 +29,247 @@
 #include <cerrno>
 #include <climits>
 
-static int xmlrpc_do_empty_value(Qore::Xml::intern::XmlRpcValue *v, const char* name, int depth, ExceptionSink* xsink) {
-   if (!strcmp(name, "string"))
-      v->set(null_string());
-   else if (!strcmp(name, "i4") || !strcmp(name, "int") || !strcmp(name, "ex:i1") || !strcmp(name, "ex:i2") || !strcmp(name, "ex:i8"))
-      v->set(0ll);
-   else if (!strcmp(name, "boolean"))
-      v->set(false);
-   else if (!strcmp(name, "struct"))
-      v->set(new QoreHashNode(autoTypeInfo));
-   else if (!strcmp(name, "array"))
-      v->set(new QoreListNode(autoTypeInfo));
-   else if (!strcmp(name, "double") || !strcmp(name, "ex:float"))
-      v->set(0.0f);
-   else if (!strcmp(name, "dateTime.iso8601") || !strcmp(name, "ex:dateTime"))
-      v->set(zero_date());
-   else if (!strcmp(name, "base64"))
-      v->set(new BinaryNode);
-   else if (!strcmp(name, "ex:nil"))
-      v->set(reinterpret_cast<AbstractQoreNode*>(0));
-   else {
-      xsink->raiseException("PARSE-XMLRPC-ERROR", "unknown XML-RPC type '%s' at level %d", name, depth);
-      return -1;
-   }
-   return 0;
+static int xmlrpc_do_empty_value(Qore::Xml::intern::XmlRpcValue *v, const char *name, int depth, ExceptionSink *xsink) {
+    if (!strcmp(name, "string")) {
+        v->set(null_string());
+    } else if (!strcmp(name, "i4") || !strcmp(name, "int") || !strcmp(name, "ex:i1") || !strcmp(name, "ex:i2") ||
+               !strcmp(name, "ex:i8")) {
+        v->set(0ll);
+    } else if (!strcmp(name, "boolean")) {
+        v->set(false);
+    } else if (!strcmp(name, "struct")) {
+        v->set(new QoreHashNode(autoTypeInfo));
+    } else if (!strcmp(name, "array")) {
+        v->set(new QoreListNode(autoTypeInfo));
+    } else if (!strcmp(name, "double") || !strcmp(name, "ex:float")) {
+        v->set(0.0f);
+    } else if (!strcmp(name, "dateTime.iso8601") || !strcmp(name, "ex:dateTime")) {
+        v->set(zero_date());
+    } else if (!strcmp(name, "base64")) {
+        v->set(new BinaryNode);
+    } else if (!strcmp(name, "ex:nil")) {
+        v->set(reinterpret_cast<AbstractQoreNode *>(0));
+    } else {
+        xsink->raiseException("PARSE-XMLRPC-ERROR", "unknown XML-RPC type '%s' at level %d", name, depth);
+        return -1;
+    }
+    return 0;
 }
 
-int QoreXmlRpcReader::getStruct(Qore::Xml::intern::XmlRpcValue *v, const QoreEncoding* data_ccsid, ExceptionSink* xsink) {
-   int nt;
+int QoreXmlRpcReader::getStruct(Qore::Xml::intern::XmlRpcValue *v, const QoreEncoding *data_ccsid,
+                                ExceptionSink *xsink) {
+    int nt;
 
-   QoreHashNode* h = new QoreHashNode(autoTypeInfo);
-   v->set(h);
+    QoreHashNode *h = new QoreHashNode(autoTypeInfo);
+    v->set(h);
 
-   int member_depth = depth();
-   while (true) {
-      if ((nt = readXmlRpcNode(xsink)) == -1)
-         return -1;
-
-      if (nt == XML_READER_TYPE_END_ELEMENT)
-         break;
-
-      if (nt != XML_READER_TYPE_ELEMENT) {
-         xsink->raiseException("PARSE-XMLRPC-ERROR", "error parsing XML string, expecting 'member' element (got type %d)", nt);
-         return -1;
-      }
-
-      // check for 'member' element
-      if (checkXmlRpcMemberName("member", xsink))
-         return -1;
-
-      // get member name
-      if (readXmlRpc(xsink))
-         return -1;
-
-      if ((nt = nodeTypeSkipWhitespace()) != XML_READER_TYPE_ELEMENT) {
-         xsink->raiseException("PARSE-XMLRPC-ERROR", "error parsing XML string, expecting struct 'name'");
-         return -1;
-      }
-
-      // check for 'name' element
-      if (checkXmlRpcMemberName("name", xsink))
-         return -1;
-
-      if (readXmlRpc(xsink))
-         return -1;
-
-      if ((nt = readXmlRpcNode(xsink)) == -1)
-         return -1;
-
-      if (nt != XML_READER_TYPE_TEXT) {
-         xsink->raiseException("PARSE-XMLRPC-ERROR", "empty member name in hash");
-         return -1;
-      }
-
-      const char* member_name = constValue();
-      if (!member_name) {
-         xsink->raiseException("PARSE-XMLRPC-ERROR", "empty member name in struct");
-         return -1;
-      }
-
-      QoreString member(member_name);
-      //printd(5, "QoreXmlRpcReader::getStruct() DEBUG: got member name '%s'\n", member_name);
-
-      if (readXmlRpc(xsink))
-         return -1;
-
-      if ((nt = readXmlRpcNode(xsink)) == -1)
-         return -1;
-      if (nt != XML_READER_TYPE_END_ELEMENT) {
-         xsink->raiseException("PARSE-XMLRPC-ERROR", "error parsing XML string, expecting name close element");
-         return -1;
-      }
-
-      // get value
-      if (readXmlRpc(xsink))
-         return -1;
-
-      if ((nt = readXmlRpcNode(xsink)) == -1)
-         return -1;
-      if (nt != XML_READER_TYPE_ELEMENT) {
-         xsink->raiseException("PARSE-XMLRPC-ERROR", "error parsing XML string, expecting struct 'value' for key '%s'", member.getBuffer());
-         return -1;
-      }
-
-      if (checkXmlRpcMemberName("value", xsink))
-         return -1;
-
-      if (readXmlRpc(xsink))
-         break;
-
-      v->setReference(&h->getKeyValueReference(member.getBuffer()));
-
-      // if if was not an empty value element
-      if (member_depth < depth()) {
-         // check for close value tag
-         if ((nt = readXmlRpcNode(xsink)) == -1)
+    while (true) {
+        if ((nt = readXmlRpcNode(xsink)) == -1) {
             return -1;
-         if (nt != XML_READER_TYPE_END_ELEMENT) {
-            //printd(5, "QoreXmlRpcReader::getStruct() struct member='%s', parsing value node\n", member.getBuffer());
+        }
 
-            if (getValueData(v, data_ccsid, true, xsink))
-               return -1;
+        if (nt == XML_READER_TYPE_END_ELEMENT) {
+            break;
+        }
 
-            //printd(5, "QoreXmlRpcReader::getStruct() struct member='%s', finished parsing value node\n", member.getBuffer());
+        if (nt != XML_READER_TYPE_ELEMENT) {
+            xsink->raiseException("PARSE-XMLRPC-ERROR",
+                                  "error parsing XML string, expecting 'member' element (got type %d)", nt);
+            return -1;
+        }
 
-            if ((nt = nodeTypeSkipWhitespace()) != XML_READER_TYPE_END_ELEMENT) {
-               //printd(5, "EXCEPTION close /value: %d: %s\n", nt, (char*)constName());
-               xsink->raiseException("PARSE-XMLRPC-ERROR", "error parsing XML string, expecting value close element");
-               return -1;
+        // check for 'member' element
+        if (checkXmlRpcMemberName("member", xsink)) {
+            return -1;
+        }
+
+        // get member name
+        if (readXmlRpc(xsink)) {
+            return -1;
+        }
+
+        if ((nt = nodeTypeSkipWhitespace()) != XML_READER_TYPE_ELEMENT) {
+            xsink->raiseException("PARSE-XMLRPC-ERROR", "error parsing XML string, expecting struct 'name'");
+            return -1;
+        }
+
+        // check for 'name' element
+        if (checkXmlRpcMemberName("name", xsink)) {
+            return -1;
+        }
+
+        ReferenceHolder<QoreStringNode> member(new QoreStringNode(QCS_UTF8), xsink);
+        if (!isEmptyElement()) {
+            if (read(xsink) != 1) {
+                return -1;
             }
-            //printd(5, "QoreXmlRpcReader::getStruct() close /value: %s\n", (char*)constName());
-         }
-         if (readXmlRpc(xsink))
+            member = readCharacterData(xsink);
+            if (!member) {
+                return -1;
+            }
+            if (nodeType() != XML_READER_TYPE_END_ELEMENT || checkXmlRpcMemberName("name", xsink, true)) {
+                if (!*xsink) {
+                    xsink->raiseException("PARSE-XMLRPC-ERROR", "struct names require character data only");
+                }
+                return -1;
+            }
+        }
+
+        // get value
+        if (readXmlRpc(xsink)) {
             return -1;
-      }
+        }
 
-      if ((nt = readXmlRpcNode(xsink)) == -1)
-         return -1;
-      if (nt != XML_READER_TYPE_END_ELEMENT) {
-         //printd(5, "QoreXmlRpcReader::getStruct() error nt: %d\n", nt);
-         xsink->raiseException("PARSE-XMLRPC-ERROR", "error parsing XML string, expecting member close element");
-         return -1;
-      }
-      //printd(5, "QoreXmlRpcReader::getStruct() close /member: %s\n", (char*)constName());
+        if ((nt = readXmlRpcNode(xsink)) == -1) {
+            return -1;
+        }
+        if (nt != XML_READER_TYPE_ELEMENT) {
+            xsink->raiseException("PARSE-XMLRPC-ERROR",
+                                  "error parsing XML string, expecting struct 'value' for key '%s'", member->c_str());
+            return -1;
+        }
 
-      if (readXmlRpc(xsink))
-         return -1;
-   }
-   return 0;
+        v->setReference(&h->getKeyValueReference(member->c_str()));
+        if (getValue(v, data_ccsid, xsink)) {
+            return -1;
+        }
+
+        if ((nt = readXmlRpcNode(xsink)) == -1) {
+            return -1;
+        }
+        if (nt != XML_READER_TYPE_END_ELEMENT) {
+            // printd(5, "QoreXmlRpcReader::getStruct() error nt: %d\n", nt);
+            xsink->raiseException("PARSE-XMLRPC-ERROR", "error parsing XML string, expecting member close element");
+            return -1;
+        }
+        // printd(5, "QoreXmlRpcReader::getStruct() close /member: %s\n", (char*)constName());
+
+        if (readXmlRpc(xsink)) {
+            return -1;
+        }
+    }
+    return 0;
 }
 
-int QoreXmlRpcReader::getParams(Qore::Xml::intern::XmlRpcValue *v, const QoreEncoding* data_ccsid, ExceptionSink* xsink) {
-   int nt;
-   int index = 0;
+int QoreXmlRpcReader::getParams(Qore::Xml::intern::XmlRpcValue *v, const QoreEncoding *data_ccsid,
+                                ExceptionSink *xsink) {
+    int nt;
+    int index = 0;
 
-   QoreListNode* l = new QoreListNode(autoTypeInfo);
-   v->set(l);
+    QoreListNode *l = new QoreListNode(autoTypeInfo);
+    v->set(l);
 
-   int array_depth = depth();
+    int array_depth = depth();
 
-   while (true) {
-      // expecting param open element
-      if ((nt = readXmlRpcNode(xsink)) == -1)
-         return -1;
-
-      //printd(5, "getParams() nt: %d name: %s\n", nt, constName());
-
-      // if higher-level "params" element closed, then return
-      if (nt == XML_READER_TYPE_END_ELEMENT)
-         return 0;
-
-      if (nt != XML_READER_TYPE_ELEMENT) {
-         xsink->raiseException("PARSE-XMLRPC-ERROR", "error parsing XML string, expecting 'param' open element");
-         return -1;
-      }
-
-      if (checkXmlRpcMemberName("param", xsink))
-         return -1;
-
-      v->setReference(&l->getEntryReference(index++));
-
-      // get next value tag or param close tag
-      if (readXmlRpc(xsink))
-         return -1;
-
-      int value_depth = depth();
-      // if param was not an empty node
-      if (value_depth > array_depth) {
-         if ((nt = readXmlRpcNode(xsink)) == -1)
+    while (true) {
+        // expecting param open element
+        if ((nt = readXmlRpcNode(xsink)) == -1) {
             return -1;
+        }
 
-         // if we got a "value" element
-         if (nt == XML_READER_TYPE_ELEMENT) {
-            if (checkXmlRpcMemberName("value", xsink))
-               return -1;
+        // printd(5, "getParams() nt: %d name: %s\n", nt, constName());
 
-            if (readXmlRpc(xsink))
-               return -1;
+        // if higher-level "params" element closed, then return
+        if (nt == XML_READER_TYPE_END_ELEMENT) {
+            return 0;
+        }
 
-            //printd(5, "just read <value>, now value_depth: %d, depth: %d\n", value_depth, depth());
+        if (nt != XML_READER_TYPE_ELEMENT) {
+            xsink->raiseException("PARSE-XMLRPC-ERROR", "error parsing XML string, expecting 'param' open element");
+            return -1;
+        }
 
-            // if this was <value/>, then skip
-            if (value_depth <= depth()) {
-               if ((nt = readXmlRpcNode(xsink)) == -1)
-                  return -1;
+        if (checkXmlRpcMemberName("param", xsink)) {
+            return -1;
+        }
 
-               // if ! </value>
-               if (nt != XML_READER_TYPE_END_ELEMENT) {
-                  if (getValueData(v, data_ccsid, true, xsink))
-                     return -1;
+        v->setReference(&l->getEntryReference(index++));
 
-                  // position on </value> close tag
-                  if ((nt = nodeTypeSkipWhitespace()) != XML_READER_TYPE_END_ELEMENT) {
-                     xsink->raiseException("PARSE-XMLRPC-ERROR", "extra data in params, expecting value close tag");
-                     return -1;
-                  }
+        // get next value tag or param close tag
+        if (readXmlRpc(xsink)) {
+            return -1;
+        }
 
-                  if (checkXmlRpcMemberName("value", xsink, true))
-                     return -1;
-               }
-
-               // get param close tag
-               if (readXmlRpc(xsink))
-                  return -1;
+        int value_depth = depth();
+        // if param was not an empty node
+        if (value_depth > array_depth) {
+            if ((nt = readXmlRpcNode(xsink)) == -1) {
+                return -1;
             }
 
-            if ((nt = nodeTypeSkipWhitespace()) != XML_READER_TYPE_END_ELEMENT) {
-               xsink->raiseException("PARSE-XMLRPC-ERROR", "extra data in params, expecting param close tag (got node type %s instead)", get_xml_node_type_name(nt));
-               return -1;
+            // if we got a "value" element
+            if (nt == XML_READER_TYPE_ELEMENT) {
+                if (getValue(v, data_ccsid, xsink)) {
+                    return -1;
+                }
+
+                if ((nt = nodeTypeSkipWhitespace()) != XML_READER_TYPE_END_ELEMENT) {
+                    xsink->raiseException("PARSE-XMLRPC-ERROR",
+                                          "extra data in params, expecting param close tag (got node type %s instead)",
+                                          get_xml_node_type_name(nt));
+                    return -1;
+                }
+
+                if (checkXmlRpcMemberName("param", xsink, true)) {
+                    return -1;
+                }
+            } else if (nt != XML_READER_TYPE_END_ELEMENT) {
+                xsink->raiseException("PARSE-XMLRPC-ERROR", "extra data in params, expecting value element");
+                return -1;
             }
-
-            if (checkXmlRpcMemberName("param", xsink, true))
-               return -1;
-         }
-         else if (nt != XML_READER_TYPE_END_ELEMENT) {
-            xsink->raiseException("PARSE-XMLRPC-ERROR", "extra data in params, expecting value element");
-            return -1;
-         }
-         // just read a param close tag, position reader at next element
-         if (readXmlRpc(xsink))
-            return -1;
-      }
-   }
-   return 0;
+            // just read a param close tag, position reader at next element
+            if (readXmlRpc(xsink)) {
+                return -1;
+            }
+        }
+    }
+    return 0;
 }
 
-int QoreXmlRpcReader::getString(Qore::Xml::intern::XmlRpcValue *v, const QoreEncoding* data_ccsid, ExceptionSink* xsink) {
-   int nt;
-
-   if ((nt = readXmlRpcNode(xsink)) == -1)
-      return -1;
-
-   if (nt == XML_READER_TYPE_END_ELEMENT) {
-      // save an empty string
-      v->set(null_string());
-      return 0;
-   }
-
-   if (nt != XML_READER_TYPE_TEXT && nt != XML_READER_TYPE_SIGNIFICANT_WHITESPACE) {
-      //printd(5, "getString() unexpected node type %d (expecting text %s)\n", nt, constName());
-      xsink->raiseException("PARSE-XMLRPC-ERROR", "extra information in string");
-      return -1;
-   }
-
-   QoreStringNode* qstr = getValue(data_ccsid, xsink);
-   if (!qstr)
-      return -1;
-
-   //printd(5, "** got string '%s'\n", str);
-   v->set(qstr);
-
-   if (readXmlRpc(xsink))
-      return -1;
-
-   if ((nt = readXmlRpcNode(xsink)) == -1)
-      return -1;
-
-   if (nt != XML_READER_TYPE_END_ELEMENT) {
-      printd(5, "getString() unexpected node type %d (expecting end element %s)\n", nt, constName());
-      xsink->raiseException("PARSE-XMLRPC-ERROR", "extra information in string (%d)", nt);
-      return -1;
-   }
-
-   return 0;
+QoreStringNode *QoreXmlRpcReader::readCharacterData(ExceptionSink *xsink) {
+    ReferenceHolder<QoreStringNode> text(new QoreStringNode(QCS_UTF8), xsink);
+    while (true) {
+        int nt = nodeType();
+        if (nt == XML_READER_TYPE_ELEMENT || nt == XML_READER_TYPE_END_ELEMENT) {
+            return text.release();
+        }
+        if (nt == XML_READER_TYPE_TEXT || nt == XML_READER_TYPE_CDATA || nt == XML_READER_TYPE_WHITESPACE ||
+            nt == XML_READER_TYPE_SIGNIFICANT_WHITESPACE) {
+            const char *value = constValue();
+            if (value) {
+                text->concat(value);
+            }
+        } else if (nt != XML_READER_TYPE_COMMENT && nt != XML_READER_TYPE_PROCESSING_INSTRUCTION) {
+            xsink->raiseException("PARSE-XMLRPC-ERROR", "unexpected XML-RPC character data node %d", nt);
+            return nullptr;
+        }
+        // Every reader advance checks cancellation and retains parser errors.
+        if (read(xsink) != 1) {
+            if (!*xsink) {
+                xsink->raiseException("PARSE-XMLRPC-ERROR", "unterminated XML-RPC character data");
+            }
+            return nullptr;
+        }
+    }
 }
 
+int QoreXmlRpcReader::getString(Qore::Xml::intern::XmlRpcValue *v, const QoreEncoding *data_ccsid,
+                                ExceptionSink *xsink) {
+    ReferenceHolder<QoreStringNode> text(readCharacterData(xsink), xsink);
+    if (!text) {
+        return -1;
+    }
+    if (nodeType() != XML_READER_TYPE_END_ELEMENT) {
+        xsink->raiseException("PARSE-XMLRPC-ERROR", "XML-RPC strings require character data only");
+        return -1;
+    }
+    QoreStringNode *converted = data_ccsid == QCS_UTF8 ? text.release() : text->convertEncoding(data_ccsid, xsink);
+    if (!converted) {
+        return -1;
+    }
+    v->set(converted);
+    return 0;
+}
 int QoreXmlRpcReader::getBoolean(Qore::Xml::intern::XmlRpcValue *v, ExceptionSink* xsink) {
    int nt;
 
@@ -490,201 +446,189 @@ int QoreXmlRpcReader::getBase64(Qore::Xml::intern::XmlRpcValue *v, ExceptionSink
    return 0;
 }
 
-int QoreXmlRpcReader::getArray(Qore::Xml::intern::XmlRpcValue *v, const QoreEncoding* data_ccsid, ExceptionSink* xsink) {
-   int nt;
-   int index = 0;
-
-   QoreListNode* l = new QoreListNode(autoTypeInfo);
-   v->set(l);
-
-   int array_depth = depth();
-
-   // expecting data open element
-   if ((nt = readXmlRpcNode(xsink)) == -1)
-      return -1;
-
-   // if higher-level element closed, then return
-   if (nt == XML_READER_TYPE_END_ELEMENT)
-      return 0;
-
-   if (nt != XML_READER_TYPE_ELEMENT) {
-      xsink->raiseExceptionArg("PARSE-XMLRPC-ERROR", new QoreStringNode(*xml), "error parsing XML string, expecting data open element");
-      return -1;
-   }
-
-   if (checkXmlRpcMemberName("data", xsink))
-      return -1;
-
-   //printd(5, "getArray() level: %d before str: %s\n", depth(), (char*)constName());
-
-   // get next value tag or data close tag
-   if (readXmlRpc(xsink))
-      return -1;
-
-   int value_depth = depth();
-
-   // if we just read an empty tag, then don't try to read to data close tag
-   if (value_depth > array_depth) {
-      while (true) {
-         if ((nt = readXmlRpcNode(xsink)) == -1)
-            return -1;
-
-         if (nt == XML_READER_TYPE_END_ELEMENT)
-            break;
-
-         // get "value" element
-         if (nt != XML_READER_TYPE_ELEMENT) {
-            xsink->raiseExceptionArg("PARSE-XMLRPC-ERROR", new QoreStringNode(*xml), "extra data in array, expecting value element");
-            return -1;
-         }
-
-         if (checkXmlRpcMemberName("value", xsink))
-            return -1;
-
-         v->setReference(&l->getEntryReference(index++));
-
-         if (readXmlRpc(xsink))
-            return -1;
-
-         //printd(5, "DEBUG: vd: %d, d: %d\n", value_depth, depth());
-
-         // if this was <value/>, then skip
-         if (value_depth < depth()) {
-            if ((nt = readXmlRpcNode(xsink)) == -1)
-               return -1;
-
-            if (nt == XML_READER_TYPE_END_ELEMENT)
-               v->set(reinterpret_cast<AbstractQoreNode*>(0));
-            else {
-               if (getValueData(v, data_ccsid, true, xsink))
-                  return -1;
-
-               //printd(5, "after getValueData() nt: %d name: %s\n", nt, constName());
-
-               // check for </value> close tag
-               if ((nt = nodeTypeSkipWhitespace()) != XML_READER_TYPE_END_ELEMENT) {
-                  //printd(5, "nt: %d name: %s\n", nt, constName());
-                  xsink->raiseExceptionArg("PARSE-XMLRPC-ERROR", new QoreStringNode(*xml), "extra data in array, expecting value close tag");
-                  return -1;
-               }
+int QoreXmlRpcReader::getArray(Qore::Xml::intern::XmlRpcValue *v, const QoreEncoding *data_ccsid,
+                               ExceptionSink *xsink) {
+    QoreListNode *list = new QoreListNode(autoTypeInfo);
+    v->set(list);
+    if (nodeType() != XML_READER_TYPE_ELEMENT || checkXmlRpcMemberName("data", xsink)) {
+        if (!*xsink) {
+            xsink->raiseException("PARSE-XMLRPC-ERROR", "expecting array data element");
+        }
+        return -1;
+    }
+    bool empty = isEmptyElement();
+    if (readXmlRpc(xsink)) {
+        return -1;
+    }
+    if (!empty) {
+        size_t index = 0;
+        while (nodeType() != XML_READER_TYPE_END_ELEMENT) {
+            // getValue() advances through cancellation-aware reader calls.
+            v->setReference(&list->getEntryReference(index++));
+            if (getValue(v, data_ccsid, xsink)) {
+                return -1;
             }
-            // read </data> close tag element
-            if (readXmlRpc("expecting data close tag", xsink))
-               return -1;
-         }
-      }
-      // read </array> close tag element
-      if (readXmlRpc("error reading array close tag", xsink))
-         return -1;
-   }
-   else if (value_depth == array_depth && readXmlRpc(xsink))
-      return -1;
-
-   //printd(5, "vd: %d ad: %d\n", value_depth, array_depth);
-
-   // check for array close tag
-   if ((nt = nodeTypeSkipWhitespace()) != XML_READER_TYPE_END_ELEMENT) {
-      if (nt == XML_READER_TYPE_ELEMENT)
-         xsink->raiseExceptionArg("PARSE-XMLRPC-ERROR", new QoreStringNode(*xml), "expecting array close tag, got element '%s' instead", constName());
-      else
-         xsink->raiseExceptionArg("PARSE-XMLRPC-ERROR", new QoreStringNode(*xml), "extra data in array, expecting array close tag, got node type %d", nt);
-      return -1;
-   }
-   return 0;
+        }
+        if (checkXmlRpcMemberName("data", xsink, true) || readXmlRpc(xsink)) {
+            return -1;
+        }
+    }
+    if (nodeType() != XML_READER_TYPE_END_ELEMENT || checkXmlRpcMemberName("array", xsink, true)) {
+        if (!*xsink) {
+            xsink->raiseException("PARSE-XMLRPC-ERROR", "expecting array close element");
+        }
+        return -1;
+    }
+    return 0;
 }
 
-int QoreXmlRpcReader::getValueData(Qore::Xml::intern::XmlRpcValue *v, const QoreEncoding* data_ccsid, bool read_next, ExceptionSink* xsink) {
-   int nt = nodeTypeSkipWhitespace();
-   if (nt == -1) {
-      xsink->raiseException("PARSE-XMLRPC-ERROR", "error parsing XML string");
-      return -1;
-   }
+int QoreXmlRpcReader::getValue(Qore::Xml::intern::XmlRpcValue *v, const QoreEncoding *data_ccsid,
+                               ExceptionSink *xsink) {
+    if (nodeType() != XML_READER_TYPE_ELEMENT || checkXmlRpcMemberName("value", xsink)) {
+        if (!*xsink) {
+            xsink->raiseException("PARSE-XMLRPC-ERROR", "expecting value element");
+        }
+        return -1;
+    }
+    if (isEmptyElement()) {
+        v->set(QoreValue());
+        return readXmlRpc(xsink);
+    }
+    // Whitespace is data until a typed child proves that it is formatting.
+    if (read(xsink) != 1) {
+        return -1;
+    }
+    if (nodeType() == XML_READER_TYPE_END_ELEMENT) {
+        v->set(QoreValue());
+    } else if (getValueData(v, data_ccsid, true, xsink)) {
+        return -1;
+    }
+    if (nodeType() != XML_READER_TYPE_END_ELEMENT || checkXmlRpcMemberName("value", xsink, true)) {
+        if (!*xsink) {
+            xsink->raiseException("PARSE-XMLRPC-ERROR", "expecting value close element");
+        }
+        return -1;
+    }
+    return readXmlRpc(xsink);
+}
 
-   //printd(5, "QoreXmlRpcReader::getValueData() DEBUG nt: %d read_next: %d\n", nt, read_next);
+int QoreXmlRpcReader::getValueData(Qore::Xml::intern::XmlRpcValue *v, const QoreEncoding *data_ccsid, bool read_next,
+                                   ExceptionSink *xsink) {
+    int nt = nodeType();
+    if (nt == -1) {
+        xsink->raiseException("PARSE-XMLRPC-ERROR", "error parsing XML string");
+        return -1;
+    }
 
-   if (nt == XML_READER_TYPE_ELEMENT) {
-      int depth = QoreXmlReader::depth();
+    // printd(5, "QoreXmlRpcReader::getValueData() DEBUG nt: %d read_next: %d\n", nt, read_next);
 
-      // get xmlrpc type name
-      const char* name = constName();
-      if (!name) {
-         xsink->raiseException("PARSE-XMLRPC-ERROR", "expecting type name, got NOTHING at level %d", depth);
-         return -1;
-      }
-
-      //printd(5, "QoreXmlRpcReader::getValueData() DEBUG parsing type '%s'\n", name);
-
-      int rc = readSkipWhitespace();
-      if (rc != 1) {
-         if (!read_next)
-            return xmlrpc_do_empty_value(v, name, depth, xsink);
-
-         xsink->raiseException("PARSE-XMLRPC-ERROR", "error parsing XML string");
-         return -1;
-      }
-
-      //printd(5, "QoreXmlRpcReader::getValueData() old depth: %d new depth: %d element='%s' nt: %d\n", depth, QoreXmlReader::depth(), name, nodeType());
-
-      // if this was an empty element, assign an empty value
-      if (depth == QoreXmlReader::depth()) {
-         int rc = xmlrpc_do_empty_value(v, name, depth, xsink);
-         return !rc && read_next ? readXmlRpc(xsink) : rc;
-      }
-
-      if (depth > QoreXmlReader::depth())
-         return xmlrpc_do_empty_value(v, name, depth, xsink);
-
-      if (!strcmp(name, "string")) {
-         if (getString(v, data_ccsid, xsink))
+    if (nt != XML_READER_TYPE_ELEMENT && nt != XML_READER_TYPE_END_ELEMENT) {
+        ReferenceHolder<QoreStringNode> text(readCharacterData(xsink), xsink);
+        if (!text) {
             return -1;
-      }
-      else if (!strcmp(name, "i4") || !strcmp(name, "int") || !strcmp(name, "ex:i1") || !strcmp(name, "ex:i2") || !strcmp(name, "ex:i8")) {
-         if (getInt(v, xsink))
-            return -1;
-      }
-      else if (!strcmp(name, "boolean")) {
-         if (getBoolean(v, xsink))
-            return -1;
-      }
-      else if (!strcmp(name, "struct")) {
-         if (getStruct(v, data_ccsid, xsink))
-            return -1;
-      }
-      else if (!strcmp(name, "array")) {
-         if (getArray(v, data_ccsid, xsink))
-            return -1;
-      }
-      else if (!strcmp(name, "double") || !strcmp(name, "ex:float")) {
-         if (getDouble(v, xsink))
-            return -1;
-      }
-      else if (!strcmp(name, "dateTime.iso8601") || !strcmp(name, "ex:dateTime")) {
-         if (getDate(v, xsink))
-            return -1;
-      }
-      else if (!strcmp(name, "base64")) {
-         if (getBase64(v, xsink))
-            return -1;
-      }
-      else {
-         xsink->raiseException("PARSE-XMLRPC-ERROR", "unknown XML-RPC type '%s' at level %d", name, depth);
-         return -1;
-      }
+        }
+        if (nodeType() == XML_READER_TYPE_END_ELEMENT) {
+            QoreStringNode *converted =
+                data_ccsid == QCS_UTF8 ? text.release() : text->convertEncoding(data_ccsid, xsink);
+            if (!converted) {
+                return -1;
+            }
+            v->set(converted);
+            // The collector is already on </value>; the containing parser consumes it.
+            return 0;
+        }
+        for (size_t i = 0; i < text->size(); ++i) {
+            if (!(i % 100) && qore_check_cancel(xsink, "XML-RPC value whitespace")) {
+                return -1;
+            }
+            char c = text->c_str()[i];
+            if (c != ' ' && c != '\t' && c != '\r' && c != '\n') {
+                xsink->raiseException("PARSE-XMLRPC-ERROR", "character data before an XML-RPC typed value");
+                return -1;
+            }
+        }
+        nt = nodeType();
+    }
 
-      //printd(5, "getValueData() finished parsing type '%s' element depth: %d\n", name, depth);
-      if (xsink->isEvent())
-         return -1;
-   }
-   else if (nt == XML_READER_TYPE_TEXT) { // without type defaults to string
-      QoreStringNode* qstr = getValue(data_ccsid, xsink);
-      if (!qstr)
-         return -1;
-      v->set(qstr);
-   }
-   else {
-      xsink->raiseException("PARSE-XMLRPC-ERROR", "unable to parse XML-RPC string; expecting element node, got type %d instead", nt);
-      return -1;
-   }
+    if (nt == XML_READER_TYPE_ELEMENT) {
+        int depth = QoreXmlReader::depth();
 
-   return read_next ? readXmlRpc(xsink) : 0;
+        const char *current_name = constName();
+        if (!current_name) {
+            xsink->raiseException("PARSE-XMLRPC-ERROR", "expecting type name at level %d", depth);
+            return -1;
+        }
+        QoreString type_name(current_name, QCS_UTF8);
+        const char *name = type_name.c_str();
+        if (isEmptyElement()) {
+            int rc = xmlrpc_do_empty_value(v, name, depth, xsink);
+            return !rc && read_next ? readXmlRpc(xsink) : rc;
+        }
+        int rc = !strcmp(name, "string") ? read(xsink) : readSkipWhitespace(xsink);
+        if (rc != 1) {
+            if (!*xsink) {
+                xsink->raiseException("PARSE-XMLRPC-ERROR", "unterminated XML-RPC typed value");
+            }
+            return -1;
+        }
+        if (depth == QoreXmlReader::depth()) {
+            if (nodeType() != XML_READER_TYPE_END_ELEMENT || checkXmlRpcMemberName(name, xsink, true)) {
+                if (!*xsink) {
+                    xsink->raiseException("PARSE-XMLRPC-ERROR", "expecting typed value close element");
+                }
+                return -1;
+            }
+            int rc = xmlrpc_do_empty_value(v, name, depth, xsink);
+            return !rc && read_next ? readXmlRpc(xsink) : rc;
+        }
+
+        if (!strcmp(name, "string")) {
+            if (getString(v, data_ccsid, xsink)) {
+                return -1;
+            }
+        } else if (!strcmp(name, "i4") || !strcmp(name, "int") || !strcmp(name, "ex:i1") || !strcmp(name, "ex:i2") ||
+                   !strcmp(name, "ex:i8")) {
+            if (getInt(v, xsink)) {
+                return -1;
+            }
+        } else if (!strcmp(name, "boolean")) {
+            if (getBoolean(v, xsink)) {
+                return -1;
+            }
+        } else if (!strcmp(name, "struct")) {
+            if (getStruct(v, data_ccsid, xsink)) {
+                return -1;
+            }
+        } else if (!strcmp(name, "array")) {
+            if (getArray(v, data_ccsid, xsink)) {
+                return -1;
+            }
+        } else if (!strcmp(name, "double") || !strcmp(name, "ex:float")) {
+            if (getDouble(v, xsink)) {
+                return -1;
+            }
+        } else if (!strcmp(name, "dateTime.iso8601") || !strcmp(name, "ex:dateTime")) {
+            if (getDate(v, xsink)) {
+                return -1;
+            }
+        } else if (!strcmp(name, "base64")) {
+            if (getBase64(v, xsink)) {
+                return -1;
+            }
+        } else {
+            xsink->raiseException("PARSE-XMLRPC-ERROR", "unknown XML-RPC type '%s' at level %d", name, depth);
+            return -1;
+        }
+
+        // printd(5, "getValueData() finished parsing type '%s' element depth: %d\n", name, depth);
+        if (xsink->isEvent()) {
+            return -1;
+        }
+    } else {
+        xsink->raiseException("PARSE-XMLRPC-ERROR",
+                              "unable to parse XML-RPC string; expecting element node, got type %d instead", nt);
+        return -1;
+    }
+
+    return read_next ? readXmlRpc(xsink) : 0;
 }

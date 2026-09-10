@@ -53,7 +53,7 @@ namespace intern { // make classes local
 
         DLLLOCAL void set(QoreValue v) {
             if (is_set) {
-                *vp = v;
+                discard(vp->assign(v), nullptr);
             } else {
                 discard(val.assign(v), 0);
             }
@@ -223,9 +223,27 @@ public:
         return 0;
     }
 
+    // Validate trailing XML nodes before returning a completed protocol value.
+    DLLLOCAL int finishDocument(ExceptionSink* xsink) {
+        int rc;
+        while ((rc = read(xsink)) == 1) {
+            int nt = nodeType();
+            if (nt != XML_READER_TYPE_COMMENT && nt != XML_READER_TYPE_PROCESSING_INSTRUCTION
+                    && nt != XML_READER_TYPE_WHITESPACE && nt != XML_READER_TYPE_SIGNIFICANT_WHITESPACE) {
+                xsink->raiseException("PARSE-XMLRPC-ERROR", "extra content after XML-RPC document");
+                return -1;
+            }
+        }
+        return rc == -1 ? -1 : 0;
+    }
+
+    // Read a complete value element, leaving the reader at the following significant node.
+    DLLLOCAL int getValue(Qore::Xml::intern::XmlRpcValue* v, const QoreEncoding* data_ccsid, ExceptionSink* xsink);
     DLLLOCAL int getArray(Qore::Xml::intern::XmlRpcValue *v, const QoreEncoding* data_ccsid, ExceptionSink* xsink);
     DLLLOCAL int getStruct(Qore::Xml::intern::XmlRpcValue *v, const QoreEncoding* data_ccsid, ExceptionSink* xsink);
     DLLLOCAL int getString(Qore::Xml::intern::XmlRpcValue *v, const QoreEncoding* data_ccsid, ExceptionSink* xsink);
+    // Collect UTF-8 character data, leaving the reader on the next element or end element.
+    DLLLOCAL QoreStringNode* readCharacterData(ExceptionSink* xsink);
     DLLLOCAL int getBoolean(Qore::Xml::intern::XmlRpcValue *v, ExceptionSink* xsink);
     DLLLOCAL int getInt(Qore::Xml::intern::XmlRpcValue *v, ExceptionSink* xsink);
     DLLLOCAL int getDouble(Qore::Xml::intern::XmlRpcValue *v, ExceptionSink* xsink);
