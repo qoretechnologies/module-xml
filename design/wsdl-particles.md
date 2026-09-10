@@ -352,3 +352,90 @@ also cover unbounded counts, namespace collisions, counts beyond 64 bits, a shar
 graph representing `2^70` occurrences, invalid graphs, interruption and concurrent
 reuse. Legacy native group serialization and sample generation remain separate
 P4 implementation criteria.
+
+## Native named-element emission
+
+Named element-only native records use the complete particle to allocate values
+to an ordered child sequence. Field names and scalar/list shapes remain the
+existing provider projection. A supplied list holds successive values of that
+field; a single-occurrence XSD list datatype instead retains the list as one
+child value. Missing optional fields contribute zero children. Required empty
+wrappers retain their established empty-value representation, and an explicitly
+supplied empty hash emits its optional wrapper rather than dropping it.
+
+Provider metadata, native emission and native decoding select field names from
+the same active declaration projection. Zero-occurrence declarations do not
+create namespace collisions or absent fields. Removing an inactive reference
+from a temporary map never deletes the shared `XsdElement`; metadata inspection
+therefore leaves later serialization, decoding and reconstruction usable.
+
+The serializer first collects occurrence counts, retaining each field's value
+order. `XsdParticle::orderElementNames()` keeps an already matching order or
+finds a deterministic permutation in the particle language. Complete attribution
+then selects the actual declaration for every occurrence. Each declaration's
+`serializeOccurrence()` validates/converts that value using a local one-occurrence
+range. Neither method changes shared element counts. Nonadjacent repeated XML
+names receive the XML generator's ordered suffix keys; adjacent occurrences keep
+the usual list form. This prevents a valid `a,b,a,b` schedule from being regrouped
+into `a,a,b,b` at XML generation.
+
+For example, a batch of two quantity/note records retains positional pairing
+within the schema's repeated sequence:
+
+```qore
+XsdSchema schema("<xs:schema xmlns:xs='http://www.w3.org/2001/XMLSchema'>"
+    "<xs:complexType name='Batch'><xs:sequence minOccurs='2' maxOccurs='2'>"
+    "<xs:element name='quantity' type='xs:int'/><xs:element name='note' type='xs:string'/>"
+    "</xs:sequence></xs:complexType></xs:schema>");
+XsdComplexType batch = cast<XsdComplexType>(schema.findType("Batch"));
+hash<auto> output = batch.serializeValue(schema.nsc.copy(),
+    {"quantity": (3, 7), "note": ("first", "second")}, True);
+@assert(keys output == ("quantity", "note", "quantity^1", "note^1"));
+@assert(output.quantity == 3 && output."quantity^1" == 7);
+@assert(output.note == "first" && output."note^1" == "second");
+```
+
+A flat record cannot identify its original choice/repetition boundaries or
+interleaving across different names. The ordering method chooses structure before
+value conversion; it does not try different declarations to make a value pass.
+Use the P2 `XsdXmlValue` representation when a particular original ordering or
+declaration context must survive. Its ordered matcher retains the original XML.
+Mixed/wildcard value processing belongs to P5; explanatory `^choices` samples
+retain their separate generation adapter until P4 sample integration is complete.
+
+### Exact allocation and bounds
+
+Greedy choice selection and independent min/max checks are insufficient. A later
+sequence term can require a name also present in an earlier choice. Count gaps
+can require leaving all occurrences for a later group: `(a{2})* b (a{3})*` accepts
+`b,a,a,a`, while taking two `a` values before `b` leaves an impossible suffix.
+
+The general allocator uses the same child-before-parent compiled graph as ordered
+matching. Each node stores one witness for every attainable supplied count vector.
+Sequence takes bounded vector sums; choice takes union; repetition takes bounded
+products of nonempty iterations. Nullable atoms can pad their minimum with empty
+iterations, so numeric counts never cause numeric-range expansion. Nonempty
+iterations consume supplied children and cannot exceed the supplied length.
+Empty languages and epsilon remain distinct. Wildcard positions in the public
+ordering API use their namespace predicate. `all` needs no reordering search.
+
+Let `N` be the supplied number of children, `K` the number of distinct names,
+`M` the compiled node count, `E` its edges, and
+`S = product(count[name] + 1)`. Each node/frontier stores at most `S` vectors.
+There are at most `E + M*N` vector products, each testing at most `S*S` pairs
+with `O(K)` integer additions and decimal-key formatting. Stored vectors use
+`O(M*S*K)` integers. An index-based witness arena adds at most
+`O((E + M*N)*S)` constant-size records; it avoids copying an accumulated word at
+every step and recursive cleanup. Output traversal is iterative and proportional
+to the emitted word. Arbitrary schema-bound arithmetic has its separate decimal
+digit cost. Exact occurrence extrema reject impossible named counts before
+general allocation; an already valid order uses the existing polynomial matcher.
+
+`S` can be exponential in `K`; this is an explicit bound, not a claim of polynomial
+unordered allocation. General unordered regular-expression membership is
+intractable; see [Boneva, Ciucanu and Staworko, section 3](https://arxiv.org/abs/1311.7307v4).
+The allocator deduplicates states without backtracking through derivations or
+permutations, retains Qore cancellation, and has no arbitrary rejection cutoff.
+All mutable state belongs to one call, including witness storage and namespace
+copies. Ordered matching/attribution retain their separately documented
+polynomial bounds and do not pay for unordered reconstruction.

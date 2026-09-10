@@ -1,0 +1,361 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires xml
+%requires ../qlib/WSDL.qm
+%exec-class ParticleSerializationTest
+
+class ParticleSerializationTest inherits QUnit::Test {
+    constructor() : Test("Ordered particle serialization", "1.0") {
+        addTestCase("One occurrence retains its declaration's value checks", \occurrences());
+        addTestCase("List-valued children remain one occurrence", \lists());
+        addTestCase("Nil and empty children remain explicit occurrences", \empty());
+        addTestCase("Explicit type wrappers retain dispatch and validation", \types());
+        addTestCase("Interrupted occurrence conversion permits reuse", \cancellation());
+        addTestCase("Concurrent occurrence calls keep declaration limits unchanged", \concurrency());
+        addTestCase("Native choices retain their sequence positions", \nativeOrder());
+        addTestCase("Native fields enforce complete group membership and count gaps", \nativeGroups());
+        addTestCase("Native repeated values use their actual attributed declarations", \nativeValues());
+        addTestCase("Shared choice fields reserve the required suffix", \allocations());
+        addTestCase("Repeated groups emit interleaved children", \interleaving());
+        addTestCase("Ordering handles huge counts, nullable atoms and all groups", \orderBoundaries());
+        addTestCase("Large repeated outputs retain every occurrence", \largeOutput());
+        addTestCase("Inactive names neither collide nor destroy shared declarations", \inactiveNames());
+        addTestCase("Shared groups and wildcard ordering retain caller continuations", \sharedGroups());
+        set_return_value(main());
+    }
+    private XsdSchema schema(string declaration, string types = "") {
+        return new XsdSchema('<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:t="urn:emit"
+            targetNamespace="urn:emit">' + types + '<xs:complexType name="Record"><xs:sequence>'
+            + declaration + '</xs:sequence></xs:complexType></xs:schema>');
+    }
+    private XsdElement child(XsdSchema source) {
+        return cast<XsdComplexType>(source.findType("Record")).getParticle().getChildren()[0].getElement();
+    }
+    private auto emit(XsdSchema source, auto value) {
+        return child(source).serializeOccurrence(source.nsc.copy(), value, True, "item", "Record");
+    }
+    private hash<auto> emitRecord(XsdSchema source, hash<auto> value) {
+        return cast<XsdComplexType>(source.findType("Record")).serializeValue(source.nsc.copy(), value, True);
+    }
+    allocations() {
+        string choice = '<xs:choice><xs:sequence><xs:element name="p" type="xs:int"/>'
+            '<xs:element name="a" type="xs:int"/></xs:sequence><xs:sequence>'
+            '<xs:element name="q" type="xs:int"/><xs:element name="a" type="xs:int"/>'
+            '</xs:sequence></xs:choice>';
+        XsdSchema original = schema(choice);
+        foreach XsdSchema source in (original, Serializable::deserialize(original.serialize())) {
+            assertEq(("q", "a"), keys emitRecord(source, {"a": 2, "q": 1}));
+            assertEq(("p", "a"), keys emitRecord(source, {"a": 2, "p": 1}));
+        }
+        original = schema(choice + '<xs:element name="p" type="xs:int"/>');
+        foreach XsdSchema source in (original, Serializable::deserialize(original.serialize())) {
+            assertEq(("q", "a", "p"), keys emitRecord(source, {"a": 2, "p": 3, "q": 1}));
+            assertEq({"p": 1, "a": 2, "p^1": 3}, emitRecord(source, {"a": 2, "p": (1, 3)}));
+        }
+        original = schema('<xs:sequence minOccurs="0" maxOccurs="unbounded"><xs:element name="a"'
+            ' type="xs:int" minOccurs="2" maxOccurs="2"/></xs:sequence><xs:element name="b" type="xs:int"/>'
+            '<xs:sequence minOccurs="0" maxOccurs="unbounded"><xs:element name="a" type="xs:int"'
+            ' minOccurs="3" maxOccurs="3"/></xs:sequence>');
+        foreach XsdSchema source in (original, Serializable::deserialize(original.serialize())) {
+            assertEq({"b": 4, "a": (1, 2, 3)}, emitRecord(source, {"a": (1, 2, 3), "b": 4}));
+            assertEq({"a": (1, 2), "b": 4}, emitRecord(source, {"a": (1, 2), "b": 4}));
+            assertThrows("SOAP-SERIALIZATION-ERROR", \emitRecord(), (source, {"a": 1, "b": 4}));
+        }
+    }
+    interleaving() {
+        XsdSchema original = schema('<xs:sequence minOccurs="2" maxOccurs="3">'
+            '<xs:element name="a" type="xs:int"/><xs:element name="b" type="xs:int"/></xs:sequence>');
+        foreach XsdSchema source in (original, Serializable::deserialize(original.serialize())) {
+            hash<auto> result = emitRecord(source, {"a": (1, 2), "b": (3, 4)});
+            assertEq(("a", "b", "a^1", "b^1"), keys result);
+            assertEq({"a": 1, "b": 3, "a^1": 2, "b^1": 4}, result);
+            assertTrue(index(make_xml({"record": result}),
+                '<record><a>1</a><b>3</b><a>2</a><b>4</b></record>') >= 0);
+            assertThrows("SOAP-SERIALIZATION-ERROR", \emitRecord(), (source, {"a": (1, 2), "b": 3}));
+            assertThrows("SOAP-SERIALIZATION-ERROR", \emitRecord(), (source, {"a": (1, 2, 3, 4), "b": (5, 6, 7, 8)}));
+        }
+    }
+    orderBoundaries() {
+        string huge = "1000000000000000000000000000000000000000000";
+        XsdSchema source = schema('<xs:sequence minOccurs="' + huge + '" maxOccurs="' + huge + '">'
+            '<xs:element name="a" type="xs:int" minOccurs="0"/><xs:element name="b" type="xs:int" minOccurs="0"/>'
+            '</xs:sequence>');
+        XsdParticle particle = cast<XsdComplexType>(source.findType("Record")).getParticle();
+        assertEq((), particle.orderElementNames(()));
+        assertEq(("{}b", "{}a"), particle.orderElementNames(("{}b", "{}a")));
+        assertEq(NOTHING, particle.orderElementNames(("{}unknown",)));
+        assertThrows("XSD-PARTICLE-ERROR", \particle.orderElementNames(), (("invalid",),));
+        source = schema('<xs:sequence minOccurs="' + huge + '" maxOccurs="' + huge + '">'
+            '<xs:element name="a" type="xs:int"/></xs:sequence>');
+        particle = cast<XsdComplexType>(source.findType("Record")).getParticle();
+        assertEq(NOTHING, particle.orderElementNames(("{}a",)));
+        source = schema('<xs:sequence minOccurs="' + huge + '" maxOccurs="' + huge + '"/>');
+        particle = cast<XsdComplexType>(source.findType("Record")).getParticle();
+        assertEq((), particle.orderElementNames(()));
+        source = schema('<xs:choice/>');
+        particle = cast<XsdComplexType>(source.findType("Record")).getParticle();
+        assertEq(NOTHING, particle.orderElementNames(()));
+        source = new XsdSchema('<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">'
+            '<xs:complexType name="Record"><xs:all minOccurs="0"><xs:element name="a" type="xs:int"/>'
+            '<xs:element name="b" type="xs:int"/></xs:all></xs:complexType></xs:schema>');
+        particle = cast<XsdComplexType>(source.findType("Record")).getParticle();
+        assertEq(("{}b", "{}a"), particle.orderElementNames(("{}b", "{}a")));
+        assertEq((), particle.orderElementNames(()));
+        assertEq(NOTHING, particle.orderElementNames(("{}a",)));
+        assertEq(NOTHING, particle.orderElementNames(("{}a", "{}a", "{}b")));
+    }
+    largeOutput() {
+        XsdSchema source = schema('<xs:sequence minOccurs="2" maxOccurs="unbounded">'
+            '<xs:element name="a" type="xs:int"/><xs:element name="b" type="xs:int"/></xs:sequence>');
+        list<int> values();
+        for (int index = 0; index < 300; ++index) {
+            push values, index;
+        }
+        hash<auto> result = emitRecord(source, {"a": values, "b": values});
+        list<string> names = keys result;
+        assertEq(600, names.size());
+        for (int index = 0; index < 300; ++index) {
+            assertEq(index ? "a^" + index : "a", names[index * 2]);
+            assertEq(index ? "b^" + index : "b", names[index * 2 + 1]);
+            assertEq(index, result{names[index * 2]});
+            assertEq(index, result{names[index * 2 + 1]});
+        }
+    }
+    inactiveNames() {
+        XsdSchema original = schema('<xs:element name="a" type="xs:int" form="qualified" minOccurs="0" maxOccurs="0"/>'
+            '<xs:element name="a" type="xs:int"/>');
+        foreach XsdSchema source in (original, Serializable::deserialize(original.serialize())) {
+            XsdComplexType type = cast<XsdComplexType>(source.findType("Record"));
+            XsdElement absent = type.getParticle().getChildren()[0].getElement();
+            assertEq(("a",), keys type.getDataProviderType().getFields());
+            assertEq("{urn:emit}a", absent.getExpandedName());
+            assertEq({"a": 7}, emitRecord(source, {"a": 7}));
+            assertEq({"a": 8}, emitRecord(source, {"{}a": 8}));
+            assertEq({"a": 7}, type.deserializeValue("Record", new hash<string, XsdAbstractType>(), NOTHING,
+                {"{}a": "7"}));
+            assertEq(("a",), keys type.getDataProviderType().getFields());
+            assertEq("{urn:emit}a", absent.getExpandedName());
+            assertThrows("SOAP-SERIALIZATION-ERROR", \emitRecord(), (source, {"{urn:emit}a": 7}));
+            assertThrows("SOAP-SERIALIZATION-ERROR", \emitRecord(), (source, {"a": 7, "{}a": 8}));
+        }
+    }
+    sharedGroups() {
+        XsdSchema original = schema('<xs:group ref="t:Pair" minOccurs="2" maxOccurs="2"/>'
+            '<xs:element name="c" type="xs:int"/><xs:group ref="t:Pair"/>',
+            '<xs:group name="Pair"><xs:sequence><xs:element name="a" type="xs:int"/>'
+            '<xs:element name="b" type="xs:int"/></xs:sequence></xs:group>');
+        foreach XsdSchema source in (original, Serializable::deserialize(original.serialize())) {
+            hash<auto> result = emitRecord(source, {"a": (1, 2, 3), "b": (4, 5, 6), "c": 7});
+            assertEq(("a", "b", "a^1", "b^1", "c", "a^2", "b^2"), keys result);
+            assertEq({"a": 1, "b": 4, "a^1": 2, "b^1": 5, "c": 7, "a^2": 3, "b^2": 6}, result);
+        }
+        original = schema('<xs:any namespace="urn:other" minOccurs="2" maxOccurs="2" processContents="skip"/>'
+            '<xs:element name="end" type="xs:int"/>');
+        foreach XsdSchema source in (original, Serializable::deserialize(original.serialize())) {
+            XsdParticle particle = cast<XsdComplexType>(source.findType("Record")).getParticle();
+            assertEq(("{urn:other}a", "{urn:other}b", "{}end"),
+                particle.orderElementNames(("{}end", "{urn:other}a", "{urn:other}b")));
+            assertEq(NOTHING, particle.orderElementNames(("{}end", "{urn:wrong}a", "{urn:other}b")));
+        }
+    }
+    nativeOrder() {
+        XsdSchema original = schema('<xs:choice><xs:element name="a" type="xs:int"/>'
+            '<xs:element name="b" type="xs:int"/></xs:choice><xs:element name="c" type="xs:string"/>');
+        foreach XsdSchema source in (original, Serializable::deserialize(original.serialize())) {
+            hash<auto> value = emitRecord(source, {"c": "tail", "b": 7});
+            assertEq(("b", "c"), keys value);
+            assertEq({"b": 7, "c": "tail"}, value);
+            value = emitRecord(source, {"c": "tail", "a": 8});
+            assertEq(("a", "c"), keys value);
+            assertThrows("SOAP-SERIALIZATION-ERROR", \emitRecord(), (source, {"c": "tail"}));
+            assertThrows("SOAP-SERIALIZATION-ERROR", \emitRecord(), (source, {"a": 8, "b": 7, "c": "tail"}));
+            assertThrows("SOAP-SERIALIZATION-ERROR", \emitRecord(), (source, {"a": 8, "c": "tail", "unknown": 9}));
+        }
+    }
+    nativeGroups() {
+        XsdSchema original = schema('<xs:sequence minOccurs="0"><xs:element name="a" type="xs:int"/>'
+            '<xs:element name="b" type="xs:int"/></xs:sequence>');
+        foreach XsdSchema source in (original, Serializable::deserialize(original.serialize())) {
+            assertEq({}, emitRecord(source, {}));
+            assertEq({"a": 1, "b": 2}, emitRecord(source, {"b": 2, "a": 1}));
+            assertThrows("SOAP-SERIALIZATION-ERROR", \emitRecord(), (source, {"a": 1}));
+            assertThrows("SOAP-SERIALIZATION-ERROR", \emitRecord(), (source, {"b": 2}));
+        }
+        original = schema('<xs:sequence minOccurs="2" maxOccurs="3"><xs:element name="a" type="xs:int"'
+            ' minOccurs="2" maxOccurs="2"/></xs:sequence>');
+        foreach XsdSchema source in (original, Serializable::deserialize(original.serialize())) {
+            assertEq({"a": (1, 2, 3, 4)}, emitRecord(source, {"a": (1, 2, 3, 4)}));
+            assertEq({"a": (1, 2, 3, 4, 5, 6)}, emitRecord(source, {"a": (1, 2, 3, 4, 5, 6)}));
+            assertThrows("SOAP-SERIALIZATION-ERROR", \emitRecord(), (source, {"a": (1, 2, 3, 4, 5)}));
+        }
+    }
+    nativeValues() {
+        XsdSchema original = schema('<xs:element name="a" type="xs:int" minOccurs="2" maxOccurs="2"/>'
+            '<xs:element name="a" type="xs:int" nillable="true"/>');
+        foreach XsdSchema source in (original, Serializable::deserialize(original.serialize())) {
+            list<auto> supplied = (7, 8, NOTHING);
+            hash<auto> result = emitRecord(source, {"a": supplied});
+            assertEq(3, result.a.size());
+            assertEq(7, result.a[0]);
+            assertEq(8, result.a[1]);
+            assertEq("true", result.a[2]."^attributes^".firstValue());
+            assertEq(supplied, (7, 8, NOTHING));
+            supplied = (NOTHING, 8, 9);
+            assertThrows("SOAP-SERIALIZATION-ERROR", \emitRecord(), (source, {"a": supplied}));
+        }
+        original = schema('<xs:sequence minOccurs="2" maxOccurs="3"><xs:element name="a" type="t:Numbers"/>'
+            '</xs:sequence>', '<xs:simpleType name="Numbers"><xs:list itemType="xs:int"/></xs:simpleType>');
+        assertEq({"a": ("1 2", "3")}, emitRecord(original, {"a": ((1, 2), (3,))}));
+        original = schema('<xs:element name="wrapper"><xs:complexType><xs:sequence minOccurs="0">'
+            '<xs:element name="a" type="xs:int"/></xs:sequence></xs:complexType></xs:element>');
+        hash<auto> result = emitRecord(original, {});
+        assertEq(("wrapper",), keys result);
+        assertEq(NOTHING, result.wrapper);
+        assertEq(result, emitRecord(original, {"wrapper": ()}));
+    }
+    occurrences() {
+        XsdSchema original = schema('<xs:element name="item" type="xs:int" minOccurs="2" maxOccurs="4"/>');
+        foreach XsdSchema source in (original, Serializable::deserialize(original.serialize())) {
+            XsdElement element = child(source);
+            assertEq(7, emit(source, 7));
+            assertEq(0, emit(source, 0));
+            assertEq((7, 8), element.serializeValue(source.nsc.copy(), (7, 8), True, "item", "Record"));
+            assertThrows("SOAP-SERIALIZATION-ERROR", \element.serializeValue(),
+                (source.nsc.copy(), 7, True, "item", "Record"));
+            foreach auto invalid in ((1, 2), (), "invalid", 2147483648, NOTHING) {
+                assertThrows("SOAP-SERIALIZATION-ERROR", \emit(), (source, invalid));
+            }
+            assertEq(2, element.minOccurs);
+            assertEq(4, element.maxOccurs);
+            assertEq(8, emit(source, 8));
+        }
+    }
+    lists() {
+        XsdSchema original = schema('<xs:element name="item" type="t:Numbers" minOccurs="2" maxOccurs="3"/>',
+            '<xs:simpleType name="Numbers"><xs:list itemType="xs:int"/></xs:simpleType>');
+        foreach XsdSchema source in (original, Serializable::deserialize(original.serialize())) {
+            assertEq("7 8", emit(source, (7, 8)));
+            assertEq("9", emit(source, (9,)));
+            assertEq("", emit(source, ()));
+            assertThrows("SOAP-SERIALIZATION-ERROR", \emit(), (source, (7, "invalid")));
+            assertEq(("7 8", "9"), child(source).serializeValue(source.nsc.copy(), ((7, 8), (9,)),
+                True, "item", "Record"));
+            assertEq(2, child(source).minOccurs);
+            assertEq(3, child(source).maxOccurs);
+        }
+    }
+    empty() {
+        XsdSchema original = schema('<xs:element name="item" type="xs:int" nillable="true" minOccurs="0"
+            maxOccurs="unbounded"/>');
+        foreach XsdSchema source in (original, Serializable::deserialize(original.serialize())) {
+            Namespaces output = source.nsc.copy();
+            string prefix = output.getOutputNamespacePrefix("http://www.w3.org/2001/XMLSchema-instance");
+            assertEq({"^attributes^": {prefix + ":nil": "true"}},
+                child(source).serializeOccurrence(output, NOTHING, True, "item", "Record"));
+            assertEq(NOTHING, child(source).serializeValue(source.nsc.copy(), NOTHING, True, "item", "Record"));
+            assertEq(0, child(source).minOccurs);
+            assertEq(-1, child(source).maxOccurs);
+            assertEq(4, emit(source, 4));
+        }
+        original = schema('<xs:element name="item" minOccurs="2" maxOccurs="3"><xs:complexType/></xs:element>');
+        assertEq({"^value^": NOTHING}, emit(original, NOTHING));
+        assertEq({"^value^": NOTHING}, emit(original, {}));
+    }
+    types() {
+        XsdSchema source = schema('<xs:element name="item" type="t:Content" minOccurs="2" maxOccurs="3"/>',
+            '<xs:complexType name="Content"><xs:sequence><xs:element name="count" type="xs:int"/>'
+            '</xs:sequence></xs:complexType>');
+        hash<auto> explicit = {"^type^": child(source).type, "^val^": {"count": 7}};
+        assertEq({"count": 7}, emit(source, explicit));
+        assertTrue(explicit."^type^" === child(source).type);
+        assertEq({"count": 7}, explicit."^val^");
+        explicit."^val^" = {"count": "invalid"};
+        assertThrows("SOAP-SERIALIZATION-ERROR", \emit(), (source, explicit));
+        explicit = {"^type^": source.nsc.getBaseType("string"), "^val^": "text"};
+        assertThrows("SOAP-SERIALIZATION-ERROR", \emit(), (source, explicit));
+        assertEq({"count": 8}, emit(source, {"count": 8}));
+    }
+    cancellation() {
+        XsdSchema source = schema('<xs:element name="item" type="xs:int" minOccurs="2" maxOccurs="3"/>');
+        SandboxManager manager();
+        on_exit manager.clearInterrupt();
+        Program program(PO_NEW_STYLE | PO_STRICT_ARGS | PO_REQUIRE_TYPES);
+        program.setSandboxManager(manager);
+        program.parse("%modern\n%requires ../qlib/WSDL.qm\n"
+            "auto sub emit(XsdElement element, Namespaces namespaces, SandboxManager manager, bool cancel) {\n"
+            "    if (cancel) { manager.requestInterrupt(); }\n"
+            "    return element.serializeOccurrence(namespaces, 7, True, \"item\", \"Record\");\n"
+            "}\n"
+            "*list<string> sub order(XsdParticle particle, SandboxManager manager, bool cancel) {\n"
+            "    if (cancel) { manager.requestInterrupt(); }\n"
+            "    return particle.orderElementNames((\"{}item\", \"{}item\"));\n"
+            "}\n", get_script_dir() + "/particle-serialization-cancellation.qr");
+        *hash<ExceptionInfo> error;
+        try {
+            program.callFunction("emit", child(source), source.nsc.copy(), manager, True);
+        } catch (hash<ExceptionInfo> ex) {
+            error = ex;
+        }
+        manager.clearInterrupt();
+        assertEq("PROGRAM-INTERRUPTED", error.err);
+        assertEq(7, program.callFunction("emit", child(source), source.nsc.copy(), manager, False));
+        assertEq(2, child(source).minOccurs);
+        assertEq(3, child(source).maxOccurs);
+        XsdParticle particle = cast<XsdComplexType>(source.findType("Record")).getParticle();
+        error = NOTHING;
+        try {
+            program.callFunction("order", particle, manager, True);
+        } catch (hash<ExceptionInfo> ex) {
+            error = ex;
+        }
+        manager.clearInterrupt();
+        assertEq("PROGRAM-INTERRUPTED", error.err);
+        assertEq(("{}item", "{}item"), program.callFunction("order", particle, manager, False));
+    }
+    concurrency() {
+        XsdSchema source = schema('<xs:element name="item" type="xs:int" minOccurs="2" maxOccurs="3"/>');
+        XsdSchema grouped = schema('<xs:sequence minOccurs="2" maxOccurs="3">'
+            '<xs:element name="a" type="xs:int"/><xs:element name="b" type="xs:int"/></xs:sequence>');
+        Qore::Thread::Queue ready();
+        Qore::Thread::Queue start();
+        Qore::Thread::Queue results();
+        Qore::Thread::Counter running();
+        on_exit {
+            for (int index = 0; index < 4; ++index) {
+                start.push(True);
+            }
+            assertEq(0, running.waitForZero(30s));
+        }
+        for (int index = 0; index < 4; ++index) {
+            running.inc();
+            background sub () {
+                on_exit running.dec();
+                try {
+                    ready.push(True);
+                    start.get(30s);
+                    results.push({"value": emit(source, 9),
+                        "record": emitRecord(grouped, {"a": (1, 2), "b": (3, 4)})});
+                } catch (hash<ExceptionInfo> ex) {
+                    results.push({"error": ex});
+                }
+            }();
+        }
+        for (int index = 0; index < 4; ++index) {
+            assertTrue(ready.get(30s));
+        }
+        for (int index = 0; index < 4; ++index) {
+            start.push(True);
+        }
+        for (int index = 0; index < 4; ++index) {
+            hash<auto> result = results.get(30s);
+            assertFalse(exists result.error);
+            assertEq(9, result.value);
+            assertEq({"a": 1, "b": 3, "a^1": 2, "b^1": 4}, result.record);
+        }
+        assertEq(2, child(source).minOccurs);
+        assertEq(3, child(source).maxOccurs);
+    }
+}

@@ -80,6 +80,10 @@ module WSDL {
     @section wsdlrelnotes WSDL Module Release Notes
 
     @subsection wsdl_0_5_8 WSDL v0.5.8
+    - native named-element serialization allocates complete particle groups and emits their ordered children,
+      preserving per-field value order, repeated child boundaries and explicit empty wrappers
+    - XsdParticle::orderElementNames() reconstructs a valid ordering with exact count-state allocation;
+      XsdElement::serializeOccurrence() converts one attributed child without changing shared declaration limits
     - ordered particles expose exact named-element occurrence ranges; complex provider fields derive
       requiredness and list shape from complete sequences, alternatives and group repetitions
     - SOAP decoding validates complete ordered particles and converts each child with its selected declaration;
@@ -10505,16 +10509,42 @@ public class XsdElement inherits WSDL::XsdTypedData {
     }
 
     auto serializeValue(Namespaces nsc, auto h, *softbool omitType, string key, string typename) {
+        return serializeOccurrences(nsc, h, omitType, key, typename, minOccurs, maxOccurs);
+    }
+
+    #! serializes one child occurrence after its containing particle has selected this declaration
+    /** @param nsc namespace context for this serialization
+        @param value the native value of one child, including a native list for an XSD list datatype
+        @param omitType whether to omit implicit type metadata
+        @param key the containing native field name for diagnostics
+        @param typename the containing type name for diagnostics
+        @return the child's XML data, including its attributes when needed
+        @throw SOAP-SERIALIZATION-ERROR an invalid scalar value, explicit type, nil or child content
+        @note The containing particle validates complete occurrence counts. This method uses a local
+        one-occurrence range and does not alter shared declaration limits. The caller's namespace context
+        can acquire output prefixes, as with serializeValue().
+        @par Example
+        An invoice line selected from a repeated line group is serialized once with its own declared
+        datatype; the invoice serializer checks the number and order of complete line groups separately.
+        @since %WSDL 0.5.8
+    */
+    auto serializeOccurrence(Namespaces nsc, auto value, *softbool omitType, string key, string typename) {
+        return serializeOccurrences(nsc, value, omitType, key, typename, 1, 1);
+    }
+
+    private auto serializeOccurrences(Namespaces nsc, auto h, *softbool omitType, string key, string typename,
+            int minimum, int maximum) {
         if (h."^type^" && h."^type^" instanceof XsdAbstractType && h.hasKey("^val^")) {
             XsdAbstractType ntype = cast<XsdAbstractType>(h."^type^");
             ntype.checkExtends(type, name);
-            return serializeAsIntern(nsc, ntype, h."^val^", omitType, key, name);
+            return serializeAsIntern(nsc, ntype, h."^val^", omitType, key, name, minimum, maximum);
         }
 
-        return serializeAsIntern(nsc, type, h, omitType, key, typename);
+        return serializeAsIntern(nsc, type, h, omitType, key, typename, minimum, maximum);
     }
 
-    private auto serializeAsIntern(Namespaces nsc, XsdAbstractType type, auto h, *softbool omitType, string key, string typename) {
+    private auto serializeAsIntern(Namespaces nsc, XsdAbstractType type, auto h, *softbool omitType, string key,
+            string typename, int minOccurs, int maxOccurs) {
         #printf("DEBUG: XsdElement::serializeAsIntern() name: %y (with type: %y) h: %y key: %y typename: %y (%y) minOccurs: %y nillable: %y (%y %y)\n", name, ((!omitType || type != self.type) && type.hasRealName()), h, key, typename, type.getName(), minOccurs, nillable, !exists h, !minOccurs);
 
         int tc = h.typeCode();
@@ -17612,6 +17642,27 @@ public final class XsdParticle inherits Qore::Serializable {
         return program.attribute(names);
     }
 
+    #! finds a complete particle ordering of a collection of expanded child names
+    /** @param names expanded child names, with one entry for each supplied occurrence
+        @return the original order if it matches, otherwise a deterministic matching permutation,
+        or NOTHING when no permutation matches; an accepted empty collection returns an empty list
+        @throw WSDL-ERROR unresolved/cyclic groups or invalid XSD 1.0 all placement
+        @throw XSD-PARTICLE-ERROR a malformed expanded name
+        @note This reconstructs structural order only. Values sharing a name keep their supplied order.
+        Use XsdXmlValue to retain a particular original interleaving. General unordered allocation uses
+        count-vector dynamic programming: its state space is bounded by the product of the supplied
+        per-name counts plus one, and can grow exponentially with the number of distinct names.
+        Ordered matching retains its separate polynomial bound. No numeric occurrence range is expanded.
+        @par Example
+        A batch with two quantity/note groups can supply two values in each native field. The returned
+        quantity/note/quantity/note schedule places each field's first value before its second value.
+        @since %WSDL 0.5.8
+    */
+    *list<string> orderElementNames(list<string> names) {
+        XsdParticleProgram program(self);
+        return program.order(names);
+    }
+
     #! returns exact per-element occurrence bounds for the complete particle
     /** @return bounds keyed by expanded element name, an empty hash when no named declaration can occur,
         or NOTHING when the particle cannot accept any child sequence
@@ -17941,10 +17992,222 @@ class XsdParticleProgram {
         }
     }
 
+    *list<string> order(list<string> names) {
+        if (matches(names)) {
+            return names;
+        }
+        if (all) {
+            # All accepts every permutation of a valid member collection.
+            return;
+        }
+        bool wildcard = False;
+        foreach XsdParticle declaration in (terminals.iterator()) {
+            wildcard = wildcard || declaration.getKind() == XsdParticleKind::Any;
+        }
+        if (!wildcard) {
+            *hash<string, hash<XsdParticleOccurrenceRange>> ranges = elementOccurrenceRanges();
+            if (!exists ranges) {
+                return;
+            }
+            hash<string, int> counts();
+            foreach string name in (names) {
+                if (!ranges.hasKey(name)) {
+                    return;
+                }
+                ++counts{name};
+            }
+            foreach string name in (keys ranges) {
+                string count = (counts{name} ?? 0).toString();
+                if (XsdIntegerLexicalHelper::compare(count, ranges{name}.minimum) < 0
+                        || (exists ranges{name}.maximum
+                            && XsdIntegerLexicalHelper::compare(count, ranges{name}.maximum) > 0)) {
+                    return;
+                }
+            }
+        }
+        XsdParticleOrderPlanner planner(nodes, names, \terminal());
+        return planner.order(root);
+    }
+
     validateDeterminism() {
         if (!all) {
             XsdParticleAmbiguity check(nodes, terminals, root);
         }
+    }
+}
+
+# One witness per reachable count vector is sufficient: a parent observes only
+# counts and concatenates the witness. It never revisits alternative derivations.
+hashdecl XsdParticleOrderState {
+    list<int> counts;
+    int witness = -1;
+}
+
+hashdecl XsdParticleOrderWitness {
+    *string name;
+    int left = -1;
+    int right = -1;
+}
+
+class XsdParticleOrderPlanner {
+    private {
+        list<hash<XsdRegexNode>> nodes;
+        list<string> alphabet();
+        list<int> limits();
+        code<bool(int, string)> terminal;
+        int length;
+        string target;
+        hash<string, hash<XsdParticleOrderState>> epsilon();
+        list<hash<XsdParticleOrderWitness>> witnesses();
+    }
+
+    constructor(list<hash<XsdRegexNode>> nodes, list<string> names, code<bool(int, string)> terminal) {
+        self.nodes = nodes;
+        self.terminal = terminal;
+        length = names.size();
+        hash<string, int> counts();
+        foreach string name in (names) {
+            ++counts{name};
+        }
+        alphabet = keys counts;
+        limits = map counts{$1}, alphabet;
+        target = key(limits);
+        list<int> zero = map 0, alphabet;
+        epsilon{key(zero)} = <XsdParticleOrderState>{"counts": zero};
+    }
+
+    private static string key(list<int> counts) {
+        return (map $1.toString(), counts).join(",");
+    }
+
+    private static int bounded(string count, int limit) {
+        return XsdIntegerLexicalHelper::compare(count, limit.toString()) > 0 ? limit : int(count);
+    }
+
+    private hash<string, hash<XsdParticleOrderState>> product(
+            hash<string, hash<XsdParticleOrderState>> left, hash<string, hash<XsdParticleOrderState>> right) {
+        hash<string, hash<XsdParticleOrderState>> result();
+        foreach hash<XsdParticleOrderState> first in (left.iterator()) {
+            foreach hash<XsdParticleOrderState> second in (right.iterator()) {
+                list<int> sum();
+                bool fits = True;
+                for (int index = 0; index < limits.size(); ++index) {
+                    # Subtract before adding so even impossible pairs cannot overflow.
+                    if (first.counts[index] > limits[index] - second.counts[index]) {
+                        fits = False;
+                        break;
+                    }
+                    push sum, first.counts[index] + second.counts[index];
+                }
+                if (fits) {
+                    string identity = key(sum);
+                    if (!result.hasKey(identity)) {
+                        int witness = first.witness;
+                        if (witness < 0) {
+                            witness = second.witness;
+                        } else if (second.witness >= 0) {
+                            witness = witnesses.size();
+                            push witnesses, <XsdParticleOrderWitness>{"left": first.witness, "right": second.witness};
+                        }
+                        result{identity} = <XsdParticleOrderState>{"counts": sum,
+                            "witness": witness};
+                    }
+                }
+            }
+        }
+        return result;
+    }
+
+    *list<string> order(int root) {
+        list<hash<string, hash<XsdParticleOrderState>>> states();
+        for (int index = 0; index < nodes.size(); ++index) {
+            hash<XsdRegexNode> node = nodes[index];
+            hash<string, hash<XsdParticleOrderState>> result();
+            switch (node.kind) {
+                case XRN_EMPTY:
+                    result = epsilon;
+                    break;
+                case XRN_CHARACTER:
+                    for (int letter = 0; letter < alphabet.size(); ++letter) {
+                        if (terminal(index, alphabet[letter])) {
+                            list<int> counts = map 0, alphabet;
+                            counts[letter] = 1;
+                            result{key(counts)} = <XsdParticleOrderState>{"counts": counts,
+                                "witness": witnesses.size()};
+                            push witnesses, <XsdParticleOrderWitness>{"name": alphabet[letter]};
+                        }
+                    }
+                    break;
+                case XRN_SEQUENCE:
+                    result = epsilon;
+                    foreach int child in (node.children) {
+                        result = product(result, states[child]);
+                        if (!result) {
+                            break;
+                        }
+                    }
+                    break;
+                case XRN_ALTERNATIVE:
+                    foreach int child in (node.children) {
+                        foreach string identity in (keys states[child]) {
+                            if (!result.hasKey(identity)) {
+                                result{identity} = states[child]{identity};
+                            }
+                        }
+                    }
+                    break;
+                case XRN_REPEAT: {
+                    int child = node.children[0];
+                    bool nullable = nodes[child].nullable;
+                    int low = nullable ? 0 : bounded(node.low, length + 1);
+                    int high = exists node.high ? bounded(node.high, length) : length;
+                    if (low > high) {
+                        break;
+                    }
+                    hash<string, hash<XsdParticleOrderState>> atoms = states[child];
+                    # Empty iterations can pad any minimum. Every remaining step
+                    # consumes a supplied child, so at most length steps are needed.
+                    delete atoms{epsilon.firstKey()};
+                    hash<string, hash<XsdParticleOrderState>> frontier = epsilon;
+                    if (!low) {
+                        result = epsilon;
+                    }
+                    for (int count = 1; count <= high && frontier; ++count) {
+                        frontier = product(frontier, atoms);
+                        if (count >= low) {
+                            foreach string identity in (keys frontier) {
+                                if (!result.hasKey(identity)) {
+                                    result{identity} = frontier{identity};
+                                }
+                            }
+                        }
+                    }
+                    break;
+                }
+                default:
+                    @assert(False);
+            }
+            push states, result;
+        }
+        if (!states[root].hasKey(target)) {
+            return;
+        }
+        list<string> result();
+        list<int> pending = (states[root]{target}.witness,);
+        while (pending) {
+            int index = pop pending;
+            if (index < 0) {
+                continue;
+            }
+            hash<XsdParticleOrderWitness> witness = witnesses[index];
+            if (exists witness.name) {
+                push result, witness.name;
+            } else {
+                push pending, witness.right;
+                push pending, witness.left;
+            }
+        }
+        return result;
     }
 }
 
@@ -19851,16 +20114,7 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
         }
         if (particle && cx_type != XET_SIMPLE) {
             *hash<string, hash<XsdParticleOccurrenceRange>> ranges = particle.getElementOccurrenceRanges();
-            hash<string, XsdElement> declarations = XsdElementFieldHelper::getExpandedMap(elementmap);
-            foreach hash<ChoiceInfo> choice in (choices) {
-                declarations += XsdElementFieldHelper::getExpandedMap(choice.elementmap);
-            }
-            declarations += element_declarations;
-            foreach string identity in (keys declarations) {
-                if (!ranges.hasKey(identity)) {
-                    delete declarations{identity};
-                }
-            }
+            hash<string, XsdElement> declarations = getParticleDeclarations(ranges);
             hash<string, string> fields = XsdElementFieldHelper::getFieldNames(declarations);
             HashDataType result(name);
             foreach string identity in (keys declarations) {
@@ -20017,6 +20271,8 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
                     # the attribute hash to an empty string and drop the attributes
                     rh = {} + {"^value^": h};
                 }
+            } else if (particle && !mixed && !anyAttribute && !(select keys h, $1 =~ /^\^choices/)) {
+                rh += serializeNamedParticle(nsc, h, omitType);
             } else if (cx_type == XET_SEQUENCE || cx_type == XET_ALL) {
                 foreach string p in (keys elementmap) {
                     #printf("DEBUG element: %y (%y)\nvalue: %y\n", p, elementmap{p}, h{p});
@@ -20107,6 +20363,103 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
 
         #printf("DEBUG complex type %s returning %y from %y\n", name, rh, h);
         return rh;
+    }
+
+    # All native field adapters use only declarations present in the language.
+    private hash<string, XsdElement> getParticleDeclarations(*hash<string, hash<XsdParticleOccurrenceRange>> ranges) {
+        hash<string, XsdElement> declarations = XsdElementFieldHelper::getExpandedMap(elementmap);
+        foreach hash<ChoiceInfo> choice in (choices) {
+            declarations += XsdElementFieldHelper::getExpandedMap(choice.elementmap);
+        }
+        declarations += element_declarations;
+        foreach string identity in (keys declarations) {
+            if (!ranges.hasKey(identity)) {
+                # Remove the local reference; delete would destroy the shared declaration.
+                remove declarations{identity};
+            }
+        }
+        return declarations;
+    }
+
+    # Complete attribution selects every declaration before child conversion.
+    private hash<auto> serializeNamedParticle(Namespaces nsc, *hash<auto> value, *softbool omitType) {
+        @assert(particle);
+        *hash<string, hash<XsdParticleOccurrenceRange>> ranges = particle.getElementOccurrenceRanges();
+        hash<string, XsdElement> declarations = getParticleDeclarations(ranges);
+        hash<string, string> fields = XsdElementFieldHelper::getFieldNames(declarations);
+        list<string> names();
+        hash<string, list<auto>> values();
+        foreach string identity in (keys ranges) {
+            string field = fields{identity};
+            @assert(exists field && declarations.hasKey(identity));
+            if (field != identity && value.hasKey(identity)) {
+                if (value.hasKey(field)) {
+                    throw SOAP_SERIALIZATION_ERROR, sprintf("duplicate native values for field %Y in type %Y", field, name);
+                }
+                value{field} = remove value{identity};
+            }
+            auto supplied = remove value{field};
+            hash<XsdParticleOccurrenceRange> range = ranges{identity};
+            if (!exists supplied && range.minimum == "0") {
+                continue;
+            }
+            bool list_value = declarations{identity}.type.hasNativeListValue() && range.maximum == "1";
+            list<auto> children = supplied.typeCode() == NT_LIST && !list_value ? supplied : (supplied,);
+            if (!children && range.minimum == "1" && range.maximum == "1") {
+                # The established empty-list spelling of a required empty wrapper
+                # still supplies the wrapper. Its declaration validates the value.
+                children = (supplied,);
+            }
+            values{identity} = children;
+            foreach auto child in (children) {
+                push names, identity;
+            }
+        }
+        if (value) {
+            throw SOAP_SERIALIZATION_ERROR, sprintf("invalid members %Y in type %Y; expected fields %Y", keys value,
+                name, map fields{$1}, keys fields);
+        }
+        *list<string> ordered = particle.orderElementNames(names);
+        if (!exists ordered) {
+            throw SOAP_SERIALIZATION_ERROR, sprintf("native child collection %Y does not match the complete "
+                "particle of type %Y", names, name);
+        }
+        *list<XsdParticle> positions = particle.attributeElementNames(ordered);
+        @assert(exists positions);
+        hash<auto> result();
+        hash<string, int> counts();
+        hash<string, int> segments();
+        hash<string, int> offsets();
+        string previous;
+        string output_key;
+        for (int index = 0; index < positions.size(); ++index) {
+            XsdParticle terminal = positions[index];
+            @assert(terminal.getKind() == XsdParticleKind::Element);
+            XsdElement declaration = terminal.getElement();
+            string identity = ordered[index];
+            string field = fields{identity};
+            auto converted = declaration.serializeOccurrence(nsc, values{identity}[offsets{identity}++],
+                omitType, field, name);
+            string wire_name = declaration.getXmlName(nsc);
+            if (wire_name != previous) {
+                output_key = wire_name;
+                if (result.hasKey(output_key)) {
+                    output_key += "^" + (++segments{wire_name}).toString();
+                }
+                result{output_key} = converted;
+                counts{output_key} = 1;
+                previous = wire_name;
+            } else {
+                if (counts{output_key} == 1) {
+                    list<auto> occurrences();
+                    push occurrences, result{output_key};
+                    result{output_key} = occurrences;
+                }
+                push result{output_key}, converted;
+                ++counts{output_key};
+            }
+        }
+        return result;
     }
 
     private *hash<auto> serializeChoice(Namespaces nsc, hash<string, XsdElement> emap, hash<auto> h,
@@ -20326,18 +20679,13 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
     private hash<auto> deserializeParticle(hash<string, XsdAbstractType> tmap, *hash<auto> mrh,
             *hash<auto> value) {
         @assert(particle);
-        list<hash<string, XsdElement>> maps = (elementmap,);
-        foreach hash<ChoiceInfo> choice in (choices) {
-            push maps, choice.elementmap;
-        }
-        hash<string, string> fields = XsdElementFieldHelper::getFieldNames(maps);
+        hash<string, XsdElement> declarations = getParticleDeclarations(particle.getElementOccurrenceRanges());
+        hash<string, string> fields = XsdElementFieldHelper::getFieldNames(declarations);
         hash<string, string> identities = map {$1.value: $1.key}, fields.pairIterator();
         hash<string, bool> ambiguous_names();
-        foreach hash<string, XsdElement> declarations in (maps) {
-            foreach XsdElement element in (declarations.iterator()) {
-                if (fields{element.getExpandedName()} != element.name) {
-                    ambiguous_names{element.name} = True;
-                }
+        foreach XsdElement element in (declarations.iterator()) {
+            if (fields{element.getExpandedName()} != element.name) {
+                ambiguous_names{element.name} = True;
             }
         }
         list<string> names();
@@ -20391,8 +20739,11 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
         # Preserve the existing absent native field contract; choice-only fields
         # remain absent until selected. Actual group validity was checked above.
         if (cx_type != XET_CHOICE && !result) {
-            foreach string field in (keys elementmap) {
-                result{field} = NOTHING;
+            foreach XsdElement element in (elementmap.iterator()) {
+                string identity = element.getExpandedName();
+                if (fields.hasKey(identity)) {
+                    result{fields{identity}} = NOTHING;
+                }
             }
         }
         hash<string, int> counts();

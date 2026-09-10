@@ -6140,3 +6140,81 @@ P4 continues with native serialization of complete ordered groups, removal of
 legacy shared group field mutations, and particle-driven sample generation.
 P5–P9 retain the full original scope, including the separately recorded broad
 documentation and GCC/dependency debug-information diagnostics.
+
+## P4-10 — Native particle emission (complete)
+
+After P4-09 `bd57449`, native named-element emission now uses exact count-vector
+allocation and ordered XML keys. The one-occurrence adapter retains shared
+element limits and existing scalar/list/nil/type conversion. Complete attribution
+selects each actual declaration before value conversion. The
+[implemented contract](../../design/wsdl-particles.md#native-named-element-emission)
+records canonical native behavior, the lossless `XsdXmlValue` alternative, exact
+resource bounds and independent research. This increment does not close P4.
+
+Greedy branch/count decisions fail when a suffix reserves an earlier choice's
+name or attainable counts have gaps. The allocator deduplicates count vectors
+in the compiled DAG, retains compact indexed witnesses, and bounds nonempty
+iterations by supplied child count. Its general unordered state space is
+explicitly exponential in distinct names; ordered matching retains its polynomial
+bound. Nonadjacent same-name occurrences keep separate XML generator keys.
+
+Audit reproduced and fixed a P4-09 ownership bug: with a zero-occurrence qualified
+`a` beside an active unqualified `a`, provider field inspection used `delete` on
+an inactive `XsdElement` in a temporary map and destroyed the shared object.
+The fix uses `remove` and shares active declaration projection across provider,
+encoder and decoder. `inactiveNames()` tests repeated metadata inspection,
+original/reconstructed schemas, local/expanded fields, encoding, decoding and
+object survival. The failing reproduction remains in
+`/tmp/wsdl-p4-10-inactive-field.qr` and `.log`.
+
+Final source SHA-256:
+`a92e785c691589ca52407c703d9cc924ed488da9e40c5d6ac48c19dc4d80625e`.
+The [validation inventory](P4-10-validation.json) and
+[complete audit](audits/P4-10-native-emission.md) record:
+
+- 110 suites, 1113 cases and 56270 reported assertions, with no warnings or failing
+  cases. The three pre-existing caught SOAP comparator negatives remain intentional.
+- Four affected suites pass 43 cases/1787 assertions in each execution mode;
+  the final new suite contributes 15 cases/1385 assertions in all four modes.
+  Shared group continuations, wildcard ordering, 600 ordered children, huge
+  counts, interruption and four synchronized callers are covered.
+- The independent finite-language oracle checks 1000 models and 15132 rows per
+  mode, including all original/reconstructed probes and 235 required schema
+  rejections. Both actual SOAP bindings and both directions pass the 248-row
+  value matrix with 224 independently valid retained/native outputs per mode.
+- AOT compiles 1173 variants and the explicit compiled module passes 15/1385.
+  All five particle design examples, 15 survey-harness methods, two compositor
+  context methods (including the former nested-choice failure) and affected
+  API documentation pass without warnings.
+- The both-version survey preserves all 2443 row identities and original
+  provenance. Twenty-two emission failures and four SequenceChoice output-order
+  failures now produce valid XML. Two P5 dynamic-type failures only change
+  diagnostics. Serialization failures fall from 34 to 12 and rejected outputs
+  from 34 to 30; no valid-input/invalid-output row remains in this diagnostic.
+- Strict coverage passes 130 selected descriptions/1260 directions on its first
+  isolated final-source run. Broader failures decrease from 144 to 92. The
+  904 explicitly unassessed value/infoset directions include 44 newly reachable
+  outputs; they are not counted as successful value-preservation checks.
+- All 62 audit items are resolved: 19 Pass, 43 N/A, zero Fail. No C++ source
+  changed and native XML/libqore hashes are unchanged, so no new Valgrind run
+  is required. Normal PCRE2 JIT remains enabled.
+
+Final logs use `/tmp/wsdl-p4-10-final-*`. The focused `serialization-complete`
+mode records supersede the first 14-case AST serialization run after shared-group
+and wildcard tests were added. Earlier `verified-*` runs predate the inactive-field
+fix and are diagnostic evidence only. Both current reports are updated; original
+fixtures, findings and provenance remain unchanged.
+
+The existing builtin `^type^` wrapper failure remains explicitly assigned to P5:
+selecting an identical builtin type is rejected by the base
+`XsdAbstractType::checkExtends()`, including through the unchanged legacy public
+`serializeValue()` reproducer. The [finding](p5-native-type-wrapper-finding.md)
+retains the normative identity rule and failure; it is not a passing expected
+rejection. The P4 wrapper test uses the supported complex-type path.
+
+Both origin/develop branches were fetched and are already contained locally.
+Main Qore is clean at `f1dd175f0` (ahead two); no Qore change was needed in P4-10.
+No push or installation was performed. The unrelated `test/cmake/__pycache__/`
+directory is not staged. Next work is P4 sample generation, removal of legacy
+shared group occurrence mutation and phase acceptance. P5-P9 retain their full
+scope, including the recorded broader documentation/debug-information findings.

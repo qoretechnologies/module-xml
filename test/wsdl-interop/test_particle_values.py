@@ -9,6 +9,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+from collections import defaultdict
 
 from lxml import etree
 from independent import SchemaJob, run as run_independent
@@ -87,6 +88,7 @@ class ParticleValuesTest(unittest.TestCase):
             if not valid:
                 self.assertEqual('SOAP-DESERIALIZATION-ERROR', row['decode_error'], row)
                 self.assertEqual('SOAP-SERIALIZATION-ERROR', row['encode_error'], row)
+                self.assertFalse(row['native_attempted'], row)
                 continue
             self.assertEqual('', row['decode_error'], row)
             self.assertEqual('', row['encode_error'], row)
@@ -102,6 +104,20 @@ class ParticleValuesTest(unittest.TestCase):
             name = row['case'].split('/')[0]
             self.assertTrue(compilers[name].validate(after), str(compilers[name].error_log))
             outputs[name][f"{row['case']}/{row['copy']}/{row['message']}"] = etree.tostring(after)
+            self.assertTrue(row['native_attempted'], row)
+            self.assertEqual('', row['native_error'], row)
+            native_envelope = etree.fromstring(row['native_xml'].encode())
+            self.assertEqual('{' + envelope_ns + '}Envelope', native_envelope.tag)
+            native_payload = native_envelope.find('{*}Body')[0]
+            self.assertEqual(before.tag, native_payload.tag)
+            self.assertTrue(compilers[name].validate(native_payload), str(compilers[name].error_log))
+            values_before, values_after = defaultdict(list), defaultdict(list)
+            for child in before:
+                values_before[child.tag].append(int(child.text))
+            for child in native_payload:
+                values_after[child.tag].append(int(child.text))
+            self.assertEqual(dict(values_before), dict(values_after), row)
+            outputs[name][f"{row['case']}/{row['copy']}/{row['message']}/native"] = etree.tostring(native_payload)
         emitted_jobs = [SchemaJob(job.name, job.uri, job.schema, outputs[job.name]) for job in jobs]
         emitted = run_independent(emitted_jobs)
         self.assertEqual(sum(len(value) for value in outputs.values()), len(emitted['documents']))

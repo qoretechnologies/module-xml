@@ -1190,4 +1190,23 @@ See the [range and provider contract](../../design/wsdl-particles.md#exact-named
 These field bounds describe independent extrema; complete particle validation
 still enforces correlations, order, exclusivity and count gaps. The Qore runtime
 prerequisite `f1dd175f0` fixes absent optional soft-list values and collection
-defaults. Native particle serialization and sample generation remain P4 work.
+defaults. Sample generation and removal of legacy shared group adjustments
+remain P4 work.
+
+## Native particle ordering and emission
+
+`qore -b --enable-debug test/wsdl-particle-serialization.qtest` checks complete
+native groups, choice/suffix allocation, count gaps, interleaved repeated values,
+list-valued children, empty/nil wrappers, actual declaration selection, huge
+counts, all-groups, a 600-child output, interruption and synchronized reuse.
+`python3 test/wsdl-interop/test_particle_ordering.py -v` checks 1,000 generated
+finite models and every per-name count pair through one beyond the exact maxima,
+plus unknown names. Its 15,132 rows include reconstruction, required schema
+rejections, accepted native output order and exact per-field value preservation.
+The oracle enumerates complete marked languages independently of production.
+
+`test_particle_values.py` additionally emits the decoded native records through
+both actual SOAP bindings, in both directions and after reconstruction. Pinned
+libxml2 and Xerces validate all 224 retained/native outputs; native checks compare
+each field's exact ordered integer values. Set `QORE_EXEC_MODE` for all four modes.
+See [the implemented allocation contract and bounds](../../design/wsdl-particles.md#native-named-element-emission).
