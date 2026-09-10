@@ -45,7 +45,6 @@ substitution collisions, typed-content rejection, repeated compilation, interrup
 and subsequent reuse. The allocation fixture checks every allocation fault point
 in the identity map, including growth and reuse without new allocations.
 
-This identity correction does not replace counter-feasibility analysis or enforce
-component constraints after unreachable states have already been removed. Their
-remaining native failures are recorded in the P4 interoperability evidence.
+The [component attribution checker](xml-particle-attribution.md) uses these
+positions with exact count-context analysis before automaton reduction.
 The normative rule is [XSD 1.0 unique particle attribution](https://www.w3.org/TR/2004/REC-xmlschema-1-20041028/#cos-nonambig).

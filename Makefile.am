@@ -59,6 +59,10 @@ EXTRA_DIST = COPYING.LGPL COPYING.MIT AUTHORS README \
     cmake/QoreXmlLibXml2.cmake cmake/QoreXmlLibXml2CatalogFix.cmake cmake/QoreXmlLibXml2QNameFix.cmake \
     cmake/QoreXmlLibXml2UriFix.cmake cmake/QoreXmlLibXml2EntityFix.cmake \
     cmake/QoreXmlLibXml2OccursFix.cmake cmake/libxml2-occurs.inc \
+    cmake/QoreXmlLibXml2ParticleAttributionFix.cmake cmake/QoreXmlLibXml2ParticleCounterFix.cmake \
+    cmake/libxml2-particle-attribution-math.inc cmake/libxml2-particle-attribution-sets.inc \
+    cmake/libxml2-particle-attribution-schema.inc cmake/libxml2-particle-attribution-elements.inc \
+    cmake/libxml2-particle-attribution-probe.h \
     cmake/QoreXmlLibXml2ParticleIdentityFix.cmake cmake/libxml2-particle-identity.inc \
     cmake/system-libxml2/CMakeLists.txt \
     cmake/libxml2-namespace-probe.c cmake/libxml2-qname-probe.h \

@@ -31,8 +31,8 @@ class SourceDistributionTest(unittest.TestCase):
 
 class LibXml2ProviderTest(unittest.TestCase):
     @classmethod
-    def run_command(cls, args, *, success=True):
-        result = subprocess.run([str(arg) for arg in args], text=True, capture_output=True, timeout=180)
+    def run_command(cls, args, *, success=True, input=None):
+        result = subprocess.run([str(arg) for arg in args], text=True, capture_output=True, timeout=180, input=input)
         with (cls.root / "commands.log").open("a") as log:
             log.write(repr(args) + "\n" + result.stdout + result.stderr + "\n")
         if (result.returncode == 0) != success:
@@ -66,6 +66,31 @@ add_executable(entity-allocation "{REPO}/test/cmake/libxml2_entity_allocation.c"
 target_link_libraries(entity-allocation PRIVATE ${{QORE_XML_LIBXML2_TARGET}})
 add_executable(particle-allocation "{REPO}/test/cmake/libxml2_particle_identity_allocation.c")
 target_link_libraries(particle-allocation PRIVATE ${{QORE_XML_LIBXML2_TARGET}})
+add_executable(particle-execution-allocation "{REPO}/test/cmake/libxml2_particle_execution_allocation.c")
+target_link_libraries(particle-execution-allocation PRIVATE ${{QORE_XML_LIBXML2_TARGET}})
+foreach(part attribution-allocation attribution-math attribution-summary)
+    string(REPLACE "attribution-" "" suffix "${{part}}")
+    add_executable(${{part}} "{REPO}/test/cmake/libxml2_particle_attribution_${{suffix}}.c")
+    target_link_libraries(${{part}} PRIVATE ${{QORE_XML_LIBXML2_TARGET}})
+endforeach()
+if(TARGET LibXml2)
+    get_target_property(native_sources LibXml2 SOURCES)
+    foreach(native_source IN LISTS native_sources)
+        get_filename_component(native_name "${{native_source}}" NAME)
+        if(native_name STREQUAL "xmlschemas.c")
+            set(schema_source "${{native_source}}")
+        endif()
+    endforeach()
+    add_executable(attribution-schema-allocation "{REPO}/test/cmake/libxml2_particle_attribution_schema_allocation.c")
+    target_compile_definitions(attribution-schema-allocation PRIVATE QORE_XML_SCHEMA_SOURCE="${{schema_source}}")
+    get_target_property(native_includes LibXml2 INCLUDE_DIRECTORIES)
+    target_include_directories(attribution-schema-allocation PRIVATE ${{native_includes}})
+    get_target_property(native_options LibXml2 COMPILE_OPTIONS)
+    if(native_options)
+        target_compile_options(attribution-schema-allocation PRIVATE ${{native_options}})
+    endif()
+    target_link_libraries(attribution-schema-allocation PRIVATE ${{QORE_XML_LIBXML2_TARGET}})
+endif()
 install(TARGETS probe RUNTIME DESTINATION bin)
 ''')
         source = os.environ.get("XML_LIBXML2_SOURCE")
@@ -93,6 +118,10 @@ include("{REPO}/cmake/QoreXmlLibXml2OccursFix.cmake")
 qore_xml_fix_libxml2_occurs("{cls.source}" "${{CMAKE_CURRENT_BINARY_DIR}}/libxml")
 include("{REPO}/cmake/QoreXmlLibXml2ParticleIdentityFix.cmake")
 qore_xml_fix_libxml2_particle_identity("{cls.source}" "${{CMAKE_CURRENT_BINARY_DIR}}/libxml")
+include("{REPO}/cmake/QoreXmlLibXml2ParticleAttributionFix.cmake")
+qore_xml_fix_libxml2_particle_attribution("{cls.source}" "${{CMAKE_CURRENT_BINARY_DIR}}/libxml")
+include("{REPO}/cmake/QoreXmlLibXml2ParticleCounterFix.cmake")
+qore_xml_fix_libxml2_particle_counters("{cls.source}" "${{CMAKE_CURRENT_BINARY_DIR}}/libxml")
 ''')
         cls.fixed = cls.root / "fixed/build-debug"
         cls.run_command(["cmake", "-S", fixed_project, "-B", cls.fixed, "-DCMAKE_BUILD_TYPE=Debug",
@@ -125,6 +154,7 @@ qore_xml_fix_libxml2_particle_identity("{cls.source}" "${{CMAKE_CURRENT_BINARY_D
         self.assertIn("entity_values=PASS", output)
         self.assertIn("occurs_values=PASS", output)
         self.assertIn("particle_identity=PASS", output)
+        self.assertIn("particle_attribution=PASS", output)
         stage = self.root / "stage"
         self.run_command(["cmake", "--install", self.root / "bundled", "--prefix", stage])
         self.assertEqual(["bin/probe", "share/licenses/qore-xml/libxml2-NOTICES.txt"],
@@ -204,6 +234,10 @@ qore_xml_fix_libxml2_uris("{self.source}" "${{CMAKE_CURRENT_BINARY_DIR}}/libxml"
         project = self.root / "occurs-broken/source"
         project.mkdir(parents=True)
         fixed = (self.root / "fixed/source/CMakeLists.txt").read_text()
+        for module, function in (("ParticleAttribution", "particle_attribution"), ("ParticleCounter", "particle_counters")):
+            fixed = fixed.replace(f'include("{REPO}/cmake/QoreXmlLibXml2{module}Fix.cmake")\n', "")
+            fixed = fixed.replace(f'qore_xml_fix_libxml2_{function}("{self.source}" '
+                                  '"${CMAKE_CURRENT_BINARY_DIR}/libxml")\n', "")
         fixed = fixed.replace(f'include("{REPO}/cmake/QoreXmlLibXml2ParticleIdentityFix.cmake")\n', "")
         fixed = fixed.replace(f'qore_xml_fix_libxml2_particle_identity("{self.source}" '
                               '"${CMAKE_CURRENT_BINARY_DIR}/libxml")\n', "")
@@ -238,6 +272,10 @@ qore_xml_fix_libxml2_uris("{self.source}" "${{CMAKE_CURRENT_BINARY_DIR}}/libxml"
         project = self.root / "particle-broken/source"
         project.mkdir(parents=True)
         fixed = (self.root / "fixed/source/CMakeLists.txt").read_text()
+        for module, function in (("ParticleAttribution", "particle_attribution"), ("ParticleCounter", "particle_counters")):
+            fixed = fixed.replace(f'include("{REPO}/cmake/QoreXmlLibXml2{module}Fix.cmake")\n', "")
+            fixed = fixed.replace(f'qore_xml_fix_libxml2_{function}("{self.source}" '
+                                  '"${CMAKE_CURRENT_BINARY_DIR}/libxml")\n', "")
         fixed = fixed.replace(f'include("{REPO}/cmake/QoreXmlLibXml2ParticleIdentityFix.cmake")\n', "")
         fixed = fixed.replace(f'qore_xml_fix_libxml2_particle_identity("{self.source}" '
                               '"${CMAKE_CURRENT_BINARY_DIR}/libxml")\n', "")
@@ -269,6 +307,136 @@ qore_xml_fix_libxml2_uris("{self.source}" "${{CMAKE_CURRENT_BINARY_DIR}}/libxml"
         self.run_command(["cmake", "--build", self.root / "bundled", "--target", "particle-allocation", "-j4"])
         self.assertIn("Particle identity allocation cleanup: PASS",
                       self.run_command([self.root / "bundled/particle-allocation"]))
+
+    def test_particle_exact_arithmetic_and_cleanup(self):
+        from fractions import Fraction
+        import itertools
+        import random
+        targets = ("attribution-math", "attribution-summary", "attribution-allocation",
+                   "attribution-schema-allocation", "particle-execution-allocation")
+        self.run_command(["cmake", "--build", self.root / "bundled", "--target", *targets, "-j4"])
+        executable = self.root / "bundled/attribution-math"
+        rng = random.Random(4105)
+        boundaries = (0, 1, 2, 999999999, 1000000000, 1000000001, 10**80 - 1, 10**80)
+        pairs = list(itertools.product(boundaries, repeat=2))
+        pairs += [(rng.randrange(10**rng.randint(1, 349)), rng.randrange(10**rng.randint(1, 349)))
+                  for _ in range(300)]
+        checks = 0
+        for left, right in pairs:
+            self.assertEqual(str(left * right), self.run_command([executable, "multiply", left, right]).strip())
+            self.assertEqual(str((left > right) - (left < right)),
+                             self.run_command([executable, "compare", left, right]).strip())
+            self.assertEqual(str(abs(left - right)),
+                             self.run_command([executable, "subtract", max(left, right), min(left, right)]).strip())
+            checks += 3
+        for _ in range(300):
+            args = [rng.randrange(1, 10**rng.randint(1, 200)) for _ in range(4)]
+            left, right = Fraction(*args[:2]), Fraction(*args[2:])
+            self.assertEqual(str((left > right) - (left < right)),
+                             self.run_command([executable, "ratio", *args]).strip())
+            checks += 1
+        for args in (("subtract", "1", "2"), ("multiply", "x", "2"), ("multiply", "", "1"),
+                     ("ratio", "1", "0", "2", "1"), ("unknown", "1", "1"),
+                     ("ratio", "1", "2"), ("multiply", "1", "2", "3", "4")):
+            self.assertEqual("", self.run_command([executable, *args], success=False))
+            checks += 1
+        self.assertEqual(1399, checks)
+        for executable, label in (("attribution-allocation", "Native UPA arithmetic/sets: PASS"),
+                                  ("attribution-schema-allocation", "Native particle attribution cleanup: PASS"),
+                                  ("particle-execution-allocation", "Native particle execution cleanup: PASS")):
+            self.assertIn(label, self.run_command([self.root / "bundled" / executable]))
+
+    def test_particle_summary_boundaries_and_present_components(self):
+        self.run_command(["cmake", "--build", self.root / "bundled", "--target", "attribution-summary", "-j4"])
+        a, b = ("a",), ("b",)
+        def repeat(child, low, high):
+            return ("r", child, str(low), str(high))
+        def nested(outer, low=2, high=3):
+            return ("s", repeat(("s", repeat(b, 0, 1), repeat(a, low, high)), outer, outer), b)
+        low, high = 10**80 - 1, 10**80
+        fixtures = [(("c", a, a), 0), (repeat(("c", a, a), 0, 0), 1),
+                    (("s", ("e",), ("c", a, a)), 0), (("s", repeat(a, 2, 2), a), 1),
+                    (("s", repeat(a, 2, 3), a), 0), (nested(2), 1), (nested(3), 0),
+                    (nested(low, low, high), 1), (nested(high, low, high), 0),
+                    (("s", repeat(a, 0, "u"), b), 1), (("s", repeat(a, 0, "u"), a), 0)]
+        def encode(expression, rows):
+            kind = expression[0]
+            if kind in ("a", "b", "e", "0"):
+                row = (kind, 0, 0, 1, 1)
+            elif kind == "r":
+                row = (kind, encode(expression[1], rows), 0, expression[2], expression[3])
+            else:
+                row = (kind, encode(expression[1], rows), encode(expression[2], rows), 1, 1)
+            rows.append(row)
+            return len(rows) - 1
+        inputs = []
+        for expression, _ in fixtures:
+            rows = []
+            encode(expression, rows)
+            inputs.append(str(len(rows)) + "\n" + "\n".join(" ".join(map(str, row)) for row in rows))
+        source = "\n".join(inputs) + "\n"
+        (self.root / "summary-input.txt").write_text(source)
+        executable = self.root / "bundled/attribution-summary"
+        output = self.run_command([executable], input=source)
+        self.assertEqual([expected for _, expected in fixtures], [int(value) for value in output.splitlines()])
+        for malformed in ("x\n", "1\ns 0 0 1 1\n", "1\nr 0 0 1 1\n", "2\na 0 0 1 1\nr 0 0 2 1\n"):
+            self.assertEqual("", self.run_command([executable], input=malformed, success=False))
+
+    def test_attribution_backport_detection(self):
+        project = self.root / "attribution-broken/source"
+        project.mkdir(parents=True)
+        fixed = (self.root / "fixed/source/CMakeLists.txt").read_text()
+        for module, function in (("ParticleAttribution", "particle_attribution"), ("ParticleCounter", "particle_counters")):
+            fixed = fixed.replace(f'include("{REPO}/cmake/QoreXmlLibXml2{module}Fix.cmake")\n', "")
+            fixed = fixed.replace(f'qore_xml_fix_libxml2_{function}("{self.source}" '
+                                  '"${CMAKE_CURRENT_BINARY_DIR}/libxml")\n', "")
+        (project / "CMakeLists.txt").write_text(fixed)
+        build = self.root / "attribution-broken/build-debug"
+        self.run_command(["cmake", "-S", project, "-B", build, "-DCMAKE_BUILD_TYPE=Debug",
+                          "-DBUILD_SHARED_LIBS=ON", "-DLIBXML2_WITH_PROGRAMS=OFF",
+                          "-DLIBXML2_WITH_TESTS=OFF", "-DLIBXML2_WITH_PYTHON=OFF"])
+        self.run_command(["cmake", "--build", build, "--target", "LibXml2", "-j4"])
+        libraries = list((build / "libxml").glob("libxml2.so")) + list((build / "libxml").glob("libxml2.dylib"))
+        self.assertEqual(1, len(libraries))
+        options = [f"-DLIBXML2_LIBRARY={libraries[0]}", f"-DLIBXML2_INCLUDE_DIR={self.fixed_include}",
+                   f"-DFETCHCONTENT_SOURCE_DIR_QORE_XML_LIBXML2={self.source}"]
+        self.configure("attribution-broken-auto", "-DQORE_XML_LIBXML2_PROVIDER=AUTO", *options)
+        probe = (self.root / "attribution-broken-auto/system-libxml2/namespace-probe.log").read_text()
+        self.assertIn("particle_identity=PASS", probe)
+        self.assertIn("particle_attribution=FAIL", probe)
+        self.configure("attribution-broken-system", "-DQORE_XML_LIBXML2_PROVIDER=SYSTEM", *options, success=False)
+
+    def test_counter_backport_detection_and_source_idempotence(self):
+        import hashlib
+        project = self.root / "counter-broken/source"
+        project.mkdir(parents=True)
+        fixed = (self.root / "fixed/source/CMakeLists.txt").read_text()
+        fixed = fixed.replace(f'include("{REPO}/cmake/QoreXmlLibXml2ParticleCounterFix.cmake")\n', "")
+        fixed = fixed.replace(f'qore_xml_fix_libxml2_particle_counters("{self.source}" '
+                              '"${CMAKE_CURRENT_BINARY_DIR}/libxml")\n', "")
+        (project / "CMakeLists.txt").write_text(fixed)
+        build = self.root / "counter-broken/build-debug"
+        self.run_command(["cmake", "-S", project, "-B", build, "-DCMAKE_BUILD_TYPE=Debug",
+                          "-DBUILD_SHARED_LIBS=ON", "-DLIBXML2_WITH_PROGRAMS=OFF",
+                          "-DLIBXML2_WITH_TESTS=OFF", "-DLIBXML2_WITH_PYTHON=OFF"])
+        self.run_command(["cmake", "--build", build, "--target", "LibXml2", "-j4"])
+        libraries = list((build / "libxml").glob("libxml2.so")) + list((build / "libxml").glob("libxml2.dylib"))
+        self.assertEqual(1, len(libraries))
+        options = [f"-DLIBXML2_LIBRARY={libraries[0]}", f"-DLIBXML2_INCLUDE_DIR={self.fixed_include}",
+                   f"-DFETCHCONTENT_SOURCE_DIR_QORE_XML_LIBXML2={self.source}"]
+        self.configure("counter-broken-auto", "-DQORE_XML_LIBXML2_PROVIDER=AUTO", *options)
+        probe = (self.root / "counter-broken-auto/system-libxml2/namespace-probe.log").read_text()
+        self.assertIn("particle_identity=PASS", probe)
+        self.assertIn("particle_attribution=FAIL", probe)
+        self.configure("counter-broken-system", "-DQORE_XML_LIBXML2_PROVIDER=SYSTEM", *options, success=False)
+        directory = self.root / "bundled/_deps/qore_xml_libxml2-build"
+        paths = [directory / "qore-particle-attribution-fix/xmlschemas.c",
+                 directory / "qore-particle-counters-fix/xmlregexp.c"]
+        stamps = {path: (path.stat().st_mtime_ns, hashlib.sha256(path.read_bytes()).hexdigest()) for path in paths}
+        self.configure("bundled", "-DQORE_XML_LIBXML2_PROVIDER=BUNDLED",
+                       f"-DFETCHCONTENT_SOURCE_DIR_QORE_XML_LIBXML2={self.source}")
+        for path, expected in stamps.items():
+            self.assertEqual(expected, (path.stat().st_mtime_ns, hashlib.sha256(path.read_bytes()).hexdigest()))
 
     def test_unknown_regexp_source_is_rejected(self):
         override = self.qname_source_override("changed-regexp-source", "xmlregexp.c", fixed=False)

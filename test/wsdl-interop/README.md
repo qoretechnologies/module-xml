@@ -27,6 +27,14 @@ that must close before P4 acceptance.
 The [native identity evidence](native-particle-identity-evidence.md) records provider
 selection, allocation cleanup and the remaining P4 attribution diagnostics.
 
+`test/xml-particle-attribution.qtest` and `test_native_particle_attribution.py`
+check exact native counted attribution, component constraints, callback selection
+and DOM/reader execution against complete finite languages. The CMake provider
+suite also tests exact arithmetic, empty-language summaries and allocation cleanup.
+See [the native attribution evidence](native-particle-attribution-evidence.md).
+`native_particle_ranges.py` separately records the still-failing native large-count
+requirements; a completed diagnostic run does not make those failures pass.
+
 The W3C XML Schema Databinding collection is a useful independent source of WSDL 1.1 descriptions,
 XSDs, and SOAP messages. Running it against this module exposed defects that the existing tests missed.
 The small regression suite runs offline in the normal `test/*.qtest` CI loop. The larger survey is a

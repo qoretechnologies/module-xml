@@ -5816,3 +5816,80 @@ The [full audit](audits/P4-04-native-particle-identity.md) resolves all 62 check
 component checks, then ordered message conversion, field metadata and samples.
 P5-P9 retain all original requirements, including the 22 separately recorded P9
 documentation diagnostics. No push was performed.
+
+## P4-05 — Native counted attribution and execution (2026-09-10)
+
+P4-04 is committed as `0bacf95`. The private dependency now checks exact counted
+component attribution before automaton reduction. Every present group is checked,
+including unused definitions and components inside an empty surrounding language.
+Zero-count particles contribute no child component. The checker uses a memoized
+source DAG, sparse name predicates and exact integer ratios; inherited particles
+retain their original count source. The [implemented design](../../design/xml-particle-attribution.md)
+includes an executed fixed-boundary example and documents ownership and execution.
+
+The [12-schema native matrix](P4-05-native-attribution.json) now passes all 24
+DOM/reader rows, closing P4-04's three remaining attribution/component failures.
+Abstract declarations contribute only usable substitution members, and native
+callbacks now follow the admitted declaration. All groups retain required empty
+members as an empty language. The [native attribution evidence](native-particle-attribution-evidence.md)
+records normative requirements, root causes and independent-validator evidence.
+
+Correct schema acceptance exposed lost nested counter operations in native epsilon
+reduction: the initial finite-language oracle found 28 false acceptances. The fix
+preserves schema increments and their upper bounds. Nullable terms use a zero
+execution minimum without modifying source occurrence fields; saved/restored
+progress marks prevent counting repeated empty iterations. The correction is
+restricted to schema automata, preserving generic regexp and Relax NG behavior.
+The original independent validators and their recorded discrepancy lists remain
+unchanged; native fixes do not reinterpret those results.
+
+The final gate passes **105 Qore suites / 1,059 cases / 43,828 reported assertions**.
+The native suite passes **eight cases / 157 assertions** in AST, IR, JIT and tiered
+modes. The complete finite-language oracle uses seed 4103 and checks **1,000 models**
+(765 valid / 235 invalid), **2,000 schema rows** and **41,630 DOM/reader document rows**
+per mode, including negative mutations and complete row accounting. Every mode
+passes all 43,630 rows. Existing SOAP/provider/HTTP, failure recovery and interruption
+suites remain in the affected gate.
+
+All **30 CMake provider/source-distribution tests** pass with CMake 4.3.0 and zero
+compiler warnings. An **11-case behavior probe** detects incomplete attribution
+and counter backports. Exact arithmetic checks **1,399 operations**, summary tests
+cover 11 boundaries (including adjacent 80/81-digit ratios) and four malformed
+programs, and direct all-summary assertions verify required versus optional empty
+members. Allocation fixtures exhaust **134 arithmetic/set, 229 checker and 15
+executor fault points**, with baseline ownership and successful fresh reuse.
+
+Valgrind passes the final native Qore suite and all three standalone fixtures:
+**zero memory errors, zero definite/indirect/possible losses and zero suppressions**.
+Standalone fixtures free every heap block. Qore retains 116,230 bytes in 46
+LLVM/loader process-lifetime blocks; its known isolated-core DWARF diagnostic stays
+P9-owned. Only Valgrind uses the authorized PCRE2 JIT testing switch. Affected
+native documentation, the executed example and all 15 survey harness methods pass.
+No system installation was made.
+
+The entire both-version corpus reports are identical to P4-04: **2,411 baseline
+rows**, source/input hashes, **293 coverage cases**, **144 failure records** and all
+stage accounting. Strict coverage has no selected failures across **130 descriptions
+/ 1,260 message directions**. The [validation inventory](P4-05-validation.json)
+records final source/runtime hashes and complete suite results. Logs use
+`/tmp/wsdl-p4-05-`; final provider artifacts are
+`/tmp/qore-xml-libxml2-test-gz7woxfi`.
+
+A separate native occurrence-range defect remains explicitly failing and assigned
+to the next P4 increment: the scanner saturates at `INT_MAX`, then rejects finite
+maxima above the `UNBOUNDED` sentinel (`1 << 30`) before exact attribution runs.
+The [range diagnostic](P4-native-count-range-diagnostics.json) retains eight schemas
+/ 16 DOM-reader rows with **14 failing requirements**, including a small positive
+control and a negative schema rejected for the wrong reason. Large exact helper
+arithmetic does not imply that those native occurrence attributes already parse.
+This defect must close before P4 acceptance; no range limitation or workaround has
+been approved. Ordered WSDL message conversion, field metadata and samples remain
+P4 requirements, including the four visible compositor runtime failures.
+
+The [full audit](audits/P4-05-native-particle-attribution.md) resolves all 62 checks:
+**20 Pass / 42 N/A / 0 Fail**. Both remotes were fetched again; no incoming develop
+commit remained. Main Qore is clean and synchronized at `cb90afb7b`; the XML remote
+bugfix at `c1403ef` is already included. The tested isolated core is recorded by
+binary hash. No push was performed. P5–P9 retain their complete scope, including
+mandatory Python CI setup, supported-platform acceptance and the 22 previously
+recorded P9 documentation diagnostics.
