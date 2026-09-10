@@ -439,3 +439,62 @@ permutations, retains Qore cancellation, and has no arbitrary rejection cutoff.
 All mutable state belongs to one call, including witness storage and namespace
 copies. Ordered matching/attribution retain their separately documented
 polynomial bounds and do not pay for unordered reconstruction.
+
+## Bounded structural examples
+
+`XsdParticle::getSampleElementNames(max_occurrences = 3, max_children = 10000)`
+returns a deterministic complete word of expanded child names. A shipment with
+repeated quantity/note groups receives complete pairs, including when its child
+budget permits fewer than the preferred number of groups:
+
+```qore
+XsdSchema shipment("<xs:schema xmlns:xs='http://www.w3.org/2001/XMLSchema'>"
+    "<xs:complexType name='Shipment'><xs:sequence minOccurs='2' maxOccurs='4'>"
+    "<xs:element name='quantity' type='xs:int'/><xs:element name='note' type='xs:string'/>"
+    "</xs:sequence></xs:complexType></xs:schema>");
+XsdParticle pairs = cast<XsdComplexType>(shipment.findType("Shipment")).getParticle();
+@assert(pairs.getSampleElementNames(3, 5) == ("{}quantity", "{}note", "{}quantity", "{}note"));
+@assert(pairs.getSampleElementNames(3, 6).size() == 6);
+```
+
+The result follows [XSD 1.0 particle validation](https://www.w3.org/TR/2004/REC-xmlschema-1-20041028/#cvc-particle)
+and [model-group validation](https://www.w3.org/TR/2004/REC-xmlschema-1-20041028/#cvc-model-group).
+Generation limits are caller resource choices, not restrictions on valid schemas.
+`max_occurrences` must be positive and bounds **nonempty iterations of each
+particle**; nested repetitions can contribute more occurrences of a field.
+`max_children` must be nonnegative and bounds the entire returned word. Empty
+iterations can satisfy arbitrarily large minima without allocation. A required
+nonempty count above the limit raises `XSD-SAMPLE-ERROR`; no incomplete sample is
+returned. Increasing the limits can make that schema's example constructible.
+
+The generator processes the compiled acyclic graph from children to parents,
+keeping a shortest feasible word and a preferred feasible word for each node.
+Choices prefer the first feasible alternative. Sequences reserve the shortest
+required suffix before choosing a child's preferred or shortest word. Repetitions
+use complete copies of a feasible child word, falling back to the shorter word
+when required copies of the preferred one would not fit. Empty languages and
+languages containing the empty word remain distinct. An `all` group emits its
+members in schema order and reserves capacity for required members. Group
+references reuse graph summaries without altering shared declarations.
+
+For a compiled graph of `M` nodes and `E` child edges and a child budget `B`, the
+planner performs `O((M + E) * (B + 1))` name/edge operations and stores
+`O(M * (B + 1))` name references. Exact count comparisons additionally read their
+decimal digits. It checks remaining capacity before addition and clamps counts
+before machine-integer conversion or allocation. Work does not depend on the
+numeric value of an empty repetition bound. The implementation is iterative and
+call-local; Qore interruption remains enabled and concurrent calls share only
+resolved immutable schema data. These bounds follow the existing graph compiler's
+separate construction cost.
+
+This API generates structure. A wildcard name satisfies its namespace predicate,
+including an absent namespace, but does not assert that a declaration or value
+satisfies `processContents`. The regular element/value, dynamic-type, nil and
+attribute checks remain necessary when constructing an instance. It also does
+not search scalar alternatives or promise a largest possible example.
+
+`wsdl-particle-samples.qtest` checks groups, choices, all, exact huge counts,
+wildcards, empty/impossible models, shared groups, depth, cancellation and
+concurrency. `test_particle_samples.py` independently enumerates complete finite
+languages under both repetition limits and six child budgets; every construction
+and original/reconstructed sample has an explicitly accounted result.

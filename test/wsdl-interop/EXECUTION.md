@@ -6218,3 +6218,50 @@ No push or installation was performed. The unrelated `test/cmake/__pycache__/`
 directory is not staged. Next work is P4 sample generation, removal of legacy
 shared group occurrence mutation and phase acceptance. P5-P9 retain their full
 scope, including the recorded broader documentation/debug-information findings.
+
+## P4-11 — Bounded structural sample selection (complete)
+
+After P4-10 `b1f38c4`, `XsdParticle::getSampleElementNames()` selects a complete
+structural example within explicit nonempty-repetition and total-child budgets.
+Shortest and preferred words are computed once per compiled graph node. Required
+suffixes reserve capacity; repetitions retain complete groups; nullable terms can
+satisfy huge minimum counts with empty iterations. Choices, all groups, namespace
+wildcards and shared references have defined behavior. No shared declaration is
+modified, and generation errors are distinct from schema rejection. See the
+[implemented API, shipment example and bounds](../../design/wsdl-particles.md#bounded-structural-examples).
+
+The helper baseline `/tmp/wsdl-p4-11-sample-before.qr` demonstrates the remaining
+integration problem: a batch requiring two quantity/note pairs is generated as
+one pair because `WSMessageHelper` reads flattened fields. The complete-particle
+validator correctly rejects it. This primitive is independently usable and tested;
+the next P4 increment connects it to native samples and removes legacy shared
+group count adjustments. P4 remains open.
+
+Final source SHA-256:
+`5e0627f9524ac8fabeaea9fdcee6bc046cb5eb41aa6bd2476dd7f362b6086fb4`.
+The [validation inventory](P4-11-validation.json) and
+[62-item audit](audits/P4-11-bounded-samples.md) record:
+
+- All four modes pass 10 sample cases/190 assertions and 19360 independent rows:
+  765 valid models, 235 schema rejections, 12852 successful original/reconstructed
+  samples and 5508 exact budget/language generation rejections per mode.
+- Sixteen existing suites pass 304 cases/16420 reported assertions. The existing
+  three caught SOAP comparator negatives remain intentional. The survey harness
+  passes all 15 methods. No test warning or failing case remains.
+- AOT compiles 1180 variants and its explicitly loaded artifact passes 10/190.
+  The new shipment example and affected WSDL/module docs pass without warnings.
+- All 2443 survey rows and the complete isolated strict ledger retain their prior
+  outcomes and provenance. All 130 selected descriptions/1260 directions pass;
+  92 broader failures and 904 unassessed value/infoset directions remain visible.
+  Current reports change only their WSDL source hash; stale README ledger counts
+  are corrected to match them.
+- All 62 audit checks pass or are individually not applicable: 19 Pass, 43 N/A,
+  zero Fail. No C++ source changes; native XML/libqore hashes are unchanged, so
+  no additional Valgrind run is needed. Normal PCRE2 JIT remains enabled.
+
+Final logs use `/tmp/wsdl-p4-11-final-*`. The strict gate starts from deterministic
+process completion after the remaining checks and runs in isolation. Early
+`first`/`second` logs are diagnostic development runs, not final acceptance.
+Both remotes were fetched and are already included. Main Qore is clean at
+`f1dd175f0`; nothing was installed or pushed. P5-P9 and the tracked builtin type
+wrapper identity defect retain their complete scope.

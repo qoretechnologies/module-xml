@@ -401,9 +401,9 @@ values and Xerces checks every document. The already adjudicated old-libxml2
 decimals. Qore 3.0 supplies shortest round-trip native float/number formatting,
 while XML decimal text retains its precision and noncanonical spellings.
 
-[coverage-report.json](coverage-report.json) preserves the complete current ledger, including 144 failed
+[coverage-report.json](coverage-report.json) preserves the complete current ledger, including 92 failed
 requirements assigned to remaining phases. Its stage accounting includes unreachable, missing, skipped and
-unassessed work. In this run 860 value/infoset assessments remain unimplemented, explicitly counted as
+unassessed work. In this run 904 value/infoset assessments remain unimplemented, explicitly counted as
 unassessed. Successful schema validation is insufficient to close them. Exact numeric checks now pass
 all eight formerly failing decimal output cases. Decimal attributes, elements and retained decimal
 patterns belong to the strict gate, alongside all thirteen integer builtin families, including original
@@ -1210,3 +1210,17 @@ both actual SOAP bindings, in both directions and after reconstruction. Pinned
 libxml2 and Xerces validate all 224 retained/native outputs; native checks compare
 each field's exact ordered integer values. Set `QORE_EXEC_MODE` for all four modes.
 See [the implemented allocation contract and bounds](../../design/wsdl-particles.md#native-named-element-emission).
+
+## Bounded particle samples
+
+Run `qore -b --enable-debug test/wsdl-particle-samples.qtest` for complete group
+selection, required suffix reservations, all groups, wildcards, huge empty counts,
+shared groups, bounded deep models, cancellation and concurrent reuse.
+`python3 test/wsdl-interop/test_particle_samples.py -v` checks 1,000 complete finite
+models against an independent exhaustive oracle, with two repetition limits and
+six child budgets. All 19,360 rows are required, including schema rejections and
+original/reconstructed generation errors. Set `QORE_EXEC_MODE` for AST, IR, JIT
+or tiered execution. See the [implemented structural API and resource bounds](../../design/wsdl-particles.md#bounded-structural-examples).
+
+This primitive is complete; integrating its schedules into `WSMessageHelper` and
+removing legacy shared-group count adjustments remain the next P4 increment.

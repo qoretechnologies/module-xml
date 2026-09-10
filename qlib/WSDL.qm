@@ -80,6 +80,8 @@ module WSDL {
     @section wsdlrelnotes WSDL Module Release Notes
 
     @subsection wsdl_0_5_8 WSDL v0.5.8
+    - ordered particles can generate bounded complete structural examples, retaining group counts,
+      required suffixes and wildcard namespace constraints without expanding huge empty repetitions
     - native named-element serialization allocates complete particle groups and emits their ordered children,
       preserving per-field value order, repeated child boundaries and explicit empty wrappers
     - XsdParticle::orderElementNames() reconstructs a valid ordering with exact count-state allocation;
@@ -17663,6 +17665,30 @@ public final class XsdParticle inherits Qore::Serializable {
         return program.order(names);
     }
 
+    #! constructs a bounded example of the complete particle's child-name sequence
+    /** @param max_occurrences maximum nonempty repetitions of each particle, at least one; default: 3
+        @param max_children maximum total child names in this example, at least zero; default: 10000
+        @return a deterministic accepted sequence of expanded names, possibly empty
+        @throw XSD-SAMPLE-ERROR invalid generation limits or no structural example within those limits
+        @throw WSDL-ERROR unresolved/cyclic groups or invalid XSD 1.0 all placement
+        @note Limits apply to generation, not schema validity. Empty repetitions can satisfy arbitrarily
+        large minima without allocating children. Choices prefer their first feasible alternative;
+        sequences reserve space for every required suffix. Wildcard names satisfy namespace constraints
+        only: values, declarations, processContents and dynamic types require separate instance checks.
+        The bottom-up algorithm stores two bounded words per graph node and clamps counts before allocation.
+        @par Example
+        For a shipment containing two to four quantity/note groups, getSampleElementNames(3, 6) returns
+        three complete quantity/note pairs; a five-child budget permits two complete pairs.
+        @since %WSDL 0.5.8
+    */
+    list<string> getSampleElementNames(int max_occurrences = 3, int max_children = 10000) {
+        if (max_occurrences < 1 || max_children < 0) {
+            throw "XSD-SAMPLE-ERROR", "particle sample limits require max_occurrences >= 1 and max_children >= 0";
+        }
+        XsdParticleProgram program(self);
+        return program.sample(max_occurrences, max_children);
+    }
+
     #! returns exact per-element occurrence bounds for the complete particle
     /** @return bounds keyed by expanded element name, an empty hash when no named declaration can occur,
         or NOTHING when the particle cannot accept any child sequence
@@ -17825,6 +17851,35 @@ class XsdParticleProgram {
         if (!shared) {
             automaton = XsdRegexAutomaton::compile(nodes, root);
         }
+    }
+
+    list<string> sample(int max_occurrences, int max_children) {
+        if (all) {
+            list<string> result();
+            int required = 0;
+            foreach string name in (keys terminals) {
+                required += int(terminals{name}.getMinOccurs() == "1");
+            }
+            if (required > max_children) {
+                if (all_optional) {
+                    return result;
+                }
+                throw "XSD-SAMPLE-ERROR", sprintf("all-group sample requires %d children; max_children is %d",
+                    required, max_children);
+            }
+            foreach string name in (keys terminals) {
+                bool mandatory = terminals{name}.getMinOccurs() == "1";
+                if (mandatory) {
+                    --required;
+                }
+                if (mandatory || result.size() < max_children - required) {
+                    push result, name;
+                }
+            }
+            return result;
+        }
+        XsdParticleSamplePlanner planner(nodes, terminals, max_occurrences, max_children);
+        return planner.sample(root);
     }
 
     *hash<string, hash<XsdParticleOccurrenceRange>> elementOccurrenceRanges() {
@@ -18033,6 +18088,171 @@ class XsdParticleProgram {
         if (!all) {
             XsdParticleAmbiguity check(nodes, terminals, root);
         }
+    }
+}
+
+hashdecl XsdParticleSampleWords {
+    *list<string> minimum;
+    *list<string> preferred;
+}
+
+# Each compiled node is summarized once, in child-before-parent order. The
+# shortest bounded word guarantees room for required suffixes; the preferred
+# word shows optional/repeated content when space permits. Neither word exceeds
+# the caller's child budget. Empty repetitions are represented by no work.
+class XsdParticleSamplePlanner {
+    private {
+        list<hash<XsdRegexNode>> nodes;
+        hash<string, XsdParticle> terminals;
+        int max_occurrences;
+        int max_children;
+    }
+
+    constructor(list<hash<XsdRegexNode>> nodes, hash<string, XsdParticle> terminals,
+            int max_occurrences, int max_children) {
+        self.nodes = nodes;
+        self.terminals = terminals;
+        self.max_occurrences = max_occurrences;
+        self.max_children = max_children;
+    }
+
+    private static *string sampleName(XsdParticle particle) {
+        if (particle.getKind() == XsdParticleKind::Element) {
+            return particle.getElement().getExpandedName();
+        }
+        hash<XsdAttributeWildcardInfo> wildcard = particle.getWildcard();
+        if (wildcard.constraint == XsdWildcardConstraint::Any) {
+            return "{}sample";
+        }
+        if (wildcard.constraint == XsdWildcardConstraint::Set) {
+            foreach string uri in (keys wildcard.namespaces) {
+                if (wildcard.namespaces{uri}) {
+                    return type_qname(uri, "sample");
+                }
+            }
+            return;
+        }
+        string uri = "urn:qore:xml:sample";
+        return type_qname(uri == wildcard.excluded_namespace ? uri + ":other" : uri, "sample");
+    }
+
+    private static list<string> copies(list<string> word, int count) {
+        list<string> result();
+        if (word) {
+            for (int index = 0; index < count; ++index) {
+                foreach string name in (word) {
+                    push result, name;
+                }
+            }
+        }
+        return result;
+    }
+
+    private hash<XsdParticleSampleWords> repeat(hash<XsdRegexNode> node,
+            hash<XsdParticleSampleWords> child) {
+        hash<XsdParticleSampleWords> result();
+        if (!exists child.minimum) {
+            if (node.low == "0") {
+                result.minimum = result.preferred = ();
+            }
+            return result;
+        }
+        int minimum = 0;
+        if (child.minimum) {
+            int limit = min(max_occurrences, max_children / child.minimum.size());
+            if (XsdIntegerLexicalHelper::compare(node.low, limit.toString()) > 0) {
+                return result;
+            }
+            minimum = int(node.low);
+        }
+        result.minimum = copies(child.minimum, minimum);
+        list<string> atom = child.preferred;
+        # Prefer a complete shorter group over truncating a required repetition.
+        if (atom && minimum > max_children / atom.size()) {
+            atom = child.minimum;
+        }
+        int count = atom ? min(max_occurrences, max_children / atom.size()) : 0;
+        if (exists node.high && XsdIntegerLexicalHelper::compare(node.high, count.toString()) < 0) {
+            count = int(node.high);
+        }
+        @assert(!child.minimum || count >= minimum);
+        result.preferred = copies(atom, count);
+        return result;
+    }
+
+    list<string> sample(int root) {
+        list<hash<XsdParticleSampleWords>> words();
+        for (int index = 0; index < nodes.size(); ++index) {
+            hash<XsdRegexNode> node = nodes[index];
+            hash<XsdParticleSampleWords> result();
+            switch (node.kind) {
+                case XRN_EMPTY:
+                    result.minimum = result.preferred = ();
+                    break;
+                case XRN_CHARACTER: {
+                    *string name = sampleName(terminals{index.toString()});
+                    if (exists name && max_children) {
+                        result.minimum = result.preferred = (name,);
+                    }
+                    break;
+                }
+                case XRN_ALTERNATIVE:
+                    foreach int child in (node.children) {
+                        @assert(child < index);
+                        if (!exists words[child].minimum) {
+                            continue;
+                        }
+                        if (!exists result.preferred) {
+                            result.preferred = words[child].preferred;
+                        }
+                        if (!exists result.minimum || words[child].minimum.size() < result.minimum.size()) {
+                            result.minimum = words[child].minimum;
+                        }
+                    }
+                    break;
+                case XRN_SEQUENCE: {
+                    int length = 0;
+                    bool possible = True;
+                    foreach int child in (node.children) {
+                        @assert(child < index);
+                        if (!exists words[child].minimum || words[child].minimum.size() > max_children - length) {
+                            possible = False;
+                            break;
+                        }
+                        length += words[child].minimum.size();
+                    }
+                    if (!possible) {
+                        break;
+                    }
+                    result.minimum = result.preferred = ();
+                    foreach int child in (node.children) {
+                        length -= words[child].minimum.size();
+                        list<string> selected = words[child].preferred.size()
+                            <= max_children - result.preferred.size() - length
+                            ? words[child].preferred : words[child].minimum;
+                        foreach string name in (words[child].minimum) {
+                            push result.minimum, name;
+                        }
+                        foreach string name in (selected) {
+                            push result.preferred, name;
+                        }
+                    }
+                    break;
+                }
+                case XRN_REPEAT:
+                    @assert(node.children[0] < index);
+                    result = repeat(node, words[node.children[0]]);
+                    break;
+                default:
+                    @assert(False);
+            }
+            push words, result;
+        }
+        if (!exists words[root].preferred) {
+            throw "XSD-SAMPLE-ERROR", sprintf("no structural particle example within max_occurrences %d "
+                "and max_children %d", max_occurrences, max_children);
+        }
+        return words[root].preferred;
     }
 }
 
