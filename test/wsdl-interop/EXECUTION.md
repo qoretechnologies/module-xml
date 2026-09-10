@@ -5893,3 +5893,66 @@ bugfix at `c1403ef` is already included. The tested isolated core is recorded by
 binary hash. No push was performed. P5–P9 retain their complete scope, including
 mandatory Python CI setup, supported-platform acceptance and the 22 previously
 recorded P9 documentation diagnostics.
+
+## P4-06 — Exact native occurrence ranges (2026-09-10)
+
+P4-05 is committed as `35e54e3`. The private dependency now preserves arbitrary
+finite occurrence bounds through parsing, automaton construction and DOM/reader
+execution. The root cause was the lexical/control-field ceiling and a numeric
+maximum colliding with `UNBOUNDED` (`1 << 30`). The correction keeps exact source
+attributes and separate finite identity, with owned exact counter bounds and
+executor values. Small finite counters retain integer storage. Unbounded counters
+saturate at the minimum, where all larger values are language-equivalent; finite
+maxima remain exact. No rounding, numerical cap or scope exception is introduced.
+The [implemented design](../../design/xml-particle-ranges.md) documents semantics,
+ownership, storage cost, rollback/diagnostics and an executed batch example.
+
+The [current range report](P4-06-native-count-ranges.json) passes all **eight schemas
+/ 16 DOM-reader rows**, with unchanged fixture hashes and attribution-specific
+rejection of the ambiguous schema. The historical 14 failing requirements remain
+in their original report. Min/max ordering is checked before absent-particle
+removal, including unused groups, and XSD 1.0 all-group restrictions remain active.
+Nullable and inherited particles retain exact original bounds without counting
+empty iterations.
+
+The final affected gate passes **106 Qore suites / 1,067 cases / 44,362 reported
+assertions**, with no test warnings. The range suite passes **eight cases / 534
+assertions** in AST, IR, JIT and tiered modes. The complete native finite-language
+oracle again passes **1,000 models / 43,630 schema-document rows per mode**.
+All **33 CMake provider/source-distribution tests** pass under CMake 4.3.0 with zero
+compiler warnings. An eight-case DOM/reader range probe detects an incomplete
+backport even when the prior attribution/counter checks pass; AUTO uses the
+private fallback and SYSTEM rejects it. Reconfiguration preserves checked source
+hashes and timestamps.
+
+Counter arithmetic matches Python integers across **881 boundary cases**, two
+lexical-equivalence pairs, 33 malformed lexical positions and five invalid
+configurations. Private execution tests reach **80/81-digit boundaries**, finite
+`INT_MAX`, distinct counter offsets, rollback, resets, diagnostic snapshots and
+unbounded saturation. Allocation fixtures exhaust **six execution and six schema
+bridge fault points**, plus the affected prior **229 checker / 15 executor**
+fault points, with baseline ownership and successful fresh reuse. The final
+expanded executor fixture was rebuilt and rerun after the complete provider gate.
+
+Valgrind passes the range Qore suite and five standalone fixtures with **zero
+memory errors, zero definite/indirect/possible losses and zero suppressions**.
+Standalone fixtures free every heap block. The same isolated-core DWARF diagnostic
+remains P9-owned; Qore retains 116,230 bytes in 46 LLVM/loader process-lifetime
+blocks, with no lost allocation. Only Valgrind uses `QORE_PCRE2_NO_JIT=1`.
+Affected native documentation, both executed design examples and all 15 survey
+harness methods pass. No system installation or push was performed.
+
+The entire both-version corpus reports are identical to P4-05: **2,411 baseline
+rows**, source/input hashes, **293 coverage cases**, **144 failure records** and
+all stage accounting. Strict coverage passes **130 descriptions / 1,260 message
+directions**. The [validation inventory](P4-06-validation.json) records source and
+runtime hashes, complete suite results and evidence paths. Logs use
+`/tmp/wsdl-p4-06-`; provider artifacts are `/tmp/qore-xml-libxml2-test-9gmlk1wx`.
+
+The [full audit](audits/P4-06-native-particle-ranges.md) resolves all 62 checks:
+**20 Pass / 42 N/A / 0 Fail**. Main Qore remains clean and synchronized at
+`cb90afb7b`; the remote XML bugfix at `c1403ef` is included. P4 now continues with
+ordered WSDL conversion, field metadata and samples, including its four visible
+compositor runtime failures. P5–P9 retain the full original scope, supported-platform
+and mandatory Python/corpus/peer CI acceptance, and previously recorded P9
+documentation diagnostics.

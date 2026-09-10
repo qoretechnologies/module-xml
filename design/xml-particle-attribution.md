@@ -31,7 +31,8 @@ their mutable sets. Arithmetic and graph storage belong to one compiler context.
 Temporary cross-products are freed immediately, and all remaining allocations are
 released on success or error. Source attributes distinguish finite values from
 the native unbounded sentinel. Synthetic extension particles retain a borrowed
-pointer to their original count source.
+pointer to their original count source. Exact bounds also reach the native
+compiler and executor; see [occurrence ranges](xml-particle-ranges.md).
 
 The automaton retains [particle-use identities](xml-particle-identity.md) and its
 computed execution flags. Schema acceptance uses the component analysis instead

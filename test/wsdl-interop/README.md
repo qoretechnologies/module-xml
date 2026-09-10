@@ -1132,3 +1132,21 @@ XML-RPC character data has dedicated native and independent HTTP checks:
 `python3 test/wsdl-interop/test_xmlrpc_text.py -v`. They check exact strings,
 struct names, UTF-16 bytes, faults, integer boundaries and the separate CPython
 literal-CR marshaller defect. See [the value contract](../../design/xmlrpc-character-data.md).
+
+
+## Native exact occurrence ranges
+
+`xml-particle-ranges.qtest` covers finite ranges above the native sentinel and
+integer limits, whole sequences/choices, nullable and inherited particles,
+substitution members, wildcards and invalid lexical/range declarations. The
+[implemented design](../../design/xml-particle-ranges.md) includes an executable
+batch example and explains exact counter storage, rollback and ownership.
+`test/cmake/test_libxml2_provider.py` compares 881 boundary cases against Python
+integers and exercises native execution and allocation failure. Its behavior
+probe rejects incomplete range backports before selecting a system library.
+
+The historical [failing range diagnostic](P4-native-count-range-diagnostics.json)
+remains unchanged. [P4-06's current report](P4-06-native-count-ranges.json) records
+all 16 DOM/reader requirements passing, including the ambiguous schema rejected
+for attribution. Full phase status and broader remaining requirements are in
+[EXECUTION.md](EXECUTION.md).

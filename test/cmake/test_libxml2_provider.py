@@ -66,6 +66,8 @@ add_executable(entity-allocation "{REPO}/test/cmake/libxml2_entity_allocation.c"
 target_link_libraries(entity-allocation PRIVATE ${{QORE_XML_LIBXML2_TARGET}})
 add_executable(particle-allocation "{REPO}/test/cmake/libxml2_particle_identity_allocation.c")
 target_link_libraries(particle-allocation PRIVATE ${{QORE_XML_LIBXML2_TARGET}})
+add_executable(counter-values "{REPO}/test/cmake/libxml2_particle_counter_values.c")
+target_link_libraries(counter-values PRIVATE ${{QORE_XML_LIBXML2_TARGET}})
 add_executable(particle-execution-allocation "{REPO}/test/cmake/libxml2_particle_execution_allocation.c")
 target_link_libraries(particle-execution-allocation PRIVATE ${{QORE_XML_LIBXML2_TARGET}})
 foreach(part attribution-allocation attribution-math attribution-summary)
@@ -79,17 +81,23 @@ if(TARGET LibXml2)
         get_filename_component(native_name "${{native_source}}" NAME)
         if(native_name STREQUAL "xmlschemas.c")
             set(schema_source "${{native_source}}")
+        elseif(native_name STREQUAL "xmlregexp.c")
+            set(regexp_source "${{native_source}}")
         endif()
     endforeach()
-    add_executable(attribution-schema-allocation "{REPO}/test/cmake/libxml2_particle_attribution_schema_allocation.c")
-    target_compile_definitions(attribution-schema-allocation PRIVATE QORE_XML_SCHEMA_SOURCE="${{schema_source}}")
     get_target_property(native_includes LibXml2 INCLUDE_DIRECTORIES)
-    target_include_directories(attribution-schema-allocation PRIVATE ${{native_includes}})
     get_target_property(native_options LibXml2 COMPILE_OPTIONS)
-    if(native_options)
-        target_compile_options(attribution-schema-allocation PRIVATE ${{native_options}})
-    endif()
-    target_link_libraries(attribution-schema-allocation PRIVATE ${{QORE_XML_LIBXML2_TARGET}})
+    foreach(part attribution-schema-allocation counter-schema-allocation counter-execution)
+        string(REPLACE "-" "_" suffix "${{part}}")
+        add_executable(${{part}} "{REPO}/test/cmake/libxml2_particle_${{suffix}}.c")
+        target_compile_definitions(${{part}} PRIVATE QORE_XML_SCHEMA_SOURCE="${{schema_source}}"
+                                                   QORE_REGEXP_SOURCE="${{regexp_source}}")
+        target_include_directories(${{part}} PRIVATE ${{native_includes}})
+        if(native_options)
+            target_compile_options(${{part}} PRIVATE ${{native_options}})
+        endif()
+        target_link_libraries(${{part}} PRIVATE ${{QORE_XML_LIBXML2_TARGET}})
+    endforeach()
 endif()
 install(TARGETS probe RUNTIME DESTINATION bin)
 ''')
@@ -122,6 +130,8 @@ include("{REPO}/cmake/QoreXmlLibXml2ParticleAttributionFix.cmake")
 qore_xml_fix_libxml2_particle_attribution("{cls.source}" "${{CMAKE_CURRENT_BINARY_DIR}}/libxml")
 include("{REPO}/cmake/QoreXmlLibXml2ParticleCounterFix.cmake")
 qore_xml_fix_libxml2_particle_counters("{cls.source}" "${{CMAKE_CURRENT_BINARY_DIR}}/libxml")
+include("{REPO}/cmake/QoreXmlLibXml2ParticleRangeFix.cmake")
+qore_xml_fix_libxml2_particle_ranges("{cls.source}" "${{CMAKE_CURRENT_BINARY_DIR}}/libxml")
 ''')
         cls.fixed = cls.root / "fixed/build-debug"
         cls.run_command(["cmake", "-S", fixed_project, "-B", cls.fixed, "-DCMAKE_BUILD_TYPE=Debug",
@@ -155,6 +165,7 @@ qore_xml_fix_libxml2_particle_counters("{cls.source}" "${{CMAKE_CURRENT_BINARY_D
         self.assertIn("occurs_values=PASS", output)
         self.assertIn("particle_identity=PASS", output)
         self.assertIn("particle_attribution=PASS", output)
+        self.assertIn("particle_ranges=PASS", output)
         stage = self.root / "stage"
         self.run_command(["cmake", "--install", self.root / "bundled", "--prefix", stage])
         self.assertEqual(["bin/probe", "share/licenses/qore-xml/libxml2-NOTICES.txt"],
@@ -234,7 +245,8 @@ qore_xml_fix_libxml2_uris("{self.source}" "${{CMAKE_CURRENT_BINARY_DIR}}/libxml"
         project = self.root / "occurs-broken/source"
         project.mkdir(parents=True)
         fixed = (self.root / "fixed/source/CMakeLists.txt").read_text()
-        for module, function in (("ParticleAttribution", "particle_attribution"), ("ParticleCounter", "particle_counters")):
+        for module, function in (("ParticleAttribution", "particle_attribution"), ("ParticleCounter", "particle_counters"),
+                                 ("ParticleRange", "particle_ranges")):
             fixed = fixed.replace(f'include("{REPO}/cmake/QoreXmlLibXml2{module}Fix.cmake")\n', "")
             fixed = fixed.replace(f'qore_xml_fix_libxml2_{function}("{self.source}" '
                                   '"${CMAKE_CURRENT_BINARY_DIR}/libxml")\n', "")
@@ -272,7 +284,8 @@ qore_xml_fix_libxml2_uris("{self.source}" "${{CMAKE_CURRENT_BINARY_DIR}}/libxml"
         project = self.root / "particle-broken/source"
         project.mkdir(parents=True)
         fixed = (self.root / "fixed/source/CMakeLists.txt").read_text()
-        for module, function in (("ParticleAttribution", "particle_attribution"), ("ParticleCounter", "particle_counters")):
+        for module, function in (("ParticleAttribution", "particle_attribution"), ("ParticleCounter", "particle_counters"),
+                                 ("ParticleRange", "particle_ranges")):
             fixed = fixed.replace(f'include("{REPO}/cmake/QoreXmlLibXml2{module}Fix.cmake")\n', "")
             fixed = fixed.replace(f'qore_xml_fix_libxml2_{function}("{self.source}" '
                                   '"${CMAKE_CURRENT_BINARY_DIR}/libxml")\n', "")
@@ -346,6 +359,66 @@ qore_xml_fix_libxml2_uris("{self.source}" "${{CMAKE_CURRENT_BINARY_DIR}}/libxml"
                                   ("particle-execution-allocation", "Native particle execution cleanup: PASS")):
             self.assertIn(label, self.run_command([self.root / "bundled" / executable]))
 
+    def test_particle_counter_value_boundaries(self):
+        import random
+        self.run_command(["cmake", "--build", self.root / "bundled", "--target", "counter-values", "-j4"])
+        executable = self.root / "bundled/counter-values"
+        rng = random.Random(4106)
+        values = (0, 1, 2, 3, 999999998, 999999999, 1000000000, 1000000001,
+                  1073741823, 1073741824, 1073741825, 2147483646, 2147483647, 2147483648,
+                  2**64 - 1, 2**64, 10**80 - 1, 10**80)
+        cases = []
+        for low in values:
+            for high in (low, low + 1, None):
+                for emitted in (0, 1):
+                    if high == 0 and emitted:
+                        continue  # An absent particle never emits a first occurrence.
+                    for nullable in (0, 1):
+                        minimum = max(0, (0 if nullable else low) - emitted)
+                        maximum = None if high is None else high - emitted
+                        for current in sorted({0, max(0, minimum - 1), minimum,
+                                               maximum if maximum is not None else minimum + 10}):
+                            if maximum is None or current <= maximum:
+                                cases.append((low, high, emitted, nullable, current, 3))
+        for _ in range(300):
+            low = rng.randrange(10**rng.randint(1, 180))
+            high = low + rng.randrange(100)
+            current = rng.choice((0, max(0, low - 2), low, high))
+            cases.append((low, high, 0, 0, current, rng.randrange(6)))
+        self.assertEqual(881, len(cases))
+        for low, high, emitted, nullable, current, steps in cases:
+            minimum = max(0, (0 if nullable else low) - emitted)
+            maximum = None if high is None else high - emitted
+            advanced = steps if maximum is None else min(steps, maximum - current)
+            result = min(current + advanced, minimum) if maximum is None else current + advanced
+            expected = [minimum, "u" if maximum is None else maximum, result, advanced,
+                        int(maximum is None or result < maximum),
+                        int(result >= minimum and (maximum is None or result <= maximum)),
+                        minimum if minimum <= 2147483647 else "wide",
+                        maximum if maximum is not None and maximum <= 2147483647 else "wide"]
+            args = [low, "unbounded" if high is None else high, emitted, nullable, current, steps]
+            self.assertEqual(" ".join(map(str, expected)), self.run_command([executable, *args]).strip())
+        for low, high in (("  +0002\t", " +0003\n"), ("-000", " unbounded\r\n")):
+            canonical = [int(low), "unbounded" if "unbounded" in high else int(high)]
+            self.assertEqual(self.run_command([executable, *canonical, 0, 0, 0, 3]),
+                             self.run_command([executable, low, high, 0, 0, 0, 3]))
+        for invalid in ("", " ", "+", "-", "-1", "1.0", "1e2", "1x", "1 2", "++1", "NaN"):
+            for position in (0, 1, 4):
+                args = ["0", "3", "0", "0", "0", "3"]
+                args[position] = invalid
+                self.assertEqual("", self.run_command([executable, *args], success=False))
+        for args in (("4", "3", 0, 0, 0, 1), ("4", "3", 0, 1, 0, 1),
+                     ("0", "0", 1, 0, 0, 1), ("0", "3", 0, 0, 4, 1),
+                     ("unbounded", "unbounded", 0, 0, 0, 1)):
+            self.assertEqual("", self.run_command([executable, *args], success=False))
+
+    def test_particle_counter_execution_and_cleanup(self):
+        targets = ("counter-execution", "counter-schema-allocation")
+        self.run_command(["cmake", "--build", self.root / "bundled", "--target", *targets, "-j4"])
+        for executable, label in (("counter-execution", "Exact native counter execution and rollback: PASS"),
+                                  ("counter-schema-allocation", "Exact native schema counter cleanup: PASS")):
+            self.assertIn(label, self.run_command([self.root / "bundled" / executable]))
+
     def test_particle_summary_boundaries_and_present_components(self):
         self.run_command(["cmake", "--build", self.root / "bundled", "--target", "attribution-summary", "-j4"])
         a, b = ("a",), ("b",)
@@ -386,7 +459,8 @@ qore_xml_fix_libxml2_uris("{self.source}" "${{CMAKE_CURRENT_BINARY_DIR}}/libxml"
         project = self.root / "attribution-broken/source"
         project.mkdir(parents=True)
         fixed = (self.root / "fixed/source/CMakeLists.txt").read_text()
-        for module, function in (("ParticleAttribution", "particle_attribution"), ("ParticleCounter", "particle_counters")):
+        for module, function in (("ParticleAttribution", "particle_attribution"), ("ParticleCounter", "particle_counters"),
+                                 ("ParticleRange", "particle_ranges")):
             fixed = fixed.replace(f'include("{REPO}/cmake/QoreXmlLibXml2{module}Fix.cmake")\n', "")
             fixed = fixed.replace(f'qore_xml_fix_libxml2_{function}("{self.source}" '
                                   '"${CMAKE_CURRENT_BINARY_DIR}/libxml")\n', "")
@@ -411,6 +485,9 @@ qore_xml_fix_libxml2_uris("{self.source}" "${{CMAKE_CURRENT_BINARY_DIR}}/libxml"
         project = self.root / "counter-broken/source"
         project.mkdir(parents=True)
         fixed = (self.root / "fixed/source/CMakeLists.txt").read_text()
+        fixed = fixed.replace(f'include("{REPO}/cmake/QoreXmlLibXml2ParticleRangeFix.cmake")\n', "")
+        fixed = fixed.replace(f'qore_xml_fix_libxml2_particle_ranges("{self.source}" '
+                              '"${CMAKE_CURRENT_BINARY_DIR}/libxml")\n', "")
         fixed = fixed.replace(f'include("{REPO}/cmake/QoreXmlLibXml2ParticleCounterFix.cmake")\n', "")
         fixed = fixed.replace(f'qore_xml_fix_libxml2_particle_counters("{self.source}" '
                               '"${CMAKE_CURRENT_BINARY_DIR}/libxml")\n', "")
@@ -433,6 +510,41 @@ qore_xml_fix_libxml2_uris("{self.source}" "${{CMAKE_CURRENT_BINARY_DIR}}/libxml"
         paths = [directory / "qore-particle-attribution-fix/xmlschemas.c",
                  directory / "qore-particle-counters-fix/xmlregexp.c"]
         stamps = {path: (path.stat().st_mtime_ns, hashlib.sha256(path.read_bytes()).hexdigest()) for path in paths}
+        self.configure("bundled", "-DQORE_XML_LIBXML2_PROVIDER=BUNDLED",
+                       f"-DFETCHCONTENT_SOURCE_DIR_QORE_XML_LIBXML2={self.source}")
+        for path, expected in stamps.items():
+            self.assertEqual(expected, (path.stat().st_mtime_ns, hashlib.sha256(path.read_bytes()).hexdigest()))
+
+    def test_range_backport_detection_and_source_idempotence(self):
+        import hashlib
+        project = self.root / "range-broken/source"
+        project.mkdir(parents=True)
+        fixed = (self.root / "fixed/source/CMakeLists.txt").read_text()
+        fixed = fixed.replace(f'include("{REPO}/cmake/QoreXmlLibXml2ParticleRangeFix.cmake")\n', "")
+        fixed = fixed.replace(f'qore_xml_fix_libxml2_particle_ranges("{self.source}" '
+                              '"${CMAKE_CURRENT_BINARY_DIR}/libxml")\n', "")
+        (project / "CMakeLists.txt").write_text(fixed)
+        build = self.root / "range-broken/build-debug"
+        self.run_command(["cmake", "-S", project, "-B", build, "-DCMAKE_BUILD_TYPE=Debug",
+                          "-DBUILD_SHARED_LIBS=ON", "-DLIBXML2_WITH_PROGRAMS=OFF",
+                          "-DLIBXML2_WITH_TESTS=OFF", "-DLIBXML2_WITH_PYTHON=OFF"])
+        self.run_command(["cmake", "--build", build, "--target", "LibXml2", "-j4"])
+        libraries = list((build / "libxml").glob("libxml2.so")) + list((build / "libxml").glob("libxml2.dylib"))
+        self.assertEqual(1, len(libraries))
+        options = [f"-DLIBXML2_LIBRARY={libraries[0]}", f"-DLIBXML2_INCLUDE_DIR={self.fixed_include}",
+                   f"-DFETCHCONTENT_SOURCE_DIR_QORE_XML_LIBXML2={self.source}"]
+        output = self.configure("range-broken-auto", "-DQORE_XML_LIBXML2_PROVIDER=AUTO", *options)
+        self.assertIn("using private static libxml2 2.15.4", output)
+        probe = (self.root / "range-broken-auto/system-libxml2/namespace-probe.log").read_text()
+        for label in ("qname_values", "qname_unions", "uri_identity", "entity_values", "occurs_values",
+                      "particle_identity", "particle_attribution"):
+            self.assertIn(label + "=PASS", probe)
+        self.assertIn("particle_ranges=FAIL", probe)
+        self.configure("range-broken-system", "-DQORE_XML_LIBXML2_PROVIDER=SYSTEM", *options, success=False)
+        directory = self.root / "bundled/_deps/qore_xml_libxml2-build/qore-particle-ranges-fix"
+        stamps = {path: (path.stat().st_mtime_ns, hashlib.sha256(path.read_bytes()).hexdigest())
+                  for path in (directory / "xmlschemas.c", directory / "xmlregexp.c")}
+        self.assertEqual(2, len(stamps))
         self.configure("bundled", "-DQORE_XML_LIBXML2_PROVIDER=BUNDLED",
                        f"-DFETCHCONTENT_SOURCE_DIR_QORE_XML_LIBXML2={self.source}")
         for path, expected in stamps.items():
