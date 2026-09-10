@@ -1172,3 +1172,22 @@ exercises these groups over local HTTP with native and retained XML consumers.
 The historical SoapUI request in `soap.qtest` is preserved as an invalid-order
 negative; its explicit derivative reverses the three inherited `issue560` children
 into base-first order and supplies the missing required nillable `i3367` child.
+
+## Named-element occurrence metadata
+
+`wsdl-particle-occurrences.qtest` checks exact per-name counts and provider field
+requiredness/list shape for nested sequences, alternatives, shared groups and
+all-groups. It covers original/reconstructed types and providers, both actual SOAP
+bindings and message directions, namespace collisions, repeated enum choices,
+unbounded and very large counts, empty/impossible content, invalid graphs,
+interruption and concurrent reuse. `test_particle_occurrences.py` checks 1,000
+generated models against complete finite languages: 765 valid models produce
+original/reconstructed projections, and 235 invalid models must be rejected.
+Every run accounts for all 2,530 rows. Set `QORE_EXEC_MODE` to `ast`, `ir`, `jit`
+or `tiered`; the default is `jit`.
+
+See the [range and provider contract](../../design/wsdl-particles.md#exact-named-element-occurrence-ranges).
+These field bounds describe independent extrema; complete particle validation
+still enforces correlations, order, exclusivity and count gaps. The Qore runtime
+prerequisite `f1dd175f0` fixes absent optional soft-list values and collection
+defaults. Native particle serialization and sample generation remain P4 work.

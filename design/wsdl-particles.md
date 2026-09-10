@@ -286,6 +286,69 @@ XsdXmlValue batch = batch_schema.getXmlValue("<batch><quantity>009</quantity>"
 
 These rules implement XSD 1.0 [complex-content validity](https://www.w3.org/TR/2004/REC-xmlschema-1-20041028/#cvc-complex-type)
 and [particle validity](https://www.w3.org/TR/2004/REC-xmlschema-1-20041028/#cvc-particle).
-Native serialization, independent field-cardinality metadata and sample generation
+Native serialization and sample generation
 remain separately tracked P4 work. Wildcard processing, full mixed-content and
 dynamic-type rules remain P5 requirements.
+
+## Exact named-element occurrence ranges
+
+`XsdParticle::getElementOccurrenceRanges()` returns a map from expanded element
+names to `XsdParticleOccurrenceRange` records. Each record contains canonical
+decimal `minimum` and `maximum` strings; `NOTHING` denotes an unbounded maximum.
+The method counts positions attributed to named declarations. Wildcard positions
+have no named field and do not contribute to this projection. An accepted language
+with no named positions returns an empty map; an impossible language returns
+`NOTHING`. A required empty choice is impossible, while an empty sequence accepts
+empty content.
+
+For each name, sequences sum their children's counts, choices take the extrema
+over productive alternatives (including zero when a field is absent), and
+repetition multiplies by its own limits. An impossible branch contributes no
+alternative; an optional impossible term can still accept empty content. Zero-count
+declarations contribute no component. All-groups retain each member's zero/one
+maximum and account for optionality of the complete group and its reference.
+These are extrema of the particle's language, derived from XSD 1.0
+[model-group validity](https://www.w3.org/TR/2004/REC-xmlschema-1-20041028/#cvc-model-group)
+and [particle validity](https://www.w3.org/TR/2004/REC-xmlschema-1-20041028/#cvc-particle).
+They do not imply that every intermediate count or combination of fields is valid.
+
+Compilation reuses the checked child-before-parent graph. Each node is summarized
+once; shared group definitions are neither copied nor expanded. For `m` graph
+nodes/edges and `k` named fields, the bounds use at most `O(mk)` map entries and
+map operations, plus exact integer arithmetic proportional to the count digits.
+No count is narrowed to a machine integer or rounded. All mutable maps belong to
+the call, and caller modifications use copy-on-write storage. Failed graph
+validation and interruption leave the declaration graph reusable.
+
+Complex provider fields use the complete particle's minimum to determine
+optionality and its maximum to determine repeated-value shape. A field common to
+every choice alternative can be required. A repeated optional sequence exposes
+optional list fields. Fields with the same local name in different namespaces
+retain separate identities and ranges. Provider construction uses the declared
+item type and existing scalar/list conventions without consulting occurrence
+adjustments left by legacy group adapters. Scalar item validation, enum choices,
+attributes, and reconstruction remain active. Whole-particle matching is still
+required for correlations, exclusivity, order and count gaps.
+
+For example, an invoice may contain between two and four complete line pairs:
+
+```qore
+XsdSchema lines("<xs:schema xmlns:xs='http://www.w3.org/2001/XMLSchema'>"
+    "<xs:complexType name='Lines'><xs:sequence minOccurs='2' maxOccurs='4'>"
+    "<xs:element name='sku' type='xs:string'/><xs:element name='quantity' type='xs:int'/>"
+    "</xs:sequence></xs:complexType></xs:schema>");
+XsdComplexType line_type = cast<XsdComplexType>(lines.findType("Lines"));
+hash<string, hash<XsdParticleOccurrenceRange>> ranges = line_type.getParticle().getElementOccurrenceRanges();
+@assert(ranges."{}sku".minimum == "2" && ranges."{}sku".maximum == "4");
+@assert(line_type.getDataProviderType().getFields().sku.getType().isList());
+@assert(line_type.getDataProviderType().getFields().quantity.isMandatory());
+```
+
+Run `qore -b --enable-debug test/wsdl-particle-occurrences.qtest` and
+`python3 test/wsdl-interop/test_particle_occurrences.py -v`. The independent Python
+test enumerates complete finite marked languages and computes per-word counts;
+it compares every field bound on original and reconstructed models. Unit tests
+also cover unbounded counts, namespace collisions, counts beyond 64 bits, a shared
+graph representing `2^70` occurrences, invalid graphs, interruption and concurrent
+reuse. Legacy native group serialization and sample generation remain separate
+P4 implementation criteria.

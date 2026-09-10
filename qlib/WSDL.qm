@@ -80,6 +80,8 @@ module WSDL {
     @section wsdlrelnotes WSDL Module Release Notes
 
     @subsection wsdl_0_5_8 WSDL v0.5.8
+    - ordered particles expose exact named-element occurrence ranges; complex provider fields derive
+      requiredness and list shape from complete sequences, alternatives and group repetitions
     - SOAP decoding validates complete ordered particles and converts each child with its selected declaration;
       retained XML validation preserves alternating groups while applying decode and encode value checks
     - SOAP transport parsing preserves child order; optional inner groups no longer make required wrappers optional
@@ -10198,6 +10200,16 @@ public class XsdAttribute inherits WSDL::XsdTypedData {
 
 # Internal field indexing shared by element groups and complex types.
 class XsdElementFieldHelper {
+    # Provider shape belongs to the containing particle, not to the shared declaration.
+    static AbstractDataProviderType getOccurrenceType(XsdElement element, bool optional, bool repeated) {
+        AbstractDataProviderType result = element.type.getDataProviderType();
+        if (repeated && (element.type.hasNativeListValue()
+                || (!(result instanceof ListDataType) && !result.isList()))) {
+            result = new SoftListDataType(result.getName(), result, False, NOTHING, result.getTags());
+        }
+        return optional || element.nillable ? result.getOrNothingType() : result;
+    }
+
     # Reindex maps during schema construction before selecting compatible public field names.
     static hash<string, XsdElement> getExpandedMap(hash<string, XsdElement> element_map) {
         hash<string, XsdElement> result();
@@ -10394,14 +10406,7 @@ public class XsdElement inherits WSDL::XsdTypedData {
     }
 
     AbstractDataProviderType getDataProviderType() {
-        AbstractDataProviderType rv = type.getDataProviderType();
-        if (maxOccurs != 1 && (type.hasNativeListValue() || (!(rv instanceof ListDataType) && !rv.isList()))) {
-           rv = new SoftListDataType(rv.getName(), rv, False, NOTHING, rv.getTags());
-        }
-        if (!minOccurs || nillable) {
-            rv = rv.getOrNothingType();
-        }
-        return rv;
+        return XsdElementFieldHelper::getOccurrenceType(self, !minOccurs, maxOccurs != 1);
     }
 
     *list<auto> getAllowedValues() {
@@ -17344,6 +17349,15 @@ hashdecl XsdParticleVisit {
     bool leaving = False;
 }
 
+#! Exact bounds on occurrences attributed to named element declarations
+/** @since %WSDL 0.5.8 */
+public hashdecl XsdParticleOccurrenceRange {
+    #! Minimum count, as an exact nonnegative decimal integer
+    string minimum;
+    #! Maximum count, as an exact nonnegative decimal integer, or NOTHING for unbounded
+    *string maximum;
+}
+
 #! An ordered XSD particle declaration with its own occurrence range
 /** The particle retains group references and each individual declaration position. Element
     objects are shared with the schema's field metadata; occurrence constraints belong to the
@@ -17598,6 +17612,23 @@ public final class XsdParticle inherits Qore::Serializable {
         return program.attribute(names);
     }
 
+    #! returns exact per-element occurrence bounds for the complete particle
+    /** @return bounds keyed by expanded element name, an empty hash when no named declaration can occur,
+        or NOTHING when the particle cannot accept any child sequence
+        @throw WSDL-ERROR unresolved/cyclic groups or invalid XSD 1.0 all placement
+        @note These are projections, not a replacement for complete particle validation: counts can have
+        gaps, and fields can depend on one another. Wildcard positions are not named declarations.
+        Bounds use particle limits and do not modify shared element declarations or public field types.
+        @par Example
+        A batch containing two to four repetitions of a quantity/note sequence has independent quantity
+        and note bounds of two to four; accepting a batch still requires each complete ordered pair.
+        @since %WSDL 0.5.8
+    */
+    *hash<string, hash<XsdParticleOccurrenceRange>> getElementOccurrenceRanges() {
+        XsdParticleProgram program(self);
+        return program.elementOccurrenceRanges();
+    }
+
     #! validates XSD 1.0 unique particle attribution for this content model
     /** @throw WSDL-ERROR ambiguous particles, unresolved/cyclic groups or invalid all placement
         @note Occurrence counts are exact; repeated uses of one declaration do not themselves
@@ -17743,6 +17774,113 @@ class XsdParticleProgram {
         if (!shared) {
             automaton = XsdRegexAutomaton::compile(nodes, root);
         }
+    }
+
+    *hash<string, hash<XsdParticleOccurrenceRange>> elementOccurrenceRanges() {
+        if (all) {
+            hash<string, hash<XsdParticleOccurrenceRange>> result();
+            foreach string name in (keys terminals) {
+                result{name} = <XsdParticleOccurrenceRange>{
+                    "minimum": all_optional ? "0" : terminals{name}.getMinOccurs(),
+                    "maximum": terminals{name}.getMaxOccurs()};
+            }
+            return result;
+        }
+        # The compiled graph is in child-before-parent order, including shared
+        # group definitions. Summarize each node once without expanding counts.
+        list<hash<string, hash<XsdParticleOccurrenceRange>>> summaries();
+        list<bool> productive();
+        for (int index = 0; index < nodes.size(); ++index) {
+            hash<XsdRegexNode> node = nodes[index];
+            hash<string, hash<XsdParticleOccurrenceRange>> result();
+            bool possible = True;
+            switch (node.kind) {
+                case XRN_EMPTY:
+                    break;
+                case XRN_CHARACTER: {
+                    XsdParticle declaration = terminals{index.toString()};
+                    if (declaration.getKind() == XsdParticleKind::Element) {
+                        result{declaration.getElement().getExpandedName()} =
+                            <XsdParticleOccurrenceRange>{"minimum": "1", "maximum": "1"};
+                    }
+                    break;
+                }
+                case XRN_SEQUENCE:
+                case XRN_ALTERNATIVE: {
+                    bool choice = node.kind == XRN_ALTERNATIVE;
+                    int alternatives = 0;
+                    hash<string, int> appearances();
+                    foreach int child in (node.children) {
+                        @assert(child < index);
+                        if (!productive[child]) {
+                            if (!choice) {
+                                possible = False;
+                                result = {};
+                                break;
+                            }
+                            continue;
+                        }
+                        ++alternatives;
+                        foreach string name in (keys summaries[child]) {
+                            hash<XsdParticleOccurrenceRange> incoming = summaries[child]{name};
+                            if (!result.hasKey(name)) {
+                                result{name} = incoming;
+                            } else {
+                                result{name}.minimum = choice
+                                    ? (XsdIntegerLexicalHelper::compare(result{name}.minimum, incoming.minimum) < 0
+                                        ? result{name}.minimum : incoming.minimum)
+                                    : XsdDurationIntegerHelper::add(result{name}.minimum, incoming.minimum);
+                                result{name}.maximum = upperBound(result{name}.maximum, incoming.maximum, choice);
+                            }
+                            ++appearances{name};
+                        }
+                    }
+                    if (choice) {
+                        possible = alternatives != 0;
+                        foreach string name in (keys result) {
+                            if (appearances{name} != alternatives) {
+                                result{name}.minimum = "0";
+                            }
+                        }
+                    }
+                    break;
+                }
+                case XRN_REPEAT: {
+                    int child = node.children[0];
+                    @assert(child < index);
+                    possible = productive[child] || node.low == "0";
+                    if (productive[child]) {
+                        foreach string name in (keys summaries[child]) {
+                            hash<XsdParticleOccurrenceRange> value = summaries[child]{name};
+                            result{name} = <XsdParticleOccurrenceRange>{
+                                "minimum": XsdDurationIntegerHelper::multiply(value.minimum, node.low),
+                                "maximum": upperProduct(value.maximum, node.high)};
+                        }
+                    }
+                    break;
+                }
+                default:
+                    @assert(False);
+            }
+            push summaries, result;
+            push productive, possible;
+        }
+        return productive[root] ? summaries[root] : NOTHING;
+    }
+
+    private static *string upperBound(*string left, *string right, bool choice) {
+        if (!exists left || !exists right) {
+            return;
+        }
+        return choice ? (XsdIntegerLexicalHelper::compare(left, right) > 0 ? left : right)
+            : XsdDurationIntegerHelper::add(left, right);
+    }
+
+    private static *string upperProduct(*string left, *string right) {
+        if (left == "0" || right == "0") {
+            return "0";
+        }
+        return exists left && exists right ? XsdDurationIntegerHelper::multiply(left, right) : NOTHING;
     }
 
     private static string namespaceOf(string name) {
@@ -19710,6 +19848,33 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
     private AbstractDataProviderType getDataProviderTypeIntern() {
         if (array) {
             return array.getDataProviderType();
+        }
+        if (particle && cx_type != XET_SIMPLE) {
+            *hash<string, hash<XsdParticleOccurrenceRange>> ranges = particle.getElementOccurrenceRanges();
+            hash<string, XsdElement> declarations = XsdElementFieldHelper::getExpandedMap(elementmap);
+            foreach hash<ChoiceInfo> choice in (choices) {
+                declarations += XsdElementFieldHelper::getExpandedMap(choice.elementmap);
+            }
+            declarations += element_declarations;
+            foreach string identity in (keys declarations) {
+                if (!ranges.hasKey(identity)) {
+                    delete declarations{identity};
+                }
+            }
+            hash<string, string> fields = XsdElementFieldHelper::getFieldNames(declarations);
+            HashDataType result(name);
+            foreach string identity in (keys declarations) {
+                XsdElement declaration = declarations{identity};
+                hash<XsdParticleOccurrenceRange> range = ranges{identity};
+                bool repeated = !exists range.maximum || XsdIntegerLexicalHelper::compare(range.maximum, "1") > 0;
+                hash<auto> info = {"name": fields{identity},
+                    "type": XsdElementFieldHelper::getOccurrenceType(declaration, range.minimum == "0",
+                        repeated)};
+                info{repeated ? "element_allowed_values" : "allowed_values"} =
+                    declaration.getDataProviderAllowedValues();
+                result.addField(XsdDataFieldHelper::create(declaration.type, info));
+            }
+            return addAttributeFields(result);
         }
         switch (cx_type) {
             case XET_SIMPLE:

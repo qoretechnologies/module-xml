@@ -6078,3 +6078,65 @@ GCC/dependency debug-information diagnostics remain explicit P9 work. No install
 or push was performed. P4 continues with native particle serialization, independent
 field-cardinality metadata and particle-driven samples; P5-P9 retain the complete
 original scope.
+
+## P4-09 — Exact occurrence metadata (2026-09-10)
+
+P4-08 is committed as `6ebdd39`. `XsdParticle::getElementOccurrenceRanges()`
+now exposes exact named-element minima/maxima for the complete accepted language.
+Sequence sums, choice extrema (including absent fields), repetition products,
+optional all-groups and shared group references use decimal integer arithmetic.
+Impossible languages differ from accepted empty content, and zero-count
+declarations contribute no component. Wildcard positions are excluded from named
+field counts. The child-before-parent graph is summarized once without expanding
+numeric counts or shared definitions; the implemented bound is `O(mk)` map work
+and storage plus digit-dependent arithmetic.
+
+Complex provider fields derive requiredness, scalar/list shape and repeated enum
+choices from these bounds. A field common to every choice alternative can be
+required; separate uses of a shared optional/repeated group do not contaminate
+another type's metadata. Expanded-name collisions retain separate fields. Item
+validators, attributes and reconstructed types/providers retain their existing
+contracts. The bounds are extrema, so complete particle checks still enforce
+field correlations, order, exclusivity and unattainable intermediate counts.
+
+The new tests exposed a prerequisite in Qore: an absent optional soft list was
+dispatched to the item validator as a single missing item. Main Qore commit
+**`f1dd175f0`** fixes missing collection/default dispatch while preserving explicit
+NULL and missing-valued item validation. Its 62-item audit resolves **20 Pass /
+42 N/A / 0 Fail**. Nine core checks pass **75 cases / 2,875 assertions**, including
+the new **5-case / 129-assertion** regression in all four execution modes. An
+explicit compiled-module run also passes 5/129. The isolated DataProvider-qmod
+target was rebuilt with the exact changed source and contains **2,117 variants**;
+the six directly related classes and all five existing provider suites match main
+Qore sources. No C++ source changed, and the libqore/native XML hashes are unchanged.
+
+XML validation passes **109 suites / 1,098 cases / 54,884 reported assertions**
+without warnings. The occurrence suite has **11 cases / 219 assertions**, covering
+both actual SOAP bindings and directions, original/reconstructed providers,
+repeated enum choices, huge/unbounded limits, a `2^70` shared graph, malformed
+graphs, cancellation and concurrent reuse. Per AST/IR/JIT/tiered mode, three
+affected Qore suites pass **28 cases / 402 assertions**. Independent complete
+languages check **1,000 models / 2,530 rows per mode** (765 valid models, 235
+required schema rejections). The existing value matrix also passes **248 rows /
+124 independently assessed inputs / 112 outputs per mode** with lxml and Xerces.
+The compiled WSDL module contains **1,162 variants** and passes 11/219.
+
+Both-version survey preserves all **2,443 stage rows/verdicts** and all original
+source/input/catalog hashes. Strict coverage passes **130 descriptions / 1,260
+directions** on its first isolated run. All **293 cases / 144 visible failures**
+and stage accounting, including **860 unassessed value/infoset directions**, are
+unchanged. Current reports only update runtime/source-version metadata. All 15
+survey-harness methods, affected WSDL documentation, four WSDL design examples,
+SoftList qdx extraction and its design example pass without warnings.
+
+The [inventory](P4-09-validation.json) records source/artifact hashes and complete
+gate/mode rows. The [full XML audit](audits/P4-09-occurrence-metadata.md) resolves
+all 62 checks: **19 Pass / 43 N/A / 0 Fail**. Both remotes were fetched again and
+had no additional commits; the previously pulled `95bdf29f4` Qore bugfix and XML
+`c1403ef` remain included. No install or push was performed. No new Valgrind run
+was required for these Qore-only changes; normal PCRE2 JIT remains enabled.
+
+P4 continues with native serialization of complete ordered groups, removal of
+legacy shared group field mutations, and particle-driven sample generation.
+P5–P9 retain the full original scope, including the separately recorded broad
+documentation and GCC/dependency debug-information diagnostics.
