@@ -17,6 +17,12 @@ groups, shared references, wildcard namespaces and all permutations. See the
 [matching evidence](particle-matching-evidence.md) for independently asserted
 validator defects and the precise separation from pending message conversion.
 
+`test/wsdl-particle-ambiguity.qtest` and `test/wsdl-interop/test_particle_ambiguity.py`
+check construction-time unique particle attribution with exact count thresholds,
+complete finite-prefix oracles and actual SOAP bindings. The [attribution evidence](particle-ambiguity-evidence.md)
+records validator disagreements and the still-failing native libxml2 requirements
+that must close before P4 acceptance.
+
 The W3C XML Schema Databinding collection is a useful independent source of WSDL 1.1 descriptions,
 XSDs, and SOAP messages. Running it against this module exposed defects that the existing tests missed.
 The small regression suite runs offline in the normal `test/*.qtest` CI loop. The larger survey is a

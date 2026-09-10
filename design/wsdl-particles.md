@@ -58,6 +58,7 @@ XsdComplexType invoice = cast<XsdComplexType>(schema.findType("Invoice"));
 list<XsdParticle> content = invoice.getParticle().getChildren();
 @assert(content[0].getElement().name == "number");
 @assert(content[1].getKind() == XsdParticleKind::Choice);
+invoice.getParticle().validateDeterminism();
 @assert(invoice.getParticle().matchesElementNames(("{}number", "{}card")));
 @assert(!invoice.getParticle().matchesElementNames(("{}card", "{}number")));
 ```
@@ -120,3 +121,71 @@ Run `qore -b --enable-debug test/wsdl-particle-matching.qtest` and
 `python3 test/wsdl-interop/test_particle_matching.py -v` with local modules selected.
 The [matching evidence](../test/wsdl-interop/particle-matching-evidence.md) records
 the independent empty-choice and zero-count validator differences.
+
+## Unique particle attribution
+
+Schema construction checks ordered particle attribution after declaration/group
+resolution and base-type composition, before legacy field adapters can change
+shared occurrence metadata. Unused named group definitions are checked too.
+`XsdParticle::validateDeterminism()` applies the same check to a detached or
+reconstructed graph. An ambiguity raises `WSDL-ERROR`. `XsdElement::getNamespaceUri()`
+returns the namespace of the actual element name, including unqualified local
+forms and resolved global references. Element and wildcard overlap uses this
+identity and the resolved wildcard namespace algebra.
+
+The check implements weak determinism: the current expanded name and preceding
+input must determine a unique declaration position. Different decompositions into
+repetition iterations are allowed if they identify the same declaration. For
+example, nested counts around one `a` position remain deterministic, while an
+optional `a` followed by another `a` position is ambiguous. An exact two-count
+`a` followed by another `a` position is deterministic. No lookahead into later
+names, values or attributes resolves a conflict.
+
+The implementation combines Chen and Lu's weak-determinism conditions with the
+count-flexibility calculation described by Kilpeläinen and reproduced as Algorithm
+3 in Groz and Maneth. First-name sets are independent of repetition context.
+Follow-last membership and ambiguity are monotone in the inherited maximum count
+`N`: each becomes true at one rational threshold, or never. A graph node stores
+those thresholds, its nullability, its flexibility ratio and the two ambiguity
+thresholds for continuing/noncontinuing contexts. Named references reuse this
+summary, so different call paths do not expand shared definitions.
+
+A repetition scales descendant thresholds by its maximum. A nonnullable sibling
+resets the corresponding inherited count to one. Choice merges thresholds by their
+minimum; sequence applies the published cross-boundary conditions. For a fixed
+repeat maximum `n` whose child's flexibility ratio is `p/q > 1`, its own flexible
+threshold is `p / ((p-q)n)`. A variable range is flexible unconditionally. Nullable
+counted children normalize their minimum to zero for the analysis only; declaration
+counts remain unchanged. Optional one-count terms introduce no repetition edge.
+The threshold calculation uses exact decimal integer products and comparisons;
+there is no floating-point rounding or expansion of numeric counts.
+
+Empty languages and epsilon are distinct. Zero-count declarations contribute no
+component and their absent child graph is not traversed by the compiled program.
+Every present model group must itself satisfy the component constraints, including
+one inside a surrounding empty language. An empty parent therefore cannot hide an
+ambiguous nested group. Construction-time QName/type consistency remains a
+separate prerequisite.
+
+For `m` graph nodes/edges and `p` distinct terminal predicates, summaries need
+`O(mp)` entries; wildcard intersection caching needs at most `O(p²)` entries.
+`O(mp²)` predicate/set work is a conservative bound, with exact integer arithmetic
+adding its digit-dependent cost. Rational numerator/denominator lengths grow with
+count digits along graph paths, not with expanded occurrence values. Ordinary
+name intersections use hash lookups over the smaller set, and flat choices update
+accumulated sets in place. Tests include 1,000 alternatives and a shared DAG whose
+expanded declaration count exceeds one billion. All mutable analysis state belongs
+to the call; concurrent calls and cancellation/reuse are tested.
+
+The WSDL particle checks cover element names and wildcard namespace admission.
+Implicit substitution-member admission is coupled to the separate substitution
+resolution requirements. These checks do not replace native libxml2 schema
+validation; its independent attribution defects are tracked with the interoperability
+evidence. Ordered SOAP message conversion and field/sample integration remain
+separate requirements in the execution plan.
+
+References:
+
+- [Chen and Lu, Checking Determinism of Regular Expressions with Counting (2012)](https://lcs.ios.ac.cn/~chm/papers/dlt2012.pdf), sections 3, 4 and 6.
+- [Groz and Maneth, Efficient Testing and Matching of Deterministic Regular Expressions (2017)](https://www.pure.ed.ac.uk/ws/portalfiles/portal/32885322/jcss2017_3.pdf), section 3.4 and Algorithm 3.
+- [XSD 1.0 model-group component constraints](https://www.w3.org/TR/2004/REC-xmlschema-1-20041028/#cos-nonambig).

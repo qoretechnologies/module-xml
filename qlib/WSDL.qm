@@ -80,6 +80,8 @@ module WSDL {
     @section wsdlrelnotes WSDL Module Release Notes
 
     @subsection wsdl_0_5_8 WSDL v0.5.8
+    - schema construction rejects ambiguous ordered particles using exact counted-group attribution;
+      XsdParticle::validateDeterminism() also checks reconstructed graphs without expanding group references
     - XsdParticle::matchesElementNames() checks ordered child names, complete group occurrence counts,
       all-group permutations and wildcard namespace constraints with bounded structural matching
     - complex types and named groups expose ordered XsdParticle construction metadata, retaining declaration
@@ -3354,6 +3356,25 @@ class XsdDurationIntegerHelper {
             push result, carry;
         }
         return render(result, negative);
+    }
+
+    # Exact multiplication when both factors are arbitrary-size integers.
+    static string multiply(string left, string right) {
+        bool ln = left[0] == "-";
+        bool rn = right[0] == "-";
+        list<int> lhs = limbs(ln ? left.substr(1) : left);
+        list<int> rhs = limbs(rn ? right.substr(1) : right);
+        list<int> result = map 0, (0 .. lhs.size() + rhs.size() - 1);
+        for (int i = 0; i < lhs.size(); ++i) {
+            int carry = 0;
+            for (int j = 0; j < rhs.size(); ++j) {
+                int total = result[i + j] + lhs[i] * rhs[j] + carry;
+                result[i + j] = total % Base;
+                carry = total / Base;
+            }
+            result[i + rhs.size()] = carry;
+        }
+        return render(result, ln != rn);
     }
 
     # Euclidean division: the remainder is always nonnegative, including negative durations.
@@ -10410,7 +10431,15 @@ public class XsdElement inherits WSDL::XsdTypedData {
         @since %WSDL 0.5.8
     */
     string getExpandedName() {
-        return type_qname(ref ? ref_ns : (usedocns ? ns : ""), name);
+        return type_qname(getNamespaceUri(), name);
+    }
+
+    #! returns the namespace of the element's XML name
+    /** @return the resolved namespace URI, or an empty string for an unqualified element
+        @since %WSDL 0.5.8
+    */
+    string getNamespaceUri() {
+        return (ref ? ref_ns : (usedocns ? ns : "")) ?? "";
     }
 
     #! returns the XML output name for this element declaration
@@ -10419,7 +10448,7 @@ public class XsdElement inherits WSDL::XsdTypedData {
         @since %WSDL 0.5.8
     */
     string getXmlName(Namespaces namespaces) {
-        *string uri = ref ? ref_ns : (usedocns ? ns : "");
+        string uri = getNamespaceUri();
         return uri ? namespaces.getOutputNamespacePrefix(uri) + ":" + name : name;
     }
 
@@ -17132,6 +17161,7 @@ hashdecl XsdParticleVisit {
     list<XsdParticle> content = invoice.getParticle().getChildren();
     @assert(content[0].getElement().name == "number");
     @assert(content[1].getKind() == XsdParticleKind::Choice);
+    invoice.getParticle().validateDeterminism();
     @assert(invoice.getParticle().matchesElementNames(("{}number", "{}card")));
     @assert(!invoice.getParticle().matchesElementNames(("{}card", "{}number")));
     @endcode
@@ -17354,6 +17384,16 @@ public final class XsdParticle inherits Qore::Serializable {
         XsdParticleProgram program(self);
         return program.matches(names);
     }
+
+    #! validates XSD 1.0 unique particle attribution for this content model
+    /** @throw WSDL-ERROR ambiguous particles, unresolved/cyclic groups or invalid all placement
+        @note Occurrence counts are exact; repeated uses of one declaration do not themselves
+        introduce ambiguity. Complete schema resolution before calling this method.
+    */
+    validateDeterminism() {
+        XsdParticleProgram program(self);
+        program.validateDeterminism();
+    }
 }
 
 # Particle recognition shares the bounded structural matcher used by XSD patterns.
@@ -17422,6 +17462,11 @@ class XsdParticleProgram {
             XsdParticle node = visit.node;
             string key = node.uniqueHash();
             if (compiled.hasKey(key)) {
+                continue;
+            }
+            if (node.getMaxOccurs() == "0") {
+                compiled{key} = nodes.size();
+                push nodes, <XsdRegexNode>{"kind": XRN_EMPTY, "nullable": True};
                 continue;
             }
             list<XsdParticle> children = node.getChildren();
@@ -17526,6 +17571,338 @@ class XsdParticleProgram {
         }
         XsdRegexMatcher matcher(nodes, names, \terminal());
         return matcher.matches(root, automaton);
+    }
+
+    validateDeterminism() {
+        if (!all) {
+            XsdParticleAmbiguity check(nodes, terminals, root);
+        }
+    }
+}
+
+# Exact positive rationals. NOTHING denotes infinity; a zero threshold applies
+# for every inherited repetition context N >= 1.
+hashdecl XsdParticleRatio {
+    string numerator = "1";
+    string denominator = "1";
+}
+
+class XsdParticleRational {
+    static hash<XsdParticleRatio> zero() {
+        return <XsdParticleRatio>{"numerator": "0"};
+    }
+
+    static int compare(hash<XsdParticleRatio> left, hash<XsdParticleRatio> right) {
+        return XsdIntegerLexicalHelper::compare(
+            XsdDurationIntegerHelper::multiply(left.numerator, right.denominator),
+            XsdDurationIntegerHelper::multiply(right.numerator, left.denominator));
+    }
+
+    static *hash<XsdParticleRatio> minimum(*hash<XsdParticleRatio> left, *hash<XsdParticleRatio> right) {
+        return !left ? right : !right || compare(left, right) <= 0 ? left : right;
+    }
+
+    static *hash<XsdParticleRatio> maximum(*hash<XsdParticleRatio> left, *hash<XsdParticleRatio> right) {
+        return !left || !right ? NOTHING : compare(left, right) >= 0 ? left : right;
+    }
+
+    static bool applies(*hash<XsdParticleRatio> threshold) {
+        return threshold && XsdIntegerLexicalHelper::compare(threshold.numerator, threshold.denominator) <= 0;
+    }
+
+    static hash<XsdParticleRatio> threshold(string numerator, string denominator) {
+        @assert(denominator != "0");
+        return XsdIntegerLexicalHelper::compare(numerator, denominator) <= 0 ? zero()
+            : <XsdParticleRatio>{"numerator": numerator, "denominator": denominator};
+    }
+
+    static *hash<XsdParticleRatio> scale(*hash<XsdParticleRatio> value, *string count) {
+        if (!value) {
+            return;
+        }
+        return !exists count ? zero()
+            : threshold(value.numerator, XsdDurationIntegerHelper::multiply(value.denominator, count));
+    }
+
+    static *hash<XsdParticleRatio> withContext(*hash<XsdParticleRatio> value, bool inherit) {
+        return inherit ? value : applies(value) ? zero() : NOTHING;
+    }
+}
+
+hashdecl XsdParticleAmbiguityInfo {
+    bool nullable = False;
+    bool empty = False;
+    hash<string, bool> first = {};
+    hash<string, hash<XsdParticleRatio>> follow = {};
+    *hash<XsdParticleRatio> ratio;
+    *hash<XsdParticleRatio> plain;
+    *hash<XsdParticleRatio> continuing;
+}
+
+# Chen/Lu's weak-determinism conditions, with Kilpelainen's flexibility
+# calculation retained symbolically in the inherited maximum N. Each threshold
+# represents all N at or above it. Shared definitions therefore need one summary,
+# regardless of the number of paths or the magnitudes of occurrence counts.
+class XsdParticleAmbiguity {
+    private {
+        hash<string, XsdParticle> terminals;
+        hash<string, bool> overlap_cache();
+        bool has_wildcards = False;
+    }
+
+    constructor(list<hash<XsdRegexNode>> nodes, hash<string, XsdParticle> terminals, int root) {
+        self.terminals = terminals;
+        foreach XsdParticle terminal in (terminals.iterator()) {
+            has_wildcards = has_wildcards || terminal.getKind() == XsdParticleKind::Any;
+        }
+        list<hash<XsdParticleAmbiguityInfo>> summaries();
+        foreach hash<XsdRegexNode> node in (nodes) {
+            hash<XsdParticleAmbiguityInfo> summary();
+            switch (node.kind) {
+                case XRN_EMPTY:
+                    summary.nullable = True;
+                    break;
+                case XRN_CHARACTER:
+                    string terminal_key = summaries.size().toString();
+                    XsdParticle terminal = terminals{terminal_key};
+                    if (terminal.getKind() == XsdParticleKind::Element) {
+                        terminal_key = terminal.getElement().getExpandedName();
+                        self.terminals{terminal_key} = terminal;
+                    }
+                    summary.first{terminal_key} = True;
+                    summary.ratio = new hash<XsdParticleRatio>();
+                    break;
+                case XRN_REPEAT:
+                    summary = repeat(summaries[node.children[0]], node.low, node.high);
+                    break;
+                case XRN_SEQUENCE:
+                case XRN_ALTERNATIVE:
+                    summary.nullable = node.kind == XRN_SEQUENCE;
+                    summary.empty = node.kind == XRN_ALTERNATIVE;
+                    foreach int child in (node.children) {
+                        combine(\summary, summaries[child], node.kind == XRN_ALTERNATIVE);
+                    }
+                    break;
+                default:
+                    @assert(False);
+            }
+            # Every present model group must satisfy its own component
+            # constraints, even when a surrounding empty language is reduced.
+            if (XsdParticleRational::applies(summary.plain)) {
+                throw WSDL_ERROR, "content model violates XSD 1.0 unique particle attribution";
+            }
+            push summaries, summary;
+        }
+        @assert(root >= 0 && root < summaries.size());
+    }
+
+    private bool overlaps(string left, string right) {
+        string key = sprintf("%d:%s%s", left.size(), left, right);
+        if (overlap_cache.hasKey(key)) {
+            return overlap_cache{key};
+        }
+        XsdParticle lhs = terminals{left};
+        XsdParticle rhs = terminals{right};
+        @assert(lhs && rhs);
+        bool result = False;
+        if (lhs.getKind() == XsdParticleKind::Element && rhs.getKind() == XsdParticleKind::Element) {
+            result = lhs.getElement().getExpandedName() == rhs.getElement().getExpandedName();
+        } else if (lhs.getKind() == XsdParticleKind::Element) {
+            result = XsdAttributeWildcardHelper::allows(rhs.getWildcard(), lhs.getElement().getNamespaceUri());
+        } else if (rhs.getKind() == XsdParticleKind::Element) {
+            result = XsdAttributeWildcardHelper::allows(lhs.getWildcard(), rhs.getElement().getNamespaceUri());
+        } else {
+            hash<XsdAttributeWildcardInfo> a = lhs.getWildcard();
+            hash<XsdAttributeWildcardInfo> b = rhs.getWildcard();
+            if (a.constraint == XsdWildcardConstraint::Set) {
+                foreach string uri in (keys a.namespaces) {
+                    if (XsdAttributeWildcardHelper::allows(b, uri)) {
+                        result = True;
+                        break;
+                    }
+                }
+            } else if (b.constraint == XsdWildcardConstraint::Set) {
+                foreach string uri in (keys b.namespaces) {
+                    if (XsdAttributeWildcardHelper::allows(a, uri)) {
+                        result = True;
+                        break;
+                    }
+                }
+            } else {
+                # Any and cofinite constraints always share some namespace.
+                result = True;
+            }
+        }
+        overlap_cache{key} = result;
+        return result;
+    }
+
+    private *hash<XsdParticleRatio> intersection(hash<string, hash<XsdParticleRatio>> follow,
+            hash<string, bool> first) {
+        if (!follow || !first) {
+            return;
+        }
+        *hash<XsdParticleRatio> result;
+        if (!has_wildcards) {
+            foreach string key in (follow.size() < first.size() ? keys follow : keys first) {
+                if (follow.hasKey(key) && first.hasKey(key)) {
+                    result = XsdParticleRational::minimum(result, follow{key});
+                }
+            }
+            return result;
+        }
+        list<string> wildcards = select keys first, $1[0] != "{";
+        foreach string left in (keys follow) {
+            if (first.hasKey(left)) {
+                result = XsdParticleRational::minimum(result, follow{left});
+            }
+            # Exact expanded names use hash lookups. Only wildcard predicates
+            # require a pairwise namespace-intersection test.
+            foreach string right in (left[0] == "{" ? wildcards : keys first) {
+                if (overlaps(left, right)) {
+                    result = XsdParticleRational::minimum(result, follow{left});
+                }
+            }
+        }
+        return result;
+    }
+
+    private static hash<string, hash<XsdParticleRatio>> unconditional(hash<string, bool> first) {
+        hash<string, hash<XsdParticleRatio>> result();
+        foreach string key in (keys first) {
+            result{key} = XsdParticleRational::zero();
+        }
+        return result;
+    }
+
+    private static hash<string, hash<XsdParticleRatio>> contexts(hash<string, hash<XsdParticleRatio>> source,
+            bool inherit) {
+        if (inherit) {
+            return source;
+        }
+        hash<string, hash<XsdParticleRatio>> result();
+        foreach string key in (keys source) {
+            if (XsdParticleRational::applies(source{key})) {
+                result{key} = XsdParticleRational::zero();
+            }
+        }
+        return result;
+    }
+
+    private combine(reference<hash<XsdParticleAmbiguityInfo>> left,
+            hash<XsdParticleAmbiguityInfo> right, bool choice) {
+        if (left.empty || right.empty) {
+            left = choice ? (left.empty ? right : left) : <XsdParticleAmbiguityInfo>{"empty": True};
+            return;
+        }
+        hash<XsdParticleAmbiguityInfo> result();
+        *hash<XsdParticleRatio> overlap = left.first.size() < right.first.size()
+            ? intersection(unconditional(left.first), right.first)
+            : intersection(unconditional(right.first), left.first);
+        if (choice) {
+            result.nullable = left.nullable || right.nullable;
+            result.ratio = XsdParticleRational::maximum(left.ratio, right.ratio);
+            result.plain = XsdParticleRational::minimum(overlap,
+                XsdParticleRational::minimum(left.plain, right.plain));
+            result.continuing = XsdParticleRational::minimum(overlap,
+                XsdParticleRational::minimum(left.continuing, right.continuing));
+            result.continuing = XsdParticleRational::minimum(result.continuing,
+                XsdParticleRational::minimum(intersection(left.follow, right.first),
+                    intersection(right.follow, left.first)));
+            left.first += right.first;
+            foreach string key in (keys right.follow) {
+                left.follow{key} = XsdParticleRational::minimum(left.follow{key}, right.follow{key});
+            }
+            left.nullable = result.nullable;
+            left.ratio = result.ratio;
+            left.plain = result.plain;
+            left.continuing = result.continuing;
+            return;
+        }
+        result.nullable = left.nullable && right.nullable;
+        hash<string, hash<XsdParticleRatio>> lf = contexts(left.follow, right.nullable);
+        hash<string, hash<XsdParticleRatio>> rf = contexts(right.follow, left.nullable);
+        result.ratio = left.nullable ? (right.nullable ? NOTHING : right.ratio)
+            : right.nullable ? left.ratio : new hash<XsdParticleRatio>();
+        *hash<XsdParticleRatio> base = XsdParticleRational::minimum(intersection(lf, right.first),
+            left.nullable ? overlap : NOTHING);
+        result.plain = XsdParticleRational::minimum(base,
+            XsdParticleRational::minimum(XsdParticleRational::withContext(left.plain, right.nullable),
+                XsdParticleRational::withContext(right.plain, left.nullable)));
+        result.continuing = XsdParticleRational::minimum(base,
+            XsdParticleRational::minimum(XsdParticleRational::withContext(
+                    right.nullable ? left.continuing : left.plain, right.nullable),
+                XsdParticleRational::withContext(left.nullable ? right.continuing : right.plain, left.nullable)));
+        result.continuing = XsdParticleRational::minimum(result.continuing,
+            XsdParticleRational::minimum(intersection(rf, left.first),
+                !left.nullable && right.nullable ? overlap : NOTHING));
+        remove lf;
+        if (right.nullable) {
+            foreach string key in (keys right.first) {
+                left.follow{key} = XsdParticleRational::zero();
+            }
+            foreach string key in (keys rf) {
+                left.follow{key} = XsdParticleRational::minimum(left.follow{key}, rf{key});
+            }
+        } else {
+            left.follow = rf;
+        }
+        if (left.nullable) {
+            left.first += right.first;
+        }
+        left.nullable = result.nullable;
+        left.ratio = result.ratio;
+        left.plain = result.plain;
+        left.continuing = result.continuing;
+    }
+
+    private static hash<XsdParticleAmbiguityInfo> repeat(hash<XsdParticleAmbiguityInfo> child,
+            string low, *string high) {
+        if (high == "0" || (child.empty && low == "0")) {
+            return <XsdParticleAmbiguityInfo>{"nullable": True};
+        }
+        if (child.empty) {
+            return child;
+        }
+        if (child.nullable) {
+            low = "0";
+        }
+        hash<XsdParticleAmbiguityInfo> result = child;
+        result.nullable = low == "0" || child.nullable;
+        if (high == "1") {
+            if (low == "0") {
+                result.ratio = NOTHING;
+            }
+            return result;
+        }
+        result.follow = {};
+        foreach string key in (keys child.follow) {
+            result.follow{key} = XsdParticleRational::scale(child.follow{key}, high);
+        }
+        *hash<XsdParticleRatio> flexible;
+        if (!exists high || low != high || !child.ratio) {
+            flexible = XsdParticleRational::zero();
+        } else if (XsdIntegerLexicalHelper::compare(child.ratio.numerator, child.ratio.denominator) > 0) {
+            string difference = XsdDurationIntegerHelper::add(child.ratio.numerator,
+                XsdDurationIntegerHelper::negate(child.ratio.denominator));
+            flexible = XsdParticleRational::threshold(child.ratio.numerator,
+                XsdDurationIntegerHelper::multiply(difference, high));
+        }
+        if (flexible) {
+            foreach string key in (keys child.first) {
+                result.follow{key} = XsdParticleRational::minimum(result.follow{key}, flexible);
+            }
+        }
+        if (low == "0" || !exists high || !child.ratio) {
+            result.ratio = NOTHING;
+        } else if (low != high) {
+            result.ratio = <XsdParticleRatio>{
+                "numerator": XsdDurationIntegerHelper::multiply(child.ratio.numerator, high),
+                "denominator": XsdDurationIntegerHelper::multiply(child.ratio.denominator, low)};
+        }
+        result.plain = XsdParticleRational::scale(child.continuing, high);
+        result.continuing = result.plain;
+        return result;
     }
 }
 
@@ -17737,7 +18114,7 @@ public class XsdGroup inherits WSDL::XsdNamedData, Qore::Serializable {
 
     #! resolves nested group identities before consumers use their elements
     /** @param groups the schema group registry
-        @throw WSDL-ERROR an undefined or cyclic group reference
+        @throw WSDL-ERROR an undefined/cyclic group reference or ambiguous content model
         @since %WSDL 0.5.8
     */
     resolveNestedGroups(hash<string, XsdGroup> groups) {
@@ -17765,6 +18142,7 @@ public class XsdGroup inherits WSDL::XsdNamedData, Qore::Serializable {
             XsdElementConsistencyHelper::merge(\declarations, (map $1, groups{key}.getElementDeclarations().iterator()));
         }
         particle.resolveGroups(groups);
+        particle.validateDeterminism();
         elementDeclarations = declarations;
         groupElements = XsdElementFieldHelper::getFieldMap(merged_elements, XsdElementFieldHelper::getFieldNames(merged_elements));
         resolved = True;
@@ -18643,6 +19021,12 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
             baseType = resolved_base;
         }
 
+        # Validate before legacy occurrence projections can mutate shared declarations.
+        if (particle) {
+            particle.resolveGroups(groupMap ?? {});
+            particle.validateDeterminism();
+        }
+
         # Resolve captured expanded group identities; missing definitions are construction errors.
         if (unresolved) {
             *list<hash<GroupRefInfo>> groupRefList = unresolved.getGroupRefs(self);
@@ -18682,9 +19066,6 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
             }
         }
         element_declarations = declarations;
-        if (particle) {
-            particle.resolveGroups(groupMap ?? {});
-        }
         finalizeElementFields();
         attribute_wildcard = wildcard;
     }

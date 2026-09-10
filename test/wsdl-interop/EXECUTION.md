@@ -5689,3 +5689,66 @@ Debug runtime identified in the inventory. Nothing was installed or pushed.
 The [full audit](audits/P4-02-particle-matching.md) resolves all 62 checks with zero
 Fail. P4 ambiguity validation, ordered message conversion, field metadata and
 sample generation remain in progress. P5-P9 retain their complete original scope.
+
+## P4-03 — Exact construction-time particle attribution (2026-09-10)
+
+P4-02 is committed as `e71a61d`. Schema construction now checks unique particle
+attribution after group and base resolution, before legacy occurrence projection
+can mutate shared declarations. Unused named groups and each present nested
+component are checked. `XsdParticle::validateDeterminism()` applies the same rule
+to reconstructed graphs. Actual expanded names and wildcard namespace constraints
+determine overlap; repeated iteration boundaries around one declaration may remain
+ambiguous without violating unique declaration attribution.
+
+The implementation follows published weak-determinism/flexibility algorithms with
+exact rational thresholds. Occurrence values and shared reference paths are never
+expanded. An arbitrary-integer multiplication overload supports exact cross-product
+comparisons, including adjacent 80/81-digit count thresholds. The implemented
+[design](../../design/wsdl-particles.md) documents the algorithm and resource bounds.
+The [independent evidence](particle-ambiguity-evidence.md) records specification
+references, complete finite-prefix enumeration and exact validator discrepancies.
+
+The final affected inventory passes **103 Qore suites / 1,045 cases / 43,578 reported
+assertions**. This includes the final attribution suite's **14 cases / 90 assertions**;
+the audit added unused-group, extension-boundary and absent-zero-group coverage after
+the full gate, then reran that suite in all four modes. Production source did not
+change after the gate. Existing matcher, model and duration suites pass AST, IR,
+JIT and tiered modes. The new independent tests pass all four modes: **300 finite
+schema cases (242 valid / 58 ambiguous), 600 actual binding descriptions and 2,536
+worker rows**, plus **12 focused schemas / 24 bindings / 72 rows** per mode. Every
+bound request/response and reconstructed graph is accounted for. No emitted case
+is skipped or partially enumerated. Failure/recovery, four concurrent callers and
+interrupt/reuse tests pass. A rejected schema preserves previously shared group
+requiredness and allows a subsequent valid schema addition.
+
+Four additional native libxml2 attribution bugs were reproduced and root-caused:
+counter-insensitive automaton analysis rejects two valid counted-boundary models;
+transition coalescing loses declaration identity and accepts duplicate-choice
+positions, including inside a surrounding empty language. Private libxml2 2.15.4
+reproduces all four. [P4-native-attribution-diagnostics.json](P4-native-attribution-diagnostics.json)
+keeps these as **failing requirements assigned to the next P4 native attribution
+increment**, which must be repaired before P4 acceptance. Xerces-J 2.12.2 has one
+independently asserted false rejection because its UPA builder reduces an inner
+2..3 range to 1..2. Neither independent implementation was changed. This increment
+establishes the Qore schema check; it does not claim native validation is repaired.
+
+Both corpus reports retain identical counts, all **2,411 baseline rows**, source
+hashes, inputs, **144 failure records**, 293 case records and complete stage
+accounting. Only the WSDL module fingerprint changes. Strict coverage passes all
+**130 selected descriptions / 1,260 message directions**. Affected Doxygen output
+and the updated invoice example pass without warnings. Native code/binaries are
+unchanged; this Qore-only increment requires no new Valgrind run. The complete
+[P4-03 validation inventory](P4-03-validation.json) records hashes and suite results;
+logs use `/tmp/wsdl-p4-03-`.
+
+Both remotes were fetched. XML has no incoming develop commit; main Qore develop
+is clean and synchronized at `cb90afb7b`, including the parallel deferred-constant,
+separated-module-source and binary multipart fixes. Tests use the unchanged isolated
+Debug runtime identified by its binary hash, not an unverified newer core build.
+No installation or push was performed.
+
+The [full audit](audits/P4-03-particle-attribution.md) resolves all 62 checks:
+**19 Pass / 43 N/A / 0 Fail**. P4 native attribution, ordered message conversion,
+field metadata and sample generation remain in progress; the four compositor
+runtime failures remain visible. P5-P9 keep their entire original scope, including
+the 22 separately recorded P9 documentation diagnostics.
