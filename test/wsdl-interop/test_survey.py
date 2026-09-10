@@ -19,6 +19,8 @@ from unittest.mock import patch
 from lxml import etree
 
 import survey
+from test_attribute_values import description, NS
+from test_compositor_context import schema
 
 
 ROOT = Path(__file__).resolve().parent
@@ -265,6 +267,51 @@ class SurveyTest(unittest.TestCase):
         rows = survey.run_worker([case], {})
         self.assertEqual(1, len(rows))
         self.assertEqual("WSDL-BINDING-ERROR", rows[0]["err"])
+
+    def test_worker_preserves_complete_repeated_sequence_order(self):
+        source = schema('<xs:sequence minOccurs="2" maxOccurs="2">'
+                        '<xs:element name="a" type="xs:string"/>'
+                        '<xs:element name="b" type="xs:string"/></xs:sequence>')
+        compiled = etree.XMLSchema(etree.fromstring(source.encode()))
+        cases, expected = [], {}
+        with tempfile.TemporaryDirectory(prefix="wsdl-worker-particles-") as directory:
+            root = Path(directory)
+            for version, namespace in zip(("11", "12"), survey.SOAP_NAMESPACES):
+                path = root / (version + '.wsdl')
+                path.write_text(description(version, source))
+                messages = []
+                for direction, wrapper in (("request", "Submit"), ("response", "Reply")):
+                    for valid, word in ((True, 'abab'), (False, 'aabb'), (False, 'abba'), (False, 'aba')):
+                        name = version + '/' + direction + '/' + word
+                        content = ''.join(f'<{letter}>{index}</{letter}>' for index, letter in enumerate(word))
+                        wire = (f'<s:Envelope xmlns:s="{namespace}" xmlns:t="{NS}"><s:Body>'
+                                f'<t:{wrapper}>{content}</t:{wrapper}></s:Body></s:Envelope>')
+                        payload = survey.payload(wire.encode(), survey.parser(root))
+                        self.assertEqual(valid, compiled.validate(payload), name)
+                        target = root / name.replace('/', '-')
+                        target.write_text(wire)
+                        messages.append({'file': name, 'path': str(target), 'direction': direction})
+                        expected[name] = valid
+                cases.append({'name': 'Pairs' + version, 'wsdl': str(path), 'base': 'http://example.invalid/',
+                              'operation': 'submit', 'binding': 'Soap' + version, 'messages': messages})
+            rows = survey.run_worker(cases, {})
+        counts = survey.stage_accounting(cases, rows)['counts']
+        self.assertEqual(4, counts['serialize']['ok'])
+        self.assertEqual(12, counts['deserialize']['failed'])
+        self.assertEqual(12, counts['serialize']['unreachable'])
+        for row in rows:
+            if row['stage'] == 'parse':
+                self.assertTrue(row['ok'], row)
+            elif not expected[row['file']]:
+                self.assertFalse(row['ok'], row)
+                self.assertEqual('SOAP-DESERIALIZATION-ERROR', row['err'])
+            else:
+                self.assertTrue(row['ok'], row)
+                if row['stage'] == 'serialize':
+                    payload = etree.fromstring(row['body'].encode()).find('{*}Body')[0]
+                    self.assertTrue(compiled.validate(payload), str(compiled.error_log))
+                    self.assertEqual(list('abab'), [child.tag for child in payload])
+                    self.assertEqual(['0', '1', '2', '3'], [child.text for child in payload])
 
 
 if __name__ == "__main__":

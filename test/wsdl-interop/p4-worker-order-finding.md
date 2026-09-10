@@ -2,8 +2,10 @@
 
 Copyright (C) 2026 Qore Technologies, s.r.o.
 
-Status: root cause confirmed; owned by the next P4 increment after the helper
-integration. This is not a passing expected rejection and P4 remains open.
+Status: the P4-13 worker change selects `XPF_PRESERVE_ORDER`. The new worker
+regression fails before that change and passes afterward. All 13 owned families
+now have native value and retained-order checks; final phase evidence is recorded
+in the P4-13 execution entry. The original failure evidence below is preserved.
 
 The current coverage ledger contains 24 P4 decode failures across six payload
 examples in five repeated-sequence families, in both SOAP versions and directions. `probe.qr` calls `parse_xml(text)`
@@ -25,7 +27,7 @@ XSD 1.0 [Model Group Validation Rules](https://www.w3.org/TR/xmlschema-1/#cvc-mo
 require ordered partitions for a sequence; group-reference occurrence limits belong
 to the reference particle ([Model Group Definitions](https://www.w3.org/TR/xmlschema-1/#Model_Group_Definitions)).
 
-The next increment must fix the worker caller, add positive and wrong-order
+The acceptance checks fix the worker caller, add positive and wrong-order
 negative regressions, rerun every original row, and extend strict P4 value/order
 coverage. Native canonical ordering and the explicit retained XML path need their
 respective value and full-order assertions. Original fixtures and historical

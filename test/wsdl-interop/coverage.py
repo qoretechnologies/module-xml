@@ -23,6 +23,7 @@ import calendar_reference
 import temporal_reference
 import duration_reference
 import binary_reference
+import particle_reference
 from independent import SchemaJob, run as run_independent
 import normative
 import survey
@@ -94,6 +95,15 @@ def value_checks(expected: etree._Element, actual: etree._Element, assertions: l
     results = []
     for assertion in assertions:
         try:
+            if assertion.get("datatype") == "particle":
+                particle_reference.validate_assertion(assertion)
+                before = particle_reference.observe(normative.select_element(expected, assertion),
+                                                     assertion["leaves"], assertion["order"])
+                after = particle_reference.observe(normative.select_element(actual, assertion),
+                                                    assertion["leaves"], assertion["order"])
+                results.append({"datatype": "particle", "order": assertion["order"],
+                                "expected": before, "actual": after, "ok": before == after})
+                continue
             before = normative.select_value(expected, assertion)
             after = normative.select_value(actual, assertion)
             datatype = assertion["datatype"]
@@ -180,6 +190,9 @@ def validate_selection(selection: dict, records: dict) -> None:
             if decision["valid"] is False and assertions:
                 raise ValueError("invalid source message cannot expect successful serialization")
             for assertion in assertions:
+                if isinstance(assertion, dict) and assertion.get("datatype") == "particle":
+                    particle_reference.validate_assertion(assertion)
+                    continue
                 if (not isinstance(assertion, dict) or not isinstance(assertion.get("elements"), list)
                         or not assertion["elements"] or any(not isinstance(s, str) for s in assertion["elements"])
                         or assertion.get("datatype") not in {"QName", "list", "boolean", "string", "normalizedString", "token", "decimal", "float", "double", "duration", "hexBinary", "base64Binary",

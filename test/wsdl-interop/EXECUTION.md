@@ -6318,3 +6318,66 @@ P4 remains open. The [worker finding](p4-worker-order-finding.md) proves that
 24 remaining P4 failures come from the diagnostic caller's unordered XML hash.
 The next increment fixes that caller and expands strict value/order acceptance
 for all 13 P4-owned families. P5-P9 retain their complete required scope.
+
+## P4-13 — Ordered corpus and P4 acceptance (complete)
+
+After helper integration `e8ea3b6`, the corpus worker now uses the ordered XML
+hash required by `WSOperation`. The reduced repeated-pair worker test fails
+before that parser flag and passes after it in both actual SOAP bindings and
+directions, while wrong/missing group members still fail for the intended
+reason. This closes the [24-direction caller finding](p4-worker-order-finding.md)
+without reordering invalid input or changing any original fixture.
+
+The strict selection now covers every message in all 13 P4-owned families.
+Complete element/string observations preserve expanded names, attributes,
+occurrence counts and values. The native contract retains order within each
+field; the retained XML contract compares original interleaving. Empty complex
+containers and exact string whitespace are distinct. Mutations demonstrate
+that lost/extra nodes, changed values/names/attributes and changed occurrence
+order cannot pass. The iterative predicate handles 2000 nested containers.
+
+The [validation inventory](P4-13-validation.json) and
+[62-item audit](audits/P4-13-particle-acceptance.md) record:
+
+- 18 Qore suites pass 333 cases/16941 reported assertions, with no warning or
+  new failing case. Existing caught SOAP comparator negatives remain intentional.
+  Three reference tests and all 16 worker-harness methods pass.
+- Each of AST, IR, JIT and tiered execution passes 240 original/reconstructed,
+  request/response corpus rows. Eight rows reject invalid source content through
+  both APIs; all 696 native/retained outputs independently validate and preserve
+  their required values/order. Every original WSDL, inline schema and message
+  digest is verified. SOAP 1.2 derivative descriptions change only the binding
+  extension namespace, with exact hashes and actual binding identity recorded.
+- The 2455-row survey preserves every previous successful row. Twelve unordered
+  decode failures become successes with 12 new independently valid outputs.
+  The original source hashes and historical findings are unchanged.
+- The final isolated strict gate passes 142 selected descriptions/1376 directions.
+  All 120 P4 directions pass their requirements: 116 valid values and four
+  required source rejections. Broader failures fall from 92 to 68, removing only
+  the 24 P4 decode failures. No P4 failure remains; 812 broader value/infoset
+  directions remain explicitly unassessed.
+- Coverage unit tests retain exactly the two previously routed P6 selected-binding
+  assertions. Their failures stay visible and are not counted as passes. The
+  expanded strict-count assertion is updated and passes; a misspelled runner
+  filename is corrected to the existing provider suite, which passes.
+- All 62 audit items resolve: 16 Pass, 46 N/A, zero Fail. WSDL source, compiled
+  WSDL, native XML and libqore hashes are unchanged from P4-12. No C++ changes,
+  additional Valgrind run, rebuild, install, PCRE2 JIT disablement or push.
+
+P4 acceptance is complete across its implementation increments:
+
+| Required behavior | Implemented evidence |
+|---|---|
+| Ordered nested sequence/choice/all/group graphs and exact limits | P4-01 through P4-07; `wsdl-particle-model`, matching, ambiguity and attribution suites; implemented bounds in `design/wsdl-particles.md` |
+| Complete matching, declaration selection and ordered value conversion | P4-08; `wsdl-particle-values`, independent finite languages, both bindings/directions and reconstructed schemas |
+| Requiredness/occurrence metadata without mutating shared declarations | P4-09 and P4-12; exact provider ranges, reusable groups and optional collection runtime prerequisite `f1dd175f0` |
+| Complete native group emission and lossless ordered instances | P4-10 and P4-13; count-vector allocation, retained XML, 1000-model ordering oracle and every owned corpus message |
+| Bounded valid samples and clear generation failures | P4-11/P4-12; complete structural words, total-element budgets, callback/reentrant scopes and independent example outputs |
+| Negative/boundary/adversarial behavior and documented resource bounds | Model/matching/attribution/occurrence suites cover empty/finite/unbounded/huge counts, wrong order, incomplete groups, ambiguity, cancellation and synchronized callers; no exponential derivation backtracking |
+
+Logs use `/tmp/wsdl-p4-13-final-*`; the inventory distinguishes the corrected
+runner diagnostic and the two retained P6 failures. P5 is next, including the
+[builtin wrapper identity finding](p5-native-type-wrapper-finding.md), full
+wildcard/mixed/dynamic/nil semantics and the already tracked wildcard example
+failure. P6-P9 retain their complete agreed scope and outstanding environment/CI
+requirements. Concurrent main Qore development remains untouched.

@@ -457,7 +457,7 @@ class CoverageTest(unittest.TestCase):
         self.assertEqual("", process.stderr)
         report = json.loads(output.read_text())
         self.assertEqual([], report["selected_failures"])
-        self.assertEqual({"wsdls": 130, "message_directions": 1260}, report["selected_scope"])
+        self.assertEqual({"wsdls": 142, "message_directions": 1376}, report["selected_scope"])
         self.assertEqual(293, len(report["cases"]))
         self.assertEqual(2272, sum(len(c["messages"]) for c in report["cases"]))
         for stage, counts in report["stage_accounting"]["counts"].items():
@@ -467,6 +467,18 @@ class CoverageTest(unittest.TestCase):
         # Harness assertions verify retained failures, not conformance passes for broken functionality.
         self.assertGreater(len(report["failures"]), 0)
         by_name = {c["case"]: c for c in report["cases"]}
+        from test_particle_corpus import FAMILIES
+        particle_messages = [message for name in FAMILIES for message in by_name[name]["messages"]]
+        self.assertEqual(120, len(particle_messages))
+        self.assertEqual(116, sum(message["source_valid"] for message in particle_messages))
+        for message in particle_messages:
+            self.assertEqual([], message["failures"], message)
+            if message["source_valid"]:
+                self.assertTrue(message["values"]["ok"], message)
+                self.assertEqual("particle", message["values"]["assertions"][0]["datatype"])
+            else:
+                self.assertTrue(message["rejection_passed"], message)
+                self.assertEqual("SOAP-DESERIALIZATION-ERROR", message["deserialize"]["err"])
         for name, count in (("DateTimeElement", 24), ("DateTimeAttribute", 24),
                             ("TimeElement", 20), ("TimeAttribute", 20)):
             self.assertEqual(count, len(by_name[name]["messages"]))

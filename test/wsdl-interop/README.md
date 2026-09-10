@@ -1236,3 +1236,49 @@ errors request insufficient budgets; they are distinct from invalid XML or
 unsupported model classifications. The 19-case `wsdl-sample-instances.qtest` suite
 also checks callbacks, same-helper reentrancy, nested lists, recursive types,
 metadata reuse, option errors and complete override/fragment output budgets. Set `QORE_EXEC_MODE` for each execution mode.
+
+## P4 corpus value and order acceptance
+
+`probe.qr` parses SOAP input with `XPF_PRESERVE_ORDER`, as required by the
+`WSOperation` hash decoding API. This retains interleaved repeated-group members
+before complete-particle validation. The worker regression covers both actual
+SOAP bindings and directions, complete pairs, wrong order, mixed ordering and
+missing members. Original invalid input is still rejected; the worker does not
+reorder it before validation.
+
+The strict selection includes all 13 P4-owned families from the plan, with 60
+original messages and 120 request/response directions. Four directions must
+reject invalid `MinOccurs1` inputs. The other 116 require complete expanded
+names, exact `xs:string` values, occurrence counts and order within each native
+field. `particle_reference.py` compares whole selected trees, preserves string
+whitespace, and ignores indentation only in element-only containers. Its
+`per-name` ordering contract corresponds to flat native records; its `exact`
+contract compares the complete original child sequence. Schema validation is
+required independently of these value assertions. Mixed content and dynamic
+value semantics remain separate P5 requirements.
+
+Run `python3 test/wsdl-interop/test_particle_reference.py -v` for mutation checks
+covering changed values, whitespace, namespaces, missing/extra nodes, field
+occurrence order, attributes, malformed assertions and 2000 nested containers.
+`python3 test/wsdl-interop/test_particle_corpus.py -v` checks all 240 explicit
+original/reconstructed and request/response rows. Its eight source rejections
+must fail in both native and retained APIs. Every one of the 696 successful
+native, retained-wire and retained-payload outputs receives independent libxml2
+and Xerces validation, plus the relevant complete value/order comparison.
+Set `QORE_EXEC_MODE` to `ast`, `ir`, `jit` or `tiered` for each runtime mode.
+
+The corpus test verifies original WSDL, inline-schema and message hashes against
+`adjudication-report.json`. SOAP 1.1 uses the original description; the SOAP 1.2
+derivative changes only the WSDL extension namespace from
+`http://schemas.xmlsoap.org/wsdl/soap/` to
+`http://schemas.xmlsoap.org/wsdl/soap12/`, and checks the resulting binding
+identity before invoking Qore. Original files remain untouched. `WSDL_CORPUS`
+can select a verified corpus root; the default is
+`/tmp/module-xml-wsdl-survey/databinding/examples/6/09`.
+
+The normative structural rules are XSD 1.0
+[Model Group Validation Rules](https://www.w3.org/TR/xmlschema-1/#cvc-model-group)
+and [Particle Validation Rules](https://www.w3.org/TR/xmlschema-1/#cvc-particle).
+Retained XML is required when an application needs the original interleaving of
+distinct field names. The existing P6 test for selecting between two SOAP
+bindings in one description remains a visible failure until that phase.
