@@ -2,7 +2,7 @@
 
 Copyright (C) 2026 Qore Technologies, s.r.o.
 
-Status: P1 corpus/adjudication, P2 schema/representation, P3 scalar and P4 particle acceptance are complete on `develop`; P5 is in progress with native type identity, annotation ownership and construction-time final exclusions implemented.
+Status: P1 corpus/adjudication, P2 schema/representation, P3 scalar and P4 particle acceptance are complete on `develop`; P5 is in progress with native type identity, annotation ownership, construction-time final exclusions and instance derivation/block/abstract controls implemented.
 See [EXECUTION.md](EXECUTION.md) for acceptance evidence and remaining implementation criteria.
 Prepared 2026-09-07 after `cc13171` on `develop`.
 Keep proposals here; put durable implementation details in `design/` only after implementation.

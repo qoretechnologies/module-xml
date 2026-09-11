@@ -8,32 +8,34 @@ uses `test/xml-particle-counts.qtest` and `test/wsdl-interop/test_particle_count
 Both Python matrices accept `QORE_EXEC_MODE=ast|ir|jit|tiered` and use local modules.
 See [the ordered model](../../design/wsdl-particles.md),
 [native correction](../../design/xml-particle-counts.md), and
-[independent evidence](particle-counts-evidence.md). P4 runtime matching and
-serialization acceptance remain in progress.
+[independent evidence](particle-counts-evidence.md). P4 construction, matching,
+serialization and value acceptance are complete; see the P4-13 entry in
+[EXECUTION.md](EXECUTION.md).
 
 `test/wsdl-particle-matching.qtest` and `test/wsdl-interop/test_particle_matching.py`
 exercise the bounded child-name recognizer, including complete counts, empty/absent
 groups, shared references, wildcard namespaces and all permutations. See the
 [matching evidence](particle-matching-evidence.md) for independently asserted
-validator defects and the precise separation from pending message conversion.
+validator defects and the boundary between recognition and message conversion.
 
 `test/wsdl-particle-ambiguity.qtest` and `test/wsdl-interop/test_particle_ambiguity.py`
 check construction-time unique particle attribution with exact count thresholds,
 complete finite-prefix oracles and actual SOAP bindings. The [attribution evidence](particle-ambiguity-evidence.md)
-records validator disagreements and the still-failing native libxml2 requirements
-that must close before P4 acceptance.
+records validator disagreements and the native libxml2 requirements resolved by
+the subsequent native attribution and count-range corrections.
 
 `test/xml-particle-identity.qtest` checks native DOM/reader schema position identity.
 The [native identity evidence](native-particle-identity-evidence.md) records provider
-selection, allocation cleanup and the remaining P4 attribution diagnostics.
+selection, allocation cleanup and attribution diagnostics.
 
 `test/xml-particle-attribution.qtest` and `test_native_particle_attribution.py`
 check exact native counted attribution, component constraints, callback selection
 and DOM/reader execution against complete finite languages. The CMake provider
 suite also tests exact arithmetic, empty-language summaries and allocation cleanup.
 See [the native attribution evidence](native-particle-attribution-evidence.md).
-`native_particle_ranges.py` separately records the still-failing native large-count
-requirements; a completed diagnostic run does not make those failures pass.
+`native_particle_ranges.py` separately checks native large-count requirements;
+[P4-06-native-count-ranges.json](P4-06-native-count-ranges.json) records the corrected
+results. A completed diagnostic run alone does not make recorded failures pass.
 
 The W3C XML Schema Databinding collection is a useful independent source of WSDL 1.1 descriptions,
 XSDs, and SOAP messages. Running it against this module exposed defects that the existing tests missed.
@@ -1304,9 +1306,9 @@ prefixes on the same simple-content element. Non-QName rows additionally exercis
 the QName rows use the complete XML APIs required by their namespace-allocation
 contract. Set `QORE_EXEC_MODE` to `ast`, `ir`, `jit` or `tiered`.
 
-The implemented identity and immediate complex-dispatch rules are documented in
+The implemented component identity and annotation ownership rules are documented in
 [`design/wsdl-type-selection.md`](../../design/wsdl-type-selection.md). Full P5
-derivation controls, selected-type retention, wildcard/mixed/generic content,
+selected-type retention, wildcard/mixed/generic content,
 substitution groups and nil/default/fixed behavior remain required by the plan.
 
 Type construction final exclusions are checked by `test/wsdl-type-final.qtest`,
@@ -1315,5 +1317,17 @@ Type construction final exclusions are checked by `test/wsdl-type-final.qtest`,
 required construction errors and 352 independently schema-valid request/response
 outputs with exact native value comparisons. See the [implemented design](../../design/wsdl-type-final.md)
 and [specification/validator adjudication](type-final-evidence.md). This increment
-covers type construction; remaining P5 instance and element substitution controls
-remain explicit in the plan.
+covers type construction; instance controls are checked by the following matrix.
+
+Instance derivation and `block`/abstract controls are covered by
+`test/wsdl-type-substitution.qtest` and `test_type_substitution.py`. The independent
+matrix has 104 schema/type cases in both actual bindings and directions, including
+original/reconstructed services: 832 rows require 336 invalid-instance rejections
+and independently validate 992 native-wrapper/retained XML outputs. Both pinned
+validators check the original input verdicts. Retained outputs keep their selected
+type QName; native values retain the established field shapes. See the
+[implemented design](../../design/wsdl-type-substitution.md),
+[specification evidence](type-substitution-evidence.md) and
+[validation inventory](P5-03-validation.json). P5 remains open for
+native selected-type retention, element substitution, generic/mixed/wildcard
+content, complete nil/default/fixed semantics and document identity constraints.

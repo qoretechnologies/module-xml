@@ -80,6 +80,11 @@ module WSDL {
     @section wsdlrelnotes WSDL Module Release Notes
 
     @subsection wsdl_0_5_8 WSDL v0.5.8
+    - instance type selection checks complete resolved simple/complex derivation and effective block exclusions;
+      abstract elements and types require concrete instances, including references and retained XML
+    - added XsdSubstitutionMethod, getBlockedSubstitutions() and isAbstract() metadata; blockDefault is
+      source-scoped, explicit empty controls override it, and malformed or misplaced controls fail at construction
+    - detached union value probes retain the namespaces used by their emitted type QName
     - type construction enforces final exclusions for restrictions, lists, composed unions and complex
       derivations; source-scoped finalDefault values survive imports, anonymous types and schema copies
     - added XsdDerivationMethod and type final metadata; invalid final syntax and anonymous final attributes
@@ -2205,11 +2210,23 @@ public enum XsdDerivationMethod : string {
     Union = "union",
 }
 
+#! Methods that an element can exclude from substitution
+/** @since %WSDL 0.5.8 */
+public enum XsdSubstitutionMethod : string {
+    #! Substitute a type derived by extension
+    Extension = "extension",
+    #! Substitute a type derived by restriction
+    Restriction = "restriction",
+    #! Substitute a different element declaration
+    Substitution = "substitution",
+}
+
 # Construction-only parsing; defaults belong to the source schema, not the assembled registry.
 class XsdDerivationControlHelper {
     const Simple = {"restriction": True, "list": True, "union": True};
     const Complex = {"extension": True, "restriction": True};
     const All = Simple + Complex;
+    const Substitutions = Complex + {"substitution": True};
 
     static hash<string, bool> parse(*string source, string attribute, hash<string, bool> allowed) {
         string normalized = XsdSimpleType::normalizeWhiteSpace(source ?? "", "collapse");
@@ -2243,6 +2260,37 @@ class XsdDerivationControlHelper {
             }
         }
         return result;
+    }
+
+    static hash<string, bool> forBlock(*hash<auto> attributes, Namespaces nsc, bool complex_type) {
+        hash<string, bool> allowed = complex_type ? Complex : Substitutions;
+        if (exists attributes.block) {
+            if (complex_type && !exists attributes.name) {
+                throw WSDL_ERROR, "an anonymous complex type cannot declare block";
+            }
+            return parse(attributes.block, "block", allowed);
+        }
+        hash<string, bool> result();
+        foreach string method in (keys allowed) {
+            if (nsc.schema_block_default{method}) {
+                result{method} = True;
+            }
+        }
+        return result;
+    }
+
+    static bool booleanValue(*string value, string attribute) {
+        if (!exists value) {
+            return False;
+        }
+        string lexical = XsdSimpleType::normalizeWhiteSpace(value, "collapse");
+        if (lexical == "true" || lexical == "1") {
+            return True;
+        }
+        if (lexical == "false" || lexical == "0") {
+            return False;
+        }
+        throw WSDL_ERROR, sprintf("invalid %s value %Y", attribute, value);
     }
 
     static check(XsdAbstractType base, XsdDerivationMethod method, string derived) {
@@ -2315,6 +2363,22 @@ public class XsdAbstractType inherits WSDL::XsdNamedData {
         return final_derivations{method} ?? False;
     }
 
+    #! returns instance substitution methods prohibited by this type
+    /** @return an independent set of extension/restriction names; empty for simple types
+        @since %WSDL 0.5.8
+    */
+    hash<string, bool> getBlockedSubstitutions() {
+        return {};
+    }
+
+    #! returns whether this type requires a concrete derived instance type
+    /** @return True for an abstract complex type, False for other types
+        @since %WSDL 0.5.8
+    */
+    bool isAbstract() {
+        return False;
+    }
+
     private resolveNamespace() {
         if (!ns) {
             *string tns = nsc.getTargetNamespaceUri();
@@ -2328,17 +2392,15 @@ public class XsdAbstractType inherits WSDL::XsdNamedData {
     #! checks whether this explicit native type can replace the declared type
     /** @param t the element's resolved declared type
         @param ename the element name for diagnostics
-        @throw SOAP-SERIALIZATION-ERROR incompatible type components
-        @note Identity accepts the same component, including canonical builtin definitions in separate
+        @throw SOAP-SERIALIZATION-ERROR incompatible, blocked or abstract selected type
+        @note Resolved simple and complex ancestry is checked through every derivation step.
+        Identity accepts the same component, including canonical builtin definitions in separate
         registries. User-defined and custom conversion types require their resolved component identity.
         @par Example
         An invoice quantity can explicitly select its own integer datatype without bypassing range checks.
     */
     checkExtends(XsdAbstractType t, string ename) {
-        if (XsdTypeDerivationHelper::sameType(self, t)) {
-            return;
-        }
-        throw SOAP_SERIALIZATION_ERROR, sprintf("explicit type %y given for element %y, type %y, however the types are not compatible", name, ename, t.name);
+        XsdTypeSubstitutionHelper::check(self, t, ename, SOAP_SERIALIZATION_ERROR);
     }
 
     string getNameWithNS() {
@@ -9623,27 +9685,16 @@ public class XsdBaseType inherits WSDL::XsdAbstractType {
     */
     auto deserializeValue(string en, hash<string, XsdAbstractType> tmap, *hash<auto> mrh, auto val) {
         XsdQNameNamespaceScope qname_scope(val.typeCode() == NT_HASH ? val."^attributes^" : NOTHING);
-        string type;
+        XsdAbstractType selected = XsdTypeSubstitutionHelper::select(\val, self, tmap, en);
+        if (selected !== self) {
+            return XsdDocumentValueHelper::deserializeValue(selected, en, tmap, mrh, val);
+        }
+        string type = name;
         if (val.typeCode() == NT_HASH) {
             if (name != "anyType") {
                 XsdBase::validateSimpleAttributes(val."^attributes^", name);
             }
-            if (val."^attributes^"."xsi:type") {
-                type = val."^attributes^"."xsi:type";
-                string t = (type =~ x/[^:]+:([^:]+)/)[0];
-                if (exists t) {
-                    type = t;
-                }
-
-                if (name != "anyType" && type != name) {
-                    throw SOAP_DESERIALIZATION_ERROR, sprintf("expecting base type %y, got %y", name, val."^attributes^"."xsi:type");
-                }
-            } else {
-                type = name;
-            }
-            val = type == "anyType" ? val."^value^" : XsdScalarTextHelper::value(val, SOAP_DESERIALIZATION_ERROR);
-        } else {
-            type = name;
+            val = name == "anyType" ? val."^value^" : XsdScalarTextHelper::value(val, SOAP_DESERIALIZATION_ERROR);
         }
 
         # issue #5411: apply "whiteSpace" processing to the lexical value
@@ -9868,6 +9919,8 @@ public class XsdBaseType inherits WSDL::XsdAbstractType {
 public class XsdArrayType inherits WSDL::XsdAbstractType {
     private {
         bool finalized;
+        hash<string, bool> blocked_substitutions();
+        bool abstract_type = False;
     }
 
     public {
@@ -9885,11 +9938,16 @@ public class XsdArrayType inherits WSDL::XsdAbstractType {
         @param nsc the declaration namespace registry
         @param unresolved the schema resolution queue
         @param final_derivations the enclosing complex type's effective final exclusions
+        @param blocked_substitutions the enclosing complex type's instance exclusions
+        @param abstract_type the enclosing declaration's abstract flag
         @throw WSDL-ERROR malformed or unresolved array declaration
         @throw WSDL-NAMESPACE-ERROR malformed or unbound item QName
     */
     constructor(string t, string ns, string arrayType, Namespaces nsc, XsdLateResolverHelper unresolved,
-            *hash<string, bool> final_derivations) : XsdAbstractType(t, ns, nsc, final_derivations) {
+            *hash<string, bool> final_derivations, *hash<string, bool> blocked_substitutions, *bool abstract_type)
+            : XsdAbstractType(t, ns, nsc, final_derivations) {
+        self.blocked_substitutions = blocked_substitutions ?? {};
+        self.abstract_type = abstract_type ?? False;
         # Parse array dimensions - handles both [] and [,] notation
         # SOAP 1.1 Section 5.4.2 supports:
         # - Single dimension: type[] or type[n]
@@ -9955,7 +10013,26 @@ public class XsdArrayType inherits WSDL::XsdAbstractType {
         elementType = t;
     }
 
+    #! returns the enclosing complex declaration's effective instance exclusions
+    /** @return an independent extension/restriction method-name set
+        @since %WSDL 0.5.8
+    */
+    hash<string, bool> getBlockedSubstitutions() {
+        return blocked_substitutions;
+    }
+
+    #! returns the enclosing declaration's abstract flag
+    /** @return True when the array type cannot directly validate an instance
+        @since %WSDL 0.5.8
+    */
+    bool isAbstract() {
+        return abstract_type;
+    }
+
     auto serializeValue(Namespaces nsc, auto val, *softbool omitType) {
+        if (isAbstract()) {
+            throw SOAP_SERIALIZATION_ERROR, sprintf("abstract type %Y cannot validate an instance", name);
+        }
         switch (name) {
             case "binary": {
                 int t = val.typeCode();
@@ -10003,6 +10080,9 @@ public class XsdArrayType inherits WSDL::XsdAbstractType {
     }
 
     auto deserializeValue(string en, hash<string, XsdAbstractType> tmap, *hash<auto> mrh, auto val) {
+        if (isAbstract()) {
+            throw SOAP_DESERIALIZATION_ERROR, sprintf("abstract type %Y cannot validate an instance", name);
+        }
         XsdQNameNamespaceScope qname_scope(val.typeCode() == NT_HASH ? val."^attributes^" : NOTHING);
         switch (name) {
             case "binary": {
@@ -10465,6 +10545,8 @@ public class XsdElement inherits WSDL::XsdTypedData {
 
     private {
         bool has_value_constraint = False;
+        hash<string, bool> blocked_substitutions();
+        bool abstract_element = False;
     }
 
     #! constructs an element declaration or a reference to a global element
@@ -10523,17 +10605,10 @@ public class XsdElement inherits WSDL::XsdTypedData {
             throw "XSD-ELEMENT-ERROR", sprintf("minOccurs (%d) > maxOccurs (%d) for element %s", minOccurs, maxOccurs,
                 name);
         }
-        foreach string property in ("nillable", "abstract") {
-            if (!exists a{property}) {
-                continue;
-            }
-            string value = trim(a{property});
-            if (value != "true" && value != "false" && value != "1" && value != "0") {
-                throw WSDL_ERROR, sprintf("invalid %s value %Y for element %Y", property, value, name);
-            }
-            if (property == "nillable") {
-                nillable = value == "true" || value == "1";
-            }
+        nillable = XsdDerivationControlHelper::booleanValue(a.nillable, "nillable");
+        abstract_element = XsdDerivationControlHelper::booleanValue(a.abstract, "abstract");
+        if (!exists a.ref) {
+            blocked_substitutions = XsdDerivationControlHelper::forBlock(a, nsc, False);
         }
         has_value_constraint = exists a.default || exists a.fixed;
         on_success {
@@ -10595,8 +10670,11 @@ public class XsdElement inherits WSDL::XsdTypedData {
 
     assimilate(WSDL::XsdElement other) {
         map self{$1.key} = $1.value, other.pairIterator(), !exists self{$1.key};
-        # we have to use the namespace of the referenced element
+        # A reference uses the global declaration's properties, independently of local defaults.
         ns = other.ns;
+        blocked_substitutions = other.blocked_substitutions;
+        abstract_element = other.abstract_element;
+        nillable = other.nillable;
     }
 
     bool isRequired() {
@@ -10605,6 +10683,22 @@ public class XsdElement inherits WSDL::XsdTypedData {
 
     bool isNillable() {
         return nillable;
+    }
+
+    #! returns this declaration's effective disallowed substitutions
+    /** @return a copy of the extension/restriction/substitution method-name set
+        @since %WSDL 0.5.8
+    */
+    hash<string, bool> getBlockedSubstitutions() {
+        return blocked_substitutions;
+    }
+
+    #! returns whether this declaration can occur only through a substitution member
+    /** @return True for abstract global element declarations and their references
+        @since %WSDL 0.5.8
+    */
+    bool isAbstract() {
+        return abstract_element;
     }
 
     #! returns the expanded XML name required by this element declaration
@@ -10719,7 +10813,6 @@ public class XsdElement inherits WSDL::XsdTypedData {
             int minimum, int maximum) {
         if (h."^type^" && h."^type^" instanceof XsdAbstractType && h.hasKey("^val^")) {
             XsdAbstractType ntype = cast<XsdAbstractType>(h."^type^");
-            ntype.checkExtends(type, name);
             if (XsdTypeDerivationHelper::sameType(ntype, type)) {
                 ntype = type;
             }
@@ -10740,6 +10833,17 @@ public class XsdElement inherits WSDL::XsdTypedData {
             h = h[0];
             tc = h.typeCode();
         }
+
+        if (!minOccurs && (!exists h || (tc == NT_LIST && h.empty() && !is_list_type))) {
+            return;
+        }
+        if (abstract_element) {
+            throw SOAP_SERIALIZATION_ERROR, sprintf("abstract element %Y cannot occur directly", name);
+        }
+        if (type !== self.type && !type.hasRealName()) {
+            throw SOAP_SERIALIZATION_ERROR, sprintf("anonymous type cannot supply xsi:type for element %Y", name);
+        }
+        XsdTypeSubstitutionHelper::check(type, self.type, name, SOAP_SERIALIZATION_ERROR, blocked_substitutions);
 
         # For list types, empty lists are valid values (serialize to empty element content)
         # For non-list types, empty lists with minOccurs=0 can be skipped
@@ -10844,31 +10948,42 @@ public class XsdElement inherits WSDL::XsdTypedData {
 
     private auto deserializeOccurrences(hash<string, XsdAbstractType> tmap, *hash<auto> mrh, auto val,
             bool present, int minOccurs, int maxOccurs) {
-        #printf("XsdElement::deserialize() name: %y type: %y (nillable: %y) val: %y present: %y\n", name, type.getName(), type.isNillable(), val, present);
-        *hash<auto> a = val."^attributes^";
-        if (a)
-            WSDL::XsdBase::removeNS(\a);
-
-        if ((!exists val && !present) || a.nil == "true") {
-            if (nillable || type.isNillable() || !minOccurs)
+        if (!exists val && !present) {
+            if (nillable || type.isNillable() || !minOccurs) {
                 return;
-            throw SOAP_DESERIALIZATION_ERROR, sprintf("NOTHING passed for element %y type %y, but nillable=False and minOccurs: %d", name, type.getName(), minOccurs);
+            }
+            throw SOAP_DESERIALIZATION_ERROR, sprintf("missing element %Y with minOccurs %d", name, minOccurs);
         }
-
         if (val.typeCode() == NT_LIST) {
-            int el = elements val;
-            if (maxOccurs != -1 && el > maxOccurs)
-                throw SOAP_DESERIALIZATION_ERROR, sprintf("error deserializing element %y, maxOccurs: %d but list<auto> is %d elements long", name, maxOccurs, el);
-            if (el < minOccurs)
-                throw SOAP_DESERIALIZATION_ERROR, sprintf("error deserializing element %y, minOccurs: %d but list<auto> is %d elements long", name, minOccurs, el);
-
-            return map XsdDocumentValueHelper::deserializeValue(type, name, tmap, mrh, getValue(mrh, $1)), val;
+            int count = val.size();
+            if ((maxOccurs != -1 && count > maxOccurs) || count < minOccurs) {
+                throw SOAP_DESERIALIZATION_ERROR, sprintf("element %Y has %d occurrences outside %d..%d",
+                    name, count, minOccurs, maxOccurs);
+            }
+            return map deserializeTypedValue(tmap, mrh, getValue(mrh, $1)), val;
         }
+        if (minOccurs > 1) {
+            throw SOAP_DESERIALIZATION_ERROR, sprintf("single value passed for element %Y with minOccurs %d",
+                name, minOccurs);
+        }
+        return deserializeTypedValue(tmap, mrh, getValue(mrh, val));
+    }
 
-        if (minOccurs > 1)
-            throw SOAP_DESERIALIZATION_ERROR, sprintf("single value passed for element %y, but minOccurs: %d", name, minOccurs);
-
-        return XsdDocumentValueHelper::deserializeValue(type, name, tmap, mrh, getValue(mrh, val));
+    private auto deserializeTypedValue(hash<string, XsdAbstractType> tmap, *hash<auto> references, auto value) {
+        if (abstract_element) {
+            throw SOAP_DESERIALIZATION_ERROR, sprintf("abstract element %Y cannot occur directly", name);
+        }
+        XsdQNameNamespaceScope scope(value.typeCode() == NT_HASH ? value."^attributes^" : NOTHING);
+        XsdAbstractType selected = XsdTypeSubstitutionHelper::select(\value, type, tmap, name, blocked_substitutions);
+        *hash<auto> attributes = value."^attributes^";
+        XsdBase::removeNS(\attributes);
+        if (attributes.nil == "true") {
+            if (nillable || selected.isNillable() || !minOccurs) {
+                return;
+            }
+            throw SOAP_DESERIALIZATION_ERROR, sprintf("element %Y is not nillable", name);
+        }
+        return XsdDocumentValueHelper::deserializeValue(selected, name, tmap, references, value);
     }
 }
 
@@ -11438,6 +11553,9 @@ class XsdDocumentValueHelper {
     }
 
     static auto serializeValue(XsdAbstractType type, Namespaces nsc, auto value, *softbool omitType) {
+        if (type.isAbstract()) {
+            throw SOAP_SERIALIZATION_ERROR, sprintf("abstract type %Y cannot validate an instance", type.name);
+        }
         XsdDocumentValueCapture capture(type);
         auto converted = type.serializeValue(nsc, value, omitType);
         capture.validate(value, converted, SOAP_SERIALIZATION_ERROR);
@@ -11446,6 +11564,8 @@ class XsdDocumentValueHelper {
 
     static auto deserializeValue(XsdAbstractType type, string name, hash<string, XsdAbstractType> tmap,
             *hash<auto> references, auto value) {
+        XsdQNameNamespaceScope scope(value.typeCode() == NT_HASH ? value."^attributes^" : NOTHING);
+        type = XsdTypeSubstitutionHelper::select(\value, type, tmap, name);
         XsdDocumentValueCapture capture(type);
         auto converted = type.deserializeValue(name, tmap, references, value);
         capture.validate(value, converted, SOAP_DESERIALIZATION_ERROR);
@@ -11846,9 +11966,16 @@ class XsdUnionValueHelper {
                 foreach string key in (keys value."^attributes^") {
                     *string prefix = (key =~ x/^([^:]+):[^:]+$/)[0];
                     if (prefix && prefix != "xmlns" && !value."^attributes^".hasKey("xmlns:" + prefix)) {
-                        # Builtin serializers use the envelope's fixed xsi prefix for type annotations.
-                        value."^attributes^"{"xmlns:" + prefix} = prefix == "xsi" ? XSI_NS
-                            : namespaces.getOutputNamespaceUri(prefix);
+                        value."^attributes^"{"xmlns:" + prefix} = namespaces.getOutputNamespaceUri(prefix);
+                    }
+                    # A detached instance-type annotation also needs the QName value's namespace.
+                    # This context comes from the serializer that produced the fragment.
+                    if (prefix && prefix != "xmlns" && key.endsWith(":type")
+                            && value."^attributes^"{"xmlns:" + prefix} == XSI_NS) {
+                        *string type_prefix = (value."^attributes^"{key} =~ x/^([^:]+):[^:]+$/)[0];
+                        if (type_prefix && !value."^attributes^".hasKey("xmlns:" + type_prefix)) {
+                            value."^attributes^"{"xmlns:" + type_prefix} = namespaces.getOutputNamespaceUri(type_prefix);
+                        }
                     }
                 }
             }
@@ -14980,6 +15107,7 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
         @param desc_name descriptive name for an anonymous declaration
         @param resolved_base already resolved simple content to restrict, when the XML base denotes a complex type
         @throw XSD-SIMPLETYPE-ERROR malformed restriction or non-simple resolved base
+        @throw WSDL-ERROR invalid final controls, or forbidden block/abstract attributes
         @throw WSDL-NAMESPACE-ERROR invalid or unresolved base QName prefix
         @since %WSDL 0.5.8 supports resolved_base for simple-content restrictions
     */
@@ -14988,6 +15116,9 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
             : XsdAbstractType(\st, nsc, desc_name,
                 resolved_base ? new hash<string, bool>() : XsdDerivationControlHelper::forType(st."^attributes^", nsc, True)) {
         NamespacePrefixHelper declaration(nsc, st."^attributes^");
+        if (exists st."^attributes^".block || exists st."^attributes^".abstract) {
+            throw WSDL_ERROR, "simpleType cannot declare block or abstract";
+        }
         usedocns = n_usedocns;
         #any a = st."^attributes^";
         delete st."^attributes^";
@@ -17327,6 +17458,10 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
             val = val.getLexicalValue();
         }
         XsdQNameNamespaceScope qname_scope(val.typeCode() == NT_HASH ? val."^attributes^" : NOTHING);
+        XsdAbstractType selected = XsdTypeSubstitutionHelper::select(\val, self, tmap, en);
+        if (selected !== self) {
+            return XsdDocumentValueHelper::deserializeValue(selected, en, tmap, mrh, val);
+        }
         # Handle list type deserialization
         if (val.typeCode() == NT_HASH && val.hasKey("^attributes^")) {
             XsdBase::validateSimpleAttributes(val."^attributes^", name);
@@ -19582,15 +19717,6 @@ public hashdecl ChoiceInfo {
 class XsdTypeDerivationHelper {
     private {
         hash<string, bool> results();
-        const BuiltinParents = {
-            "normalizedString": "string", "token": "normalizedString", "language": "token",
-            "Name": "token", "NCName": "Name", "ID": "NCName", "IDREF": "NCName", "ENTITY": "NCName",
-            "NMTOKEN": "token", "integer": "decimal", "nonPositiveInteger": "integer",
-            "negativeInteger": "nonPositiveInteger", "long": "integer", "int": "long", "short": "int",
-            "byte": "short", "nonNegativeInteger": "integer", "unsignedLong": "nonNegativeInteger",
-            "unsignedInt": "unsignedLong", "unsignedShort": "unsignedInt", "unsignedByte": "unsignedShort",
-            "positiveInteger": "nonNegativeInteger",
-        };
     }
 
     # Every schema has the same builtin definitions. User components and custom
@@ -19648,7 +19774,7 @@ class XsdTypeDerivationHelper {
                 if (current == base.name) {
                     return True;
                 }
-                current = current == "anySimpleType" ? "anyType" : BuiltinParents{current} ?? "anySimpleType";
+                current = current == "anySimpleType" ? "anyType" : XsdTypeSubstitutionHelper::BuiltinParents{current} ?? "anySimpleType";
             }
             return False;
         }
@@ -19678,6 +19804,188 @@ class XsdTypeDerivationHelper {
             }
         }
         return False;
+    }
+}
+
+hashdecl XsdTypeSubstitutionPair {
+    XsdAbstractType derived;
+    XsdAbstractType base;
+}
+
+# Instance derivation uses a fixed exclusion set and resolved component identities.
+# Each pair is visited once; shared union graphs never expand repeated dependency paths.
+class XsdTypeSubstitutionHelper {
+    const BuiltinParents = {
+        "normalizedString": "string", "token": "normalizedString", "language": "token",
+        "Name": "token", "NCName": "Name", "ID": "NCName", "IDREF": "NCName", "ENTITY": "NCName",
+        "NMTOKEN": "token", "integer": "decimal", "nonPositiveInteger": "integer",
+        "negativeInteger": "nonPositiveInteger", "long": "integer", "int": "long", "short": "int",
+        "byte": "short", "nonNegativeInteger": "integer", "unsignedLong": "nonNegativeInteger",
+        "unsignedInt": "unsignedLong", "unsignedShort": "unsignedInt", "unsignedByte": "unsignedShort",
+        "positiveInteger": "nonNegativeInteger",
+    };
+
+    static bool builtin(XsdAbstractType type, *string name) {
+        return Class::getClass(type).getPathName() == "WSDL::XsdBaseType"
+            && (!exists name || type.name == name) && type.name != "binary"
+            && XsdBaseType::BuiltinTypes{type.name} && type.ons
+            && type.nsc.getOutputNamespaceUri(type.ons) == XSD_NS;
+    }
+
+    private static enqueue(reference<list<hash<XsdTypeSubstitutionPair>>> pending,
+            reference<hash<string, bool>> seen, XsdAbstractType derived, XsdAbstractType base) {
+        string key = derived.uniqueHash() + ":" + base.uniqueHash();
+        if (!seen{key}) {
+            seen{key} = True;
+            push pending, <XsdTypeSubstitutionPair>{"derived": derived, "base": base};
+        }
+    }
+
+    private static list<XsdAbstractType> unionMembers(XsdAbstractType base,
+            reference<hash<string, list<XsdAbstractType>>> cache) {
+        *XsdAbstractType current = base;
+        hash<string, bool> visited();
+        list<XsdAbstractType> members();
+        while (current instanceof XsdSimpleType) {
+            string key = current.uniqueHash();
+            if (exists cache{key}) {
+                members = cache{key};
+                break;
+            }
+            if (visited{key}) {
+                break;
+            }
+            visited{key} = True;
+            XsdSimpleType simple = cast<XsdSimpleType>(current);
+            if (simple.unionTypes) {
+                members = simple.unionTypes;
+                break;
+            }
+            current = simple.type;
+        }
+        foreach string key in (keys visited) {
+            cache{key} = members;
+        }
+        return members;
+    }
+
+    static bool allowed(XsdAbstractType derived, XsdAbstractType base, hash<string, bool> blocked) {
+        list<hash<XsdTypeSubstitutionPair>> pending();
+        hash<string, bool> seen();
+        hash<string, list<XsdAbstractType>> unions();
+        enqueue(\pending, \seen, derived, base);
+        while (pending) {
+            hash<XsdTypeSubstitutionPair> pair = pop pending;
+            if (XsdTypeDerivationHelper::sameType(pair.derived, pair.base)) {
+                return True;
+            }
+            if (pair.derived instanceof XsdComplexType) {
+                XsdComplexType complex_type = cast<XsdComplexType>(pair.derived);
+                if (blocked{complex_type.extension ? XsdSubstitutionMethod::Extension : XsdSubstitutionMethod::Restriction}) {
+                    continue;
+                }
+                if (complex_type.baseType) {
+                    enqueue(\pending, \seen, complex_type.baseType, pair.base);
+                } else if (builtin(pair.base, "anyType")) {
+                    return True;
+                }
+                continue;
+            }
+            if (blocked{XsdSubstitutionMethod::Restriction}) {
+                continue;
+            }
+            if (builtin(pair.derived)) {
+                if (pair.derived.name == "anyType") {
+                    continue;
+                }
+                if (builtin(pair.base)) {
+                    string current = pair.derived.name;
+                    while (current != "anyType") {
+                        current = current == "anySimpleType" ? "anyType" : BuiltinParents{current} ?? "anySimpleType";
+                        if (current == pair.base.name) {
+                            return True;
+                        }
+                    }
+                }
+            } else if (pair.derived instanceof XsdSimpleType) {
+                XsdSimpleType simple = cast<XsdSimpleType>(pair.derived);
+                if (simple.type) {
+                    if (simple.type.isFinal(XsdDerivationMethod::Restriction)) {
+                        continue;
+                    }
+                    enqueue(\pending, \seen, simple.type, pair.base);
+                } else if (builtin(pair.base, "anySimpleType") || builtin(pair.base, "anyType")) {
+                    return True;
+                }
+            } else {
+                # Custom conversion classes and legacy adapters have only component identity here.
+                continue;
+            }
+            # Restricted unions retain the composed member definitions of their base.
+            foreach XsdAbstractType member in (unionMembers(pair.base, \unions)) {
+                enqueue(\pending, \seen, pair.derived, member);
+            }
+        }
+        return False;
+    }
+
+    static check(XsdAbstractType selected, XsdAbstractType declared, string name, string error,
+            *hash<string, bool> blocked) {
+        if (selected.isAbstract()) {
+            throw error, sprintf("abstract type %Y cannot validate element %Y", selected.name, name);
+        }
+        if (XsdTypeDerivationHelper::sameType(selected, declared)) {
+            return;
+        }
+        hash<string, bool> exclusions = blocked ?? {};
+        if (selected instanceof XsdComplexType || selected instanceof XsdArrayType) {
+            exclusions += declared.getBlockedSubstitutions();
+        }
+        if (!allowed(selected, declared, exclusions)) {
+            throw error, sprintf("explicit type %Y cannot replace declared type %Y for element %Y with block %Y",
+                selected.name, declared.name, name, keys exclusions);
+        }
+    }
+
+    # The caller owns the instance QName scope. Consume only the resolved type annotation;
+    # namespace bindings and other attributes remain available to scalar/content conversion.
+    static XsdAbstractType select(reference<auto> value, XsdAbstractType declared,
+            hash<string, XsdAbstractType> types, string name, *hash<string, bool> blocked) {
+        XsdAbstractType selected = declared;
+        hash<auto> attributes = XsdBase::getExpandedAttributes(value.typeCode() == NT_HASH ? value."^attributes^" : NOTHING);
+        string attribute = type_qname(XSI_NS, "type");
+        if (exists attributes{attribute}) {
+            XsdQNameValue identity = XsdQNameValueHelper::resolve(attributes{attribute},
+                SOAP_DESERIALIZATION_ERROR, QNameInputNamespaces);
+            string uri = identity.getNamespaceUri();
+            string local = identity.getLocalName();
+            if (uri == XSD_NS && local != "binary" && XsdBaseType::BuiltinTypes{local}) {
+                # Independent output state avoids populating a shared schema's lazy builtin cache.
+                selected = new XsdBaseType(local, new Namespaces({}));
+            } else {
+                *XsdAbstractType resolved = types{type_qname(uri, local)};
+                if (!resolved) {
+                    throw SOAP_DESERIALIZATION_ERROR, sprintf("unknown explicit type {%s}%s for element %Y",
+                        uri, local, name);
+                }
+                selected = resolved;
+            }
+            foreach string key in (keys value."^attributes^") {
+                if (key == attribute) {
+                    remove value."^attributes^"{key};
+                    continue;
+                }
+                list<string> parts = key.split(":");
+                if (parts.size() == 2 && parts[1] == "type" && QNameInputNamespaces{parts[0]} == XSI_NS) {
+                    remove value."^attributes^"{key};
+                }
+            }
+            if (XsdTypeDerivationHelper::sameType(selected, declared)) {
+                selected = declared;
+            }
+        }
+        check(selected, declared, name, SOAP_DESERIALIZATION_ERROR, blocked);
+        return selected;
     }
 }
 
@@ -19747,6 +20055,8 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
         *XsdSimpleType inlineSimpleType;
         hash<string, bool> prohibited_attributes();
         bool mixed = False;
+        hash<string, bool> blocked_substitutions();
+        bool abstract_type = False;
         bool content_emptiable = True;
         bool content_empty = True;
         bool has_element_wildcard = False;
@@ -19775,13 +20085,27 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
         self += members;
     }
 
-    # ct can be NOTHING in case of an empty complex type
+    #! constructs a complex type and captures its effective instance controls
+    /** @param ct parsed declaration, or NOTHING for an empty anonymous type
+        @param nsc the declaration namespace registry and active source defaults
+        @param unresolved the schema resolution queue
+        @param n_usedocns default local element qualification
+        @param desc_name descriptive name for an anonymous type
+        @throw WSDL-ERROR malformed or misplaced controls, unresolved bases or invalid content declarations
+        @throw WSDL-NAMESPACE-ERROR malformed or unbound declaration QName
+        @note Instance block controls do not prohibit constructing derived types; final controls do.
+    */
     constructor(*hash<auto> ct, Namespaces nsc, XsdLateResolverHelper unresolved, bool n_usedocns, *string desc_name)
             : XsdAbstractType(\ct, nsc, desc_name, XsdDerivationControlHelper::forType(ct."^attributes^", nsc, False)) {
         NamespacePrefixHelper declaration(nsc, ct."^attributes^");
         usedocns = n_usedocns;
         # Anonymous nested types also need group/base resolution and final field-name selection.
         on_success unresolved.add(self);
+        blocked_substitutions = XsdDerivationControlHelper::forBlock(ct."^attributes^", nsc, True);
+        if (exists ct."^attributes^".abstract && !exists ct."^attributes^".name) {
+            throw WSDL_ERROR, "an anonymous complex type cannot declare abstract";
+        }
+        abstract_type = XsdDerivationControlHelper::booleanValue(ct."^attributes^".abstract, "abstract");
         mixed = XsdEmptiabilityHelper::getMixed(ct."^attributes^");
         content_empty = !mixed;
         #any a = ct."^attributes^";
@@ -19834,7 +20158,8 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
                         cx_type = XET_SEQUENCE;
                     } else {
                         NamespacePrefixHelper attribute_scope(nsc, array_declaration);
-                        array = new XsdArrayType(name, "", aa.arrayType, nsc, unresolved, getFinalDerivations());
+                        array = new XsdArrayType(name, "", aa.arrayType, nsc, unresolved, getFinalDerivations(),
+                            blocked_substitutions, abstract_type);
                     }
 
                     #printf("DEBUG: ans: %y atn: %y aa: %y\n", ans, atn, aa);
@@ -20193,21 +20518,21 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
         return attribute_wildcard;
     }
 
-    #! throws an exception if the types are not compatible
-    /** @param t the resolved declared type
-        @param ename the element name for diagnostics
-        @throw SOAP-SERIALIZATION-ERROR this component is neither identical nor an immediate extension
-        @note An extension is checked against its resolved base component, independently of local-name aliases.
-        @par Example
-        A shipment's explicit extension must refer to that shipment type, not a same-named unrelated type.
+    #! returns the effective instance substitution exclusions
+    /** @return an independent extension/restriction method-name set
+        @note The source blockDefault is filtered when this component is constructed.
+        @since %WSDL 0.5.8
     */
-    checkExtends(XsdAbstractType t, string ename) {
-        if (t === self || (extension && baseType === t)) {
-            return;
-        }
-        throw SOAP_SERIALIZATION_ERROR, sprintf("explicit type %y given for element %y, type %y, however the types "
-            "are not compatible%s", name, ename, t.name,
-            extension ? sprintf("; %y extends %y", name, extension) : "");
+    hash<string, bool> getBlockedSubstitutions() {
+        return blocked_substitutions;
+    }
+
+    #! returns whether instances must select a concrete derived type
+    /** @return the declaration's abstract property
+        @since %WSDL 0.5.8
+    */
+    bool isAbstract() {
+        return abstract_type;
     }
 
     private parseData(hash<auto> d, XsdLateResolverHelper unresolved, Namespaces nsc) {
@@ -20630,6 +20955,9 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
         A measured invoice quantity retains both its numeric text and required unit attribute.
     */
     *hash<auto> serializeValue(Namespaces nsc, auto h, *softbool omitType) {
+        if (isAbstract()) {
+            throw SOAP_SERIALIZATION_ERROR, sprintf("abstract type %Y cannot validate an instance", name);
+        }
         if (array) {
             return array.serializeValue(nsc, h, omitType);
         }
@@ -20936,30 +21264,9 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
         if (exists array)
             return array.deserializeValue(en, tmap, mrh, oval);
 
-        # Select the actual component before validating its fields or attributes.
-        # The instance's QName context is independent of the schema's prefixes.
-        hash<auto> instance_attributes = XsdBase::getExpandedAttributes(oval."^attributes^");
-        if (exists instance_attributes{type_qname(XSI_NS, "type")}) {
-            XsdQNameValue selected_name = XsdQNameValueHelper::resolve(
-                instance_attributes{type_qname(XSI_NS, "type")}, SOAP_DESERIALIZATION_ERROR,
-                QNameInputNamespaces);
-            string identity = type_qname(selected_name.getNamespaceUri(), selected_name.getLocalName());
-            string own_identity = type_qname(ons ? nsc.getOutputNamespaceUri(ons) : "", name);
-            if (!hasRealName() || identity != own_identity) {
-                *XsdAbstractType selected = tmap{identity};
-                if (!selected) {
-                    throw SOAP_DESERIALIZATION_ERROR, sprintf("unknown explicit type %Y for element %Y", identity, en);
-                }
-                try {
-                    selected.checkExtends(self, en);
-                } catch (hash<ExceptionInfo> ex) {
-                    if (ex.err == SOAP_SERIALIZATION_ERROR) {
-                        rethrow SOAP_DESERIALIZATION_ERROR, ex.desc, ex.arg;
-                    }
-                    rethrow;
-                }
-                return selected.deserializeValue(en, tmap, mrh, oval);
-            }
+        XsdAbstractType selected = XsdTypeSubstitutionHelper::select(\oval, self, tmap, en);
+        if (selected !== self) {
+            return XsdDocumentValueHelper::deserializeValue(selected, en, tmap, mrh, oval);
         }
 
         if (!exists oval) {
@@ -23828,6 +24135,10 @@ public class Namespaces inherits Serializable {
         /** @since %WSDL 0.5.8 */
         hash<string, bool> schema_final_default();
 
+        #! blockDefault for the schema currently being constructed, restored on scope exit
+        /** @since %WSDL 0.5.8 */
+        hash<string, bool> schema_block_default();
+
         #! schema component namespaces allowed by the source currently being constructed
         /** This construction scope includes the target namespace, declared imports and builtin XSD types.
             NOTHING outside schema construction preserves general QName expansion for public callers.
@@ -25482,6 +25793,11 @@ public class XsdSchema inherits WSDL::XsdBase {
             on_exit nsc.schema_final_default = previous_final_default;
             nsc.schema_final_default = XsdDerivationControlHelper::parse(sa.finalDefault, "finalDefault",
                 XsdDerivationControlHelper::All);
+
+            hash<string, bool> previous_block_default = nsc.schema_block_default;
+            on_exit nsc.schema_block_default = previous_block_default;
+            nsc.schema_block_default = XsdDerivationControlHelper::parse(sa.blockDefault, "blockDefault",
+                XsdDerivationControlHelper::Substitutions);
 
             string previous_attribute_form = nsc.attribute_form_default;
             on_exit nsc.attribute_form_default = previous_attribute_form;

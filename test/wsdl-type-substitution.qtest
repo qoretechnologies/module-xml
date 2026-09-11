@@ -1,0 +1,404 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires xml
+%requires ../qlib/WSDL.qm
+%exec-class TypeSubstitutionTest
+
+class TypeSubstitutionTest inherits QUnit::Test {
+    private {
+        const Xsd = "http://www.w3.org/2001/XMLSchema";
+        const Xsi = "http://www.w3.org/2001/XMLSchema-instance";
+        const Base = '<xs:complexType name="A"><xs:attribute name="id" type="xs:int" use="required"/></xs:complexType>';
+        const Extension = '<xs:complexType name="B"><xs:complexContent><xs:extension base="A">'
+            '<xs:attribute name="code" type="xs:int"/></xs:extension></xs:complexContent></xs:complexType>';
+        const Transitive = '<xs:complexType name="C"><xs:complexContent><xs:extension base="B"/>'
+            '</xs:complexContent></xs:complexType>';
+        const Restriction = '<xs:complexType name="R"><xs:complexContent><xs:restriction base="A">'
+            '<xs:attribute name="id" type="xs:int" use="required"/></xs:restriction></xs:complexContent></xs:complexType>';
+        const Value = {"^attributes^": {"id": 17}};
+    }
+    constructor() : Test("XSD instance substitution controls", "1.0") {
+        addTestCase("Schema defaults and component overrides retain distinct method sets", \metadata());
+        addTestCase("Control syntax uses XML whitespace and declaration placement", \syntax());
+        addTestCase("Resolved complex derivation follows every extension and restriction", \complexDerivation());
+        addTestCase("Simple derivation preserves builtin, list and union relationships", \simpleDerivation());
+        addTestCase("Wire type selection checks expanded names before value conversion", \wireTypes());
+        addTestCase("Element and declared type blocks constrain the complete path", \blocks());
+        addTestCase("Abstract elements and types require concrete instance declarations", \abstracts());
+        addTestCase("Global references retain controls across namespace scopes", \references());
+        addTestCase("Failed schema construction restores block defaults", \recovery());
+        addTestCase("Legacy array adapters retain abstract and block metadata", \arrays());
+        addTestCase("Direct type APIs enforce the same resolved substitutions", \directTypes());
+        addTestCase("Concurrent conversions keep shared component metadata immutable", \concurrency());
+        addTestCase("Shared and deep derivation graphs terminate without path expansion", \derivationGraphs());
+        set_return_value(main());
+    }
+    private string source(string definitions, string type = "A", string element = "", string schema = "") {
+        return '<xs:schema xmlns:xs="' + Xsd + '" ' + schema + '>' + definitions
+            + '<xs:element name="value" type="' + type + '" ' + element + '/></xs:schema>';
+    }
+    private XsdSchema parse(string text) {
+        return new XsdSchema(text, {"async_only": True});
+    }
+    private auto emit(XsdSchema schema, auto value, *XsdAbstractType selected) {
+        XsdElement element = schema.getElement("", "value");
+        return element.serializeValue(schema.nsc.copy(), selected ? {"^type^": selected, "^val^": value} : value,
+            True, "value", "test");
+    }
+    private auto decode(XsdSchema schema, string xml) {
+        hash<auto> expanded = XsdBase::expandElementNamespaces(parse_xml(xml, XPF_PRESERVE_ORDER));
+        return schema.getElement("", "value").deserializeValue(schema.getTypeMap(), NOTHING, expanded."{}value", True);
+    }
+    private string wire(string selected, string content = ' id="17"', string value = "") {
+        return '<value xmlns:i="' + Xsi + '" xmlns:xs="' + Xsd + '" i:type="' + selected + '"'
+            + content + '>' + value + '</value>';
+    }
+    private valid(string text, string xml) {
+        XmlReader reader(xml);
+        reader.schemaValidateString(text);
+        while (reader.read()) {
+        }
+        assertTrue(reader.isValid());
+    }
+    metadata() {
+        string text = source(Base + '<xs:complexType name="Empty" block=""/><xs:simpleType name="S">'
+            '<xs:restriction base="xs:int"/></xs:simpleType>', "A", 'block=""', 'blockDefault="#all"');
+        XsdSchema original = parse(text);
+        foreach XsdSchema schema in (original, Serializable::deserialize(original.serialize())) {
+            assertEq({"extension": True, "restriction": True}, schema.findType("A").getBlockedSubstitutions());
+            assertEq({}, schema.findType("Empty").getBlockedSubstitutions());
+            assertEq({}, schema.findType("S").getBlockedSubstitutions());
+            assertEq({}, schema.getElement("", "value").getBlockedSubstitutions());
+            assertFalse(schema.findType("A").isAbstract());
+            assertFalse(schema.getElement("", "value").isAbstract());
+            hash<string, bool> copy = schema.findType("A").getBlockedSubstitutions();
+            remove copy.extension;
+            assertTrue(schema.findType("A").getBlockedSubstitutions().extension);
+        }
+        XsdSchema schema = parse(source(Base, "A", "", 'blockDefault="substitution"'));
+        assertEq({}, schema.findType("A").getBlockedSubstitutions());
+        assertEq({"substitution": True}, schema.getElement("", "value").getBlockedSubstitutions());
+        assertEq({}, schema.nsc.schema_block_default);
+    }
+    syntax() {
+        foreach string control in ("", "restriction", "extension", "#all", " extension&#9;restriction&#10;extension ") {
+            XsdSchema schema = parse(source(Base, "A", 'block="' + control + '"'));
+            assertFalse(schema.getElement("", "value").isAbstract());
+        }
+        foreach string control in ("list", "union", "bad", "#ALL", "#all restriction", "restriction #all",
+                "extension,restriction", "extension&#160;restriction") {
+            assertThrows("WSDL-ERROR", sub() { parse(source(Base, "A", 'block="' + control + '"')); });
+            assertThrows("WSDL-ERROR", sub() { parse(source(Base, "A", "", 'blockDefault="' + control + '"')); });
+            assertThrows("WSDL-ERROR", sub() { parse(source('<xs:complexType name="A" block="' + control + '"/>')); });
+        }
+        assertThrows("WSDL-ERROR", sub() { parse(source('<xs:complexType name="A" block="substitution"/>')); });
+        foreach string control in ('block=""', 'abstract="false"') {
+            assertThrows("WSDL-ERROR", sub() { parse(source('<xs:complexType name="A"><xs:sequence>'
+                '<xs:element name="item"><xs:complexType ' + control + '/></xs:element></xs:sequence></xs:complexType>')); });
+            assertThrows("WSDL-ERROR", sub() { parse(source('<xs:simpleType name="A" ' + control + '>'
+                '<xs:restriction base="xs:int"/></xs:simpleType>')); });
+        }
+        foreach string value in ("TRUE", "yes", "", "2", "true&#160;") {
+            assertThrows("WSDL-ERROR", sub() { parse(source(Base, "A", 'abstract="' + value + '"')); });
+            assertThrows("WSDL-ERROR", sub() { parse(source('<xs:complexType name="A" abstract="' + value + '"/>')); });
+        }
+        foreach string value in ("true", "1", " &#9;true&#10; ") {
+            assertTrue(parse(source(Base, "A", 'abstract="' + value + '"')).getElement("", "value").isAbstract());
+        }
+    }
+    complexDerivation() {
+        string definitions = Base + Extension + Transitive + Restriction
+            + '<xs:complexType name="Q"><xs:complexContent><xs:extension base="R"/>'
+              '</xs:complexContent></xs:complexType><xs:complexType name="Other"/>';
+        string text = source(definitions);
+        XsdSchema original = parse(text);
+        foreach XsdSchema schema in (original, Serializable::deserialize(original.serialize())) {
+            foreach string selected in ("A", "B", "C", "R", "Q") {
+                hash<auto> output = emit(schema, Value, schema.findType(selected));
+                assertEq(17, output."^attributes^".id);
+                string xml = wire(selected);
+                valid(text, xml);
+                assertEq(Value, decode(schema, xml));
+            }
+            assertThrows("SOAP-SERIALIZATION-ERROR", sub() { emit(schema, Value, schema.findType("Other")); });
+            assertThrows("SOAP-DESERIALIZATION-ERROR", sub() { decode(schema, wire("Other")); });
+        }
+        text = source('<xs:simpleType name="S"><xs:restriction base="xs:int"/></xs:simpleType>'
+            '<xs:complexType name="A"><xs:simpleContent><xs:extension base="S">'
+            '<xs:attribute name="id" type="xs:int"/></xs:extension></xs:simpleContent></xs:complexType>', "xs:decimal");
+        XsdSchema schema = parse(text);
+        string xml = wire("A", ' id="17"', "42");
+        valid(text, xml);
+        assertEq({"^value^": 42, "^attributes^": {"id": 17}}, decode(schema, xml));
+    }
+    simpleDerivation() {
+        string definitions = '<xs:simpleType name="I"><xs:restriction base="xs:int"/></xs:simpleType>'
+            '<xs:simpleType name="J"><xs:restriction base="I"><xs:minInclusive value="0"/></xs:restriction></xs:simpleType>'
+            '<xs:simpleType name="L"><xs:list itemType="xs:int"/></xs:simpleType>'
+            '<xs:simpleType name="LR"><xs:restriction base="L"><xs:length value="2"/></xs:restriction></xs:simpleType>'
+            '<xs:simpleType name="U"><xs:union memberTypes="xs:int xs:boolean"/></xs:simpleType>';
+        foreach list<auto> row in (("xs:decimal", "J", 17, "17"), ("xs:integer", "xs:short", 17, "17"),
+                ("xs:anySimpleType", "L", (17, 18), "17 18"), ("xs:anyType", "LR", (17, 18), "17 18"),
+                ("L", "LR", (17, 18), "17 18"), ("U", "J", 17, "17")) {
+            string text = source(definitions, row[0]);
+            XsdSchema original = parse(text);
+            foreach XsdSchema schema in (original, Serializable::deserialize(original.serialize())) {
+                XsdAbstractType selected = row[1].startsWith("xs:") ? schema.nsc.getBaseType(row[1].substr(3))
+                    : schema.findType(row[1]);
+                auto output = emit(schema, row[2], selected);
+                assertTrue(exists output);
+                string xml = wire(row[1], "", row[3]);
+                valid(text, xml);
+                assertEq(row[2], decode(schema, xml));
+            }
+        }
+        XsdSchema schema = parse(source(definitions, "I"));
+        assertThrows("SOAP-DESERIALIZATION-ERROR", sub() { decode(schema, wire("J", "", "-1")); });
+        assertThrows("SOAP-DESERIALIZATION-ERROR", sub() { decode(schema, wire("xs:string", "", "17")); });
+        assertThrows("SOAP-SERIALIZATION-ERROR", sub() { emit(schema, "17", schema.nsc.getBaseType("string")); });
+        assertThrows("SOAP-SERIALIZATION-ERROR", sub() { emit(schema, -1, schema.findType("J")); });
+    }
+    wireTypes() {
+        XsdSchema schema = parse(source(Base + Extension));
+        foreach string selected in ("Missing", "xs:missing", "unknown:B", "a:b:c", "", " B X ") {
+            assertThrows("SOAP-DESERIALIZATION-ERROR", sub() { decode(schema, wire(selected)); });
+        }
+        assertEq(Value, decode(schema, wire(" B ")));
+        assertThrows("SOAP-DESERIALIZATION-ERROR", sub() { decode(schema,
+            '<value xmlns:i="' + Xsi + '" xmlns:t="urn:unrelated" i:type="t:B" id="17"/>'); });
+        assertThrows("SOAP-DESERIALIZATION-ERROR", sub() { decode(schema, wire("B", ' id="garbage"')); });
+        assertThrows("SOAP-DESERIALIZATION-ERROR", sub() { decode(schema, wire("B", "")); });
+        assertEq(Value, decode(schema, wire("B")));
+    }
+    blocks() {
+        foreach string block in ("extension", "restriction", "#all", "substitution", "") {
+            string text = source(Base + Extension + Transitive + Restriction, "A", 'block="' + block + '"');
+            XsdSchema schema = parse(text);
+            foreach string selected in ("A", "B", "C", "R") {
+                bool permitted = selected == "A" || (block != "#all"
+                    && block != (selected == "R" ? "restriction" : "extension"));
+                if (permitted) {
+                    assertEq(17, emit(schema, Value, schema.findType(selected))."^attributes^".id);
+                    valid(text, wire(selected));
+                    assertEq(Value, decode(schema, wire(selected)));
+                } else {
+                    assertThrows("SOAP-SERIALIZATION-ERROR", sub() { emit(schema, Value, schema.findType(selected)); });
+                    assertThrows("SOAP-DESERIALIZATION-ERROR", sub() { decode(schema, wire(selected)); });
+                }
+            }
+        }
+        string base = Base;
+        base =~ s/name="A"/name="A" block="extension"/;
+        XsdSchema schema = parse(source(base + Extension + Transitive, "A", 'block=""'));
+        assertThrows("SOAP-SERIALIZATION-ERROR", sub() { emit(schema, Value, schema.findType("C")); });
+        assertThrows("SOAP-DESERIALIZATION-ERROR", sub() { decode(schema, wire("C")); });
+        string middle = Extension;
+        middle =~ s/name="B"/name="B" block="extension"/;
+        string text = source(Base + middle + Transitive);
+        schema = parse(text);
+        valid(text, wire("C"));
+        assertEq(Value, decode(schema, wire("C")));
+        schema = parse(source(Base + Extension, "A", 'block=""', 'blockDefault="extension"'));
+        assertThrows("SOAP-DESERIALIZATION-ERROR", sub() { decode(schema, wire("B")); });
+        schema = parse(source('<xs:simpleType name="I"><xs:restriction base="xs:int"/></xs:simpleType>',
+            "xs:integer", 'block="restriction"'));
+        assertThrows("SOAP-SERIALIZATION-ERROR", sub() { emit(schema, 17, schema.findType("I")); });
+        assertThrows("SOAP-DESERIALIZATION-ERROR", sub() { decode(schema, wire("I", "", "17")); });
+    }
+    abstracts() {
+        string base = Base;
+        base =~ s/name="A"/name="A" abstract="true"/;
+        string text = source(base + Extension + Transitive, "A", 'nillable="true"');
+        XsdSchema original = parse(text);
+        foreach XsdSchema schema in (original, Serializable::deserialize(original.serialize())) {
+            assertTrue(schema.findType("A").isAbstract());
+            assertThrows("SOAP-SERIALIZATION-ERROR", sub() { emit(schema, Value); });
+            assertThrows("SOAP-SERIALIZATION-ERROR", sub() { emit(schema, NOTHING, schema.findType("A")); });
+            assertThrows("SOAP-DESERIALIZATION-ERROR", sub() { decode(schema, wire("A")); });
+            assertThrows("SOAP-DESERIALIZATION-ERROR", sub() { decode(schema, '<value id="17"/>'); });
+            assertThrows("SOAP-DESERIALIZATION-ERROR", sub() { decode(schema, wire("A", ' i:nil="true"')); });
+            valid(text, wire("C"));
+            assertEq(Value, decode(schema, wire("C")));
+            assertEq(17, emit(schema, Value, schema.findType("C"))."^attributes^".id);
+        }
+        XsdSchema schema = parse(source(Base + Extension, "A", 'abstract="true" nillable="true"'));
+        assertThrows("SOAP-SERIALIZATION-ERROR", sub() { emit(schema, Value, schema.findType("B")); });
+        assertThrows("SOAP-DESERIALIZATION-ERROR", sub() { decode(schema, wire("B")); });
+        assertThrows("SOAP-DESERIALIZATION-ERROR", sub() { decode(schema, wire("B", ' i:nil="true"')); });
+    }
+    references() {
+        string imported = '<xs:schema xmlns:xs="' + Xsd + '" xmlns:b="urn:b" targetNamespace="urn:b" '
+            'blockDefault="extension"><xs:complexType name="A" block=""/>'
+            '<xs:element name="head" type="b:A" abstract="true" nillable="true"/></xs:schema>';
+        string root = '<xs:schema xmlns:xs="' + Xsd + '" xmlns:b="urn:b" blockDefault="restriction">'
+            '<xs:import namespace="urn:b" schemaLocation="b.xsd"/><xs:complexType name="T"><xs:sequence>'
+            '<xs:element ref="b:head" minOccurs="0"/></xs:sequence></xs:complexType>'
+            '<xs:element name="value" type="T"/></xs:schema>';
+        XsdSchema original(root, {"async_only":True,"def_path":"http://example.invalid",
+            "xsd_cache":{"http://example.invalid/b.xsd":imported}});
+        foreach XsdSchema schema in (original, Serializable::deserialize(original.serialize())) {
+            XsdElement ref = cast<XsdComplexType>(schema.findType("T")).elementmap.head;
+            assertTrue(ref.isAbstract());
+            assertTrue(ref.isNillable());
+            assertEq({"extension":True}, ref.getBlockedSubstitutions());
+            assertEq({}, ref.type.getBlockedSubstitutions());
+            auto output = emit(schema, {});
+            assertFalse(exists output.head);
+            assertThrows("SOAP-SERIALIZATION-ERROR", sub() { emit(schema, {"head":{}}); });
+            assertFalse(exists ref.serializeValue(schema.nsc.copy(), {"^type^":ref.type,"^val^":NOTHING},
+                True, "head", "test"));
+        }
+    }
+    recovery() {
+        XsdSchema schema = parse(source(Base));
+        assertThrows("WSDL-ERROR", sub() { schema.addSchemaString('<xs:schema xmlns:xs="' + Xsd + '" blockDefault="extension">'
+            '<xs:complexType name="Bad" block="list"/></xs:schema>'); });
+        assertEq({}, schema.nsc.schema_block_default);
+        schema.addSchemaString('<xs:schema xmlns:xs="' + Xsd + '"><xs:complexType name="Good"/></xs:schema>');
+        assertEq({}, schema.findType("Good").getBlockedSubstitutions());
+        assertEq(17, emit(schema, Value)."^attributes^".id);
+    }
+    arrays() {
+        string text = '<xs:schema xmlns:xs="' + Xsd + '" xmlns:e="http://schemas.xmlsoap.org/soap/encoding/"'
+            + ' xmlns:w="http://schemas.xmlsoap.org/wsdl/" blockDefault="extension">'
+            + '<xs:import namespace="http://schemas.xmlsoap.org/soap/encoding/"/>'
+            + '<xs:complexType name="Items" abstract="true"><xs:complexContent><xs:restriction base="e:Array">'
+            + '<xs:attribute ref="e:arrayType" w:arrayType="xs:int[]"/>'
+            + '</xs:restriction></xs:complexContent></xs:complexType></xs:schema>';
+        XsdSchema original = parse(text);
+        foreach XsdSchema schema in (original, Serializable::deserialize(original.serialize())) {
+            XsdAbstractType type = schema.findType("Items");
+            assertTrue(type instanceof XsdArrayType);
+            assertTrue(type.isAbstract());
+            assertEq({"extension":True}, type.getBlockedSubstitutions());
+            assertThrows("SOAP-SERIALIZATION-ERROR", sub() { type.serializeValue(schema.nsc.copy(), (17, 18), True); });
+            assertThrows("SOAP-DESERIALIZATION-ERROR", sub() { type.deserializeValue("value", schema.getTypeMap(), NOTHING, {}); });
+        }
+    }
+    directTypes() {
+        string text = source('<xs:simpleType name="I"><xs:restriction base="xs:int"/></xs:simpleType>'
+            '<xs:simpleType name="J"><xs:restriction base="I"><xs:minInclusive value="0"/></xs:restriction></xs:simpleType>', "I");
+        XsdSchema schema = parse(text);
+        auto value = parse_xml(wire("J", "", "17")).value;
+        assertEq(17, schema.findType("I").deserializeValue("value", schema.getTypeMap(), NOTHING, value));
+        assertEq(17, schema.nsc.getBaseType("integer").deserializeValue("value", schema.getTypeMap(), NOTHING, value));
+        value = parse_xml(wire("J", "", "-1")).value;
+        assertThrows("SOAP-DESERIALIZATION-ERROR", sub() {
+            schema.nsc.getBaseType("integer").deserializeValue("value", schema.getTypeMap(), NOTHING, value);
+        });
+        value = parse_xml('<value xmlns:i="' + Xsi + '" xmlns:wrong="urn:wrong" i:type="wrong:int">17</value>').value;
+        assertThrows("SOAP-DESERIALIZATION-ERROR", sub() {
+            schema.nsc.getBaseType("int").deserializeValue("value", schema.getTypeMap(), NOTHING, value);
+        });
+        schema = parse(source(Base + Extension + Transitive));
+        value = parse_xml(wire("C")).value;
+        assertEq(Value, schema.findType("A").deserializeValue("value", schema.getTypeMap(), NOTHING, value));
+        schema = parse(source('<xs:complexType name="A" abstract="true"/>'));
+        assertThrows("SOAP-SERIALIZATION-ERROR", sub() { schema.findType("A").serializeValue(schema.nsc.copy(), {}, True); });
+        schema = parse(source(Base + '<xs:element name="anonymous"><xs:complexType><xs:complexContent>'
+            '<xs:extension base="A"/></xs:complexContent></xs:complexType></xs:element>'));
+        assertThrows("SOAP-SERIALIZATION-ERROR", sub() { emit(schema, Value, schema.getElement("", "anonymous").type); });
+    }
+    private bool inspect(XsdSchema schema) {
+        for (int index = 0; index < 40; ++index) {
+            if (emit(schema, Value, schema.findType("C"))."^attributes^".id != 17
+                    || decode(schema, wire("C")) != Value) {
+                return False;
+            }
+            XsdSchema copy = Serializable::deserialize(schema.serialize());
+            if (copy.getElement("", "value").getBlockedSubstitutions() != {"substitution": True}
+                    || copy.findType("C").isAbstract()) {
+                return False;
+            }
+        }
+        return True;
+    }
+    concurrency() {
+        XsdSchema schema = parse(source(Base + Extension + Transitive, "A", 'block="substitution"'));
+        auto namespaces = schema.nsc.getOutputNamespaceHash();
+        Qore::Thread::Queue ready();
+        Qore::Thread::Queue start();
+        Qore::Thread::Queue results();
+        Qore::Thread::Counter running();
+        on_exit {
+            start.push(True);
+            start.push(True);
+            assertEq(0, running.waitForZero(30s));
+        }
+        for (int index = 0; index < 2; ++index) {
+            running.inc();
+            background sub() {
+                on_exit running.dec();
+                try {
+                    ready.push(True);
+                    start.get(30s);
+                    results.push(inspect(schema));
+                } catch (hash<ExceptionInfo> error) {
+                    results.push(error);
+                }
+            }();
+        }
+        for (int index = 0; index < 2; ++index) {
+            assertTrue(ready.get(30s));
+        }
+        start.push(True);
+        start.push(True);
+        for (int index = 0; index < 2; ++index) {
+            assertEq(True, results.get(30s));
+        }
+        assertEq(namespaces, schema.nsc.getOutputNamespaceHash());
+    }
+
+    derivationGraphs() {
+        XsdSchema schema = parse(source(Base + '<xs:simpleType name="U"><xs:union memberTypes="xs:int xs:boolean"/></xs:simpleType>'));
+        XsdSimpleType current = cast<XsdSimpleType>(schema.findType("U"));
+        for (int index = 0; index < 40; ++index) {
+            XsdSimpleType parent = cast<XsdSimpleType>(schema.findType("U").copy());
+            parent.unionTypes = (current, current);
+            current = parent;
+        }
+        XsdAbstractType integer = schema.nsc.getBaseType("int");
+        integer.checkExtends(current, "value");
+        assertThrows("SOAP-SERIALIZATION-ERROR", sub() { schema.nsc.getBaseType("date").checkExtends(current, "value"); });
+        current.unionTypes = (current, current);
+        assertThrows("SOAP-SERIALIZATION-ERROR", sub() { integer.checkExtends(current, "value"); });
+        XsdComplexType base = cast<XsdComplexType>(schema.findType("A"));
+        XsdComplexType derived = base;
+        for (int index = 0; index < 1000; ++index) {
+            XsdComplexType child = base.copy();
+            child.baseType = derived;
+            child.extension = "A";
+            derived = child;
+        }
+        derived.checkExtends(base, "value");
+        assertThrows("SOAP-SERIALIZATION-ERROR", sub() { base.checkExtends(derived, "value"); });
+
+        XsdSimpleType repeated = cast<XsdSimpleType>(schema.findType("U").copy());
+        repeated.unionTypes = ();
+        for (int index = 0; index < 10000; ++index) {
+            push repeated.unionTypes, integer;
+        }
+        integer.checkExtends(repeated, "value");
+        assertThrows("SOAP-SERIALIZATION-ERROR", sub() { schema.nsc.getBaseType("date").checkExtends(repeated, "value"); });
+
+        XsdSchema chains = parse(source('<xs:simpleType name="I"><xs:restriction base="xs:int"/></xs:simpleType>'
+            '<xs:simpleType name="D"><xs:restriction base="xs:date"/></xs:simpleType>', "I"));
+        XsdSimpleType left = cast<XsdSimpleType>(chains.findType("I"));
+        XsdSimpleType right = cast<XsdSimpleType>(chains.findType("D"));
+        for (int index = 0; index < 1000; ++index) {
+            XsdSimpleType child = cast<XsdSimpleType>(chains.findType("I").copy());
+            child.type = left;
+            left = child;
+            child = cast<XsdSimpleType>(chains.findType("D").copy());
+            child.type = right;
+            right = child;
+        }
+        left.checkExtends(integer, "value");
+        assertThrows("SOAP-SERIALIZATION-ERROR", sub() { left.checkExtends(right, "value"); });
+        assertThrows("SOAP-SERIALIZATION-ERROR", sub() { right.checkExtends(left, "value"); });
+    }
+
+}

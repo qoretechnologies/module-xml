@@ -22,13 +22,13 @@ their definitions into that schema merely by being passed in a wrapper. Accepted
 equivalent builtins normalize to the element's declared object before conversion,
 so an explicitly selected identical type does not force unnecessary annotations.
 
-The complex override accepts identity or an immediate extension whose resolved
-`baseType` is the declared component. It does not compare the extension's local
-name. Complex wire decoding resolves the expanded `{namespace}local` identity of
-`xsi:type` in the instance's current namespace scope before validating attributes
-and children. The existing scoped QName context is restored on every return and
+Resolved simple and complex ancestry is checked by the
+[type substitution implementation](wsdl-type-substitution.md), including effective
+`block` controls and abstract declarations. Wire decoding resolves the expanded
+`{namespace}local` identity of `xsi:type` in the instance scope before validating
+attributes and children. Scoped QName context restores on every return and
 exception. Unknown, unbound, malformed and incompatible selections report
-`SOAP-DESERIALIZATION-ERROR`; a failed native compatibility check keeps
+`SOAP-DESERIALIZATION-ERROR`; native compatibility failures report
 `SOAP-SERIALIZATION-ERROR`.
 
 `XsdDocumentValueHelper::typeAttributes()` translates the selected component's
@@ -50,10 +50,10 @@ prefixes collide with structural prefixes.
 
 All new helper state is local to a call. Schema registries are read through their
 owned output mapping, and only the caller's output registry acquires prefixes.
-Identity and immediate-base checks require constant component operations;
-serialization still visits each occurrence once. No new graph traversal,
-unbounded backtracking or conversion retry is introduced. Cancellation propagates
-unchanged, and custom value conversion is invoked once per occurrence.
+Identity checks require constant component operations. Different selected types
+use the bounded resolved-graph traversal documented with substitution controls.
+Serialization visits each occurrence once. Cancellation propagates unchanged,
+and custom value conversion is invoked once per occurrence.
 
 For an invoice quantity, the explicit spelling can be used without changing its
 ordinary native representation:
@@ -71,7 +71,7 @@ The implementation follows XSD 1.0 Structures
 [builtin definitions in section 3.14.7](https://www.w3.org/TR/2004/REC-xmlschema-1-20041028/),
 and [Element Locally Valid](https://www.w3.org/TR/2004/REC-xmlschema-1-20041028/#cvc-elt).
 The executable scope is recorded by `test/wsdl-type-identity.qtest` and the
-independent `test/wsdl-interop/test_type_identity.py` matrix. Full derivation
-controls, selected-type retention in native results and the remaining P5
-semantics keep their ownership in the interoperability plan; this design
-describes identity, annotation ownership and immediate complex dispatch only.
+independent `test/wsdl-interop/test_type_identity.py` matrix. The derivation and
+instance-control regressions extend that scope in `wsdl-type-substitution.qtest`.
+Native result retention and the remaining P5 semantics retain their full plan
+ownership; retained XML carries the original selected type annotation.

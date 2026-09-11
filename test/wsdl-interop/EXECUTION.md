@@ -6536,3 +6536,64 @@ resolved dynamic derivation, followed by substitution groups, wildcard/mixed/
 generic content, nil/default/fixed and document identity acceptance. The known
 P6 dual-binding diagnostic and P9 environment/CI/docs/debug-info requirements
 retain their full ownership.
+
+
+## P5-03 — Instance derivation, block and abstract controls (complete increment)
+
+Parent: `460349d` (P5-02). Instance type selection now follows complete resolved
+simple/complex derivation with effective block exclusions. Construction retains
+source-scoped blockDefault and explicit empty overrides; global references retain
+their declaration's block, abstract and nillable properties. Abstract selected
+types and direct abstract element instances reject. Optional absent occurrences
+create no instance. Direct type, element, native-wrapper and retained XML paths
+share the checked expanded-QName selection.
+
+The [implemented design](../../design/wsdl-type-substitution.md) and
+[specification evidence](type-substitution-evidence.md) describe XSD 1.0 type
+ancestry, fixed exclusion sets and annotation ownership. Worklists deduplicate
+pairs on enqueue and cache base union lookups, including absence. Tests cover
+1000-step complex/unrelated simple chains, 10000 repeated member references and
+40 levels of shared union edges, with defensive termination on a mutated cycle.
+No Debug-build performance claim is made.
+
+The [validation inventory](P5-03-validation.json) and
+[62-item audit](audits/P5-03-type-substitution.md) record **19 Pass / 43 N/A / 0 Fail**:
+
+- 115 suites pass 1170 cases/57779 reported assertions with no warnings. The
+  affected IEEE suite adds an unbound-prefix negative. Three caught legacy SOAP
+  comparator negatives remain intentional within their successful suite.
+- The new Qore suite passes 13 cases/280 assertions in AST, IR, JIT, tiered and
+  compiled WSDL. It covers controls, QName errors, imports/copies, optional absent
+  references, direct APIs, adapter metadata, failed reuse and synchronized consumers.
+- The final matrix passes 104 schema/type cases (62 valid/42 invalid) in all five
+  modes. Each mode has 832 actual SOAP 1.1/1.2 request/response rows, 336 required
+  rejections in each conversion path and 992 independently valid outputs. Both
+  pinned input validators agree. Exact native values and expanded names are
+  asserted; nonidentical native selections must emit their type annotation.
+- AOT builds 1210 variants (12315444 bytes); WSDL/native docs and the executed
+  invoice example pass. Prior final-control and type-identity matrices, all 16
+  survey harness methods, union composition and attribute/simple-content tests pass.
+- The isolated both-version survey preserves all 2455 rows and every count.
+  Strict coverage retains 142 descriptions/1376 directions with zero selected
+  failures and all 68 broader failures. Values remain 1264 ok / 0 failed /
+  196 unreachable / 812 unassessed / 0 missing / 0 skipped. Only WSDL digests change.
+
+The initial broad gate exposed non-hash metadata access and missing namespace
+context in detached probes/test fragments. Those causes are fixed and the final
+full gate passes. A union probe now binds QName value prefixes, preventing a
+selected boolean value from changing lexical form after detached validation.
+IEEE and array test callers supply their actual enclosing output context;
+unbound wire prefixes still fail. The first matrix's extra part-wrapper
+expectation and malformed negative test-call references were corrected. All
+superseded diagnostic failures remain identified separately from final passes.
+
+Final WSDL SHA-256 is
+`e8e08d237bd074dcf5eb0275dbb35534fe846090a610b1ca3b99e5ca3d59c959`.
+Native XML and isolated libqore hashes remain unchanged. There are no C++ edits,
+new Valgrind run, installation or push. Both remotes were fetched and already
+included; main Qore remains clean at `1c63ff2c5`.
+
+P5 remains in progress: native selected-type retention, element substitution and
+final exclusions, wildcard/mixed/generic content, nil/default/fixed and document
+identity requirements remain. P6-P9 retain full ownership, including the known
+dual-binding diagnostic and platform/CI/docs/debug-info findings.
