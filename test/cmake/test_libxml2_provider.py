@@ -134,6 +134,8 @@ include("{REPO}/cmake/QoreXmlLibXml2ParticleRangeFix.cmake")
 qore_xml_fix_libxml2_particle_ranges("{cls.source}" "${{CMAKE_CURRENT_BINARY_DIR}}/libxml")
 include("{REPO}/cmake/QoreXmlLibXml2TypeFinalFix.cmake")
 qore_xml_fix_libxml2_type_finals("{cls.source}" "${{CMAKE_CURRENT_BINARY_DIR}}/libxml")
+include("{REPO}/cmake/QoreXmlLibXml2ElementSubstitutionFix.cmake")
+qore_xml_fix_libxml2_element_substitution("{cls.source}" "${{CMAKE_CURRENT_BINARY_DIR}}/libxml")
 ''')
         cls.fixed = cls.root / "fixed/build-debug"
         cls.run_command(["cmake", "-S", fixed_project, "-B", cls.fixed, "-DCMAKE_BUILD_TYPE=Debug",
@@ -168,6 +170,7 @@ qore_xml_fix_libxml2_type_finals("{cls.source}" "${{CMAKE_CURRENT_BINARY_DIR}}/l
         self.assertIn("particle_identity=PASS", output)
         self.assertIn("particle_attribution=PASS", output)
         self.assertIn("particle_ranges=PASS", output)
+        self.assertIn("element_substitution=PASS", output)
         stage = self.root / "stage"
         self.run_command(["cmake", "--install", self.root / "bundled", "--prefix", stage])
         self.assertEqual(["bin/probe", "share/licenses/qore-xml/libxml2-NOTICES.txt"],
@@ -554,10 +557,44 @@ qore_xml_fix_libxml2_uris("{self.source}" "${{CMAKE_CURRENT_BINARY_DIR}}/libxml"
 
     def previous_fix_fixture(self):
         """Keep fixtures for earlier fixes independent of the final-default correction."""
-        fixed = (self.root / "fixed/source/CMakeLists.txt").read_text()
+        fixed = self.previous_substitution_fixture()
         fixed = fixed.replace(f'include("{REPO}/cmake/QoreXmlLibXml2TypeFinalFix.cmake")\n', "")
         return fixed.replace(f'qore_xml_fix_libxml2_type_finals("{self.source}" '
                              '"${CMAKE_CURRENT_BINARY_DIR}/libxml")\n', "")
+
+    def previous_substitution_fixture(self):
+        """Build the verified dependency with only the substitution correction omitted."""
+        fixed = (self.root / "fixed/source/CMakeLists.txt").read_text()
+        fixed = fixed.replace(f'include("{REPO}/cmake/QoreXmlLibXml2ElementSubstitutionFix.cmake")\n', "")
+        return fixed.replace(f'qore_xml_fix_libxml2_element_substitution("{self.source}" '
+                             '"${CMAKE_CURRENT_BINARY_DIR}/libxml")\n', "")
+
+    def test_substitution_backport_detection_and_idempotence(self):
+        import hashlib
+        project = self.root / "substitution-broken/source"
+        project.mkdir(parents=True)
+        (project / "CMakeLists.txt").write_text(self.previous_substitution_fixture())
+        build = self.root / "substitution-broken/build-debug"
+        self.run_command(["cmake", "-S", project, "-B", build, "-DCMAKE_BUILD_TYPE=Debug",
+                          "-DBUILD_SHARED_LIBS=ON", "-DLIBXML2_WITH_PROGRAMS=OFF",
+                          "-DLIBXML2_WITH_TESTS=OFF", "-DLIBXML2_WITH_PYTHON=OFF"])
+        self.run_command(["cmake", "--build", build, "--target", "LibXml2", "-j4"])
+        libraries = list((build / "libxml").glob("libxml2.so")) + list((build / "libxml").glob("libxml2.dylib"))
+        self.assertEqual(1, len(libraries))
+        options = [f"-DLIBXML2_LIBRARY={libraries[0]}", f"-DLIBXML2_INCLUDE_DIR={self.fixed_include}",
+                   f"-DFETCHCONTENT_SOURCE_DIR_QORE_XML_LIBXML2={self.source}"]
+        output = self.configure("substitution-broken-auto", "-DQORE_XML_LIBXML2_PROVIDER=AUTO", *options)
+        self.assertIn("using private static libxml2 2.15.4", output)
+        probe = (self.root / "substitution-broken-auto/system-libxml2/namespace-probe.log").read_text()
+        self.assertIn("type_final_defaults=PASS", probe)
+        self.assertIn("element_substitution=FAIL", probe)
+        self.configure("substitution-broken-system", "-DQORE_XML_LIBXML2_PROVIDER=SYSTEM", *options, success=False)
+        path = self.root / "bundled/_deps/qore_xml_libxml2-build/qore-element-substitution-fix/xmlschemas.c"
+        stamp = (path.stat().st_mtime_ns, hashlib.sha256(path.read_bytes()).hexdigest())
+        self.assertEqual("3c2709538ea99bd15fe64b61a30c96cfcab57153a074167bf23b89e32391674c", stamp[1])
+        self.configure("bundled", "-DQORE_XML_LIBXML2_PROVIDER=BUNDLED",
+                       f"-DFETCHCONTENT_SOURCE_DIR_QORE_XML_LIBXML2={self.source}")
+        self.assertEqual(stamp, (path.stat().st_mtime_ns, hashlib.sha256(path.read_bytes()).hexdigest()))
 
     def test_final_default_backport_detection_and_idempotence(self):
         import hashlib

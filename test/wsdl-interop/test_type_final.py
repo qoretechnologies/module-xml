@@ -105,10 +105,14 @@ def definitions():
 
 
 class TypeFinalTest(unittest.TestCase):
+    case_factory = staticmethod(definitions)
+    expected_counts = (87, 44, 438, 86, 352)
+    worker = 'type-final.qr'
+
     def test_exclusions_and_values_in_both_bindings(self):
-        models = list(definitions())
-        self.assertEqual(87, len(models))
-        self.assertEqual(44, sum(case.valid for case in models))
+        models = list(self.case_factory())
+        self.assertEqual(self.expected_counts[0], len(models))
+        self.assertEqual(self.expected_counts[1], sum(case.valid for case in models))
         self.assertEqual(len(models), len({case.name for case in models}))
         jobs = []
         compilers = {}
@@ -136,7 +140,7 @@ class TypeFinalTest(unittest.TestCase):
             path = Path(temporary) / 'cases.json'
             path.write_text(json.dumps(cases))
             process = subprocess.run(['qore', '-b', '--enable-debug', '--exec-mode=' + mode,
-                                      str(Path(__file__).with_name('type-final.qr')), str(path)],
+                                      str(Path(__file__).parent / self.worker), str(path)],
                                      capture_output=True, text=True, timeout=180)
         self.assertEqual(0, process.returncode, process.stderr + process.stdout[-2000:])
         self.assertEqual('', process.stderr)
@@ -177,7 +181,7 @@ class TypeFinalTest(unittest.TestCase):
         for key, result in {**validated['schemas'], **validated['documents']}.items():
             self.assertTrue(result['ok'], (key, result))
             self.assertEqual([], result['warnings'])
-        self.assertEqual((438, 86, 352), (count, rejected, len(validated['documents'])))
+        self.assertEqual(self.expected_counts[2:], (count, rejected, len(validated['documents'])))
         print(f'{mode}: {len(models)} schemas, {count} rows, {rejected} construction errors, '
               f'{len(validated["documents"])} independently validated outputs', flush=True)
 

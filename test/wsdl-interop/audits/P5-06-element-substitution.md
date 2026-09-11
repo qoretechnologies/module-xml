@@ -1,0 +1,97 @@
+# P5-06 element substitution declaration audit
+
+Copyright (C) 2026 Qore Technologies, s.r.o.
+
+Audited 2026-09-11 against parent `725c1b2`, using the complete
+`/home/david/.codex/skills/audit-changes/SKILL.md` and its five referenced design
+guides. All 62 individual checks are recorded: **21 Pass, 41 N/A, 0 Fail**.
+
+The change resolves global element affiliations, inherited types, final
+constraints and concrete membership, and corrects libxml2's substitution
+method accumulation. The native correction and probe join the existing
+hash-guarded build-tree chain. Both original source and supported corrected
+system backports are tested; no source override bypasses validation.
+
+Final verification passes 119 Qore suites/1215 cases/59100 reported assertions.
+New declaration tests pass 12 cases/250 assertions in all four source modes
+and AOT. Native tests pass 5 cases/168 assertions. Each source/AOT matrix checks
+72 construction schemas, 384 rows, 64 required errors, 320 independently valid
+outputs, 31 group maps and 102 particle documents. Four supporting-oracle
+disagreements stay explicit normative negatives. All 35 dependency-provider
+tests pass. Native tests and the complete configure probe report zero Valgrind
+errors and no lost memory. Compiled provider/HTTP/Cargo/CDA consumers, the
+documentation example, prior final/value matrices and the survey harness pass.
+
+The final isolated survey retains all 2455 rows with unchanged results except
+the WSDL digest. Strict selected coverage has no failures; all 68 broader
+failures remain visible. The [inventory](../P5-06-validation.json) records exact
+source, artifact, fixture and log hashes, commands and all individual checks.
+P5 runtime member-name processing is the next increment under the unchanged
+P1–P9 plan. There are no main-Qore edits, system installs or pushes from this work.
+Both remotes were fetched and included; main Qore remains at `1c63ff2c5` with
+unrelated Azure/OpenAPI/MIME development in progress.
+
+| # | Check | Status | Evidence |
+| --- | --- | --- | --- |
+| 1 | Entry exists in `doxygen/lang/120_modules.dox.tmpl` (for modules in the Qore repo; N/A for external module repos) | N/A | Existing external WSDL module; no Qore module catalog entry is added. |
+| 2 | Entry exists in `doxygen/lang/900_release_notes.dox.tmpl` (for modules in the Qore repo; external modules have release notes in their .qm) | Pass | WSDL 0.5.8 release notes describe declaration affiliations, inherited types, final constraints and concrete membership. |
+| 3 | `qore_user_module()` or `qore_external_user_module()` call in `CMakeLists.txt` | N/A | No new user module. The native dependency correction joins the existing provider chain and is distributed in Makefile.am; all six existing dependent qmods build. |
+| 4 | Module added to QMOD list in `CMakeLists.txt` | N/A | No new user module. The native dependency correction joins the existing provider chain and is distributed in Makefile.am; all six existing dependent qmods build. |
+| 5 | `.qm` file has `@section <lowercasemodname>intro` as first doc section — **must be all lowercase** (e.g., `avrodataproviderintro`, not `AvroDataProviderintro`) | N/A | Existing lowercase wsdlintro remains the first documentation section. |
+| 6 | `%modern` in `.qm` file — no redundant `%new-style`, `%require-types`, `%strict-args`, `%enable-all-warnings` | Pass | WSDL, both new qtests and the group worker use %modern without redundant directives. |
+| 7 | No parse directives (`%requires`, `%modern`, `%new-style`) in separated `.qc` files (check OUTSIDE of `@code` blocks only) | N/A | No separated qc file changes. |
+| 8 | No `%include` usage (deprecated for modules) | Pass | No deprecated %include or alternate entry point is introduced. |
+| 9 | Copyright 2026 on all new files | Pass | All new code, design, evidence, audit and inventory carry Copyright 2026. Third-party notices are preserved. |
+| 10 | Directory layout: `.qm` inside `qlib/<ModuleName>/` directory (not at `qlib/<ModuleName>.qm` for multi-file modules) | N/A | Existing single-file module layout; no duplicate entry point or QPP class. |
+| 11 | No second `.qm` for the same module at `qlib/<ModuleName>.qm` | N/A | Existing single-file module layout; no duplicate entry point or QPP class. |
+| 12 | `ns=Qore::XX` matches the QoreNamespace constructor path | N/A | Existing single-file module layout; no duplicate entry point or QPP class. |
+| 13 | `%modern` directive present | Pass | WSDL, both new qtests and the group worker use %modern without redundant directives. |
+| 14 | Executable permission set (`chmod +x`) | Pass | Both qtests, the group qr worker and the Python matrix are executable. |
+| 15 | Uses %prepend-module-path  before %requires for in-repo modules (Qore and Qore modules only; not Qorus) | Pass | Tests prepend local qlib before requirements and require the local WSDL file by relative path. AOT workers explicitly import the rebuilt qmod. |
+| 16 | External module dependencies use `%try-module` — except modules delivered with the project itself (Qore ex: DataProvider, ConnectionProvider, QUnit, etc.) which use hard `%requires` | Pass | Project xml and Qore QUnit use hard requirements; external json uses %try-module with an explicit missing-dependency error. |
+| 17 | No filesystem operations (fopen, open, creat, unlink, remove, rename, mkdir, rmdir, stat, chmod) without sandbox checks | Pass | The native correction only accumulates derivation flags. The C probe uses in-memory schemas and documents; no new filesystem or network operation. |
+| 18 | No network operations (connect, bind, socket, getaddrinfo, gethostbyname) without sandbox checks | Pass | The native correction only accumulates derivation flags. The C probe uses in-memory schemas and documents; no new filesystem or network operation. |
+| 19 | If filesystem/network ops exist, verify `QoreSandboxManagerHelper` usage | N/A | No native external I/O requiring QoreSandboxManagerHelper is added. |
+| 20 | No `File::`, `Dir::`, `Socket::`, `HTTPClient::` usage without justification | Pass | Declaration resolution adds no I/O. The fixture worker reads its explicit JSON manifest; existing schema retrieval and cancellation behavior is retained. |
+| 21 | All `for`/`while` loops that could iterate >100 times have `qore_check_cancel()` checks | N/A | No Qore C++ loop or cancellation API changes. The dependency correction changes two flag conditions within an existing traversal; standalone configure loops are fixed to 45 schemas. Qore traversal retains runtime interruption. |
+| 22 | Uses `qore_check_cancel()` (NOT deprecated `qore_check_io_interrupt()`) | N/A | No Qore C++ loop or cancellation API changes. The dependency correction changes two flag conditions within an existing traversal; standalone configure loops are fixed to 45 schemas. Qore traversal retains runtime interruption. |
+| 23 | Check frequency: every 100 iterations for tight loops, every 10 for expensive iterations | N/A | No Qore C++ loop or cancellation API changes. The dependency correction changes two flag conditions within an existing traversal; standalone configure loops are fixed to 45 schemas. Qore traversal retains runtime interruption. |
+| 24 | No blocking operations without cancellation support | Pass | No blocking production operation is introduced. Test subprocesses and concurrent completion queues/counters have bounded deadlines; workers propagate cancellation. |
+| 25 | Every action has `display_name`, `short_desc` (plain text, <80 chars), `desc` (markdown) | N/A | No DataProvider field, action, application, factory or JNI registration changes. Existing native-provider and Cargo/CDA consumers are regression-tested. |
+| 26 | Every action has `options` populated via `getActionOptionFromFields()` — without this, the action shows an empty, unusable form | N/A | No DataProvider field, action, application, factory or JNI registration changes. Existing native-provider and Cargo/CDA consumers are regression-tested. |
+| 27 | Every action has `output_type` set to a typed data type constant (e.g., `MyResponseDataType`) — not omitted | N/A | No DataProvider field, action, application, factory or JNI registration changes. Existing native-provider and Cargo/CDA consumers are regression-tested. |
+| 28 | DPAT_API actions: provider has `"supports_request": True` and implements `doRequestImpl()` | N/A | No DataProvider field, action, application, factory or JNI registration changes. Existing native-provider and Cargo/CDA consumers are regression-tested. |
+| 29 | DPAT_FIND actions: every option exists in `SearchOptions`, `getRecordTypeImpl()` returns `*hash<string, AbstractDataField>` | N/A | No DataProvider field, action, application, factory or JNI registration changes. Existing native-provider and Cargo/CDA consumers are regression-tested. |
+| 30 | Scheme-based apps (with `"scheme"` in registerApp): actions use `"path"` and do NOT use `"cls"` — having both `scheme` and `cls` causes a runtime error | N/A | No DataProvider field, action, application, factory or JNI registration changes. Existing native-provider and Cargo/CDA consumers are regression-tested. |
+| 31 | Single-key hash slices use trailing comma: `Fields{"key",}` (without trailing comma, `Fields{"key"}` returns the value, not a hash) | N/A | No DataProvider field, action, application, factory or JNI registration changes. Existing native-provider and Cargo/CDA consumers are regression-tested. |
+| 32 | **Typed data type classes exist** for request and response types — inherit `HashDataType`, have `const Fields` hash, call `addQoreFields(Fields)` in constructor, export public constant at bottom (e.g., `public const MyDataType = new MyDataType();`) | N/A | No DataProvider field, action, application, factory or JNI registration changes. Existing native-provider and Cargo/CDA consumers are regression-tested. |
+| 33 | Request/input types use `public` Fields (enables `ClassName::Fields` in action registration) | N/A | No DataProvider field, action, application, factory or JNI registration changes. Existing native-provider and Cargo/CDA consumers are regression-tested. |
+| 34 | Response/output types use `private` Fields | N/A | No DataProvider field, action, application, factory or JNI registration changes. Existing native-provider and Cargo/CDA consumers are regression-tested. |
+| 35 | Each field in data types has `display_name`, `type`, and `desc` (markdown-formatted) | N/A | No DataProvider field, action, application, factory or JNI registration changes. Existing native-provider and Cargo/CDA consumers are regression-tested. |
+| 36 | Input fields have `example_value` where useful (string fields, endpoint URIs, SQL queries, etc.) | N/A | No DataProvider field, action, application, factory or JNI registration changes. Existing native-provider and Cargo/CDA consumers are regression-tested. |
+| 37 | Fields with finite allowed values use `allowed_values` with `AllowedValueInfo` containing both `value` and `display_name` (Title Case, human-readable) — never bare values, never described only in text | N/A | No DataProvider field, action, application, factory or JNI registration changes. Existing native-provider and Cargo/CDA consumers are regression-tested. |
+| 38 | Password/secret fields have `"sensitive": True` | N/A | No DataProvider field, action, application, factory or JNI registration changes. Existing native-provider and Cargo/CDA consumers are regression-tested. |
+| 39 | `groups` uses `AppGroup` enum values from `qlib/DataProvider/AppGroup.qc` | N/A | No DataProvider field, action, application, factory or JNI registration changes. Existing native-provider and Cargo/CDA consumers are regression-tested. |
+| 40 | App `logo` stored as separate file, loaded at module level in `Priv` namespace | N/A | No DataProvider field, action, application, factory or JNI registration changes. Existing native-provider and Cargo/CDA consumers are regression-tested. |
+| 41 | App `desc` uses markdown: bullet list of capabilities, links to project website, business-language explanation of value | N/A | No DataProvider field, action, application, factory or JNI registration changes. Existing native-provider and Cargo/CDA consumers are regression-tested. |
+| 42 | `display_name` is user-friendly ("Apache Avro" not "avro") | N/A | No DataProvider field, action, application, factory or JNI registration changes. Existing native-provider and Cargo/CDA consumers are regression-tested. |
+| 43 | `short_desc` is plain text, under 80 chars, single sentence — no markdown | N/A | No DataProvider field, action, application, factory or JNI registration changes. Existing native-provider and Cargo/CDA consumers are regression-tested. |
+| 44 | `desc` uses markdown: backticks for code/field refs (`` `field_name` ``, `` `True` ``, `` `pdf` ``), `\n\n` for paragraphs, `- ` bullet lists for enumerations, `**bold**` for caveats | N/A | No DataProvider field, action, application, factory or JNI registration changes. Existing native-provider and Cargo/CDA consumers are regression-tested. |
+| 45 | Descriptions use plain business language relating to common challenges — not just technical "what" but "why" and "when to use" | N/A | No DataProvider field, action, application, factory or JNI registration changes. Existing native-provider and Cargo/CDA consumers are regression-tested. |
+| 46 | No bare `True`/`False`/`NOTHING` — must be backtick-wrapped in `desc` | N/A | No DataProvider field, action, application, factory or JNI registration changes. Existing native-provider and Cargo/CDA consumers are regression-tested. |
+| 47 | No bare field/option names in prose — must use backticks | N/A | No DataProvider field, action, application, factory or JNI registration changes. Existing native-provider and Cargo/CDA consumers are regression-tested. |
+| 48 | Long descriptions (>500 chars) use bold section headers and bullet lists | N/A | No DataProvider field, action, application, factory or JNI registration changes. Existing native-provider and Cargo/CDA consumers are regression-tested. |
+| 49 | **Factory registration in Qore repo**: every factory name registered in `qlib/DataProvider/DataProvider.qc` → `FactoryMap` (without this, module loads but doesn't appear in Qorus apps) | N/A | No DataProvider field, action, application, factory or JNI registration changes. Existing native-provider and Cargo/CDA consumers are regression-tested. |
+| 50 | **`getRecordTypeImpl()` signature**: must be `private *hash<string, AbstractDataField> getRecordTypeImpl(*hash<auto> search_options)` — NOT returning `*AbstractDataProviderType` | N/A | No DataProvider field, action, application, factory or JNI registration changes. Existing native-provider and Cargo/CDA consumers are regression-tested. |
+| 51 | **Dependency JARs committed** (for JNI modules): JAR files in `qlib/*/jar/` may be gitignored — use `git add -f` to ensure they're tracked, otherwise CI compilation fails | N/A | No DataProvider field, action, application, factory or JNI registration changes. Existing native-provider and Cargo/CDA consumers are regression-tested. |
+| 52 | JAR install rules in CMakeLists.txt for all dependency JARs | N/A | No DataProvider field, action, application, factory or JNI registration changes. Existing native-provider and Cargo/CDA consumers are regression-tested. |
+| 53 | **No workarounds**: No TODOs, FIXMEs, stubs, or partially-implemented features | Pass | Omitted types resolve from their actual head, all affiliations validate before publication, and native method accumulation is corrected at its source. No runtime fixture-name branches, validation bypasses, stubs or new skips. P5 runtime member-name support remains explicitly open under the authorized incremental plan. |
+| 54 | **Exception safety**: C++ uses `ReferenceHolder` for Qore allocations, `std::unique_ptr` for C++ allocations, `*xsink` checked after every fallible operation | Pass | Registry additions snapshot published membership, compute all new sets before publication and restore on failure. Qore owns declaration links and copied maps. Native code adds no allocations; parser/schema probe resources are freed on every branch. Native tests and the complete probe have zero Valgrind errors or lost blocks. |
+| 55 | **Thread safety**: All mutable shared state protected by `std::lock_guard<std::mutex>` or documented as immutable-after-construction | Pass | Membership and links are immutable after construction. Incremental schema mutation retains the existing single-writer contract; concurrent readers use read-only or reconstructed graphs. Construction state is local. |
+| 56 | **Type safety**: Strongly-typed `code<return(args)>` instead of untyped `code`; `static_cast` instead of C casts; typed hashdecls for results; enums where appropriate | Pass | Typed element lists and nested declaration maps carry graph data. QName objects retain expanded identity. Existing XsdSubstitutionMethod constants identify blocked derivations; intentional polymorphic fixture values use auto. |
+| 57 | **Performance**: No O(n²) where O(n) is possible; no unnecessary copies; coordinate descent uses incremental residuals not full matrix multiply | Pass | Iterative affiliation resolution visits each declaration once, and group output is bounded by potential member/head pairs. Type derivation uses bounded component-pair worklists. No recursive affiliation stack or exponential path expansion; 97-member chains are tested. |
+| 58 | **Error handling**: All inputs validated (dimensions, empty data, unfitted models); C++ I/O handles EAGAIN/EINTR if applicable | Pass | Tests reject bad QName syntax, missing heads, cycles, incompatible types, final exclusions and invalid inherited ID constraints. Positive cases cover empty controls, defaults, abstract types, import/chameleon scopes, block identity and both derivation orders. Failed and cancelled additions preserve published schemas. |
+| 59 | **Documentation**: Doxygen `@param`, `@return`, `@throw` on all public methods; `@par Example` with realistic business scenarios; `@note` for important caveats | Pass | Public metadata getters document returns, ownership and version; construction mutators are marked internal. Durable design and the executed quantity example describe implemented behavior. README, release notes, plan and evidence retain the next runtime criteria. |
+| 60 | **QPP flags**: `[flags=CONSTANT]` on methods that never throw; `[flags=RET_VALUE_ONLY]` on methods that throw but have no side effects | N/A | No QPP flags change. |
+| 61 | **Security**: No user-controlled format strings; no buffer overflows; bounds checking on array indices; no credentials in code | Pass | Format strings are fixed, generated probe buffers are bounded, component lookups validate expanded names, and no credentials or new external production access are introduced. Pinned source and output hashes guard the native correction. |
+| 62 | **Correctness**: Algorithms verified against reference implementations; edge cases tested (empty data, single sample, all-zero features) | Pass | The exact final changes pass the recorded Qore gate, four source modes and AOT, native DOM/reader tests, 35 provider tests, Valgrind, independent construction/membership matrices, affected compiled consumers, and the both-version corpus comparison in P5-06-validation.json. Supporting-oracle discrepancies remain explicit normative negatives. |

@@ -80,6 +80,10 @@ module WSDL {
     @section wsdlrelnotes WSDL Module Release Notes
 
     @subsection wsdl_0_5_8 WSDL v0.5.8
+    - global element substitution groups resolve imported and forward affiliations, inherit omitted member
+      types, and reject incompatible types, final exclusions, missing heads and circular affiliations
+    - added element substitution affiliation, final and concrete membership metadata; transitive membership
+      applies element blocks and all intermediate complex type blocks, including through global references
     - added XsdSchema::getNativeDataProviderType() and WSMessage::getDataProviderType(True) for native
       selected-type wrappers; receiving definitions validate derived fields and expose both value shapes
     - native selected-type providers retain recursive graphs through Serializable reconstruction;
@@ -2280,6 +2284,19 @@ class XsdDerivationControlHelper {
         hash<string, bool> result();
         foreach string method in (keys allowed) {
             if (nsc.schema_block_default{method}) {
+                result{method} = True;
+            }
+        }
+        return result;
+    }
+
+    static hash<string, bool> forElementFinal(*hash<auto> attributes, Namespaces nsc) {
+        if (exists attributes.final) {
+            return parse(attributes.final, "element final", Complex);
+        }
+        hash<string, bool> result();
+        foreach string method in (keys Complex) {
+            if (nsc.schema_final_default{method}) {
                 result{method} = True;
             }
         }
@@ -10559,6 +10576,11 @@ public class XsdElement inherits WSDL::XsdTypedData {
         bool has_value_constraint = False;
         hash<string, bool> blocked_substitutions();
         bool abstract_element = False;
+        hash<string, bool> substitution_exclusions();
+        *XsdQNameValue substitution_name;
+        *XsdElement substitution_head;
+        *XsdElement declaration_ref;
+        hash<string, XsdElement> substitution_members();
     }
 
     #! constructs an element declaration or a reference to a global element
@@ -10622,6 +10644,13 @@ public class XsdElement inherits WSDL::XsdTypedData {
         if (!exists a.ref) {
             blocked_substitutions = XsdDerivationControlHelper::forBlock(a, nsc, False);
         }
+        if (global_element) {
+            substitution_exclusions = XsdDerivationControlHelper::forElementFinal(a, nsc);
+            if (exists a.substitutionGroup) {
+                hash<auto> identity = nsc.getTypeHash(a.substitutionGroup);
+                substitution_name = new XsdQNameValue(identity.uri, identity.val);
+            }
+        }
         has_value_constraint = exists a.default || exists a.fixed;
         on_success {
             if (has_value_constraint) {
@@ -10646,7 +10675,7 @@ public class XsdElement inherits WSDL::XsdTypedData {
             ref_ns = identity.uri;
             usedocns = boolean(ref_ns);
             unresolved.add(self);
-        } else {
+        } else if (!substitution_name) {
             type = nsc.getBaseType("anyType");
         }
     }
@@ -10687,7 +10716,53 @@ public class XsdElement inherits WSDL::XsdTypedData {
         blocked_substitutions = other.blocked_substitutions;
         abstract_element = other.abstract_element;
         nillable = other.nillable;
+        declaration_ref = other;
     }
+
+    #! returns this element's effective final exclusions for substitution group affiliations
+    /** @return a copy of the extension/restriction method-name set
+        @since %WSDL 0.5.8
+    */
+    hash<string, bool> getSubstitutionGroupExclusions() {
+        return declaration_ref ? declaration_ref.getSubstitutionGroupExclusions() : substitution_exclusions;
+    }
+
+    #! returns the expanded name of the declared substitution group head
+    /** @return the captured QName, or NOTHING when this declaration has no affiliation
+        @since %WSDL 0.5.8
+    */
+    *XsdQNameValue getSubstitutionGroupName() {
+        return declaration_ref ? declaration_ref.getSubstitutionGroupName() : substitution_name;
+    }
+
+    #! returns the resolved immediate substitution group head
+    /** @return the head declaration, or NOTHING when there is no affiliation
+        @since %WSDL 0.5.8
+    */
+    *XsdElement getSubstitutionGroupAffiliation() {
+        return declaration_ref ? declaration_ref.getSubstitutionGroupAffiliation() : substitution_head;
+    }
+
+    #! returns the concrete declarations that can substitute for this global declaration
+    /** @return a copy of the expanded-name-to-declaration map, including this declaration when nonabstract;
+        local declarations have no substitution group, while references use their global declaration
+        @since %WSDL 0.5.8
+    */
+    hash<string, XsdElement> getSubstitutionGroup() {
+        return declaration_ref ? declaration_ref.getSubstitutionGroup() : substitution_members;
+    }
+
+    /** @cond INTERNAL */
+    # Schema construction only; affiliations resolve before omitted types and local references.
+    resolveSubstitutionGroupAffiliation(*XsdElement head) {
+        substitution_head = head;
+    }
+
+    # Schema construction only; publish the complete membership set after type finalization.
+    resolveSubstitutionGroupMembers(hash<string, XsdElement> members) {
+        substitution_members = members;
+    }
+    /** @endcond */
 
     bool isRequired() {
         return minOccurs > 0;
@@ -20654,6 +20729,31 @@ class XsdTypeSubstitutionHelper {
         return False;
     }
 
+    # XSD 1.0 Substitution Group OK (Transitive) additionally applies every intermediate
+    # complex type's block to the entire derivation, including methods below that type.
+    static bool allowedElement(XsdAbstractType derived, XsdAbstractType base, hash<string, bool> blocked) {
+        if (blocked{XsdSubstitutionMethod::Substitution}) {
+            return False;
+        }
+        hash<string, bool> exclusions = blocked + base.getBlockedSubstitutions();
+        XsdAbstractType current = derived;
+        hash<string, bool> seen();
+        while (current instanceof XsdComplexType && !XsdTypeDerivationHelper::sameType(current, base)) {
+            string key = current.uniqueHash();
+            if (seen{key}) {
+                return False;
+            }
+            seen{key} = True;
+            *XsdAbstractType parent = cast<XsdComplexType>(current).baseType;
+            if (!parent) {
+                break;
+            }
+            exclusions += parent.getBlockedSubstitutions();
+            current = parent;
+        }
+        return allowed(derived, base, exclusions);
+    }
+
     static check(XsdAbstractType selected, XsdAbstractType declared, string name, string error,
             *hash<string, bool> blocked) {
         if (selected.isAbstract()) {
@@ -25925,6 +26025,12 @@ public class XsdSchema inherits WSDL::XsdBase {
         }
         # Registry updates are atomic: failed documents must not leave declarations or import marks.
         hash<string, hash<string, XsdElement>> old_elements = emap;
+        hash<string, hash<string, XsdElement>> old_substitution_groups();
+        foreach hash<string, XsdElement> declarations in (old_elements.iterator()) {
+            foreach XsdElement element in (declarations.iterator()) {
+                old_substitution_groups{element.getExpandedName()} = element.getSubstitutionGroup();
+            }
+        }
         hash<string, XsdAbstractType> old_types = tmap;
         hash<string, XsdGroup> old_groups = groupMap;
         hash<string, XsdAttributeGroup> old_attribute_groups = attrGroupMap;
@@ -25934,6 +26040,11 @@ public class XsdSchema inherits WSDL::XsdBase {
         list<hash<XsdSourceInfo>> old_sources = schema_sources;
         on_error {
             emap = old_elements;
+            foreach hash<string, XsdElement> declarations in (old_elements.iterator()) {
+                foreach XsdElement element in (declarations.iterator()) {
+                    element.resolveSubstitutionGroupMembers(old_substitution_groups{element.getExpandedName()});
+                }
+            }
             tmap = old_types;
             groupMap = old_groups;
             attrGroupMap = old_attribute_groups;
@@ -26352,17 +26463,92 @@ public class XsdSchema inherits WSDL::XsdBase {
 
     private resolveType(XsdElement xe) {
         if (xe.ref) {
-            # find element
-            #printf("DEBUG resolveType(XsdElement), ref_ns: %y ref: %y\n", xe.ref_ns, xe.ref);
             XsdElement e = emap_get(emap, xe.ref_ns, xe.ref);
-            if (!e.type)
+            if (!e.type) {
                 resolveType(e);
-            #printf("resolveType(XsdElement), resolved to e: %y type: %y\n", e.name, e.type.name);
+            }
             xe.assimilate(e);
-            #throw "OOPS", sprintf("e: %y", xe);
         } else if (!xe.type) {
-            xe.type = resolveType(xe.typeinfo);
-            #printf("resolveType(XsdElement), %y\n", xe.type.name);
+            *XsdElement head = xe.getSubstitutionGroupAffiliation();
+            if (!xe.typeinfo && head) {
+                @assert(head.type);
+                xe.type = head.type;
+            } else {
+                xe.type = resolveType(xe.typeinfo);
+            }
+        }
+    }
+
+    private list<XsdElement> resolveElementDeclarations() {
+        list<XsdElement> global_declarations();
+        foreach hash<string, XsdElement> declarations in (emap.iterator()) {
+            foreach XsdElement element in (declarations.iterator()) {
+                global_declarations += element;
+                *XsdQNameValue head = element.getSubstitutionGroupName();
+                if (head) {
+                    element.resolveSubstitutionGroupAffiliation(emap_get(emap,
+                        head.getNamespaceUri(), head.getLocalName()));
+                }
+            }
+        }
+        hash<string, bool> resolved();
+        foreach XsdElement element in (global_declarations) {
+            list<XsdElement> path();
+            hash<string, bool> visiting();
+            *XsdElement current = element;
+            while (current && !resolved{current.uniqueHash()}) {
+                string key = current.uniqueHash();
+                if (visiting{key}) {
+                    throw WSDL_ERROR, sprintf("circular substitution group affiliation at element %Y",
+                        current.getExpandedName());
+                }
+                visiting{key} = True;
+                path += current;
+                current = current.getSubstitutionGroupAffiliation();
+            }
+            while (path) {
+                XsdElement declaration = pop path;
+                resolveType(declaration);
+                resolved{declaration.uniqueHash()} = True;
+            }
+        }
+        return global_declarations;
+    }
+
+    private resolveElementSubstitutionGroups(list<XsdElement> global_declarations) {
+        hash<string, hash<string, XsdElement>> groups();
+        foreach XsdElement element in (global_declarations) {
+            *XsdElement head = element.getSubstitutionGroupAffiliation();
+            if (head && !XsdTypeSubstitutionHelper::allowed(element.type, head.type,
+                    head.getSubstitutionGroupExclusions())) {
+                throw WSDL_ERROR, sprintf("element %Y type %Y is not validly derived from substitution group head %Y"
+                    " type %Y under its final exclusions %Y", element.getExpandedName(), element.type.name,
+                    head.getExpandedName(), head.type.name, keys head.getSubstitutionGroupExclusions());
+            }
+            if (element.isAbstract()) {
+                continue;
+            }
+            groups{element.getExpandedName()}{element.getExpandedName()} = element;
+            while (head) {
+                if (XsdTypeSubstitutionHelper::allowedElement(element.type, head.type, head.getBlockedSubstitutions())) {
+                    groups{head.getExpandedName()}{element.getExpandedName()} = element;
+                }
+                head = head.getSubstitutionGroupAffiliation();
+            }
+        }
+        # Existing declarations are shared with callers across addSchemaString(). Publish only after
+        # every new constraint succeeds, restoring their previous metadata if publication is interrupted.
+        hash<string, hash<string, XsdElement>> previous();
+        foreach XsdElement element in (global_declarations) {
+            previous{element.getExpandedName()} = element.getSubstitutionGroup();
+        }
+        on_error {
+            foreach XsdElement element in (global_declarations) {
+                element.resolveSubstitutionGroupMembers(previous{element.getExpandedName()});
+            }
+        }
+        foreach XsdElement element in (global_declarations) {
+            element.resolveSubstitutionGroupMembers(groups{element.getExpandedName()} ?? {});
         }
     }
 
@@ -26738,6 +26924,7 @@ public class XsdSchema inherits WSDL::XsdBase {
             return;
         }
         # Resolve only after every document has contributed its declarations, allowing dependency cycles.
+        list<XsdElement> global_declarations = resolveElementDeclarations();
         map resolveType($1), unresolved.getList();
         unresolved.clearResolved();
 
@@ -26759,6 +26946,7 @@ public class XsdSchema inherits WSDL::XsdBase {
 
         map resolveType($1), unresolved.getList();
         unresolved.validateElementConstraints();
+        resolveElementSubstitutionGroups(global_declarations);
     }
 }
 

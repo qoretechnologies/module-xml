@@ -1354,3 +1354,16 @@ See [provider evidence](native-type-providers-evidence.md) and
 [P5-05 validation](P5-05-validation.json). Default factories keep their native
 field shapes; explicit factories accept captured types. Remaining P5 semantics
 and P6 binding/part-aware SoapDataProvider integration stay in the plan.
+
+Element affiliation resolution is covered by `wsdl-element-substitution.qtest`,
+`xml-element-substitution.qtest` and `test_element_substitution.py`. The declaration
+matrix builds 72 schemas through actual SOAP 1.1/1.2 bindings: 384 rows include
+64 required construction rejections and 320 independently valid outputs with
+preserved integer values. The membership matrix compares 62 reconstructed/original
+maps and 102 documents across 31 groups, retaining four supporting-oracle
+disagreements explicitly. The native dependency correction is selected by the
+45-schema configure probe and tested with real fixed/broken system backports.
+See the [implemented declaration design](../../design/wsdl-element-substitution.md)
+and [root causes and specification evidence](element-substitution-evidence.md).
+WSDL message processing of alternate member names and selected root identity
+remains the next P5 increment.

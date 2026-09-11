@@ -1,0 +1,318 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires xml
+%requires ../qlib/WSDL.qm
+%exec-class ElementSubstitutionTest
+
+class ElementSubstitutionTest inherits QUnit::Test {
+    private {
+        const Xsd = "http://www.w3.org/2001/XMLSchema";
+        const Base = "http://example.invalid/substitution/";
+    }
+    constructor() : Test("XSD element substitution declarations", "1.0") {
+        addTestCase("Element final controls filter defaults and validate lexical sets", \controls());
+        addTestCase("Omitted types inherit from forward and transitive affiliations", \inheritance());
+        addTestCase("Affiliations require compatible resolved types and respect final", \derivation());
+        addTestCase("Affiliation names resolve in their own declaration scope", \namespaces());
+        addTestCase("Imports and chameleon includes retain their own defaults", \schemaScopes());
+        addTestCase("Cycles and unknown heads fail even with explicit types", \invalidGraphs());
+        addTestCase("Actual groups filter abstract declarations and element blocks", \membership());
+        addTestCase("Intermediate complex type blocks constrain the complete derivation", \typeBlocks());
+        addTestCase("References retain global groups and independent occurrence limits", \references());
+        addTestCase("Failed and interrupted additions preserve published groups", \recovery());
+        addTestCase("Deep affiliation graphs resolve without recursive traversal", \deepGraphs());
+        addTestCase("Concurrent readers preserve declaration identity and metadata", \concurrency());
+        set_return_value(main());
+    }
+    private string source(string body, string attributes = "") {
+        return '<xs:schema xmlns:xs="' + Xsd + '" ' + attributes + '>' + body + '</xs:schema>';
+    }
+    private XsdSchema parse(string text) {
+        return new XsdSchema(text, {"async_only": True});
+    }
+    private string element(string name, string type = "xs:int", string attributes = "") {
+        return '<xs:element name="' + name + '"' + (type ? ' type="' + type + '"' : '')
+            + ' ' + attributes + '/>';
+    }
+    private list<string> group(XsdSchema schema, string name, string uri = "") {
+        return sort(keys schema.getElement(uri, name).getSubstitutionGroup());
+    }
+    private list<XsdSchema> copies(string text) {
+        XsdSchema schema = parse(text);
+        return (schema, Serializable::deserialize(schema.serialize()));
+    }
+    controls() {
+        foreach hash<auto> row in (
+            {"lexical": "", "expected": {}},
+            {"lexical": "extension", "expected": {"extension": True}},
+            {"lexical": "restriction", "expected": {"restriction": True}},
+            {"lexical": "#all", "expected": {"extension": True, "restriction": True}},
+            {"lexical": " extension&#9;restriction&#10;extension&#13; ",
+                "expected": {"extension": True, "restriction": True}}
+        ) {
+            foreach XsdSchema schema in (copies(source(element("head", "xs:int", 'final="' + row.lexical + '"'),
+                    'finalDefault="#all"'))) {
+                XsdElement head = schema.getElement("", "head");
+                assertEq(row.expected, head.getSubstitutionGroupExclusions());
+                hash<string, bool> detached = head.getSubstitutionGroupExclusions();
+                detached.union = True;
+                assertEq(row.expected, head.getSubstitutionGroupExclusions());
+            }
+        }
+        foreach string control in ("list", "union", "substitution", "unknown", "#ALL", "#all restriction",
+                "restriction #all", "extension,restriction", "extension&#160;restriction") {
+            assertThrows("WSDL-ERROR", \parse(), (source(element("head", "xs:int", 'final="' + control + '"')),));
+        }
+        foreach XsdSchema schema in (copies(source(element("head"), 'finalDefault="list union extension"'))) {
+            assertEq({"extension": True}, schema.getElement("", "head").getSubstitutionGroupExclusions());
+            assertEq({}, schema.nsc.schema_final_default);
+        }
+        foreach string attribute in ('final=""', 'substitutionGroup="head"') {
+            assertThrows("WSDL-ERROR", \parse(), (source(element("head")
+                + '<xs:complexType name="C"><xs:sequence>' + element("local", "xs:int", attribute)
+                + '</xs:sequence></xs:complexType>'),));
+        }
+    }
+    inheritance() {
+        foreach string datatype in ("xs:int", "xs:QName", "xs:anySimpleType", "xs:anyType") {
+            foreach XsdSchema schema in (copies(source(element("last", "", 'substitutionGroup="middle"')
+                    + element("middle", "", 'substitutionGroup="head"')
+                    + element("head", datatype, 'nillable="true" final="#all"')))) {
+                XsdElement head = schema.getElement("", "head");
+                XsdElement middle = schema.getElement("", "middle");
+                XsdElement last = schema.getElement("", "last");
+                assertTrue(head.type === middle.type);
+                assertTrue(head.type === last.type);
+                assertTrue(last.getSubstitutionGroupAffiliation() === middle);
+                assertTrue(middle.getSubstitutionGroupAffiliation() === head);
+                assertEq("head", middle.getSubstitutionGroupName().getLocalName());
+                assertFalse(middle.isNillable());
+                assertTrue(head.isNillable());
+                assertEq(("{}head", "{}last", "{}middle"), group(schema, "head"));
+            }
+        }
+        string anonymous = '<xs:element name="head"><xs:simpleType><xs:restriction base="xs:int"/>'
+            '</xs:simpleType></xs:element>';
+        foreach XsdSchema schema in (copies(source(element("member", "", 'substitutionGroup="head"') + anonymous))) {
+            assertTrue(schema.getElement("", "head").type === schema.getElement("", "member").type);
+            assertEq(17, schema.getElement("", "member").getDataProviderType().acceptsValue(17));
+            assertThrows("RUNTIME-TYPE-ERROR", sub() {
+                schema.getElement("", "member").getDataProviderType().acceptsValue("invalid");
+            });
+        }
+        assertThrows("WSDL-ERROR", \parse(), (source(element("head", "xs:ID")
+            + element("member", "", 'substitutionGroup="head" default="id"')),));
+    }
+    derivation() {
+        foreach string control in ("", "extension", "restriction", "#all") {
+            string text = source(element("head", "xs:decimal", 'final="' + control + '"')
+                + element("member", "xs:int", 'substitutionGroup="head"'));
+            if (control == "restriction" || control == "#all") {
+                assertThrows("WSDL-ERROR", \parse(), (text,));
+            } else {
+                foreach XsdSchema schema in (copies(text)) {
+                    assertEq(("{}head", "{}member"), group(schema, "head"));
+                }
+            }
+        }
+        foreach string datatype in ("xs:string", "xs:float", "xs:anyType") {
+            assertThrows("WSDL-ERROR", \parse(), (source(element("head", "xs:int")
+                + element("member", datatype, 'substitutionGroup="head"')),));
+        }
+        foreach string method in ("extension", "restriction") {
+            string types = '<xs:complexType name="B" abstract="true"/>'
+                + '<xs:complexType name="D" abstract="true"><xs:complexContent><xs:' + method
+                + ' base="B"/></xs:complexContent></xs:complexType>';
+            foreach string control in ("", method) {
+                string text = source(types + element("head", "B", 'final="' + control + '"')
+                    + element("member", "D", 'substitutionGroup="head"'));
+                if (control) {
+                    assertThrows("WSDL-ERROR", \parse(), (text,));
+                } else {
+                    foreach XsdSchema schema in (copies(text)) {
+                        assertTrue(schema.getElement("", "member").type.isAbstract());
+                        assertEq(("{}head", "{}member"), group(schema, "head"));
+                    }
+                }
+            }
+        }
+    }
+    namespaces() {
+        string text = source(element("member", "", 'xmlns:h="urn:a" substitutionGroup="h:head"')
+            + element("head"), 'targetNamespace="urn:a" xmlns:h="urn:wrong"');
+        foreach XsdSchema schema in (copies(text)) {
+            assertEq(("{urn:a}head", "{urn:a}member"), group(schema, "head", "urn:a"));
+            assertEq("urn:a", schema.getElement("urn:a", "member").getSubstitutionGroupName().getNamespaceUri());
+        }
+        text = source(element("member", "", 'substitutionGroup="head"') + element("head"),
+            'targetNamespace="urn:a" xmlns="urn:a"');
+        foreach XsdSchema schema in (copies(text)) {
+            assertEq(("{urn:a}head", "{urn:a}member"), group(schema, "head", "urn:a"));
+        }
+        foreach string reference in ("missing:head", "a:b:c", "", "bad name", ":head") {
+            assertThrows("WSDL-NAMESPACE-ERROR", \parse(), (source(element("member", "xs:int",
+                'substitutionGroup="' + reference + '"')),));
+        }
+        assertThrows("WSDL-ERROR", \parse(), (source(element("head")
+            + element("member", "xs:int", 'xmlns:h="urn:wrong" substitutionGroup="h:head"')),));
+    }
+    schemaScopes() {
+        string included = source(element("head", "xs:decimal")
+            + element("member", "xs:int", 'substitutionGroup="head"'), 'finalDefault="extension list"');
+        string imported = source('<xs:import namespace="urn:a"/>'
+            + element("foreign", "xs:int", 'substitutionGroup="t:head"'),
+            'targetNamespace="urn:b" xmlns:t="urn:a"');
+        # The root head is made available before the imported document is finalized.
+        string root = source('<xs:import namespace="urn:b" schemaLocation="b.xsd"/>'
+            + '<xs:include schemaLocation="i.xsd"/>', 'targetNamespace="urn:a" finalDefault="restriction"');
+        XsdSchema original(root, {"async_only": True, "def_path": Base,
+            "xsd_cache": {Base + "b.xsd": imported, Base + "i.xsd": included}});
+        foreach XsdSchema schema in (original, Serializable::deserialize(original.serialize())) {
+            assertEq({"extension": True}, schema.getElement("urn:a", "head").getSubstitutionGroupExclusions());
+            assertEq({}, schema.getElement("urn:b", "foreign").getSubstitutionGroupExclusions());
+            assertEq(("{urn:a}head", "{urn:a}member", "{urn:b}foreign"), group(schema, "head", "urn:a"));
+            schema.addSchemaString(source('<xs:include schemaLocation="i.xsd"/>', 'targetNamespace="urn:c"'));
+            assertEq(("{urn:c}head", "{urn:c}member"), group(schema, "head", "urn:c"));
+            assertFalse(schema.getElement("urn:a", "head") === schema.getElement("urn:c", "head"));
+        }
+    }
+    invalidGraphs() {
+        foreach bool explicit_type in (False, True) {
+            string datatype = explicit_type ? "xs:int" : "";
+            assertThrows("WSDL-ERROR", \parse(), (source(element("head", datatype, 'substitutionGroup="head"')),));
+            assertThrows("WSDL-ERROR", \parse(), (source(element("a", datatype, 'substitutionGroup="b"')
+                + element("b", datatype, 'substitutionGroup="c"')
+                + element("c", datatype, 'substitutionGroup="a"')),));
+            assertThrows("WSDL-ERROR", \parse(), (source(element("member", datatype, 'substitutionGroup="missing"')),));
+        }
+    }
+    membership() {
+        foreach string control in ("", "extension", "restriction", "substitution", "#all") {
+            string text = source(element("head", "xs:decimal", 'abstract="true" block="' + control + '"')
+                + element("middle", "xs:decimal", 'substitutionGroup="head" abstract="true" block="substitution"')
+                + element("same", "xs:decimal", 'substitutionGroup="middle"')
+                + element("restricted", "xs:int", 'substitutionGroup="middle"'));
+            foreach XsdSchema schema in (copies(text)) {
+                list<string> expected = control == "substitution" || control == "#all" ? ()
+                    : control == "restriction" ? ("{}same",) : ("{}restricted", "{}same");
+                assertEq(expected, group(schema, "head"));
+                assertEq((), group(schema, "middle"));
+                assertEq(("{}same",), group(schema, "same"));
+                assertEq(("{}restricted",), group(schema, "restricted"));
+            }
+        }
+    }
+    typeBlocks() {
+        foreach string blocked in ("", "extension", "restriction", "#all") {
+            # R restricts B, D extends R: R's block applies to both derivation steps.
+            string text = source('<xs:complexType name="B"/><xs:complexType name="R" block="' + blocked + '">'
+                '<xs:complexContent><xs:restriction base="B"/></xs:complexContent></xs:complexType>'
+                '<xs:complexType name="D" block="#all"><xs:complexContent><xs:extension base="R"/>'
+                '</xs:complexContent></xs:complexType>' + element("head", "B")
+                + element("member", "D", 'substitutionGroup="head"'));
+            foreach XsdSchema schema in (copies(text)) {
+                assertEq(blocked ? ("{}head",) : ("{}head", "{}member"), group(schema, "head"));
+            }
+        }
+        # A selected type's own block does not prohibit that declaration's substitution.
+        foreach XsdSchema schema in (copies(source('<xs:complexType name="B" block="#all"/>'
+                + element("head", "B") + element("member", "B", 'substitutionGroup="head"')))) {
+            assertEq(("{}head", "{}member"), group(schema, "head"));
+        }
+    }
+    references() {
+        string text = source('<xs:complexType name="Container"><xs:sequence>'
+            '<xs:element ref="head" minOccurs="0" maxOccurs="3"/>'
+            + element("local") + '</xs:sequence></xs:complexType>'
+            + element("head", "xs:int", 'final="#all"')
+            + element("member", "", 'substitutionGroup="head"'));
+        foreach XsdSchema schema in (copies(text)) {
+            XsdComplexType container = cast<XsdComplexType>(schema.findType("Container"));
+            XsdElement ref_element = container.elementmap.head;
+            assertEq(0, ref_element.minOccurs);
+            assertEq(3, ref_element.maxOccurs);
+            assertEq(("{}head", "{}member"), sort(keys ref_element.getSubstitutionGroup()));
+            assertEq({"extension": True, "restriction": True}, ref_element.getSubstitutionGroupExclusions());
+            assertEq({}, container.elementmap.local.getSubstitutionGroup());
+            assertTrue(ref_element.getSubstitutionGroup()."{}head" === schema.getElement("", "head"));
+            hash<string, XsdElement> detached = ref_element.getSubstitutionGroup();
+            remove detached."{}member";
+            assertEq(2, ref_element.getSubstitutionGroup().size());
+            schema.addSchemaString(source(element("later", "", 'substitutionGroup="member"')));
+            assertEq(("{}head", "{}later", "{}member"), sort(keys ref_element.getSubstitutionGroup()));
+        }
+    }
+    recovery() {
+        XsdSchema schema = parse(source(element("head") + element("member", "", 'substitutionGroup="head"')));
+        XsdElement head = schema.getElement("", "head");
+        foreach string body in (
+            element("good", "xs:int", 'substitutionGroup="head"') + element("bad", "xs:string", 'substitutionGroup="head"'),
+            element("good", "xs:int", 'substitutionGroup="head"') + element("bad", "xs:int", 'substitutionGroup="bad"'),
+            element("good", "xs:int", 'substitutionGroup="head"') + element("bad", "", 'substitutionGroup="missing"')
+        ) {
+            assertThrows("WSDL-ERROR", \schema.addSchemaString(), (source(body, 'finalDefault="#all"'),));
+            assertEq(("{}head", "{}member"), sort(keys head.getSubstitutionGroup()));
+            assertNothing(schema.getElement("", "good"));
+            assertNothing(schema.getElement("", "bad"));
+            assertEq({}, schema.nsc.schema_final_default);
+        }
+        schema.addSchemaString(source(element("later", "", 'substitutionGroup="member"')));
+        assertTrue(head === schema.getElement("", "head"));
+        assertEq(("{}head", "{}later", "{}member"), sort(keys head.getSubstitutionGroup()));
+        XsdSchema restored = Serializable::deserialize(schema.serialize());
+        assertEq(group(schema, "head"), group(restored, "head"));
+        XsdSchema interrupted(source(element("head")), {"try_import": string sub(string location) {
+            throw "THREAD-CANCELLED", "cancel substitution dependency construction";
+        }});
+        assertThrows("THREAD-CANCELLED", \interrupted.addSchemaString(), (source(
+            '<xs:include schemaLocation="dependency.xsd"/>' + element("member", "", 'substitutionGroup="head"')),));
+        assertEq(("{}head",), group(interrupted, "head"));
+        interrupted.addSchemaString(source(element("member", "", 'substitutionGroup="head"')));
+        assertEq(("{}head", "{}member"), group(interrupted, "head"));
+    }
+    deepGraphs() {
+        string body = element("e0");
+        for (int index = 1; index <= 96; ++index) {
+            body = element("e" + index, "", 'substitutionGroup="e' + (index - 1) + '"') + body;
+        }
+        foreach XsdSchema schema in (copies(source(body))) {
+            assertEq(97, group(schema, "e0").size());
+            assertEq(1, group(schema, "e96").size());
+            assertTrue(schema.getElement("", "e0").type === schema.getElement("", "e96").type);
+        }
+        body =~ s/name="e0" type="xs:int"/name="e0" substitutionGroup="e96"/;
+        assertThrows("WSDL-ERROR", \parse(), (source(body),));
+    }
+    concurrency() {
+        XsdSchema schema = parse(source(element("head", "xs:int", 'final="#all"')
+            + element("member", "", 'substitutionGroup="head"')));
+        Qore::Thread::Queue results();
+        Qore::Thread::Counter running();
+        on_exit assertEq(0, running.waitForZero(30s));
+        for (int worker = 0; worker < 2; ++worker) {
+            running.inc();
+            background sub() {
+                on_exit running.dec();
+                try {
+                    for (int index = 0; index < 20; ++index) {
+                        XsdSchema copy = Serializable::deserialize(schema.serialize());
+                        if (group(copy, "head") != ("{}head", "{}member")
+                                || !(copy.getElement("", "member").getSubstitutionGroupAffiliation()
+                                    === copy.getElement("", "head"))) {
+                            throw "TEST-ERROR", "substitution graph changed across readers";
+                        }
+                    }
+                    results.push(True);
+                } catch (hash<ExceptionInfo> ex) {
+                    results.push(ex);
+                }
+            }();
+        }
+        for (int worker = 0; worker < 2; ++worker) {
+            assertEq(True, results.get(30s));
+        }
+    }
+}

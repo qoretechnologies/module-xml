@@ -4,7 +4,7 @@ Copyright (C) 2026 Qore Technologies, s.r.o.
 
 Execution started 2026-09-07 on `develop` at `c81b2db`, with a clean working tree.
 The authoritative scope and acceptance criteria remain in [PLAN.md](PLAN.md).
-P1 corpus/adjudication and P2 schema/representation acceptance are complete; P3 scalar work is in progress. No scope reductions or workarounds are approved.
+P1 corpus/adjudication, P2 schema/representation, P3 scalar and P4 particle acceptance are complete; P5 content and substitution work is in progress. No scope reductions or workarounds are approved.
 
 ## P1: corpus provenance and adjudication (complete)
 
@@ -6708,3 +6708,55 @@ P6 message-shape work; the new datatype APIs and HTTP consumers are covered here
 P6-P9 retain full ownership, including operation lifetime and existing dual-binding,
 platform, CI, documentation and debug-info findings. The legacy default corpus
 still reports its type loss; capture tests do not silently change its API choice.
+
+
+## P5-06 — Element affiliation and native substitution constraints (complete increment)
+
+Parent: `725c1b2` (P5-05). Global element affiliations resolve by expanded name
+after imports and includes. Forward and transitive omitted types inherit the
+head's exact component; missing heads, cycles, incompatible types and final
+exclusions fail at construction. Concrete membership applies head element
+blocks and all intermediate complex type blocks. References keep their own
+occurrences and refer to the global graph; failed additions restore published
+membership. See the [implemented design](../../design/wsdl-element-substitution.md),
+[evidence](element-substitution-evidence.md), [inventory](P5-06-validation.json)
+and [complete audit](audits/P5-06-element-substitution.md).
+
+- 119 Qore suites pass 1215 cases/59100 reported assertions without warnings.
+  The three caught legacy comparator negatives remain intentional in their
+  successful SOAP suite. New declaration tests pass 12 cases/250 assertions;
+  new native tests pass 5 cases/168 assertions.
+- AST, IR, JIT, tiered and AOT pass the declaration suite and both independent
+  matrices. Each mode checks 72 schemas, 384 actual-binding/direction/copy rows,
+  64 required construction errors and 320 independently valid exact-value
+  outputs. The group matrix checks 62 maps and 102 documents over 31 groups.
+- The independent checks exposed missing builtin restriction flags and a wrong
+  extension-bit guard in libxml2. The private correction counts all methods.
+  Four lxml and one Xerces verdict discrepancies remain explicit normative
+  negatives, with specification and source/bytecode root causes recorded.
+- The 45-schema configure probe and 35 provider tests check real broken/fixed
+  system libraries, AUTO fallback, SYSTEM rejection, source hashes and stable
+  reconfiguration. Native regression and full-probe Valgrind runs report zero
+  errors and no lost blocks. The latter frees every allocation.
+- WSDL and five dependent qmods plus WSDL/native documentation build without
+  warnings. Compiled native-provider HTTP, Cargo/CDA and saved-provider tests,
+  the executed quantity example, prior final/native-value matrices and all
+  16 survey harness methods pass.
+- The isolated both-version corpus retains 2455 rows and all prior counts,
+  except the WSDL digest. Strict coverage retains 142 descriptions/1376
+  directions, zero selected failures, 68 broader failures and unchanged value
+  accounting. No corpus fixture or historical finding was modified.
+
+All 62 audit items are recorded: 21 Pass/41 N/A/0 Fail. Native XML changes to
+the rebuilt dependency; isolated libqore remains unchanged. Both remotes were
+fetched and included. Main Qore is still at `1c63ff2c5` with unrelated
+Azure/OpenAPI/MIME work in progress; this XML increment made no main-Qore edits,
+system installs or pushes.
+
+P5 remains in progress. Next: WSDL particle attribution for alternate member
+names and selected root identity, then native/retained conversion, providers
+and sample selection. Wildcard/mixed/generic content, complete nil/default/fixed
+and document identity remain required. P6–P9 retain their full scope, including
+binding/part-aware SoapDataProvider integration, operation lifetime, platform
+and CI acceptance. Native XML substitution coverage does not hide the WSDL
+corpus failures that require runtime member-name support.
