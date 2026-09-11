@@ -7038,3 +7038,41 @@ no Qore edit, installation or push was made in this increment.
 P5 still requires element wildcards, mixed/generic content, complete
 nil/default/fixed semantics and document identity. All remaining P6-P9 criteria
 remain required.
+
+
+## P5-12 — failed deserialization graph cleanup
+
+P5-11 was committed locally as `99565bb`. Its separately reproduced core cycle
+is fixed in main Qore develop commit `0eb8abb81`. The index invalidates failed
+objects while retaining all target references, then releases those references.
+No incomplete user destructor is invoked; escaped references are deleted objects,
+original errors remain available, successful identity is unchanged, and pending
+interruption after a native/custom hook follows the same cleanup path.
+
+The new core test passes six cases/94 assertions in AST/IR/JIT/tiered modes.
+All 20 core checks pass 130 cases/1484 assertions. Fourteen Valgrind runs have
+zero errors and no lost blocks, including the full wildcard metadata consumer
+that previously leaked, HTTP/registry consumers and existing constructor/class
+regressions. The known Debug DWARF-reader warning remains explicitly recorded.
+The native build, ordinary tests and strict release-note table processing are
+clean. The main checkout's three changed C++ files match the tested runtime.
+
+All 127 XML suites pass 1274 cases/63311 reported assertions; the legacy SOAP
+suite's three intentional caught comparator negatives remain. Nineteen AOT,
+consumer, matrix, harness and example supplements pass. Both-version survey and
+strict coverage exactly match P5-11: 2455 rows, 144 selected WSDLs/1388 directions,
+zero selected failures and 60 broader failures. Both origins were fetched with
+no incoming develop commits. No install or push was made.
+
+See [core-graph-cleanup-evidence.md](core-graph-cleanup-evidence.md),
+[P5-12-validation.json](P5-12-validation.json) and
+[the complete XML audit](audits/P5-12-core-graph-cleanup.md). The separate Qore
+commit contains its full 62-item native audit. Original failure evidence remains
+in [the core finding](p5-deserialization-cycle-finding.md).
+
+The next P5-13 native prerequisite is [strict wildcard instance-type assessment](p5-native-wildcard-type-finding.md).
+A 24-document temporary prototype confirms the early missing-declaration check
+prevents valid xsi:type assessment; moving that check after type resolution
+matches the specification and Xerces while retaining negative outcomes.
+P5 then retains element wildcard, mixed/generic, complete nil/default/fixed and
+identity requirements. P6-P9 remain required; this increment is not phase closure.

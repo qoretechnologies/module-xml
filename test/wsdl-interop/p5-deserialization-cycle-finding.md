@@ -2,8 +2,10 @@
 
 Copyright (C) 2026 Qore Technologies, s.r.o.
 
-Status: reproduced independent Qore core defect; next prerequisite P5-12 before
-continuing XML content implementation. P5-11 changes only native libxml2 behavior.
+Status: fixed by Qore develop commit `0eb8abb81` in P5-12. See
+[final evidence](core-graph-cleanup-evidence.md) and [inventory](P5-12-validation.json).
+The following sections preserve the original P5-11 failure evidence.
+P5-11 changed only native libxml2 behavior.
 The new native unit, complete C probe and native allocation-failure checks have
 zero Valgrind errors and no lost blocks. The broader existing wildcard consumer
 suite has a failed Valgrind result, retained explicitly in the P5-11 inventory.
