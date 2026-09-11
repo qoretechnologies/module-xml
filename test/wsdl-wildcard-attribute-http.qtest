@@ -1,0 +1,213 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires xml
+%requires ../qlib/WSDL.qm
+%requires ../qlib/SoapClient.qm
+%requires ../qlib/SoapHandler.qm
+%requires ../qlib/SoapDataProvider
+%requires HttpServer
+%exec-class WildcardAttributeHttpTest
+
+class WildcardAttributeHttpTest inherits QUnit::Test {
+    const Uri = "urn:qore:wildcard-attribute-http";
+    constructor() : Test("Wildcard attributes through HTTP consumers", "1.0") {
+        addTestCase("Typed and unassessed attributes survive clients, handlers and providers", \native());
+        addTestCase("Retained requests and responses preserve wildcard lexical text", \retained());
+        addTestCase("Concurrent SOAP output and failures preserve shared schema state", \concurrent());
+        addTestCase("Cancellation propagates and later wildcard serialization succeeds", \cancellation());
+        set_return_value(main());
+    }
+    private auto saved(auto value) {
+        return Serializable::deserialize(Serializable::serialize(value));
+    }
+    private WebService service(string version) {
+        string soap = "http://schemas.xmlsoap.org/wsdl/soap" + (version == "12" ? "12" : "") + "/";
+        return new WebService('<w:definitions xmlns:w="http://schemas.xmlsoap.org/wsdl/" xmlns:s="' + soap
+            + '" xmlns:xs="' + XSD_NS + '" xmlns:t="' + Uri + '" targetNamespace="' + Uri + '">'
+            '<w:types><xs:schema targetNamespace="' + Uri + '">'
+            '<xs:attribute name="number" type="xs:int"/>'
+            '<xs:element name="record"><xs:complexType><xs:anyAttribute processContents="lax"/>'
+            '</xs:complexType></xs:element></xs:schema></w:types>'
+            '<w:message name="Input"><w:part name="body" element="t:record"/></w:message>'
+            '<w:message name="Output"><w:part name="body" element="t:record"/></w:message>'
+            '<w:portType name="Port"><w:operation name="submit"><w:input message="t:Input"/>'
+            '<w:output message="t:Output"/></w:operation></w:portType>'
+            '<w:binding name="Soap" type="t:Port"><s:binding style="document" transport="http://schemas.xmlsoap.org/soap/http"/>'
+            '<w:operation name="submit"><s:operation soapAction="urn:submit"' + (version == "12"
+                ? ' soapActionRequired="false"' : '') + '/><w:input><s:body use="literal"/></w:input>'
+            '<w:output><s:body use="literal"/></w:output></w:operation></w:binding>'
+            '<w:service name="Service"><w:port name="Port" binding="t:Soap">'
+            '<s:address location="http://example.invalid/"/></w:port></w:service></w:definitions>', {"async_only": True});
+    }
+
+    private auto value(string uri = "urn:products") {
+        return {"^attributes^":{"{" + Uri + "}number":17,
+            "{" + uri + "}category":new XsdScopedLexicalValue("p:Stock", {"p":uri})}};
+    }
+    private check(auto input, string uri = "urn:products") {
+        assertEq(1, input.size());
+        assertEq(2, input."^attributes^".size());
+        assertEq(17, input."^attributes^"{"{" + Uri + "}number"});
+        XsdScopedLexicalValue category = input."^attributes^"{"{" + uri + "}category"};
+        assertEq("p:Stock", category.getLexicalValue());
+        assertEq(uri, category.getNamespaceBindings().p);
+    }
+    private native() {
+        foreach string version in ("11", "12") {
+            WebService ws = service(version);
+            WSOperation operation = ws.getBindingOperation("Soap", "submit");
+            AbstractDataProviderType input = saved(operation.input.getDataProviderType(True));
+            AbstractDataProviderType output = saved(operation.output.getDataProviderType(True));
+            HttpServer server();
+            on_exit server.stop();
+            SoapHandler handler(new PermissiveAuthenticator());
+            server.setDefaultHandler("soap", handler);
+            Queue observed();
+            code<auto(hash<auto>, auto)> callback = auto sub(hash<auto> cx, auto value) {
+                auto checked = input.acceptsValue({"body":value});
+                observed.push(checked.body);
+                return output.acceptsValue(checked);
+            };
+            handler.addMethod(ws, operation, callback, NOTHING, NOTHING, NOTHING, "Service", NOTHING,
+                NOTHING, "Soap", NOTHING, False, True);
+            server.addListener(0);
+            string url = sprintf("http://127.0.0.1:%d/Service", server.getListenerInfo(0).port);
+            SoapClient client({"wsdl":saved(ws), "url":url, "timeout":30000, "connect_timeout":30000});
+            foreach bool preserve in (False, True) {
+                auto result = client.callOperation("submit", input.acceptsValue({"body":value()}),
+                    {"binding":"Soap", "preserve_types":preserve});
+                check(observed.pop(30000));
+                check(result);
+                check(output.acceptsValue({"body":saved(result)}).body);
+            }
+            SoapDataProvider data_provider(ws, client);
+            AbstractDataProvider request = data_provider.getChildProviderEx("submit");
+            auto request_value = request.getRequestType().acceptsValue({"body":value()});
+            auto response = request.doRequest(request_value, {"binding":"Soap"});
+            check(observed.pop(30000));
+            check(request.getResponseType().acceptsValue({"body":response}).body);
+        }
+    }
+    private retained() {
+        foreach string version in ("11", "12") {
+            WebService ws = service(version);
+            WSOperation operation = ws.getBindingOperation("Soap", "submit");
+            AbstractDataProviderType provider = saved(ws.getXmlDataProviderType(Uri, "record"));
+            HttpServer server();
+            on_exit server.stop();
+            SoapHandler handler(new PermissiveAuthenticator());
+            server.setDefaultHandler("soap", handler);
+            Queue observed();
+            code<auto(hash<auto>, auto)> callback = auto sub(hash<auto> cx, auto message) {
+                XsdXmlValue value = provider.acceptsValue(message.body.body);
+                observed.push(value);
+                return {"body":value};
+            };
+            handler.addMethod(ws, operation, callback, NOTHING, NOTHING, NOTHING, "Service", NOTHING,
+                NOTHING, "Soap", NOTHING, True);
+            server.addListener(0);
+            string url = sprintf("http://127.0.0.1:%d/Service", server.getListenerInfo(0).port);
+            SoapClient client({"wsdl":saved(ws), "url":url, "timeout":30000, "connect_timeout":30000});
+            XsdXmlValue value('<t:record xmlns:t="' + Uri
+                + '" xmlns:p="urn:products" t:number="017" p:category="p:Stock"/>');
+            hash<SoapXmlMessageInfo> result = client.callOperation("submit", {"body":value},
+                {"binding":"Soap", "xml_values":True});
+            foreach XsdXmlValue received in (observed.pop(30000), result.body.body) {
+                assertEq(Uri, received.getNamespaceUri());
+                assertEq("record", received.getLocalName());
+                assertEq("017", received.getElementData()."^attributes^"."t:number");
+                assertEq("p:Stock", received.getElementData()."^attributes^"."p:category");
+                assertEq("urn:products", received.getElementData()."^attributes^"."xmlns:p");
+                assertEq(received.getXml(), provider.acceptsValue(received).getXml());
+            }
+        }
+    }
+    private concurrent() {
+        foreach string version in ("11", "12") {
+            WebService ws = service(version);
+            WSOperation operation = ws.getBindingOperation("Soap", "submit");
+            hash<auto> before = ws.nsc.getOutputNamespaceHash(NOTHING);
+            Queue ready();
+            Queue start();
+            Queue results();
+            Counter running();
+            on_exit {
+                for (int worker = 0; worker < 4; ++worker) {
+                    start.push(True);
+                }
+                assertEq(0, running.waitForZero(30s));
+            }
+            for (int worker = 0; worker < 4; ++worker) {
+                running.inc();
+                background sub(int id) {
+                    on_exit running.dec();
+                    try {
+                        ready.push(True);
+                        start.pop(30000);
+                        for (int index = 0; index < 8; ++index) {
+                            string uri = sprintf("urn:partner:%d:%d", id, index);
+                            auto native = value(uri);
+                            string xml = operation.serializeRequest({"body":native}, NOTHING, NOTHING, NOTHING,
+                                NOTHING, NOTHING, "Soap").body;
+                            auto decoded = operation.deserializeRequest(parse_xml(xml, XPF_PRESERVE_ORDER), "Soap");
+                            @assert(decoded."^attributes^"{"{" + Uri + "}number"} == 17);
+                            XsdScopedLexicalValue lexical = decoded."^attributes^"{"{" + uri + "}category"};
+                            @assert(lexical.getLexicalValue() == "p:Stock");
+                            @assert(lexical.getNamespaceBindings().p == uri);
+                        }
+                        results.push(True);
+                    } catch (hash<ExceptionInfo> error) {
+                        results.push(error);
+                    }
+                }(worker);
+            }
+            for (int worker = 0; worker < 4; ++worker) {
+                ready.pop(30000);
+            }
+            for (int worker = 0; worker < 4; ++worker) {
+                start.push(True);
+            }
+            for (int worker = 0; worker < 4; ++worker) {
+                assertEq(True, results.pop(30000));
+            }
+            assertEq(before, ws.nsc.getOutputNamespaceHash(NOTHING));
+            assertThrows("SOAP-SERIALIZATION-ERROR", \operation.serializeRequest(),
+                ({"body":{"^attributes^":{"{urn:failed}category":23}}}, NOTHING, NOTHING, NOTHING,
+                    NOTHING, NOTHING, "Soap"));
+            assertEq(before, ws.nsc.getOutputNamespaceHash(NOTHING));
+            string xml = operation.serializeRequest({"body":value()}, NOTHING, NOTHING, NOTHING,
+                NOTHING, NOTHING, "Soap").body;
+            check(operation.deserializeRequest(parse_xml(xml, XPF_PRESERVE_ORDER), "Soap"));
+        }
+    }
+    private cancellation() {
+        WebService ws = service("12");
+        WSOperation operation = ws.getBindingOperation("Soap", "submit");
+        hash<auto> before = ws.nsc.getOutputNamespaceHash(NOTHING);
+        SandboxManager manager();
+        on_exit manager.clearInterrupt();
+        Program program(PO_NEW_STYLE | PO_STRICT_ARGS | PO_REQUIRE_TYPES);
+        program.setSandboxManager(manager);
+        program.parse("%modern\n%requires ../qlib/WSDL.qm\n"
+            "string sub encode(WSOperation op, auto value, SandboxManager manager) {\n"
+            "    manager.requestInterrupt();\n"
+            "    return op.serializeRequest({\"body\":value}, NOTHING, NOTHING, NOTHING, NOTHING, NOTHING, \"Soap\").body;\n"
+            "}\n", get_script_dir() + "/wildcard-attribute-cancellation.qr");
+        *hash<ExceptionInfo> interrupted;
+        try {
+            program.callFunction("encode", operation, value(), manager);
+        } catch (hash<ExceptionInfo> error) {
+            interrupted = error;
+        }
+        manager.clearInterrupt();
+        assertTrue(exists interrupted);
+        assertTrue(interrupted.err == "THREAD-CANCELLED" || interrupted.err == "PROGRAM-INTERRUPTED");
+        assertEq(before, ws.nsc.getOutputNamespaceHash(NOTHING));
+        string xml = operation.serializeRequest({"body":value()}, NOTHING, NOTHING, NOTHING,
+            NOTHING, NOTHING, "Soap").body;
+        check(operation.deserializeRequest(parse_xml(xml, XPF_PRESERVE_ORDER), "Soap"));
+    }
+}

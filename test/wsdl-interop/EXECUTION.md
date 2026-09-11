@@ -6909,3 +6909,98 @@ P5 remains open. Next: wildcard attribute and element instance processing,
 ordered mixed/generic content, complete nil/default/fixed behavior and document
 identity constraints. P6–P9 retain all binding, protocol, attachment, independent
 peer, platform and mandatory-CI requirements.
+
+
+P5-09 was committed locally as `a2ce739` (no push).
+
+## P5-10 — Wildcard attribute instance processing (in progress)
+
+Parent: `a2ce739`. The reduced `/tmp/wsdl-p5-10-attribute-before.qr` and its
+log reproduce lost wildcard attributes and missing strict/lax instance checks.
+`anyAttribute` was a broad legacy content flag (also set by element wildcards),
+while the resolved namespace/processContents component was unused at runtime.
+The new `test/wsdl-wildcard-attributes.qtest` first failed all four cases.
+
+Current changes enforce the effective attribute wildcard independently of
+child admission, resolve global attributes through a shared completed registry,
+preserve expanded names and typed known values, and retain unassessed lexical
+text/context using the existing XsdScopedLexicalValue. Namespace contexts and
+serialized providers retain the registry. Ordinary attribute-map providers now
+validate names and constraints as well as explicit native providers.
+
+Initial unit coverage passes four cases/134 assertions. The affected 14-suite
+run found one legacy SOAP diagnostic regression: native unqualified attribute
+names supplied an uninitialized namespace string to XsdQNameValue. It was fixed
+with an explicit empty namespace; the SOAP suite now passes. Other affected
+suites passed. Provider reconstruction required a public Serializable registry
+class; the new provider class also preserves validation through soft copies.
+
+Next: imported/additional declarations and rollback, fixed/list/QName values,
+namespace collisions and malformed native attributes, inherited wildcards,
+XSD 1.0 section 3.4.4's wildcard-ID restrictions, provider metadata/soft variants,
+both SOAP bindings/directions and HTTP, independent validators, all source/AOT
+modes, full existing-suite/corpus gates, documentation and the 62-item audit.
+No P5-10 commit has been made. No C++ or main-Qore changes, install or push.
+
+
+P5-10 expansion: wildcard IDs now enforce XSD 1.0 section 3.4.4 clauses 5.1/5.2.
+Imported same-local-name declarations, fixed values, failed additions and
+reconstruction pass the initial expanded unit suite (7 cases/192 assertions).
+The XML namespace URI needs the reserved `xml` output prefix; its omission
+from the default prefix table was corrected. Malformed native names and XML
+characters now reject with serialization errors. No new native C++ changes.
+
+The independent 24-schema/192-document matrix is under development. It exposed
+a separate pre-existing native libxml2 wildcard-ID reporting defect, root-caused
+in [p5-native-wildcard-id-finding.md](p5-native-wildcard-id-finding.md) and assigned
+to the next native increment P5-11. Pinned Xerces rejects all six required
+negatives; lxml's omissions remain explicit. Native DOM/reader acceptance is
+recorded as a failure, not conformance.
+
+The first complete SOAP matrix also exposed empty wildcard-only element
+provider requiredness. Empty complex content without required attributes now
+retains its native NOTHING representation. Simple-content provider/field
+selection also accounts for effective attribute wildcards. The current unit
+suite adds simple-content/soft/provider cases; final source/compiled matrices,
+HTTP tests, corpus checks, documentation and audit remain unfinished.
+
+P5-10 implementation and acceptance are complete. The final unit suite passes
+13 cases/302 assertions; the registry ownership suite passes 2 cases/17 assertions.
+Native/retained HTTP consumers pass 4 cases/138 assertions and eight exchanges
+per execution mode. The 39-schema/324-document independent matrix passes 2592
+rows and 4248 independently validated outputs per mode. All three Qore suites
+and the matrix pass AST, IR, JIT, tiered and compiled WSDL.
+
+The audit found and corrected a provider-field admission bypass: a caller-added
+field must still satisfy the effective wildcard and available declaration.
+Required-field aliases now normalize before conversion, duplicate XML names
+reject, metadata reconstruction is checked, and unassessed context includes
+absence of a default namespace. The complete SOAP output namespace map is now
+collected after body/header conversion in per-message state. Concurrent use,
+cancellation, failed output, schema addition/rollback and saved-provider
+publication/lifetime checks pass.
+
+The final 125-suite regression gate plus the registry suite pass 1270 cases and
+62684 reported assertions without warnings or errors. The legacy SOAP suite
+still includes its three intentional caught comparator negatives. Six qmods and
+WSDL Doxygen build cleanly. All 19 compiled/consumer/previous-matrix/harness
+supplements and the compiled registry suite pass; the shipment example executes.
+
+Both-version survey completes 2455 rows. Strict coverage now selects 144 WSDLs
+and 1388 message directions, including the four original invalid
+AnyAttributeOtherStrict cases. Those four previously accepted invalid messages
+now reject correctly. Broader failures decrease from 64 to 60, with no added
+failure; no selected, value, missing or skipped failures. Historical findings
+and original corpus sources remain unchanged.
+
+See [wildcard-attributes-evidence.md](wildcard-attributes-evidence.md),
+[P5-10-validation.json](P5-10-validation.json), and the full
+[62-item audit](audits/P5-10-wildcard-attributes.md). No C++ changed; native XML
+and isolated libqore hashes match P5-09. Both origins were fetched with no incoming
+develop commits. Main Qore remains clean at 35dc29f31, ahead one. No main-Qore
+edits, installs or pushes were made.
+
+Next is P5-11's independently reproduced native wildcard-ID reporting defect.
+P5 then retains element wildcard processing, mixed/generic content, complete
+nil/default/fixed and document identity semantics. All remaining P6-P9 criteria
+remain required.

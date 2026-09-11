@@ -1,0 +1,352 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires xml
+%requires ../qlib/WSDL.qm
+%exec-class WildcardAttributesTest
+
+class WildcardAttributesTest inherits QUnit::Test {
+    const Uri = "urn:qore:wildcard-attributes";
+    constructor() : Test("Wildcard attribute instances", "1.0") {
+        addTestCase("Strict and lax validate available declarations; skip retains lexical data", \processing());
+        addTestCase("Every processing mode enforces the wildcard namespace", \namespaces());
+        addTestCase("Wildcard values preserve attributes alongside declared content", \content());
+        addTestCase("Native and reconstructed providers validate wildcard attributes", \providers());
+        addTestCase("Global additions and reconstruction preserve declaration identity and rollback", \additions());
+        addTestCase("Native attribute names and lexical XML characters are checked", \invalidNative());
+        addTestCase("Wildcard ID attributes respect declared ID uses", \identifiers());
+        addTestCase("Simple content and soft providers retain wildcard attributes", \simpleContent());
+        addTestCase("Attribute providers normalize aliases and reject duplicate XML names", \providerNames());
+        addTestCase("Inherited attribute groups, extensions and restrictions use effective wildcards", \inherited());
+        addTestCase("Imported and unqualified global attributes retain list and QName values", \imports());
+        addTestCase("Provider metadata is isolated and malformed serialized components are rejected", \metadata());
+        addTestCase("Unassessed attribute text retains default namespace absence", \defaultNamespace());
+        set_return_value(main());
+    }
+    private string source(string process, string constraint = "##any", string content = "") {
+        return '<xs:schema xmlns:xs="' + XSD_NS + '" xmlns:t="' + Uri + '" targetNamespace="' + Uri + '">'
+            '<xs:attribute name="number" type="xs:int"/><xs:attribute name="flag" type="xs:boolean"/>'
+            '<xs:attribute name="category" type="xs:QName"/>'
+            '<xs:element name="record"><xs:complexType>' + content
+            + '<xs:anyAttribute namespace="' + constraint + '" processContents="' + process + '"/>'
+            '</xs:complexType></xs:element></xs:schema>';
+    }
+    private string xml(string attributes, string content = "") {
+        return '<t:record xmlns:t="' + Uri + '" xmlns:p="urn:products" ' + attributes + '>'
+            + content + '</t:record>';
+    }
+    private auto saved(auto value) {
+        return Serializable::deserialize(Serializable::serialize(value));
+    }
+    private auto decode(XsdSchema schema, string text) {
+        XsdXmlValue value(text);
+        return schema.getElement(Uri, "record").type.deserializeValue("record", schema.getTypeMap(),
+            NOTHING, value.getElementData());
+    }
+    private string encode(XsdSchema schema, auto value) {
+        return schema.serializeXmlValue(Uri, "record", value).getXml();
+    }
+    private string lexical(auto value) {
+        return value instanceof XsdScopedLexicalValue ? value.getLexicalValue() : string(value);
+    }
+    private processing() {
+        foreach string process in ("strict", "lax", "skip") {
+            XsdSchema initial(source(process));
+            foreach XsdSchema schema in (initial, saved(initial)) {
+                auto native = decode(schema, xml('t:number="017" t:flag="1" t:category="p:Stock"'));
+                hash<auto> attrs = native."^attributes^";
+                assertEq(3, attrs.size());
+                if (process == "skip") {
+                    assertEq("017", lexical(attrs{"{" + Uri + "}number"}));
+                    assertEq("1", lexical(attrs{"{" + Uri + "}flag"}));
+                    assertEq("p:Stock", lexical(attrs{"{" + Uri + "}category"}));
+                } else {
+                    assertEq(17, attrs{"{" + Uri + "}number"});
+                    assertEq(True, attrs{"{" + Uri + "}flag"});
+                    assertEq("urn:products", attrs{"{" + Uri + "}category"}.getNamespaceUri());
+                    assertEq("Stock", attrs{"{" + Uri + "}category"}.getLocalName());
+                }
+                string output = encode(schema, saved(native));
+                assertEq(3, decode(schema, output)."^attributes^".size());
+                assertEq(output, schema.validateXmlValue(new XsdXmlValue(output)).getXml());
+                if (process == "skip") {
+                    assertEq("invalid", lexical(decode(schema, xml('t:number="invalid"'))."^attributes^"{"{" + Uri + "}number"}));
+                } else {
+                    assertThrows("SOAP-DESERIALIZATION-ERROR", \decode(), (schema, xml('t:number="invalid"')));
+                    assertThrows("SOAP-SERIALIZATION-ERROR", \encode(),
+                        (schema, {"^attributes^":{"{" + Uri + "}number":2147483648}}));
+                }
+                if (process == "strict") {
+                    assertThrows("SOAP-DESERIALIZATION-ERROR", \decode(), (schema, xml('unknown="kept"')));
+                    assertThrows("SOAP-SERIALIZATION-ERROR", \encode(), (schema, {"^attributes^":{"{}unknown":"kept"}}));
+                } else {
+                    auto value = decode(schema, xml('unknown="kept"'));
+                    assertEq("kept", lexical(value."^attributes^"."{}unknown"));
+                    assertEq("kept", lexical(decode(schema, encode(schema, value))."^attributes^"."{}unknown"));
+                    assertEq("kept", lexical(decode(schema, encode(schema,
+                        {"^attributes^":{"unknown":"kept"}}))."^attributes^"."{}unknown"));
+                }
+            }
+        }
+    }
+    private namespaces() {
+        foreach string process in ("strict", "lax", "skip") {
+            foreach string constraint in ("##other", "urn:foreign", "##local", "##targetNamespace") {
+                XsdSchema schema(source(process, constraint));
+                bool target = constraint == "##targetNamespace";
+                bool local = constraint == "##local" && process != "strict";
+                foreach bool qualified in (False, True) {
+                    string input = xml((qualified ? "t:" : "") + 'number="17"');
+                    auto value = {"^attributes^":{(qualified ? "{" + Uri + "}" : "{}") + "number":"17"}};
+                    if (qualified ? target : local) {
+                        assertEq(1, decode(schema, input)."^attributes^".size());
+                        assertEq(1, decode(schema, encode(schema, value))."^attributes^".size());
+                    } else {
+                        assertThrows("SOAP-DESERIALIZATION-ERROR", \decode(), (schema, input));
+                        assertThrows("SOAP-SERIALIZATION-ERROR", \encode(), (schema, value));
+                    }
+                }
+            }
+        }
+    }
+    private content() {
+        XsdSchema schema(source("lax", "##any", '<xs:sequence><xs:element name="quantity" type="xs:int"/>'
+            '</xs:sequence><xs:attribute name="id" type="xs:string" use="required"/>'));
+        auto native = decode(schema, xml('id="shipment" t:number="017" number="free"', '<quantity>23</quantity>'));
+        assertEq(23, native.quantity);
+        assertEq("shipment", native."^attributes^".id);
+        assertEq(17, native."^attributes^"{"{" + Uri + "}number"});
+        assertEq("free", lexical(native."^attributes^"."{}number"));
+        auto again = decode(schema, encode(schema, native));
+        assertEq(23, again.quantity);
+        assertEq("shipment", again."^attributes^".id);
+        assertEq("free", lexical(again."^attributes^"."{}number"));
+        assertThrows("SOAP-DESERIALIZATION-ERROR", \decode(), (schema, xml('t:number="17"', '<quantity>23</quantity>')));
+    }
+    private providers() {
+        XsdSchema schema(source("strict"));
+        AbstractDataProviderType native = schema.getNativeDataProviderType(Uri, "record");
+        AbstractDataProviderType ordinary = schema.getElement(Uri, "record").type.getDataProviderType();
+        foreach AbstractDataProviderType provider in (native, saved(native), ordinary, saved(ordinary)) {
+            auto value = provider.acceptsValue({"^attributes^":{"{" + Uri + "}number":17}});
+            assertEq(17, value."^attributes^"{"{" + Uri + "}number"});
+            assertThrows("RUNTIME-TYPE-ERROR", \provider.acceptsValue(),
+                ({"^attributes^":{"{" + Uri + "}number":2147483648}},));
+            assertThrows("RUNTIME-TYPE-ERROR", \provider.acceptsValue(), ({"^attributes^":{"{}unknown":"x"}},));
+        }
+    }
+    private additions() {
+        XsdSchema initial(source("strict"));
+        string foreign = '<xs:schema xmlns:xs="' + XSD_NS + '" targetNamespace="urn:foreign">'
+            '<xs:attribute name="number" type="xs:boolean" fixed="true"/></xs:schema>';
+        string input = xml('xmlns:f="urn:foreign" t:number="17" f:number="1"');
+        assertThrows("SOAP-DESERIALIZATION-ERROR", \decode(), (initial, input));
+        initial.addSchemaString(foreign);
+        foreach XsdSchema schema in (initial, saved(initial)) {
+            auto value = decode(schema, input);
+            assertEq(17, value."^attributes^"{"{" + Uri + "}number"});
+            assertEq(True, value."^attributes^"."{urn:foreign}number");
+            assertEq(True, decode(schema, encode(schema, value))."^attributes^"."{urn:foreign}number");
+            assertThrows("SOAP-DESERIALIZATION-ERROR", \decode(),
+                (schema, xml('xmlns:f="urn:foreign" f:number="false"')));
+            assertThrows("SOAP-SERIALIZATION-ERROR", \encode(),
+                (schema, {"^attributes^":{"{urn:foreign}number":False}}));
+            assertThrows("WSDL-ERROR", \schema.addSchemaString(), (foreign,));
+            assertEq(True, decode(schema, input)."^attributes^"."{urn:foreign}number");
+            assertEq(NOTHING, decode(schema, xml("")));
+        }
+    }
+    private invalidNative() {
+        XsdSchema schema(source("skip"));
+        foreach string key in ("a:b", "{urn:x}a:b", "{broken", "{}", " bad ", "xmlns",
+                "{http://www.w3.org/2000/xmlns/}p") {
+            assertThrows("SOAP-SERIALIZATION-ERROR", \encode(), (schema, {"^attributes^":{key:"x"}}));
+        }
+        assertThrows("SOAP-SERIALIZATION-ERROR", \encode(),
+            (schema, {"^attributes^":{"{}bad":"a" + chr(1)}}));
+        assertThrows("SOAP-SERIALIZATION-ERROR", \encode(),
+            (schema, {"^attributes^":{"number":"17", "{}number":"18"}}));
+        auto whitespace = decode(schema, xml('unknown="a&#9;b&#10;c&#13;d  e"'));
+        assertEq("a\tb\nc\rd  e", lexical(whitespace."^attributes^"."{}unknown"));
+        assertEq("a\tb\nc\rd  e", lexical(decode(schema, encode(schema, whitespace))."^attributes^"."{}unknown"));
+        auto xml_attr = decode(schema, xml('xml:lang="en"'));
+        assertEq("en", lexical(xml_attr."^attributes^"."{http://www.w3.org/XML/1998/namespace}lang"));
+        assertEq("en", lexical(decode(schema, encode(schema, xml_attr))
+            ."^attributes^"."{http://www.w3.org/XML/1998/namespace}lang"));
+    }
+    private identifiers() {
+        foreach string process in ("strict", "lax", "skip") {
+            foreach bool declared_id in (False, True) {
+                string text = source(process, "##any", declared_id
+                    ? '<xs:attribute name="id" type="xs:ID"/>' : "");
+                text = replace(text, '<xs:element name="record">',
+                    '<xs:attribute name="first" type="xs:ID"/><xs:attribute name="second" type="xs:ID"/>'
+                    '<xs:element name="record">');
+                XsdSchema schema(text);
+                foreach bool two in (False, True) {
+                    string input = xml('t:first="one"' + (two ? ' t:second="two"' : ""));
+                    auto value = {"^attributes^":{"{" + Uri + "}first":"one"}};
+                    if (two) {
+                        value."^attributes^"{"{" + Uri + "}second"} = "two";
+                    }
+                    if (process == "skip" || (!two && !declared_id)) {
+                        assertEq(two ? 2 : 1, decode(schema, input)."^attributes^".size());
+                        assertEq(two ? 2 : 1, decode(schema, encode(schema, value))."^attributes^".size());
+                    } else {
+                        assertThrows("SOAP-DESERIALIZATION-ERROR", \decode(), (schema, input));
+                        assertThrows("SOAP-SERIALIZATION-ERROR", \encode(), (schema, value));
+                        AbstractDataProviderType provider = schema.getNativeDataProviderType(Uri, "record");
+                        assertThrows("RUNTIME-TYPE-ERROR", \provider.acceptsValue(), (value,));
+                    }
+                }
+            }
+        }
+    }
+
+    private simpleContent() {
+        string text = source("strict");
+        text = replace(text, '<xs:element name="record">', '<xs:simpleType name="Measure"><xs:restriction base="xs:int">'
+            '<xs:enumeration value="23"/></xs:restriction></xs:simpleType><xs:element name="record">');
+        text = replace(text, '<xs:complexType>', '<xs:complexType><xs:simpleContent><xs:extension base="t:Measure">');
+        text = replace(text, '</xs:complexType>', '</xs:extension></xs:simpleContent></xs:complexType>');
+        XsdSchema initial(text);
+        foreach XsdSchema schema in (initial, saved(initial)) {
+            auto value = decode(schema, xml('t:number="017"', '023'));
+            assertEq(23, value."^value^");
+            assertEq(17, value."^attributes^"{"{" + Uri + "}number"});
+            assertEq(NOTHING, schema.getElement(Uri, "record").type.getDataProviderAllowedValues());
+            foreach AbstractDataProviderType provider in (schema.getNativeDataProviderType(Uri, "record"),
+                    schema.getElement(Uri, "record").type.getDataProviderType()) {
+                assertEq(value, provider.acceptsValue(value));
+                auto soft = saved(provider.getSoftType());
+                auto converted = soft.acceptsValue({"^value^":"23", "^attributes^":{"{" + Uri + "}number":"17"}});
+                assertEq(23, converted."^value^");
+                assertEq(17, converted."^attributes^"{"{" + Uri + "}number"});
+                assertThrows("RUNTIME-TYPE-ERROR", \soft.acceptsValue(),
+                    ({"^value^":"23", "^attributes^":{"{" + Uri + "}number":"2147483648"}},));
+                assertEq(17, decode(schema, encode(schema, converted))."^attributes^"{"{" + Uri + "}number"});
+            }
+        }
+        XsdSchema empty(source("strict"));
+        assertEq(NOTHING, empty.getNativeDataProviderType(Uri, "record").acceptsValue(decode(empty, xml(""))));
+    }
+
+    private providerNames() {
+        XsdSchema schema(source("skip", "##any", '<xs:attribute name="code" type="xs:int" use="required"/>'));
+        AbstractDataProviderType original = schema.getElement(Uri, "record").type.getDataProviderType();
+        foreach AbstractDataProviderType provider in (original, saved(original)) {
+            auto value = provider.acceptsValue({"^attributes^":{"{}code":23, "{}number":"17"}});
+            assertEq(23, value."^attributes^".code);
+            assertEq("17", lexical(value."^attributes^"."{}number"));
+            assertEq(23, decode(schema, encode(schema, value))."^attributes^".code);
+            foreach hash<auto> attributes in ({"code":23, "{}code":24},
+                    {"code":23, "number":"17", "{}number":"18"},
+                    {"code":23, "a:b":"x"}) {
+                assertThrows("RUNTIME-TYPE-ERROR", \provider.acceptsValue(), ({"^attributes^":attributes},));
+            }
+        }
+    }
+    private inherited() {
+        string preamble = '<xs:schema xmlns:xs="' + XSD_NS + '" xmlns:t="' + Uri + '" targetNamespace="' + Uri + '">';
+        string group = '<xs:attributeGroup name="Common"><xs:anyAttribute namespace="##local" processContents="skip"/>'
+            '</xs:attributeGroup><xs:complexType name="Base"><xs:attributeGroup ref="t:Common"/></xs:complexType>';
+        string extended = '<xs:complexType name="Extended"><xs:complexContent><xs:extension base="t:Base">'
+            '<xs:anyAttribute namespace="##targetNamespace" processContents="lax"/>'
+            '</xs:extension></xs:complexContent></xs:complexType>';
+        string restricted = '<xs:complexType name="Restricted"><xs:complexContent><xs:restriction base="t:Extended">'
+            '<xs:anyAttribute namespace="##targetNamespace" processContents="strict"/>'
+            '</xs:restriction></xs:complexContent></xs:complexType>';
+        foreach bool restrict in (False, True) {
+            XsdSchema initial(preamble + '<xs:attribute name="number" type="xs:int"/>' + group + extended + restricted
+                + '<xs:element name="record" type="t:' + (restrict ? 'Restricted' : 'Extended') + '"/></xs:schema>');
+            foreach XsdSchema schema in (initial, saved(initial)) {
+                auto value = decode(schema, xml('t:number="017"'));
+                assertEq(17, value."^attributes^"{"{" + Uri + "}number"});
+                assertEq(17, decode(schema, encode(schema, value))."^attributes^"{"{" + Uri + "}number"});
+                assertThrows("SOAP-DESERIALIZATION-ERROR", \decode(), (schema, xml('t:number="invalid"')));
+                assertThrows("SOAP-DESERIALIZATION-ERROR", \decode(), (schema, xml('p:number="17"')));
+                if (restrict) {
+                    assertThrows("SOAP-DESERIALIZATION-ERROR", \decode(), (schema, xml('other="keep"')));
+                } else {
+                    assertEq("keep", lexical(decode(schema, xml('other="keep"'))."^attributes^"."{}other"));
+                }
+            }
+        }
+    }
+    private imports() {
+        string foreign = '<xs:schema xmlns:xs="' + XSD_NS + '" xmlns:f="urn:foreign" targetNamespace="urn:foreign">'
+            '<xs:attribute name="numbers"><xs:simpleType><xs:list itemType="xs:int"/></xs:simpleType></xs:attribute>'
+            '<xs:attribute name="categories"><xs:simpleType><xs:list itemType="xs:QName"/></xs:simpleType></xs:attribute>'
+            '</xs:schema>';
+        string bare = '<xs:schema xmlns:xs="' + XSD_NS + '"><xs:attribute name="flag" type="xs:boolean"/></xs:schema>';
+        string text = replace(source("strict"), '<xs:attribute name="number"',
+            '<xs:import namespace="urn:foreign" schemaLocation="foreign.xsd"/>'
+            '<xs:import schemaLocation="bare.xsd"/><xs:attribute name="number"');
+        XsdSchema initial(text, {"def_path":"http://example.invalid/attributes/", "async_only":True,
+            "xsd_cache":{"http://example.invalid/attributes/foreign.xsd":foreign,
+                "http://example.invalid/attributes/bare.xsd":bare}});
+        foreach XsdSchema schema in (initial, saved(initial)) {
+            auto native = decode(schema, xml('xmlns:f="urn:foreign" flag="0" f:numbers="017 -23" f:categories="p:Stock Local"'));
+            assertEq(False, native."^attributes^"."{}flag");
+            assertEq((17, -23), native."^attributes^"."{urn:foreign}numbers");
+            assertEq("urn:products", native."^attributes^"."{urn:foreign}categories"[0].getNamespaceUri());
+            assertEq("Local", native."^attributes^"."{urn:foreign}categories"[1]);
+            AbstractDataProviderType provider = saved(schema.getElement(Uri, "record").type.getDataProviderType());
+            auto converted = provider.acceptsValue(saved(native));
+            auto restored = decode(schema, encode(schema, converted));
+            assertEq((17, -23), restored."^attributes^"."{urn:foreign}numbers");
+            assertEq("urn:products", restored."^attributes^"."{urn:foreign}categories"[0].getNamespaceUri());
+            assertEq("Local", restored."^attributes^"."{urn:foreign}categories"[1]);
+            assertThrows("SOAP-DESERIALIZATION-ERROR", \decode(),
+                (schema, xml('xmlns:f="urn:foreign" f:numbers="17 invalid"')));
+            assertThrows("SOAP-DESERIALIZATION-ERROR", \decode(),
+                (schema, xml('xmlns:f="urn:foreign" f:categories="unknown:Stock"')));
+        }
+    }
+
+    private metadata() {
+        XsdSchema schema(source("lax", "##local"));
+        XsdAttributeMapDataType provider = cast<XsdAttributeMapDataType>(schema.getElement(Uri, "record")
+            .type.getDataProviderType().getField("^attributes^").getType());
+        foreach XsdAttributeMapDataType type in (provider, saved(provider), saved(provider.getSoftType())) {
+            hash<XsdAttributeWildcardInfo> info = type.getAttributeWildcard();
+            assertEq(XsdWildcardConstraint::Set, info.constraint);
+            assertEq({"":True}, info.namespaces);
+            assertEq(XsdWildcardProcessing::Lax, info.processing);
+            info.namespaces{"urn:changed"} = True;
+            assertEq({"":True}, type.getAttributeWildcard().namespaces);
+            assertTrue(type.getInfo().can_manage_fields);
+            XsdAttributeMapDataType extended = saved(type);
+            extended.addField(new QoreDataField({"name":"{urn:changed}item", "type":AbstractDataProviderTypeMap.string,
+                "display_name":"Partner item", "desc":"An added field must still satisfy the schema wildcard."}));
+            assertThrows("RUNTIME-TYPE-ERROR", \extended.acceptsValue(), ({"{urn:changed}item":"keep"},));
+            assertThrows("RUNTIME-TYPE-ERROR", \type.acceptsValue(), ({"{urn:changed}item":"keep"},));
+        }
+        foreach hash<auto> change in ({"processing":"unchecked"}, {"constraint":"anything"},
+                {"namespaces":{"":False}}, {"excluded_namespace":23}) {
+            hash<SerializationInfo> state = provider.serializeToData();
+            string index = state._index."0"._class_data."WSDL::XsdAttributeMapDataType".wildcard._index;
+            state._index{index}._hash = "^auto";
+            state._index{index}._members += change;
+            assertThrows("DESERIALIZATION-ERROR", \Serializable::deserialize(), (state,));
+        }
+        hash<SerializationInfo> state = provider.serializeToData();
+        state._index."0"._class_data."WSDL::XsdAttributeMapDataType".declared = "invalid";
+        assertThrows("DESERIALIZATION-ERROR", \Serializable::deserialize(), (state,));
+        assertEq("keep", lexical(saved(provider).acceptsValue({"{}item":"keep"})."{}item"));
+    }
+    private defaultNamespace() {
+        XsdSchema schema(source("lax"));
+        auto native = decode(schema, xml('unknown="Local"'));
+        assertEq("", native."^attributes^"."{}unknown".getNamespaceBindings(){""});
+        native."^attributes^"{"{" + Uri + "}category"} = new XsdQNameValue("urn:products", "Stock");
+        assertThrows("SOAP-SERIALIZATION-ERROR", \encode(), (schema, native));
+        native = decode(schema, xml('xmlns="urn:lexical" unknown="Local"'));
+        auto restored = decode(schema, encode(schema, saved(native)));
+        assertEq("Local", lexical(restored."^attributes^"."{}unknown"));
+        assertEq("urn:lexical", restored."^attributes^"."{}unknown".getNamespaceBindings(){""});
+    }
+
+}

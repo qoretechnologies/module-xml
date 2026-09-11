@@ -608,7 +608,7 @@ The independent matrix checks 82 schemas through 164 actual binding parses and
 both versions/directions, providers, examples and reconstructed services. Two
 libxml2 subset verdict gaps are explicit: it admits `##local` into `##other` and
 rejects the empty set as a subset of `##other`; Xerces and Qore enforce XSD 1.0.
-Runtime wildcard value validation and preservation remain tracked under P5.
+Attribute wildcard instance validation and preservation are implemented in P5-10 below. Element wildcard processing remains tracked under P5.
 
 `test/wsdl-element-consistency.qtest` and `test_element_consistency.py` check
 conflicting element types before flat field maps merge, including nested named
@@ -1399,3 +1399,29 @@ original/reconstructed values. Both native DOM and reader paths must reject
 invalid schemas with `XSD-SYNTAX-ERROR`, while WSDL reports `WSDL-ERROR`.
 The 34-schema configure probe and allocation-failure tests live with the
 libxml2 provider tests; see `p5-native-element-consistency-finding.md`.
+
+
+## Wildcard attribute instances (P5-10)
+
+`test/wsdl-wildcard-attributes.qtest` covers effective strict/lax/skip processing,
+namespace constraints, inherited groups/derivation, imported and no-namespace
+global attributes, typed fixed/list/QName values, wildcard IDs, provider aliases,
+soft copies, malformed metadata and lossless unassessed namespace context.
+`test/wsdl-wildcard-attribute-http.qtest` exercises both actual SOAP bindings
+through clients, handlers and data providers, plus concurrent serialization,
+cancellation, failed conversion and shared-schema recovery.
+`test/wsdl-wildcard-attribute-registry.qtest` checks completed publication,
+serialized provider snapshots, detached lifetime and failed-addition rollback.
+
+`test_wildcard_attributes.py` checks 39 schemas and 324 input documents through
+request/response processing and reconstruction. lxml and pinned Xerces assess
+input and output; typed values, expanded names and unassessed lexical bindings
+are compared separately. Six lxml omissions for wildcard-ID constraints are
+explicit; the normative negative remains mandatory for Qore and Xerces.
+The separate native DOM/reader defect is recorded in
+[p5-native-wildcard-id-finding.md](p5-native-wildcard-id-finding.md) for P5-11.
+
+See [the implemented contract](../../design/wsdl-wildcard-attributes.md) and
+[execution evidence](wildcard-attributes-evidence.md). Element wildcard, mixed
+and generic content, full nil/default/fixed and document identity requirements
+remain open in P5; binding/protocol/attachment and final CI acceptance remain P6-P9.

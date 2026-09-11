@@ -80,6 +80,14 @@ module WSDL {
     @section wsdlrelnotes WSDL Module Release Notes
 
     @subsection wsdl_0_5_8 WSDL v0.5.8
+    - effective attribute wildcards enforce namespace and strict/lax/skip processing in schema, SOAP and provider
+      values; known global attributes retain typed values and unassessed attributes retain lexical namespace context
+    - wildcard attributes use expanded names in ^attributes^; inherited groups, imports and added declarations
+      retain their completed registry through schema and provider reconstruction
+    - attribute providers normalize declared aliases, reject duplicate XML names and retain wildcard constraints
+      through soft copies; empty and simple-content values keep their existing native representations
+    - SOAP output collects namespaces after body/header conversion in a separate map for each message,
+      preserving new wildcard namespaces without changing shared schema state
     - complete schema elements and document SOAP body/header parts preserve concrete substitution roots
       with portable ^element^ / ^val^ wrappers, independently of selected xsi:type wrappers
     - native providers, retained XML and samples use selected member declarations; unordered message parts
@@ -5774,8 +5782,8 @@ class XsdQNameContextHelper {
 
 #! Lexical scalar text whose interpretation depends on XML namespace bindings
 /** A union can select a string member because a prefix is unbound, or because its
-    binding excludes an earlier QName restriction. This immutable value retains
-    the original text and namespace context needed to preserve that selection.
+    binding excludes an earlier QName restriction. Unassessed wildcard attributes also require
+    their lexical text and namespace context. This immutable value retains both.
     @par Example
     A union field containing \c "category:Legacy" can retain an unbound \c category prefix
     while another field in the same SOAP message declares it for a QName value.
@@ -9434,7 +9442,7 @@ class XsdDataFieldHelper {
         }
         if (schema instanceof XsdComplexType) {
             XsdComplexType complex = cast<XsdComplexType>(schema);
-            if (!complex.attrs && complex.simpleType) {
+            if (!complex.attrs && !exists complex.getAttributeWildcard() && complex.simpleType) {
                 schema = complex.simpleType;
             }
         }
@@ -11923,6 +11931,7 @@ public class XsdNativeTypeDataField inherits QoreDataField {
         info.type = AbstractDataProviderTypeMap.any;
         XsdAbstractType scalar = schema;
         if (scalar instanceof XsdComplexType && !cast<XsdComplexType>(scalar).attrs
+                && !exists cast<XsdComplexType>(scalar).getAttributeWildcard()
                 && cast<XsdComplexType>(scalar).simpleType) {
             scalar = cast<XsdComplexType>(scalar).simpleType;
         }
@@ -12230,6 +12239,168 @@ public class XsdMessageDataType inherits HashDataType {
         }
         if (*AbstractDataProviderType other = getDefaultOtherFieldType()) {
             result.setDefaultOtherFieldType(other.getSoftType());
+        }
+        result.soft_type = True;
+        return result;
+    }
+}
+
+#! Attribute map provider enforcing namespace and processContents constraints
+/** Declared fields retain their existing metadata. Other fields use expanded attribute names and
+    resolve available global declarations before conversion. Unassessed values retain their XML text
+    and namespace context as XsdScopedLexicalValue.
+    @par Example
+    A shipment extension can accept a partner's declared quantity attribute while rejecting an
+    out-of-range quantity or an attribute outside the permitted partner namespace.
+    @since %WSDL 0.5.8
+*/
+public class XsdAttributeMapDataType inherits HashDataType {
+    private {
+        Namespaces namespaces;
+        hash<XsdAttributeWildcardInfo> wildcard;
+        hash<string, XsdAttribute> declared;
+    }
+    #! constructs an attribute provider with its effective wildcard
+    /** @param name descriptive owner name
+        @param namespaces receiving declaration namespace context and global registry
+        @param wildcard resolved wildcard namespace and processing constraints
+        @param declared the containing type's declared attribute uses
+        @throw XSD-SIMPLETYPE-ERROR invalid wildcard metadata
+    */
+    constructor(string name, Namespaces namespaces, hash<XsdAttributeWildcardInfo> wildcard,
+            hash<string, XsdAttribute> declared) : HashDataType(name) {
+        validateWildcard(wildcard, "XSD-SIMPLETYPE-ERROR");
+        self.namespaces = namespaces;
+        self.wildcard = wildcard;
+        self.declared = declared;
+    }
+    private:internal deserializeMembers(hash<auto> members) {
+        if (!(members.namespaces instanceof Namespaces) || members.wildcard.typeCode() != NT_HASH
+                || members.declared.typeCode() != NT_HASH) {
+            throw "DESERIALIZATION-ERROR", "an attribute map provider requires its namespace context and wildcard";
+        }
+        foreach auto attribute in (members.declared.iterator()) {
+            if (!(attribute instanceof XsdAttribute)) {
+                throw "DESERIALIZATION-ERROR", "an attribute map provider requires declared attribute uses";
+            }
+        }
+        validateWildcard(members.wildcard, "DESERIALIZATION-ERROR");
+        declared = members.declared;
+        namespaces = members.namespaces;
+        wildcard = members.wildcard;
+    }
+    private static validateWildcard(hash<auto> value, string error) {
+        if (!inlist(value.constraint, (XsdWildcardConstraint::Any, XsdWildcardConstraint::Not,
+                XsdWildcardConstraint::Set))
+                || !inlist(value.processing, (XsdWildcardProcessing::Skip, XsdWildcardProcessing::Lax,
+                    XsdWildcardProcessing::Strict))
+                || value.excluded_namespace.typeCode() != NT_STRING || value.namespaces.typeCode() != NT_HASH) {
+            throw error, "invalid attribute wildcard metadata";
+        }
+        foreach auto admitted in (value.namespaces.iterator()) {
+            if (admitted !== True) {
+                throw error, "an attribute wildcard namespace set requires true membership values";
+            }
+        }
+        if ((value.constraint != XsdWildcardConstraint::Set && value.namespaces)
+                || (value.constraint != XsdWildcardConstraint::Not && value.excluded_namespace)) {
+            throw error, "inconsistent attribute wildcard namespace constraints";
+        }
+    }
+    #! returns the effective namespace and processing constraints
+    /** @return a copy of the wildcard component; changing it does not alter validation */
+    hash<XsdAttributeWildcardInfo> getAttributeWildcard() {
+        return wildcard;
+    }
+    #! requires field-name validation for native hashes
+    /** @return NOTHING */
+    *Type getValueType() {
+        return;
+    }
+    #! prevents enclosing providers from bypassing wildcard admission
+    /** @return an empty map */
+    *hash<string, bool> getDirectTypeHash() {
+        return {};
+    }
+    #! converts declared and wildcard attribute values
+    /** @param input native attribute values keyed by field or expanded name
+        @return converted attributes, or NOTHING for optional omission
+        @throw RUNTIME-TYPE-ERROR invalid attribute name, namespace, declaration or value
+        @throw MISSING-VALUE-ERROR an absent required attribute
+    */
+    auto acceptsValue(auto input) {
+        if (input.typeCode() == NT_HASH) {
+            hash<string, string> fields();
+            foreach string field in (keys declared) {
+                XsdAttribute attribute = declared{field};
+                fields{type_qname(attribute.namespaceUri, attribute.name)} = field;
+            }
+            hash<auto> normalized();
+            hash<string, bool> seen();
+            foreach string key in (keys input) {
+                *XsdAttribute attribute = declared{key};
+                string identity;
+                if (attribute) {
+                    identity = type_qname(attribute.namespaceUri, attribute.name);
+                } else {
+                    XsdQNameValue qname = XsdWildcardAttributeHelper::name(key, "RUNTIME-TYPE-ERROR");
+                    identity = type_qname(qname.getNamespaceUri(), qname.getLocalName());
+                    attribute = declared{fields{identity}};
+                }
+                if (seen{identity}) {
+                    throw "RUNTIME-TYPE-ERROR", sprintf("duplicate XML attribute %Y", identity);
+                }
+                seen{identity} = True;
+                if (attribute && attribute.use == "prohibited") {
+                    throw "RUNTIME-TYPE-ERROR", sprintf("prohibited XML attribute %Y", identity);
+                }
+                normalized{fields{identity} ?? identity} = input{key};
+            }
+            input = normalized;
+        }
+        auto value = HashDataType::acceptsValue(input);
+        if (!exists value) {
+            return;
+        }
+        Namespaces output = namespaces.copy();
+        XsdQNameOutputScope output_scope(output);
+        list<string> wildcard_names();
+        foreach string key in (keys value) {
+            if (declared.hasKey(key)) {
+                continue;
+            }
+            try {
+                XsdQNameValue identity = XsdWildcardAttributeHelper::name(key, SOAP_SERIALIZATION_ERROR);
+                push wildcard_names, type_qname(identity.getNamespaceUri(), identity.getLocalName());
+                *XsdAttribute attribute = XsdWildcardAttributeHelper::declaration(namespaces, wildcard, identity,
+                    SOAP_SERIALIZATION_ERROR);
+                if (attribute) {
+                    AbstractDataProviderType provider = attribute.type.getDataProviderType();
+                    if (soft_type) {
+                        provider = provider.getSoftType();
+                    }
+                    value{key} = provider.acceptsValue(value{key});
+                }
+                auto checked = XsdWildcardAttributeHelper::encode(namespaces, output, wildcard, identity, value{key});
+                if (!attribute) {
+                    value{key} = checked;
+                }
+            } catch (hash<ExceptionInfo> ex) {
+                if (ex.err == SOAP_SERIALIZATION_ERROR) {
+                    rethrow "RUNTIME-TYPE-ERROR", ex.desc, ex.arg;
+                }
+                rethrow;
+            }
+        }
+        XsdWildcardAttributeHelper::checkIds(namespaces, wildcard, declared, wildcard_names, "RUNTIME-TYPE-ERROR");
+        return value;
+    }
+    #! returns a soft copy retaining wildcard validation
+    /** @return the same constraints with soft native field conversion */
+    AbstractDataProviderType getSoftType() {
+        XsdAttributeMapDataType result = self.copy();
+        foreach AbstractDataField field in (getFields().iterator()) {
+            result.replaceField(field.getSoftType());
         }
         result.soft_type = True;
         return result;
@@ -20511,6 +20682,107 @@ public hashdecl XsdAttributeWildcardInfo {
     XsdWildcardProcessing processing = XsdWildcardProcessing::Strict;
 }
 
+# Instance attribute admission is independent of element wildcard admission.
+class XsdWildcardAttributeHelper {
+    static XsdQNameValue name(string key, string error) {
+        string uri = "";
+        string local = key;
+        if (key.startsWith("{")) {
+            (*string namespace_uri, *string local_name) = key =~ x/^\{(.*)\}([^{}]+)$/;
+            if (!exists namespace_uri || !exists local_name) {
+                throw error, sprintf("invalid expanded wildcard attribute name %Y", key);
+            }
+            uri = namespace_uri;
+            local = local_name;
+        }
+        if (!Namespaces::isNCName(local)) {
+            throw error, sprintf("invalid wildcard attribute local name %Y", local);
+        }
+        try {
+            XsdQNameValue result(uri, uri == "http://www.w3.org/XML/1998/namespace" ? "xml:" + local : local);
+            if (uri == "http://www.w3.org/2000/xmlns/" || (!uri && local == "xmlns")) {
+                throw error, "namespace declarations are not wildcard attribute values";
+            }
+            return result;
+        } catch (hash<ExceptionInfo> ex) {
+            if (ex.err == "XSD-QNAME-VALUE-ERROR") {
+                rethrow error, ex.desc, ex.arg;
+            }
+            rethrow;
+        }
+    }
+    static *XsdAttribute declaration(Namespaces namespaces, *hash<XsdAttributeWildcardInfo> wildcard,
+            XsdQNameValue name, string error) {
+        string identity = type_qname(name.getNamespaceUri(), name.getLocalName());
+        if (!exists wildcard) {
+            throw error, sprintf("unknown attribute %Y without an attribute wildcard", identity);
+        }
+        if (!XsdAttributeWildcardHelper::allows(wildcard, name.getNamespaceUri())) {
+            throw error, sprintf("attribute %Y is not admitted by the attribute wildcard", identity);
+        }
+        if (wildcard.processing == XsdWildcardProcessing::Skip) {
+            return;
+        }
+        *XsdAttribute declaration = namespaces.getGlobalAttribute(identity);
+        if (!declaration && wildcard.processing == XsdWildcardProcessing::Strict) {
+            throw error, sprintf("strict wildcard attribute %Y requires a global declaration", identity);
+        }
+        return declaration;
+    }
+    static checkIds(Namespaces namespaces, *hash<XsdAttributeWildcardInfo> wildcard,
+            hash<string, XsdAttribute> declared, list<string> names, string error) {
+        if (!exists wildcard || wildcard.processing == XsdWildcardProcessing::Skip) {
+            return;
+        }
+        bool found = False;
+        foreach string identity in (names) {
+            *XsdAttribute attribute = namespaces.getGlobalAttribute(identity);
+            if (!attribute || !XsdTypeDerivationHelper::isIdDerived(attribute.type)) {
+                continue;
+            }
+            if (found) {
+                throw error, "an element cannot have more than one wildcard ID attribute";
+            }
+            found = True;
+        }
+        if (found) {
+            foreach XsdAttribute attribute in (declared.iterator()) {
+                if (XsdTypeDerivationHelper::isIdDerived(attribute.type)) {
+                    throw error, "a wildcard ID attribute is forbidden when the type has a declared ID attribute use";
+                }
+            }
+        }
+    }
+    static auto decode(Namespaces namespaces, *hash<XsdAttributeWildcardInfo> wildcard,
+            string identity, string value) {
+        XsdQNameValue qname = name(identity, SOAP_DESERIALIZATION_ERROR);
+        *XsdAttribute attribute = declaration(namespaces, wildcard, qname, SOAP_DESERIALIZATION_ERROR);
+        return attribute ? attribute.getValue(value) : new XsdScopedLexicalValue(value, {"":""} + (QNameInputNamespaces ?? {}));
+    }
+    static auto encode(Namespaces declarations, Namespaces output, *hash<XsdAttributeWildcardInfo> wildcard,
+            XsdQNameValue name, auto value) {
+        *XsdAttribute attribute = declaration(declarations, wildcard, name, SOAP_SERIALIZATION_ERROR);
+        if (attribute) {
+            return attribute.serializeAttributeValue(output, value);
+        }
+        if (value instanceof XsdScopedLexicalValue) {
+            return value;
+        }
+        if (value.typeCode() != NT_STRING) {
+            throw SOAP_SERIALIZATION_ERROR, "an unassessed wildcard attribute requires XML text or XsdScopedLexicalValue";
+        }
+        # The carrier validates XML characters while retaining the supplied unbound namespace context.
+        try {
+            return new XsdScopedLexicalValue(value, {"":""});
+        } catch (hash<ExceptionInfo> ex) {
+            if (ex.err == "XSD-SCOPED-VALUE-ERROR") {
+                rethrow SOAP_SERIALIZATION_ERROR, ex.desc, ex.arg;
+            }
+            rethrow;
+        }
+    }
+}
+
 # Construction algebra follows XSD 1.0's intensional rules, including non-expressible combinations.
 class XsdAttributeWildcardHelper {
     static hash<XsdAttributeWildcardInfo> parse(auto declaration, *string target_namespace, string term = "anyAttribute") {
@@ -21613,7 +21885,7 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
         otherwise the existing scalar choices
     */
     *list<auto> getDataProviderAllowedValues() {
-        return simpleType && attrs ? NOTHING : getAllowedValues();
+        return simpleType && (attrs || exists attribute_wildcard) ? NOTHING : getAllowedValues();
     }
 
     finalize(hash<string, XsdAbstractType> tmap, Namespaces nsc, *hash<string, XsdGroup> groupMap,
@@ -22134,7 +22406,7 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
 
     AbstractDataProviderType getDataProviderType() {
         AbstractDataProviderType rv = getDataProviderTypeIntern();
-        return nillable || (!required && !hasRequiredAttributes())
+        return nillable || ((!required || isEmpty()) && !hasRequiredAttributes())
             ? rv.getOrNothingType()
             : rv;
     }
@@ -22150,10 +22422,12 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
 
     #! adds the existing public attribute hash to a complex content provider type
     private HashDataType addAttributeFields(HashDataType rv) {
-        if (!attrs) {
+        if (!attrs && !exists attribute_wildcard) {
             return rv;
         }
-        HashDataType attributes(name + " attributes");
+        HashDataType attributes = exists attribute_wildcard
+            ? new XsdAttributeMapDataType(name + " attributes", nsc, attribute_wildcard, attrs)
+            : new HashDataType(name + " attributes");
         *hash<auto> defaults;
         foreach string key in (keys attrs) {
             XsdAttribute attr = attrs{key};
@@ -22181,7 +22455,7 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
             }
             attributes.addField(XsdDataFieldHelper::create(attr.type, info));
         }
-        if (anyAttribute) {
+        if (exists attribute_wildcard) {
             attributes.setDefaultOtherFieldType(AbstractDataProviderType::get(AbstractDataProviderType::anyType));
         }
         bool mandatory = hasRequiredAttributes();
@@ -22189,7 +22463,10 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
             "name": "^attributes^",
             "display_name": "XML attributes",
             "short_desc": "XML attribute values",
-            "desc": "XML attribute values keyed by local name, or expanded name when local names collide",
+            "desc": exists attribute_wildcard
+                ? "Declared XML attributes use their field names. Wildcard attributes use expanded names such as "
+                    "`{urn:partner}quantity`; unassessed text retains its namespace context."
+                : "XML attribute values keyed by local name, or expanded name when local names collide",
             "type": mandatory ? attributes : attributes.getOrNothingType(),
             "default_value": mandatory ? NOTHING : defaults,
         }));
@@ -22220,7 +22497,7 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
         }
         switch (cx_type) {
             case XET_SIMPLE:
-                if (attrs) {
+                if (attrs || exists attribute_wildcard) {
                     QoreDataField value_field = XsdDataFieldHelper::create(simpleType, {
                         "name": "^value^",
                         "display_name": "Value",
@@ -22263,7 +22540,7 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
             }
 
             case XET_NONE:
-                if (attrs) {
+                if (attrs || exists attribute_wildcard) {
                     return addAttributeFields(new HashDataType(name));
                 }
                 return AbstractDataProviderType::get(AbstractDataProviderType::nothingType);
@@ -22320,19 +22597,36 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
         if (h.typeCode() == NT_HASH) {
             if (h."^attributes^") {
                 hash<auto> mah = remove h."^attributes^";
-                foreach string k in (keys mah) {
-                    if (!attrs{k}) {
-                        throw SOAP_SERIALIZATION_ERROR, sprintf("cannot set unknown attribute %y of element %y; known "
-                            "attributes: %y", k, getName(), attrs.keys());
-                    }
-                    if (attrs{k}.use == "prohibited") {
-                        throw SOAP_SERIALIZATION_ERROR, sprintf("cannot set attribute %y of element %y; the WSDL "
-                            "marks this attribute as prohibited", k, getName());
-                    }
-                    # attribute values must be serialized according to their type like element values; a missing
-                    # value is left untouched so that the check for required attributes below still catches it
-                    ah{attrs{k}.getXmlName(nsc)} = exists mah{k} ? attrs{k}.serializeAttributeValue(nsc, mah{k}) : mah{k};
+                hash<string, XsdAttribute> declared_attributes();
+                foreach XsdAttribute attribute in (attrs.iterator()) {
+                    declared_attributes{type_qname(attribute.namespaceUri, attribute.name)} = attribute;
                 }
+                list<string> wildcard_names();
+                foreach string k in (keys mah) {
+                    *XsdAttribute attribute = attrs{k} ?? declared_attributes{k};
+                    string wire_name;
+                    auto value;
+                    if (attribute) {
+                        if (attribute.use == "prohibited") {
+                            throw SOAP_SERIALIZATION_ERROR, sprintf("cannot set prohibited attribute %Y", k);
+                        }
+                        wire_name = attribute.getXmlName(nsc);
+                        value = exists mah{k} ? attribute.serializeAttributeValue(nsc, mah{k}) : mah{k};
+                    } else {
+                        XsdQNameValue identity = XsdWildcardAttributeHelper::name(k, SOAP_SERIALIZATION_ERROR);
+                        push wildcard_names, type_qname(identity.getNamespaceUri(), identity.getLocalName());
+                        wire_name = identity.getNamespaceUri()
+                            ? nsc.getOutputNamespacePrefix(identity.getNamespaceUri()) + ":" + identity.getLocalName()
+                            : identity.getLocalName();
+                        value = XsdWildcardAttributeHelper::encode(self.nsc, nsc, attribute_wildcard, identity, mah{k});
+                    }
+                    if (ah.hasKey(wire_name)) {
+                        throw SOAP_SERIALIZATION_ERROR, sprintf("duplicate attribute %Y", wire_name);
+                    }
+                    ah{wire_name} = value;
+                }
+                XsdWildcardAttributeHelper::checkIds(self.nsc, attribute_wildcard, attrs, wildcard_names,
+                    SOAP_SERIALIZATION_ERROR);
             }
             foreach string k in (keys h) {
                 if (k =~ /^\^comment/) {
@@ -22687,12 +22981,17 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
             }
         }
 
+        list<string> wildcard_names();
         foreach string identity in (keys expanded_attributes) {
-            if (!declared_attributes{identity} && !XsdBase::isInstanceAttribute(identity) && !anyAttribute) {
-                throw SOAP_DESERIALIZATION_ERROR, sprintf("unknown attribute %Y for element %Y", identity, en);
+            if (!declared_attributes{identity} && !XsdBase::isInstanceAttribute(identity)) {
+                push wildcard_names, identity;
+                ah{identity} = XsdWildcardAttributeHelper::decode(nsc, attribute_wildcard, identity,
+                    expanded_attributes{identity});
             }
         }
 
+        XsdWildcardAttributeHelper::checkIds(nsc, attribute_wildcard, attrs, wildcard_names,
+            SOAP_DESERIALIZATION_ERROR);
         if (attr) {
             remove val."^attributes^";
         }
@@ -22766,7 +23065,12 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
         if (ah) {
             if (RetainedXmlValidationNamespaces && particle) {
                 foreach string field in (keys ah) {
-                    attrs{field}.serializeAttributeValue(RetainedXmlValidationNamespaces, ah{field});
+                    if (attrs{field}) {
+                        attrs{field}.serializeAttributeValue(RetainedXmlValidationNamespaces, ah{field});
+                    } else {
+                        XsdWildcardAttributeHelper::encode(nsc, RetainedXmlValidationNamespaces, attribute_wildcard,
+                            XsdWildcardAttributeHelper::name(field, SOAP_SERIALIZATION_ERROR), ah{field});
+                    }
                 }
             }
             rh."^attributes^" = ah;
@@ -23420,6 +23724,7 @@ public class WSMessage inherits WSDL::XsdNamedData {
         @param ons receives the output namespace prefix
     */
     auto serializeRpcValue(string part, bool encoded, reference<hash<auto>> h, reference<string> ons) {
+        Namespaces output_namespaces = QNameOutputNamespaces ?? nsc;
         XsdNativeTypeOutputScope type_scope(tmap);
         string key = pmap{part};
         auto v = getValueFromHash(key, \h, True);
@@ -23437,10 +23742,10 @@ public class WSMessage inherits WSDL::XsdNamedData {
         #printf("DEBUG: part: %y, key: %y, with %y\n", part, key, args{key});
         #printf("DEBUG: serializeRpcValue, part: %y, key: %y, val: %y\n", part, key, v."^val^" ?? v);
         if (args{key}.element) {
-            hv = args{key}.element.serializeValue(nsc, v, !encoded, key, name);
-            ons = nsc.getOutputNamespacePrefix(args{key}.element.ns);
+            hv = args{key}.element.serializeValue(output_namespaces, v, !encoded, key, name);
+            ons = output_namespaces.getOutputNamespacePrefix(args{key}.element.ns);
         } else {
-            hv = XsdDocumentValueHelper::serializePartValue(args{key}.type, nsc, v, !encoded);
+            hv = XsdDocumentValueHelper::serializePartValue(args{key}.type, output_namespaces, v, !encoded);
             ons = args{key}.type.getOutputNamespacePrefix();
         }
         #printf("DEBUG: arg %s got %y from %y (%y)\n", part, hv, v, exists args{key}.element ? args{key}.element : args{key}.type);
@@ -23458,6 +23763,7 @@ public class WSMessage inherits WSDL::XsdNamedData {
         @param fault @ref True if serializing a fault response
      */
     *hash<auto> serializeRpc(*softlist<auto> parts, *WSDL::BindingMessageDescription msginfo, *MultiPartRelatedMessage mpm, string n_name, bool encoded, reference<auto> h, bool fault) {
+        Namespaces output_namespaces = QNameOutputNamespaces ?? nsc;
         hash<auto> rh;
         #printf("DEBUG: message %s: parts: %y, pmap: %y, h: %y\n", name , parts, pmap, ,h);
         foreach string part in (parts ?? keys pmap) {
@@ -23476,7 +23782,7 @@ public class WSMessage inherits WSDL::XsdNamedData {
                 mpm.addPart(hv, sprintf("<%s>", k), partContentType);
                 hv = {"^attributes^": {"href": "cid:" + k}};
             }
-            rh{args{k}.element ? args{k}.element.getXmlName(nsc) : k} = hv;
+            rh{args{k}.element ? args{k}.element.getXmlName(output_namespaces) : k} = hv;
         }
 
         if (rh) {
@@ -23491,7 +23797,7 @@ public class WSMessage inherits WSDL::XsdNamedData {
                 return rh;
             }
 
-            return {nsc.getTargetNamespaceOutputPrefix() + ":" + n_name: rh};
+            return {output_namespaces.getTargetNamespaceOutputPrefix() + ":" + n_name: rh};
         }
     }
 
@@ -23508,6 +23814,7 @@ public class WSMessage inherits WSDL::XsdNamedData {
         Multiple selected parts require part or element wrappers to identify ownership.
      */
     *hash<auto> serializeDocument(*softlist<auto> parts, *WSDL::BindingMessageDescription msginfo, *MultiPartRelatedMessage mpm, bool encoded, reference<auto> h, bool fault) {
+        Namespaces output_namespaces = QNameOutputNamespaces ?? nsc;
         XsdNativeTypeOutputScope type_scope(tmap);
         hash<auto> rh;
         *hash<string, string> xml_attributes;
@@ -23580,11 +23887,11 @@ public class WSMessage inherits WSDL::XsdNamedData {
                         "retained XML values require an element-based literal SOAP part";
                 }
                 XsdSoapXmlHelper::validate(val, SOAP_SERIALIZATION_ERROR);
-                auto native = arg.element.validateXmlValue(val, nsc, tmap);
+                auto native = arg.element.validateXmlValue(val, output_namespaces, tmap);
                 XsdSoapXmlHelper::mergeContext(\xml_attributes, cast<XsdXmlValue>(val).getInheritedXmlAttributes());
                 # Headers are serialized in separate calls and merged, so the marker must include
                 # both message and part identity rather than a per-call numeric index.
-                rh{sprintf("^xml^%d:%s:%s", name.length(), name, p)} = XsdQNameOutputScope::retains(nsc)
+                rh{sprintf("^xml^%d:%s:%s", name.length(), name, p)} = XsdQNameOutputScope::retains(output_namespaces)
                     ? new XsdQNameXmlFragment(cast<XsdXmlValue>(val), native) : cast<XsdXmlValue>(val).getXml();
                 push emitted_parts, p;
                 push emitted_names, cast<XsdXmlValue>(val).getExpandedName();
@@ -23599,14 +23906,14 @@ public class WSMessage inherits WSDL::XsdNamedData {
                 mpm.addPart(val, sprintf("<%s>", k), partContentType);
                 # For document style with element parts, use element name with namespace
                 if (arg.element) {
-                    rh{arg.element.getXmlName(nsc)} = {"^attributes^": {"href": "cid:" + k}};
+                    rh{arg.element.getXmlName(output_namespaces)} = {"^attributes^": {"href": "cid:" + k}};
                 } else {
                     rh{p} = {"^attributes^": {"href": "cid:" + k}};
                 }
             } else if (arg.element) {
                 XsdElement selected = XsdElementValueHelper::select(arg.element, \val);
-                auto th = selected.serializeValue(nsc, val, !encoded, k, name);
-                string wire_name = selected.getXmlName(nsc);
+                auto th = selected.serializeValue(output_namespaces, val, !encoded, k, name);
+                string wire_name = selected.getXmlName(output_namespaces);
                 if (rh.hasKey(wire_name)) {
                     throw SOAP_SERIALIZATION_ERROR, sprintf("multiple message parts select element %Y", wire_name);
                 }
@@ -23614,7 +23921,7 @@ public class WSMessage inherits WSDL::XsdNamedData {
                 push emitted_parts, p;
                 push emitted_names, selected.getExpandedName();
             } else {
-                auto th = XsdDocumentValueHelper::serializePartValue(arg.type, nsc, val, !encoded);
+                auto th = XsdDocumentValueHelper::serializePartValue(arg.type, output_namespaces, val, !encoded);
                 rh{p} = th;
                 push emitted_parts, p;
                 push emitted_names, type_qname("", p);
@@ -24194,7 +24501,8 @@ public class SoapBinding inherits WSDL::OperationalBinding {
 
         MultiPartRelatedMessage mpm;
 
-        XsdQNameOutputScope output_scope(op.nsc);
+        Namespaces output_namespaces = op.nsc.copy();
+        XsdQNameOutputScope output_scope(output_namespaces);
         XsdQNameXmlOutputHelper output();
         rv.body = make_xml(output.prepare(serializeSoapMessage(op, msg, h, header, nsh, request, soap12, \mpm, faultmsg)), xml_opts, enc);
 
@@ -24243,7 +24551,7 @@ public class SoapBinding inherits WSDL::OperationalBinding {
 
         hash<auto> rh = hash(soap12 ? WSDL::ENVELOPE_12_NS : WSDL::ENVELOPE_11_NS);
         string soapenvEnvelope = rh.firstKey();
-        rh{soapenvEnvelope}."^attributes^" += op.nsc.getOutputNamespaceHash(nsh);
+        Namespaces output_namespaces = QNameOutputNamespaces ?? op.nsc;
 
         BindingMessageDescription bmd = self{io};
 
@@ -24305,7 +24613,7 @@ public class SoapBinding inherits WSDL::OperationalBinding {
                         } else if (!key.startsWith("^")) {
                             list<string> qname = key.split(":");
                             push emitted_header_names, type_qname(qname.size() == 2
-                                ? hdr.msg.nsc.getOutputNamespaceUri(qname[0]) : "", qname[-1]);
+                                ? output_namespaces.getOutputNamespaceUri(qname[0]) : "", qname[-1]);
                             if (outh.hasKey(key)) {
                                 throw SOAP_SERIALIZATION_ERROR, sprintf("multiple header parts select element %Y", key);
                             }
@@ -24377,6 +24685,9 @@ public class SoapBinding inherits WSDL::OperationalBinding {
                 rh{soapenvEnvelope}."soapenv:Body" = body;
             }
         }
+        # Body and header values can introduce namespaces absent from the schema. Publish the
+        # complete per-message map only after every part has allocated its output names.
+        rh{soapenvEnvelope}."^attributes^" += output_namespaces.getOutputNamespaceHash(nsh);
         return rh;
     }
 
@@ -25696,6 +26007,40 @@ class NamespacePrefixHelper {
     }
 }
 
+#! Shared completed global attributes for a schema's declaration namespace contexts
+/** Serialized provider graphs retain this registry independently of their source schema.
+    @note Replacement is a schema-construction operation and must precede concurrent reads.
+    @since %WSDL 0.5.8
+*/
+public class XsdGlobalAttributeRegistry inherits Serializable {
+    private {
+        hash<string, XsdAttribute> attributes();
+    }
+    private:internal deserializeMembers(hash<auto> members) {
+        if (members.attributes.typeCode() != NT_HASH) {
+            throw "DESERIALIZATION-ERROR", "a global attribute registry requires its declaration map";
+        }
+        foreach auto value in (members.attributes.iterator()) {
+            if (!(value instanceof XsdAttribute)) {
+                throw "DESERIALIZATION-ERROR", "a global attribute registry requires attribute declarations";
+            }
+        }
+        attributes = members.attributes;
+    }
+    #! replaces the completed declaration map
+    /** @param attributes global attributes indexed by expanded name */
+    replace(hash<string, XsdAttribute> attributes) {
+        self.attributes = attributes;
+    }
+    #! resolves a global attribute
+    /** @param identity the expanded name
+        @return its declaration, or NOTHING if it is not available
+    */
+    *XsdAttribute get(string identity) {
+        return attributes{identity};
+    }
+}
+
 #! namespace container class
 public class Namespaces inherits Serializable {
     public {
@@ -25724,6 +26069,8 @@ public class Namespaces inherits Serializable {
     }
 
     private {
+        XsdGlobalAttributeRegistry global_attributes();
+
         #! maps output namespace prefixes to namespace URIs
         hash<string, string> ns = {
             "xsd": XSD_NS,
@@ -25776,6 +26123,7 @@ public class Namespaces inherits Serializable {
 
         #! maps namespaces to default prefixes
         const DefaultPrefixes = {
+            "http://www.w3.org/XML/1998/namespace": "xml",
             SOAP_ENCODING: "soapenc",
             XSD_NS: "xsd",
             XSI_NS: "xsi",
@@ -25793,6 +26141,7 @@ public class Namespaces inherits Serializable {
             # prefixes before allocating any for this schema so later merging cannot reassign them.
             ns = nsc.ns;
             nsr = nsc.nsr;
+            global_attributes = nsc.global_attributes;
         }
         if (!nsh.targetNamespace && targetNamespace) {
             chameleon_ns = targetNamespace;
@@ -25813,6 +26162,24 @@ public class Namespaces inherits Serializable {
 
         base_types += nsc.base_types;
         #printf("*** DEBUG: Namespaces::constructor() imap: %y\n", imap);
+    }
+
+    #! publishes completed schema attribute declarations to the shared instance registry
+    /** @param attributes global declarations indexed by expanded name
+        @note Schema construction calls this after successful resolution; updates must precede concurrent use.
+        @since %WSDL 0.5.8
+    */
+    setGlobalAttributes(hash<string, XsdAttribute> attributes) {
+        global_attributes.replace(attributes);
+    }
+
+    #! resolves an instance attribute independently of source-prefix spelling
+    /** @param identity the expanded global attribute name
+        @return its declaration, or NOTHING if none is available
+        @since %WSDL 0.5.8
+    */
+    *XsdAttribute getGlobalAttribute(string identity) {
+        return global_attributes.get(identity);
     }
 
     *string getDefaultNs() {
@@ -26778,6 +27145,7 @@ public class XsdSchema inherits WSDL::XsdBase {
             groupMap = old_groups;
             attrGroupMap = old_attribute_groups;
             attributeMap = old_attributes;
+            nsc.setGlobalAttributes(old_attributes);
             import_map = old_imports;
             schema_dependencies = old_dependencies;
             schema_sources = old_sources;
@@ -27715,6 +28083,7 @@ public class XsdSchema inherits WSDL::XsdBase {
         resolveElementSubstitutionGroups(global_declarations);
         # Membership can change existing content models during an incremental addition.
         validateSubstitutionParticles(global_declarations);
+        nsc.setGlobalAttributes(attributeMap);
     }
 }
 
