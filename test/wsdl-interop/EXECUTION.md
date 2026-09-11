@@ -6597,3 +6597,66 @@ P5 remains in progress: native selected-type retention, element substitution and
 final exclusions, wildcard/mixed/generic content, nil/default/fixed and document
 identity requirements remain. P6-P9 retain full ownership, including the known
 dual-binding diagnostic and platform/CI/docs/debug-info findings.
+
+
+## P5-04 — Portable native type capture (complete increment)
+
+Parent: `c0b4633` (P5-03). Explicit `preserve_types` decoding retains selected
+types at element and WSDL type-part boundaries using `XsdQNameValue` in the
+existing `^type^`/`^val^` wrapper. Saved values and receiving schemas can be
+reconstructed independently. Output resolves the QName against its own schema
+and repeats derivation, block, abstract, facet and content checks. Existing
+component wrappers keep strict component identity; default native shapes are
+unchanged. SoapClient call options and SoapHandler registration expose capture
+explicitly. Conflicting XML/native representation choices reject before I/O or
+registration. The [implemented contract](../../design/wsdl-native-type-values.md)
+and [evidence](native-type-values-evidence.md) document the decisions.
+
+The [validation inventory](P5-04-validation.json) and
+[62-item audit](audits/P5-04-native-type-values.md) record **19 Pass / 43 N/A / 0 Fail**:
+
+- 116 Qore suites pass 1187 cases/58265 reported assertions without warnings.
+  Three caught legacy SOAP comparator negatives are intentional within their
+  successful suite. Cargo, CDA and SOAP provider consumers remain in the gate.
+- The new unit suite passes 17 cases/486 assertions in AST, IR, JIT, tiered and
+  compiled WSDL/SoapClient/SoapHandler. It includes invalid receiver definitions,
+  root/header/type-part boundaries, independent copies, nil/list/QName values,
+  cancellation, synchronized consumers and 24 local HTTP calls.
+- The 105-case matrix (63 valid/42 invalid) passes in all five modes. Each mode
+  checks 840 actual SOAP 1.1/1.2 request/response/copy rows, requires 336 rejecting
+  rows in both conversion paths and independently validates 1008 outputs with
+  exact values and expanded names. Both pinned input validators agree.
+- The original W3C TypeSubstitutionUsingXsiType example passes with capture:
+  8 actual-binding/direction/schema-copy rows validate 2 original inputs and 24
+  native/retained outputs, preserving part numbers, derived description and Part2.
+  Original hashes are checked; the SOAP 1.2 derivative changes only the WSDL
+  binding extension namespace and asserts the binding identity.
+- AOT builds all three changed modules; the inventory records exact variant and
+  byte counts. All three module documentation targets and the executed invoice
+  example pass. Prior type substitution/final/identity, union composition,
+  attribute values and all 16 survey harness methods pass.
+- The isolated both-version corpus preserves all 2455 survey rows and every
+  previous result except the WSDL digest. Strict coverage retains 142 descriptions/
+  1376 directions, zero selected failures and 68 broader failures. Value counts
+  remain 1264 ok/0 failed/196 unreachable/812 unassessed/0 missing/0 skipped.
+
+Root-wrapper extraction and header flattening originally mishandled selected
+native roots. The audit also caught incorrect wrapper acceptance in attribute
+and simple-content text serialization. Wrapper handling now has a separate
+WSDL type-part entry point, and eight negative scalar-context cases prevent
+regressions. All boundaries are fixed and the full final gate was rerun.
+A temporary reconstructed service exposed pre-existing weak operation/message dependencies. Its committed
+source reduction and full P6 ownership are recorded in
+[the lifetime finding](p6-operation-lifetime-finding.md); it is not counted as a
+passing detached-operation test. Malformed test callbacks and temporary example
+syntax were corrected before the final passing runs.
+
+Native XML and isolated libqore hashes remain unchanged. No C++ edits, Valgrind
+rerun, installation or push occurred. Both remotes were fetched and already
+included; main Qore remains clean at `1c63ff2c5`.
+
+P5 remains in progress. Next: native provider integration and sample/consumer
+acceptance. Element final/substitution groups, wildcard/mixed/generic content,
+complete nil/default/fixed and document identity remain required. P6-P9 retain
+their full scope. The default diagnostic corpus still reports its native type
+loss; explicit capture tests do not silently change that report's API choice.

@@ -2,7 +2,7 @@
 
 Copyright (C) 2026 Qore Technologies, s.r.o.
 
-Status: P1 corpus/adjudication, P2 schema/representation, P3 scalar and P4 particle acceptance are complete on `develop`; P5 is in progress with native type identity, annotation ownership, construction-time final exclusions and instance derivation/block/abstract controls implemented.
+Status: P1 corpus/adjudication, P2 schema/representation, P3 scalar and P4 particle acceptance are complete on `develop`; P5 is in progress with native type identity, annotation ownership, construction-time final exclusions, instance derivation/block/abstract controls and explicit portable native type capture implemented. Native provider integration and the remaining P5 content semantics are open.
 See [EXECUTION.md](EXECUTION.md) for acceptance evidence and remaining implementation criteria.
 Prepared 2026-09-07 after `cc13171` on `develop`.
 Keep proposals here; put durable implementation details in `design/` only after implementation.
@@ -193,6 +193,8 @@ are negative tests. Include collisions between identical local names in differen
 - Replay pinned CXF contracts and golden messages, including the README's bare/RPC/headers/empty-parts
   examples. Build actual SOAP 1.2 binding tests; accepting a SOAP 1.2 envelope through a SOAP 1.1 contract
   must not be counted as SOAP 1.2 binding coverage.
+- Resolve the independently reproduced [operation handle ownership defect](p6-operation-lifetime-finding.md)
+  as part of component/consumer lifecycle checks, including complete binding/header dependencies.
 
 **Acceptance:** every advertised binding has parse, serialize, deserialize and local HTTP integration
 coverage for both directions. Correct operation/part/QName selection is independently asserted. Invalid

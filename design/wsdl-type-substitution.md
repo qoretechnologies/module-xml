@@ -54,7 +54,9 @@ owned type annotation. A different anonymous component cannot provide an
 are handled before instantiation checks.
 
 `XsdXmlValue` keeps the original type annotation in its immutable source XML.
-Native conversion retains the established scalar/record field shapes. Callers
+Native conversion retains the established scalar/record field shapes by default.
+The explicit [native type capture option](wsdl-native-type-values.md) retains
+portable selected QNames and values for independent reconstruction. Callers
 that need the complete XML instance can use the retained XML APIs; callers that
 select a native type explicitly use the existing `^type^`/`^val^` wrapper. For
 example, an invoice can select a concrete taxable amount derived from its base:

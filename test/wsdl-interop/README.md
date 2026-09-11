@@ -1329,5 +1329,17 @@ type QName; native values retain the established field shapes. See the
 [implemented design](../../design/wsdl-type-substitution.md),
 [specification evidence](type-substitution-evidence.md) and
 [validation inventory](P5-03-validation.json). P5 remains open for
-native selected-type retention, element substitution, generic/mixed/wildcard
+provider integration with selected native types, element substitution, generic/mixed/wildcard
 content, complete nil/default/fixed semantics and document identity constraints.
+
+Explicit native type capture is covered by `test/wsdl-native-type-values.qtest`
+and `test_native_type_values.py`. The Qore suite checks 17 cases and 486 assertions,
+including root/body/header boundaries, saved values with independent receiving
+schemas, invalid selections, cancellation, concurrency and 24 local HTTP calls.
+The independent 105-case matrix checks 840 rows, requires 336 rejecting rows and
+validates 1008 outputs per execution mode. Actual SOAP 1.1 and SOAP 1.2 bindings
+exercise both directions. Set `QORE_EXEC_MODE=ast|ir|jit|tiered` for the matrix.
+See the [portable value contract](../../design/wsdl-native-type-values.md) and
+[evidence](native-type-values-evidence.md). Default native results and provider
+metadata keep their existing shapes. P6 also owns the independently reproduced
+[operation handle lifetime defect](p6-operation-lifetime-finding.md).

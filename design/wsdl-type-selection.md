@@ -73,5 +73,6 @@ and [Element Locally Valid](https://www.w3.org/TR/2004/REC-xmlschema-1-20041028/
 The executable scope is recorded by `test/wsdl-type-identity.qtest` and the
 independent `test/wsdl-interop/test_type_identity.py` matrix. The derivation and
 instance-control regressions extend that scope in `wsdl-type-substitution.qtest`.
-Native result retention and the remaining P5 semantics retain their full plan
-ownership; retained XML carries the original selected type annotation.
+Explicit native result retention uses the portable QName contract documented in
+[native type values](wsdl-native-type-values.md). Default native projections keep
+their existing shapes; retained XML carries the original selected type annotation.
