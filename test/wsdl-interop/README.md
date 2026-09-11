@@ -1425,3 +1425,12 @@ See [the implemented contract](../../design/wsdl-wildcard-attributes.md) and
 [execution evidence](wildcard-attributes-evidence.md). Element wildcard, mixed
 and generic content, full nil/default/fixed and document identity requirements
 remain open in P5; binding/protocol/attachment and final CI acceptance remain P6-P9.
+
+
+Native wildcard-ID validation and ID ancestry are covered by
+`test_native_wildcard_ids.py` (24 schemas/180 documents and 100 schema cases),
+`../xml-wildcard-ids.qtest`, the configure probe and dependency allocation tests.
+See [P5-11 evidence](native-wildcard-ids-evidence.md) for normative expectations,
+validator differences and local build commands. The additional core cyclic
+error-cleanup failure remains tracked in
+[the P5-12 prerequisite](p5-deserialization-cycle-finding.md).

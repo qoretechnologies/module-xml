@@ -87,9 +87,13 @@ if(TARGET LibXml2)
     endforeach()
     get_target_property(native_includes LibXml2 INCLUDE_DIRECTORIES)
     get_target_property(native_options LibXml2 COMPILE_OPTIONS)
-    foreach(part attribution-schema-allocation counter-schema-allocation counter-execution edc-schema-allocation)
+    foreach(part attribution-schema-allocation counter-schema-allocation counter-execution edc-schema-allocation wildcard-id-allocation)
         string(REPLACE "-" "_" suffix "${{part}}")
-        add_executable(${{part}} "{REPO}/test/cmake/libxml2_particle_${{suffix}}.c")
+        if(part STREQUAL "wildcard-id-allocation")
+            add_executable(${{part}} "{REPO}/test/cmake/libxml2_wildcard_id_allocation.c")
+        else()
+            add_executable(${{part}} "{REPO}/test/cmake/libxml2_particle_${{suffix}}.c")
+        endif()
         target_compile_definitions(${{part}} PRIVATE QORE_XML_SCHEMA_SOURCE="${{schema_source}}"
                                                    QORE_REGEXP_SOURCE="${{regexp_source}}")
         target_include_directories(${{part}} PRIVATE ${{native_includes}})
@@ -138,6 +142,8 @@ include("{REPO}/cmake/QoreXmlLibXml2ElementSubstitutionFix.cmake")
 qore_xml_fix_libxml2_element_substitution("{cls.source}" "${{CMAKE_CURRENT_BINARY_DIR}}/libxml")
 include("{REPO}/cmake/QoreXmlLibXml2ElementConsistencyFix.cmake")
 qore_xml_fix_libxml2_element_consistency("{cls.source}" "${{CMAKE_CURRENT_BINARY_DIR}}/libxml")
+include("{REPO}/cmake/QoreXmlLibXml2WildcardIdFix.cmake")
+qore_xml_fix_libxml2_wildcard_ids("{cls.source}" "${{CMAKE_CURRENT_BINARY_DIR}}/libxml")
 ''')
         cls.fixed = cls.root / "fixed/build-debug"
         cls.run_command(["cmake", "-S", fixed_project, "-B", cls.fixed, "-DCMAKE_BUILD_TYPE=Debug",
@@ -174,6 +180,7 @@ qore_xml_fix_libxml2_element_consistency("{cls.source}" "${{CMAKE_CURRENT_BINARY
         self.assertIn("particle_ranges=PASS", output)
         self.assertIn("element_substitution=PASS", output)
         self.assertIn("element_consistency=PASS", output)
+        self.assertIn("wildcard_ids=PASS", output)
         stage = self.root / "stage"
         self.run_command(["cmake", "--install", self.root / "bundled", "--prefix", stage])
         self.assertEqual(["bin/probe", "share/licenses/qore-xml/libxml2-NOTICES.txt"],
@@ -577,9 +584,48 @@ qore_xml_fix_libxml2_uris("{self.source}" "${{CMAKE_CURRENT_BINARY_DIR}}/libxml"
         self.assertIn("Native element consistency cleanup: PASS",
                       self.run_command([self.root / "bundled/edc-schema-allocation"]))
 
+    def previous_wildcard_id_fixture(self):
+        """Build every earlier correction while omitting wildcard ID reporting."""
+        fixed = (self.root / "fixed/source/CMakeLists.txt").read_text()
+        fixed = fixed.replace(f'include("{REPO}/cmake/QoreXmlLibXml2WildcardIdFix.cmake")\n', "")
+        return fixed.replace(f'qore_xml_fix_libxml2_wildcard_ids("{self.source}" '
+                             '"${CMAKE_CURRENT_BINARY_DIR}/libxml")\n', "")
+
+    def test_wildcard_id_constraint_allocation_cleanup(self):
+        self.run_command(["cmake", "--build", self.root / "bundled", "--target", "wildcard-id-allocation", "-j4"])
+        self.assertIn("Native attribute use constraints: PASS",
+                      self.run_command([self.root / "bundled/wildcard-id-allocation"]))
+
+    def test_wildcard_id_backport_detection_and_idempotence(self):
+        import hashlib
+        project = self.root / "wildcard-id-broken/source"
+        project.mkdir(parents=True)
+        (project / "CMakeLists.txt").write_text(self.previous_wildcard_id_fixture())
+        build = self.root / "wildcard-id-broken/build-debug"
+        self.run_command(["cmake", "-S", project, "-B", build, "-DCMAKE_BUILD_TYPE=Debug",
+                          "-DBUILD_SHARED_LIBS=ON", "-DLIBXML2_WITH_PROGRAMS=OFF",
+                          "-DLIBXML2_WITH_TESTS=OFF", "-DLIBXML2_WITH_PYTHON=OFF"])
+        self.run_command(["cmake", "--build", build, "--target", "LibXml2", "-j4"])
+        libraries = list((build / "libxml").glob("libxml2.so")) + list((build / "libxml").glob("libxml2.dylib"))
+        self.assertEqual(1, len(libraries))
+        options = [f"-DLIBXML2_LIBRARY={libraries[0]}", f"-DLIBXML2_INCLUDE_DIR={self.fixed_include}",
+                   f"-DFETCHCONTENT_SOURCE_DIR_QORE_XML_LIBXML2={self.source}"]
+        output = self.configure("wildcard-id-broken-auto", "-DQORE_XML_LIBXML2_PROVIDER=AUTO", *options)
+        self.assertIn("using private static libxml2 2.15.4", output)
+        probe = (self.root / "wildcard-id-broken-auto/system-libxml2/namespace-probe.log").read_text()
+        self.assertIn("element_consistency=PASS", probe)
+        self.assertIn("wildcard_ids=FAIL", probe)
+        self.configure("wildcard-id-broken-system", "-DQORE_XML_LIBXML2_PROVIDER=SYSTEM", *options, success=False)
+        path = self.root / "bundled/_deps/qore_xml_libxml2-build/qore-wildcard-id-fix/xmlschemas.c"
+        stamp = (path.stat().st_mtime_ns, hashlib.sha256(path.read_bytes()).hexdigest())
+        self.assertEqual("3a78da4283035b2691688766e2bd6dda205a14cf36ce8430af3ec03677d2e80f", stamp[1])
+        self.configure("bundled", "-DQORE_XML_LIBXML2_PROVIDER=BUNDLED",
+                       f"-DFETCHCONTENT_SOURCE_DIR_QORE_XML_LIBXML2={self.source}")
+        self.assertEqual(stamp, (path.stat().st_mtime_ns, hashlib.sha256(path.read_bytes()).hexdigest()))
+
     def previous_consistency_fixture(self):
         """Build the verified dependency with only declaration consistency omitted."""
-        fixed = (self.root / "fixed/source/CMakeLists.txt").read_text()
+        fixed = self.previous_wildcard_id_fixture()
         fixed = fixed.replace(f'include("{REPO}/cmake/QoreXmlLibXml2ElementConsistencyFix.cmake")\n', "")
         return fixed.replace(f'qore_xml_fix_libxml2_element_consistency("{self.source}" '
                              '"${CMAKE_CURRENT_BINARY_DIR}/libxml")\n', "")

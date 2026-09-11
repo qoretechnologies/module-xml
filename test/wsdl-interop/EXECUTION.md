@@ -7004,3 +7004,37 @@ Next is P5-11's independently reproduced native wildcard-ID reporting defect.
 P5 then retains element wildcard processing, mixed/generic content, complete
 nil/default/fixed and document identity semantics. All remaining P6-P9 criteria
 remain required.
+
+
+## P5-11 — native wildcard ID constraints
+
+P5-10 was committed locally as `ccc7820`. P5-11 adds missing native wildcard-ID
+reports, correct base-type ancestry and referenced-constraint evaluation.
+The native unit passes 4 cases/627 assertions across AST/IR/JIT/tiered, including
+schema errors, recovery, cancellation and concurrent readers. Independent tests
+cover 180 documents and 100 ancestry schemas with explicitly adjudicated
+supporting-validator discrepancies. CMake detects missing backports; all 40
+distinct provider tests pass. The new native unit, full probe and all 30 injected
+constraint-allocation failures pass Valgrind with zero errors/lost blocks.
+
+The 127-suite gate passes 1,274 cases/63,311 assertions. All 19 compiled and
+consumer supplements pass, native documentation builds without warnings, and
+the shipment ID example executes. Both-version survey/strict reports exactly
+match P5-10: 2,455 rows, 144 selected WSDLs/1,388 directions, no selected failures
+and 60 broader failures. Original corpus sources and historical findings remain
+unchanged. See [the evidence](native-wildcard-ids-evidence.md),
+[validation inventory](P5-11-validation.json) and
+[full audit](audits/P5-11-native-wildcard-ids.md).
+
+An additional consumer Valgrind run found a Qore core error-cleanup cycle.
+The isolated metadata case and a minimal program without XML reproduce it;
+an acyclic error does not leak. This result is retained as a failure in
+[p5-deserialization-cycle-finding.md](p5-deserialization-cycle-finding.md).
+P5-12 must fix this independent core prerequisite before continuing XML content
+work. Native P5-11 cleanup itself is verified. Both origins were fetched again,
+with no incoming develop commits. Main Qore remains clean at `35dc29f31`;
+no Qore edit, installation or push was made in this increment.
+
+P5 still requires element wildcards, mixed/generic content, complete
+nil/default/fixed semantics and document identity. All remaining P6-P9 criteria
+remain required.
