@@ -80,6 +80,10 @@ module WSDL {
     @section wsdlrelnotes WSDL Module Release Notes
 
     @subsection wsdl_0_5_8 WSDL v0.5.8
+    - type construction enforces final exclusions for restrictions, lists, composed unions and complex
+      derivations; source-scoped finalDefault values survive imports, anonymous types and schema copies
+    - added XsdDerivationMethod and type final metadata; invalid final syntax and anonymous final attributes
+      fail before use, and builtin types retain their intrinsic derivation controls
     - explicit native type wrappers accept the declared simple type and equivalent canonical builtin definitions;
       selected type annotations retain their own namespace independently of element qualification
     - complex type selection resolves instance QNames before checking derived attributes; direct extensions
@@ -2188,6 +2192,67 @@ public class XsdNamedData inherits WSDL::XsdData {
     }
 }
 
+#! Methods used to construct derived XML Schema types
+/** @since %WSDL 0.5.8 */
+public enum XsdDerivationMethod : string {
+    #! Extend complex or simple content
+    Extension = "extension",
+    #! Restrict a type's value or content space
+    Restriction = "restriction",
+    #! Construct a list from an item type
+    List = "list",
+    #! Construct a union from member types
+    Union = "union",
+}
+
+# Construction-only parsing; defaults belong to the source schema, not the assembled registry.
+class XsdDerivationControlHelper {
+    const Simple = {"restriction": True, "list": True, "union": True};
+    const Complex = {"extension": True, "restriction": True};
+    const All = Simple + Complex;
+
+    static hash<string, bool> parse(*string source, string attribute, hash<string, bool> allowed) {
+        string normalized = XsdSimpleType::normalizeWhiteSpace(source ?? "", "collapse");
+        if (normalized == "#all") {
+            return allowed;
+        }
+        hash<string, bool> result();
+        if (normalized) {
+            foreach string method in (normalized.split(" ")) {
+                if (!allowed{method}) {
+                    throw WSDL_ERROR, sprintf("invalid %s derivation method %Y", attribute, method);
+                }
+                result{method} = True;
+            }
+        }
+        return result;
+    }
+
+    static hash<string, bool> forType(*hash<auto> attributes, Namespaces nsc, bool simple) {
+        hash<string, bool> allowed = simple ? Simple : Complex;
+        if (exists attributes.final) {
+            if (!exists attributes.name) {
+                throw WSDL_ERROR, "an anonymous type cannot declare final";
+            }
+            return parse(attributes.final, "final", allowed);
+        }
+        hash<string, bool> result();
+        foreach string method in (keys allowed) {
+            if (nsc.schema_final_default{method}) {
+                result{method} = True;
+            }
+        }
+        return result;
+    }
+
+    static check(XsdAbstractType base, XsdDerivationMethod method, string derived) {
+        if (base.isFinal(method)) {
+            throw WSDL_ERROR, sprintf("type %Y cannot be derived by %s from final type %Y",
+                derived, method, base.name);
+        }
+    }
+}
+
 public class XsdAbstractType inherits WSDL::XsdNamedData {
     public {
         #! owned declaration namespace context
@@ -2197,14 +2262,57 @@ public class XsdAbstractType inherits WSDL::XsdNamedData {
         string ons;
     }
 
-    constructor(reference e, Namespaces nsc, *string desc_name) : XsdNamedData(\e, desc_name) {
+    private {
+        # Immutable after construction; Serializable retains the source's effective controls.
+        hash<string, bool> final_derivations();
+    }
+
+    #! initializes a declared type's identity and resolved derivation exclusions
+    /** @param e the parsed declaration
+        @param nsc the owned declaration namespace registry
+        @param desc_name a description for an anonymous declaration
+        @param final_derivations the already validated effective final set, or NOTHING for an empty set
+        @note Concrete schema type constructors resolve finalDefault before this registry's source scope exits.
+    */
+    constructor(reference e, Namespaces nsc, *string desc_name, *hash<string, bool> final_derivations)
+            : XsdNamedData(\e, desc_name) {
         self.nsc = nsc;
+        self.final_derivations = final_derivations ?? {};
         resolveNamespace();
     }
 
-    constructor(string name, string ns, Namespaces nsc) : XsdNamedData(name, ns) {
+    #! initializes an intrinsic or synthetic type's identity and derivation exclusions
+    /** @param name the type name
+        @param ns the input namespace prefix
+        @param nsc the owned namespace registry
+        @param final_derivations resolved final exclusions, or NOTHING for the intrinsic empty set
+        @note Schema defaults do not alter canonical builtin definitions.
+    */
+    constructor(string name, string ns, Namespaces nsc, *hash<string, bool> final_derivations)
+            : XsdNamedData(name, ns) {
         self.nsc = nsc;
+        self.final_derivations = final_derivations ?? {};
         resolveNamespace();
+    }
+
+    #! returns the derivation methods prohibited by this type's effective final value
+    /** @return a copy of the method-name set, with True for each prohibited method
+        @note Builtin types have intrinsic controls independent of schema defaults.
+        @par Example
+        An invoice schema can expose whether its amount type permits restriction by another contract.
+        @since %WSDL 0.5.8
+    */
+    hash<string, bool> getFinalDerivations() {
+        return final_derivations;
+    }
+
+    #! tests whether this type prohibits a derivation method
+    /** @param method the method to test
+        @return True when this type's final set contains the method
+        @since %WSDL 0.5.8
+    */
+    bool isFinal(XsdDerivationMethod method) {
+        return final_derivations{method} ?? False;
     }
 
     private resolveNamespace() {
@@ -9770,7 +9878,18 @@ public class XsdArrayType inherits WSDL::XsdAbstractType {
         int dimensions = 1;
     }
 
-    constructor(string t, string ns, string arrayType, Namespaces nsc, XsdLateResolverHelper unresolved) : XsdAbstractType(t, ns, nsc) {
+    #! constructs a legacy encoded array type
+    /** @param t the array type name
+        @param ns the input namespace prefix
+        @param arrayType the encoded item type and dimension spelling
+        @param nsc the declaration namespace registry
+        @param unresolved the schema resolution queue
+        @param final_derivations the enclosing complex type's effective final exclusions
+        @throw WSDL-ERROR malformed or unresolved array declaration
+        @throw WSDL-NAMESPACE-ERROR malformed or unbound item QName
+    */
+    constructor(string t, string ns, string arrayType, Namespaces nsc, XsdLateResolverHelper unresolved,
+            *hash<string, bool> final_derivations) : XsdAbstractType(t, ns, nsc, final_derivations) {
         # Parse array dimensions - handles both [] and [,] notation
         # SOAP 1.1 Section 5.4.2 supports:
         # - Single dimension: type[] or type[n]
@@ -14866,7 +14985,8 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
     */
     constructor(hash<auto> st, Namespaces nsc, XsdLateResolverHelper unresolved, bool n_usedocns, *string desc_name,
             *XsdAbstractType resolved_base)
-            : XsdAbstractType(\st, nsc, desc_name) {
+            : XsdAbstractType(\st, nsc, desc_name,
+                resolved_base ? new hash<string, bool>() : XsdDerivationControlHelper::forType(st."^attributes^", nsc, True)) {
         NamespacePrefixHelper declaration(nsc, st."^attributes^");
         usedocns = n_usedocns;
         #any a = st."^attributes^";
@@ -19657,7 +19777,7 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
 
     # ct can be NOTHING in case of an empty complex type
     constructor(*hash<auto> ct, Namespaces nsc, XsdLateResolverHelper unresolved, bool n_usedocns, *string desc_name)
-            : XsdAbstractType(\ct, nsc, desc_name) {
+            : XsdAbstractType(\ct, nsc, desc_name, XsdDerivationControlHelper::forType(ct."^attributes^", nsc, False)) {
         NamespacePrefixHelper declaration(nsc, ct."^attributes^");
         usedocns = n_usedocns;
         # Anonymous nested types also need group/base resolution and final field-name selection.
@@ -19714,7 +19834,7 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
                         cx_type = XET_SEQUENCE;
                     } else {
                         NamespacePrefixHelper attribute_scope(nsc, array_declaration);
-                        array = new XsdArrayType(name, "", aa.arrayType, nsc, unresolved);
+                        array = new XsdArrayType(name, "", aa.arrayType, nsc, unresolved, getFinalDerivations());
                     }
 
                     #printf("DEBUG: ans: %y atn: %y aa: %y\n", ans, atn, aa);
@@ -19880,6 +20000,8 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
         if (baseTypeInfo) {
             XsdAbstractType resolved_base = baseTypeInfo.uri == XSD_NS ? nsc.getBaseType(baseTypeInfo.val)
                 : tmap_get(tmap, type_qname(baseTypeInfo.uri, baseTypeInfo.val));
+            XsdDerivationControlHelper::check(resolved_base,
+                extension ? XsdDerivationMethod::Extension : XsdDerivationMethod::Restriction, name);
             if (cx_type == XET_SIMPLE) {
                 XsdAbstractType content_type;
                 if (resolved_base instanceof XsdComplexType) {
@@ -23702,6 +23824,10 @@ public class Namespaces inherits Serializable {
         /** @since %WSDL 0.5.8 */
         string attribute_form_default = "unqualified";
 
+        #! finalDefault in the schema currently being constructed, restored on scope exit
+        /** @since %WSDL 0.5.8 */
+        hash<string, bool> schema_final_default();
+
         #! schema component namespaces allowed by the source currently being constructed
         /** This construction scope includes the target namespace, declared imports and builtin XSD types.
             NOTHING outside schema construction preserves general QName expansion for public callers.
@@ -25053,6 +25179,7 @@ public class XsdSchema inherits WSDL::XsdBase {
                 t.listItemType = resolveType(t.listItemTypeInfo);
             }
             resolveSimpleDependency(t.listItemType);
+            XsdDerivationControlHelper::check(t.listItemType, XsdDerivationMethod::List, t.name);
             if (!validListItemType(t.listItemType)) {
                 throw WSDL_ERROR, sprintf("list item type %Y must be atomic or a union of atomic types",
                     t.listItemType.name);
@@ -25066,6 +25193,12 @@ public class XsdSchema inherits WSDL::XsdBase {
             list<XsdAbstractType> composed();
             foreach XsdAbstractType member in (members) {
                 resolveSimpleDependency(member);
+                # XSD 1.0 applies member constraints to the composed atomic/list definitions.
+                # A resolved union graph has already checked those definitions; its own final
+                # does not become a property of the members that replace it.
+                if (!union_definitions.hasKey(member.uniqueHash())) {
+                    XsdDerivationControlHelper::check(member, XsdDerivationMethod::Union, t.name);
+                }
                 # XSD 1.0 Part 2 section 4.1.2.3 replaces an explicit union member
                 # with its member definitions, without that union's own restrictions.
                 # Keep shared union nodes to avoid expanding repeated dependency graphs.
@@ -25078,6 +25211,7 @@ public class XsdSchema inherits WSDL::XsdBase {
                 t.type = resolveType(t.typeinfo);
             }
             resolveSimpleDependency(t.type);
+            XsdDerivationControlHelper::check(t.type, XsdDerivationMethod::Restriction, t.name);
             if (t.type instanceof XsdBaseType && t.type.name == "anySimpleType") {
                 throw WSDL_ERROR, "a simpleType restriction requires a base with atomic, list, or union variety";
             }
@@ -25343,6 +25477,11 @@ public class XsdSchema inherits WSDL::XsdBase {
             #if (!sa)
             #    throw "OOPS";
             NamespacePrefixHelper nph(nsc, sa, True);
+
+            hash<string, bool> previous_final_default = nsc.schema_final_default;
+            on_exit nsc.schema_final_default = previous_final_default;
+            nsc.schema_final_default = XsdDerivationControlHelper::parse(sa.finalDefault, "finalDefault",
+                XsdDerivationControlHelper::All);
 
             string previous_attribute_form = nsc.attribute_form_default;
             on_exit nsc.attribute_form_default = previous_attribute_form;

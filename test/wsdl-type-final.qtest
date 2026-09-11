@@ -1,0 +1,250 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires xml
+%requires ../qlib/WSDL.qm
+%exec-class TypeFinalTest
+
+class TypeFinalTest inherits QUnit::Test {
+    private {
+        const Xsd = "http://www.w3.org/2001/XMLSchema";
+        const Base = "http://example.invalid/final/";
+    }
+    constructor() : Test("XSD type derivation exclusions", "1.0") {
+        addTestCase("Simple restrictions respect the base type's final set", \restrictions());
+        addTestCase("List items and composed union members enforce their own controls", \composition());
+        addTestCase("Complex derivation and simple content respect final", \complexTypes());
+        addTestCase("Defaults are filtered and explicit empty sets override them", \defaults());
+        addTestCase("Anonymous declarations inherit defaults and reject explicit final", \anonymousTypes());
+        addTestCase("Final lexical values use XML whitespace and valid method sets", \lexical());
+        addTestCase("Imported and included schemas own their derivation defaults", \schemaScopes());
+        addTestCase("Failed construction restores defaults and permits reuse", \recovery());
+        addTestCase("Encoded array adapters retain declaration final metadata", \arrayMetadata());
+        addTestCase("Concurrent consumers retain immutable final metadata", \concurrency());
+        set_return_value(main());
+    }
+    private string source(string definitions, string defaults = "", string uri = "") {
+        return '<xs:schema xmlns:xs="' + Xsd + '" ' + defaults
+            + (uri ? ' targetNamespace="' + uri + '" xmlns:t="' + uri + '"' : '') + '>'
+            + definitions + '</xs:schema>';
+    }
+    private XsdSchema parse(string text) {
+        return new XsdSchema(text, {"async_only": True});
+    }
+    private string simple(string name, string content, string attributes = "") {
+        return '<xs:simpleType name="' + name + '" ' + attributes + '>' + content + '</xs:simpleType>';
+    }
+    private verify(string text, string type, hash<string, bool> expected) {
+        XsdSchema original = parse(text);
+        foreach XsdSchema schema in (original, Serializable::deserialize(original.serialize())) {
+            XsdAbstractType value = schema.findType(type);
+            assertEq(expected, value.getFinalDerivations());
+            foreach XsdDerivationMethod method in (XsdDerivationMethod::Extension, XsdDerivationMethod::Restriction,
+                    XsdDerivationMethod::List, XsdDerivationMethod::Union) {
+                assertEq(expected{method} ?? False, value.isFinal(method));
+            }
+            hash<string, bool> detached = value.getFinalDerivations();
+            detached.restriction = !(detached.restriction ?? False);
+            assertEq(expected, value.getFinalDerivations());
+            assertEq({}, schema.nsc.schema_final_default);
+        }
+    }
+    restrictions() {
+        foreach string body in ('<xs:restriction base="xs:string"/>', '<xs:list itemType="xs:int"/>',
+                '<xs:union memberTypes="xs:int xs:boolean"/>') {
+            foreach string control in ("restriction", "#all", "list restriction union") {
+                string text = source(simple("B", body, 'final="' + control + '"')
+                    + simple("D", '<xs:restriction base="B"/>'));
+                assertThrows("WSDL-ERROR", \parse(), (text,));
+            }
+            foreach string control in ("", "list", "union", "list union") {
+                string text = source(simple("B", body, 'final="' + control + '"')
+                    + simple("D", '<xs:restriction base="B"/>', 'final="restriction"'));
+                verify(text, "D", {"restriction": True});
+            }
+        }
+    }
+    composition() {
+        foreach string method in ("list", "union") {
+            string derivation = method == "list" ? '<xs:list itemType="B"/>' : '<xs:union memberTypes="B xs:boolean"/>';
+            foreach string control in (method, "#all", "list union") {
+                assertThrows("WSDL-ERROR", \parse(), (source(simple("B", '<xs:restriction base="xs:int"/>',
+                    'final="' + control + '"') + simple("D", derivation)),));
+            }
+            verify(source(simple("B", '<xs:restriction base="xs:int"/>', 'final="restriction"')
+                + simple("D", derivation)), "D", {});
+        }
+        # XSD 1.0 composes union member definitions; the replaced union's properties do not survive.
+        string base = simple("U", '<xs:union memberTypes="xs:int xs:boolean"/>', 'final="union"');
+        verify(source(base + simple("D", '<xs:union memberTypes="U"/>')), "D", {});
+        base = simple("U", '<xs:union memberTypes="xs:int xs:boolean"/>')
+            + simple("R", '<xs:restriction base="U"/>', 'final="union"');
+        verify(source(base + simple("D", '<xs:union memberTypes="R"/>')), "D", {});
+        # A list is an actual union member, so its union exclusion remains effective.
+        assertThrows("WSDL-ERROR", \parse(), (source(simple("B", '<xs:list itemType="xs:int"/>', 'final="union"')
+            + simple("D", '<xs:union memberTypes="B"/>')),));
+        # A union used as a list item keeps its own list exclusion.
+        assertThrows("WSDL-ERROR", \parse(), (source(simple("B", '<xs:union memberTypes="xs:int xs:boolean"/>',
+            'final="list"') + simple("D", '<xs:list itemType="B"/>')),));
+    }
+    complexTypes() {
+        foreach string method in ("extension", "restriction") {
+            foreach string content in ("complexContent", "simpleContent") {
+                string body = content == "simpleContent"
+                    ? '<xs:simpleContent><xs:extension base="xs:string"/></xs:simpleContent>' : '';
+                string derived = '<xs:complexType name="D"><xs:' + content + '><xs:' + method
+                    + ' base="B"/></xs:' + content + '></xs:complexType>';
+                foreach string control in (method, "#all", "extension restriction") {
+                    assertThrows("WSDL-ERROR", \parse(), (source('<xs:complexType name="B" final="' + control + '">'
+                        + body + '</xs:complexType>' + derived),));
+                }
+                string allowed = method == "extension" ? "restriction" : "extension";
+                verify(source('<xs:complexType name="B" final="' + allowed + '">' + body + '</xs:complexType>'
+                    + derived), "D", {});
+            }
+        }
+        string content = simple("S", '<xs:restriction base="xs:string"/>', 'final="restriction"')
+            + '<xs:complexType name="B"><xs:simpleContent><xs:extension base="S"/></xs:simpleContent></xs:complexType>';
+        verify(source(content), "B", {});
+        assertThrows("WSDL-ERROR", \parse(), (source(content + '<xs:complexType name="D"><xs:simpleContent>'
+            + '<xs:restriction base="B"><xs:maxLength value="10"/></xs:restriction></xs:simpleContent></xs:complexType>'),));
+    }
+    defaults() {
+        string definitions = simple("S", '<xs:restriction base="xs:string"/>') + '<xs:complexType name="C"/>'
+            + '<xs:element name="value" type="xs:int"/>';
+        verify(source(definitions, 'finalDefault="#all"'), "S", {"restriction": True, "list": True, "union": True});
+        verify(source(definitions, 'finalDefault="#all"'), "C", {"restriction": True, "extension": True});
+        verify(source(definitions, 'finalDefault="extension"'), "S", {});
+        verify(source(definitions, 'finalDefault="list union"'), "C", {});
+        string overridden = simple("S", '<xs:restriction base="xs:string"/>', 'final=""')
+            + '<xs:complexType name="C" final=""/>';
+        verify(source(overridden, 'finalDefault="#all"'), "S", {});
+        verify(source(overridden, 'finalDefault="#all"'), "C", {});
+        XsdSchema schema = parse(source(definitions, 'finalDefault="#all"'));
+        assertEq({}, schema.getElement("", "value").type.getFinalDerivations());
+        # Normative Datatypes 4.1.2 filters extension out of simple finalDefault.
+        verify(source(definitions + '<xs:complexType name="D"><xs:simpleContent><xs:extension base="S"/>'
+            + '</xs:simpleContent></xs:complexType>', 'finalDefault="#all"'), "D",
+            {"extension": True, "restriction": True});
+    }
+    anonymousTypes() {
+        foreach string kind in ("simple", "complex") {
+            string body = kind == "simple" ? '<xs:restriction base="xs:string"/>' : '';
+            assertThrows("WSDL-ERROR", \parse(), (source('<xs:element name="value"><xs:' + kind + 'Type final="">'
+                + body + '</xs:' + kind + 'Type></xs:element>'),));
+            XsdSchema original = parse(source('<xs:element name="value"><xs:' + kind + 'Type>' + body
+                + '</xs:' + kind + 'Type></xs:element>', 'finalDefault="#all"'));
+            foreach XsdSchema schema in (original, Serializable::deserialize(original.serialize())) {
+                assertEq(kind == "simple" ? {"restriction": True, "list": True, "union": True}
+                    : {"restriction": True, "extension": True}, schema.getElement("", "value").type.getFinalDerivations());
+            }
+        }
+        foreach string method in ("restriction", "list", "union") {
+            string body = '<xs:' + method + '><xs:simpleType><xs:restriction base="xs:string"/></xs:simpleType></xs:'
+                + method + '>';
+            assertThrows("WSDL-ERROR", \parse(), (source(simple("D", body, 'final=""'),
+                'finalDefault="' + method + '"'),));
+        }
+    }
+    lexical() {
+        foreach string value in ("bogus", "#all restriction", "restriction #all", "#ALL", "Restriction",
+                "restriction,union", "restriction&#160;union") {
+            assertThrows("WSDL-ERROR", \parse(), (source('', 'finalDefault="' + value + '"'),));
+            assertThrows("WSDL-ERROR", \parse(), (source(simple("S", '<xs:restriction base="xs:string"/>',
+                'final="' + value + '"')),));
+        }
+        foreach string value in ("extension", "substitution") {
+            assertThrows("WSDL-ERROR", \parse(), (source(simple("S", '<xs:restriction base="xs:string"/>',
+                'final="' + value + '"')),));
+        }
+        foreach string value in ("list", "union", "substitution") {
+            assertThrows("WSDL-ERROR", \parse(), (source('<xs:complexType name="C" final="' + value + '"/>'),));
+        }
+        verify(source(simple("S", '<xs:restriction base="xs:string"/>',
+            'final=" &#9;restriction&#10;union&#13;restriction "')), "S", {"restriction": True, "union": True});
+        verify(source(simple("S", '<xs:restriction base="xs:string"/>'), 'finalDefault=" &#9; "'), "S", {});
+    }
+    schemaScopes() {
+        string imported = source(simple("S", '<xs:restriction base="xs:string"/>'), 'finalDefault="restriction"', "urn:b");
+        string included = source(simple("I", '<xs:restriction base="xs:int"/>'), 'finalDefault="list"');
+        string root = source('<xs:import namespace="urn:b" schemaLocation="b.xsd"/>'
+            + '<xs:include schemaLocation="i.xsd"/>' + simple("R", '<xs:restriction base="xs:string"/>'),
+            'finalDefault="union"', "urn:a");
+        XsdSchema original(root, {"async_only": True, "def_path": Base,
+            "xsd_cache": {Base + "b.xsd": imported, Base + "i.xsd": included}});
+        foreach XsdSchema schema in (original, Serializable::deserialize(original.serialize())) {
+            assertEq({"restriction": True}, schema.findType("{urn:b}S").getFinalDerivations());
+            assertEq({"list": True}, schema.findType("{urn:a}I").getFinalDerivations());
+            assertEq({"union": True}, schema.findType("{urn:a}R").getFinalDerivations());
+            assertEq({}, schema.nsc.schema_final_default);
+            schema.addSchemaString(source('<xs:include schemaLocation="i.xsd"/>', '', "urn:c"));
+            assertEq({"list": True}, schema.findType("{urn:c}I").getFinalDerivations());
+        }
+    }
+    recovery() {
+        XsdSchema schema = parse(source(simple("S", '<xs:restriction base="xs:string"/>', 'final="restriction"')));
+        string failed = source(simple("D", '<xs:restriction base="S"/>'), 'finalDefault="#all"');
+        assertThrows("WSDL-ERROR", \schema.addSchemaString(), (failed,));
+        assertEq({}, schema.nsc.schema_final_default);
+        schema.addSchemaString(source(simple("D", '<xs:restriction base="xs:int"/>')));
+        assertEq({}, schema.findType("D").getFinalDerivations());
+        assertEq({"restriction": True}, schema.findType("S").getFinalDerivations());
+    }
+    arrayMetadata() {
+        string text = '<xs:schema xmlns:xs="' + Xsd + '" xmlns:e="http://schemas.xmlsoap.org/soap/encoding/"'
+            + ' xmlns:w="http://schemas.xmlsoap.org/wsdl/" finalDefault="extension">'
+            + '<xs:import namespace="http://schemas.xmlsoap.org/soap/encoding/"/>'
+            + '<xs:complexType name="Items"><xs:complexContent><xs:restriction base="e:Array">'
+            + '<xs:attribute ref="e:arrayType" w:arrayType="xs:int[]"/>'
+            + '</xs:restriction></xs:complexContent></xs:complexType></xs:schema>';
+        verify(text, "Items", {"extension": True});
+        XsdSchema schema = parse(text);
+        assertTrue(schema.findType("Items") instanceof XsdArrayType);
+    }
+    private bool inspect(XsdSchema schema) {
+        for (int i = 0; i < 40; ++i) {
+            XsdSchema copy = Serializable::deserialize(schema.serialize());
+            if (!copy.findType("S").isFinal(XsdDerivationMethod::Restriction)
+                    || copy.findType("S").isFinal(XsdDerivationMethod::Extension)) {
+                return False;
+            }
+        }
+        return True;
+    }
+    concurrency() {
+        XsdSchema schema = parse(source(simple("S", '<xs:restriction base="xs:int"/>', 'final="restriction"')));
+        Qore::Thread::Queue ready();
+        Qore::Thread::Queue start();
+        Qore::Thread::Queue results();
+        Qore::Thread::Counter running();
+        on_exit {
+            start.push(True);
+            start.push(True);
+            assertEq(0, running.waitForZero(30s));
+        }
+        for (int index = 0; index < 2; ++index) {
+            running.inc();
+            background sub() {
+                on_exit running.dec();
+                try {
+                    ready.push(True);
+                    start.get(30s);
+                    results.push(inspect(schema));
+                } catch (hash<ExceptionInfo> error) {
+                    results.push(error);
+                }
+            }();
+        }
+        for (int index = 0; index < 2; ++index) {
+            assertTrue(ready.get(30s));
+        }
+        start.push(True);
+        start.push(True);
+        for (int index = 0; index < 2; ++index) {
+            assertEq(True, results.get(30s));
+        }
+        assertEq({"restriction": True}, schema.findType("S").getFinalDerivations());
+    }
+}

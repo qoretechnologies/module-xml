@@ -1308,3 +1308,12 @@ The implemented identity and immediate complex-dispatch rules are documented in
 [`design/wsdl-type-selection.md`](../../design/wsdl-type-selection.md). Full P5
 derivation controls, selected-type retention, wildcard/mixed/generic content,
 substitution groups and nil/default/fixed behavior remain required by the plan.
+
+Type construction final exclusions are checked by `test/wsdl-type-final.qtest`,
+`test/xml-type-final.qtest` and `test_type_final.py`. The independent matrix has
+87 schemas and 174 actual SOAP binding contracts: 438 worker rows include 86
+required construction errors and 352 independently schema-valid request/response
+outputs with exact native value comparisons. See the [implemented design](../../design/wsdl-type-final.md)
+and [specification/validator adjudication](type-final-evidence.md). This increment
+covers type construction; remaining P5 instance and element substitution controls
+remain explicit in the plan.

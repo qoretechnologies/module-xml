@@ -45,6 +45,8 @@ else()
     include("${_qore_xml_libxml2_cmake_dir}/QoreXmlLibXml2ParticleCounterFix.cmake")
     include("${_qore_xml_libxml2_cmake_dir}/QoreXmlLibXml2ParticleRangeFix.cmake")
 
+    include("${_qore_xml_libxml2_cmake_dir}/QoreXmlLibXml2TypeFinalFix.cmake")
+
     function(qore_xml_fetch_libxml2)
         # Normal variables are scoped to this function; do not overwrite the
         # caller's BUILD_SHARED_LIBS or any other project's cache options.
@@ -83,6 +85,7 @@ else()
         qore_xml_fix_libxml2_particle_attribution("${qore_xml_libxml2_SOURCE_DIR}" "${qore_xml_libxml2_BINARY_DIR}")
         qore_xml_fix_libxml2_particle_counters("${qore_xml_libxml2_SOURCE_DIR}" "${qore_xml_libxml2_BINARY_DIR}")
         qore_xml_fix_libxml2_particle_ranges("${qore_xml_libxml2_SOURCE_DIR}" "${qore_xml_libxml2_BINARY_DIR}")
+        qore_xml_fix_libxml2_type_finals("${qore_xml_libxml2_SOURCE_DIR}" "${qore_xml_libxml2_BINARY_DIR}")
         # Neither upstream tools nor headers/libraries belong in our install.
         set_property(DIRECTORY "${qore_xml_libxml2_SOURCE_DIR}" PROPERTY EXCLUDE_FROM_ALL TRUE)
         set_target_properties(LibXml2 PROPERTIES POSITION_INDEPENDENT_CODE ON C_VISIBILITY_PRESET hidden)

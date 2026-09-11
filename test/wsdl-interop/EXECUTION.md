@@ -6462,3 +6462,77 @@ Next: retain/enforce per-schema and per-component `block`/`final` defaults and f
 resolved type derivation, then complete the remaining P5 content/substitution/nil
 and identity requirements. P6-P9, the known dual-binding diagnostic and broad
 P9 docs/debug-info findings retain their full plan ownership.
+
+
+## P5-02 — Type final exclusions and native defaults (complete increment)
+
+Parent: `d223ed4` (P5-01). Source parsing now retains applicable per-schema
+`finalDefault` and per-type `final`, including explicit empty overrides,
+anonymous declarations, imported/included/chameleon sources and serialized
+copies. The resolver checks restrictions, list items, composed union members
+and complex/simple-content derivations against their actual resolved bases.
+Canonical builtins keep their intrinsic controls; encoded array adapters retain
+the enclosing component's metadata. Invalid tokens and prohibited anonymous
+attributes fail with `WSDL-ERROR`. Metadata remains immutable after construction,
+and source defaults restore on errors.
+
+The [implemented design](../../design/wsdl-type-final.md) and
+[specification evidence](type-final-evidence.md) document the XSD 1.0 mapping.
+Normative Datatypes 4.1.2 filters irrelevant extension from simple defaults and
+replaces nested unions with their actual member definitions. The non-normative
+Structures duplication and independent-validator disagreements do not override
+those rules. Original oracle verdicts and four output-only reference derivatives
+are separately identified and hashed; disagreements are not conformance passes.
+
+The native investigation found that libxml2 2.15.4 applies finalDefault only to
+named simple types. The private build now initializes the anonymous branch with
+the same three flags. Its generated source has checked input/output hashes; the
+upstream archive/source stays unchanged. A 12-case behavior probe rejects the
+uncorrected dependency, including backports with all preceding fixes. AUTO uses
+the corrected private dependency, SYSTEM rejects a failing implementation, and
+a fully corrected system backport remains usable.
+
+The [validation inventory](P5-02-validation.json) and
+[62-item audit](audits/P5-02-type-final.md) record **22 Pass / 40 N/A / 0 Fail**:
+
+- Full gate: 114 suites, 1157 cases and 57498 reported assertions, no warnings;
+  all preceding suite results are unchanged. Three caught legacy SOAP comparator
+  negatives remain intentional within their successful suite.
+- WSDL final tests: 10 cases/514 assertions in AST, IR, JIT, tiered and compiled
+  WSDL. Native final tests: 3 cases/77 assertions in all four source modes.
+  Cases cover metadata, imports/copies, empty/invalid/default controls, anonymous
+  types, method distinctions, failed reuse and synchronized concurrent consumers.
+- Final independent matrix: 87 schemas/174 actual SOAP 1.1/1.2 descriptions,
+  438 rows, 86 required construction errors and 352 independently valid outputs
+  in each of AST, IR, JIT, tiered and AOT. Originals/copies and both directions
+  preserve exact typed values and expanded names. This supersedes the earlier
+  86-schema mode matrix after one further negative fixture was added.
+- 34 native provider tests pass. The native behavior probe, native final suite
+  and 12-case/191-assertion reader schema cancellation/lifecycle suite pass under
+  Valgrind with zero errors and zero lost blocks. Only Valgrind disables PCRE2
+  JIT through `QORE_PCRE2_NO_JIT=1`; ordinary tests retain JIT.
+- AOT builds 1194 variants (12149708 bytes). Affected WSDL/native docs and the
+  executed invoice example pass without warnings. All 16 survey harness methods,
+  union composition, attribute/simple-content values and prior type-identity
+  matrices pass. The supplementary runner's nonexistent filename is preserved
+  as failed orchestration, then corrected to the existing attribute-value suite.
+- Both-version survey retains all 2455 rows and all previous counts. Isolated
+  strict coverage retains 142 descriptions/1376 directions with zero selected
+  failures. All 68 broader failures and 1264 ok / 0 failed / 196 unreachable /
+  812 unassessed value directions remain unchanged. Only recorded WSDL version
+  digests change; original sources and historical findings remain untouched.
+
+Final WSDL SHA-256 is
+`7827754908f1a91bf01b955283017458d0f779e73ee524013112e0712688f3a9`;
+native XML is `6ce26fee5b3101eb20c7c59f763393770ea5325a80002cadaf4981c1380b33bb`.
+The pinned isolated libqore artifact is unchanged. Logs use `/tmp/wsdl-p5-02-*`;
+the inventory distinguishes final matrix/gates from superseded development runs.
+Both develop remotes were fetched and already included. Main Qore remains clean
+at `1c63ff2c5`; this increment changes no main Qore source and performs no push
+or installation.
+
+P5 remains in progress. Next: instance `block`/abstract controls and complete
+resolved dynamic derivation, followed by substitution groups, wildcard/mixed/
+generic content, nil/default/fixed and document identity acceptance. The known
+P6 dual-binding diagnostic and P9 environment/CI/docs/debug-info requirements
+retain their full ownership.
