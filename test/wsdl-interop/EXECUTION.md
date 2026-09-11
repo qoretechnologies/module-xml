@@ -6760,3 +6760,52 @@ and document identity remain required. P6–P9 retain their full scope, includin
 binding/part-aware SoapDataProvider integration, operation lifetime, platform
 and CI acceptance. Native XML substitution coverage does not hide the WSDL
 corpus failures that require runtime member-name support.
+
+
+## P5-07 — Child substitution particles (complete increment)
+
+Parent: `09b3abc` (P5-06). Concrete member names now occupy their original
+particle position with shared counts and one all-group slot. Conversion and
+providers use the actual member declaration. Construction validates implicit
+members for UPA and declaration consistency, including unused groups and models
+affected by incremental additions; cancellation after publication restores
+previous memberships. See the [design](../../design/wsdl-substitution-particles.md),
+[evidence](substitution-particles-evidence.md), [inventory](P5-07-validation.json)
+and [full audit](audits/P5-07-substitution-particles.md).
+
+- The final 120-suite gate passes 1229 cases/60607 reported assertions without
+  warnings. The three caught comparator negatives in the legacy SOAP suite
+  remain intentional within a successful suite.
+- The new Qore suite passes 14 cases/1507 assertions in AST, IR, JIT, tiered and
+  AOT. Each mode also passes 53 schemas/310 documents/2586 rows, with 992 SOAP
+  outputs and 58 standalone samples independently validated by pinned Xerces.
+  Both actual SOAP bindings, directions and reconstructed graphs are covered.
+- Tests exposed and corrected dropped present empty members, abstract-type
+  sample selection despite available concrete members, and flattened SOAP
+  extraction using head-only fields. Explicit and flattened inputs now preserve
+  member values; emptiable records retain the enclosing message element.
+- WSDL and four dependent qmods rebuild, the unchanged CDA target remains
+  current, and WSDL documentation builds without warnings. All 13 supplement
+  commands pass: compiled unit/provider/HTTP/Cargo/CDA consumers and matrix,
+  prior declaration/final/native-value checks, native unit, the executed design
+  example and 16 survey harness methods. No native code changed, so a new
+  Valgrind run is not required; unchanged binary/source fingerprints are saved.
+- The final both-version survey has 2457 rows. Strict coverage passes 143 WSDLs
+  and 1384 directions, including all eight original SubstitutionGroup paths.
+  Four broader deserialization failures are removed, none are added, 64 remain
+  visible, and value/missing/skip failures are zero. The changed strict harness
+  method passes; the separate known P6 dual-binding failure stays open.
+- Supporting lxml/Xerces omissions remain explicitly adjudicated negative
+  cases. The newly isolated pre-existing native EDC omission is a failed P5
+  requirement owned by the next native increment; its complete schemas and
+  unchanged native fingerprints remain in the linked finding and diagnostics.
+
+All 62 audit checks are recorded: 19 Pass/43 N/A/0 Fail. Both origins were
+fetched with no incoming develop commits. Main Qore remains at `1c63ff2c5`;
+concurrent Azure/OpenAPI/MIME/RestSchemaActions/Serializable work was preserved.
+This increment made no main-Qore edits, system installs or pushes.
+
+P5 remains open. Next: native element-declaration consistency, followed by
+selected substituted message-root identity, remaining wildcard/mixed/generic
+content, complete nil/default/fixed behavior and document identity constraints.
+P6–P9 retain every binding, protocol, attachment, platform and CI requirement.

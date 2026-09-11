@@ -457,7 +457,7 @@ class CoverageTest(unittest.TestCase):
         self.assertEqual("", process.stderr)
         report = json.loads(output.read_text())
         self.assertEqual([], report["selected_failures"])
-        self.assertEqual({"wsdls": 142, "message_directions": 1376}, report["selected_scope"])
+        self.assertEqual({"wsdls": 143, "message_directions": 1384}, report["selected_scope"])
         self.assertEqual(293, len(report["cases"]))
         self.assertEqual(2272, sum(len(c["messages"]) for c in report["cases"]))
         for stage, counts in report["stage_accounting"]["counts"].items():
@@ -467,6 +467,13 @@ class CoverageTest(unittest.TestCase):
         # Harness assertions verify retained failures, not conformance passes for broken functionality.
         self.assertGreater(len(report["failures"]), 0)
         by_name = {c["case"]: c for c in report["cases"]}
+        substitutions = by_name["SubstitutionGroup"]["messages"]
+        self.assertEqual(8, len(substitutions))
+        for message in substitutions:
+            self.assertTrue(message["source_valid"], message)
+            self.assertEqual([], message["failures"], message)
+            self.assertTrue(message["values"]["ok"], message)
+            self.assertEqual("exact", message["values"]["assertions"][0]["order"])
         from test_particle_corpus import FAMILIES
         particle_messages = [message for name in FAMILIES for message in by_name[name]["messages"]]
         self.assertEqual(120, len(particle_messages))

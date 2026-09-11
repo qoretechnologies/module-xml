@@ -1,0 +1,477 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires xml
+%requires ../qlib/WSDL.qm
+%exec-class SubstitutionParticlesTest
+
+class SubstitutionConsistencyProbe inherits XsdBaseType {
+    public {
+        *XsdElement head;
+        bool published = False;
+    }
+    constructor(Namespaces nsc) : XsdBaseType("int", nsc) {
+    }
+    bool hasRealName() {
+        published = head.getSubstitutionGroup().hasKey("{}quantity");
+        throw "THREAD-CANCELLED", "interrupt final declaration consistency after membership publication";
+    }
+}
+
+class SubstitutionParticlesTest inherits QUnit::Test {
+    private {
+        const Declarations = '<xs:element name="head" type="xs:decimal" abstract="true"/>'
+            '<xs:element name="quantity" type="xs:int" substitutionGroup="head"/>'
+            '<xs:element name="amount" type="xs:decimal" substitutionGroup="head"/>';
+    }
+    constructor() : Test("Substitution members in ordered particles", "1.0") {
+        addTestCase("Sequence members share occurrence limits and preserve position identity", \sequences());
+        addTestCase("Choices and shared groups retain their calling positions", \groups());
+        addTestCase("All aliases occupy one slot and share its required occurrence", \all());
+        addTestCase("Empty abstract groups distinguish impossible and optional content", \empty());
+        addTestCase("Members participate in ambiguity and type consistency checks", \constraints());
+        addTestCase("Imported member namespaces determine fields and wildcard overlap", \namespaces());
+        addTestCase("Native and retained conversions use each selected member type", \values());
+        addTestCase("Empty and nil member fields preserve the selected occurrence", \presence());
+        addTestCase("Providers and samples expose concrete member fields", \providers());
+        addTestCase("Samples prefer members whose declared types are concrete", \abstractSamples());
+        addTestCase("Both actual SOAP bindings preserve member values in both directions", \soap());
+        addTestCase("Late ambiguity and consistency failures restore existing memberships", \recovery());
+        addTestCase("Large groups and exact counts remain bounded", \large());
+        addTestCase("Concurrent conversion and interrupted matching permit reuse", \concurrency());
+        set_return_value(main());
+    }
+    private string source(string body) {
+        return '<xs:schema xmlns:xs="' + XSD_NS + '">' + body + '</xs:schema>';
+    }
+    private XsdSchema schema(string content, string declarations = Declarations) {
+        return new XsdSchema(source(declarations + '<xs:complexType name="Record">' + content
+            + '</xs:complexType><xs:element name="record" type="Record"/>'), {"async_only": True});
+    }
+    private XsdParticle particle(XsdSchema schema) {
+        return cast<XsdComplexType>(schema.findType("Record")).getParticle();
+    }
+    private list<XsdSchema> copies(XsdSchema original) {
+        return (original, Serializable::deserialize(original.serialize()));
+    }
+    private auto decode(XsdSchema schema, string body) {
+        hash<auto> parsed = XsdBase::expandElementNamespaces(parse_xml('<record xmlns:xsi="'
+            + XSI_NS + '">' + body + '</record>', XPF_PRESERVE_ORDER));
+        return schema.getElement("", "record").deserializeValue(schema.getTypeMap(), NOTHING, parsed."{}record", True);
+    }
+    private rejected(XsdParticle model, list<list<string>> inputs) {
+        foreach list<string> names in (inputs) {
+            assertFalse(model.matchesElementNames(names));
+            assertEq(NOTHING, model.attributeElementNames(names));
+            assertEq(NOTHING, model.orderElementNames(names));
+        }
+    }
+    sequences() {
+        foreach XsdSchema s in (copies(schema('<xs:sequence><xs:element ref="head" minOccurs="2" maxOccurs="2"/>'
+                '<xs:element name="tail" type="xs:string"/></xs:sequence>'))) {
+            XsdParticle p = particle(s);
+            list<string> names = ("{}quantity", "{}amount", "{}tail");
+            assertTrue(p.matchesElementNames(names));
+            list<XsdParticle> positions = p.attributeElementNames(names);
+            assertTrue(positions[0] === positions[1]);
+            assertTrue(positions[0] === p.getChildren()[0]);
+            assertTrue(positions[2] === p.getChildren()[1]);
+            assertTrue(positions[0].getElement().getInstanceDeclaration("{}quantity") === s.getElement("", "quantity"));
+            assertTrue(positions[0].getElement().getDeclaration() === s.getElement("", "head"));
+            assertEq(NOTHING, positions[0].getElement().getInstanceDeclaration("{}head"));
+            assertEq({"{}quantity": {"minimum": "0", "maximum": "2"},
+                "{}amount": {"minimum": "0", "maximum": "2"},
+                "{}tail": {"minimum": "1", "maximum": "1"}}, p.getElementOccurrenceRanges());
+            assertEq(names, p.orderElementNames(("{}tail", "{}quantity", "{}amount")));
+            rejected(p, ((), ("{}tail",), ("{}quantity", "{}tail"),
+                ("{}quantity", "{}amount", "{}quantity", "{}tail"), ("{}head", "{}quantity", "{}tail")));
+            list<string> sample = p.getSampleElementNames(2, 3);
+            assertEq(3, sample.size());
+            assertTrue(p.matchesElementNames(sample));
+            assertThrows("XSD-SAMPLE-ERROR", \p.getSampleElementNames(), (2, 2));
+        }
+    }
+    groups() {
+        string defs = Declarations + '<xs:group name="Pair"><xs:sequence><xs:element ref="head"/>'
+            '<xs:element name="tag" type="xs:string"/></xs:sequence></xs:group>';
+        foreach XsdSchema s in (copies(schema('<xs:sequence><xs:group ref="Pair" minOccurs="2" maxOccurs="2"/>'
+                '<xs:choice><xs:element name="tail" type="xs:string"/><xs:group ref="Pair"/></xs:choice>'
+                '</xs:sequence>', defs))) {
+            XsdParticle p = particle(s);
+            list<string> names = ("{}quantity", "{}tag", "{}amount", "{}tag", "{}quantity", "{}tag");
+            assertTrue(p.matchesElementNames(names));
+            list<XsdParticle> positions = p.attributeElementNames(names);
+            assertTrue(positions[0] === positions[2]);
+            assertTrue(positions[0] === positions[4]);
+            assertEq(names, p.orderElementNames(names));
+            assertEq("3", p.getElementOccurrenceRanges()."{}quantity".maximum);
+            rejected(p, (("{}quantity", "{}tag", "{}tail"), ("{}quantity", "{}amount", "{}tag", "{}tail")));
+            assertTrue(p.matchesElementNames(p.getSampleElementNames(2, 6)));
+        }
+    }
+    all() {
+        foreach string optional in ("", ' minOccurs="0"') {
+            foreach XsdSchema s in (copies(schema('<xs:all' + optional + '><xs:element ref="head"/>'
+                    '<xs:element name="tail" type="xs:string"/></xs:all>'))) {
+                XsdParticle p = particle(s);
+                foreach string member in ("{}quantity", "{}amount") {
+                    assertTrue(p.matchesElementNames((member, "{}tail")));
+                    assertTrue(p.matchesElementNames(("{}tail", member)));
+                    list<XsdParticle> positions = p.attributeElementNames(("{}tail", member));
+                    assertTrue(positions[1] === p.getChildren()[0]);
+                    assertEq("0", p.getElementOccurrenceRanges(){member}.minimum);
+                    assertEq("1", p.getElementOccurrenceRanges(){member}.maximum);
+                }
+                rejected(p, (("{}quantity",), ("{}tail",), ("{}quantity", "{}amount", "{}tail"),
+                    ("{}quantity", "{}quantity", "{}tail"), ("{}head", "{}tail")));
+                assertEq(boolean(optional), p.matchesElementNames(()));
+                assertTrue(p.matchesElementNames(p.getSampleElementNames(1, 2)));
+                if (optional) {
+                    assertEq((), p.getSampleElementNames(1, 1));
+                } else {
+                    assertThrows("XSD-SAMPLE-ERROR", \p.getSampleElementNames(), (1, 1));
+                }
+            }
+        }
+    }
+    empty() {
+        foreach string control in ("", ' block="substitution"') {
+            string defs = '<xs:element name="head" type="xs:int" abstract="true"' + control + '/>'
+                + (control ? '<xs:element name="quantity" type="xs:int" substitutionGroup="head"/>' : "");
+            foreach string kind in ("sequence", "choice", "all") {
+                foreach bool optional in (False, True) {
+                    XsdParticle p = particle(schema('<xs:' + kind + (optional ? ' minOccurs="0"' : '')
+                        + '><xs:element ref="head"/></xs:' + kind + '>', defs));
+                    assertEq(optional, p.matchesElementNames(()));
+                    rejected(p, (("{}head",), ("{}quantity",)));
+                    if (optional) {
+                        assertEq({}, p.getElementOccurrenceRanges());
+                        assertEq((), p.getSampleElementNames());
+                    } else {
+                        assertEq(NOTHING, p.getElementOccurrenceRanges());
+                        assertThrows("XSD-SAMPLE-ERROR", \p.getSampleElementNames());
+                    }
+                }
+            }
+            XsdParticle p = particle(schema('<xs:choice><xs:element ref="head"/>'
+                '<xs:element name="tail" type="xs:string"/></xs:choice>', defs));
+            assertEq(("{}tail",), p.getSampleElementNames());
+            assertEq({"{}tail": {"minimum": "1", "maximum": "1"}}, p.getElementOccurrenceRanges());
+        }
+    }
+    constraints() {
+        foreach string content in (
+            '<xs:choice><xs:element ref="head"/><xs:element ref="quantity"/></xs:choice>',
+            '<xs:sequence><xs:element ref="head" minOccurs="0"/><xs:element ref="quantity"/></xs:sequence>',
+            '<xs:sequence><xs:element ref="head" minOccurs="2" maxOccurs="3"/>'
+                '<xs:element ref="quantity"/></xs:sequence>',
+            '<xs:all><xs:element ref="head"/><xs:element ref="quantity"/></xs:all>',
+            '<xs:choice><xs:element ref="head"/><xs:any namespace="##local"/></xs:choice>',
+            '<xs:sequence><xs:element ref="head"/><xs:element name="quantity" type="xs:string"/></xs:sequence>'
+        ) {
+            assertThrows("WSDL-ERROR", \schema(), (content,));
+            assertThrows("WSDL-ERROR", \schema(), ('<xs:sequence/>', Declarations
+                + '<xs:group name="Unused">' + content + '</xs:group>'));
+            assertThrows("WSDL-ERROR", \schema(), ('<xs:sequence><xs:element name="nested"><xs:complexType>'
+                + content + '</xs:complexType></xs:element></xs:sequence>',));
+        }
+        XsdParticle p = particle(schema('<xs:sequence><xs:element ref="head" minOccurs="2" maxOccurs="2"/>'
+            '<xs:element ref="quantity"/></xs:sequence>'));
+        list<XsdParticle> positions = p.attributeElementNames(("{}quantity", "{}quantity", "{}quantity"));
+        assertTrue(positions[0] === positions[1]);
+        assertFalse(positions[1] === positions[2]);
+        string anonymous = '<xs:element name="head" abstract="true"><xs:simpleType><xs:restriction base="xs:int"/>'
+            '</xs:simpleType></xs:element><xs:element name="quantity" substitutionGroup="head"/>';
+        p = particle(schema('<xs:sequence><xs:element ref="head"/><xs:element ref="quantity"/></xs:sequence>', anonymous));
+        assertTrue(p.matchesElementNames(("{}quantity", "{}quantity")));
+    }
+    namespaces() {
+        string imported = '<xs:schema xmlns:xs="' + XSD_NS + '" targetNamespace="urn:members">'
+            '<xs:import schemaLocation="head.xsd"/><xs:element name="quantity" type="xs:int" substitutionGroup="head"/>'
+            '</xs:schema>';
+        string head = source('<xs:element name="head" type="xs:decimal" abstract="true"/>');
+        hash<string, string> cache = {"http://example.invalid/substitution/head.xsd": head,
+            "http://example.invalid/substitution/members.xsd": imported};
+        foreach string constraint in ("##local", "urn:members") {
+            string text = source('<xs:include schemaLocation="head.xsd"/>'
+                '<xs:import namespace="urn:members" schemaLocation="members.xsd"/>'
+                '<xs:complexType name="Record"><xs:choice><xs:element ref="head"/>'
+                '<xs:any namespace="' + constraint + '"/></xs:choice></xs:complexType>');
+            if (constraint == "urn:members") {
+                assertThrows("WSDL-ERROR", sub() {
+                    new XsdSchema(text, {"def_path": "http://example.invalid/substitution/", "xsd_cache": cache,
+                        "async_only": True});
+                });
+            } else {
+                XsdSchema original(text, {"def_path": "http://example.invalid/substitution/", "xsd_cache": cache,
+                    "async_only": True});
+                foreach XsdSchema s in (copies(original)) {
+                    XsdParticle p = particle(s);
+                    assertTrue(p.matchesElementNames(("{urn:members}quantity",)));
+                    assertTrue(p.attributeElementNames(("{urn:members}quantity",))[0] === p.getChildren()[0]);
+                }
+            }
+        }
+        string namespace_schema = source('<xs:include schemaLocation="head.xsd"/>'
+            '<xs:import namespace="urn:members" schemaLocation="members.xsd"/>'
+            '<xs:element name="quantity" type="xs:int" substitutionGroup="head"/>'
+            '<xs:complexType name="Record"><xs:sequence><xs:element ref="head" maxOccurs="2"/></xs:sequence>'
+            '</xs:complexType><xs:element name="record" type="Record"/>');
+        hash<auto> options = {"def_path": "http://example.invalid/substitution/", "xsd_cache": cache, "async_only": True};
+        XsdSchema original(namespace_schema, options);
+        foreach XsdSchema s in (copies(original)) {
+            hash<auto> value = {"{}quantity": 17, "{urn:members}quantity": 23};
+            assertEq(value, decode(s, '<quantity>17</quantity><m:quantity xmlns:m="urn:members">23</m:quantity>'));
+            XsdXmlValue output = s.serializeXmlValue("", "record", value);
+            hash<auto> expanded = XsdBase::expandElementNamespaces(parse_xml(output.getXml(), XPF_PRESERVE_ORDER));
+            assertEq("17", expanded."{}record"."{}quantity");
+            assertEq("23", expanded."{}record"."{urn:members}quantity");
+            assertEq(("{urn:members}quantity", "{}quantity"), sort(keys s.getElement("", "record").getDataProviderType().getFields()));
+            assertThrows("SOAP-SERIALIZATION-ERROR", \s.serializeXmlValue(), ("", "record", {"quantity": 17}));
+        }
+        foreach string version in ("11", "12") {
+            WebService original_service = service(version, namespace_schema, options);
+            foreach WebService ws in (original_service, Serializable::deserialize(original_service.serialize())) {
+                WSOperation operation = ws.getBindingOperation("Soap", "submit");
+                hash<auto> value = {"{}quantity": 17, "{urn:members}quantity": 23};
+                foreach bool response in (False, True) {
+                    string output = (response
+                        ? operation.serializeResponse(value, NOTHING, NOTHING, NOTHING, NOTHING, NOTHING, "Soap")
+                        : operation.serializeRequest(value, NOTHING, NOTHING, NOTHING, NOTHING, NOTHING, "Soap")).body;
+                    auto received = response ? operation.deserializeResponse(parse_xml(output, XPF_PRESERVE_ORDER), "Soap")
+                        : operation.deserializeRequest(parse_xml(output, XPF_PRESERVE_ORDER), "Soap");
+                    assertEq(value, received);
+                }
+                assertThrows("SOAP-SERIALIZATION-ERROR", \operation.serializeRequest(), ({"quantity": 17},));
+            }
+        }
+    }
+    values() {
+        foreach XsdSchema s in (copies(schema('<xs:sequence><xs:element ref="head" maxOccurs="3"/></xs:sequence>'))) {
+            string body = '<quantity>017</quantity><amount>1.250</amount><quantity>23</quantity>';
+            assertEq({"quantity": (17, 23), "amount": "1.250"}, decode(s, body));
+            XsdXmlValue retained('<record>' + body + '</record>');
+            AbstractDataProviderType provider = s.getXmlDataProviderType("", "record");
+            assertEq(retained.getXml(), provider.acceptsValue(retained).getXml());
+            XsdXmlValue encoded = s.serializeXmlValue("", "record", {"quantity": (17, 23), "amount": 1.25n});
+            assertTrue(index(encoded.getXml(), '<quantity>17</quantity>') >= 0);
+            assertTrue(index(encoded.getXml(), '<amount>1.25</amount>') >= 0);
+            foreach string invalid in ('<quantity>1.5</quantity>', '<quantity>2147483648</quantity>',
+                    '<head>17</head>', '<other>17</other>', '<quantity>1</quantity><amount>2</amount>'
+                    '<quantity>3</quantity><amount>4</amount>') {
+                assertThrows("SOAP-DESERIALIZATION-ERROR", \decode(), (s, invalid));
+                assertThrows("SOAP-SERIALIZATION-ERROR", \provider.acceptsValue(), (new XsdXmlValue('<record>' + invalid + '</record>'),));
+            }
+            foreach hash<auto> invalid in ({"quantity": 1.5n}, {"quantity": 2147483648}, {"head": 17},
+                    {"quantity": (1, 2), "amount": (3, 4)}) {
+                assertThrows("SOAP-SERIALIZATION-ERROR", \s.serializeXmlValue(), ("", "record", invalid));
+            }
+        }
+    }
+    presence() {
+        string defs = '<xs:complexType name="Empty"/><xs:element name="head" type="Empty"/>'
+            '<xs:element name="member" type="Empty" nillable="true" substitutionGroup="head"/>';
+        foreach XsdSchema s in (copies(schema('<xs:sequence><xs:element ref="head" minOccurs="0" maxOccurs="2"/>'
+                '</xs:sequence>', defs))) {
+            assertEq({}, decode(s, ""));
+            foreach string selected in ("head", "member") {
+                hash<auto> value = {selected: NOTHING};
+                assertEq(value, decode(s, '<' + selected + '/>'));
+                XsdXmlValue output = s.serializeXmlValue("", "record", value);
+                assertTrue(index(output.getXml(), '<' + selected) >= 0);
+                assertEq(output.getXml(), s.getXmlDataProviderType("", "record").acceptsValue(output).getXml());
+            }
+            assertEq({"member": NOTHING}, decode(s, '<member xsi:nil="true"/>'));
+            assertEq({"member": (NOTHING, NOTHING)}, decode(s, '<member/><member/>'));
+            assertEq({"head": NOTHING, "member": NOTHING}, decode(s, '<head/><member/>'));
+            assertTrue(index(s.serializeXmlValue("", "record", {"member": NOTHING}).getXml(), '<member') >= 0);
+            assertTrue(index(s.serializeXmlValue("", "record", {}).getXml(), '<head') < 0);
+        }
+    }
+    private WebService service(string version = "11", *string schema_xml, *hash<auto> options) {
+        string soap_ns = "http://schemas.xmlsoap.org/wsdl/soap" + (version == "12" ? "12" : "") + "/";
+        return new WebService('<w:definitions xmlns:w="http://schemas.xmlsoap.org/wsdl/" xmlns:s="' + soap_ns
+            + '" xmlns:xs="' + XSD_NS + '" xmlns:t="urn:service" targetNamespace="urn:service">'
+            '<w:types>' + (schema_xml ?? source(Declarations + '<xs:complexType name="Record"><xs:sequence>'
+            '<xs:element ref="head" maxOccurs="2"/></xs:sequence></xs:complexType>'
+            '<xs:element name="record" type="Record"/>')) + '</w:types>'
+            '<w:message name="Input"><w:part name="body" element="record"/></w:message>'
+            '<w:message name="Output"><w:part name="body" element="record"/></w:message>'
+            '<w:portType name="Port"><w:operation name="submit"><w:input message="t:Input"/>'
+            '<w:output message="t:Output"/></w:operation></w:portType>'
+            '<w:binding name="Soap" type="t:Port"><s:binding style="document" transport="http://schemas.xmlsoap.org/soap/http"/>'
+            '<w:operation name="submit"><s:operation soapAction="urn:submit"/><w:input><s:body use="literal"/></w:input>'
+            '<w:output><s:body use="literal"/></w:output></w:operation></w:binding></w:definitions>', options ?? {"async_only": True});
+    }
+    providers() {
+        foreach WebService ws in (service(), Serializable::deserialize(service().serialize())) {
+            XsdNativeTypeDataType type = ws.getNativeDataProviderType("", "record");
+            assertEq(("amount", "quantity"), sort(keys type.getSelectedValueType(new XsdQNameValue("", "Record")).getFields()));
+            foreach AbstractDataProviderType provider in (type, Serializable::deserialize(type.serialize()),
+                    ws.getElement("", "record").getDataProviderType()) {
+                assertEq({"quantity": (17,)}, provider.acceptsValue({"quantity": (17,)}));
+                assertThrows("RUNTIME-TYPE-ERROR", \provider.acceptsValue(), ({"quantity": (2147483648,)},));
+            }
+            WSMessageHelper helper(ws, {"max_items": 2});
+            hash<auto> example = helper.getMessage(ws.messages.Input).record;
+            assertEq({"quantity": (123, 123)}, example);
+            assertTrue(index(helper.getXmlMessage(ws.messages.Input).body.getXml(), '<quantity>123</quantity>') >= 0);
+        }
+    }
+    abstractSamples() {
+        foreach string compositor in ("sequence", "choice", "all") {
+            WebService original('<w:definitions xmlns:w="http://schemas.xmlsoap.org/wsdl/" xmlns:xs="' + XSD_NS + '">'
+                '<w:types>' + source('<xs:complexType name="B" abstract="true"/>'
+                    '<xs:complexType name="D"><xs:complexContent><xs:extension base="B"/></xs:complexContent></xs:complexType>'
+                    '<xs:element name="head" type="B"/><xs:element name="middle" type="B" substitutionGroup="head"/>'
+                    '<xs:element name="member" type="D" substitutionGroup="middle"/>'
+                    '<xs:element name="record"><xs:complexType><xs:' + compositor + '><xs:element ref="head"/>'
+                    '</xs:' + compositor + '></xs:complexType></xs:element>') + '</w:types></w:definitions>');
+            foreach WebService ws in (original, Serializable::deserialize(original.serialize())) {
+                XsdElement record = ws.getElement("", "record");
+                XsdParticle model = cast<XsdComplexType>(record.type).getParticle();
+                assertEq(("{}member",), model.getSampleElementNames());
+                assertTrue(model.matchesElementNames(("{}head",)));
+                assertTrue(model.matchesElementNames(("{}middle",)));
+                WSMessageHelper helper(ws);
+                hash<auto> sample = helper.getMessage(record).record;
+                assertEq({"member": {}}, sample);
+                XsdXmlValue output = ws.serializeXmlValue("", "record", sample);
+                assertEq(output.getXml(), ws.getXmlDataProviderType("", "record").acceptsValue(output).getXml());
+            }
+        }
+    }
+    soap() {
+        foreach string version in ("11", "12") {
+            foreach WebService ws in (service(version), Serializable::deserialize(service(version).serialize())) {
+                WSOperation operation = ws.getOperation("submit");
+                foreach bool response in (False, True) {
+                    hash<auto> value = {"quantity": 17, "amount": "1.25"};
+                    hash<auto> encoded = response
+                        ? operation.serializeResponse({"body": value}, NOTHING, NOTHING, NOTHING, NOTHING, NOTHING, "Soap")
+                        : operation.serializeRequest({"body": value}, NOTHING, NOTHING, NOTHING, NOTHING, NOTHING, "Soap");
+                    assertTrue(index(encoded.body, version == "12" ? SOAP_12_ENV : SOAP_11_ENV) >= 0);
+                    auto decoded = response ? operation.deserializeResponse(parse_xml(encoded.body, XPF_PRESERVE_ORDER), "Soap")
+                        : operation.deserializeRequest(parse_xml(encoded.body, XPF_PRESERVE_ORDER), "Soap");
+                    assertEq({"quantity": 17, "amount": 1.25}, decoded);
+                }
+            }
+        }
+    }
+    recovery() {
+        foreach string tail in ('<xs:element name="quantity" type="xs:int"/>',
+                '<xs:element name="quantity" type="xs:string"/>') {
+            bool ambiguity = index(tail, 'xs:int') >= 0;
+            XsdSchema s = schema('<xs:sequence><xs:element ref="head"' + (ambiguity ? ' minOccurs="0"' : '')
+                + '/>' + tail + '</xs:sequence>', '<xs:element name="head" type="xs:int" abstract="true"/>'
+                '<xs:element name="initial" type="xs:int" substitutionGroup="head"/>');
+            XsdElement head = s.getElement("", "head");
+            XsdParticle p = particle(s);
+            list<string> accepted = ("{}initial", "{}quantity");
+            assertTrue(p.matchesElementNames(accepted));
+            assertThrows("WSDL-ERROR", \s.addSchemaString(), (source(
+                '<xs:element name="quantity" type="xs:int" substitutionGroup="head"/>'),));
+            assertTrue(s.getElement("", "head") === head);
+            assertEq(("{}initial",), keys head.getSubstitutionGroup());
+            assertTrue(p.matchesElementNames(accepted));
+            assertEq(NOTHING, s.getElement("", "quantity"));
+            s.addSchemaString(source('<xs:element name="later" type="xs:int" substitutionGroup="head"/>'));
+            assertTrue(p.matchesElementNames(("{}later", "{}quantity")));
+            assertTrue(particle(Serializable::deserialize(s.serialize())).matchesElementNames(("{}later", "{}quantity")));
+        }
+        XsdSchema s = schema('<xs:sequence><xs:element ref="head"/><xs:element name="quantity" type="xs:int"/>'
+            '</xs:sequence>', '<xs:element name="head" type="xs:int" abstract="true"/>'
+                '<xs:element name="initial" type="xs:int" substitutionGroup="head"/>');
+        XsdElement head = s.getElement("", "head");
+        XsdElement initial = s.getElement("", "initial");
+        XsdAbstractType original_type = head.type;
+        SubstitutionConsistencyProbe probe(s.nsc);
+        probe.head = head;
+        head.type = probe;
+        initial.type = probe;
+        on_exit {
+            head.type = original_type;
+            initial.type = original_type;
+        }
+        assertThrows("THREAD-CANCELLED", \s.addSchemaString(), (source(
+            '<xs:element name="quantity" substitutionGroup="head"/>'),));
+        assertTrue(probe.published);
+        assertEq(("{}initial",), keys head.getSubstitutionGroup());
+        assertEq(NOTHING, s.getElement("", "quantity"));
+        head.type = original_type;
+        initial.type = original_type;
+        s.addSchemaString(source('<xs:element name="quantity" type="xs:int" substitutionGroup="head"/>'));
+        assertTrue(particle(s).matchesElementNames(("{}quantity", "{}quantity")));
+    }
+    large() {
+        string defs = '<xs:element name="head" type="xs:int" abstract="true"/>';
+        for (int index = 0; index < 96; ++index) {
+            defs += sprintf('<xs:element name="m%d" type="xs:int" substitutionGroup="head"/>', index);
+        }
+        XsdParticle p = particle(schema('<xs:sequence><xs:element ref="head" maxOccurs="unbounded"/></xs:sequence>', defs));
+        list<string> names();
+        for (int index = 0; index < 1000; ++index) {
+            names += "{}m" + (index % 96);
+        }
+        list<XsdParticle> positions = p.attributeElementNames(names);
+        assertEq(1000, positions.size());
+        foreach XsdParticle position in (positions) {
+            assertTrue(position === p.getChildren()[0]);
+        }
+        assertEq(96, p.getElementOccurrenceRanges().size());
+        assertTrue(p.matchesElementNames(p.getSampleElementNames(3, 3)));
+        string huge = "1" + strmul("0", 80);
+        p = particle(schema('<xs:sequence minOccurs="' + huge + '" maxOccurs="' + huge
+            + '"><xs:element ref="head" minOccurs="0"/></xs:sequence>'));
+        assertTrue(p.matchesElementNames(("{}quantity", "{}amount")));
+        assertEq(huge, p.getElementOccurrenceRanges()."{}quantity".maximum);
+        assertEq((), p.getSampleElementNames(3, 0));
+    }
+    concurrency() {
+        XsdSchema s = schema('<xs:sequence><xs:element ref="head" maxOccurs="2"/></xs:sequence>');
+        XsdParticle p = particle(s);
+        SandboxManager manager();
+        on_exit manager.clearInterrupt();
+        Program program(PO_NEW_STYLE | PO_STRICT_ARGS | PO_REQUIRE_TYPES);
+        program.setSandboxManager(manager);
+        program.parse("%modern\n%requires ../qlib/WSDL.qm\n"
+            "bool sub match(XsdParticle p, SandboxManager manager) {\n"
+            "    manager.requestInterrupt();\n"
+            "    return p.matchesElementNames((\"{}quantity\",));\n"
+            "}\n", get_script_dir() + "/substitution-particle-cancellation.qr");
+        *hash<ExceptionInfo> interrupted;
+        try {
+            program.callFunction("match", p, manager);
+        } catch (hash<ExceptionInfo> ex) {
+            interrupted = ex;
+        }
+        manager.clearInterrupt();
+        assertTrue(exists interrupted);
+        assertTrue(interrupted.err == "THREAD-CANCELLED" || interrupted.err == "PROGRAM-INTERRUPTED");
+        assertTrue(p.matchesElementNames(("{}quantity",)));
+        Qore::Thread::Queue results();
+        Qore::Thread::Counter running();
+        on_exit assertEq(0, running.waitForZero(30s));
+        for (int worker = 0; worker < 2; ++worker) {
+            running.inc();
+            background sub() {
+                on_exit running.dec();
+                try {
+                    for (int index = 0; index < 10; ++index) {
+                        @assert(decode(s, '<quantity>17</quantity><amount>1.25</amount>')
+                            == {"quantity": 17, "amount": "1.25"});
+                        @assert(p.matchesElementNames(p.getSampleElementNames()));
+                    }
+                    results.push(True);
+                } catch (hash<ExceptionInfo> ex) {
+                    results.push(ex);
+                }
+            }();
+        }
+        for (int worker = 0; worker < 2; ++worker) {
+            assertEq(True, results.get(30s));
+        }
+    }
+}

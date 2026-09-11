@@ -80,6 +80,12 @@ module WSDL {
     @section wsdlrelnotes WSDL Module Release Notes
 
     @subsection wsdl_0_5_8 WSDL v0.5.8
+    - ordered child particles admit concrete substitution members while retaining each declaration position
+      and its shared occurrence limits; all-group aliases occupy one slot
+    - native and retained child conversion, provider fields and samples use the selected member declaration;
+      substitution fields preserve explicit presence for empty and nil values
+    - schema construction checks implicit member declarations for consistency and unique attribution after
+      membership resolution; failed or interrupted additions restore earlier memberships
     - global element substitution groups resolve imported and forward affiliations, inherit omitted member
       types, and reject incompatible types, final exclusions, missing heads and circular affiliations
     - added element substitution affiliation, final and concrete membership metadata; transitive membership
@@ -10450,10 +10456,26 @@ public class XsdAttribute inherits WSDL::XsdTypedData {
 
 # Internal field indexing shared by element groups and complex types.
 class XsdElementFieldHelper {
+    # Keep all admitted names, preferring declarations that need no xsi:type for an instance sample.
+    static list<string> getPreferredInstanceNames(XsdElement element) {
+        list<string> concrete();
+        list<string> abstract_types();
+        foreach hash<string, auto> entry in (element.getInstanceDeclarations().pairIterator()) {
+            XsdElement declaration = entry.value;
+            if (declaration.type.isAbstract()) {
+                abstract_types += string(entry.key);
+            } else {
+                concrete += string(entry.key);
+            }
+        }
+        return concrete + abstract_types;
+    }
+
     # Index every active named declaration from the authoritative particle graph.
     # Field aliases must include alternatives not selected by a particular sample.
     static hash<string, XsdElement> getParticleDeclarations(XsdParticle particle,
-            *hash<string, hash<XsdParticleOccurrenceRange>> ranges) {
+            *hash<string, hash<XsdParticleOccurrenceRange>> ranges,
+            *reference<hash<string, bool>> substitution_fields) {
         hash<string, XsdElement> result();
         hash<string, bool> seen();
         list<XsdParticle> pending = (particle,);
@@ -10464,9 +10486,16 @@ class XsdElementFieldHelper {
             }
             seen{node.uniqueHash()} = True;
             if (node.getKind() == XsdParticleKind::Element) {
-                string identity = node.getElement().getExpandedName();
-                if (ranges.hasKey(identity) && !result.hasKey(identity)) {
-                    result{identity} = node.getElement();
+                XsdElement head = node.getElement().getDeclaration();
+                hash<string, XsdElement> admitted = node.getElement().getInstanceDeclarations();
+                foreach XsdElement declaration in (admitted.iterator()) {
+                    string identity = declaration.getExpandedName();
+                    if (ranges.hasKey(identity) && !result.hasKey(identity)) {
+                        result{identity} = declaration;
+                    }
+                    if (exists substitution_fields && (admitted.size() > 1 || declaration != head)) {
+                        substitution_fields{identity} = True;
+                    }
                 }
             } else if (node.getKind() == XsdParticleKind::Group) {
                 @assert(node.getGroupDefinition());
@@ -10540,7 +10569,7 @@ class XsdElementConsistencyHelper {
         foreach XsdElement element in (additions) {
             string identity = element.getExpandedName();
             *XsdElement previous = declarations{identity};
-            if (previous && previous != element && !(previous.ref && element.ref)
+            if (previous && previous.getDeclaration() != element.getDeclaration() && !(previous.ref && element.ref)
                     && !(previous.type.hasRealName() && element.type.hasRealName()
                         && previous.type == element.type)) {
                 throw WSDL_ERROR, sprintf("conflicting type definitions for element %Y in one content model",
@@ -10556,6 +10585,38 @@ class XsdElementConsistencyHelper {
         *hash<auto> attributes = data."^attributes^";
         return XsdEmptiabilityHelper::zeroOccurs(attributes.minOccurs)
             && XsdEmptiabilityHelper::zeroOccurs(attributes.maxOccurs);
+    }
+
+    # Substitution members are implicit declarations under XSD 1.0 section 3.8.6.
+    # Return child types for the schema's iterative traversal of anonymous and recursive definitions.
+    static list<XsdAbstractType> validateParticle(XsdParticle particle) {
+        particle.validateDeterminism();
+        hash<string, XsdElement> declarations();
+        list<XsdAbstractType> types();
+        hash<string, bool> seen();
+        list<XsdParticle> pending = (particle,);
+        while (pending) {
+            XsdParticle node = pop pending;
+            if (node.getMaxOccurs() == "0" || seen{node.uniqueHash()}) {
+                continue;
+            }
+            seen{node.uniqueHash()} = True;
+            if (node.getKind() == XsdParticleKind::Element) {
+                XsdElement element = node.getElement();
+                XsdElementConsistencyHelper::merge(\declarations, (element,));
+                types += element.type;
+                foreach XsdElement member in (element.getInstanceDeclarations().iterator()) {
+                    XsdElementConsistencyHelper::merge(\declarations, (member,));
+                    types += member.type;
+                }
+            } else if (node.getKind() == XsdParticleKind::Group) {
+                @assert(node.getGroupDefinition());
+                pending += node.getGroupDefinition();
+            } else {
+                pending += node.getChildren();
+            }
+        }
+        return types;
     }
 }
 
@@ -10750,6 +10811,39 @@ public class XsdElement inherits WSDL::XsdTypedData {
     */
     hash<string, XsdElement> getSubstitutionGroup() {
         return declaration_ref ? declaration_ref.getSubstitutionGroup() : substitution_members;
+    }
+
+    #! returns the concrete declarations admitted at an occurrence of this element
+    /** @return declarations keyed by expanded instance name; a local declaration admits only itself,
+        while a global declaration or reference admits its concrete substitution group
+        @note Instance type, value and nil constraints remain properties of the selected declaration.
+        @since %WSDL 0.5.8
+    */
+    hash<string, XsdElement> getInstanceDeclarations() {
+        if (declaration_ref) {
+            return declaration_ref.getSubstitutionGroup();
+        }
+        if (substitution_members || abstract_element) {
+            return substitution_members;
+        }
+        return {getExpandedName(): self};
+    }
+
+    #! resolves an expanded instance name to its validating element declaration
+    /** @param name the expanded instance name in {namespace-uri}local-name form
+        @return the permitted declaration, or NOTHING when the name is not admitted
+        @since %WSDL 0.5.8
+    */
+    *XsdElement getInstanceDeclaration(string name) {
+        return getInstanceDeclarations(){name};
+    }
+
+    #! returns the declaration component represented by this element or reference
+    /** @return the referenced global declaration, or this declaration for a non-reference
+        @since %WSDL 0.5.8
+    */
+    XsdElement getDeclaration() {
+        return declaration_ref ?? self;
     }
 
     /** @cond INTERNAL */
@@ -18764,9 +18858,11 @@ class XsdParticleProgram {
     private {
         list<hash<XsdRegexNode>> nodes();
         hash<string, XsdParticle> terminals();
+        hash<string, string> element_names();
         int root;
         *XsdRegexAutomaton automaton;
         *XsdParticle all;
+        list<XsdParticle> all_positions();
         bool all_optional = False;
     }
 
@@ -18803,11 +18899,13 @@ class XsdParticleProgram {
                     throw WSDL_ERROR, "XSD 1.0 all members must be elements with maximum 0 or 1";
                 }
                 if (child.getMaxOccurs() != "0") {
-                    string name = child.getElement().getExpandedName();
-                    if (terminals.hasKey(name)) {
-                        throw WSDL_ERROR, sprintf("ambiguous all member %Y", name);
+                    push all_positions, child;
+                    foreach string name in (keys child.getElement().getInstanceDeclarations()) {
+                        if (terminals.hasKey(name)) {
+                            throw WSDL_ERROR, sprintf("ambiguous all member %Y", name);
+                        }
+                        terminals{name} = child;
                     }
-                    terminals{name} = child;
                 }
             }
             all = top;
@@ -18858,7 +18956,18 @@ class XsdParticleProgram {
             if (node.getMaxOccurs() == "0") {
                 term.kind = XRN_EMPTY;
                 term.nullable = True;
-            } else if (node.getKind() == XsdParticleKind::Element || node.getKind() == XsdParticleKind::Any) {
+            } else if (node.getKind() == XsdParticleKind::Element) {
+                # A substitution is a finite name alternative at the same declaration position.
+                # Empty groups have an empty language, rather than admitting an abstract head.
+                term.kind = XRN_ALTERNATIVE;
+                foreach string name in (XsdElementFieldHelper::getPreferredInstanceNames(node.getElement())) {
+                    int id = nodes.size();
+                    terminals{id.toString()} = node;
+                    element_names{id.toString()} = name;
+                    push nodes, <XsdRegexNode>{"kind": XRN_CHARACTER};
+                    push term.children, id;
+                }
+            } else if (node.getKind() == XsdParticleKind::Any) {
                 term.kind = XRN_CHARACTER;
                 terminals{nodes.size().toString()} = node;
             } else {
@@ -18898,8 +19007,15 @@ class XsdParticleProgram {
         if (all) {
             list<string> result();
             int required = 0;
-            foreach string name in (keys terminals) {
-                required += int(terminals{name}.getMinOccurs() == "1");
+            foreach XsdParticle position in (all_positions) {
+                bool mandatory = position.getMinOccurs() == "1";
+                if (mandatory && !position.getElement().getInstanceDeclarations()) {
+                    if (all_optional) {
+                        return result;
+                    }
+                    throw "XSD-SAMPLE-ERROR", "required all position has no concrete element declaration";
+                }
+                required += int(mandatory);
             }
             if (required > max_children) {
                 if (all_optional) {
@@ -18908,28 +19024,37 @@ class XsdParticleProgram {
                 throw "XSD-SAMPLE-ERROR", sprintf("all-group sample requires %d children; max_children is %d",
                     required, max_children);
             }
-            foreach string name in (keys terminals) {
-                bool mandatory = terminals{name}.getMinOccurs() == "1";
+            foreach XsdParticle position in (all_positions) {
+                bool mandatory = position.getMinOccurs() == "1";
                 if (mandatory) {
                     --required;
                 }
                 if (mandatory || result.size() < max_children - required) {
-                    push result, name;
+                    *string name = XsdElementFieldHelper::getPreferredInstanceNames(position.getElement())[0];
+                    if (exists name) {
+                        push result, name;
+                    }
                 }
             }
             return result;
         }
-        XsdParticleSamplePlanner planner(nodes, terminals, max_occurrences, max_children);
+        XsdParticleSamplePlanner planner(nodes, terminals, element_names, max_occurrences, max_children);
         return planner.sample(root);
     }
 
     *hash<string, hash<XsdParticleOccurrenceRange>> elementOccurrenceRanges() {
         if (all) {
             hash<string, hash<XsdParticleOccurrenceRange>> result();
-            foreach string name in (keys terminals) {
-                result{name} = <XsdParticleOccurrenceRange>{
-                    "minimum": all_optional ? "0" : terminals{name}.getMinOccurs(),
-                    "maximum": terminals{name}.getMaxOccurs()};
+            foreach XsdParticle position in (all_positions) {
+                hash<string, XsdElement> admitted = position.getElement().getInstanceDeclarations();
+                if (!admitted && position.getMinOccurs() == "1") {
+                    return all_optional ? new hash<string, hash<XsdParticleOccurrenceRange>>() : NOTHING;
+                }
+                foreach string name in (keys admitted) {
+                    result{name} = <XsdParticleOccurrenceRange>{
+                        "minimum": all_optional || admitted.size() != 1 ? "0" : position.getMinOccurs(),
+                        "maximum": position.getMaxOccurs()};
+                }
             }
             return result;
         }
@@ -18947,7 +19072,7 @@ class XsdParticleProgram {
                 case XRN_CHARACTER: {
                     XsdParticle declaration = terminals{index.toString()};
                     if (declaration.getKind() == XsdParticleKind::Element) {
-                        result{declaration.getElement().getExpandedName()} =
+                        result{element_names{index.toString()}} =
                             <XsdParticleOccurrenceRange>{"minimum": "1", "maximum": "1"};
                     }
                     break;
@@ -19030,7 +19155,7 @@ class XsdParticleProgram {
         return exists left && exists right ? XsdDurationIntegerHelper::multiply(left, right) : NOTHING;
     }
 
-    private static string namespaceOf(string name) {
+    static string namespaceOf(string name) {
         *list<string> parts = name =~ x/\A\{(.*)\}([^}]+)\z/;
         if (parts.size() != 2 || !Namespaces::isNCName(parts[1])) {
             throw "XSD-PARTICLE-ERROR", sprintf("invalid expanded child element name %Y", name);
@@ -19041,7 +19166,7 @@ class XsdParticleProgram {
     private bool terminal(int id, string name) {
         XsdParticle node = terminals{id.toString()};
         @assert(node);
-        return node.getKind() == XsdParticleKind::Element ? node.getElement().getExpandedName() == name
+        return node.getKind() == XsdParticleKind::Element ? element_names{id.toString()} == name
             : XsdAttributeWildcardHelper::allows(node.getWildcard(), namespaceOf(name));
     }
 
@@ -19055,13 +19180,17 @@ class XsdParticleProgram {
             }
             hash<string, bool> seen();
             foreach string name in (names) {
-                if (!terminals.hasKey(name) || seen{name}) {
+                if (!terminals.hasKey(name)) {
                     return False;
                 }
-                seen{name} = True;
+                string position = terminals{name}.uniqueHash();
+                if (seen{position}) {
+                    return False;
+                }
+                seen{position} = True;
             }
-            foreach string name in (keys terminals) {
-                if (!seen{name} && terminals{name}.getMinOccurs() != "0") {
+            foreach XsdParticle position in (all_positions) {
+                if (!seen{position.uniqueHash()} && position.getMinOccurs() != "0") {
                     return False;
                 }
             }
@@ -19127,7 +19256,7 @@ class XsdParticleProgram {
 
     validateDeterminism() {
         if (!all) {
-            XsdParticleAmbiguity check(nodes, terminals, root);
+            XsdParticleAmbiguity check(nodes, terminals, element_names, root);
         }
     }
 }
@@ -19145,21 +19274,24 @@ class XsdParticleSamplePlanner {
     private {
         list<hash<XsdRegexNode>> nodes;
         hash<string, XsdParticle> terminals;
+        hash<string, string> element_names;
         int max_occurrences;
         int max_children;
     }
 
-    constructor(list<hash<XsdRegexNode>> nodes, hash<string, XsdParticle> terminals,
+    constructor(list<hash<XsdRegexNode>> nodes, hash<string, XsdParticle> terminals, hash<string, string> element_names,
             int max_occurrences, int max_children) {
         self.nodes = nodes;
         self.terminals = terminals;
+        self.element_names = element_names;
         self.max_occurrences = max_occurrences;
         self.max_children = max_children;
     }
 
-    private static *string sampleName(XsdParticle particle) {
+    private static *string sampleName(XsdParticle particle, *string element_name) {
         if (particle.getKind() == XsdParticleKind::Element) {
-            return particle.getElement().getExpandedName();
+            @assert(exists element_name);
+            return element_name;
         }
         hash<XsdAttributeWildcardInfo> wildcard = particle.getWildcard();
         if (wildcard.constraint == XsdWildcardConstraint::Any) {
@@ -19231,7 +19363,7 @@ class XsdParticleSamplePlanner {
                     result.minimum = result.preferred = ();
                     break;
                 case XRN_CHARACTER: {
-                    *string name = sampleName(terminals{index.toString()});
+                    *string name = sampleName(terminals{index.toString()}, element_names{index.toString()});
                     if (exists name && max_children) {
                         result.minimum = result.preferred = (name,);
                     }
@@ -19542,7 +19674,8 @@ class XsdParticleAmbiguity {
         bool has_wildcards = False;
     }
 
-    constructor(list<hash<XsdRegexNode>> nodes, hash<string, XsdParticle> terminals, int root) {
+    constructor(list<hash<XsdRegexNode>> nodes, hash<string, XsdParticle> terminals,
+            hash<string, string> element_names, int root) {
         self.terminals = terminals;
         foreach XsdParticle terminal in (terminals.iterator()) {
             has_wildcards = has_wildcards || terminal.getKind() == XsdParticleKind::Any;
@@ -19558,7 +19691,7 @@ class XsdParticleAmbiguity {
                     string terminal_key = summaries.size().toString();
                     XsdParticle terminal = terminals{terminal_key};
                     if (terminal.getKind() == XsdParticleKind::Element) {
-                        terminal_key = terminal.getElement().getExpandedName();
+                        terminal_key = element_names{terminal_key};
                         self.terminals{terminal_key} = terminal;
                     }
                     summary.first{terminal_key} = True;
@@ -19598,11 +19731,11 @@ class XsdParticleAmbiguity {
         @assert(lhs && rhs);
         bool result = False;
         if (lhs.getKind() == XsdParticleKind::Element && rhs.getKind() == XsdParticleKind::Element) {
-            result = lhs.getElement().getExpandedName() == rhs.getElement().getExpandedName();
+            result = left == right;
         } else if (lhs.getKind() == XsdParticleKind::Element) {
-            result = XsdAttributeWildcardHelper::allows(rhs.getWildcard(), lhs.getElement().getNamespaceUri());
+            result = XsdAttributeWildcardHelper::allows(rhs.getWildcard(), XsdParticleProgram::namespaceOf(left));
         } else if (rhs.getKind() == XsdParticleKind::Element) {
-            result = XsdAttributeWildcardHelper::allows(lhs.getWildcard(), rhs.getElement().getNamespaceUri());
+            result = XsdAttributeWildcardHelper::allows(lhs.getWildcard(), XsdParticleProgram::namespaceOf(right));
         } else {
             hash<XsdAttributeWildcardInfo> a = lhs.getWildcard();
             hash<XsdAttributeWildcardInfo> b = rhs.getWildcard();
@@ -21948,7 +22081,11 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
     }
 
     # All native field adapters use only declarations present in the language.
-    private hash<string, XsdElement> getParticleDeclarations(*hash<string, hash<XsdParticleOccurrenceRange>> ranges) {
+    private hash<string, XsdElement> getParticleDeclarations(*hash<string, hash<XsdParticleOccurrenceRange>> ranges,
+            *reference<hash<string, bool>> substitution_fields) {
+        if (exists substitution_fields) {
+            return XsdElementFieldHelper::getParticleDeclarations(particle, ranges, \substitution_fields);
+        }
         return XsdElementFieldHelper::getParticleDeclarations(particle, ranges);
     }
 
@@ -21956,7 +22093,8 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
     private hash<auto> serializeNamedParticle(Namespaces nsc, *hash<auto> value, *softbool omitType) {
         @assert(particle);
         *hash<string, hash<XsdParticleOccurrenceRange>> ranges = particle.getElementOccurrenceRanges();
-        hash<string, XsdElement> declarations = getParticleDeclarations(ranges);
+        hash<string, bool> substitution_fields();
+        hash<string, XsdElement> declarations = getParticleDeclarations(ranges, \substitution_fields);
         hash<string, string> fields = XsdElementFieldHelper::getFieldNames(declarations);
         list<string> names();
         hash<string, list<auto>> values();
@@ -21969,9 +22107,10 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
                 }
                 value{field} = remove value{identity};
             }
+            bool present = value.hasKey(field);
             auto supplied = remove value{field};
             hash<XsdParticleOccurrenceRange> range = ranges{identity};
-            if (!exists supplied && range.minimum == "0") {
+            if (!exists supplied && range.minimum == "0" && !(present && substitution_fields{identity})) {
                 continue;
             }
             bool list_value = declarations{identity}.type.hasNativeListValue() && range.maximum == "1";
@@ -22006,8 +22145,9 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
         for (int index = 0; index < positions.size(); ++index) {
             XsdParticle terminal = positions[index];
             @assert(terminal.getKind() == XsdParticleKind::Element);
-            XsdElement declaration = terminal.getElement();
             string identity = ordered[index];
+            *XsdElement declaration = terminal.getElement().getInstanceDeclaration(identity);
+            @assert(declaration);
             string field = fields{identity};
             auto converted = declaration.serializeOccurrence(nsc, values{identity}[offsets{identity}++],
                 omitType, field, name);
@@ -22246,7 +22386,9 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
     private hash<auto> deserializeParticle(hash<string, XsdAbstractType> tmap, *hash<auto> mrh,
             *hash<auto> value) {
         @assert(particle);
-        hash<string, XsdElement> declarations = getParticleDeclarations(particle.getElementOccurrenceRanges());
+        hash<string, bool> substitution_fields();
+        hash<string, XsdElement> declarations = getParticleDeclarations(particle.getElementOccurrenceRanges(),
+            \substitution_fields);
         hash<string, string> fields = XsdElementFieldHelper::getFieldNames(declarations);
         hash<string, string> identities = map {$1.value: $1.key}, fields.pairIterator();
         hash<string, bool> ambiguous_names();
@@ -22308,7 +22450,9 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
         if (cx_type != XET_CHOICE && !result) {
             foreach XsdElement element in (elementmap.iterator()) {
                 string identity = element.getExpandedName();
-                if (fields.hasKey(identity)) {
+                # A substitution field's presence selects an element even when its value is NOTHING.
+                # Do not invent absent head fields that would add a second member during serialization.
+                if (fields.hasKey(identity) && !substitution_fields{identity}) {
                     result{fields{identity}} = NOTHING;
                 }
             }
@@ -22319,7 +22463,9 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
             string field = field_names[index];
             auto converted;
             if (terminal.getKind() == XsdParticleKind::Element) {
-                converted = terminal.getElement().deserializeOccurrence(tmap, mrh, getValue(mrh, values[index]));
+                *XsdElement declaration = terminal.getElement().getInstanceDeclaration(names[index]);
+                @assert(declaration);
+                converted = declaration.deserializeOccurrence(tmap, mrh, getValue(mrh, values[index]));
             } else {
                 @assert(terminal.getKind() == XsdParticleKind::Any);
                 # Wildcard processing semantics remain separate from particle
@@ -23301,9 +23447,19 @@ public class WSMessage inherits WSDL::XsdNamedData {
                 return rv ?? NULL;
             }
             if (v.typeCode() == NT_HASH) {
-                hash<string, bool> fields = map {$1: True}, keys type.elementmap;
-                foreach hash<ChoiceInfo> choice in (type.choices) {
-                    map fields{$1} = True, keys choice.elementmap;
+                hash<string, bool> fields();
+                if (type.getParticle()) {
+                    XsdParticle particle = type.getParticle();
+                    hash<string, XsdElement> declarations = XsdElementFieldHelper::getParticleDeclarations(particle,
+                        particle.getElementOccurrenceRanges());
+                    foreach hash<auto> field in (XsdElementFieldHelper::getFieldNames(declarations).pairIterator()) {
+                        fields{field.key} = fields{field.value} = True;
+                    }
+                } else {
+                    fields = map {$1: True}, keys type.elementmap;
+                    foreach hash<ChoiceInfo> choice in (type.choices) {
+                        map fields{$1} = True, keys choice.elementmap;
+                    }
                 }
                 foreach string key in (keys v) {
                     if (reserved{key} && !(key == name && fields{key})) {
@@ -23317,6 +23473,10 @@ public class WSMessage inherits WSDL::XsdNamedData {
                         }
                     }
                 }
+            }
+            if (!exists rv && type.getParticle() && type.getParticle().matchesElementNames(())) {
+                # A present single part can have no child fields; preserve its enclosing element.
+                return new hash<auto>();
             }
             return rv;
         }
@@ -26552,6 +26712,33 @@ public class XsdSchema inherits WSDL::XsdBase {
         }
     }
 
+    private validateSubstitutionParticles(list<XsdElement> global_declarations) {
+        list<XsdAbstractType> pending = map $1, tmap.iterator();
+        pending += map $1.type, global_declarations;
+        foreach XsdGroup group in (groupMap.iterator()) {
+            pending += XsdElementConsistencyHelper::validateParticle(group.getParticle());
+        }
+        hash<string, bool> seen();
+        while (pending) {
+            XsdAbstractType type = pop pending;
+            if (seen{type.uniqueHash()}) {
+                continue;
+            }
+            seen{type.uniqueHash()} = True;
+            if (type instanceof XsdComplexType) {
+                XsdComplexType complex = cast<XsdComplexType>(type);
+                if (complex.getParticle()) {
+                    pending += XsdElementConsistencyHelper::validateParticle(complex.getParticle());
+                }
+                if (complex.baseType) {
+                    pending += complex.baseType;
+                }
+            } else if (type instanceof XsdArrayType) {
+                pending += cast<XsdArrayType>(type).elementType;
+            }
+        }
+    }
+
     private resolveType(XsdAttribute xd) {
         *XsdAttribute declaration;
         if (xd.refInfo) {
@@ -26947,6 +27134,8 @@ public class XsdSchema inherits WSDL::XsdBase {
         map resolveType($1), unresolved.getList();
         unresolved.validateElementConstraints();
         resolveElementSubstitutionGroups(global_declarations);
+        # Membership can change existing content models during an incremental addition.
+        validateSubstitutionParticles(global_declarations);
     }
 }
 
@@ -27879,7 +28068,9 @@ public class WSMessageHelper {
             if (!values.hasKey(identity)) {
                 values{identity} = new list<auto>();
             }
-            push values{identity}, getFieldMessage(fields{identity}, positions[index].getElement(), comments,
+            *XsdElement declaration = positions[index].getElement().getInstanceDeclaration(identity);
+            @assert(declaration);
+            push values{identity}, getFieldMessage(fields{identity}, declaration, comments,
                 True){fields{identity}};
         }
         hash<auto> result();

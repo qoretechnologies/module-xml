@@ -1365,5 +1365,15 @@ disagreements explicitly. The native dependency correction is selected by the
 45-schema configure probe and tested with real fixed/broken system backports.
 See the [implemented declaration design](../../design/wsdl-element-substitution.md)
 and [root causes and specification evidence](element-substitution-evidence.md).
-WSDL message processing of alternate member names and selected root identity
-remains the next P5 increment.
+
+Child substitution processing is covered by `wsdl-substitution-particles.qtest`
+and `test_substitution_particles.py`. The integration matrix has 53 schemas and
+310 documents across actual SOAP 1.1/1.2 bindings, original/restored graphs and
+both directions: 2,586 rows include 992 independently validated SOAP outputs and 58 standalone samples. It
+checks concrete member names and values, shared occurrence limits, all slots,
+post-membership ambiguity and declaration consistency. Retained values preserve
+exact XML; native fields retain member identity and per-field value order.
+See the [implemented particle design](../../design/wsdl-substitution-particles.md)
+and [regression evidence](substitution-particles-evidence.md).
+The separate [native declaration-consistency gap](p5-native-element-consistency-finding.md),
+selected message-root identity and remaining P5 content semantics stay open.

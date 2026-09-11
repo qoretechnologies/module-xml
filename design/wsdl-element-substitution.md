@@ -40,6 +40,9 @@ The public inspection APIs are:
 | `getSubstitutionGroupName()` | Captured immediate head QName, or NOTHING |
 | `getSubstitutionGroupAffiliation()` | Resolved immediate head declaration, or NOTHING |
 | `getSubstitutionGroup()` | Concrete members keyed by expanded element name |
+| `getInstanceDeclarations()` | Concrete occurrence declarations, including self for a local element |
+| `getInstanceDeclaration(name)` | Permitted declaration for an expanded instance name |
+| `getDeclaration()` | Canonical global declaration behind a reference, otherwise self |
 
 For example, a member can inherit an integer head's type:
 
@@ -81,3 +84,6 @@ These rules implement XSD 1.0 Structures §3.3.2, Element Declaration Properties
 Correct §3.3.6(4,6), Substitution Group OK (Transitive) §3.3.6 and Type Derivation
 OK §3.4.6/§3.14.6. See the [normative specification](https://www.w3.org/TR/2004/REC-xmlschema-1-20041028/)
 and the separate [validator adjudication and tests](../test/wsdl-interop/element-substitution-evidence.md).
+
+The [child-particle design](wsdl-substitution-particles.md) explains matching,
+attribution, conversion, provider fields, samples and post-membership component checks.
