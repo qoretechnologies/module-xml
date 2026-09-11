@@ -1,0 +1,241 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires xml
+%exec-class XmlElementConsistencyTest
+
+class ElementConsistencyImport inherits AbstractXmlIoInputCallback {
+    private {
+        string type;
+    }
+    public {
+        int calls = 0;
+    }
+    constructor(string type) {
+        self.type = type;
+    }
+    *InputStream open(string location) {
+        if (!location.endsWith("members.xsd")) {
+            return NOTHING;
+        }
+        ++calls;
+        return new StringInputStream('<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"'
+            ' xmlns:t="urn:edc" targetNamespace="urn:other">'
+            '<xs:import namespace="urn:edc"/>'
+            '<xs:element name="member" type="xs:int" substitutionGroup="t:head"/>'
+            '<xs:group name="G"><xs:sequence><xs:element name="member" type="' + type
+            + '" form="qualified"/></xs:sequence></xs:group></xs:schema>');
+    }
+}
+
+class XmlElementConsistencyTest inherits QUnit::Test {
+    constructor() : Test("Native XSD element declaration consistency", "1.0") {
+        addTestCase("Repeated declarations share named types, not merely lexical values", \explicitTypes());
+        addTestCase("Named groups and inherited models retain their complete declaration scope", \groups());
+        addTestCase("Implicit concrete members obey substitution blocking and namespace identity", \members());
+        addTestCase("Imported members and groups retain complete expanded names", \imports());
+        addTestCase("Anonymous types preserve component identity and nested scopes", \anonymous());
+        addTestCase("Zero particles and shared graphs do not expand occurrence counts", \boundaries());
+        addTestCase("Failed replacements preserve the prior schema and permit recovery", \replacement());
+        addTestCase("Cancellation and concurrent readers permit subsequent reuse", \concurrency());
+        set_return_value(main());
+    }
+    private string source(string definitions, string content) {
+        return '<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:t="urn:edc" targetNamespace="urn:edc">'
+            + definitions + '<xs:element name="root"><xs:complexType>' + content
+            + '</xs:complexType></xs:element></xs:schema>';
+    }
+    private bool consume(string schema, string document) {
+        XmlReader reader(new StringInputStream(document), {"xsd": schema});
+        while (reader.read()) {
+        }
+        return reader.isValid();
+    }
+    private check(string schema, bool valid, string children = "") {
+        string document = '<t:root xmlns:t="urn:edc">' + children + '</t:root>';
+        if (valid) {
+            assertTrue(consume(schema, document));
+            assertEq(parse_xml(document), parse_xml_with_schema(document, schema));
+            assertThrows("PARSE-XML-EXCEPTION", \consume(), (schema, "<wrong/>"));
+        } else {
+            assertThrows("XSD-SYNTAX-ERROR", \consume(), (schema, document));
+            assertThrows("XSD-SYNTAX-ERROR", \parse_xml_with_schema(), (document, schema));
+            XmlReader reader(document);
+            assertThrows("XSD-SYNTAX-ERROR", \reader.schemaValidateString(), (schema,));
+        }
+    }
+    explicitTypes() {
+        foreach string first in ("xs:int", "xs:decimal", "t:Named") {
+            foreach string second in ("xs:int", "xs:decimal", "t:Named") {
+                string schema = source('<xs:simpleType name="Named"><xs:restriction base="xs:int"/></xs:simpleType>',
+                    '<xs:sequence><xs:element name="x" type="' + first + '"/>'
+                    + '<xs:element name="x" type="' + second + '"/></xs:sequence>');
+                check(schema, first == second, '<x>17</x><x>18</x>');
+            }
+        }
+    }
+    groups() {
+        foreach bool unused in (False, True) {
+            foreach string compositor in ("sequence", "choice", "all") {
+                # Sequence isolates EDC; overlapping choice/all also violate UPA.
+                string content = '<xs:' + compositor + '><xs:element name="x" type="xs:int"/>'
+                    + '<xs:element name="x" type="xs:string"/></xs:' + compositor + '>';
+                check(source(unused ? '<xs:group name="G">' + content + '</xs:group>' : "",
+                    unused ? '<xs:sequence/>' : content), False);
+            }
+        }
+        string groups = '<xs:group name="A"><xs:sequence><xs:element name="x" type="xs:int"/></xs:sequence></xs:group>'
+            + '<xs:group name="B"><xs:sequence><xs:element name="x" type="xs:string"/></xs:sequence></xs:group>';
+        check(source(groups, '<xs:sequence><xs:group ref="t:A"/><xs:group ref="t:B"/></xs:sequence>'), False);
+        check(source(groups, '<xs:sequence><xs:group ref="t:A"/><xs:group ref="t:A"/></xs:sequence>'), True,
+            '<x>17</x><x>18</x>');
+        string base = '<xs:complexType name="B"><xs:sequence><xs:element name="x" type="xs:int"/></xs:sequence></xs:complexType>';
+        foreach string type in ("xs:int", "xs:string") {
+            string derived = '<xs:complexType name="D"><xs:complexContent><xs:extension base="t:B">'
+                '<xs:sequence><xs:element name="x" type="' + type + '"/></xs:sequence>'
+                '</xs:extension></xs:complexContent></xs:complexType>';
+            check(source(base + derived, '<xs:sequence><xs:element name="record" type="t:D"/></xs:sequence>'),
+                type == "xs:int", '<record><x>17</x><x>18</x></record>');
+        }
+    }
+    members() {
+        foreach string block in ("", "extension", "restriction", "substitution", "#all") {
+            string definitions = '<xs:element name="head" type="xs:decimal" block="' + block + '"/>'
+                '<xs:element name="middle" type="xs:decimal" abstract="true" substitutionGroup="t:head"/>'
+                '<xs:element name="member" type="xs:int" substitutionGroup="t:middle"/>';
+            foreach bool qualified in (False, True) {
+                string content = '<xs:sequence><xs:element ref="t:head"/>'
+                    '<xs:element name="member" type="xs:string" form="' + (qualified ? "qualified" : "unqualified")
+                    + '"/></xs:sequence>';
+                bool valid = !qualified || (block != "" && block != "extension");
+                check(source(definitions, content), valid,
+                    '<t:head>17</t:head><' + (qualified ? "t:" : "") + 'member>text</'
+                    + (qualified ? "t:" : "") + 'member>');
+            }
+        }
+        string definitions = '<xs:element name="head" type="xs:decimal" abstract="true"/>'
+            '<xs:element name="member" type="xs:int" substitutionGroup="t:head"/>';
+        foreach bool unused in (False, True) {
+            string content = '<xs:sequence><xs:element ref="t:head"/>'
+                '<xs:element name="member" type="xs:string" form="qualified"/></xs:sequence>';
+            check(source(definitions + (unused ? '<xs:group name="G">' + content + '</xs:group>' : ""),
+                unused ? '<xs:sequence/>' : content), False);
+        }
+        # An abstract member is excluded from the implicit set, but an explicit
+        # abstract head still participates in declaration consistency.
+        check(source('<xs:element name="head" type="xs:decimal"/>'
+            '<xs:element name="member" type="xs:int" abstract="true" substitutionGroup="t:head"/>',
+            '<xs:sequence><xs:element ref="t:head"/><xs:element name="member" type="xs:string" form="qualified"/>'
+            '</xs:sequence>'), True, '<t:head>17</t:head><t:member>text</t:member>');
+        check(source(definitions, '<xs:sequence><xs:element ref="t:head"/>'
+            '<xs:element name="head" type="xs:int" form="qualified"/></xs:sequence>'), False);
+    }
+    private bool imported(string schema, ElementConsistencyImport provider) {
+        XmlReader reader(new StringInputStream('<t:root xmlns:t="urn:edc" xmlns:o="urn:other">'
+            '<o:member>17</o:member><o:member>18</o:member></t:root>'),
+            {"xsd": schema, "xml_input_io": provider});
+        while (reader.read()) {
+        }
+        return reader.isValid();
+    }
+    imports() {
+        string schema = source('<xs:import namespace="urn:other" schemaLocation="members.xsd"/>'
+            '<xs:element name="head" type="xs:decimal" abstract="true"/>',
+            '<xs:sequence><xs:element ref="t:head"/><xs:group xmlns:o="urn:other" ref="o:G"/></xs:sequence>');
+        foreach bool valid in (False, True) {
+            ElementConsistencyImport provider(valid ? "xs:int" : "xs:string");
+            if (valid) {
+                assertTrue(imported(schema, provider));
+            } else {
+                assertThrows("XSD-SYNTAX-ERROR", \imported(), (schema, provider));
+            }
+            assertTrue(provider.calls > 0);
+        }
+    }
+    anonymous() {
+        string anonymous = '<xs:simpleType><xs:restriction base="xs:int"/></xs:simpleType>';
+        check(source("", '<xs:sequence><xs:element name="x">' + anonymous + '</xs:element>'
+            '<xs:element name="x">' + anonymous + '</xs:element></xs:sequence>'), False);
+        check(source('<xs:element name="x">' + anonymous + '</xs:element>',
+            '<xs:sequence><xs:element ref="t:x"/><xs:element ref="t:x"/></xs:sequence>'), True,
+            '<t:x>17</t:x><t:x>18</t:x>');
+        check(source("", '<xs:sequence><xs:element name="x" type="xs:int"/>'
+            '<xs:element name="child"><xs:complexType><xs:sequence><xs:element name="x" type="xs:string"/>'
+            '</xs:sequence></xs:complexType></xs:element></xs:sequence>'), True, '<x>17</x><child><x>text</x></child>');
+        check(source("", '<xs:sequence><xs:element name="child"><xs:complexType><xs:sequence>'
+            '<xs:element name="x" type="xs:int"/><xs:element name="x" type="xs:string"/>'
+            '</xs:sequence></xs:complexType></xs:element></xs:sequence>'), False);
+    }
+    boundaries() {
+        check(source("", '<xs:sequence><xs:element name="x" type="xs:int"/>'
+            '<xs:element name="x" type="xs:string" minOccurs="0" maxOccurs="0"/></xs:sequence>'), True, '<x>17</x>');
+        string definitions = '<xs:group name="G0"><xs:sequence><xs:element name="x" type="xs:int"/></xs:sequence></xs:group>';
+        # An exponentially large language is represented by a linear shared graph.
+        for (int i = 1; i <= 24; ++i) {
+            definitions += sprintf('<xs:group name="G%d"><xs:sequence><xs:group ref="t:G%d"/>'
+                '<xs:group ref="t:G%d"/></xs:sequence></xs:group>', i, i - 1, i - 1);
+        }
+        XmlReader reader("<t:root xmlns:t='urn:edc'/>");
+        reader.schemaValidateString(source(definitions, '<xs:sequence/>'));
+        while (reader.read()) {
+        }
+        assertTrue(reader.isValid());
+        check(source("", '<xs:sequence minOccurs="0" maxOccurs="99999999999999999999999999999999999999999999999999">'
+            '<xs:element name="x" type="xs:int"/></xs:sequence>'), True);
+    }
+    replacement() {
+        string good = source("", '<xs:sequence><xs:element name="x" type="xs:int"/></xs:sequence>');
+        string bad = source("", '<xs:sequence><xs:element name="x" type="xs:int"/>'
+            '<xs:element name="x" type="xs:string"/></xs:sequence>');
+        XmlReader reader("<t:root xmlns:t='urn:edc'><x>17</x></t:root>");
+        reader.schemaValidateString(good);
+        assertThrows("XSD-SYNTAX-ERROR", \reader.schemaValidateString(), (bad,));
+        reader.schemaValidateString(good);
+        while (reader.read()) {
+        }
+        assertTrue(reader.isValid());
+    }
+    concurrency() {
+        string good = source("", '<xs:sequence><xs:element name="x" type="xs:int"/></xs:sequence>');
+        Program p();
+        p.parse("%modern\n%requires xml\n"
+            "bool sub validate(string schema, SandboxManager manager, bool cancel) {\n"
+            "    if (cancel) { manager.requestInterrupt(); }\n"
+            "    XmlReader reader(\"<t:root xmlns:t='urn:edc'><x>17</x></t:root>\");\n"
+            "    reader.schemaValidateString(schema); while (reader.read()) {} return reader.isValid();\n"
+            "}\n", get_script_dir() + "/element-consistency-cancellation.qr");
+        SandboxManager manager();
+        on_exit manager.clearInterrupt();
+        p.setSandboxManager(manager);
+        try {
+            p.callFunction("validate", good, manager, True);
+            fail("expected cancellation");
+        } catch (hash<ExceptionInfo> ex) {
+            assertTrue(ex.err == "THREAD-CANCELLED" || ex.err == "PROGRAM-INTERRUPTED", ex.err);
+        }
+        manager.clearInterrupt();
+        assertTrue(p.callFunction("validate", good, manager, False));
+        Qore::Thread::Queue results();
+        Qore::Thread::Counter running();
+        on_exit assertEq(0, running.waitForZero(30s));
+        for (int worker = 0; worker < 2; ++worker) {
+            running.inc();
+            background sub() {
+                on_exit running.dec();
+                try {
+                    for (int index = 0; index < 10; ++index) {
+                        @assert(consume(good, "<t:root xmlns:t='urn:edc'><x>17</x></t:root>"));
+                    }
+                    results.push(True);
+                } catch (hash<ExceptionInfo> ex) {
+                    results.push(ex);
+                }
+            }();
+        }
+        for (int worker = 0; worker < 2; ++worker) {
+            assertEq(True, results.get(30s));
+        }
+    }
+}

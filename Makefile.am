@@ -65,6 +65,8 @@ EXTRA_DIST = COPYING.LGPL COPYING.MIT AUTHORS README \
     cmake/libxml2-particle-attribution-probe.h \
     cmake/QoreXmlLibXml2TypeFinalFix.cmake cmake/libxml2-type-final-probe.h \
     cmake/QoreXmlLibXml2ElementSubstitutionFix.cmake cmake/libxml2-element-substitution-probe.h \
+    cmake/QoreXmlLibXml2ElementConsistencyFix.cmake cmake/libxml2-element-consistency.inc \
+    cmake/libxml2-element-consistency-probe.h \
     cmake/QoreXmlLibXml2ParticleRangeFix.cmake cmake/libxml2-particle-range-probe.h \
     cmake/libxml2-particle-counter-lexical.inc cmake/libxml2-particle-counter-values.inc \
     cmake/libxml2-particle-counter-automata.inc cmake/libxml2-particle-counter-schema.inc \

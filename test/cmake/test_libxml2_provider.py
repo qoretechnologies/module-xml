@@ -87,7 +87,7 @@ if(TARGET LibXml2)
     endforeach()
     get_target_property(native_includes LibXml2 INCLUDE_DIRECTORIES)
     get_target_property(native_options LibXml2 COMPILE_OPTIONS)
-    foreach(part attribution-schema-allocation counter-schema-allocation counter-execution)
+    foreach(part attribution-schema-allocation counter-schema-allocation counter-execution edc-schema-allocation)
         string(REPLACE "-" "_" suffix "${{part}}")
         add_executable(${{part}} "{REPO}/test/cmake/libxml2_particle_${{suffix}}.c")
         target_compile_definitions(${{part}} PRIVATE QORE_XML_SCHEMA_SOURCE="${{schema_source}}"
@@ -136,6 +136,8 @@ include("{REPO}/cmake/QoreXmlLibXml2TypeFinalFix.cmake")
 qore_xml_fix_libxml2_type_finals("{cls.source}" "${{CMAKE_CURRENT_BINARY_DIR}}/libxml")
 include("{REPO}/cmake/QoreXmlLibXml2ElementSubstitutionFix.cmake")
 qore_xml_fix_libxml2_element_substitution("{cls.source}" "${{CMAKE_CURRENT_BINARY_DIR}}/libxml")
+include("{REPO}/cmake/QoreXmlLibXml2ElementConsistencyFix.cmake")
+qore_xml_fix_libxml2_element_consistency("{cls.source}" "${{CMAKE_CURRENT_BINARY_DIR}}/libxml")
 ''')
         cls.fixed = cls.root / "fixed/build-debug"
         cls.run_command(["cmake", "-S", fixed_project, "-B", cls.fixed, "-DCMAKE_BUILD_TYPE=Debug",
@@ -171,6 +173,7 @@ qore_xml_fix_libxml2_element_substitution("{cls.source}" "${{CMAKE_CURRENT_BINAR
         self.assertIn("particle_attribution=PASS", output)
         self.assertIn("particle_ranges=PASS", output)
         self.assertIn("element_substitution=PASS", output)
+        self.assertIn("element_consistency=PASS", output)
         stage = self.root / "stage"
         self.run_command(["cmake", "--install", self.root / "bundled", "--prefix", stage])
         self.assertEqual(["bin/probe", "share/licenses/qore-xml/libxml2-NOTICES.txt"],
@@ -564,10 +567,87 @@ qore_xml_fix_libxml2_uris("{self.source}" "${{CMAKE_CURRENT_BINARY_DIR}}/libxml"
 
     def previous_substitution_fixture(self):
         """Build the verified dependency with only the substitution correction omitted."""
-        fixed = (self.root / "fixed/source/CMakeLists.txt").read_text()
+        fixed = self.previous_consistency_fixture()
         fixed = fixed.replace(f'include("{REPO}/cmake/QoreXmlLibXml2ElementSubstitutionFix.cmake")\n', "")
         return fixed.replace(f'qore_xml_fix_libxml2_element_substitution("{self.source}" '
                              '"${CMAKE_CURRENT_BINARY_DIR}/libxml")\n', "")
+
+    def test_element_consistency_allocation_cleanup(self):
+        self.run_command(["cmake", "--build", self.root / "bundled", "--target", "edc-schema-allocation", "-j4"])
+        self.assertIn("Native element consistency cleanup: PASS",
+                      self.run_command([self.root / "bundled/edc-schema-allocation"]))
+
+    def previous_consistency_fixture(self):
+        """Build the verified dependency with only declaration consistency omitted."""
+        fixed = (self.root / "fixed/source/CMakeLists.txt").read_text()
+        fixed = fixed.replace(f'include("{REPO}/cmake/QoreXmlLibXml2ElementConsistencyFix.cmake")\n', "")
+        return fixed.replace(f'qore_xml_fix_libxml2_element_consistency("{self.source}" '
+                             '"${CMAKE_CURRENT_BINARY_DIR}/libxml")\n', "")
+
+    def test_consistency_backport_detection_and_idempotence(self):
+        import hashlib
+        project = self.root / "consistency-broken/source"
+        project.mkdir(parents=True)
+        (project / "CMakeLists.txt").write_text(self.previous_consistency_fixture())
+        build = self.root / "consistency-broken/build-debug"
+        self.run_command(["cmake", "-S", project, "-B", build, "-DCMAKE_BUILD_TYPE=Debug",
+                          "-DBUILD_SHARED_LIBS=ON", "-DLIBXML2_WITH_PROGRAMS=OFF",
+                          "-DLIBXML2_WITH_TESTS=OFF", "-DLIBXML2_WITH_PYTHON=OFF"])
+        self.run_command(["cmake", "--build", build, "--target", "LibXml2", "-j4"])
+        libraries = list((build / "libxml").glob("libxml2.so")) + list((build / "libxml").glob("libxml2.dylib"))
+        self.assertEqual(1, len(libraries))
+        options = [f"-DLIBXML2_LIBRARY={libraries[0]}", f"-DLIBXML2_INCLUDE_DIR={self.fixed_include}",
+                   f"-DFETCHCONTENT_SOURCE_DIR_QORE_XML_LIBXML2={self.source}"]
+        output = self.configure("consistency-broken-auto", "-DQORE_XML_LIBXML2_PROVIDER=AUTO", *options)
+        self.assertIn("using private static libxml2 2.15.4", output)
+        probe = (self.root / "consistency-broken-auto/system-libxml2/namespace-probe.log").read_text()
+        self.assertIn("element_substitution=PASS", probe)
+        self.assertIn("element_consistency=FAIL", probe)
+        self.configure("consistency-broken-system", "-DQORE_XML_LIBXML2_PROVIDER=SYSTEM", *options, success=False)
+        path = self.root / "bundled/_deps/qore_xml_libxml2-build/qore-element-consistency-fix/xmlschemas.c"
+        stamp = (path.stat().st_mtime_ns, hashlib.sha256(path.read_bytes()).hexdigest())
+        self.assertEqual("a918602d87b2ed7a35f0d7d26189e9190365123966feb8525a9aba2344711d67", stamp[1])
+        self.configure("bundled", "-DQORE_XML_LIBXML2_PROVIDER=BUNDLED",
+                       f"-DFETCHCONTENT_SOURCE_DIR_QORE_XML_LIBXML2={self.source}")
+        self.assertEqual(stamp, (path.stat().st_mtime_ns, hashlib.sha256(path.read_bytes()).hexdigest()))
+
+    def test_consistency_system_diagnostics_are_independent(self):
+        project = self.root / "consistency-alternative/source"
+        project.mkdir(parents=True)
+        text = (self.root / "fixed/source/CMakeLists.txt").read_text()
+        text += r'''
+get_target_property(edc_sources LibXml2 SOURCES)
+foreach(edc_entry IN LISTS edc_sources)
+    get_filename_component(edc_name "${edc_entry}" NAME)
+    if(edc_name STREQUAL "xmlschemas.c")
+        file(READ "${edc_entry}" edc_text)
+        string(REPLACE "xmlSchemaPCustomErr(scope->parser, XML_SCHEMAP_FAILED_PARSE,"
+            "xmlSchemaPCustomErr(scope->parser, XML_SCHEMAP_MG_PROPS_CORRECT_1," edc_text "${edc_text}")
+        string(REPLACE "cos-element-consistent: declarations with the same expanded name have inconsistent type definitions"
+            "Conflicting declarations in this model" edc_text "${edc_text}")
+        set(edc_replacement "${CMAKE_CURRENT_BINARY_DIR}/alternative-schema.c")
+        file(WRITE "${edc_replacement}" "${edc_text}")
+        list(REMOVE_ITEM edc_sources "${edc_entry}")
+        list(APPEND edc_sources "${edc_replacement}")
+        break()
+    endif()
+endforeach()
+set_property(TARGET LibXml2 PROPERTY SOURCES "${edc_sources}")
+'''
+        (project / "CMakeLists.txt").write_text(text)
+        build = self.root / "consistency-alternative/build-debug"
+        self.run_command(["cmake", "-S", project, "-B", build, "-DCMAKE_BUILD_TYPE=Debug",
+                          "-DBUILD_SHARED_LIBS=ON", "-DLIBXML2_WITH_PROGRAMS=OFF",
+                          "-DLIBXML2_WITH_TESTS=OFF", "-DLIBXML2_WITH_PYTHON=OFF"])
+        self.run_command(["cmake", "--build", build, "--target", "LibXml2", "-j4"])
+        libraries = list((build / "libxml").glob("libxml2.so")) + list((build / "libxml").glob("libxml2.dylib"))
+        self.assertEqual(1, len(libraries))
+        output = self.configure("consistency-alternative-system", "-DQORE_XML_LIBXML2_PROVIDER=SYSTEM",
+            f"-DLIBXML2_LIBRARY={libraries[0]}", f"-DLIBXML2_INCLUDE_DIR={self.fixed_include}")
+        self.assertIn("passes namespace identity probe", output)
+        log = (self.root / "consistency-alternative-system/system-libxml2/namespace-probe.log").read_text()
+        self.assertIn("element_consistency=PASS", log)
+        self.assertFalse((self.root / "consistency-alternative-system/_deps").exists())
 
     def test_substitution_backport_detection_and_idempotence(self):
         import hashlib

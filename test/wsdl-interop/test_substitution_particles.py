@@ -21,14 +21,13 @@ from test_attribute_values import NS, XSD
 # Supporting-validator discrepancies are explicit and do not change normative outcomes.
 # Count/position defects are documented in particle-ambiguity-evidence.md; unused
 # groups are not traversed by Xerces fullSchemaChecking(). libxml2's declaration
-# consistency checker is disabled, including in the current private provider.
+# consistency checker is disabled; the private provider checks these declarations.
 SCHEMA_DIFFERENCES = {
     'fixed-boundary': {'lxml': False},
     'invalid-3': {'lxml': True},
-    'invalid-5': {'lxml': True, 'native': True},
+    'invalid-5': {'lxml': True},
     **{f'unused-invalid-{index}': {'lxml': True, 'xerces': True} for index in range(6)},
 }
-SCHEMA_DIFFERENCES['unused-invalid-5']['native'] = True
 
 
 @dataclass

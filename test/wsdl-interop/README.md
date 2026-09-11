@@ -1377,3 +1377,11 @@ See the [implemented particle design](../../design/wsdl-substitution-particles.m
 and [regression evidence](substitution-particles-evidence.md).
 The separate [native declaration-consistency gap](p5-native-element-consistency-finding.md),
 selected message-root identity and remaining P5 content semantics stay open.
+
+Native element declaration consistency is covered by
+`../xml-element-consistency.qtest` and `test_native_element_consistency.py`. The latter
+checks 43 schemas (25 valid, 18 invalid), independent documents and 50 retained
+original/reconstructed values. Both native DOM and reader paths must reject
+invalid schemas with `XSD-SYNTAX-ERROR`, while WSDL reports `WSDL-ERROR`.
+The 34-schema configure probe and allocation-failure tests live with the
+libxml2 provider tests; see `p5-native-element-consistency-finding.md`.

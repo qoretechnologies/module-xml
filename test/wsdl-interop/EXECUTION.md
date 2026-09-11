@@ -6809,3 +6809,51 @@ P5 remains open. Next: native element-declaration consistency, followed by
 selected substituted message-root identity, remaining wildcard/mixed/generic
 content, complete nil/default/fixed behavior and document identity constraints.
 P6–P9 retain every binding, protocol, attachment, platform and CI requirement.
+
+
+## P5-08 — Native element-declaration consistency (complete increment)
+
+Parent: `cc16263` (completed/audited P5-07). The private native dependency now
+checks EDC after substitution resolution, including unused groups, imported
+members, inherited particles and nested anonymous types. Per-model hashes and
+visited graphs preserve declaration/type identity without expanding counts.
+See the [design](../../design/native-element-consistency.md),
+[root cause](p5-native-element-consistency-finding.md), [inventory](P5-08-validation.json)
+and [complete audit](audits/P5-08-native-element-consistency.md).
+
+- The final gate passes 121 suites/1237 cases/60736 reported assertions without
+  warnings. The three intentional caught comparator negatives remain inside a
+  passing legacy SOAP suite. Native tests pass 8 cases/129 assertions in all four
+  source modes, including imported member/group conflicts and reader recovery.
+- The new 43-schema independent matrix passes 25 valid documents, 18 required
+  construction errors per parser and 50 retained original/reconstructed values
+  in AST/IR/JIT/tiered/AOT. lxml's 18 EDC omissions and Xerces's eight unused-group
+  omissions remain explicit normative negatives. The prior EDC suite passes
+  both methods, including 30 schemas/60 bindings and both-direction consumers.
+- Child-substitution matrices pass 53 schemas/310 documents/2586 rows and 1050
+  independently validated payloads/samples per mode. Both native discrepancy
+  entries from P5-07 have been removed after required rejection passes. All 13
+  compiled/provider/HTTP/Cargo/CDA/previous-matrix/harness supplements pass.
+- The 34-schema configure probe tests behavior without depending on our error
+  text or code. All 38 distinct provider tests pass (the final 37-test gate plus
+  the new corrected-library test with alternative diagnostics), covering AUTO
+  fallback, SYSTEM rejection, corrected system use, hashes, idempotence and
+  source distribution. All 69 allocation faults reject construction and clean up.
+- Native unit, complete configure probe and allocation-test Valgrind runs report
+  zero errors and no lost memory. The latter two free every allocation. Native
+  docs build without warnings and the documented order/quantity example runs.
+- The both-version survey and strict coverage are unchanged from P5-07: 2457
+  survey rows, 143 selected WSDLs/1384 directions, zero selected/value/missing/skip
+  failures and 64 broader failures retained. No corpus source or historical
+  finding was modified.
+
+All 62 audit checks are recorded: 19 Pass/43 N/A/0 Fail. Native XML changes to
+its private dependency; the six existing WSDL/consumer qmods and isolated
+libqore remain unchanged. Both origins were fetched with no incoming develop
+commits. Main Qore's concurrent work was committed separately as `35dc29f31`;
+this increment made no main-Qore edits, system installs or pushes.
+
+P5 remains open. Next: selected substituted message-root identity, followed by
+remaining wildcard/mixed/generic content, complete nil/default/fixed behavior
+and document identity constraints. P6–P9 retain every binding, protocol,
+attachment, platform and CI requirement.
