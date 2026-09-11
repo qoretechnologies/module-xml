@@ -1,0 +1,97 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../../qlib"
+%requires xml
+%requires ../../qlib/WSDL.qm
+%try-module json
+%define NoJson
+%endtry
+%ifdef NoJson
+throw "MISSING-MODULE", "substitution root integration requires json";
+%else
+sub propagate(hash<ExceptionInfo> error) {
+    if (error.err == "THREAD-CANCELLED" || error.err == "PROGRAM-INTERRUPTED") {
+        throw error.err, error.desc, error.arg;
+    }
+}
+auto sub snapshot(auto value) {
+    if (value instanceof XsdQNameValue) {
+        return {"namespace_uri":value.getNamespaceUri(), "local_name":value.getLocalName()};
+    }
+    if (value.typeCode() == NT_HASH) {
+        hash<auto> result();
+        foreach string key in (keys value) {
+            result{key} = snapshot(value{key});
+        }
+        return result;
+    }
+    if (value.typeCode() == NT_LIST) {
+        return map snapshot($1), value;
+    }
+    return value;
+}
+if (ARGV.size() != 1) {
+    throw "USAGE", "substitution-roots.qr CASES.json";
+}
+foreach hash<auto> input in (parse_json(ReadOnlyFile::readTextFile(ARGV[0]))) {
+    WebService original(input.wsdl, {"async_only": True});
+    hash<auto> construction();
+    construction.name = input.name;
+    try {
+        WSMessageHelper helper(original);
+        construction.sample = helper.getXmlMessage(original.messages.Input).body.getXml();
+    } catch (hash<ExceptionInfo> error) {
+        propagate(error);
+        construction.sample_error = error.err;
+    }
+    printf("%s\n", make_json(construction));
+    foreach bool copy in (False, True) {
+        WebService ws = copy ? Serializable::deserialize(original.serialize()) : original;
+        WSOperation operation = ws.getBindingOperation("Soap", "submit");
+        AbstractDataProviderType provider = ws.messages.Input.getDataProviderType(True);
+        provider = Serializable::deserialize(provider.serialize());
+        foreach bool response in (False, True) {
+            foreach hash<auto> document in (input.documents) {
+                hash<auto> row();
+                row.name = input.name;
+                row.document = document.name;
+                row.copy = copy;
+                row.response = response;
+                XsdXmlValue retained(document.xml);
+                try {
+                    ws.getXmlDataProviderType(input.uri, input.head).acceptsValue(retained);
+                    row.retained = retained.getXml();
+                } catch (hash<ExceptionInfo> error) {
+                    propagate(error);
+                    row.retained_error = error.err;
+                }
+                string envelope = '<e:Envelope xmlns:e="' + input.envelope + '"><e:Body>' + document.xml
+                    + '</e:Body></e:Envelope>';
+                try {
+                    auto value = response ? operation.deserializeResponse(parse_xml(envelope, XPF_PRESERVE_ORDER), "Soap", True)
+                        : operation.deserializeRequest(parse_xml(envelope, XPF_PRESERVE_ORDER), "Soap", True);
+                    row.native = snapshot(value);
+                    auto saved = Serializable::deserialize(Serializable::serialize(value));
+                    auto converted = provider.acceptsValue({"body": saved}).body;
+                    row.provider = snapshot(converted);
+                    row.xml = (response ? operation.serializeResponse({"body": converted}, NOTHING, NOTHING,
+                        NOTHING, NOTHING, NOTHING, "Soap") : operation.serializeRequest({"body": converted}, NOTHING,
+                        NOTHING, NOTHING, NOTHING, NOTHING, "Soap")).body;
+                    row.standalone = ws.serializeXmlValue(input.uri, input.head, converted).getXml();
+                    hash<SoapXmlMessageInfo> message = response ? operation.deserializeXmlResponse(envelope, "Soap")
+                        : operation.deserializeXmlRequest(envelope, "Soap");
+                    row.retained_xml = (response ? operation.serializeResponse(message.body, NOTHING, NOTHING,
+                        NOTHING, NOTHING, NOTHING, "Soap") : operation.serializeRequest(message.body, NOTHING,
+                        NOTHING, NOTHING, NOTHING, NOTHING, "Soap")).body;
+                } catch (hash<ExceptionInfo> error) {
+                    propagate(error);
+                    row.error = error.err;
+                    row.description = error.desc;
+                }
+                printf("%s\n", make_json(row));
+            }
+        }
+    }
+}
+%endif

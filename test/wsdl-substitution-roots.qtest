@@ -1,0 +1,453 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires xml
+%requires ../qlib/WSDL.qm
+%exec-class SubstitutionRootsTest
+
+class SubstitutionRootsTest inherits QUnit::Test {
+    private {
+        const Uri = "urn:qore:substitution-roots";
+        const Declarations = '<xs:element name="head" type="xs:decimal" abstract="true"/>'
+            '<xs:element name="quantity" type="xs:int" substitutionGroup="t:head"/>'
+            '<xs:element name="amount" type="xs:decimal" substitutionGroup="t:head"/>';
+    }
+    constructor() : Test("Selected substitution roots", "1.0") {
+        addTestCase("Complete native and retained XML preserve the selected declaration", \schema());
+        addTestCase("Actual SOAP bindings preserve roots in both directions", \soap());
+        addTestCase("Native providers retain member values, metadata and reconstruction", \providers());
+        addTestCase("Samples select concrete roots", \samples());
+        addTestCase("Unordered parts require a complete unique assignment", \parts());
+        addTestCase("Headers retain selected members independently of body parts", \headers());
+        addTestCase("Overlapping header parts share the unique assignment rule", \overlappingHeaders());
+        addTestCase("Element and dynamic type identity remain distinct", \types());
+        addTestCase("Empty members preserve presence and member nillability", \empty());
+        addTestCase("Imported and no-namespace members retain exact root identity", \namespaces());
+        addTestCase("Large overlapping groups, cancellation and concurrent reuse remain bounded", \bounded());
+        addTestCase("Invalid selections, values and duplicate roots are rejected", \negative());
+        set_return_value(main());
+    }
+    private string source(string declarations = Declarations) {
+        return '<xs:schema xmlns:xs="' + XSD_NS + '" xmlns:t="' + Uri + '" targetNamespace="' + Uri + '">'
+            + declarations + '</xs:schema>';
+    }
+    private WebService service(string version = "11", string declarations = Declarations,
+            string parts = '<w:part name="body" element="t:head"/>', bool headers = False) {
+        string soap_ns = "http://schemas.xmlsoap.org/wsdl/soap" + (version == "12" ? "12" : "") + "/";
+        string binding = '<s:body use="literal"/>' + (headers
+            ? '<s:header message="t:Headers" part="token" use="literal"/>' : '');
+        return new WebService('<w:definitions xmlns:w="http://schemas.xmlsoap.org/wsdl/" xmlns:s="' + soap_ns
+            + '" xmlns:xs="' + XSD_NS + '" xmlns:t="' + Uri + '" targetNamespace="' + Uri + '">'
+            '<w:types>' + source(declarations) + '</w:types>'
+            '<w:message name="Input">' + parts + '</w:message><w:message name="Output">' + parts + '</w:message>'
+            '<w:message name="Headers"><w:part name="token" element="t:head"/></w:message>'
+            '<w:portType name="Port"><w:operation name="submit"><w:input message="t:Input"/>'
+            '<w:output message="t:Output"/></w:operation></w:portType>'
+            '<w:binding name="Soap" type="t:Port"><s:binding style="document" transport="http://schemas.xmlsoap.org/soap/http"/>'
+            '<w:operation name="submit"><s:operation soapAction="urn:submit"/><w:input>' + binding + '</w:input>'
+            '<w:output>' + binding + '</w:output></w:operation></w:binding></w:definitions>', {"async_only": True});
+    }
+    private hash<auto> selected(string name, auto value, string uri = Uri) {
+        return {"^element^": new XsdQNameValue(uri, name), "^val^": value};
+    }
+    private string payload(string name = "quantity", string text = "017") {
+        return '<t:' + name + ' xmlns:t="' + Uri + '">' + text + '</t:' + name + '>';
+    }
+    private string envelope(string version, string body, *string header) {
+        return '<e:Envelope xmlns:e="' + (version == "12" ? SOAP_12_ENV : SOAP_11_ENV) + '">'
+            + (exists header ? '<e:Header>' + header + '</e:Header>' : '') + '<e:Body>' + body + '</e:Body></e:Envelope>';
+    }
+    private auto decode(WSOperation operation, string xml, bool response = False) {
+        return response ? operation.deserializeResponse(parse_xml(xml, XPF_PRESERVE_ORDER), "Soap")
+            : operation.deserializeRequest(parse_xml(xml, XPF_PRESERVE_ORDER), "Soap");
+    }
+    private string encode(WSOperation operation, auto value, bool response = False) {
+        return (response ? operation.serializeResponse(value, NOTHING, NOTHING, NOTHING, NOTHING, NOTHING, "Soap")
+            : operation.serializeRequest(value, NOTHING, NOTHING, NOTHING, NOTHING, NOTHING, "Soap")).body;
+    }
+    private check(auto value, string name, auto native) {
+        assertEq(("^element^", "^val^"), sort(keys value));
+        assertTrue(value."^element^" instanceof XsdQNameValue);
+        assertEq(Uri, value."^element^".getNamespaceUri());
+        assertEq(name, value."^element^".getLocalName());
+        assertEq(native, value."^val^");
+    }
+    schema() {
+        XsdSchema original(source());
+        foreach XsdSchema s in (original, Serializable::deserialize(original.serialize())) {
+            XsdXmlValue output = s.serializeXmlValue(Uri, "head", selected("quantity", 17));
+            assertEq("{" + Uri + "}quantity", output.getExpandedName());
+            assertEq("17", output.getElementData()."^value^");
+            XsdXmlValue input(payload());
+            AbstractDataProviderType provider = s.getXmlDataProviderType(Uri, "head");
+            foreach AbstractDataProviderType copy in (provider, Serializable::deserialize(provider.serialize())) {
+                assertEq(input.getXml(), copy.acceptsValue(input).getXml());
+            }
+            assertEq(input.getXml(), s.validateXmlValue(input).getXml());
+            assertEq("{" + Uri + "}amount", s.serializeXmlValue(Uri, "head", selected("amount", 1.25n)).getExpandedName());
+        }
+    }
+    soap() {
+        foreach string version in ("11", "12") {
+            WebService original = service(version);
+            foreach WebService ws in (original, Serializable::deserialize(original.serialize())) {
+                WSOperation operation = ws.getBindingOperation("Soap", "submit");
+                assertTrue(inlist("quantity", operation.getTopLevelRequestNames()));
+                assertTrue(inlist("amount", operation.getTopLevelRequestNames()));
+                foreach bool response in (False, True) {
+                    string input = envelope(version, payload());
+                    auto value = decode(operation, input, response);
+                    check(value, "quantity", 17);
+                    foreach auto outgoing in (value, {"body": value}, {"head": value},
+                            {response ? "Output" : "Input": {"body": value}}) {
+                        string output = encode(operation, outgoing, response);
+                        check(decode(operation, output, response), "quantity", 17);
+                        XsdXmlValue wire(output);
+                        assertEq(version == "12" ? SOAP_12_ENV : SOAP_11_ENV, wire.getNamespaceUri());
+                        assertEq("quantity", wire.getChildValues()[0].getChildValues()[0].getLocalName());
+                    }
+                    hash<SoapXmlMessageInfo> retained = response ? operation.deserializeXmlResponse(input, "Soap")
+                        : operation.deserializeXmlRequest(input, "Soap");
+                    assertEq("quantity", retained.body.body.getLocalName());
+                    assertEq("017", retained.body.body.getElementData()."^value^");
+                    check(decode(operation, encode(operation, retained.body, response), response), "quantity", 17);
+                    check(decode(operation, encode(operation, retained.body.body, response), response), "quantity", 17);
+                }
+            }
+        }
+    }
+    providers() {
+        WebService ws = service();
+        XsdElementDataType native = ws.getNativeDataProviderType(Uri, "head");
+        foreach AbstractDataProviderType provider in (native, Serializable::deserialize(native.serialize())) {
+            check(provider.acceptsValue(selected("quantity", 17)), "quantity", 17);
+            check(provider.getSoftType().acceptsValue(selected("quantity", "17")), "quantity", 17);
+            assertThrows("MISSING-VALUE-ERROR", \provider.acceptsValue(), (NOTHING,));
+            assertEq(NOTHING, provider.getOrNothingType().acceptsValue(NOTHING));
+            assertEq(2, provider.getInfo().union_types.size());
+            assertEq(NOTHING, provider.getValueType());
+            assertEq({}, provider.getDirectTypeHash());
+            assertThrows("RUNTIME-TYPE-ERROR", \provider.acceptsValue(), (selected("quantity", 2147483648),));
+            assertThrows("RUNTIME-TYPE-ERROR", \provider.acceptsValue(), (selected("head", 17),));
+            check(provider.acceptsValue(provider.getExampleValue()), "quantity", 100);
+        }
+        assertEq(17, native.getSelectedElementType(new XsdQNameValue(Uri, "quantity")).acceptsValue(17));
+        assertThrows("SOAP-SERIALIZATION-ERROR", \native.getSelectedElementType(), (new XsdQNameValue("wrong", "quantity"),));
+        foreach bool capture in (False, True) {
+            AbstractDataProviderType original = ws.messages.Input.getDataProviderType(capture);
+            foreach AbstractDataProviderType provider in (original, Serializable::deserialize(original.serialize())) {
+                check(provider.acceptsValue({"body": selected("quantity", 17)}).body, "quantity", 17);
+                check(provider.getSoftType().acceptsValue({"body": selected("quantity", "17")}).body, "quantity", 17);
+                assertEq(2, provider.getField("body").getType().getInfo().union_types.size());
+            }
+        }
+    }
+    samples() {
+        foreach string version in ("11", "12") {
+            WebService ws = service(version);
+            WSMessageHelper helper(ws);
+            check(helper.getMessage(ws.messages.Input).head, "quantity", 123);
+            XsdXmlValue xml = helper.getXmlMessage(ws.messages.Input).body;
+            assertEq("quantity", xml.getLocalName());
+            assertEq("123", xml.getElementData()."^value^");
+            WSOperation operation = ws.getBindingOperation("Soap", "submit");
+            check(decode(operation, encode(operation, xml)), "quantity", 123);
+        }
+    }
+    parts() {
+        string defs = Declarations;
+        defs =~ s/ abstract="true"//;
+        foreach string version in ("11", "12") {
+            foreach string order in ('<w:part name="broad" element="t:head"/><w:part name="narrow" element="t:quantity"/>',
+                    '<w:part name="narrow" element="t:quantity"/><w:part name="broad" element="t:head"/>') {
+                WebService ws = service(version, defs, order);
+                WSOperation operation = ws.getBindingOperation("Soap", "submit");
+                foreach bool response in (False, True) {
+                    foreach string body in (payload() + payload("amount", "2.5"), payload("amount", "2.5") + payload()) {
+                        auto value = decode(operation, envelope(version, body), response);
+                        assertEq(17, value.narrow);
+                        check(value.broad, "amount", 2.5);
+                        auto again = decode(operation, encode(operation, value, response), response);
+                        assertEq(17, again.narrow);
+                        check(again.broad, "amount", 2.5);
+                    }
+                    assertThrows("SOAP-DESERIALIZATION-ERROR", \decode(),
+                        (operation, envelope(version, payload() + payload("quantity", "23")), response));
+                    assertThrows("SOAP-SERIALIZATION-ERROR", \encode(),
+                        (operation, {"broad": selected("quantity", 17), "narrow": 23}, response));
+                }
+                assertEq({"broad": 1, "narrow": 0}, ws.messages.Input.matchDocumentParts(("broad", "narrow"),
+                    ("{" + Uri + "}quantity", "{" + Uri + "}amount")));
+                assertEq({}, ws.messages.Input.matchDocumentParts((), ()));
+                assertEq({}, ws.messages.Input.matchDocumentParts((), ("{}other",), True));
+                assertThrows("SOAP-DESERIALIZATION-ERROR", \ws.messages.Input.matchDocumentParts(),
+                    (("broad", "broad"), ("{" + Uri + "}amount",)));
+                assertThrows("WSDL-ERROR", \ws.messages.Input.matchDocumentParts(), (("unknown",), ()));
+            }
+        }
+    }
+    headers() {
+        foreach string version in ("11", "12") {
+            WebService ws = service(version, Declarations, '<w:part name="body" element="t:head"/>', True);
+            WSOperation operation = ws.getBindingOperation("Soap", "submit");
+            foreach bool response in (False, True) {
+                string input = envelope(version, payload(), payload("amount", "2.5"));
+                auto value = decode(operation, input, response);
+                check(value.body, "quantity", 17);
+                check(value.Headers.token, "amount", 2.5);
+                auto again = decode(operation, encode(operation, value, response), response);
+                check(again.body, "quantity", 17);
+                check(again.Headers.token, "amount", 2.5);
+                hash<SoapXmlMessageInfo> retained = response ? operation.deserializeXmlResponse(input, "Soap")
+                    : operation.deserializeXmlRequest(input, "Soap");
+                assertEq("quantity", retained.body.body.getLocalName());
+                assertEq("amount", retained.headers.Headers.token.getLocalName());
+                assertThrows("SOAP-DESERIALIZATION-ERROR", \decode(),
+                    (operation, envelope(version, payload(), payload() + payload("amount", "2.5")), response));
+            }
+        }
+    }
+    types() {
+        string defs = '<xs:element name="head" type="xs:decimal" abstract="true"/>'
+            '<xs:element name="quantity" type="xs:integer" substitutionGroup="t:head"/>';
+        foreach string version in ("11", "12") {
+            WebService ws = service(version, defs);
+            WSOperation operation = ws.getBindingOperation("Soap", "submit");
+            hash<auto> value = selected("quantity", {"^type^": new XsdQNameValue(XSD_NS, "int"), "^val^": 17});
+            foreach bool response in (False, True) {
+                string xml = encode(operation, value, response);
+                auto received = response ? operation.deserializeResponse(parse_xml(xml, XPF_PRESERVE_ORDER), "Soap", True)
+                    : operation.deserializeRequest(parse_xml(xml, XPF_PRESERVE_ORDER), "Soap", True);
+                assertEq("quantity", received."^element^".getLocalName());
+                assertEq("int", received."^val^"."^type^".getLocalName());
+                assertEq(XSD_NS, received."^val^"."^type^".getNamespaceUri());
+                assertEq(17, received."^val^"."^val^");
+                assertEq("int", ws.messages.Input.getDataProviderType(True).acceptsValue({"body": received})
+                    .body."^val^"."^type^".getLocalName());
+            }
+        }
+    }
+    overlappingHeaders() {
+        string defs = Declarations;
+        defs =~ s/ abstract="true"//;
+        foreach string version in ("11", "12") {
+            WebService initial = service(version, defs, '<w:part name="body" element="t:head"/>', True);
+            string text = replace(initial.getWSDL(), '<w:portType',
+                '<w:message name="Other"><w:part name="token" element="t:quantity"/></w:message><w:portType');
+            text = replace(text, '<s:header message="t:Headers" part="token" use="literal"/>',
+                '<s:header message="t:Headers" part="token" use="literal"/>'
+                '<s:header message="t:Other" part="token" use="literal"/>');
+            WebService ws(text, {"async_only": True});
+            WSOperation operation = ws.getBindingOperation("Soap", "submit");
+            foreach bool response in (False, True) {
+                string input = envelope(version, payload(), payload() + payload("amount", "2.5") + '<u:extra xmlns:u="urn:unbound"/>');
+                auto value = decode(operation, input, response);
+                assertEq(17, value.Other.token);
+                check(value.Headers.token, "amount", 2.5);
+                auto again = decode(operation, encode(operation, value, response), response);
+                assertEq(17, again.Other.token);
+                check(again.Headers.token, "amount", 2.5);
+                hash<SoapXmlMessageInfo> retained = response ? operation.deserializeXmlResponse(input, "Soap")
+                    : operation.deserializeXmlRequest(input, "Soap");
+                assertEq("quantity", retained.headers.Other.token.getLocalName());
+                assertEq("amount", retained.headers.Headers.token.getLocalName());
+                assertEq(1, retained.unbound_headers.size());
+                assertEq("urn:unbound", retained.unbound_headers[0].getNamespaceUri());
+                auto outbound = retained.body + retained.headers;
+                again = decode(operation, encode(operation, outbound, response), response);
+                assertEq(17, again.Other.token);
+                check(again.Headers.token, "amount", 2.5);
+                foreach auto ambiguous in (selected("quantity", 17), new XsdXmlValue(payload())) {
+                    value.Headers.token = ambiguous;
+                    assertThrows("SOAP-SERIALIZATION-ERROR", \encode(), (operation, value, response));
+                }
+                assertThrows("SOAP-DESERIALIZATION-ERROR", \decode(),
+                    (operation, envelope(version, payload(), payload() + payload()), response));
+            }
+        }
+    }
+    negative() {
+        WebService ws = service();
+        WSOperation operation = ws.getBindingOperation("Soap", "submit");
+        foreach auto value in (selected("unknown", 17), selected("head", 17), selected("quantity", 17, "wrong"),
+                selected("quantity", 2147483648), selected("quantity", 1.5n), {"^element^": "quantity", "^val^": 17},
+                {"^element^": new XsdQNameValue(Uri, "quantity")}, selected("quantity", selected("amount", 17)),
+                selected("quantity", 17) + {"extra": 1}) {
+            assertThrows("SOAP-SERIALIZATION-ERROR", \ws.serializeXmlValue(), (Uri, "head", value));
+            assertThrows("SOAP-SERIALIZATION-ERROR", \encode(), (operation, value));
+        }
+        foreach string body in (payload("head"), payload("unknown"), payload("quantity", "1.5"),
+                payload("quantity", "2147483648"), payload() + payload(), payload() + payload("amount")) {
+            assertThrows("SOAP-DESERIALIZATION-ERROR", \decode(), (operation, envelope("11", body)));
+            assertThrows("SOAP-DESERIALIZATION-ERROR", \operation.deserializeXmlRequest(), (envelope("11", body), "Soap"));
+        }
+        check(decode(operation, envelope("11", payload())), "quantity", 17);
+    }
+    empty() {
+        foreach string version in ("11", "12") {
+            foreach string kind in ("empty", "nil") {
+                string defs = kind == "empty" ? '<xs:complexType name="Empty"/>'
+                    '<xs:element name="head" type="t:Empty" abstract="true"/>'
+                    '<xs:element name="quantity" type="t:Empty" substitutionGroup="t:head"/>'
+                    : '<xs:element name="head" type="xs:int" abstract="true"/>'
+                    '<xs:element name="quantity" type="xs:int" nillable="true" substitutionGroup="t:head"/>';
+                WebService ws = service(version, defs);
+                WSOperation operation = ws.getBindingOperation("Soap", "submit");
+                string xml = '<t:quantity xmlns:t="' + Uri + '"' + (kind == "nil"
+                    ? ' xmlns:xsi="' + XSI_NS + '" xsi:nil="true"' : '') + '/>';
+                foreach bool response in (False, True) {
+                    auto value = decode(operation, envelope(version, xml), response);
+                    check(value, "quantity", NOTHING);
+                    check(decode(operation, encode(operation, value, response), response), "quantity", NOTHING);
+                    XsdXmlValue standalone = ws.serializeXmlValue(Uri, "head", value);
+                    assertEq("quantity", standalone.getLocalName());
+                    check(ws.getNativeDataProviderType(Uri, "head").acceptsValue(value), "quantity", NOTHING);
+                    check(ws.messages.Input.getDataProviderType().acceptsValue({"body": value}).body, "quantity", NOTHING);
+                    assertEq(kind == "nil", index(standalone.getXml(), ':nil="true"') >= 0);
+                }
+            }
+            WebService concrete = service(version, '<xs:complexType name="Empty"/>'
+                '<xs:element name="head" type="t:Empty"/>'
+                '<xs:element name="quantity" type="t:Empty" substitutionGroup="t:head"/>');
+            WSOperation operation = concrete.getBindingOperation("Soap", "submit");
+            foreach bool response in (False, True) {
+                foreach auto value in ({"body": NOTHING}, {"head": NOTHING},
+                        {response ? "Output" : "Input": {"body": NOTHING}},
+                        {response ? "Output" : "Input": {"head": NOTHING}}) {
+                    string xml = encode(operation, value, response);
+                    XsdXmlValue wire(xml);
+                    assertEq("head", wire.getChildValues()[0].getChildValues()[0].getLocalName());
+                    assertEq(NOTHING, decode(operation, xml, response));
+                }
+            }
+        }
+    }
+    namespaces() {
+        WebService ws = service();
+        AbstractDataProviderType snapshot = ws.getNativeDataProviderType(Uri, "head");
+        foreach string uri in ("urn:other", "") {
+            ws.addSchemaString('<xs:schema xmlns:xs="' + XSD_NS + '" xmlns:t="' + Uri + '"'
+                + (uri ? ' targetNamespace="' + uri + '"' : '') + '><xs:import namespace="' + Uri + '"/>'
+                '<xs:simpleType name="Small"><xs:restriction base="xs:int"><xs:maxInclusive value="100"/>'
+                '</xs:restriction></xs:simpleType>'
+                '<xs:element name="quantity" type="xs:int" substitutionGroup="t:head"/></xs:schema>');
+        }
+        foreach AbstractDataProviderType provider in (snapshot, Serializable::deserialize(snapshot.serialize())) {
+            assertEq(2, provider.getInfo().union_types.size());
+            check(provider.acceptsValue(selected("quantity", 17)), "quantity", 17);
+            assertThrows("RUNTIME-TYPE-ERROR", \provider.acceptsValue(), (selected("quantity", 17, "urn:other"),));
+        }
+        foreach WebService copy in (ws, Serializable::deserialize(ws.serialize())) {
+            WSOperation operation = copy.getBindingOperation("Soap", "submit");
+            foreach string uri in (Uri, "urn:other", "") {
+                hash<auto> value = selected("quantity", 17, uri);
+                XsdXmlValue standalone = copy.serializeXmlValue(Uri, "head", value);
+                assertEq(uri, standalone.getNamespaceUri());
+                assertEq("quantity", standalone.getLocalName());
+                auto received = decode(operation, encode(operation, value));
+                assertEq(uri, received."^element^".getNamespaceUri());
+                assertEq(17, received."^val^");
+                assertEq(uri, copy.getNativeDataProviderType(Uri, "head").acceptsValue(value)."^element^".getNamespaceUri());
+                assertEq(standalone.getXml(), copy.getXmlDataProviderType(Uri, "head").acceptsValue(standalone).getXml());
+                if (uri != Uri) {
+                    auto typed = selected("quantity", {"^type^": new XsdQNameValue(uri, "Small"), "^val^": 17}, uri);
+                    string xml = encode(operation, typed);
+                    auto captured = operation.deserializeRequest(parse_xml(xml, XPF_PRESERVE_ORDER), "Soap", True);
+                    assertEq(uri, captured."^element^".getNamespaceUri());
+                    assertEq(uri, captured."^val^"."^type^".getNamespaceUri());
+                    assertEq("Small", captured."^val^"."^type^".getLocalName());
+                    assertEq(17, captured."^val^"."^val^");
+                }
+            }
+            hash<string, XsdAbstractType> previous = copy.messages.Input.tmap;
+            assertThrows("WSDL-ERROR", \copy.addSchemaString(), (source(
+                '<xs:element name="invalid" type="xs:string" substitutionGroup="t:head"/>'),));
+            assertEq(previous, copy.messages.Input.tmap);
+        }
+    }
+    bounded() {
+        string defs;
+        string parts;
+        list<string> part_names();
+        list<string> names();
+        for (int index = 0; index < 64; ++index) {
+            defs += sprintf('<xs:element name="e%d" type="xs:int"%s/>', index,
+                index ? sprintf(' substitutionGroup="t:e%d"', index - 1) : "");
+            parts += sprintf('<w:part name="p%d" element="t:e%d"/>', index, index);
+            push part_names, "p" + index;
+            unshift names, "{" + Uri + "}e" + index;
+        }
+        # The unused Headers message still resolves the head declaration.
+        defs += '<xs:element name="head" type="xs:int"/>';
+        WebService ws = service("11", defs, parts);
+        WSMessage message = ws.messages.Input;
+        hash<string, int> matched = message.matchDocumentParts(part_names, names);
+        assertEq(64, matched.size());
+        for (int index = 0; index < 64; ++index) {
+            assertEq(63 - index, matched{"p" + index});
+        }
+        list<string> three = ("{" + Uri + "}e0", "{" + Uri + "}e1", "{" + Uri + "}e2");
+        foreach string a in (three) {
+            foreach string b in (three) {
+                foreach string c in (three) {
+                    list<string> candidate = (a, b, c);
+                    if (sort(candidate) == three) {
+                        hash<string, int> assignment = message.matchDocumentParts(("p0", "p1", "p2"), candidate);
+                        for (int index = 0; index < 3; ++index) {
+                            assertEq(three[index], candidate[assignment{"p" + index}]);
+                        }
+                    } else {
+                        assertThrows("SOAP-DESERIALIZATION-ERROR", \message.matchDocumentParts(),
+                            (("p0", "p1", "p2"), candidate));
+                    }
+                }
+            }
+        }
+        SandboxManager manager();
+        on_exit manager.clearInterrupt();
+        Program program(PO_NEW_STYLE | PO_STRICT_ARGS | PO_REQUIRE_TYPES);
+        program.setSandboxManager(manager);
+        program.parse("%modern\n%requires ../qlib/WSDL.qm\n"
+            "hash<string, int> sub match(WSMessage msg, list<string> parts, list<string> names, SandboxManager manager) {\n"
+            "    manager.requestInterrupt();\n"
+            "    return msg.matchDocumentParts(parts, names);\n"
+            "}\n", get_script_dir() + "/substitution-root-cancellation.qr");
+        *hash<ExceptionInfo> interrupted;
+        try {
+            program.callFunction("match", message, part_names, names, manager);
+        } catch (hash<ExceptionInfo> ex) {
+            interrupted = ex;
+        }
+        manager.clearInterrupt();
+        assertTrue(exists interrupted);
+        assertTrue(interrupted.err == "THREAD-CANCELLED" || interrupted.err == "PROGRAM-INTERRUPTED");
+        assertEq(matched, message.matchDocumentParts(part_names, names));
+        WebService shared = service();
+        WSOperation operation = shared.getBindingOperation("Soap", "submit");
+        AbstractDataProviderType provider = shared.getNativeDataProviderType(Uri, "head");
+        Qore::Thread::Queue results();
+        Qore::Thread::Counter running();
+        on_exit assertEq(0, running.waitForZero(30s));
+        for (int worker = 0; worker < 2; ++worker) {
+            running.inc();
+            background sub() {
+                on_exit running.dec();
+                try {
+                    for (int index = 0; index < 10; ++index) {
+                        auto value = provider.acceptsValue(selected("quantity", index));
+                        @assert(decode(operation, encode(operation, value))."^val^" == index);
+                        @assert(provider.getInfo().union_types.size() == 2);
+                    }
+                    results.push(True);
+                } catch (hash<ExceptionInfo> ex) {
+                    results.push(ex);
+                }
+            }();
+        }
+        for (int worker = 0; worker < 2; ++worker) {
+            assertEq(True, results.get(30s));
+        }
+    }
+}

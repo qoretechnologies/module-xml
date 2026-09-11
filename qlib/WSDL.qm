@@ -80,6 +80,12 @@ module WSDL {
     @section wsdlrelnotes WSDL Module Release Notes
 
     @subsection wsdl_0_5_8 WSDL v0.5.8
+    - complete schema elements and document SOAP body/header parts preserve concrete substitution roots
+      with portable ^element^ / ^val^ wrappers, independently of selected xsi:type wrappers
+    - native providers, retained XML and samples use selected member declarations; unordered message parts
+      require a complete unique assignment, and duplicate selected roots cannot overwrite other parts
+    - WebService reconstruction restores added schemas after inline declarations and refreshes message type
+      maps after successful additions; explicit empty values retain their WSDL part and message wrappers
     - ordered child particles admit concrete substitution members while retaining each declaration position
       and its shared occurrence limits; all-group aliases occupy one slot
     - native and retained child conversion, provider fields and samples use the selected member declaration;
@@ -10457,10 +10463,10 @@ public class XsdAttribute inherits WSDL::XsdTypedData {
 # Internal field indexing shared by element groups and complex types.
 class XsdElementFieldHelper {
     # Keep all admitted names, preferring declarations that need no xsi:type for an instance sample.
-    static list<string> getPreferredInstanceNames(XsdElement element) {
+    static list<string> getPreferredInstanceNames(XsdElement element, *hash<string, XsdElement> members) {
         list<string> concrete();
         list<string> abstract_types();
-        foreach hash<string, auto> entry in (element.getInstanceDeclarations().pairIterator()) {
+        foreach hash<string, auto> entry in ((members ?? element.getInstanceDeclarations()).pairIterator()) {
             XsdElement declaration = entry.value;
             if (declaration.type.isAbstract()) {
                 abstract_types += string(entry.key);
@@ -10913,16 +10919,18 @@ public class XsdElement inherits WSDL::XsdTypedData {
         @param nsc namespace context for validating the corresponding native serialization
         @param tmap the resolved schema type map
         @return the validated native value; the retained XML is not modified
-        @throw SOAP-SERIALIZATION-ERROR wrong expanded root, forbidden DOCTYPE or rejected schema content
+        @throw SOAP-SERIALIZATION-ERROR inadmissible expanded root, forbidden DOCTYPE or rejected schema content
         @note Checks both value conversion paths for each ordered child: serialization can enforce constraints
         that decoding does not. Complete particles are validated before native field projection; retained XML is
-        not regrouped through a flat record. General scalar and dynamic-type rules follow native conversion.
+        not regrouped through a flat record. The root may be a concrete substitution member; its declaration
+        supplies the value and type constraints. General scalar and dynamic-type rules follow native conversion.
         @since %WSDL 0.5.8
     */
     auto validateXmlValue(XsdXmlValue value, Namespaces nsc, hash<string, XsdAbstractType> tmap) {
         XsdNativeTypeValueScope native_projection(False);
-        if (value.getExpandedName() != getExpandedName()) {
-            throw SOAP_SERIALIZATION_ERROR, sprintf("XML value root %Y does not match element %Y",
+        *XsdElement selected = getInstanceDeclaration(value.getExpandedName());
+        if (!selected) {
+            throw SOAP_SERIALIZATION_ERROR, sprintf("XML value root %Y does not match a declaration admitted by element %Y",
                 value.getExpandedName(), getExpandedName());
         }
         XmlReader reader = value.getReader();
@@ -10944,7 +10952,7 @@ public class XsdElement inherits WSDL::XsdTypedData {
             *Namespaces previous = RetainedXmlValidationNamespaces;
             on_exit RetainedXmlValidationNamespaces = previous;
             RetainedXmlValidationNamespaces = nsc.copy();
-            return deserializeValue(tmap, NOTHING, expanded{getExpandedName()}, True);
+            return selected.deserializeValue(tmap, NOTHING, expanded{value.getExpandedName()}, True);
         } catch (hash<ExceptionInfo> ex) {
             if (ex.err == "PROGRAM-INTERRUPTED" || ex.err == "THREAD-CANCELLED") {
                 rethrow;
@@ -11368,13 +11376,263 @@ class XsdNativeTypeProviderHelper {
             ? cast<XsdNativeTypeDataType>(result.getOrNothingType()) : result;
     }
     static bool isNative(AbstractDataProviderType type) {
-        if (type instanceof XsdNativeTypeDataType) {
+        if (type instanceof XsdNativeTypeDataType || type instanceof XsdElementDataType) {
             return True;
         }
         return type instanceof ListDataType && type.getElementType() instanceof XsdNativeTypeDataType;
     }
     static auto unwrap(auto value) {
+        if (XsdElementValueHelper::isWrapper(value)) {
+            value = value."^val^";
+        }
         return XsdNativeTypeValueHelper::isWrapper(value) ? value."^val^" : value;
+    }
+}
+
+#! Provider retaining the selected declaration of a complete global element
+/** Ordinary values use the declared element. A `^element^` / `^val^` wrapper selects a concrete
+    substitution member by expanded QName. Child particle fields already identify their declarations.
+    @par Example
+    Store an abstract shipment part as a concrete tracked-shipment element without losing its root name.
+    @since %WSDL 0.5.8
+*/
+public class XsdElementDataType inherits AbstractDataProviderType {
+    private {
+        XsdElement declared;
+        hash<string, XsdAbstractType> types;
+        hash<string, XsdElement> declarations;
+        hash<string, AbstractDataProviderType> values;
+        bool optional;
+    }
+    #! constructs a complete-element provider in the active native type capture context
+    /** @param declared the receiving head declaration
+        @param types the receiving schema's named type definitions
+    */
+    constructor(XsdElement declared, hash<string, XsdAbstractType> types) {
+        self.declared = declared;
+        self.types = types;
+        declarations = declared.getInstanceDeclarations();
+        hash<string, XsdElement> members = declarations;
+        members{declared.getExpandedName()} = declared;
+        foreach XsdElement member in (members.iterator()) {
+            values{member.getExpandedName()} = XsdElementFieldHelper::getOccurrenceType(member, False, False);
+        }
+        optional = !declared.minOccurs || (!declared.isAbstract()
+            && (declared.nillable || values{declared.getExpandedName()}.isOrNothingType()));
+    }
+    private:internal deserializeMembers(hash<auto> members) {
+        if (!(members.declared instanceof XsdElement) || members.types.typeCode() != NT_HASH
+                || members.declarations.typeCode() != NT_HASH || members.values.typeCode() != NT_HASH
+                || !members.values || members.optional.typeCode() != NT_BOOLEAN) {
+            throw "DESERIALIZATION-ERROR", "an element provider requires its declaration, type map, values and optionality";
+        }
+        foreach auto value in (members.values.iterator()) {
+            if (!(value instanceof AbstractDataProviderType)) {
+                throw "DESERIALIZATION-ERROR", "element alternatives require native value providers";
+            }
+        }
+        foreach auto type in (members.types.iterator()) {
+            if (!(type instanceof XsdAbstractType)) {
+                throw "DESERIALIZATION-ERROR", "an element provider requires schema type definitions";
+            }
+        }
+        foreach hash<string, auto> entry in (members.declarations.pairIterator()) {
+            if (!(entry.value instanceof XsdElement) || !members.values.hasKey(entry.key)) {
+                throw "DESERIALIZATION-ERROR", "each concrete element declaration requires a native value provider";
+            }
+        }
+        declared = members.declared;
+        types = members.types;
+        declarations = members.declarations;
+        values = members.values;
+        optional = members.optional;
+    }
+    #! returns the element name and representation
+    /** @return the provider name */
+    string getName() {
+        return declared.name + " with selected elements";
+    }
+    #! describes element selection
+    /** @return a description of the wrapper contract */
+    string getDesc() {
+        return "Accepts the declared native value or `^element^` / `^val^` selecting a concrete substitution member "
+            "by `XsdQNameValue`. The selected member supplies its value type and instance constraints. "
+            "The provider retains the alternatives available when it was created.";
+    }
+    #! requires schema-aware conversion
+    /** @return NOTHING */
+    *Type getValueType() {
+        return;
+    }
+    #! prevents native assignment from bypassing declaration checks
+    /** @return an empty map */
+    *hash<string, bool> getDirectTypeHash() {
+        return {};
+    }
+    #! returns no common list item type
+    /** @return NOTHING */
+    *AbstractDataProviderType getElementType() {
+        return;
+    }
+    #! returns no common fields across native and wrapper values
+    /** @return NOTHING; inspect getInfo() or getSelectedElementType() */
+    *hash<string, AbstractDataField> getFields() {
+        return;
+    }
+    #! reports omission support
+    /** @return whether the provider is optional */
+    bool isOrNothingType() {
+        return optional;
+    }
+    #! reports requiredness
+    /** @return whether a value must be supplied */
+    bool isMandatory() {
+        return !optional;
+    }
+    #! returns accepted native representations
+    /** @param simple whether simplified names are requested
+        @return declared native types and the wrapper hash form
+    */
+    hash<string, bool> getAcceptTypeHash(*bool simple) {
+        hash<string, bool> result = declared.isAbstract() ? {} : values{declared.getExpandedName()}.getAcceptTypeHash(simple);
+        result.hash = True;
+        if (optional) {
+            result.nothing = True;
+        } else {
+            remove result.nothing;
+            remove result.null;
+        }
+        return result;
+    }
+    #! returns produced native representations
+    /** @param simple whether simplified names are requested
+        @return declared native types and the wrapper hash form
+    */
+    hash<string, bool> getReturnTypeHash(*bool simple) {
+        hash<string, bool> result = declared.isAbstract() ? {} : values{declared.getExpandedName()}.getReturnTypeHash(simple);
+        result.hash = True;
+        if (optional) {
+            result.nothing = True;
+        } else {
+            remove result.nothing;
+            remove result.null;
+        }
+        return result;
+    }
+    #! returns a concrete member's value provider
+    /** @param selected the member's expanded QName
+        @return its native provider, including selected types when capture is enabled
+        @throw SOAP-SERIALIZATION-ERROR the member is not admitted by the receiving head
+    */
+    AbstractDataProviderType getSelectedElementType(XsdQNameValue selected) {
+        auto wrapper = {"^element^": selected, "^val^": NOTHING};
+        XsdElement member = XsdElementValueHelper::select(declared, \wrapper, declarations);
+        return values{member.getExpandedName()};
+    }
+    #! describes the native form and each concrete selected element
+    /** @param simple whether simplified names are requested
+        @return union metadata with expanded element examples and member value types
+    */
+    hash<DataTypeInfo> getInfo(*bool simple) {
+        hash<DataTypeInfo> result = AbstractDataProviderType::getInfo(simple);
+        if (!result.recursive) {
+            if (!declared.isAbstract()) {
+                result.union_types += values{declared.getExpandedName()}.getInfo(simple);
+            }
+            foreach XsdElement member in (declarations.iterator()) {
+                HashDataType wrapper("Selected element " + member.getExpandedName());
+                XsdQNameValue identity(member.getNamespaceUri(), member.name);
+                wrapper.addField(new XsdQNameDataField({"name": "^element^", "display_name": "Selected Element",
+                    "type": new XsdQNameDataType(), "example_value": identity,
+                    "allowed_values": (<AllowedValueInfo>{"value": identity,
+                        "display_name": "Element " + member.getExpandedName()},),
+                    "desc": "Expanded name selecting this concrete element when the message is stored or forwarded."}));
+                wrapper.addQoreFields({
+                    "^val^": {"display_name": "Value", "type": values{member.getExpandedName()},
+                        "desc": "Native value checked against the selected element, including its required fields."},
+                });
+                result.union_types += wrapper.getInfo(simple);
+            }
+        }
+        return result;
+    }
+    #! generates a native value using a concrete element declaration
+    /** @param emap declarations visited on the current example path
+        @param fname optional field context
+        @return the declared native value, or a selected member wrapper for an abstract head
+        @throw XSD-SAMPLE-ERROR no concrete instance declaration is available
+    */
+    auto getExampleValue(*hash<string, bool> emap, *string fname) {
+        if (optional) {
+            return;
+        }
+        if (!declared.isAbstract()) {
+            return values{declared.getExpandedName()}.getExampleValue(emap, fname);
+        }
+        list<string> names = XsdElementFieldHelper::getPreferredInstanceNames(declared, declarations);
+        if (!names) {
+            throw "XSD-SAMPLE-ERROR", sprintf("element %Y has no concrete instance declaration", declared.getExpandedName());
+        }
+        XsdElement selected = declarations{names[0]};
+        return XsdElementValueHelper::retain(declared, selected,
+            values{names[0]}.getExampleValue(emap, fname));
+    }
+    #! converts a value using its selected element without discarding the wrapper
+    /** @param value an ordinary value or element wrapper
+        @return the converted value retaining the selected element and any explicit type
+        @throw MISSING-VALUE-ERROR an omitted mandatory value
+        @throw RUNTIME-TYPE-ERROR invalid selection or member content
+    */
+    auto acceptsValue(auto value) {
+        if (!exists value) {
+            if (optional) {
+                return;
+            }
+            throw "MISSING-VALUE-ERROR", sprintf("element value %Y must be supplied", getName());
+        }
+        bool wrapped = XsdElementValueHelper::isWrapper(value);
+        auto native = value;
+        try {
+            XsdElement selected = XsdElementValueHelper::select(declared, \native, declarations);
+            native = values{selected.getExpandedName()}.acceptsValue(native);
+            XsdNativeTypeOutputScope type_scope(types);
+            Namespaces namespaces = selected.type.nsc.copy();
+            XsdQNameOutputScope output_scope(namespaces);
+            selected.serializeOccurrence(namespaces, native, True, selected.name, getName());
+        } catch (hash<ExceptionInfo> error) {
+            if (error.err == SOAP_SERIALIZATION_ERROR) {
+                rethrow "RUNTIME-TYPE-ERROR", error.desc, error.arg;
+            }
+            rethrow;
+        }
+        if (wrapped) {
+            value."^val^" = native;
+            return value;
+        }
+        return native;
+    }
+    #! returns an optional copy
+    /** @return a provider accepting omission */
+    AbstractDataProviderType getOrNothingType() {
+        XsdElementDataType result = self.copy();
+        result.optional = True;
+        return result;
+    }
+    #! returns a mandatory copy
+    /** @return a provider requiring a value */
+    AbstractDataProviderType getMandatoryType() {
+        XsdElementDataType result = self.copy();
+        result.optional = False;
+        return result;
+    }
+    #! returns a copy with soft native conversion for each member
+    /** @return a provider retaining all element selection and instance constraints */
+    AbstractDataProviderType getSoftType() {
+        XsdElementDataType result = self.copy();
+        foreach string identity in (keys values) {
+            result.values{identity} = values{identity}.getSoftType();
+        }
+        return result;
     }
 }
 
@@ -11862,7 +12120,8 @@ public class XsdMessageDataType inherits HashDataType {
         foreach hash<ArgInfo> arg in (parts.iterator()) {
             hash<auto> info = {"name": arg.name,
                 "type": arg.type ? (owner ? new XsdNativeTypeDataType(owner.getDefinition(arg.type), NOTHING)
-                    : arg.type.getDataProviderType()) : arg.element.getDataProviderType(),
+                    : arg.type.getDataProviderType()) : (XsdElementValueHelper::needsSelection(arg.element)
+                        ? new XsdElementDataType(arg.element, types) : arg.element.getDataProviderType()),
                 "allowed_values": arg.type ? arg.type.getDataProviderAllowedValues()
                     : arg.element.getDataProviderAllowedValues()};
             addField(arg.type ? XsdDataFieldHelper::create(arg.type, info)
@@ -11943,7 +12202,9 @@ public class XsdMessageDataType inherits HashDataType {
             }
             try {
                 if (part.element) {
-                    part.element.serializeValue(validation_namespaces, value{part.name}, True, part.name, getName());
+                    auto native = value{part.name};
+                    XsdElement selected = XsdElementValueHelper::select(part.element, \native);
+                    selected.serializeValue(validation_namespaces, native, True, part.name, getName());
                 } else {
                     XsdDocumentValueHelper::serializePartValue(part.type, validation_namespaces, value{part.name}, True);
                 }
@@ -20695,6 +20956,139 @@ class XsdNativeTypeOutputScope {
     }
 }
 
+# Complete element boundaries retain a selected declaration independently of xsi:type.
+# Child particles already carry element identity in their field names.
+class XsdElementValueHelper {
+    static bool needsSelection(XsdElement declared) {
+        hash<string, XsdElement> members = declared.getInstanceDeclarations();
+        return members.size() != 1 || members.firstKey() != declared.getExpandedName();
+    }
+
+    static bool isWrapper(auto value) {
+        return value.typeCode() == NT_HASH && value.hasKey("^element^");
+    }
+
+    static XsdElement select(XsdElement declared, reference<auto> value, *hash<string, XsdElement> members) {
+        if (!isWrapper(value)) {
+            return declared;
+        }
+        if (value.size() != 2 || !value.hasKey("^val^")
+                || !(value."^element^" instanceof XsdQNameValue) || isWrapper(value."^val^")) {
+            throw SOAP_SERIALIZATION_ERROR,
+                "an element wrapper requires only ^element^ as an XsdQNameValue and ^val^, without nested element wrappers";
+        }
+        XsdQNameValue identity = value."^element^";
+        string expanded = type_qname(identity.getNamespaceUri(), identity.getLocalName());
+        *XsdElement selected = exists members ? members{expanded} : declared.getInstanceDeclaration(expanded);
+        if (!selected) {
+            throw SOAP_SERIALIZATION_ERROR, sprintf("selected element %Y is not admitted by declaration %Y",
+                expanded, declared.getExpandedName());
+        }
+        value = value."^val^";
+        return selected;
+    }
+
+    static auto retain(XsdElement declared, XsdElement selected, auto value) {
+        return declared.getExpandedName() == selected.getExpandedName() ? value
+            : {"^element^": new XsdQNameValue(selected.getNamespaceUri(), selected.name), "^val^": value};
+    }
+}
+
+# Document/literal parts are unordered. An augmenting-path matching finds an
+# assignment without greedy name consumption. An alternating cycle or an edge
+# to an unused occurrence proves ambiguity; a linear topological pass checks
+# uniqueness. Iterative queues keep large part sets off the stack.
+class XsdMessagePartMatcher {
+    static hash<string, int> match(hash<string, list<int>> candidates, int count, bool ignore_unknown) {
+        *hash<string, int> result = assign(candidates);
+        if (!exists result) {
+            throw SOAP_DESERIALIZATION_ERROR, "SOAP elements cannot supply every selected message part";
+        }
+        if (!ignore_unknown && result.size() != count) {
+            throw SOAP_DESERIALIZATION_ERROR, "additional keys or duplicate elements included in SOAP document parts";
+        }
+        hash<string, string> owners();
+        hash<string, int> incoming();
+        hash<string, list<string>> alternatives();
+        foreach hash<string, auto> edge in (result.pairIterator()) {
+            owners{string(edge.value)} = edge.key;
+            incoming{edge.key} = 0;
+        }
+        foreach string part in (keys candidates) {
+            foreach int index in (candidates{part}) {
+                if (index == result{part}) {
+                    continue;
+                }
+                *string owner = owners{string(index)};
+                if (!exists owner) {
+                    throw SOAP_DESERIALIZATION_ERROR, "SOAP element names cannot uniquely identify their message parts";
+                }
+                push alternatives{part}, owner;
+                ++incoming{owner};
+            }
+        }
+        list<string> pending = select keys incoming, !incoming{$1};
+        for (int cursor = 0; cursor < pending.size(); ++cursor) {
+            foreach string next in (alternatives{pending[cursor]}) {
+                if (!--incoming{next}) {
+                    push pending, next;
+                }
+            }
+        }
+        if (pending.size() != result.size()) {
+            throw SOAP_DESERIALIZATION_ERROR, "SOAP element names cannot uniquely identify their message parts";
+        }
+        return result;
+    }
+
+    private static *hash<string, int> assign(hash<string, list<int>> candidates) {
+        hash<string, string> owners();
+        hash<string, int> result();
+        foreach string start in (keys candidates) {
+            list<string> pending = (start,);
+            hash<string, bool> seen_parts = {start: True};
+            hash<string, bool> seen_values();
+            hash<string, string> previous();
+            bool found = False;
+            for (int cursor = 0; cursor < pending.size() && !found; ++cursor) {
+                string part = pending[cursor];
+                foreach int index in (candidates{part}) {
+                    if (seen_values{string(index)}) {
+                        continue;
+                    }
+                    seen_values{string(index)} = True;
+                    *string owner = owners{string(index)};
+                    if (exists owner) {
+                        if (!seen_parts{owner}) {
+                            seen_parts{owner} = True;
+                            previous{owner} = part;
+                            push pending, owner;
+                        }
+                        continue;
+                    }
+                    while (True) {
+                        *int old = result{part};
+                        result{part} = index;
+                        owners{string(index)} = part;
+                        if (part == start) {
+                            break;
+                        }
+                        @assert(exists old);
+                        index = old;
+                        part = previous{part};
+                    }
+                    found = True;
+                    break;
+                }
+            }
+            if (!found) {
+                return;
+            }
+        }
+        return result;
+    }
+}
+
 class XsdNativeTypeValueHelper {
     static bool isWrapper(auto value) {
         return value.typeCode() == NT_HASH && value.hasKey("^val^")
@@ -22655,8 +23049,29 @@ public class WSOperation inherits WSDL::XsdNamedData {
     }
 
     #! returns all top-level request names for this operation
+    /** @return the existing binding names plus concrete members of document body element parts
+        @note Member names are obtained from the current schema when a handler registers the operation.
+        Body validation still checks the complete expanded name and selected binding.
+        @since %WSDL 0.5.8
+    */
     list<auto> getTopLevelRequestNames() {
-        return reqh.keys();
+        hash<string, bool> names = reqh;
+        if (input) {
+            foreach OperationalBinding binding in (bindings.iterator()) {
+                if (!(binding instanceof SoapBinding) || !binding.docstyle || !binding.input) {
+                    continue;
+                }
+                foreach string part in (binding.input.getBodyPartNames(input) ?? keys input.pmap) {
+                    *XsdElement head = input.args{input.pmap{part}}.element;
+                    if (head) {
+                        foreach XsdElement member in (head.getInstanceDeclarations().iterator()) {
+                            names{member.name} = True;
+                        }
+                    }
+                }
+            }
+        }
+        return keys names;
     }
 
     #! returns a hash representing the given binding
@@ -23096,6 +23511,8 @@ public class WSMessage inherits WSDL::XsdNamedData {
         XsdNativeTypeOutputScope type_scope(tmap);
         hash<auto> rh;
         *hash<string, string> xml_attributes;
+        list<string> emitted_parts();
+        list<string> emitted_names();
 
         #printf("DEBUG: WSMessage::serializeDocument() parts: %y h: %y args: %y, pmap: %y\n", parts, h.typeCode()==NT_HASH ?  h.keys() : h, args.keys(), pmap);
 
@@ -23169,6 +23586,8 @@ public class WSMessage inherits WSDL::XsdNamedData {
                 # both message and part identity rather than a per-call numeric index.
                 rh{sprintf("^xml^%d:%s:%s", name.length(), name, p)} = XsdQNameOutputScope::retains(nsc)
                     ? new XsdQNameXmlFragment(cast<XsdXmlValue>(val), native) : cast<XsdXmlValue>(val).getXml();
+                push emitted_parts, p;
+                push emitted_names, cast<XsdXmlValue>(val).getExpandedName();
                 continue;
             }
             # Handle multipart attachments - if this part is defined as a multipart content part
@@ -23185,11 +23604,31 @@ public class WSMessage inherits WSDL::XsdNamedData {
                     rh{p} = {"^attributes^": {"href": "cid:" + k}};
                 }
             } else if (arg.element) {
-                auto th = arg.element.serializeValue(nsc, val, !encoded, k, name);
-                rh{arg.element.getXmlName(nsc)} = th;
+                XsdElement selected = XsdElementValueHelper::select(arg.element, \val);
+                auto th = selected.serializeValue(nsc, val, !encoded, k, name);
+                string wire_name = selected.getXmlName(nsc);
+                if (rh.hasKey(wire_name)) {
+                    throw SOAP_SERIALIZATION_ERROR, sprintf("multiple message parts select element %Y", wire_name);
+                }
+                rh{wire_name} = th;
+                push emitted_parts, p;
+                push emitted_names, selected.getExpandedName();
             } else {
                 auto th = XsdDocumentValueHelper::serializePartValue(arg.type, nsc, val, !encoded);
                 rh{p} = th;
+                push emitted_parts, p;
+                push emitted_names, type_qname("", p);
+            }
+        }
+
+        if (!encoded && !mpm) {
+            try {
+                matchDocumentParts(emitted_parts, emitted_names);
+            } catch (hash<ExceptionInfo> error) {
+                if (error.err == SOAP_DESERIALIZATION_ERROR) {
+                    rethrow SOAP_SERIALIZATION_ERROR, error.desc, error.arg;
+                }
+                rethrow;
             }
         }
 
@@ -23261,6 +23700,40 @@ public class WSMessage inherits WSDL::XsdNamedData {
         hash<auto> rh;
 
         *hash<auto> attr = remove val."^attributes^";
+
+        if (expanded_names) {
+            list<string> identities();
+            list<auto> values();
+            foreach string key in (keys val) {
+                string identity = key;
+                identity =~ s/\^[0-9]+$//;
+                list<auto> occurrences = val{key}.typeCode() == NT_LIST ? val{key} : (val{key},);
+                foreach auto occurrence in (occurrences) {
+                    push identities, identity;
+                    push values, occurrence;
+                }
+            }
+            hash<string, int> assigned = matchDocumentParts(parts ?? keys pmap, identities,
+                ignore_unknown ?? exists parts);
+            foreach hash<string, auto> entry in (assigned.pairIterator()) {
+                string part = entry.key;
+                int index = entry.value;
+                hash<ArgInfo> arg = args{pmap{part}};
+                auto value = values[index];
+                if (value.typeCode() == NT_HASH) {
+                    XsdBase::removeNS2(\value);
+                }
+                if (arg.element) {
+                    XsdElement selected = arg.element.getInstanceDeclaration(identities[index]);
+                    rh{part} = XsdElementValueHelper::retain(arg.element, selected,
+                        selected.deserializeValue(tmap, mrh, getValue(mrh, value), True));
+                } else {
+                    rh{part} = XsdDocumentValueHelper::deserializeValue(arg.type, name, tmap, mrh,
+                        getValue(mrh, value), True);
+                }
+            }
+            return rh;
+        }
 
         #printf("DBG WSMessage::deserializeDocument() pmap: %y val: %y\n", pmap, val);
         if (!expanded_names && args.size() == 1) {
@@ -23367,13 +23840,13 @@ public class WSMessage inherits WSDL::XsdNamedData {
         string k;
         # there is no unique part namespace as it may contain more messages in one hash, so let's do a little heuristic
         if (v.typeCode() == NT_HASH && v.hasKey(name)) {
-            if (args{ename}.part && exists v{name}{args{ename}.part}) {
+            if (args{ename}.part && v{name}.typeCode() == NT_HASH && v{name}.hasKey(args{ename}.part)) {
                 k = args{ename}.part;
-            } else if (exists v{name}{ename}) {
+            } else if (v{name}.typeCode() == NT_HASH && v{name}.hasKey(ename)) {
                 k = ename;
             }
             if (k) {
-                rv = v{name}{k};
+                rv = v{name}{k} ?? NULL;
                 if (removeFound) {
                     remove v{name}{k};
                     if (!v{name}) {
@@ -23383,7 +23856,7 @@ public class WSMessage inherits WSDL::XsdNamedData {
             }
         }
         if (!k) {
-            if (args{ename}.part && exists v{args{ename}.part}) {
+            if (args{ename}.part && v.typeCode() == NT_HASH && v.hasKey(args{ename}.part)) {
                 k = args{ename}.part;
             } else if (v.typeCode() == NT_HASH && v.hasKey(ename)) {
                 k = ename;
@@ -23404,8 +23877,11 @@ public class WSMessage inherits WSDL::XsdNamedData {
     #! when only one arg then try to get values based on element keys
     private:internal auto getValueFromHash(*WSDL::XsdElement element, reference<auto> v, bool removeFound,
             *hash<string, bool> reserved) {
-        if ((args.size() == 1 || exists reserved) && XsdNativeTypeValueHelper::isWrapper(v)) {
-            XsdNativeTypeValueHelper::checkWrapper(v);
+        if ((args.size() == 1 || exists reserved)
+                && (XsdElementValueHelper::isWrapper(v) || XsdNativeTypeValueHelper::isWrapper(v))) {
+            if (!XsdElementValueHelper::isWrapper(v)) {
+                XsdNativeTypeValueHelper::checkWrapper(v);
+            }
             auto value = v;
             if (removeFound) {
                 remove v;
@@ -23494,6 +23970,47 @@ public class WSMessage inherits WSDL::XsdNamedData {
     string getExpandedSerializedKey(string part) {
         *XsdElement element = args{pmap{part}}.element;
         return element ? element.getExpandedName() : type_qname("", part);
+    }
+
+    #! returns all concrete expanded element names admitted by a document part
+    /** @param part the WSDL part name
+        @return admitted element names, or the unqualified name of a type part
+        @throw WSDL-ERROR the part does not exist
+        @since %WSDL 0.5.8
+    */
+    list<string> getDocumentPartNames(string part) {
+        if (!pmap.hasKey(part)) {
+            throw WSDL_ERROR, sprintf("no part %Y in message %Y", part, name);
+        }
+        *XsdElement element = args{pmap{part}}.element;
+        return element ? keys element.getInstanceDeclarations() : (type_qname("", part),);
+    }
+
+    #! assigns document elements to selected WSDL parts by their expanded names
+    /** @param parts selected part names
+        @param names expanded names of the supplied element occurrences
+        @param ignore_unknown whether other parts may remain outside the assignment
+        @return an occurrence index for each selected part
+        @throw SOAP-DESERIALIZATION-ERROR missing, duplicate or ambiguous part values
+        @throw WSDL-ERROR an unknown part was requested
+        @since %WSDL 0.5.8
+    */
+    hash<string, int> matchDocumentParts(list<string> parts, list<string> names, bool ignore_unknown = False) {
+        hash<string, list<int>> candidates();
+        hash<string, list<int>> occurrences();
+        for (int index = 0; index < names.size(); ++index) {
+            push occurrences{names[index]}, index;
+        }
+        foreach string part in (parts) {
+            if (candidates.hasKey(part)) {
+                throw SOAP_DESERIALIZATION_ERROR, sprintf("message part %Y was selected more than once", part);
+            }
+            candidates{part} = ();
+            foreach string identity in (getDocumentPartNames(part)) {
+                candidates{part} += occurrences{identity} ?? ();
+            }
+        }
+        return XsdMessagePartMatcher::match(candidates, names.size(), ignore_unknown);
     }
 
     #! check if pname is defined as message part
@@ -23761,6 +24278,7 @@ public class SoapBinding inherits WSDL::OperationalBinding {
             #printf("DEBUG: %s header: %y\n", io, header);
             #printf("DEBUG: doc: %y bhdr: %N\n", docstyle, (map $1.("message", "part"), bmd.getHeaders()));
             hash<auto> outh;
+            list<string> emitted_header_names();
             foreach BindingMessageHeaderDescription hdr in (bmd.getHeaders()) {
                 #printf("DEBUG: hdr: %y (%y)\n", hdr.("encoded", "part"), hdr.msg.args.keys());
                 # only style="document" is assumed since headers do not contain parameters.
@@ -23774,6 +24292,9 @@ public class SoapBinding inherits WSDL::OperationalBinding {
                 if (h) {
                     foreach string key in (keys h) {
                         if (key.startsWith("^xml^")) {
+                            auto fragment = h{key};
+                            XsdXmlValue xml(fragment instanceof XsdQNameXmlFragment ? fragment.getXml() : fragment);
+                            push emitted_header_names, xml.getExpandedName();
                             hash<string, string> attributes();
                             foreach string attribute in ("xml:lang", "xml:space", "xml:base") {
                                 if (h."^attributes^".hasKey(attribute)) {
@@ -23781,12 +24302,26 @@ public class SoapBinding inherits WSDL::OperationalBinding {
                                 }
                             }
                             XsdSoapXmlHelper::mergeContext(\header_xml_attributes, attributes);
-                            break;
+                        } else if (!key.startsWith("^")) {
+                            list<string> qname = key.split(":");
+                            push emitted_header_names, type_qname(qname.size() == 2
+                                ? hdr.msg.nsc.getOutputNamespaceUri(qname[0]) : "", qname[-1]);
+                            if (outh.hasKey(key)) {
+                                throw SOAP_SERIALIZATION_ERROR, sprintf("multiple header parts select element %Y", key);
+                            }
                         }
                     }
                     remove h."^attributes^".("soapenv:encodingStyle");
                     outh += h;
                 }
+            }
+            try {
+                matchHeaders(bmd, emitted_header_names);
+            } catch (hash<ExceptionInfo> error) {
+                if (error.err == SOAP_DESERIALIZATION_ERROR) {
+                    rethrow SOAP_SERIALIZATION_ERROR, error.desc, error.arg;
+                }
+                rethrow;
             }
             #printf("DEBUG: outh: %y\n", outh);
             rh{soapenvEnvelope}."soapenv:Header" = outh;
@@ -23903,51 +24438,59 @@ public class SoapBinding inherits WSDL::OperationalBinding {
         deserializeMessage(op, parse_xml(xml, XPF_PRESERVE_ORDER), request);
         if (message) {
             list<string> parts = description.getBodyPartNames(message) ?? keys message.pmap;
-            hash<string, string> wire_parts();
-            foreach string part in (parts) {
-                string wire_name = message.getExpandedSerializedKey(part);
-                if (wire_parts.hasKey(wire_name)) {
-                    throw SOAP_DESERIALIZATION_ERROR, sprintf("ambiguous XML parts for element %y", wire_name);
-                }
-                wire_parts{wire_name} = part;
-            }
-            foreach XsdXmlValue value in (body_values) {
-                *string part = remove wire_parts{value.getExpandedName()};
-                if (!exists part) {
-                    throw SOAP_DESERIALIZATION_ERROR, sprintf("unexpected or duplicate SOAP body element %y",
-                        value.getExpandedName());
-                }
+            hash<string, int> assigned = message.matchDocumentParts(parts, map $1.getExpandedName(), body_values);
+            foreach hash<string, auto> entry in (assigned.pairIterator()) {
+                string part = entry.key;
+                XsdXmlValue value = body_values[entry.value];
                 validateXmlPart(op, message, part, value);
                 result.body{part} = value;
             }
-            if (wire_parts) {
-                throw SOAP_DESERIALIZATION_ERROR, sprintf("missing SOAP body parts: %y", keys wire_parts);
-            }
         }
-        hash<string, BindingMessageHeaderDescription> wire_headers();
         foreach BindingMessageHeaderDescription header in (description.getHeaders()) {
-            string wire_name = header.msg.getExpandedSerializedKey(header.part);
-            if (header.encoded || wire_headers.hasKey(wire_name)) {
-                throw "WSDL-BINDING-ERROR", sprintf("retained XML header %y must be unambiguous and literal", wire_name);
+            if (header.encoded) {
+                throw "WSDL-BINDING-ERROR", "retained XML headers must be literal";
             }
-            wire_headers{wire_name} = header;
         }
-        hash<string, bool> seen_headers();
-        foreach XsdXmlValue value in (header_values) {
+        hash<string, BindingMessageHeaderDescription> selected_headers = matchHeaders(description,
+            map $1.getExpandedName(), header_values);
+        for (int index = 0; index < header_values.size(); ++index) {
+            XsdXmlValue value = header_values[index];
             if (!value.getNamespaceUri()) {
                 throw SOAP_DESERIALIZATION_ERROR, "SOAP header blocks must be namespace-qualified";
             }
-            *BindingMessageHeaderDescription header = wire_headers{value.getExpandedName()};
+            *BindingMessageHeaderDescription header = selected_headers{string(index)};
             if (!header) {
                 result.unbound_headers += value;
                 continue;
             }
-            if (seen_headers{value.getExpandedName()}) {
-                throw SOAP_DESERIALIZATION_ERROR, sprintf("duplicate SOAP header %y", value.getExpandedName());
-            }
-            seen_headers{value.getExpandedName()} = True;
             validateXmlPart(op, header.msg, header.part, value);
             result.headers{header.msg.name}{header.part} = value;
+        }
+        return result;
+    }
+
+    private static hash<string, BindingMessageHeaderDescription> matchHeaders(BindingMessageDescription description,
+            list<string> names) {
+        hash<string, list<int>> candidates();
+        hash<string, BindingMessageHeaderDescription> declarations();
+        hash<string, list<int>> occurrences();
+        for (int index = 0; index < names.size(); ++index) {
+            push occurrences{names[index]}, index;
+        }
+        int id = 0;
+        foreach BindingMessageHeaderDescription header in (description.getHeaders()) {
+            string key = string(id++);
+            foreach string identity in (header.msg.getDocumentPartNames(header.part)) {
+                if (occurrences{identity}) {
+                    candidates{key} += occurrences{identity};
+                    declarations{key} = header;
+                }
+            }
+        }
+        hash<string, int> assigned = XsdMessagePartMatcher::match(candidates, names.size(), True);
+        hash<string, BindingMessageHeaderDescription> result();
+        foreach hash<string, auto> entry in (assigned.pairIterator()) {
+            result{string(entry.value)} = declarations{entry.key};
         }
         return result;
     }
@@ -23989,11 +24532,25 @@ public class SoapBinding inherits WSDL::OperationalBinding {
             }
 
             #printf("DEBUG: Deserialize SOAP headers: %N\n", header);
-            foreach BindingMessageHeaderDescription hdr in (bmd.getHeaders()) {
-                if (header.hasKey(hdr.msg.getExpandedSerializedKey(hdr.part))) {
-                    # seems it may appear part name conflict between messages when namespace is stripped
-                    hrv{hdr.msg.name} += hdr.msg.deserializeDocument(NOTHING, header, hdr.part, NOTHING, True);
+            list<string> header_names();
+            list<auto> header_values();
+            foreach string key in (keys header) {
+                if (key =~ /^[\^.]/) {
+                    continue;
                 }
+                string identity = key;
+                identity =~ s/\^[0-9]+$//;
+                list<auto> occurrences = header{key}.typeCode() == NT_LIST ? header{key} : (header{key},);
+                foreach auto occurrence in (occurrences) {
+                    push header_names, identity;
+                    push header_values, occurrence;
+                }
+            }
+            foreach hash<string, auto> entry in (matchHeaders(bmd, header_names).pairIterator()) {
+                int index = int(entry.key);
+                BindingMessageHeaderDescription hdr = entry.value;
+                hrv{hdr.msg.name} += hdr.msg.deserializeDocument(NOTHING,
+                    {header_names[index]: header_values[index]}, hdr.part, NOTHING, True);
             }
             #printf("DEBUG: Deserialized SOAP headers: %N\n", hrv);
         }
@@ -24087,7 +24644,8 @@ public class SoapBinding inherits WSDL::OperationalBinding {
             # but we must be care of when the argument is a type (not element)
             # A selected root wrapper stays under its part key when header messages are also present.
             if (rv.size() == 1 && rv.typeCode() == NT_HASH && !exists hrv{rv.firstKey()}
-                    && !XsdNativeTypeValueHelper::isWrapper(rv.firstValue())) {
+                    && !XsdNativeTypeValueHelper::isWrapper(rv.firstValue())
+                    && !XsdElementValueHelper::isWrapper(rv.firstValue())) {
                 rv = rv.firstValue();
             } else {
                 foreach string k in (keys hrv) {
@@ -26099,6 +26657,9 @@ public class XsdSchema inherits WSDL::XsdBase {
         # Original documents and their bases reconstruct transient component registries.
         list<hash<XsdSourceInfo>> schema_sources();
 
+        # WebService must restore its inline declarations before schemas added later.
+        transient list<hash<XsdSourceInfo>> pending_schema_sources();
+
         # Successfully retrieved dependency bytes, indexed by normalized absolute location.
         hash<string, string> schema_dependencies();
     }
@@ -26121,12 +26682,20 @@ public class XsdSchema inherits WSDL::XsdBase {
         import_map = {};
         schema_sources = ();
         schema_dependencies = members.schema_dependencies ?? {};
+        pending_schema_sources = members.schema_sources ?? ();
+        if (!(self instanceof WebService)) {
+            restoreSchemaSources();
+        }
+    }
+
+    private restoreSchemaSources() {
         *string saved_base = def_path;
         on_exit def_path = saved_base;
-        foreach hash<XsdSourceInfo> source in (members.schema_sources) {
+        foreach hash<XsdSourceInfo> source in (pending_schema_sources) {
             def_path = source.base;
             addSchemaString(source.xml);
         }
+        pending_schema_sources = ();
     }
 
     #! creates an empty XsdSchema
@@ -26343,7 +26912,8 @@ public class XsdSchema inherits WSDL::XsdBase {
     #! serializes a native value as one complete global XML element
     /** @param namespace_uri the global element namespace, or an empty string
         @param local_name the global element's local name
-        @param value the native value accepted by the element's schema type
+        @param value the native value accepted by the element's schema type, or a ^element^ / ^val^ wrapper
+        selecting an admitted concrete member by XsdQNameValue
         @return an immutable XML value with its complete namespace context
         @throw WSDL-ERROR the global element does not exist
         @throw SOAP-SERIALIZATION-ERROR invalid content or conflicting lexical namespace requirements
@@ -26363,6 +26933,7 @@ public class XsdSchema inherits WSDL::XsdBase {
         }
         Namespaces namespaces = nsc.copy();
         XsdQNameOutputScope output_scope(namespaces);
+        element = XsdElementValueHelper::select(element, \value);
         auto serialized = element.serializeValue(namespaces, value, True, local_name, local_name);
         hash<auto> content();
         if (serialized.typeCode() == NT_HASH) {
@@ -26372,7 +26943,7 @@ public class XsdSchema inherits WSDL::XsdBase {
         }
         string root = element.getXmlName(namespaces);
         content."^attributes^" += namespaces.getOutputNamespaceHash(NOTHING);
-        if (!namespace_uri) {
+        if (!element.getNamespaceUri()) {
             content."^attributes^".xmlns = "";
         }
         XsdQNameXmlOutputHelper output();
@@ -26398,9 +26969,10 @@ public class XsdSchema inherits WSDL::XsdBase {
     #! returns an explicit provider for native values retaining selected element types
     /** @param namespace_uri the global element namespace, or an empty string
         @param local_name the global element name
-        @return a native provider accepting both declared values and selected type wrappers
+        @return a native provider accepting declared values, selected type wrappers and concrete element selections
         @throw WSDL-ERROR the global element does not exist
-        @note The receiving schema is retained independently of the source object's lifetime.
+        @note The receiving schema and available element alternatives are retained independently of the source
+        object's lifetime. Construct a new provider to include declarations added after the provider was created.
         @par Example
         Validate a stored shipment part with its selected subtype before forwarding it.
         @since %WSDL 0.5.8
@@ -26409,6 +26981,13 @@ public class XsdSchema inherits WSDL::XsdBase {
         *XsdElement element = getElement(namespace_uri, local_name);
         if (!element) {
             throw WSDL_ERROR, sprintf("no global element declaration %Y", type_qname(namespace_uri, local_name));
+        }
+        if (XsdElementValueHelper::needsSelection(element)) {
+            XsdNativeTypeProviderContext owner(tmap);
+            XsdNativeTypeProviderScope scope(owner);
+            XsdElementDataType result(element, tmap);
+            owner.complete();
+            return result;
         }
         return XsdNativeTypeProviderHelper::create(element.type, tmap, element);
     }
@@ -27552,6 +28131,20 @@ public class WebService inherits WSDL::XsdSchema {
         }
     }
 
+    #! adds a schema while keeping message type lookup current
+    /** @param xsd an XSD document extending this service's declarations
+        @throw XSD-ERROR the XML root is not an XSD schema
+        @throw WSDL-ERROR invalid declarations or references
+        @note The base schema update is atomic; message maps are refreshed only after it succeeds.
+        @since %WSDL 0.5.8
+    */
+    addSchemaString(string xsd) {
+        XsdSchema::addSchemaString(xsd);
+        foreach WSMessage message in (messages.iterator()) {
+            message.tmap = getTypeMap();
+        }
+    }
+
     #! can be used to create a WebService object from a hash created with serialize()
     /** @return a WebService object from the argument hash created with serialize()
     */
@@ -27567,6 +28160,7 @@ public class WebService inherits WSDL::XsdSchema {
         # Options now belong to XsdSchema and have already been restored by its hook.
         # Accept locally stored options from older WebService serializations as well.
         doInit(members.wsdl, members.opts ?? opts);
+        restoreSchemaSources();
     }
 }
 
@@ -27939,12 +28533,21 @@ public class WSMessageHelper {
             SampleCallContext = new XsdSampleCallContext(self, elem, new XsdSampleBudget(opts.max_elements));
             SampleCallContext.consumed = True;
         }
-        hash<auto> result = buildElementMessage(elem, comments, nested && SampleCallContext.one_occurrence);
+        XsdElement selected = elem;
+        if (!nested && !opts.choices && elem.isAbstract()) {
+            list<string> names = XsdElementFieldHelper::getPreferredInstanceNames(elem);
+            if (!names) {
+                throw "XSD-SAMPLE-ERROR", sprintf("element %Y has no concrete instance declaration", elem.getExpandedName());
+            }
+            selected = elem.getInstanceDeclaration(names[0]);
+        }
+        auto example = buildElementMessage(selected, comments, nested && SampleCallContext.one_occurrence){selected.name};
+        hash<auto> result = {elem.name: XsdElementValueHelper::retain(elem, selected, example)};
         if (!nested && !opts.choices) {
             Namespaces namespaces = elem.type.nsc.copy();
             XsdQNameOutputScope output_scope(namespaces);
             try {
-                auto converted = elem.serializeValue(namespaces, result{elem.name}, True, elem.name, "generated example");
+                auto converted = selected.serializeValue(namespaces, example, True, elem.name, "generated example");
                 SampleCallContext.budget.checkOutput(converted);
             } catch (hash<ExceptionInfo> ex) {
                 if (ex.err == SOAP_SERIALIZATION_ERROR) {
@@ -28216,6 +28819,7 @@ public class WSMessageHelper {
             }
             XsdElement element = arg.element;
             auto example = getMessage(element){element.name};
+            element = XsdElementValueHelper::select(element, \example);
             auto serialized = element.serializeValue(namespaces, example, True, part, msg.name);
             hash<auto> content();
             if (serialized.typeCode() == NT_HASH) {

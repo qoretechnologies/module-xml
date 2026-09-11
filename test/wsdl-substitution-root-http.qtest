@@ -1,0 +1,140 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires xml
+%requires ../qlib/WSDL.qm
+%requires ../qlib/SoapClient.qm
+%requires ../qlib/SoapHandler.qm
+%requires ../qlib/SoapDataProvider
+%requires HttpServer
+%exec-class SubstitutionRootHttpTest
+
+class SubstitutionRootHttpTest inherits QUnit::Test {
+    const Uri = "urn:qore:substitution-root-http";
+    constructor() : Test("Substitution roots through HTTP consumers", "1.0") {
+        addTestCase("Native roots and type choices survive clients, handlers and providers", \native());
+        addTestCase("Retained request and response roots preserve their lexical content", \retained());
+        set_return_value(main());
+    }
+    private auto saved(auto value) {
+        return Serializable::deserialize(Serializable::serialize(value));
+    }
+    private WebService service(string version) {
+        string soap = "http://schemas.xmlsoap.org/wsdl/soap" + (version == "12" ? "12" : "") + "/";
+        return new WebService('<w:definitions xmlns:w="http://schemas.xmlsoap.org/wsdl/" xmlns:s="' + soap
+            + '" xmlns:xs="' + XSD_NS + '" xmlns:t="' + Uri + '" targetNamespace="' + Uri + '">'
+            '<w:types><xs:schema targetNamespace="' + Uri + '">'
+            '<xs:complexType name="Base"><xs:sequence><xs:element name="number" type="xs:int"/>'
+            '</xs:sequence></xs:complexType><xs:complexType name="Detail"><xs:complexContent>'
+            '<xs:extension base="t:Base"><xs:sequence><xs:element name="description" type="xs:string"/>'
+            '</xs:sequence></xs:extension></xs:complexContent></xs:complexType>'
+            '<xs:element name="head" type="t:Base" abstract="true"/>'
+            '<xs:element name="member" type="t:Base" substitutionGroup="t:head"/></xs:schema></w:types>'
+            '<w:message name="Input"><w:part name="body" element="t:head"/></w:message>'
+            '<w:message name="Output"><w:part name="body" element="t:head"/></w:message>'
+            '<w:portType name="Port"><w:operation name="submit"><w:input message="t:Input"/>'
+            '<w:output message="t:Output"/></w:operation></w:portType>'
+            '<w:binding name="Soap" type="t:Port"><s:binding style="document" transport="http://schemas.xmlsoap.org/soap/http"/>'
+            '<w:operation name="submit"><s:operation soapAction="urn:submit"' + (version == "12"
+                ? ' soapActionRequired="false"' : '') + '/><w:input><s:body use="literal"/></w:input>'
+            '<w:output><s:body use="literal"/></w:output></w:operation></w:binding>'
+            '<w:service name="Service"><w:port name="Port" binding="t:Soap">'
+            '<s:address location="http://example.invalid/"/></w:port></w:service></w:definitions>', {"async_only": True});
+    }
+    private check(auto value, bool typed = True) {
+        assertEq(2, value.size());
+        assertEq(Uri, value."^element^".getNamespaceUri());
+        assertEq("member", value."^element^".getLocalName());
+        if (typed) {
+            assertEq(2, value."^val^".size());
+            assertEq(Uri, value."^val^"."^type^".getNamespaceUri());
+            assertEq("Detail", value."^val^"."^type^".getLocalName());
+            value = value."^val^";
+        }
+        assertEq({"number":17, "description":"Replacement part"}, value."^val^");
+    }
+    private native() {
+        foreach string version in ("11", "12") {
+            WebService ws = service(version);
+            WSOperation operation = ws.getBindingOperation("Soap", "submit");
+            AbstractDataProviderType input = saved(operation.input.getDataProviderType(True));
+            AbstractDataProviderType output = saved(operation.output.getDataProviderType(True));
+            HttpServer server();
+            on_exit server.stop();
+            SoapHandler handler(new PermissiveAuthenticator());
+            server.setDefaultHandler("soap", handler);
+            Queue observed();
+            code<auto(hash<auto>, auto)> callback = auto sub(hash<auto> cx, auto value) {
+                auto checked = input.acceptsValue({"body":value});
+                observed.push(checked.body);
+                return output.acceptsValue(checked);
+            };
+            handler.addMethod(ws, operation, callback, NOTHING, NOTHING, NOTHING, "Service", NOTHING,
+                NOTHING, "Soap", NOTHING, False, True);
+            server.addListener(0);
+            string url = sprintf("http://127.0.0.1:%d/Service", server.getListenerInfo(0).port);
+            SoapClient client({"wsdl":saved(ws), "url":url, "timeout":30000, "connect_timeout":30000});
+            auto value = {"^element^":new XsdQNameValue(Uri, "member"),
+                "^val^":{"^type^":new XsdQNameValue(Uri, "Detail"),
+                    "^val^":{"number":17, "description":"Replacement part"}}};
+            int attempt = 0;
+            foreach bool preserve in (True, False, True) {
+                hash<auto> options = {"binding":"Soap", "preserve_types":preserve};
+                if (version == "12" && ++attempt == 3) {
+                    options.soapaction = "";
+                }
+                auto result = client.callOperation("submit", input.acceptsValue({"body":value}),
+                    options);
+                check(observed.pop(30000));
+                check(result, preserve);
+                if (preserve) {
+                    check(output.acceptsValue({"body":result}).body);
+                    value = saved(result);
+                }
+            }
+            SoapDataProvider data_provider(ws, client);
+            AbstractDataProvider request = data_provider.getChildProviderEx("submit");
+            auto plain = {"^element^":new XsdQNameValue(Uri, "member"), "^val^":{"number":17}};
+            auto input_value = request.getRequestType().acceptsValue({"body":plain});
+            auto response = request.doRequest(input_value, {"binding":"Soap"});
+            foreach auto received in (observed.pop(30000), request.getResponseType().acceptsValue({"body":response}).body) {
+                assertEq(Uri, received."^element^".getNamespaceUri());
+                assertEq("member", received."^element^".getLocalName());
+                assertEq({"number":17}, received."^val^");
+            }
+        }
+    }
+    private retained() {
+        foreach string version in ("11", "12") {
+            WebService ws = service(version);
+            WSOperation operation = ws.getBindingOperation("Soap", "submit");
+            AbstractDataProviderType provider = saved(ws.getXmlDataProviderType(Uri, "head"));
+            HttpServer server();
+            on_exit server.stop();
+            SoapHandler handler(new PermissiveAuthenticator());
+            server.setDefaultHandler("soap", handler);
+            Queue observed();
+            code<auto(hash<auto>, auto)> callback = auto sub(hash<auto> cx, auto message) {
+                XsdXmlValue value = provider.acceptsValue(message.body.body);
+                observed.push(value);
+                return {"body":value};
+            };
+            handler.addMethod(ws, operation, callback, NOTHING, NOTHING, NOTHING, "Service", NOTHING,
+                NOTHING, "Soap", NOTHING, True);
+            server.addListener(0);
+            string url = sprintf("http://127.0.0.1:%d/Service", server.getListenerInfo(0).port);
+            SoapClient client({"wsdl":saved(ws), "url":url, "timeout":30000, "connect_timeout":30000});
+            XsdXmlValue value('<t:member xmlns:t="' + Uri + '"><number>017</number></t:member>');
+            hash<SoapXmlMessageInfo> result = client.callOperation("submit", {"body":value},
+                {"binding":"Soap", "xml_values":True, "soapaction":version == "12" ? "" : NOTHING});
+            foreach XsdXmlValue received in (observed.pop(30000), result.body.body) {
+                assertEq(Uri, received.getNamespaceUri());
+                assertEq("member", received.getLocalName());
+                assertEq("017", received.getElementData().number);
+                assertEq(received.getXml(), provider.acceptsValue(received).getXml());
+            }
+        }
+    }
+}

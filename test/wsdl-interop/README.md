@@ -1375,8 +1375,22 @@ post-membership ambiguity and declaration consistency. Retained values preserve
 exact XML; native fields retain member identity and per-field value order.
 See the [implemented particle design](../../design/wsdl-substitution-particles.md)
 and [regression evidence](substitution-particles-evidence.md).
-The separate [native declaration-consistency gap](p5-native-element-consistency-finding.md),
-selected message-root identity and remaining P5 content semantics stay open.
+
+Complete substitution roots are covered by `wsdl-substitution-roots.qtest`
+and `test_substitution_roots.py`. The independent matrix checks 34 schemas,
+116 documents in their head's schema context, native/provider identity,
+retained XML, both actual SOAP bindings and both directions. It validates
+816 outputs and 44 samples with lxml and pinned Xerces. The unit suite also
+covers overlapping body/header parts, imported and no-namespace members,
+empty/nil values, selected types, schema additions and reconstruction,
+cancellation and concurrent reuse. See the
+[implemented root design](../../design/wsdl-substitution-roots.md).
+`wsdl-substitution-root-http.qtest` adds ten loopback exchanges through
+SoapClient, SoapHandler and SoapDataProvider, including native root/type
+capture, retained XML and saved providers.
+The [native declaration-consistency gap](p5-native-element-consistency-finding.md)
+was fixed in P5-08. Selected message roots are implemented in P5-09; remaining
+wildcard, mixed/generic content, nil/default/fixed and identity constraints keep P5 open.
 
 Native element declaration consistency is covered by
 `../xml-element-consistency.qtest` and `test_native_element_consistency.py`. The latter

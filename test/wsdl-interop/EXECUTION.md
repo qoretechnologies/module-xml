@@ -6857,3 +6857,55 @@ P5 remains open. Next: selected substituted message-root identity, followed by
 remaining wildcard/mixed/generic content, complete nil/default/fixed behavior
 and document identity constraints. P6–P9 retain every binding, protocol,
 attachment, platform and CI requirement.
+
+## P5-09 — Selected complete-element and message-root identity
+
+Parent: `3e122cf`. Complete schema elements and document SOAP body/header parts
+now preserve concrete substitution roots through native values, retained XML,
+providers, samples and Serializable reconstruction. The portable outer wrapper
+uses `^element^` as an `XsdQNameValue` and `^val^` for the selected member value;
+explicit selected types remain an independent inner wrapper.
+
+The initial decimal-head/integer-member reproducer failed native/retained
+conversion, retained providers and XML samples in both bindings despite correct
+membership metadata. Every complete-root boundary now resolves and uses the
+selected declaration. WSDL document parts use an iterative complete matching
+with a linear ambiguity check; duplicate selected roots cannot overwrite body
+or header parts. Ordinary declared roots retain their representation.
+
+Expanded coverage also exposed and fixed explicit empty part presence, added
+schema replay ordering and stale message type maps, provider alternatives after
+schema additions, header owner ID zero, and actionless SOAP 1.2 member routing.
+The HTTP fixture explicitly permits omitted actions. These root causes and the
+independent witness method are recorded in
+[substitution-roots-evidence.md](substitution-roots-evidence.md).
+
+Final validation is recorded in [P5-09-validation.json](P5-09-validation.json):
+
+- New unit suite: 12 cases/1357 assertions; HTTP suite: 2 cases/134 assertions,
+  10 real exchanges through SoapClient, SoapHandler and SoapDataProvider.
+- Both suites and the independent matrix pass AST/IR/JIT/tiered and compiled
+  WSDL. The matrix covers 34 schemas/116 documents/996 rows and independently
+  checks 816 outputs plus 44 samples in each mode, including member/type
+  expanded names and typed values.
+- All 16 compiled/consumer/previous-matrix/harness supplements pass, including
+  Cargo/CDA, native providers, prior child substitution and native XML checks.
+  Six module qmods and WSDL Doxygen documentation build without warnings.
+- The 123-suite acceptance gate passes 1251 cases/62227 reported assertions
+  without warnings. Three intentional caught comparator negatives remain in
+  the passing legacy SOAP suite; per-suite results are retained in the inventory.
+- Both-version diagnostic survey and strict coverage have exactly the P5-08
+  results apart from the WSDL source fingerprint: 2457 survey rows, 143 selected
+  WSDLs/1384 directions, zero selected/value/missing/skip failures, 64 broader
+  failures retained. Corpus sources and historical findings remain unchanged.
+
+The full 62-item audit is in
+[audits/P5-09-substitution-roots.md](audits/P5-09-substitution-roots.md).
+No C++ changed; native XML and isolated libqore fingerprints match P5-08.
+Both origins were fetched with no incoming develop commits. Main Qore remains
+clean at `35dc29f31`; this increment made no main-Qore edits, installs or pushes.
+
+P5 remains open. Next: wildcard attribute and element instance processing,
+ordered mixed/generic content, complete nil/default/fixed behavior and document
+identity constraints. P6–P9 retain all binding, protocol, attachment, independent
+peer, platform and mandatory-CI requirements.
