@@ -1343,3 +1343,14 @@ See the [portable value contract](../../design/wsdl-native-type-values.md) and
 [evidence](native-type-values-evidence.md). Default native results and provider
 metadata keep their existing shapes. P6 also owns the independently reproduced
 [operation handle lifetime defect](p6-operation-lifetime-finding.md).
+
+Native selected-type providers are covered by `wsdl-native-type-providers.qtest`,
+`wsdl-native-provider-http.qtest` and `test_native_type_providers.py`. The unit
+suite checks 15 cases/521 assertions, HTTP checks 1 case/64 assertions, and each
+source/AOT matrix validates 1008 outputs across 840 rows with 336 required
+rejections per conversion path. Saved provider graphs, anonymous and abstract
+metadata, choices, both bindings/styles, cancellation and concurrency are covered.
+See [provider evidence](native-type-providers-evidence.md) and
+[P5-05 validation](P5-05-validation.json). Default factories keep their native
+field shapes; explicit factories accept captured types. Remaining P5 semantics
+and P6 binding/part-aware SoapDataProvider integration stay in the plan.

@@ -6660,3 +6660,51 @@ acceptance. Element final/substitution groups, wildcard/mixed/generic content,
 complete nil/default/fixed and document identity remain required. P6-P9 retain
 their full scope. The default diagnostic corpus still reports its native type
 loss; explicit capture tests do not silently change that report's API choice.
+
+
+## P5-05 — Native selected-type providers (complete increment)
+
+Parent: `f41e327` (P5-04). Explicit schema/message provider factories validate
+captured native type wrappers against receiving definitions, retain derived
+fields and expose declared/wrapper metadata. Recursive graphs share definitions
+and survive Serializable reconstruction with rebuilt identity indexes. Finite
+choices compare unwrapped values with the existing scalar rules; QName choice
+context is retained. Abstract examples select concrete definitions, and anonymous
+metadata uses resolved components. The [contract](../../design/wsdl-native-type-values.md),
+[evidence](native-type-providers-evidence.md), [inventory](P5-05-validation.json)
+and [62-item audit](audits/P5-05-native-type-providers.md) record the implementation.
+
+- 118 Qore suites pass 1203 cases/58850 reported assertions without warnings.
+  Three caught legacy comparator negatives are intentional within the successful SOAP suite.
+- The new unit suite passes 15 cases/521 assertions; HTTP integration passes
+  1 case/64 assertions and 12 calls. All four source modes and AOT pass, including
+  saved providers, both actual bindings/styles, metadata, choices, variants,
+  recursive and anonymous definitions, negative selections, cancellation and concurrency.
+- Each mode's independent 105-case matrix checks 840 rows, requires 336 rejecting
+  rows in each conversion path and validates 1008 outputs. Original W3C type
+  substitution passes 8 binding/direction/copy rows with exact values and Part2.
+- WSDL and five dependent qmods build; WSDL/native documentation, compiled Cargo
+  and CDA consumers, the executed invoice example and supplements pass. The
+  inventory records module variants/bytes and full temporary asset staging.
+- The isolated both-version corpus preserves 2455 rows and all previous counts
+  except the WSDL digest. Strict coverage retains 142 descriptions/1376 directions,
+  zero selected failures, 68 broader failures and unchanged value accounting.
+
+All 62 audit items pass or are inapplicable: 27 Pass/35 N/A/0 Fail. Initial tests
+and audit exposed nonpublic serialized helper classes, stale identity indexes,
+missing QName comparator context and invalid abstract/anonymous metadata examples.
+These causes are fixed; final gates were repeated after the fixes. Anonymous
+nonidentity components reject before they can be advertised as selected types.
+The initial Cargo AOT harness lacked bundled schemas; it now stages the existing
+qmod and unchanged complete module assets. Superseded diagnostics remain distinct
+from final passing evidence. No C++ edits, new Valgrind run, installation or push
+occurred. Native XML and isolated libqore hashes remain unchanged. Both remotes
+were fetched and included; main Qore is at `1c63ff2c5` with unrelated Azure/OpenAPI work in progress.
+
+P5 remains in progress. Next: element final/substitution groups, followed by
+wildcard/mixed/generic content, complete nil/default/fixed and document identity.
+Binding/part-aware SoapDataProvider capture and sample integration belongs with
+P6 message-shape work; the new datatype APIs and HTTP consumers are covered here.
+P6-P9 retain full ownership, including operation lifetime and existing dual-binding,
+platform, CI, documentation and debug-info findings. The legacy default corpus
+still reports its type loss; capture tests do not silently change its API choice.

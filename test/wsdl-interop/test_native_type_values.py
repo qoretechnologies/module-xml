@@ -29,6 +29,9 @@ def cases():
 
 
 class NativeTypeValuesTest(unittest.TestCase):
+    worker = 'native-type-values.qr'
+    manual_error = 'SOAP-SERIALIZATION-ERROR'
+
     def test_saved_values_and_receiver_checks(self):
         models = list(cases())
         self.assertEqual(105, len(models))
@@ -64,7 +67,7 @@ class NativeTypeValuesTest(unittest.TestCase):
             path = Path(directory) / 'cases.json'
             path.write_text(json.dumps(inputs))
             process = subprocess.run(['qore', '-b', '--enable-debug', '--exec-mode=' + mode,
-                                      str(Path(__file__).with_name('native-type-values.qr')), str(path)],
+                                      str(Path(__file__).with_name(self.worker)), str(path)],
                                      capture_output=True, text=True, timeout=240)
         self.assertEqual(0, process.returncode, process.stderr + process.stdout[-3000:])
         self.assertEqual('', process.stderr)
@@ -84,7 +87,7 @@ class NativeTypeValuesTest(unittest.TestCase):
                                          (row['case'], row['copy'], row['response']))
                         if not case.valid:
                             self.assertEqual('SOAP-DESERIALIZATION-ERROR', row['decode_error'], row)
-                            self.assertEqual('SOAP-SERIALIZATION-ERROR', row['manual_error'], row)
+                            self.assertEqual(self.manual_error, row['manual_error'], row)
                             self.assertNotIn('xml', row)
                             self.assertNotIn('manual', row)
                             rejected += 1

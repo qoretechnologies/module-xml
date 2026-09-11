@@ -80,6 +80,11 @@ module WSDL {
     @section wsdlrelnotes WSDL Module Release Notes
 
     @subsection wsdl_0_5_8 WSDL v0.5.8
+    - added XsdSchema::getNativeDataProviderType() and WSMessage::getDataProviderType(True) for native
+      selected-type wrappers; receiving definitions validate derived fields and expose both value shapes
+    - native selected-type providers retain recursive graphs through Serializable reconstruction;
+      finite choices compare unwrapped values, QName choice context is retained, and abstract-type examples
+      select a permitted concrete definition
     - added explicit preserve_types decoding for native element and operation values; selected types use
       portable QName wrappers that rebind against the output schema after Serializable reconstruction
     - instance type selection checks complete resolved simple/complex derivation and effective block exclusions;
@@ -9395,6 +9400,9 @@ class XsdDataFieldHelper {
     }
 
     static QoreDataField create(XsdAbstractType schema, hash<auto> info) {
+        if (XsdNativeTypeProviderHelper::isNative(info.type)) {
+            return new XsdNativeTypeDataField(schema, info);
+        }
         if (schema instanceof XsdComplexType) {
             XsdComplexType complex = cast<XsdComplexType>(schema);
             if (!complex.attrs && complex.simpleType) {
@@ -10458,7 +10466,9 @@ class XsdElementFieldHelper {
 
     # Provider shape belongs to the containing particle, not to the shared declaration.
     static AbstractDataProviderType getOccurrenceType(XsdElement element, bool optional, bool repeated) {
-        AbstractDataProviderType result = element.type.getDataProviderType();
+        AbstractDataProviderType result = NativeTypeProviderContext
+            ? new XsdNativeTypeDataType(NativeTypeProviderContext.getDefinition(element.type), element)
+            : element.type.getDataProviderType();
         if (repeated && (element.type.hasNativeListValue()
                 || (!(result instanceof ListDataType) && !result.isList()))) {
             result = new SoftListDataType(result.getName(), result, False, NOTHING, result.getTags());
@@ -11025,6 +11035,549 @@ public class XsdElement inherits WSDL::XsdTypedData {
     }
 }
 
+thread_local *XsdNativeTypeProviderContext NativeTypeProviderContext;
+
+#! Serializable definition shared by native selected-type provider boundaries
+/** Internal provider graph metadata; created by schema and message provider factories.
+    @since %WSDL 0.5.8
+*/
+public class XsdNativeTypeProviderDefinition inherits Serializable {
+    public {
+        #! The receiving declaration
+        XsdAbstractType declared;
+        #! The receiving schema and shared provider graph
+        XsdNativeTypeProviderContext owner;
+        #! The completed native value type
+        *AbstractDataProviderType native_type;
+        #! The completed soft native value type
+        *AbstractDataProviderType soft_native_type;
+    }
+    #! creates a declaration entry before traversing its nested fields
+    /** @param declared the receiving declaration
+        @param owner the containing provider graph
+        @note Factories finish both value types before exposing the graph.
+    */
+    constructor(XsdAbstractType declared, XsdNativeTypeProviderContext owner) {
+        self.declared = declared;
+        self.owner = owner;
+    }
+    private:internal deserializeMembers(hash<auto> members) {
+        if (!(members.declared instanceof XsdAbstractType)
+                || !(members.owner instanceof XsdNativeTypeProviderContext)
+                || !(members.native_type instanceof AbstractDataProviderType)
+                || !(members.soft_native_type instanceof AbstractDataProviderType)) {
+            throw "DESERIALIZATION-ERROR", "a native provider definition requires its schema, owner and value types";
+        }
+        declared = members.declared;
+        owner = members.owner;
+        native_type = members.native_type;
+        soft_native_type = members.soft_native_type;
+    }
+}
+
+#! Serializable receiving schema and its completed native provider graph
+/** Internal provider graph metadata; value validation only reads the completed graph.
+    @since %WSDL 0.5.8
+*/
+public class XsdNativeTypeProviderContext inherits Serializable {
+    public {
+        #! Named type definitions in the receiving schema
+        hash<string, XsdAbstractType> types;
+        #! Completed native definitions indexed by component identity or canonical builtin name
+        hash<string, XsdNativeTypeProviderDefinition> definitions;
+        #! Component identities used to reconstruct the index after serialization
+        hash<string, XsdAbstractType> components;
+        #! Whether construction may add definitions
+        bool building = True;
+    }
+    #! starts a provider graph for a receiving schema
+    /** @param types resolved named definitions in the receiving schema */
+    constructor(hash<string, XsdAbstractType> types) {
+        self.types = types;
+    }
+    private:internal deserializeMembers(hash<auto> members) {
+        if (members.types.typeCode() != NT_HASH || members.definitions.typeCode() != NT_HASH
+                || members.components.typeCode() != NT_HASH
+                || members.components.size() != members.definitions.size()
+                || members.building.typeCode() != NT_BOOLEAN || members.building) {
+            throw "DESERIALIZATION-ERROR", "a native provider requires a completed schema and definition graph";
+        }
+        foreach auto type in (members.types.iterator()) {
+            if (!(type instanceof XsdAbstractType)) {
+                throw "DESERIALIZATION-ERROR", "a native provider schema map requires type definitions";
+            }
+        }
+        foreach hash<auto> row in (members.definitions.pairIterator()) {
+            if (!(row.value instanceof XsdNativeTypeProviderDefinition)
+                    || !(members.components{row.key} instanceof XsdAbstractType)) {
+                throw "DESERIALIZATION-ERROR", "a native provider graph requires provider definitions";
+            }
+            # Component objects can still be initializing through a cycle. Their object identity
+            # is already stable; reading their schema members here would depend on restoration order.
+            XsdAbstractType component = members.components{row.key};
+            string identity = index(row.key, "builtin:") == 0 ? row.key : component.uniqueHash();
+            if (definitions.hasKey(identity)) {
+                throw "DESERIALIZATION-ERROR", "a native provider graph cannot repeat a component identity";
+            }
+            definitions{identity} = row.value;
+            components{identity} = component;
+        }
+        types = members.types;
+        building = False;
+    }
+    private string key(XsdAbstractType type) {
+        if (type instanceof XsdBaseType && Class::getClass(type).getPathName() == "WSDL::XsdBaseType"
+                && type.name != "binary" && XsdBaseType::BuiltinTypes{type.name}
+                && type.ons && type.nsc.getOutputNamespaceUri(type.ons) == XSD_NS) {
+            return "builtin:" + type.name;
+        }
+        return type.uniqueHash();
+    }
+    #! obtains a shared definition or an intrinsic scalar adapter
+    /** @param type the receiving component
+        @return its native and soft value providers
+        @throw SOAP-SERIALIZATION-ERROR a foreign component was supplied to a completed graph
+        @note During construction, entries are inserted before nested elements are traversed.
+    */
+    XsdNativeTypeProviderDefinition getDefinition(XsdAbstractType type) {
+        string identity = key(type);
+        if (*XsdNativeTypeProviderDefinition found = definitions{identity}) {
+            return found;
+        }
+        if (!building) {
+            if (index(identity, "builtin:") == 0) {
+                # Intrinsic scalar types have no recursive element graph. Build their small value
+                # adapter on demand without extending the shared receiving schema's completed index.
+                XsdNativeTypeProviderDefinition intrinsic(type, self);
+                intrinsic.native_type = type.getDataProviderType();
+                intrinsic.soft_native_type = intrinsic.native_type.getSoftType();
+                return intrinsic;
+            }
+            throw SOAP_SERIALIZATION_ERROR, sprintf("selected type %Y is not in the provider's schema", type.name);
+        }
+        XsdNativeTypeProviderDefinition result(type, self);
+        definitions{identity} = result;
+        components{identity} = type;
+        result.native_type = type.getDataProviderType();
+        return result;
+    }
+    #! completes all named alternatives and freezes the graph before publication
+    /** @note Intrinsic scalar adapters without nested elements can be created independently on demand. */
+    complete() {
+        foreach XsdAbstractType type in (types.iterator()) {
+            getDefinition(type);
+        }
+        foreach XsdNativeTypeProviderDefinition definition in (definitions.iterator()) {
+            @assert(definition.native_type);
+            definition.soft_native_type = definition.native_type.getSoftType();
+        }
+        building = False;
+    }
+}
+
+class XsdNativeTypeProviderScope {
+    private {
+        *XsdNativeTypeProviderContext previous;
+    }
+    constructor(*XsdNativeTypeProviderContext current) {
+        previous = NativeTypeProviderContext;
+        NativeTypeProviderContext = current;
+    }
+    destructor() {
+        NativeTypeProviderContext = previous;
+    }
+}
+
+class XsdNativeTypeProviderHelper {
+    static XsdNativeTypeDataType create(XsdAbstractType type, hash<string, XsdAbstractType> types,
+            *XsdElement element) {
+        XsdNativeTypeProviderContext owner(types);
+        XsdNativeTypeProviderScope scope(owner);
+        XsdNativeTypeDataType result(owner.getDefinition(type), element);
+        owner.complete();
+        return element && (element.nillable || !element.minOccurs)
+            ? cast<XsdNativeTypeDataType>(result.getOrNothingType()) : result;
+    }
+    static bool isNative(AbstractDataProviderType type) {
+        if (type instanceof XsdNativeTypeDataType) {
+            return True;
+        }
+        return type instanceof ListDataType && type.getElementType() instanceof XsdNativeTypeDataType;
+    }
+    static auto unwrap(auto value) {
+        return XsdNativeTypeValueHelper::isWrapper(value) ? value."^val^" : value;
+    }
+}
+
+#! Provider accepting native values and explicit selected-type wrappers
+/** The provider resolves selected types in its receiving schema and validates their native fields.
+    @note Instances are created by XsdSchema::getNativeDataProviderType() or WSMessage::getDataProviderType(True).
+    @par Example
+    Store a shipment's selected part subtype through a provider without losing the subtype's extra fields.
+    @since %WSDL 0.5.8
+*/
+public class XsdNativeTypeDataType inherits AbstractDataProviderType {
+    private {
+        XsdNativeTypeProviderDefinition definition;
+        *XsdElement element;
+        *bool optional;
+        bool softened = False;
+    }
+    #! creates a provider for a resolved schema boundary
+    /** @param definition the receiving schema's completed provider graph
+        @param element the element declaration, or NOTHING for a WSDL type part
+        @note The schema and message factories construct the graph before returning this provider.
+    */
+    constructor(XsdNativeTypeProviderDefinition definition, *XsdElement element) {
+        self.definition = definition;
+        self.element = element;
+    }
+    private:internal deserializeMembers(hash<auto> members) {
+        if (!(members.definition instanceof XsdNativeTypeProviderDefinition)
+                || (exists members.element && !(members.element instanceof XsdElement))
+                || (exists members.optional && members.optional.typeCode() != NT_BOOLEAN)
+                || members.softened.typeCode() != NT_BOOLEAN) {
+            throw "DESERIALIZATION-ERROR", "a native provider requires a definition, element and boolean type flags";
+        }
+        definition = members.definition;
+        element = members.element;
+        optional = members.optional;
+        softened = members.softened;
+    }
+    private AbstractDataProviderType nativeType() {
+        *AbstractDataProviderType result = softened ? definition.soft_native_type : definition.native_type;
+        @assert(result, "native provider graph must be complete");
+        return result;
+    }
+    #! returns the declared type's name
+    /** @return the schema name with an explicit capture label */
+    string getName() {
+        return definition.declared.name + " with selected types";
+    }
+    #! describes the two supported native forms
+    /** @return a description of native values and portable selected type wrappers */
+    string getDesc() {
+        return "Accepts native values or `^type^` / `^val^` wrappers. Selected definitions are resolved and "
+            "validated in the receiving schema, preserving derived fields when messages are stored or forwarded.";
+    }
+    #! prevents native assignment from bypassing selection and instance checks
+    /** @return NOTHING; native type compatibility is insufficient */
+    *Type getValueType() {
+        return;
+    }
+    #! prevents containers from bypassing validation
+    /** @return an empty native assignment map */
+    *hash<string, bool> getDirectTypeHash() {
+        return {};
+    }
+    #! returns no common outer list item type
+    /** @return NOTHING; the wrapper is not a list */
+    *AbstractDataProviderType getElementType() {
+        return;
+    }
+    #! returns no common fields for the two representations
+    /** @return NOTHING; getInfo() describes each alternative separately */
+    *hash<string, AbstractDataField> getFields() {
+        return;
+    }
+    #! returns whether omission is accepted
+    /** @return the explicit override or the declared native type's optionality */
+    bool isOrNothingType() {
+        return optional ?? (definition.native_type ? definition.native_type.isOrNothingType() : False);
+    }
+    #! returns whether a value is mandatory
+    /** @return the inverse of isOrNothingType() */
+    bool isMandatory() {
+        return !isOrNothingType();
+    }
+    #! returns accepted native type names
+    /** @param simple whether simplified names are requested
+        @return declared native names plus the wrapper hash form
+    */
+    hash<string, bool> getAcceptTypeHash(*bool simple) {
+        hash<string, bool> result = nativeType().getAcceptTypeHash(simple) + {"hash":True};
+        if (isOrNothingType()) {
+            result.nothing = True;
+        } else {
+            remove result.nothing;
+            remove result.null;
+        }
+        return result;
+    }
+    #! returns produced native type names
+    /** @param simple whether simplified names are requested
+        @return declared native names plus the wrapper hash form
+    */
+    hash<string, bool> getReturnTypeHash(*bool simple) {
+        hash<string, bool> result = nativeType().getReturnTypeHash(simple) + {"hash":True};
+        if (isOrNothingType()) {
+            result.nothing = True;
+        } else {
+            remove result.nothing;
+            remove result.null;
+        }
+        return result;
+    }
+    #! returns native and selected wrapper metadata
+    /** @param simple whether simplified type names are requested
+        @return a union description retaining the declared native fields
+        @note Anonymous declarations use their resolved component as the wrapper example;
+        abstract declarations use a permitted concrete type and matching value.
+        @throw XSD-SAMPLE-ERROR an abstract declaration has no permitted concrete example
+    */
+    hash<DataTypeInfo> getInfo(*bool simple) {
+        hash<DataTypeInfo> result = AbstractDataProviderType::getInfo(simple);
+        if (!result.recursive) {
+            auto wrapper_example = definition.declared.isAbstract() ? getMandatoryType().getExampleValue() : NOTHING;
+            HashDataType wrapper("Selected XSD type");
+            wrapper.addQoreFields({
+                "^type^":{"display_name":"Selected Type", "type":new QoreUnionDataType((
+                    new QoreDataType(new Type("WSDL::XsdQNameValue")),
+                    new QoreDataType(new Type("WSDL::XsdAbstractType")))),
+                    "example_value":wrapper_example."^type^" ?? (definition.declared.hasRealName()
+                        ? new XsdQNameValue(definition.declared.ons
+                        ? definition.declared.nsc.getOutputNamespaceUri(definition.declared.ons) : "",
+                            definition.declared.name) : definition.declared),
+                    "desc":"Expanded type name or resolved schema component selecting the value definition."},
+                "^val^":{"display_name":"Value", "type":AbstractDataProviderTypeMap.any,
+                    "example_value":wrapper_example."^val^",
+                    "desc":"Native value validated using the selected definition; use `getSelectedValueType()` "
+                        "to inspect its fields."},
+            });
+            result.union_types = definition.declared.isAbstract() ? (wrapper.getInfo(simple),)
+                : (nativeType().getInfo(simple), wrapper.getInfo(simple));
+        }
+        return result;
+    }
+    #! returns an example of the declared native representation
+    /** @param emap declarations already visited on the current example path
+        @param fname optional field context
+        @return the declared provider's example, or a concrete selected alternative for an abstract type;
+        recursive optional fields may be omitted
+        @throw XSD-SAMPLE-ERROR an abstract type has no permitted concrete alternative
+    */
+    auto getExampleValue(*hash<string, bool> emap, *string fname) {
+        if (isOrNothingType()) {
+            return;
+        }
+        if (!definition.declared.isAbstract()) {
+            return nativeType().getExampleValue(emap, fname);
+        }
+        foreach XsdAbstractType candidate in (definition.owner.types.iterator()) {
+            *AbstractDataProviderType selected;
+            try {
+                selected = getSelectedValueType(candidate);
+            } catch (hash<ExceptionInfo> error) {
+                if (error.err != SOAP_SERIALIZATION_ERROR) {
+                    rethrow;
+                }
+                continue;
+            }
+            return {"^type^":new XsdQNameValue(candidate.ons
+                ? candidate.nsc.getOutputNamespaceUri(candidate.ons) : "", candidate.name),
+                "^val^":selected.getExampleValue(emap, fname)};
+        }
+        throw "XSD-SAMPLE-ERROR", sprintf("abstract type %Y has no permitted concrete example", definition.declared.name);
+    }
+    #! returns the selected definition's native field provider
+    /** @param selected an expanded QName or a resolved schema component
+        @return the native provider with selected types supported in nested elements
+        @throw SOAP-SERIALIZATION-ERROR unknown, foreign, abstract or incompatible selected definition,
+        or a nonidentical anonymous type that cannot supply xsi:type
+    */
+    AbstractDataProviderType getSelectedValueType(auto selected) {
+        if (!(selected instanceof XsdQNameValue) && !(selected instanceof XsdAbstractType)) {
+            throw SOAP_SERIALIZATION_ERROR, "a selected provider type requires an expanded QName or schema component";
+        }
+        XsdNativeTypeOutputScope scope(definition.owner.types);
+        XsdAbstractType type = XsdNativeTypeValueHelper::resolve(selected, definition.declared);
+        if (type !== definition.declared && !type.hasRealName()) {
+            throw SOAP_SERIALIZATION_ERROR, "an anonymous selected type cannot supply xsi:type";
+        }
+        XsdTypeSubstitutionHelper::check(type, definition.declared, definition.declared.name,
+            SOAP_SERIALIZATION_ERROR, element ? element.getBlockedSubstitutions() : NOTHING);
+        XsdNativeTypeProviderDefinition target = definition.owner.getDefinition(type);
+        return softened ? target.soft_native_type : target.native_type;
+    }
+    #! validates and converts the supplied native representation
+    /** @param value an ordinary native value or selected-type wrapper
+        @return the converted value retaining its representation and selected type
+        @throw MISSING-VALUE-ERROR an omitted mandatory value
+        @throw RUNTIME-TYPE-ERROR invalid selection, native fields or XML instance requirements
+        @note Exceptions from custom conversions, including cancellation, propagate unchanged.
+    */
+    auto acceptsValue(auto value) {
+        if (!exists value) {
+            if (isOrNothingType()) {
+                return;
+            }
+            throw "MISSING-VALUE-ERROR", sprintf("native value %Y must be supplied", getName());
+        }
+        XsdNativeTypeOutputScope type_scope(definition.owner.types);
+        Namespaces namespaces = definition.declared.nsc.copy();
+        XsdQNameOutputScope output_scope(namespaces);
+        try {
+            if (value.typeCode() == NT_HASH && (value.hasKey("^type^") || value.hasKey("^val^"))
+                    && !XsdNativeTypeValueHelper::isWrapper(value)) {
+                throw SOAP_SERIALIZATION_ERROR, "a type wrapper requires ^type^ as an expanded QName or schema "
+                    "component and a ^val^ member";
+            }
+            if (XsdNativeTypeValueHelper::isWrapper(value)) {
+                XsdNativeTypeValueHelper::checkWrapper(value);
+                AbstractDataProviderType selected = getSelectedValueType(value."^type^");
+                if (exists value."^val^" || !(element && element.nillable)) {
+                    value."^val^" = selected.acceptsValue(value."^val^");
+                }
+            } else {
+                value = nativeType().acceptsValue(value);
+            }
+            if (element) {
+                element.serializeOccurrence(namespaces, value, True, element.name, getName());
+            } else {
+                XsdDocumentValueHelper::serializePartValue(definition.declared, namespaces, value, True);
+            }
+        } catch (hash<ExceptionInfo> error) {
+            if (error.err == SOAP_SERIALIZATION_ERROR) {
+                rethrow "RUNTIME-TYPE-ERROR", error.desc, error.arg;
+            }
+            rethrow;
+        }
+        return value;
+    }
+    #! returns an optional variant retaining the schema graph
+    /** @return an optional copy */
+    AbstractDataProviderType getOrNothingType() {
+        XsdNativeTypeDataType result = self.copy();
+        result.optional = True;
+        return result;
+    }
+    #! returns a mandatory variant retaining the schema graph
+    /** @return a mandatory copy */
+    AbstractDataProviderType getMandatoryType() {
+        XsdNativeTypeDataType result = self.copy();
+        result.optional = False;
+        return result;
+    }
+    #! returns a soft native-field variant retaining all instance checks
+    /** @return a soft copy */
+    AbstractDataProviderType getSoftType() {
+        if (softened) {
+            return self;
+        }
+        XsdNativeTypeDataType result = self.copy();
+        result.softened = True;
+        return result;
+    }
+}
+
+#! Field retaining native type wrappers while comparing underlying scalar choices
+/** @note Value conversion and schema checks belong to XsdNativeTypeDataType. Finite choices use
+    the existing schema-specific field comparator after removing only the outer type wrapper.
+    @par Example
+    An enumerated shipment status keeps its selected subtype while matching the permitted status value.
+    @since %WSDL 0.5.8
+*/
+public class XsdNativeTypeDataField inherits QoreDataField {
+    private {
+        QoreDataField comparison;
+    }
+    private static hash<auto> withoutChoices(hash<auto> info) {
+        remove info.allowed_values;
+        remove info.element_allowed_values;
+        return info;
+    }
+    #! constructs a field with wrapper-aware choice checking
+    /** @param schema the declared schema type
+        @param info the ordinary field metadata with a native type provider
+        @throw XSD-SIMPLETYPE-ERROR invalid schema choice metadata
+    */
+    constructor(XsdAbstractType schema, hash<auto> info) : QoreDataField(XsdNativeTypeDataField::withoutChoices(info)) {
+        bool repeated = info.type instanceof ListDataType;
+        info.type = AbstractDataProviderTypeMap.any;
+        XsdAbstractType scalar = schema;
+        if (scalar instanceof XsdComplexType && !cast<XsdComplexType>(scalar).attrs
+                && cast<XsdComplexType>(scalar).simpleType) {
+            scalar = cast<XsdComplexType>(scalar).simpleType;
+        }
+        XsdAbstractType base = scalar;
+        while (base instanceof XsdSimpleType && cast<XsdSimpleType>(base).type) {
+            base = cast<XsdSimpleType>(base).type;
+        }
+        if (base instanceof XsdBaseType && base.name == "QName") {
+            # QName choice strings need the declaration's lexical bindings even after the
+            # selected value itself has been resolved. The comparator owns that context.
+            XsdQNameDataType value_type = cast<XsdQNameDataType>(scalar.getDataProviderType());
+            info.type = new XsdQNameDataType(value_type.getNamespaceBindings());
+            if (repeated) {
+                info.type = new ListDataType(info.type);
+            }
+        }
+        remove info.default_value;
+        comparison = XsdDataFieldHelper::create(schema, info);
+        allowed_values = comparison.getAllowedValues() ?? ();
+        allowed_values_creatable = comparison.getAllowedValuesCreatable();
+        element_allowed_values = comparison.getElementAllowedValues() ?? ();
+        element_allowed_values_creatable = comparison.getElementAllowedValuesCreatable();
+    }
+    private:internal deserializeMembers(hash<auto> members) {
+        if (!(members.comparison instanceof QoreDataField)) {
+            throw "DESERIALIZATION-ERROR", "a native provider field requires its scalar choice comparator";
+        }
+        comparison = members.comparison;
+    }
+    #! changes complete-value choices without changing the source field's copies
+    /** @param choices permitted scalar values or AllowedValueInfo entries
+        @param creatable whether additional values are permitted
+        @return this field
+        @throw XSD-SIMPLETYPE-ERROR invalid choice values
+    */
+    AbstractDataField setAllowedValues(list<auto> choices, *bool creatable) {
+        QoreDataField next = comparison.copy();
+        next.setAllowedValues(choices, creatable);
+        comparison = next;
+        allowed_values = next.getAllowedValues() ?? ();
+        allowed_values_creatable = next.getAllowedValuesCreatable();
+        return self;
+    }
+    #! changes choices for each occurrence without changing copied fields
+    /** @param choices permitted occurrence values or AllowedValueInfo entries
+        @param creatable whether additional values are permitted
+        @return this field
+        @throw XSD-SIMPLETYPE-ERROR invalid choice values
+    */
+    AbstractDataField setElementAllowedValues(list<auto> choices, *bool creatable) {
+        QoreDataField next = comparison.copy();
+        next.setElementAllowedValues(choices, creatable);
+        comparison = next;
+        element_allowed_values = next.getElementAllowedValues() ?? ();
+        element_allowed_values_creatable = next.getElementAllowedValuesCreatable();
+        return self;
+    }
+    #! converts values and compares choices without discarding their selected types
+    /** @param value an ordinary value, wrapper or occurrence list
+        @return the converted value with its selected types
+        @throw MISSING-VALUE-ERROR an omitted mandatory value
+        @throw RUNTIME-TYPE-ERROR invalid value or selected definition
+        @throw FIELD-VALUE-ERROR a value outside the permitted choices
+    */
+    auto acceptsValue(auto value) {
+        if (!exists value && exists (auto fallback = getDefaultValue())) {
+            value = fallback;
+        }
+        on_error rethrow $1.err, sprintf("%s (while setting field %Y)", $1.desc, getName()), $1.arg;
+        value = getType().acceptsValue(value);
+        auto native = XsdNativeTypeProviderHelper::unwrap(value);
+        if (exists native && (allowed_values || element_allowed_values)) {
+            if (element_allowed_values && native.typeCode() == NT_LIST) {
+                native = map XsdNativeTypeProviderHelper::unwrap($1), native,
+                    exists XsdNativeTypeProviderHelper::unwrap($1);
+            }
+            comparison.acceptsValue(native);
+        }
+        return value;
+    }
+}
+
 #! explicit provider type for a retained XML element
 /** Native schema/provider field types remain unchanged. This opt-in type validates and returns an
     immutable XsdXmlValue, retaining its lexical text, namespaces and ordered XML.
@@ -11120,28 +11673,42 @@ public class XsdXmlValueDataType inherits QoreDataType {
 public class XsdMessageDataType inherits HashDataType {
     private {
         Namespaces namespaces;
+        hash<string, XsdAbstractType> types;
+        bool preserve_types = False;
         hash<string, hash<ArgInfo>> parts;
     }
 
     #! constructs a message provider retaining its part validation context
     /** @param message the resolved WSDL message
+        @param preserve_types True to accept portable selected-type wrappers at element and type-part boundaries
         @note The namespace registry is copied for each value check; prefix allocations are private.
     */
-    constructor(WSMessage message) : HashDataType(message.name) {
+    constructor(WSMessage message, bool preserve_types = False) : HashDataType(message.name) {
+        self.preserve_types = preserve_types;
+        types = message.tmap;
+        *XsdNativeTypeProviderContext owner = preserve_types ? new XsdNativeTypeProviderContext(types) : NOTHING;
+        XsdNativeTypeProviderScope scope(owner);
         namespaces = message.nsc;
         parts = message.args;
         foreach hash<ArgInfo> arg in (parts.iterator()) {
             hash<auto> info = {"name": arg.name,
-                "type": arg.type ? arg.type.getDataProviderType() : arg.element.getDataProviderType(),
+                "type": arg.type ? (owner ? new XsdNativeTypeDataType(owner.getDefinition(arg.type), NOTHING)
+                    : arg.type.getDataProviderType()) : arg.element.getDataProviderType(),
                 "allowed_values": arg.type ? arg.type.getDataProviderAllowedValues()
                     : arg.element.getDataProviderAllowedValues()};
             addField(arg.type ? XsdDataFieldHelper::create(arg.type, info)
                 : XsdDataFieldHelper::create(arg.element, info));
         }
+        if (owner) {
+            owner.complete();
+        }
     }
 
     private:internal deserializeMembers(hash<auto> members) {
-        if (!(members.namespaces instanceof Namespaces) || members.parts.typeCode() != NT_HASH) {
+        if (!(members.namespaces instanceof Namespaces) || members.parts.typeCode() != NT_HASH
+                || (exists members.types && members.types.typeCode() != NT_HASH)
+                || (exists members.preserve_types && members.preserve_types.typeCode() != NT_BOOLEAN)
+                || (members.preserve_types && !exists members.types)) {
             throw "DESERIALIZATION-ERROR", "a WSDL message provider requires part and namespace metadata";
         }
         hash<string, hash<ArgInfo>> restored();
@@ -11161,6 +11728,13 @@ public class XsdMessageDataType inherits HashDataType {
             names{part.name} = True;
             restored{row.key} = part;
         }
+        foreach auto type in (members.types.iterator()) {
+            if (!(type instanceof XsdAbstractType)) {
+                throw "DESERIALIZATION-ERROR", "a WSDL message provider type map requires schema definitions";
+            }
+        }
+        types = members.types ?? {};
+        preserve_types = members.preserve_types ?? False;
         namespaces = members.namespaces;
         parts = restored;
     }
@@ -11190,6 +11764,7 @@ public class XsdMessageDataType inherits HashDataType {
         }
         Namespaces validation_namespaces = namespaces.copy();
         XsdQNameOutputScope output_scope(validation_namespaces);
+        XsdNativeTypeOutputScope type_scope(types);
         foreach hash<ArgInfo> part in (parts.iterator()) {
             *AbstractDataField field = getField(part.name);
             # Explicit optional projections may omit a part. A supplied value still
@@ -11201,7 +11776,7 @@ public class XsdMessageDataType inherits HashDataType {
                 if (part.element) {
                     part.element.serializeValue(validation_namespaces, value{part.name}, True, part.name, getName());
                 } else {
-                    XsdDocumentValueHelper::serializeValue(part.type, validation_namespaces, value{part.name}, True);
+                    XsdDocumentValueHelper::serializePartValue(part.type, validation_namespaces, value{part.name}, True);
                 }
             } catch (hash<ExceptionInfo> ex) {
                 if (ex.err == SOAP_SERIALIZATION_ERROR) {
@@ -22166,12 +22741,14 @@ public class WSMessage inherits WSDL::XsdNamedData {
     }
 
     #! returns native fields with schema instance checks for the message parts
-    /** @return a HashDataType-compatible provider keyed by WSDL part name
+    /** @param preserve_types True to accept native selected-type wrappers, with declared and wrapper metadata;
+        False retains the ordinary native field types
+        @return a HashDataType-compatible provider keyed by WSDL part name
         @note Explicit field projections can omit parts; supplied retained fields still satisfy their schema.
         @since %WSDL 0.5.8
     */
-    AbstractDataProviderType getDataProviderType() {
-        return new XsdMessageDataType(self);
+    AbstractDataProviderType getDataProviderType(bool preserve_types = False) {
+        return new XsdMessageDataType(self, preserve_types);
     }
 
     /**
@@ -25546,6 +26123,25 @@ public class XsdSchema inherits WSDL::XsdBase {
         }
         return new XsdXmlValueDataType(self, namespace_uri, local_name);
     }
+
+    #! returns an explicit provider for native values retaining selected element types
+    /** @param namespace_uri the global element namespace, or an empty string
+        @param local_name the global element name
+        @return a native provider accepting both declared values and selected type wrappers
+        @throw WSDL-ERROR the global element does not exist
+        @note The receiving schema is retained independently of the source object's lifetime.
+        @par Example
+        Validate a stored shipment part with its selected subtype before forwarding it.
+        @since %WSDL 0.5.8
+    */
+    AbstractDataProviderType getNativeDataProviderType(string namespace_uri, string local_name) {
+        *XsdElement element = getElement(namespace_uri, local_name);
+        if (!element) {
+            throw WSDL_ERROR, sprintf("no global element declaration %Y", type_qname(namespace_uri, local_name));
+        }
+        return XsdNativeTypeProviderHelper::create(element.type, tmap, element);
+    }
+
 
     #! looks up a type by name; returns NOTHING if not found
     *XsdAbstractType findType(string name) {

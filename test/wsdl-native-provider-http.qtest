@@ -1,0 +1,89 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires xml
+%requires ../qlib/WSDL.qm
+%requires ../qlib/SoapClient.qm
+%requires ../qlib/SoapHandler.qm
+%requires HttpServer
+%exec-class NativeProviderHttpTest
+class NativeProviderHttpTest inherits QUnit::Test {
+    const Ns = "urn:qore:native-type-providers";
+    const Definitions = '<xs:complexType name="A"><xs:sequence><xs:element name="number" type="xs:int"/>'
+        '</xs:sequence></xs:complexType><xs:complexType name="B"><xs:complexContent><xs:extension base="t:A">'
+        '<xs:sequence><xs:element name="description" type="xs:string"/></xs:sequence>'
+        '</xs:extension></xs:complexContent></xs:complexType>';
+    constructor() : Test("Native provider HTTP consumers", "1.0") {
+        addTestCase("Saved providers validate captured values across SOAP clients and handlers", \http());
+        set_return_value(main());
+    }
+    private auto saved(auto value) {
+        return Serializable::deserialize(Serializable::serialize(value));
+    }
+    private hash<auto> selected(string name = "B", auto value = {"number":17, "description":"Replacement part"},
+            string uri = Ns) {
+        return {"^type^":new XsdQNameValue(uri, name), "^val^":value};
+    }
+    private check(auto expected, auto actual) {
+        assertTrue(expected."^type^".equals(actual."^type^"));
+        assertEq(expected."^val^", actual."^val^");
+        assertEq(2, actual.size());
+    }
+    private WebService service(bool rpc, string version) {
+        string soap = "http://schemas.xmlsoap.org/wsdl/soap" + (version == "12" ? "12" : "") + "/";
+        string part = rpc ? 'type="xs:decimal"' : 'element="t:value"';
+        return new WebService('<w:definitions xmlns:w="http://schemas.xmlsoap.org/wsdl/" xmlns:s="' + soap
+            + '" xmlns:xs="' + XSD_NS + '" xmlns:t="' + Ns + '" targetNamespace="' + Ns + '">'
+            + '<w:types><xs:schema targetNamespace="' + Ns + '">' + Definitions
+            + '<xs:element name="value" type="t:A"/></xs:schema></w:types>'
+            + '<w:message name="Input"><w:part name="body" ' + part + '/></w:message>'
+            + '<w:message name="Output"><w:part name="body" ' + part + '/></w:message>'
+            + '<w:portType name="Port"><w:operation name="submit"><w:input message="t:Input"/>'
+            + '<w:output message="t:Output"/></w:operation></w:portType>'
+            + '<w:binding name="Soap" type="t:Port"><s:binding style="' + (rpc ? "rpc" : "document")
+            + '" transport="http://schemas.xmlsoap.org/soap/http"/><w:operation name="submit">'
+            + '<s:operation soapAction="submit"/><w:input><s:body use="literal" namespace="' + Ns + '"/></w:input>'
+            + '<w:output><s:body use="literal" namespace="' + Ns + '"/></w:output></w:operation></w:binding>'
+            + '<w:service name="Service"><w:port name="Port" binding="t:Soap">'
+            + '<s:address location="http://example.invalid/"/></w:port></w:service></w:definitions>', {"async_only":True});
+    }
+    private http() {
+        foreach string version in ("11", "12") {
+            foreach bool rpc in (False, True) {
+                WebService ws = service(rpc, version);
+                WSOperation op = ws.getBindingOperation("Soap", "submit");
+                AbstractDataProviderType input = saved(op.input.getDataProviderType(True));
+                AbstractDataProviderType output = saved(op.output.getDataProviderType(True));
+                HttpServer server();
+                on_exit server.stop();
+                SoapHandler handler(new PermissiveAuthenticator());
+                server.setDefaultHandler("soap", handler);
+                Queue observed();
+                code<auto(hash<auto>, auto)> callback = auto sub(hash<auto> cx, auto value) {
+                    auto checked = input.acceptsValue({"body":value});
+                    observed.push(checked.body);
+                    return output.acceptsValue(checked);
+                };
+                handler.addMethod(ws, op, callback, NOTHING, NOTHING, NOTHING, "Service", NOTHING,
+                    NOTHING, "Soap", NOTHING, False, True);
+                server.addListener(0);
+                string url = sprintf("http://127.0.0.1:%d/Service", server.getListenerInfo(0).port);
+                SoapClient client({"wsdl":saved(ws), "url":url, "timeout":30000, "connect_timeout":30000});
+                auto value = rpc ? selected("short", 17, XSD_NS) : selected();
+                foreach bool preserve in (True, False, True) {
+                    auto result = client.callOperation("submit", input.acceptsValue({"body":value}),
+                        {"binding":"Soap", "preserve_types":preserve});
+                    check(value, observed.pop(30000));
+                    if (preserve) {
+                        check(value, output.acceptsValue({"body":result}).body);
+                        value = saved(result);
+                    } else {
+                        assertEq(value."^val^", result);
+                    }
+                }
+            }
+        }
+    }
+}

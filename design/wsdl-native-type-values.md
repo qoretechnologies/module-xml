@@ -84,11 +84,61 @@ Applications keep the `WebService` alive while using its operation handles.
 enabled together. Client validation rejects the conflicting options before I/O;
 handler registration rejects them before adding a method. `XsdXmlValue` remains
 the representation for the complete XML infoset, lexical spelling and ordering.
-Native type capture alone does not retain those properties. Existing provider
-field metadata continues to describe the ordinary native projection.
+Native type capture alone does not retain those properties. Ordinary provider
+factories continue to describe the native projection. Applications accepting
+captured values use `XsdSchema::getNativeDataProviderType(uri, element_name)` or
+`WSMessage::getDataProviderType(True)`. Message providers retain WSDL part-name
+keys around each value; operation decoding can still unwrap a single part.
+
+These providers accept the declared native form and selected-type wrappers.
+Their `union_types` metadata describes the declared native fields and the
+two-field wrapper separately. Abstract declarations expose only the wrapper
+alternative. `getSelectedValueType(qname_or_component)` resolves a permitted
+selection and exposes its native fields, including derived fields and wrappers
+in nested elements. An anonymous declaration has no type QName; its metadata
+uses the resolved component as the wrapper example. Such a component keeps the
+existing identity contract, while ordinary values use the declaration implicitly.
+A different anonymous component cannot supply an `xsi:type` annotation.
+Selection lookup raises `SOAP-SERIALIZATION-ERROR`;
+`acceptsValue()` reports invalid selection or XML instance content as
+`RUNTIME-TYPE-ERROR`. Missing mandatory fields and finite provider choices retain
+their usual `MISSING-VALUE-ERROR` and `FIELD-VALUE-ERROR` categories. Cancellation
+and custom conversion errors propagate unchanged.
+
+For the invoice above, a stored amount can pass through a provider before
+serialization:
+
+```qore
+AbstractDataProviderType amount_type = receiver.getNativeDataProviderType("", "amount");
+amount_type = Serializable::deserialize(amount_type.serialize());
+auto checked = amount_type.acceptsValue(Serializable::deserialize(saved_amount));
+XsdXmlValue validated_output = receiver.serializeXmlValue("", "amount", checked);
+```
+
+Provider construction indexes definitions before traversing nested elements,
+so recursive types share one native definition. It completes named alternatives
+and soft variants before returning. Restoring serialized providers rebuilds
+the component index in one pass using restored object identities; validation
+performs hash lookup. Unused canonical builtin scalar adapters can be created
+independently on demand without extending the shared graph. No XML encoding and
+decoding round-trip is used to convert provider values. Instance checks use the
+receiving schema's existing serialization validators with a private namespace
+scope.
+
+Field choices compare the unwrapped scalar or each unwrapped occurrence with
+the existing numeric, QName, calendar, binary, list and union comparators.
+QName choices retain the declaration's lexical bindings. Editing choices on a
+copied field does not change its source field. Provider examples delegate to
+the native branch; an abstract type selects a permitted concrete definition or
+raises `XSD-SAMPLE-ERROR` if none exists. The ordinary native provider's example
+policy still applies to the selected value. Applications customizing mutable
+provider field metadata must finish those edits before concurrent validation;
+validation itself does not mutate the completed graph.
 
 This contract builds on XSD 1.0 [Element Locally Valid](https://www.w3.org/TR/2004/REC-xmlschema-1-20041028/#cvc-elt)
 and [QName value identity](https://www.w3.org/TR/2004/REC-xmlschema-2-20041028/#QName).
 The wrapper and explicit capture choice are Qore API decisions, not wire syntax
 prescribed by XML Schema. Tests are `wsdl-native-type-values.qtest` and the
-independent `test_native_type_values.py` matrix.
+independent `test_native_type_values.py` matrix. Provider coverage is in
+`wsdl-native-type-providers.qtest` and `test_native_type_providers.py`, which
+also validates output with independent schema implementations.

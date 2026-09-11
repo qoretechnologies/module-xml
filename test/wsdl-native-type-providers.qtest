@@ -1,0 +1,415 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires xml
+%requires ../qlib/WSDL.qm
+%exec-class NativeTypeProvidersTest
+
+class NativeTypeProvidersTest inherits QUnit::Test {
+    const Ns = "urn:qore:native-type-providers";
+    const Definitions = '<xs:complexType name="A"><xs:sequence><xs:element name="number" type="xs:int"/>'
+        '</xs:sequence></xs:complexType><xs:complexType name="B"><xs:complexContent><xs:extension base="t:A">'
+        '<xs:sequence><xs:element name="description" type="xs:string"/></xs:sequence>'
+        '</xs:extension></xs:complexContent></xs:complexType>';
+    constructor() : Test("Native selected type providers", "1.0") {
+        addTestCase("Selected definitions validate fields and survive provider reconstruction", \values());
+        addTestCase("Native and selected metadata retain their separate shapes", \metadata());
+        addTestCase("Optional, mandatory, soft and enclosing providers preserve validation", \variants());
+        addTestCase("Selected scalars, lists and unions retain native values", \scalars());
+        addTestCase("Finite field choices compare values inside wrappers", \choices());
+        addTestCase("Recursive and shared declarations have bounded metadata", \recursive());
+        addTestCase("Receiving schemas reject invalid selected definitions", \receivers());
+        addTestCase("Examples use the declared native branch", \examples());
+        addTestCase("Both SOAP bindings and message styles retain provider values", \messages());
+        addTestCase("Malformed saved provider state fails during reconstruction", \savedMetadata());
+        addTestCase("Concurrent consumers share a completed provider graph", \concurrency());
+        addTestCase("Reentrant conversion and construction cancellation restore provider state", \callbacks());
+        addTestCase("QName, binary and list choices compare their selected values", \structuredChoices());
+        addTestCase("Abstract type examples select permitted concrete definitions", \abstractExamples());
+        addTestCase("Anonymous declarations retain component identity in metadata", \anonymous());
+        set_return_value(main());
+    }
+    private XsdSchema schema(string definitions = Definitions, string datatype = "t:A", string controls = "") {
+        return new XsdSchema('<xs:schema xmlns:xs="' + XSD_NS + '" xmlns:t="' + Ns + '" targetNamespace="'
+            + Ns + '">' + definitions + '<xs:element name="value" type="' + datatype + '" ' + controls
+            + '/></xs:schema>', {"async_only":True});
+    }
+    private auto saved(auto value) {
+        return Serializable::deserialize(Serializable::serialize(value));
+    }
+    private hash<auto> selected(string name = "B", auto value = {"number":17, "description":"Replacement part"},
+            string uri = Ns) {
+        return {"^type^":new XsdQNameValue(uri, name), "^val^":value};
+    }
+    private check(auto expected, auto actual) {
+        assertTrue(expected."^type^".equals(actual."^type^"));
+        assertEq(expected."^val^", actual."^val^");
+        assertEq(2, actual.size());
+    }
+    private values() {
+        XsdSchema source = schema();
+        AbstractDataProviderType original = source.getNativeDataProviderType(Ns, "value");
+        foreach AbstractDataProviderType type in (original, saved(original)) {
+            check(selected(), type.acceptsValue(saved(selected())));
+            assertEq({"number":18}, type.acceptsValue({"number":18}));
+            assertThrows("MISSING-VALUE-ERROR", \type.acceptsValue(), (selected("B", {"number":17}),));
+            assertThrows("RUNTIME-TYPE-ERROR", \type.acceptsValue(), (selected("B", {"number":"bad", "description":"x"}),));
+            auto value = selected();
+            auto output = type.acceptsValue(value);
+            output."^val^".description = "Edited";
+            assertEq("Replacement part", value."^val^".description);
+        }
+        remove source;
+        check(selected(), saved(original).acceptsValue(selected()));
+    }
+    private metadata() {
+        XsdNativeTypeDataType type = schema().getNativeDataProviderType(Ns, "value");
+        foreach bool simple in (False, True) {
+            hash<DataTypeInfo> info = type.getInfo(simple);
+            assertEq(2, info.union_types.size());
+            assertEq(("number",), keys info.union_types[0].fields);
+            assertEq(("^type^", "^val^"), keys info.union_types[1].fields);
+            assertEq(("number", "description"), keys type.getSelectedValueType(new XsdQNameValue(Ns, "B")).getFields());
+        }
+        assertEq(NOTHING, type.getValueType());
+        assertEq({}, type.getDirectTypeHash());
+        assertThrows("SOAP-SERIALIZATION-ERROR", \type.getSelectedValueType(), ("B",));
+    }
+    private variants() {
+        AbstractDataProviderType original = schema().getNativeDataProviderType(Ns, "value");
+        foreach AbstractDataProviderType variant in (original, original.getSoftType(), original.getOrNothingType(),
+                original.getOrNothingType().getMandatoryType()) {
+            foreach AbstractDataProviderType type in (variant, saved(variant)) {
+                check(selected(), type.acceptsValue(selected()));
+                ListDataType list(type);
+                check(selected(), list.acceptsValue((selected(),))[0]);
+                assertThrows("RUNTIME-TYPE-ERROR", \list.acceptsValue(), ((selected("Missing"),),));
+                QoreDataField field({"name":"message", "type":type});
+                check(selected(), field.acceptsValue(selected()));
+            }
+        }
+        assertEq(NOTHING, original.getOrNothingType().acceptsValue(NOTHING));
+        assertThrows("MISSING-VALUE-ERROR", \original.acceptsValue(), (NOTHING,));
+        AbstractDataProviderType mandatory = original.getOrNothingType().getMandatoryType();
+        assertThrows("MISSING-VALUE-ERROR", \mandatory.acceptsValue(), (NOTHING,));
+    }
+    private scalars() {
+        string definitions = '<xs:simpleType name="I"><xs:restriction base="xs:int"><xs:minInclusive value="0"/>'
+            '</xs:restriction></xs:simpleType><xs:simpleType name="L"><xs:list itemType="xs:int"/></xs:simpleType>'
+            '<xs:simpleType name="U"><xs:union memberTypes="xs:int xs:boolean"/></xs:simpleType>'
+            '<xs:simpleType name="Q"><xs:restriction base="xs:QName"/></xs:simpleType>'
+            '<xs:simpleType name="B"><xs:restriction base="xs:base64Binary"/></xs:simpleType>';
+        foreach list<auto> row in (("xs:decimal", "I", 17, Ns), ("xs:integer", "short", 17, XSD_NS),
+                ("xs:anySimpleType", "L", (17,18), Ns), ("xs:anyType", "U", True, Ns),
+                ("xs:base64Binary", "B", <0011aaff>, Ns)) {
+            XsdSchema source = schema(definitions, row[0]);
+            AbstractDataProviderType original = source.getNativeDataProviderType(Ns, "value");
+            foreach AbstractDataProviderType type in (original, saved(original)) {
+                auto value = selected(row[1], row[2], row[3]);
+                check(value, type.acceptsValue(value));
+            }
+        }
+        AbstractDataProviderType type = schema(definitions, "xs:QName").getNativeDataProviderType(Ns, "value");
+        auto value = selected("Q", new XsdQNameValue("urn:items", "p:item"));
+        assertTrue(type.acceptsValue(value)."^val^".equals(value."^val^"));
+        assertEq("p:item", value."^val^".getLexicalValue());
+        type = schema(definitions, "xs:decimal").getNativeDataProviderType(Ns, "value");
+        assertThrows("RUNTIME-TYPE-ERROR", \type.acceptsValue(), (selected("I", -1),));
+    }
+    private choices() {
+        string definitions = '<xs:simpleType name="E"><xs:restriction base="xs:decimal"><xs:enumeration value="17"/>'
+            '<xs:enumeration value="18"/></xs:restriction></xs:simpleType><xs:simpleType name="I">'
+            '<xs:restriction base="t:E"/></xs:simpleType><xs:complexType name="Record"><xs:sequence>'
+            '<xs:element name="item" type="t:E" maxOccurs="3" nillable="true"/></xs:sequence></xs:complexType>';
+        XsdNativeTypeDataType root = schema(definitions, "t:Record").getNativeDataProviderType(Ns, "value");
+        AbstractDataProviderType record = root.getSelectedValueType(new XsdQNameValue(Ns, "Record"));
+        AbstractDataField field = record.getField("item");
+        assertEq(2, field.getElementAllowedValues().size());
+        auto value = selected("I", 17.0);
+        check(value, field.acceptsValue((value,))[0]);
+        AbstractDataField copy = field.copy();
+        copy.setElementAllowedValues((18n,), False);
+        assertThrows("FIELD-VALUE-ERROR", \copy.acceptsValue(), ((value,),));
+        check(value, field.acceptsValue((value,))[0]);
+        hash<auto> nil_value = {"^type^":new XsdQNameValue(Ns, "I"), "^val^":NOTHING};
+        check(nil_value, field.acceptsValue((nil_value,))[0]);
+        copy.setElementAllowedValues((), True);
+        check(value, copy.acceptsValue((value,))[0]);
+    }
+    private recursive() {
+        string definitions = '<xs:complexType name="Node"><xs:sequence><xs:element name="number" type="xs:int"/>'
+            '<xs:element name="child" type="t:Node" minOccurs="0" maxOccurs="2"/></xs:sequence></xs:complexType>';
+        XsdNativeTypeDataType original = schema(definitions, "t:Node").getNativeDataProviderType(Ns, "value");
+        foreach XsdNativeTypeDataType type in (original, saved(original)) {
+            hash<DataTypeInfo> info = type.getInfo();
+            assertEq(2, info.union_types.size());
+            assertTrue(info.union_types[0].fields.child.type.element_type.union_types[0].recursive);
+            hash<auto> value = {"number":17, "child":({"number":18},)};
+            assertEq(value, type.acceptsValue(value));
+            assertThrows("RUNTIME-TYPE-ERROR", \type.acceptsValue(),
+                ({"number":17, "child":({"number":"bad"},)},));
+        }
+    }
+    private receivers() {
+        XsdSchema source = schema();
+        assertThrows("WSDL-ERROR", \source.getNativeDataProviderType(), (Ns, "Missing"));
+        assertThrows("WSDL-ERROR", \source.getNativeDataProviderType(), ("urn:missing", "value"));
+        auto value = selected();
+        foreach string control in ('block="extension"', 'block="#all"') {
+            AbstractDataProviderType type = schema(Definitions, "t:A", control).getNativeDataProviderType(Ns, "value");
+            assertThrows("RUNTIME-TYPE-ERROR", \type.acceptsValue(), (value,));
+        }
+        XsdNativeTypeDataType type = schema().getNativeDataProviderType(Ns, "value");
+        foreach auto bad in (selected("Missing"), selected("B", value."^val^", "urn:other"),
+                {"^type^":"B", "^val^":value."^val^"}, value + {"extra":True}, selected("B", value)) {
+            assertThrows("RUNTIME-TYPE-ERROR", \type.acceptsValue(), (bad,));
+        }
+        string definitions = Definitions;
+        definitions =~ s/name="description" type="xs:string"/name="description" type="xs:int"/;
+        type = schema(definitions).getNativeDataProviderType(Ns, "value");
+        assertThrows("RUNTIME-TYPE-ERROR", \type.acceptsValue(), (value,));
+    }
+    private examples() {
+        XsdNativeTypeDataType type = schema().getNativeDataProviderType(Ns, "value");
+        auto example = type.getExampleValue();
+        assertEq({"number":100}, example);
+        assertEq(example, type.acceptsValue(example));
+    }
+    private WebService service(bool rpc, string version) {
+        string soap = "http://schemas.xmlsoap.org/wsdl/soap" + (version == "12" ? "12" : "") + "/";
+        string part = rpc ? 'type="xs:decimal"' : 'element="t:value"';
+        return new WebService('<w:definitions xmlns:w="http://schemas.xmlsoap.org/wsdl/" xmlns:s="' + soap
+            + '" xmlns:xs="' + XSD_NS + '" xmlns:t="' + Ns + '" targetNamespace="' + Ns + '">'
+            + '<w:types><xs:schema targetNamespace="' + Ns + '">' + Definitions
+            + '<xs:element name="value" type="t:A"/></xs:schema></w:types>'
+            + '<w:message name="Input"><w:part name="body" ' + part + '/></w:message>'
+            + '<w:message name="Output"><w:part name="body" ' + part + '/></w:message>'
+            + '<w:portType name="Port"><w:operation name="submit"><w:input message="t:Input"/>'
+            + '<w:output message="t:Output"/></w:operation></w:portType>'
+            + '<w:binding name="Soap" type="t:Port"><s:binding style="' + (rpc ? "rpc" : "document")
+            + '" transport="http://schemas.xmlsoap.org/soap/http"/><w:operation name="submit">'
+            + '<s:operation soapAction="submit"/><w:input><s:body use="literal" namespace="' + Ns + '"/></w:input>'
+            + '<w:output><s:body use="literal" namespace="' + Ns + '"/></w:output></w:operation></w:binding>'
+            + '<w:service name="Service"><w:port name="Port" binding="t:Soap">'
+            + '<s:address location="http://example.invalid/"/></w:port></w:service></w:definitions>', {"async_only":True});
+    }
+    private messages() {
+        foreach bool rpc in (False, True) {
+            foreach string version in ("11", "12") {
+                WebService ws = service(rpc, version);
+                WSOperation op = ws.getBindingOperation("Soap", "submit");
+                auto value = rpc ? selected("short", 17, XSD_NS) : selected();
+                foreach bool response in (False, True) {
+                    WSMessage message = response ? op.output : op.input;
+                    HashDataType original = message.getDataProviderType(True);
+                    foreach HashDataType type in (original, saved(original), original.getSoftType()) {
+                        check(value, type.acceptsValue({"body":value}).body);
+                        hash<auto> encoded = response
+                            ? op.serializeResponse(type.acceptsValue({"body":value}), NOTHING, NOTHING, NOTHING,
+                                NOTHING, NOTHING, "Soap")
+                            : op.serializeRequest(type.acceptsValue({"body":value}), NOTHING, NOTHING, NOTHING,
+                                NOTHING, NOTHING, "Soap");
+                        auto decoded = response ? op.deserializeResponse(parse_xml(encoded.body, XPF_PRESERVE_ORDER), "Soap", True)
+                            : op.deserializeRequest(parse_xml(encoded.body, XPF_PRESERVE_ORDER), "Soap", True);
+                        check(value, decoded);
+                        assertEq(2, type.getInfo().fields.body.type.union_types.size());
+                        HashDataType projection = type.copyWithFields({});
+                        assertEq({}, projection.acceptsValue({}));
+                        assertThrows("RUNTIME-TYPE-ERROR", \type.acceptsValue(), ({"body":selected("Missing")},));
+                    }
+                }
+            }
+        }
+    }
+    private savedMetadata() {
+        AbstractDataProviderType type = schema().getNativeDataProviderType(Ns, "value");
+        hash<SerializationInfo> original = type.serializeToData();
+        foreach string member in ("definition", "softened") {
+            hash<SerializationInfo> data = original;
+            remove data._index."0"._class_data."WSDL::XsdNativeTypeDataType"{member};
+            assertThrows("DESERIALIZATION-ERROR", \Serializable::deserialize(), (data,));
+        }
+        int found = 0;
+        foreach string node in (keys original._index) {
+            foreach list<string> row in (("WSDL::XsdNativeTypeProviderDefinition", "native_type"),
+                    ("WSDL::XsdNativeTypeProviderContext", "building"), ("WSDL::XsdNativeTypeDataField", "comparison")) {
+                if (original._index{node}.hasKey("_class_data") && original._index{node}._class_data{row[0]}) {
+                    hash<SerializationInfo> data = original;
+                    remove data._index{node}._class_data{row[0]}{row[1]};
+                    assertThrows("DESERIALIZATION-ERROR", \Serializable::deserialize(), (data,));
+                    ++found;
+                    break;
+                }
+            }
+        }
+        assertGt(3, found);
+        check(selected(), saved(type).acceptsValue(selected()));
+    }
+    private concurrency() {
+        AbstractDataProviderType shared = saved(schema().getNativeDataProviderType(Ns, "value"));
+        Qore::Thread::Queue ready();
+        Qore::Thread::Queue start();
+        Qore::Thread::Queue results();
+        Qore::Thread::Counter running();
+        on_exit {
+            for (int index = 0; index < 4; ++index) {
+                start.push(True);
+            }
+            assertEq(0, running.waitForZero(30s));
+        }
+        for (int index = 0; index < 4; ++index) {
+            running.inc();
+            background sub(int worker) {
+                on_exit running.dec();
+                ready.push(True);
+                try {
+                    start.get(30s);
+                    for (int attempt = 0; attempt < 8; ++attempt) {
+                        auto value = selected("B", {"number":worker, "description":"Worker " + worker});
+                        @assert(shared.acceptsValue(value)."^val^" == value."^val^");
+                        @assert(shared.getInfo().union_types.size() == 2);
+                    }
+                    results.push(worker);
+                } catch (hash<ExceptionInfo> ex) {
+                    results.push(ex);
+                }
+            }(index);
+        }
+        for (int index = 0; index < 4; ++index) {
+            ready.get(30s);
+        }
+        for (int index = 0; index < 4; ++index) {
+            start.push(True);
+        }
+        hash<string, bool> seen();
+        for (int index = 0; index < 4; ++index) {
+            auto result = results.get(30s);
+            assertEq(NT_INT, result.typeCode());
+            assertFalse(exists seen{result});
+            seen{result} = True;
+        }
+    }
+    private callbacks() {
+        XsdSchema source = schema("", "xs:string");
+        NativeProviderProbe probe(source.nsc);
+        XsdElement declaration = source.getElement(Ns, "value");
+        declaration.type = probe;
+        AbstractDataProviderType type = source.getNativeDataProviderType(Ns, "value");
+        assertEq("Invoice", type.acceptsValue("Invoice"));
+        foreach string error in ("CONTROLLED-ERROR", "THREAD-CANCELLED") {
+            probe.error = error;
+            assertThrows(error, \type.acceptsValue(), ("Invoice",));
+            probe.error = NOTHING;
+            assertEq("Invoice", type.acceptsValue("Invoice"));
+        }
+        probe.cancel_build = True;
+        assertThrows("THREAD-CANCELLED", \source.getNativeDataProviderType(), (Ns, "value"));
+        probe.cancel_build = False;
+        assertFalse(source.getElement(Ns, "value").getDataProviderType() instanceof XsdNativeTypeDataType);
+        assertEq("Invoice", source.getNativeDataProviderType(Ns, "value").acceptsValue("Invoice"));
+    }
+    private structuredChoices() {
+        foreach list<auto> row in (("xs:QName", 'xmlns:p="urn:items"', "p:item",
+                    new XsdQNameValue("urn:items", "q:item"), new XsdQNameValue("urn:other", "q:item")),
+                ("xs:base64Binary", "", "ABGq/w==", <0011aaff>, <0011aa>),
+                ("t:Items", "", "17 18", (17,18), (18,17))) {
+            string definitions = '<xs:simpleType name="Items"><xs:list itemType="xs:int"/></xs:simpleType>'
+                + '<xs:simpleType name="E"><xs:restriction base="' + row[0] + '" ' + row[1] + '>'
+                + '<xs:enumeration value="' + row[2] + '"/></xs:restriction></xs:simpleType>'
+                + '<xs:simpleType name="I"><xs:restriction base="t:E"/></xs:simpleType>'
+                + '<xs:complexType name="Record"><xs:sequence><xs:element name="item" type="t:E"/>'
+                + '</xs:sequence></xs:complexType>';
+            XsdNativeTypeDataType original = schema(definitions, "t:Record").getNativeDataProviderType(Ns, "value");
+            foreach XsdNativeTypeDataType root in (original, saved(original)) {
+                AbstractDataField field = root.getSelectedValueType(new XsdQNameValue(Ns, "Record")).getField("item");
+                assertEq(1, field.getAllowedValues().size());
+                auto value = field.acceptsValue(selected("I", row[3]));
+                assertTrue(value."^type^".equals(new XsdQNameValue(Ns, "I")));
+                if (row[3] instanceof XsdQNameValue) {
+                    assertTrue(row[3].equals(value."^val^"));
+                } else {
+                    assertEq(row[3], value."^val^");
+                }
+                assertThrows("RUNTIME-TYPE-ERROR", \field.acceptsValue(), (selected("I", row[4]),));
+                field.setAllowedValues((), True);
+                assertTrue(exists field.acceptsValue(selected("I", row[3])));
+            }
+        }
+    }
+    private abstractExamples() {
+        string definitions = Definitions;
+        definitions =~ s/name="A"/name="A" abstract="true"/;
+        XsdNativeTypeDataType type = schema(definitions).getNativeDataProviderType(Ns, "value");
+        auto example = type.getExampleValue();
+        assertTrue(example."^type^".equals(new XsdQNameValue(Ns, "B")));
+        check(example, type.acceptsValue(example));
+        assertEq(1, type.getInfo().union_types.size());
+        assertTrue(type.getInfo().union_types[0].fields."^type^".example_value.equals(new XsdQNameValue(Ns, "B")));
+        assertEq(example."^val^", type.getInfo().union_types[0].fields."^val^".example_value);
+        assertThrows("RUNTIME-TYPE-ERROR", \type.acceptsValue(), ({"number":17},));
+        XsdNativeTypeDataType blocked = schema(definitions, "t:A", 'block="extension"').getNativeDataProviderType(Ns, "value");
+        assertThrows("XSD-SAMPLE-ERROR", \blocked.getExampleValue());
+        XsdNativeTypeDataType nillable = schema(Definitions, "t:A", 'nillable="true"').getNativeDataProviderType(Ns, "value");
+        assertEq(NOTHING, nillable.acceptsValue(NOTHING));
+        hash<auto> nil_value = {"^type^":new XsdQNameValue(Ns, "B"), "^val^":NOTHING};
+        check(nil_value, nillable.acceptsValue(nil_value));
+    }
+    private anonymous() {
+        foreach list<auto> row in (('<xs:complexType><xs:sequence><xs:element name="number" type="xs:int"/>'
+                    '</xs:sequence></xs:complexType>', {"number":17}),
+                ('<xs:simpleType><xs:restriction base="xs:int"/></xs:simpleType>', 17),
+                ('<xs:simpleType><xs:list itemType="xs:int"/></xs:simpleType>', (17,18)),
+                ('<xs:simpleType><xs:union memberTypes="xs:int xs:boolean"/></xs:simpleType>', True)) {
+            XsdSchema source('<xs:schema xmlns:xs="' + XSD_NS + '"><xs:element name="value">' + row[0]
+                + '</xs:element></xs:schema>');
+            XsdNativeTypeDataType original = source.getNativeDataProviderType("", "value");
+            foreach XsdNativeTypeDataType type in (original, saved(original)) {
+                hash<DataTypeInfo> info = type.getInfo();
+                auto component = info.union_types[1].fields."^type^".example_value;
+                assertTrue(component instanceof XsdAbstractType);
+                assertFalse(component.hasRealName());
+                auto value = {"^type^":component, "^val^":row[1]};
+                auto checked = type.acceptsValue(value);
+                assertTrue(checked."^type^" === component);
+                assertEq(row[1], checked."^val^");
+                assertEq(row[1], type.acceptsValue(row[1]));
+                assertEq(row[1], type.getSelectedValueType(component).acceptsValue(row[1]));
+            }
+        }
+        XsdSchema source('<xs:schema xmlns:xs="' + XSD_NS + '"><xs:element name="value"><xs:complexType>'
+            '<xs:sequence><xs:element name="item" type="xs:anyType"/><xs:element name="anonymous">'
+            '<xs:simpleType><xs:restriction base="xs:int"/></xs:simpleType></xs:element>'
+            '</xs:sequence></xs:complexType></xs:element></xs:schema>');
+        XsdNativeTypeDataType root = source.getNativeDataProviderType("", "value");
+        XsdComplexType record = source.getElement("", "value").type;
+        XsdNativeTypeDataType item = root.getSelectedValueType(record).getField("item").getType();
+        assertThrows("SOAP-SERIALIZATION-ERROR", \item.getSelectedValueType(), (record.elementmap.anonymous.type,));
+        assertThrows("RUNTIME-TYPE-ERROR", \item.acceptsValue(),
+            ({"^type^":record.elementmap.anonymous.type, "^val^":17},));
+    }
+}
+
+class NativeProviderProbe inherits XsdBaseType {
+    public {
+        *string error;
+        bool cancel_build = False;
+    }
+    constructor(Namespaces namespaces) : XsdBaseType("string", namespaces) {
+    }
+    AbstractDataProviderType getDataProviderType() {
+        if (cancel_build) {
+            throw "THREAD-CANCELLED", "provider construction cancelled";
+        }
+        return XsdBaseType::getDataProviderType();
+    }
+    auto serializeValue(Namespaces namespaces, auto value, *softbool omitType) {
+        XsdSchema nested('<xs:schema xmlns:xs="' + XSD_NS + '"><xs:element name="item" type="xs:int"/></xs:schema>');
+        @assert(nested.getNativeDataProviderType("", "item").acceptsValue(17) == 17);
+        if (error) {
+            throw error, "controlled provider conversion failure";
+        }
+        return XsdBaseType::serializeValue(namespaces, value, omitType);
+    }
+}
