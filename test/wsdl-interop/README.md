@@ -1553,3 +1553,24 @@ python3 test/wsdl-interop/test_mixed_values.py -v
 Use the local debug XML module and local `qlib` in `QORE_MODULE_DIR`, with the
 pinned independent validator setup documented above. Element default/fixed
 instance conversion, identity constraints and P6–P9 acceptance remain open.
+
+## Native fixed values and scalar validation (P5-16d)
+
+`../xml-value-space.qtest` checks typed fixed-value equality, empty lists,
+precision, clock offsets and unsigned lexical forms through all three native XML
+APIs. `test_native_value_spaces.py` covers 95 schemas and 774 documents, including
+simple and complex simple content, selected-type identity, fixed/enumeration equality and four time range
+facets. It preserves original XML and asserts rejection categories. Fourteen
+Xerces midnight defects are individually classified in `xerces-time-midnight.json`;
+every native expectation remains enforced.
+
+CMake detects the installed library's fixed, time, unsigned and allocation-error
+behavior. The private corrections are covered by `test/cmake/test_libxml2_provider.py`
+and the allocation-failure executable it builds. See
+[native value-space evidence](native-value-spaces-evidence.md),
+[validation inventory](P5-16d-validation.json) and
+[full audit](audits/P5-16d-native-value-spaces.md).
+
+[Default/identity semantics](default-identity-investigation.md) remain an open
+P5 adjudication; instance default application, WSDL fixed-value enforcement,
+identity constraints, the remaining valid corpus failures and P6-P9 stay required.

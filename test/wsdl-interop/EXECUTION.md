@@ -7455,3 +7455,35 @@ See [requirement evidence](nil-mixed-values-evidence.md),
 [audit](audits/P5-16c-nil-mixed-values.md). No C++ or main-Qore source change,
 installation or push was made. Next: instance defaults/fixed values, identity
 constraints and the remaining P5 findings, then all P6–P9 acceptance criteria.
+
+
+## P5-16d — native fixed values and allocation ownership
+
+2026-09-12; parent `7927265`. Fixed constraints now compare computed values,
+including empty lists and selected primitive identity. Clock comparison avoids
+invented dates, unsigned lexical forms follow XSD 1.0, and integer/list/string/URI
+allocation failures preserve internal errors and cleanup. Canonical-default
+changes remain outside this increment pending the documented identity/PSVI
+adjudication; no fallback rule or validator waiver has been introduced.
+
+Final acceptance passes 142 source suites (1,366 cases/66,465 reported assertions),
+95 schemas/774 independent matrix documents, all three source execution modes,
+two AOT consumers, 16 survey tests and 47 provider tests. All 100 allocation
+faults pass; the allocation executable, configure probe and complete new Qore
+suite have zero Valgrind errors/lost blocks. Documentation and the executed
+shipment-cutoff example are warning-free. The full 62-item audit records 18 Pass,
+44 N/A and zero Fail.
+
+The two-version corpus rows and coverage failures are unchanged from P5-16c:
+144 selected WSDLs/1,388 directions pass; eight valid-input directions and 24
+broader failure records remain. The source stayed unchanged throughout acceptance.
+The Qore shared-container cycle fix remains deployed. A separate concurrent
+installation race affecting one earlier Valgrind startup was resolved by testing
+a byte-identical frozen copy of the deployed runtime, with the original failure
+and cause retained under `/tmp/wsdl-qore-validation-install-race/`.
+
+See [requirement evidence](native-value-spaces-evidence.md),
+[inventory](P5-16d-validation.json) and
+[audit](audits/P5-16d-native-value-spaces.md). No main-Qore source change,
+installation or push was made. Next: WSDL instance fixed/default conversion and
+identity constraints, remaining P5 corpus findings, then P6-P9 acceptance.

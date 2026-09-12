@@ -71,6 +71,9 @@ EXTRA_DIST = COPYING.LGPL COPYING.MIT AUTHORS README \
     cmake/QoreXmlLibXml2WildcardTypeFix.cmake cmake/libxml2-wildcard-type-probe.h \
     cmake/QoreXmlLibXml2SchemaWhitespaceFix.cmake cmake/libxml2-schema-whitespace-probe.h \
     cmake/QoreXmlLibXml2CharacterContentFix.cmake cmake/libxml2-character-content-probe.h \
+    cmake/QoreXmlLibXml2FixedValueFix.cmake \
+    cmake/QoreXmlLibXml2TimeValueFix.cmake cmake/QoreXmlLibXml2ValueAllocationFix.cmake \
+    cmake/libxml2-value-space-probe.h cmake/libxml2-value-allocation-probe.h \
     cmake/QoreXmlLibXml2ParticleRangeFix.cmake cmake/libxml2-particle-range-probe.h \
     cmake/libxml2-particle-counter-lexical.inc cmake/libxml2-particle-counter-values.inc \
     cmake/libxml2-particle-counter-automata.inc cmake/libxml2-particle-counter-schema.inc \

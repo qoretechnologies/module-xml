@@ -87,7 +87,7 @@ if(TARGET LibXml2)
     endforeach()
     get_target_property(native_includes LibXml2 INCLUDE_DIRECTORIES)
     get_target_property(native_options LibXml2 COMPILE_OPTIONS)
-    foreach(part attribution-schema-allocation counter-schema-allocation counter-execution edc-schema-allocation wildcard-id-allocation wildcard-type-allocation character-content)
+    foreach(part attribution-schema-allocation counter-schema-allocation counter-execution edc-schema-allocation wildcard-id-allocation wildcard-type-allocation character-content value-allocation)
         string(REPLACE "-" "_" suffix "${{part}}")
         if(part STREQUAL "wildcard-id-allocation")
             add_executable(${{part}} "{REPO}/test/cmake/libxml2_wildcard_id_allocation.c")
@@ -95,6 +95,8 @@ if(TARGET LibXml2)
             add_executable(${{part}} "{REPO}/test/cmake/libxml2_wildcard_type_allocation.c")
         elseif(part STREQUAL "character-content")
             add_executable(${{part}} "{REPO}/test/cmake/libxml2_character_content.c")
+        elseif(part STREQUAL "value-allocation")
+            add_executable(${{part}} "{REPO}/test/cmake/libxml2_value_allocation.c")
         else()
             add_executable(${{part}} "{REPO}/test/cmake/libxml2_particle_${{suffix}}.c")
         endif()
@@ -154,6 +156,12 @@ include("{REPO}/cmake/QoreXmlLibXml2SchemaWhitespaceFix.cmake")
 qore_xml_fix_libxml2_schema_whitespace("{cls.source}" "${{CMAKE_CURRENT_BINARY_DIR}}/libxml")
 include("{REPO}/cmake/QoreXmlLibXml2CharacterContentFix.cmake")
 qore_xml_fix_libxml2_character_content("{cls.source}" "${{CMAKE_CURRENT_BINARY_DIR}}/libxml")
+include("{REPO}/cmake/QoreXmlLibXml2FixedValueFix.cmake")
+qore_xml_fix_libxml2_fixed_values("{cls.source}" "${{CMAKE_CURRENT_BINARY_DIR}}/libxml")
+include("{REPO}/cmake/QoreXmlLibXml2TimeValueFix.cmake")
+qore_xml_fix_libxml2_time_values("{cls.source}" "${{CMAKE_CURRENT_BINARY_DIR}}/libxml")
+include("{REPO}/cmake/QoreXmlLibXml2ValueAllocationFix.cmake")
+qore_xml_fix_libxml2_value_allocation("{cls.source}" "${{CMAKE_CURRENT_BINARY_DIR}}/libxml")
 ''')
         cls.fixed = cls.root / "fixed/build-debug"
         cls.run_command(["cmake", "-S", fixed_project, "-B", cls.fixed, "-DCMAKE_BUILD_TYPE=Debug",
@@ -194,6 +202,10 @@ qore_xml_fix_libxml2_character_content("{cls.source}" "${{CMAKE_CURRENT_BINARY_D
         self.assertIn("wildcard_types=PASS", output)
         self.assertIn("schema_whitespace=PASS", output)
         self.assertIn("character_content=PASS", output)
+        self.assertIn("fixed_values=PASS", output)
+        self.assertIn("time_values=PASS", output)
+        self.assertIn("value_allocation=PASS", output)
+        self.assertIn("unsigned_values=PASS", output)
         stage = self.root / "stage"
         self.run_command(["cmake", "--install", self.root / "bundled", "--prefix", stage])
         self.assertEqual(["bin/probe", "share/licenses/qore-xml/libxml2-NOTICES.txt"],
@@ -597,9 +609,59 @@ qore_xml_fix_libxml2_uris("{self.source}" "${{CMAKE_CURRENT_BINARY_DIR}}/libxml"
         self.assertIn("Native element consistency cleanup: PASS",
                       self.run_command([self.root / "bundled/edc-schema-allocation"]))
 
+    def test_value_allocation_cleanup(self):
+        self.run_command(["cmake", "--build", self.root / "bundled", "--target", "value-allocation", "-j4"])
+        self.assertIn("Native datatype allocation cleanup: PASS",
+                      self.run_command([self.root / "bundled/value-allocation"]))
+
+    def test_value_space_backport_detection_and_idempotence(self):
+        import hashlib
+        project = self.root / "value-space-broken/source"
+        project.mkdir(parents=True)
+        (project / "CMakeLists.txt").write_text(self.previous_value_space_fixture())
+        build = self.root / "value-space-broken/build-debug"
+        self.run_command(["cmake", "-S", project, "-B", build, "-DCMAKE_BUILD_TYPE=Debug",
+                          "-DBUILD_SHARED_LIBS=ON", "-DLIBXML2_WITH_PROGRAMS=OFF",
+                          "-DLIBXML2_WITH_TESTS=OFF", "-DLIBXML2_WITH_PYTHON=OFF"])
+        self.run_command(["cmake", "--build", build, "--target", "LibXml2", "-j4"])
+        libraries = list((build / "libxml").glob("libxml2.so")) + list((build / "libxml").glob("libxml2.dylib"))
+        self.assertEqual(1, len(libraries))
+        options = [f"-DLIBXML2_LIBRARY={libraries[0]}", f"-DLIBXML2_INCLUDE_DIR={self.fixed_include}",
+                   f"-DFETCHCONTENT_SOURCE_DIR_QORE_XML_LIBXML2={self.source}"]
+        output = self.configure("value-space-broken-auto", "-DQORE_XML_LIBXML2_PROVIDER=AUTO", *options)
+        self.assertIn("using private static libxml2 2.15.4", output)
+        probe = (self.root / "value-space-broken-auto/system-libxml2/namespace-probe.log").read_text()
+        self.assertIn("character_content=PASS", probe)
+        self.assertIn("fixed_values=FAIL", probe)
+        self.assertIn("time_values=FAIL", probe)
+        self.assertIn("value_allocation=FAIL", probe)
+        self.assertIn("unsigned_values=FAIL", probe)
+        self.configure("value-space-broken-system", "-DQORE_XML_LIBXML2_PROVIDER=SYSTEM", *options, success=False)
+        paths = [self.root / "bundled/_deps/qore_xml_libxml2-build" / part for part in
+                 ("qore-fixed-value-fix/xmlschemas.c", "qore-time-value-fix/xmlschemastypes.c",
+                  "qore-value-allocation-fix/xmlschemastypes.c")]
+        stamps = [(p.stat().st_mtime_ns, hashlib.sha256(p.read_bytes()).hexdigest()) for p in paths]
+        self.configure("bundled", "-DQORE_XML_LIBXML2_PROVIDER=BUNDLED",
+                       f"-DFETCHCONTENT_SOURCE_DIR_QORE_XML_LIBXML2={self.source}")
+        self.assertEqual(stamps, [(p.stat().st_mtime_ns, hashlib.sha256(p.read_bytes()).hexdigest()) for p in paths])
+
+    def previous_value_space_fixture(self):
+        """Build earlier corrections without time/unsigned/allocation corrections."""
+        fixed = (self.root / "fixed/source/CMakeLists.txt").read_text()
+        fixed = fixed.replace(f'include("{REPO}/cmake/QoreXmlLibXml2ValueAllocationFix.cmake")\n', "")
+        fixed = fixed.replace(f'qore_xml_fix_libxml2_value_allocation("{self.source}" '
+                              '"${CMAKE_CURRENT_BINARY_DIR}/libxml")\n', "")
+        fixed = fixed.replace(f'include("{REPO}/cmake/QoreXmlLibXml2TimeValueFix.cmake")\n', "")
+        fixed = fixed.replace(f'qore_xml_fix_libxml2_time_values("{self.source}" '
+                              '"${CMAKE_CURRENT_BINARY_DIR}/libxml")\n', "")
+        fixed = fixed.replace(f'include("{REPO}/cmake/QoreXmlLibXml2FixedValueFix.cmake")\n', "")
+        fixed = fixed.replace(f'qore_xml_fix_libxml2_fixed_values("{self.source}" '
+                              '"${CMAKE_CURRENT_BINARY_DIR}/libxml")\n', "")
+        return fixed
+
     def previous_character_content_fixture(self):
         """Build all earlier corrections without instance character assessment."""
-        fixed = (self.root / "fixed/source/CMakeLists.txt").read_text()
+        fixed = self.previous_value_space_fixture()
         fixed = fixed.replace(f'include("{REPO}/cmake/QoreXmlLibXml2CharacterContentFix.cmake")\n', "")
         return fixed.replace(f'qore_xml_fix_libxml2_character_content("{self.source}" '
                              '"${CMAKE_CURRENT_BINARY_DIR}/libxml")\n', "")
