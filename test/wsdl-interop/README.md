@@ -1491,3 +1491,22 @@ supplements pass; both new suites have clean Valgrind error/lost-block summaries
 The separate baseline-reproduced QName AOT stack failure remains a P9 runtime
 finding. P5-16 owns nil/default/fixed and the native empty-CDATA correction;
 remaining P5-P9 acceptance is still required.
+
+
+## Native character content (P5-16a)
+
+`../xml-character-content.qtest` and `test_character_content.py` check empty
+CDATA, nilled/empty/element-only content, required attributes and default/fixed
+assessment through DOM, public reader and XmlDoc. Sixteen schemas/812 documents
+agree with pinned Xerces and preserve valid XML data. The configure probe and
+provider-selection suite also check real fixed and defective libraries, buffer
+ownership, offline builds and reconfiguration.
+
+See [the implemented contract](../../design/native-character-content.md),
+[requirement evidence](native-character-content-evidence.md),
+[validation inventory](P5-16a-validation.json) and
+[full audit](audits/P5-16a-native-character-content.md). Three affected Valgrind
+runs have zero errors/lost blocks. All 136 source suites have passing final
+results; the original large-WSDL timeout and unchanged-source completion remain
+recorded. WSDL declaration-level nil/default/fixed conversion follows separately;
+complete P5-P9 acceptance and the independent P9 AOT finding remain open.

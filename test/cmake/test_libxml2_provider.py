@@ -87,12 +87,14 @@ if(TARGET LibXml2)
     endforeach()
     get_target_property(native_includes LibXml2 INCLUDE_DIRECTORIES)
     get_target_property(native_options LibXml2 COMPILE_OPTIONS)
-    foreach(part attribution-schema-allocation counter-schema-allocation counter-execution edc-schema-allocation wildcard-id-allocation wildcard-type-allocation)
+    foreach(part attribution-schema-allocation counter-schema-allocation counter-execution edc-schema-allocation wildcard-id-allocation wildcard-type-allocation character-content)
         string(REPLACE "-" "_" suffix "${{part}}")
         if(part STREQUAL "wildcard-id-allocation")
             add_executable(${{part}} "{REPO}/test/cmake/libxml2_wildcard_id_allocation.c")
         elseif(part STREQUAL "wildcard-type-allocation")
             add_executable(${{part}} "{REPO}/test/cmake/libxml2_wildcard_type_allocation.c")
+        elseif(part STREQUAL "character-content")
+            add_executable(${{part}} "{REPO}/test/cmake/libxml2_character_content.c")
         else()
             add_executable(${{part}} "{REPO}/test/cmake/libxml2_particle_${{suffix}}.c")
         endif()
@@ -150,6 +152,8 @@ include("{REPO}/cmake/QoreXmlLibXml2WildcardTypeFix.cmake")
 qore_xml_fix_libxml2_wildcard_types("{cls.source}" "${{CMAKE_CURRENT_BINARY_DIR}}/libxml")
 include("{REPO}/cmake/QoreXmlLibXml2SchemaWhitespaceFix.cmake")
 qore_xml_fix_libxml2_schema_whitespace("{cls.source}" "${{CMAKE_CURRENT_BINARY_DIR}}/libxml")
+include("{REPO}/cmake/QoreXmlLibXml2CharacterContentFix.cmake")
+qore_xml_fix_libxml2_character_content("{cls.source}" "${{CMAKE_CURRENT_BINARY_DIR}}/libxml")
 ''')
         cls.fixed = cls.root / "fixed/build-debug"
         cls.run_command(["cmake", "-S", fixed_project, "-B", cls.fixed, "-DCMAKE_BUILD_TYPE=Debug",
@@ -189,6 +193,7 @@ qore_xml_fix_libxml2_schema_whitespace("{cls.source}" "${{CMAKE_CURRENT_BINARY_D
         self.assertIn("wildcard_ids=PASS", output)
         self.assertIn("wildcard_types=PASS", output)
         self.assertIn("schema_whitespace=PASS", output)
+        self.assertIn("character_content=PASS", output)
         stage = self.root / "stage"
         self.run_command(["cmake", "--install", self.root / "bundled", "--prefix", stage])
         self.assertEqual(["bin/probe", "share/licenses/qore-xml/libxml2-NOTICES.txt"],
@@ -592,12 +597,51 @@ qore_xml_fix_libxml2_uris("{self.source}" "${{CMAKE_CURRENT_BINARY_DIR}}/libxml"
         self.assertIn("Native element consistency cleanup: PASS",
                       self.run_command([self.root / "bundled/edc-schema-allocation"]))
 
+    def previous_character_content_fixture(self):
+        """Build all earlier corrections without instance character assessment."""
+        fixed = (self.root / "fixed/source/CMakeLists.txt").read_text()
+        fixed = fixed.replace(f'include("{REPO}/cmake/QoreXmlLibXml2CharacterContentFix.cmake")\n', "")
+        return fixed.replace(f'qore_xml_fix_libxml2_character_content("{self.source}" '
+                             '"${CMAKE_CURRENT_BINARY_DIR}/libxml")\n', "")
+
     def previous_schema_whitespace_fixture(self):
         """Build all earlier corrections without declaration whitespace cleanup."""
-        fixed = (self.root / "fixed/source/CMakeLists.txt").read_text()
+        fixed = self.previous_character_content_fixture()
         fixed = fixed.replace(f'include("{REPO}/cmake/QoreXmlLibXml2SchemaWhitespaceFix.cmake")\n', "")
         return fixed.replace(f'qore_xml_fix_libxml2_schema_whitespace("{self.source}" '
                              '"${CMAKE_CURRENT_BINARY_DIR}/libxml")\n', "")
+
+    def test_character_content_ownership(self):
+        self.run_command(["cmake", "--build", self.root / "bundled", "--target", "character-content", "-j4"])
+        self.assertIn("Native character-event ownership: PASS",
+                      self.run_command([self.root / "bundled/character-content"]))
+
+    def test_character_content_backport_detection_and_idempotence(self):
+        import hashlib
+        project = self.root / "character-content-broken/source"
+        project.mkdir(parents=True)
+        (project / "CMakeLists.txt").write_text(self.previous_character_content_fixture())
+        build = self.root / "character-content-broken/build-debug"
+        self.run_command(["cmake", "-S", project, "-B", build, "-DCMAKE_BUILD_TYPE=Debug",
+                          "-DBUILD_SHARED_LIBS=ON", "-DLIBXML2_WITH_PROGRAMS=OFF",
+                          "-DLIBXML2_WITH_TESTS=OFF", "-DLIBXML2_WITH_PYTHON=OFF"])
+        self.run_command(["cmake", "--build", build, "--target", "LibXml2", "-j4"])
+        libraries = list((build / "libxml").glob("libxml2.so")) + list((build / "libxml").glob("libxml2.dylib"))
+        self.assertEqual(1, len(libraries))
+        options = [f"-DLIBXML2_LIBRARY={libraries[0]}", f"-DLIBXML2_INCLUDE_DIR={self.fixed_include}",
+                   f"-DFETCHCONTENT_SOURCE_DIR_QORE_XML_LIBXML2={self.source}"]
+        output = self.configure("character-content-broken-auto", "-DQORE_XML_LIBXML2_PROVIDER=AUTO", *options)
+        self.assertIn("using private static libxml2 2.15.4", output)
+        probe = (self.root / "character-content-broken-auto/system-libxml2/namespace-probe.log").read_text()
+        self.assertIn("schema_whitespace=PASS", probe)
+        self.assertIn("character_content=FAIL", probe)
+        self.configure("character-content-broken-system", "-DQORE_XML_LIBXML2_PROVIDER=SYSTEM", *options, success=False)
+        path = self.root / "bundled/_deps/qore_xml_libxml2-build/qore-character-content-fix/xmlschemas.c"
+        stamp = (path.stat().st_mtime_ns, hashlib.sha256(path.read_bytes()).hexdigest())
+        self.assertEqual("66f535648dac9eeb14727fb7b87550507beca80b9239fa371877931db93e2d0a", stamp[1])
+        self.configure("bundled", "-DQORE_XML_LIBXML2_PROVIDER=BUNDLED",
+                       f"-DFETCHCONTENT_SOURCE_DIR_QORE_XML_LIBXML2={self.source}")
+        self.assertEqual(stamp, (path.stat().st_mtime_ns, hashlib.sha256(path.read_bytes()).hexdigest()))
 
     def test_schema_whitespace_backport_detection_and_idempotence(self):
         import hashlib

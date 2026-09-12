@@ -175,6 +175,12 @@ and compare the meaningful XML infoset; prefix spelling and formatting alone mus
 Invalid type substitutions, unresolved QNames, forbidden wildcards and invalid nil/content combinations
 are negative tests. Include collisions between identical local names in different namespaces.
 
+The native character-content prerequisite is implemented in P5-16a: empty CDATA
+contributes no characters, element-only CDATA whitespace is assessed as text,
+and default/fixed assessment preserves event ownership. See
+[native evidence](native-character-content-evidence.md). This does not close the
+WSDL declaration-level nil/default/fixed requirements above.
+
 ## P6 — Complete WSDL component and binding interoperability
 
 **Depends on P2-P5.** This covers behavior the current W3C echo survey does not exercise.

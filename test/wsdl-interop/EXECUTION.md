@@ -7327,3 +7327,45 @@ The complete audit has 27 Pass, 35 N/A and zero failures in this increment. See
 [generic evidence](generic-values-evidence.md), [inventory](P5-15-validation.json)
 and [audit](audits/P5-15-generic-values.md). Independent finding ownership follows
 the execution prompt; complete P5 and all P6-P9 acceptance remain required.
+
+
+## P5-16a — native character-content prerequisite
+
+P5-15 committed as `716e5b5`; no push. Native DOM/SAX character assessment now
+ignores zero-length events before nil/empty/default handling, and element-only
+content accepts XML whitespace independently of text/CDATA boundaries. The
+shared helper owns the EMPTY decision; caller-owned empty buffers remain
+unconsumed. The private dependency transformation is hash-guarded and the new
+configure behavior probe decides whether system libxml2 is suitable.
+
+The new suite passes four cases/545 assertions. Sixteen authored schemas/812
+documents agree with pinned Xerces through DOM, public reader and XmlDoc; valid
+XML data is preserved. All 45 provider-selection tests and eleven relevant
+mode/AOT/matrix supplements pass. Three Valgrind runs (Qore suite, private C
+ownership boundary and complete configure probe) have zero errors/lost blocks;
+the two C checks free every allocation. qpp/Doxygen/qdx and the shipment example
+pass. No native installation or main-Qore edit was made.
+
+All 136 source suites have passing final results: 1,323 cases/65,778 reported
+assertions. The initial gate timed out the large enterprise/partner WSDL suite
+at 180 seconds. Its four earlier cases passed. The exact parent native control
+then passed the complete suite in about 152 seconds; unchanged current source
+passed all five cases/85 assertions in 153.666 seconds. The bounded completion
+check allowed 600 seconds but finished below the original cutoff. The original
+timeout, stack traces and both controls remain in the inventory; no assertions,
+fixtures or production code were changed for the rerun. The evidence establishes
+no native slowdown or new allocation defect. `/tmp/wsdl-schema-construction-runtime/`
+keeps the investigation, including Qore cycle-scanning stacks.
+
+The both-version survey and strict coverage reports are exactly unchanged from
+P5-15, including their version metadata: 144 selected WSDLs/1,388 directions pass;
+28 valid-input directions and 44 broader failure records remain open. The older
+756-document nil matrix now has zero native disagreements and retains 415 WSDL
+mismatches, assigned to the next declaration conversion increment. The independent
+P9 QName AOT finding remains a failure; complete P5 and P6-P9 acceptance stay open.
+
+The full 62-item audit has 18 Pass, 44 N/A and zero failures in the native increment.
+See [native evidence](native-character-content-evidence.md),
+[inventory](P5-16a-validation.json) and
+[audit](audits/P5-16a-native-character-content.md). Next: WSDL element nil/default/
+fixed values, including receiving-declaration identity and required attributes.
