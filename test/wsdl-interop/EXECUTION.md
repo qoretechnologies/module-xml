@@ -7369,3 +7369,39 @@ See [native evidence](native-character-content-evidence.md),
 [inventory](P5-16a-validation.json) and
 [audit](audits/P5-16a-native-character-content.md). Next: WSDL element nil/default/
 fixed values, including receiving-declaration identity and required attributes.
+
+
+## P5-16b — element value-constraint declarations
+
+P5-16a committed as `1ea1370`; no push. Schema construction now validates
+element default/fixed lexical values after type resolution, rejects incompatible
+complex content and exposes declaration-owned typed/lexical/namespace metadata.
+References and reconstructed schemas retain the original declaration context.
+
+The final new suite passes nine cases/153 assertions, including controlled errors,
+real sandbox interruption, namespace cleanup and successful revalidation. All
+137 source suites pass: 1,332 cases/65,931 reported assertions. The initial gate
+used the seven-case version of the new test; after adding two failure-path cases,
+only that changed suite was repeated in the default runtime, all four source
+modes, AOT and Valgrind. Production and compiled-module hashes stayed fixed.
+The original gate and supplement reports are retained under `/tmp`.
+
+All fourteen supplements pass, including affected existing AOT consumers and six
+Python suites. The independent matrix has 188 schemas (104 valid/84 invalid)
+and 376 real binding descriptions, with matching Xerces/WSDL outcomes and exact
+rejection categories. The new suite has zero Valgrind errors/lost blocks.
+Doxygen/qdx and the documented quantity example pass without warnings.
+
+Both-version corpus and strict coverage outcomes are identical to P5-16a; only
+the WSDL source hash changes. All 144 selected WSDLs/1,388 directions pass;
+28 valid-input directions and 44 broader failure records remain visible.
+The independent P9 QName AOT stack failure remains assigned to runtime acceptance.
+The existing 415 WSDL nil/default/fixed mismatches remain assigned to instance
+conversion; declaration validation does not claim to fix them.
+
+See [declaration evidence](element-constraints-evidence.md),
+[inventory](P5-16b-validation.json) and
+[audit](audits/P5-16b-element-constraints.md). No C++ or main-Qore change was made.
+Next: receiving-element nil permission, occurrence presence and default/fixed
+instance values, including required attributes and lossless native carriers.
+Complete P5 and all P6–P9 acceptance remain required.

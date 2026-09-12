@@ -181,6 +181,11 @@ and default/fixed assessment preserves event ownership. See
 [native evidence](native-character-content-evidence.md). This does not close the
 WSDL declaration-level nil/default/fixed requirements above.
 
+P5-16b validates element constraint declarations after final type resolution and
+preserves their lexical/typed values and namespace context through references
+and reconstruction. See [declaration evidence](element-constraints-evidence.md).
+Instance default/fixed and nil conversion remain the next P5 requirement.
+
 ## P6 — Complete WSDL component and binding interoperability
 
 **Depends on P2-P5.** This covers behavior the current W3C echo survey does not exercise.

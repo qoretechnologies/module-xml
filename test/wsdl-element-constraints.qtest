@@ -1,0 +1,249 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires xml
+%requires ../qlib/WSDL.qm
+%exec-class ElementConstraintsTest
+
+class FailingConstraintType inherits XsdBaseType {
+    private {
+        string error;
+        *SandboxManager manager;
+    }
+    constructor(string error, *SandboxManager manager) : XsdBaseType("QName", new Namespaces({})) {
+        self.error = error;
+        self.manager = manager;
+    }
+    auto deserializeValue(string en, hash<string, XsdAbstractType> tmap, *hash<auto> mrh, auto value) {
+        if (manager) {
+            manager.requestInterrupt();
+            return XsdBaseType::deserializeValue(en, tmap, mrh, value);
+        }
+        throw error, "constraint conversion interrupted before publishing a value";
+    }
+}
+
+class ElementConstraintsTest inherits QUnit::Test {
+    constructor() : Test("Element default and fixed declarations", "1.0") {
+        addTestCase("Element constraints require valid datatype lexical values", \lexical());
+        addTestCase("Restrictions and forward types validate constraint values", \restrictions());
+        addTestCase("Complex content constraints require simple or emptiable mixed content", \complexContent());
+        addTestCase("Constraints retain distinct values through references and reconstruction", \metadata());
+        addTestCase("QName and union defaults retain declaration namespaces", \namespaces());
+        addTestCase("Imported constraints retain their original namespace context", \imports());
+        addTestCase("Invalid additions preserve existing declarations", \recovery());
+        addTestCase("Conversion errors preserve constraints and restore namespace scope", \conversionFailure());
+        addTestCase("Runtime cancellation preserves constraints and permits subsequent validation", \cancellation());
+        set_return_value(main());
+    }
+    private string source(string body) {
+        return '<xs:schema xmlns:xs="' + XSD_NS + '">' + body + '</xs:schema>';
+    }
+    private XsdSchema parse(string body) {
+        return new XsdSchema(source(body), {"async_only": True});
+    }
+    private string element(string datatype, string kind, string lexical) {
+        return '<xs:element name="value" type="xs:' + datatype + '" ' + kind + '="' + lexical + '"/>';
+    }
+    private lexical() {
+        foreach string kind in ("default", "fixed") {
+            foreach list<string> row in (("int", ""), ("int", "17tail"), ("byte", "128"),
+                    ("unsignedByte", "-1"), ("decimal", "1e2"), ("boolean", "TRUE"),
+                    ("date", "2026-02-30"), ("duration", "PT"), ("hexBinary", "A"),
+                    ("base64Binary", "AB=="), ("NMTOKENS", ""), ("QName", "missing:Name")) {
+                assertThrows("WSDL-ERROR", \parse(), (element(row[0], kind, row[1]),));
+            }
+            foreach list<string> row in (("int", "17"), ("int", " +017 "), ("decimal", "17.000"),
+                    ("boolean", "1"), ("string", ""), ("NMTOKENS", " one  two "),
+                    ("anySimpleType", ""), ("anyType", "text"), ("ENTITY", "logo")) {
+                XsdSchema schema = parse(element(row[0], kind, row[1]));
+                assertEq("{}value", schema.getElement("", "value").getExpandedName());
+            }
+        }
+    }
+    private restrictions() {
+        string declarations = '<xs:simpleType name="Small"><xs:restriction base="xs:int">'
+            '<xs:minInclusive value="1"/><xs:maxInclusive value="3"/></xs:restriction></xs:simpleType>'
+            '<xs:simpleType name="Codes"><xs:list itemType="Small"/></xs:simpleType>'
+            '<xs:simpleType name="Choice"><xs:union memberTypes="Small xs:boolean"/></xs:simpleType>';
+        foreach string kind in ("default", "fixed") {
+            foreach list<string> row in (("Small", "0"), ("Codes", "1 4"), ("Choice", "4")) {
+                assertThrows("WSDL-ERROR", \parse(), ('<xs:element name="value" type="' + row[0]
+                    + '" ' + kind + '="' + row[1] + '"/>' + declarations,));
+            }
+            foreach list<string> row in (("Small", "2"), ("Codes", "1 3"), ("Choice", "false")) {
+                XsdSchema schema = parse('<xs:element name="value" type="' + row[0] + '" ' + kind
+                    + '="' + row[1] + '"/>' + declarations);
+                assertEq(row[0], schema.getElement("", "value").type.name);
+            }
+        }
+    }
+    private complexContent() {
+        foreach string kind in ("default", "fixed") {
+            foreach string body in ('<xs:complexType/>', '<xs:complexType><xs:sequence/></xs:complexType>',
+                    '<xs:complexType><xs:sequence><xs:element name="child" minOccurs="0"/>'
+                        '</xs:sequence></xs:complexType>',
+                    '<xs:complexType mixed="true"><xs:sequence><xs:element name="child"/>'
+                        '</xs:sequence></xs:complexType>') {
+                assertThrows("WSDL-ERROR", \parse(), ('<xs:element name="value" ' + kind + '="text">'
+                    + body + '</xs:element>',));
+            }
+            foreach string body in ('<xs:complexType mixed="true"/>',
+                    '<xs:complexType mixed="true"><xs:sequence><xs:element name="child" minOccurs="0"/>'
+                        '</xs:sequence></xs:complexType>',
+                    '<xs:complexType><xs:simpleContent><xs:extension base="xs:string">'
+                        '<xs:attribute name="tag" use="required"/>'
+                        '</xs:extension></xs:simpleContent></xs:complexType>') {
+                XsdSchema schema = parse('<xs:element name="value" ' + kind + '="text">'
+                    + body + '</xs:element>');
+                assertEq("{}value", schema.getElement("", "value").getExpandedName());
+            }
+        }
+    }
+    private recovery() {
+        XsdSchema schema = parse(element("int", "default", "17"));
+        XsdElement existing = schema.getElement("", "value");
+        assertThrows("WSDL-ERROR", \schema.addSchemaString(),
+            (source('<xs:element name="bad" type="xs:int" default="invalid"/>'),));
+        assertTrue(existing === schema.getElement("", "value"));
+        assertFalse(exists schema.getElement("", "bad"));
+        schema.addSchemaString(source('<xs:element name="good" type="xs:int" fixed="29"/>'));
+        assertEq("{}good", schema.getElement("", "good").getExpandedName());
+    }
+    private conversionFailure() {
+        XsdSchema schema = parse('<xs:element name="value" type="xs:QName" xmlns:p="urn:catalog"'
+            ' default="p:Item"/>');
+        XsdElement target = schema.getElement("", "value");
+        XsdAbstractType original = target.type;
+        on_exit {
+            target.type = original;
+        }
+        foreach string error in ("PROGRAM-INTERRUPTED", "THREAD-CANCELLED", "CONTROLLED-CONVERSION-ERROR") {
+            hash<XsdElementValueConstraintInfo> constraint = target.getValueConstraint();
+            target.type = new FailingConstraintType(error);
+            assertThrows(error == "CONTROLLED-CONVERSION-ERROR" ? "WSDL-ERROR" : error,
+                \target.validateValueConstraintType());
+            assertEq(constraint, target.getValueConstraint());
+            assertThrows("SOAP-DESERIALIZATION-ERROR", \original.deserializeValue(),
+                ("value", schema.getTypeMap(), NOTHING, "p:Item"));
+            target.type = original;
+            target.validateValueConstraintType();
+            assertEq("urn:catalog", cast<XsdQNameValue>(target.getValueConstraint().value).getNamespaceUri());
+        }
+    }
+    private cancellation() {
+        XsdSchema schema = parse('<xs:element name="value" type="xs:QName" xmlns:p="urn:catalog"'
+            ' fixed="p:Item"/>');
+        XsdElement target = schema.getElement("", "value");
+        XsdAbstractType original = target.type;
+        hash<XsdElementValueConstraintInfo> constraint = target.getValueConstraint();
+        Program program(PO_MODERN | PO_ENABLE_DEBUG);
+        SandboxManager manager();
+        on_exit {
+            manager.clearInterrupt();
+            target.type = original;
+        }
+        program.setSandboxManager(manager);
+        program.parse("%modern\nsub execute(code<nothing()> work) { work(); }\n", "constraint-interrupt.qr");
+        target.type = new FailingConstraintType("PROGRAM-INTERRUPTED", manager);
+        code<nothing()> work = sub() {
+            target.validateValueConstraintType();
+        };
+        *hash<ExceptionInfo> error;
+        try {
+            program.callFunction("execute", work);
+        } catch (hash<ExceptionInfo> ex) {
+            error = ex;
+        }
+        manager.clearInterrupt();
+        assertEq("PROGRAM-INTERRUPTED", error.err);
+        assertEq(constraint, target.getValueConstraint());
+        assertThrows("SOAP-DESERIALIZATION-ERROR", \original.deserializeValue(),
+            ("value", schema.getTypeMap(), NOTHING, "p:Item"));
+        target.type = original;
+        target.validateValueConstraintType();
+        assertEq("urn:catalog", cast<XsdQNameValue>(target.getValueConstraint().value).getNamespaceUri());
+        assertTrue(target.getValueConstraint().fixed);
+    }
+    private metadata() {
+        XsdSchema original = parse('<xs:element name="first" type="xs:int" default="17"/>'
+            '<xs:element name="second" type="xs:int" fixed="29"/>'
+            '<xs:element name="empty" type="xs:string" default=""/>'
+            '<xs:element name="plain" type="xs:int"/>'
+            '<xs:complexType name="Container"><xs:sequence><xs:element ref="first"/>'
+            '<xs:element ref="second"/></xs:sequence></xs:complexType>');
+        foreach XsdSchema schema in (original, Serializable::deserialize(original.serialize())) {
+            hash<XsdElementValueConstraintInfo> first = schema.getElement("", "first").getValueConstraint();
+            hash<XsdElementValueConstraintInfo> second = schema.getElement("", "second").getValueConstraint();
+            assertEq(17, first.value);
+            assertEq("17", first.lexical);
+            assertFalse(first.fixed);
+            assertEq(29, second.value);
+            assertTrue(second.fixed);
+            assertEq("", schema.getElement("", "empty").getValueConstraint().value);
+            assertFalse(exists schema.getElement("", "plain").getValueConstraint());
+            XsdComplexType container = cast<XsdComplexType>(schema.findType("Container"));
+            assertEq(first, container.elementmap.first.getValueConstraint());
+            assertEq(second, container.elementmap.second.getValueConstraint());
+            XsdElement detached = Serializable::deserialize(container.elementmap.first.serialize());
+            assertEq(first, detached.getValueConstraint());
+            first.value = 999;
+            first.namespaces.p = "urn:caller";
+            assertEq(17, schema.getElement("", "first").getValueConstraint().value);
+            assertFalse(exists schema.getElement("", "first").getValueConstraint().namespaces.p);
+        }
+    }
+    private namespaces() {
+        XsdSchema original = parse('<xs:element name="qualified" type="xs:QName" xmlns:p="urn:catalog"'
+            ' default=" p:Item "/><xs:element name="fallback" type="Either" default="unbound:Item"/>'
+            '<xs:element name="items" type="Names" xmlns:p="urn:items" fixed="p:First p:Second"/>'
+            '<xs:element name="unqualified" type="xs:QName" fixed="Item"/>'
+            '<xs:simpleType name="Names"><xs:list itemType="xs:QName"/></xs:simpleType>'
+            '<xs:simpleType name="Either"><xs:union memberTypes="xs:QName xs:string"/></xs:simpleType>');
+        foreach XsdSchema schema in (original, Serializable::deserialize(original.serialize())) {
+            hash<XsdElementValueConstraintInfo> qualified = schema.getElement("", "qualified").getValueConstraint();
+            assertEq(" p:Item ", qualified.lexical);
+            assertEq("urn:catalog", qualified.namespaces.p);
+            assertEq("urn:catalog", cast<XsdQNameValue>(qualified.value).getNamespaceUri());
+            assertEq("Item", cast<XsdQNameValue>(qualified.value).getLocalName());
+            XsdScopedLexicalValue fallback = schema.getElement("", "fallback").getValueConstraint().value;
+            assertEq("unbound:Item", fallback.getLexicalValue());
+            assertFalse(fallback.getNamespaceBindings().hasKey("unbound"));
+            hash<XsdElementValueConstraintInfo> items = schema.getElement("", "items").getValueConstraint();
+            assertTrue(items.fixed);
+            assertEq(2, items.value.size());
+            assertEq("urn:items", cast<XsdQNameValue>(items.value[0]).getNamespaceUri());
+            assertEq("First", cast<XsdQNameValue>(items.value[0]).getLocalName());
+            assertEq("Second", cast<XsdQNameValue>(items.value[1]).getLocalName());
+            hash<XsdElementValueConstraintInfo> unqualified = schema.getElement("", "unqualified").getValueConstraint();
+            assertEq("Item", unqualified.value);
+            assertEq("", unqualified.namespaces{""});
+        }
+    }
+    private imports() {
+        string imported = '<xs:schema xmlns:xs="' + XSD_NS + '" targetNamespace="urn:catalog">'
+            '<xs:element name="category" xmlns:p="urn:products" type="xs:QName" fixed="p:Product"/>'
+            '</xs:schema>';
+        string root = '<xs:schema xmlns:xs="' + XSD_NS + '" xmlns:c="urn:catalog" xmlns:p="urn:caller">'
+            '<xs:import namespace="urn:catalog" schemaLocation="http://example.invalid/catalog.xsd"/>'
+            '<xs:complexType name="Record"><xs:sequence><xs:element ref="c:category" minOccurs="0"/>'
+            '</xs:sequence></xs:complexType></xs:schema>';
+        XsdSchema original(root, {"async_only": True,
+            "xsd_cache": {"http://example.invalid/catalog.xsd": imported}});
+        foreach XsdSchema schema in (original, Serializable::deserialize(original.serialize())) {
+            XsdComplexType record = cast<XsdComplexType>(schema.findType("Record"));
+            XsdElement reference = record.elementmap.category;
+            assertEq(0, reference.minOccurs);
+            hash<XsdElementValueConstraintInfo> constraint = reference.getValueConstraint();
+            assertTrue(constraint.fixed);
+            assertEq("p:Product", constraint.lexical);
+            assertEq("urn:products", constraint.namespaces.p);
+            assertEq("urn:products", cast<XsdQNameValue>(constraint.value).getNamespaceUri());
+            assertEq("Product", cast<XsdQNameValue>(constraint.value).getLocalName());
+            XsdElement detached = Serializable::deserialize(reference.serialize());
+            assertEq("urn:products", cast<XsdQNameValue>(detached.getValueConstraint().value).getNamespaceUri());
+        }
+    }
+}

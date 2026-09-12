@@ -1510,3 +1510,17 @@ runs have zero errors/lost blocks. All 136 source suites have passing final
 results; the original large-WSDL timeout and unchanged-source completion remain
 recorded. WSDL declaration-level nil/default/fixed conversion follows separately;
 complete P5-P9 acceptance and the independent P9 AOT finding remain open.
+
+
+## Element constraint declarations (P5-16b)
+
+`../wsdl-element-constraints.qtest` validates default/fixed lexical values and
+content eligibility, retained metadata, references/imports, reconstruction,
+recovery and cancellation. `test_element_constraints.py` compares 188 schemas
+and 376 actual SOAP 1.1/1.2 binding descriptions with pinned Xerces.
+
+See [the implemented contract](../../design/wsdl-element-constraints.md),
+[requirement evidence](element-constraints-evidence.md),
+[validation inventory](P5-16b-validation.json) and
+[full audit](audits/P5-16b-element-constraints.md). Instance default application,
+fixed-value comparison and nil handling remain open P5 work.

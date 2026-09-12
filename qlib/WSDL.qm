@@ -80,6 +80,10 @@ module WSDL {
     @section wsdlrelnotes WSDL Module Release Notes
 
     @subsection wsdl_0_5_8 WSDL v0.5.8
+    - element default/fixed declarations validate their lexical values after type resolution, including
+      restrictions, lists, unions and complex simple/mixed content eligibility
+    - XsdElement::getValueConstraint() retains each declaration's typed value, lexical form and namespace
+      context through global references and Serializable reconstruction
     - xs:anyType accepts empty, scalar, attributed and mixed XML content, assesses known declarations,
       and preserves ordered XML-data fields and lexical namespace context through SOAP and provider consumers
     - generic providers enforce anySimpleType's simple-content rules and validate saved/soft/native values;
@@ -10954,6 +10958,23 @@ class XsdElementConsistencyHelper {
     }
 }
 
+#! Resolved default or fixed value belonging to an element declaration
+/** The lexical form and its declaration namespace bindings accompany the typed value.
+    This distinguishes an empty constraint from the absence of a constraint and keeps
+    QName meanings independent of instance namespace declarations.
+    @since %WSDL 0.5.8
+*/
+public hashdecl XsdElementValueConstraintInfo {
+    #! True for fixed, False for default
+    bool fixed;
+    #! The original XML attribute value
+    string lexical;
+    #! Namespace bindings used to interpret the declaration's lexical value
+    hash<string, string> namespaces;
+    #! The value converted with the resolved simple content type
+    auto value;
+}
+
 #! XSD element class
 public class XsdElement inherits WSDL::XsdTypedData {
     public {
@@ -10968,7 +10989,7 @@ public class XsdElement inherits WSDL::XsdTypedData {
     }
 
     private {
-        bool has_value_constraint = False;
+        *hash<XsdElementValueConstraintInfo> value_constraint;
         hash<string, bool> blocked_substitutions();
         bool abstract_element = False;
         hash<string, bool> substitution_exclusions();
@@ -11046,9 +11067,13 @@ public class XsdElement inherits WSDL::XsdTypedData {
                 substitution_name = new XsdQNameValue(identity.uri, identity.val);
             }
         }
-        has_value_constraint = exists a.default || exists a.fixed;
+        if (exists a.default || exists a.fixed) {
+            string lexical = a.fixed ?? a.default;
+            value_constraint = <XsdElementValueConstraintInfo>{"fixed": exists a.fixed, "lexical": lexical,
+                "namespaces": XsdQNameContextHelper::capture(lexical, nsc)};
+        }
         on_success {
-            if (has_value_constraint) {
+            if (value_constraint) {
                 unresolved.addConstrainedElement(self);
             }
         }
@@ -11075,19 +11100,55 @@ public class XsdElement inherits WSDL::XsdTypedData {
         }
     }
 
-    #! checks whether a resolved element type permits a value constraint
-    /** @throw WSDL-ERROR an ID-derived element type or simple content has a default/fixed constraint
+    #! validates and resolves an element declaration's default or fixed value
+    /** @throw WSDL-ERROR the type/content does not permit a constraint, or its lexical value is invalid
         @note Called after complex and simple type finalization.
         @since %WSDL 0.5.8
     */
     validateValueConstraintType() {
-        if (!has_value_constraint) {
+        if (!value_constraint) {
             return;
         }
-        *XsdAbstractType content = type instanceof XsdComplexType ? cast<XsdComplexType>(type).simpleType : type;
-        if (content && XsdTypeDerivationHelper::isIdDerived(content)) {
+        XsdAbstractType content = type;
+        if (type instanceof XsdComplexType) {
+            XsdComplexType complex_type = cast<XsdComplexType>(type);
+            if (!complex_type.allowsElementValueConstraint()) {
+                throw WSDL_ERROR, sprintf("element %Y requires simple or emptiable mixed content for a "
+                    "default or fixed constraint", name);
+            }
+            content = complex_type.simpleType ?? new XsdBaseType("string", new Namespaces({}));
+        } else if (XsdTypeSubstitutionHelper::builtin(type, "anyType")) {
+            content = new XsdBaseType("string", new Namespaces({}));
+        }
+        if (XsdTypeDerivationHelper::isIdDerived(content)) {
             throw WSDL_ERROR, sprintf("ID-derived element %Y cannot have a default or fixed constraint", name);
         }
+        try {
+            XsdQNameNamespaceScope declaration_scope(
+                XsdQNameContextHelper::attributes(value_constraint.namespaces), True);
+            # Schema declarations require datatype validity. Document-dependent ENTITY
+            # requirements apply when an instance uses the constraint, as for attributes.
+            auto converted = content.deserializeValue(name, new hash<string, XsdAbstractType>(), NOTHING,
+                value_constraint.lexical);
+            value_constraint.value = converted;
+        } catch (hash<ExceptionInfo> error) {
+            if (error.err == "PROGRAM-INTERRUPTED" || error.err == "THREAD-CANCELLED") {
+                rethrow;
+            }
+            throw WSDL_ERROR, sprintf("invalid value constraint for element %Y: %s: %s", name,
+                error.err, error.desc);
+        }
+    }
+
+    #! returns this declaration's resolved default or fixed value
+    /** @return a copy of the typed constraint and its original lexical/namespace context, or NOTHING
+        @note References return their global declaration's constraint. The schema must be fully resolved.
+        @par Example
+        Inspect a catalog quantity's declared default without confusing it with an absent optional element.
+        @since %WSDL 0.5.8
+    */
+    *hash<XsdElementValueConstraintInfo> getValueConstraint() {
+        return declaration_ref ? declaration_ref.getValueConstraint() : value_constraint;
     }
 
     AbstractDataProviderType getDataProviderType() {
@@ -23041,6 +23102,16 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
     */
     bool isEmpty() {
         return !elementmap && !choices && !simpleType && !has_element_wildcard;
+    }
+
+    #! returns whether an element of this type may declare a default or fixed value
+    /** @return True for simple content or mixed content whose complete particle admits no children
+        @note Required attributes do not prevent a declaration constraint; instances must still supply them.
+        This implements XSD 1.0 Element Default Valid (Immediate), independently of instance nillability.
+        @since %WSDL 0.5.8
+    */
+    bool allowsElementValueConstraint() {
+        return exists simpleType || (mixed && (!particle || particle.matchesElementNames(())));
     }
 
     AbstractDataProviderType getDataProviderType() {
