@@ -1585,3 +1585,14 @@ See [native anyType evidence](native-anytype-evidence.md),
 [Default/identity semantics](default-identity-investigation.md) remain an open
 P5 adjudication; instance default application, WSDL fixed-value enforcement,
 identity constraints, the remaining valid corpus failures and P6-P9 stay required.
+
+
+`test/wsdl-fixed-values.qtest`, `test/wsdl-fixed-http.qtest` and
+`test_fixed_values.py` check explicit nonempty element fixed values by XSD value
+identity. The independent matrix retains 53 schemas/172 documents/688 actual
+SOAP binding directions and validates 1,257 outputs with pinned Xerces. Tests
+include native/ordinary providers, constrained examples, saved old-format
+providers, forward object references, cancellation and concurrent first use.
+See [the fixed-value contract](../../design/element-fixed-values.md) and
+[acceptance evidence](fixed-values-evidence.md). Empty-element default processing
+and the documented default/identity interaction remain separate P5 work.

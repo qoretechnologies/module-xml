@@ -1,0 +1,435 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires xml
+%requires ../qlib/WSDL.qm
+%exec-class FixedValuesTest
+
+class CountingFixedValueType inherits XsdBaseType {
+    public {
+        int decoded = 0;
+        int encoded = 0;
+        bool cancel = False;
+        bool cancel_decode = False;
+    }
+    constructor(string builtin = "string") : XsdBaseType(builtin, new Namespaces({})) {
+    }
+    auto deserializeValue(string name, hash<string, XsdAbstractType> types, *hash<auto> references, auto value) {
+        ++decoded;
+        if (cancel || cancel_decode) {
+            throw "THREAD-CANCELLED", "fixed value conversion cancelled";
+        }
+        return XsdBaseType::deserializeValue(name, types, references, value);
+    }
+    auto serializeValue(Namespaces namespaces, auto value, *softbool omitType) {
+        ++encoded;
+        if (cancel) {
+            throw "THREAD-CANCELLED", "fixed value conversion cancelled";
+        }
+        return XsdBaseType::serializeValue(namespaces, value, omitType);
+    }
+}
+
+class InvoiceCodeType inherits XsdBaseType {
+    public {
+        int decoded = 0;
+        int encoded = 0;
+    }
+    constructor() : XsdBaseType("InvoiceCode", new Namespaces({})) {
+    }
+    auto deserializeValue(string name, hash<string, XsdAbstractType> types, *hash<auto> references, auto value) {
+        ++decoded;
+        return {"code":string(value.typeCode() == NT_HASH ? value."^value^" : value)};
+    }
+    auto serializeValue(Namespaces namespaces, auto value, *softbool omitType) {
+        ++encoded;
+        if (value.typeCode() != NT_HASH || value.code.typeCode() != NT_STRING) {
+            throw "INVOICE-CODE-ERROR", "an invoice code record is required";
+        }
+        return value.code;
+    }
+}
+
+class FixedValuesTest inherits QUnit::Test {
+    constructor() : Test("Receiving element fixed value identity", "1.0") {
+        addTestCase("Primitive value spaces remain distinct under xsi:type", \dynamic());
+        addTestCase("Simple-content unions retain the chosen member through conversion", \unions());
+        addTestCase("Generic XML type annotations retain actual fixed-value identity", \generic());
+        addTestCase("Fixed mixed content requires matching text without children", \mixed());
+        addTestCase("Custom conversions execute once and restore capture after cancellation", \custom());
+        addTestCase("Element providers enforce fixed values before output", \providers());
+        addTestCase("Ordered list identities and QName bindings survive providers and saved constraints", \lists());
+        addTestCase("Global references and substitution members keep their own fixed values", \declarations());
+        addTestCase("Old saved providers upgrade once after graph restoration and retry cancelled work", \legacy());
+        addTestCase("Concurrent first use of an old saved provider preserves its constraint", \concurrency());
+        addTestCase("Fixed providers retain primitive, list and record metadata", \metadata());
+        set_return_value(main());
+    }
+
+    private string source(string body) {
+        return '<xs:schema xmlns:xs="' + XSD_NS + '">' + body + '</xs:schema>';
+    }
+    private XsdSchema schema(string body) {
+        return new XsdSchema(source(body), {"async_only": True});
+    }
+    private auto saved(auto value) {
+        return Serializable::deserialize(Serializable::serialize(value));
+    }
+    private auto decode(XsdSchema schema, string content, string attributes = "") {
+        auto xml = XsdBase::expandElementNamespaces(parse_xml('<value xmlns:xs="' + XSD_NS
+            + '" xmlns:xsi="' + XSI_NS + '" ' + attributes + '>' + content + '</value>', XPF_PRESERVE_ORDER));
+        return schema.getElement("", "value").deserializeValue(schema.getTypeMap(), NOTHING, xml."{}value", True, True);
+    }
+    private XsdXmlValue encode(XsdSchema schema, auto value) {
+        return schema.serializeXmlValue("", "value", value);
+    }
+
+    dynamic() {
+        string body = '<xs:simpleType name="Base"><xs:union memberTypes="xs:boolean xs:string xs:integer"/>'
+            '</xs:simpleType><xs:element name="value" type="Base" fixed="1"/>';
+        XsdSchema original = schema(body);
+        foreach XsdSchema model in (original, saved(original)) {
+            foreach string lexical in ("true", "1") {
+                auto value = decode(model, lexical, 'xsi:type="xs:boolean"');
+                assertEq(True, value."^val^");
+                assertTrue(value."^type^".equals(new XsdQNameValue(XSD_NS, "boolean")));
+                new XmlDoc(encode(model, saved(value)).getXml()).validateSchema(source(body));
+            }
+            foreach string type in ("string", "integer") {
+                assertThrows("SOAP-DESERIALIZATION-ERROR", \decode(), (model, "1", 'xsi:type="xs:' + type + '"'));
+                assertThrows("SOAP-SERIALIZATION-ERROR", \encode(), (model,
+                    {"^type^":new XsdQNameValue(XSD_NS, type), "^val^":"1"}));
+            }
+            assertThrows("SOAP-DESERIALIZATION-ERROR", \decode(), (model, "false"));
+            assertThrows("SOAP-SERIALIZATION-ERROR", \encode(), (model, False));
+        }
+    }
+
+    unions() {
+        string body = '<xs:simpleType name="Union"><xs:union memberTypes="xs:boolean xs:string"/></xs:simpleType>'
+            '<xs:complexType name="Content"><xs:simpleContent><xs:extension base="Union">'
+            '<xs:attribute name="tag" type="xs:int" use="required"/></xs:extension></xs:simpleContent></xs:complexType>'
+            '<xs:element name="value" type="Content" fixed="1"/>';
+        XsdSchema original = schema(body);
+        foreach XsdSchema model in (original, saved(original)) {
+            auto value = decode(model, "true", 'tag="17"');
+            assertEq({"^value^":True, "^attributes^":{"tag":17}}, value);
+            new XmlDoc(encode(model, value).getXml()).validateSchema(source(body));
+            assertThrows("SOAP-DESERIALIZATION-ERROR", \decode(), (model, "other", 'tag="17"'));
+            assertThrows("SOAP-SERIALIZATION-ERROR", \encode(),
+                (model, {"^value^":"other", "^attributes^":{"tag":17}}));
+            assertThrows("SOAP-DESERIALIZATION-ERROR", \decode(), (model, "true"));
+        }
+    }
+
+    generic() {
+        foreach string type in ("anyType", "anySimpleType") {
+            XsdSchema model = schema('<xs:element name="value" type="xs:' + type + '" fixed="17"/>');
+            auto plain = decode(model, "17");
+            assertEq("17", plain.typeCode() == NT_HASH ? plain."^value^" : plain);
+            foreach string selected in ("string", "int") {
+                hash<auto> value = {"^value^":"17", "^attributes^":{
+                    "xmlns:xs":XSD_NS, "xmlns:xsi":XSI_NS, "xsi:type":"xs:" + selected}};
+                if (selected == "string") {
+                    assertEq("17", encode(model, value).getXmlDataView().value."^value^");
+                } else {
+                    assertThrows("SOAP-SERIALIZATION-ERROR", \encode(), (model, value));
+                }
+            }
+            assertThrows("SOAP-DESERIALIZATION-ERROR", \decode(), (model, "18"));
+        }
+    }
+
+    mixed() {
+        string body = '<xs:complexType name="Text" mixed="true"><xs:sequence><xs:any minOccurs="0"'
+            ' maxOccurs="unbounded" processContents="skip"/></xs:sequence></xs:complexType>'
+            '<xs:element name="value" type="Text" fixed="invoice"/>';
+        XsdSchema model = schema(body);
+        auto value = decode(model, '<!--before-->in<![CDATA[voice]]><!--after-->');
+        new XmlDoc(encode(model, value).getXml()).validateSchema(source(body));
+        assertThrows("SOAP-DESERIALIZATION-ERROR", \decode(), (model, "other"));
+        assertThrows("SOAP-DESERIALIZATION-ERROR", \decode(), (model, "invoice<child/>"));
+        assertThrows("SOAP-SERIALIZATION-ERROR", \encode(), (model, {"^value^":"other"}));
+        assertThrows("SOAP-SERIALIZATION-ERROR", \encode(), (model, {"^value^":"invoice", "child":NOTHING}));
+    }
+
+    custom() {
+        XsdSchema model = schema('<xs:element name="value" type="xs:string" fixed="invoice"/>');
+        XsdElement element = model.getElement("", "value");
+        CountingFixedValueType type();
+        element.type = type;
+        element.validateValueConstraintType();
+        assertEq(1, type.decoded);
+        assertEq("invoice", decode(model, "invoice"));
+        assertEq(2, type.decoded);
+        assertTrue(encode(model, "invoice").getXml().find(">invoice</") >= 0);
+        assertEq(1, type.encoded);
+        assertThrows("SOAP-DESERIALIZATION-ERROR", \decode(), (model, "other"));
+        assertEq(3, type.decoded);
+        assertThrows("SOAP-SERIALIZATION-ERROR", \encode(), (model, "other"));
+        assertEq(2, type.encoded);
+        type.cancel = True;
+        assertThrows("THREAD-CANCELLED", \decode(), (model, "invoice"));
+        assertThrows("THREAD-CANCELLED", \encode(), (model, "invoice"));
+        type.cancel = False;
+        assertEq("invoice", decode(model, "invoice"));
+        assertTrue(encode(model, "invoice").getXml().find(">invoice</") >= 0);
+        XsdSchema dates = schema('<xs:element name="value" type="xs:date" fixed="2026-09-12Z"/>');
+        CountingFixedValueType date_type("date");
+        XsdElement date_element = dates.getElement("", "value");
+        date_element.type = date_type;
+        date_element.validateValueConstraintType();
+        auto day = decode(dates, "2026-09-12Z");
+        new XmlDoc(encode(dates, day).getXml()).validateSchema(source(
+            '<xs:element name="value" type="xs:date" fixed="2026-09-12Z"/>'));
+        assertEq(2, date_type.decoded);
+        assertEq(1, date_type.encoded);
+        InvoiceCodeType invoice_type();
+        element.type = invoice_type;
+        element.validateValueConstraintType();
+        assertEq({"code":"invoice"}, decode(model, "invoice"));
+        assertTrue(encode(model, {"code":"invoice"}).getXml().find(">invoice</") >= 0);
+        assertEq(2, invoice_type.decoded);
+        assertEq(1, invoice_type.encoded);
+        assertThrows("SOAP-SERIALIZATION-ERROR", \encode(), (model, {"code":"other"}));
+        assertThrows("SOAP-DESERIALIZATION-ERROR", \decode(), (model, "other"));
+        assertThrows("INVOICE-CODE-ERROR", \encode(), (model, 17));
+    }
+
+    providers() {
+        XsdSchema model = schema('<xs:element name="value" type="xs:int" fixed="17"/>');
+        foreach AbstractDataProviderType provider in (model.getElement("", "value").getDataProviderType(),
+                model.getNativeDataProviderType("", "value")) {
+            foreach AbstractDataProviderType variant in (provider, provider.getSoftType(), provider.getMandatoryType(),
+                    saved(provider)) {
+                assertEq(17, variant.acceptsValue(17));
+                assertThrows("RUNTIME-TYPE-ERROR", \variant.acceptsValue(), (18,));
+                assertEq(17, variant.getMandatoryType().getExampleValue());
+                assertEq(NOTHING, variant.getOrNothingType().acceptsValue(NOTHING));
+                assertThrows("MISSING-VALUE-ERROR", sub() { variant.getMandatoryType().acceptsValue(NOTHING); });
+            }
+        }
+    }
+    lists() {
+        string body = '<xs:simpleType name="Item"><xs:union memberTypes="xs:boolean xs:string"/></xs:simpleType>'
+            '<xs:simpleType name="Items"><xs:list itemType="Item"/></xs:simpleType>'
+            '<xs:element name="value" type="Items" fixed="1 label"/>';
+        XsdSchema model = saved(schema(body));
+        auto value = decode(model, "true label");
+        assertEq((True, "label"), value);
+        new XmlDoc(encode(model, saved(value)).getXml()).validateSchema(source(body));
+        assertThrows("SOAP-DESERIALIZATION-ERROR", \decode(), (model, "label true"));
+        assertThrows("SOAP-DESERIALIZATION-ERROR", \decode(), (model, "false label"));
+        assertThrows("SOAP-SERIALIZATION-ERROR", \encode(), (model, (False,"label")));
+        foreach AbstractDataProviderType provider in (model.getElement("", "value").getDataProviderType(),
+                model.getNativeDataProviderType("", "value")) {
+            new XmlDoc(encode(model, provider.getMandatoryType().getExampleValue()).getXml()).validateSchema(source(body));
+            assertThrows("RUNTIME-TYPE-ERROR", \provider.acceptsValue(), ((False,"label"),));
+        }
+        body = '<xs:simpleType name="Names"><xs:list itemType="xs:QName"/></xs:simpleType>'
+            '<xs:element name="value" type="Names" xmlns:p="urn:items" fixed="p:First p:Second"/>';
+        model = saved(schema(body));
+        value = decode(model, "q:First q:Second", 'xmlns:q="urn:items" xmlns:p="urn:wrong"');
+        assertTrue(value[0].equals(new XsdQNameValue("urn:items", "First")));
+        assertTrue(value[1].equals(new XsdQNameValue("urn:items", "Second")));
+        foreach AbstractDataProviderType provider in (model.getElement("", "value").getDataProviderType(),
+                model.getNativeDataProviderType("", "value")) {
+            provider = saved(provider.getMandatoryType());
+            new XmlDoc(encode(model, provider.acceptsValue(value)).getXml()).validateSchema(source(body));
+            new XmlDoc(encode(model, provider.getExampleValue()).getXml()).validateSchema(source(body));
+        }
+        assertThrows("SOAP-DESERIALIZATION-ERROR", \decode(), (model, "p:First p:Second", 'xmlns:p="urn:wrong"'));
+        body = '<xs:simpleType name="UriOrText"><xs:union memberTypes="xs:anyURI xs:string"/></xs:simpleType>'
+            '<xs:element name="value" type="UriOrText" fixed="urn:items"/>';
+        model = schema(body);
+        assertThrows("SOAP-DESERIALIZATION-ERROR", \decode(), (model, "urn:items", 'xsi:type="xs:string"'));
+        new XmlDoc(encode(model, decode(model, "urn:items", 'xsi:type="xs:anyURI"')).getXml()).validateSchema(source(body));
+    }
+
+    declarations() {
+        string body = '<xs:element name="value" type="xs:int" fixed="17"/>'
+            '<xs:element name="member" substitutionGroup="value" type="xs:int" fixed="29"/>'
+            '<xs:element name="container"><xs:complexType><xs:sequence><xs:element ref="value"'
+            ' minOccurs="0" maxOccurs="unbounded"/></xs:sequence></xs:complexType></xs:element>';
+        XsdSchema model = saved(schema(body));
+        XsdElement container = model.getElement("", "container");
+        auto parsed = XsdBase::expandElementNamespaces(parse_xml('<container><value>17</value><member>29</member></container>',
+            XPF_PRESERVE_ORDER))."{}container";
+        auto value = container.deserializeValue(model.getTypeMap(), NOTHING, parsed, True, True);
+        new XmlDoc(model.serializeXmlValue("", "container", value).getXml()).validateSchema(source(body));
+        parsed."{}member" = "17";
+        assertThrows("SOAP-DESERIALIZATION-ERROR", \container.deserializeValue(),
+            (model.getTypeMap(), NOTHING, parsed, True, True));
+        AbstractDataProviderType provider = saved(model.getNativeDataProviderType("", "value"));
+        hash<auto> selected = {"^element^":new XsdQNameValue("", "member"), "^val^":29};
+        XsdXmlValue output = encode(model, provider.acceptsValue(selected));
+        assertEq("member", output.getLocalName());
+        new XmlDoc(output.getXml()).validateSchema(source(body));
+        selected."^val^" = 17;
+        assertThrows("RUNTIME-TYPE-ERROR", \provider.acceptsValue(), (selected,));
+        assertThrows("RUNTIME-TYPE-ERROR", \provider.acceptsValue(), (29,));
+    }
+
+    private AbstractDataProviderType legacyProvider() {
+        return Serializable::deserialize(parse_hex_string(ReadOnlyFile::readTextFile(
+            get_script_dir() + "/wsdl-interop/fixtures/fixed-legacy/provider.hex")));
+    }
+
+    private XsdElement legacyElement(XsdElement original) {
+        hash<SerializationInfo> data = original.serializeToData();
+        int found = 0;
+        foreach string index in (keys data._index) {
+            if (data._index{index}.hasKey("_class_data")
+                    && data._index{index}._class_data."WSDL::XsdElement".hasKey("constraint_identity")) {
+                remove data._index{index}._class_data."WSDL::XsdElement".constraint_identity;
+                ++found;
+            }
+        }
+        assertGt(0, found);
+        return Serializable::deserialize(data);
+    }
+
+    legacy() {
+        AbstractDataProviderType provider = legacyProvider();
+        foreach AbstractDataProviderType variant in (provider, saved(provider)) {
+            assertEq(17, variant.acceptsValue(17));
+            assertThrows("RUNTIME-TYPE-ERROR", \variant.acceptsValue(), (18,));
+            assertEq(17, variant.getMandatoryType().getExampleValue());
+        }
+        XsdSchema model = schema('<xs:element name="value" type="xs:string" fixed="invoice"/>');
+        XsdElement element = model.getElement("", "value");
+        element.type = new CountingFixedValueType();
+        element.validateValueConstraintType();
+        model.emap."".value = legacyElement(element);
+        CountingFixedValueType type = cast<CountingFixedValueType>(model.getElement("", "value").type);
+        assertEq(1, type.decoded);
+        type.cancel_decode = True;
+        assertThrows("THREAD-CANCELLED", \encode(), (model, "invoice"));
+        assertEq(2, type.decoded);
+        type.cancel_decode = False;
+        assertTrue(encode(model, "invoice").getXml().find(">invoice</") >= 0);
+        assertEq(3, type.decoded);
+        assertTrue(encode(model, "invoice").getXml().find(">invoice</") >= 0);
+        assertEq(3, type.decoded);
+        assertThrows("SOAP-SERIALIZATION-ERROR", \encode(), (model, "other"));
+        assertEq(3, type.decoded);
+        model.emap."".value = saved(model.getElement("", "value"));
+        assertTrue(encode(model, "invoice").getXml().find(">invoice</") >= 0);
+        assertEq(3, cast<CountingFixedValueType>(model.getElement("", "value").type).decoded);
+    }
+
+    concurrency() {
+        AbstractDataProviderType provider = legacyProvider();
+        Qore::Thread::Queue ready();
+        Qore::Thread::Queue start();
+        Qore::Thread::Queue results();
+        Qore::Thread::Counter running();
+        on_exit {
+            start.push(True);
+            start.push(True);
+            assertEq(0, running.waitForZero(30s));
+        }
+        for (int worker = 0; worker < 2; ++worker) {
+            running.inc();
+            background sub() {
+                on_exit running.dec();
+                try {
+                    ready.push(True);
+                    start.get(30s);
+                    for (int index = 0; index < 20; ++index) {
+                        if (provider.acceptsValue(17) != 17) {
+                            throw "TEST-ERROR", "fixed value changed";
+                        }
+                        bool rejected = False;
+                        try {
+                            provider.acceptsValue(18);
+                        } catch (hash<ExceptionInfo> error) {
+                            if (error.err != "RUNTIME-TYPE-ERROR") {
+                                rethrow;
+                            }
+                            rejected = True;
+                        }
+                        if (!rejected) {
+                            throw "TEST-ERROR", "invalid fixed value accepted";
+                        }
+                    }
+                    results.push(True);
+                } catch (hash<ExceptionInfo> error) {
+                    results.push(error);
+                }
+            }();
+        }
+        assertTrue(ready.get(30s));
+        assertTrue(ready.get(30s));
+        start.push(True);
+        start.push(True);
+        assertEq(True, results.get(30s));
+        assertEq(True, results.get(30s));
+        assertEq(17, saved(provider).acceptsValue(17));
+    }
+
+    metadata() {
+        XsdSchema model = schema('<xs:element name="value" type="xs:int" fixed="17"/>');
+        XsdElement element = model.getElement("", "value");
+        AbstractDataProviderType original = element.type.getDataProviderType();
+        foreach AbstractDataProviderType provider in (element.getDataProviderType(), saved(element.getDataProviderType())) {
+            assertEq(original.getBaseTypeName(), provider.getBaseTypeName());
+            assertEq(original.getBaseTypeCode(), provider.getBaseTypeCode());
+            assertEq(original.hasType(), provider.hasType());
+            assertEq("int", provider.getInfo().base_type);
+            assertEq(original.getOrNothingType().getName(), provider.getOrNothingType().getName());
+            assertEq(original.getMandatoryType().getName(), provider.getMandatoryType().getName());
+            assertFalse(provider.getOrNothingType().getInfo().mandatory);
+            assertTrue(provider.getMandatoryType().getInfo().mandatory);
+            AbstractDataProviderType softened = provider.getSoftType();
+            assertEq(17, softened.acceptsValue("17"));
+            assertThrows("RUNTIME-TYPE-ERROR", \softened.acceptsValue(), ("18",));
+        }
+        AbstractDataProviderType tagged = new QoreDataType(Reflection::IntType, NOTHING, {"invoice_quantity":True});
+        AbstractDataProviderType constrained = new XsdFixedElementDataType(element, tagged);
+        assertEq(tagged.getTags(), saved(constrained).getInfo().tags);
+        model = schema('<xs:simpleType name="Items"><xs:list itemType="xs:int"/></xs:simpleType>'
+            '<xs:element name="value" type="Items" fixed="17 29"/>');
+        element = model.getElement("", "value");
+        constrained = saved(element.getDataProviderType());
+        assertTrue(element.type.getDataProviderType().isList());
+        assertTrue(constrained.isList());
+        assertEq(element.type.getDataProviderType().getElementType().getName(), constrained.getElementType().getName());
+        assertEq("int", constrained.getInfo().element_type.base_type);
+        model = schema('<xs:element name="value" fixed="17"><xs:complexType><xs:simpleContent>'
+            '<xs:extension base="xs:int"><xs:attribute name="unit" type="xs:token" use="required"/>'
+            '</xs:extension></xs:simpleContent></xs:complexType></xs:element>');
+        element = model.getElement("", "value");
+        constrained = saved(element.getDataProviderType());
+        assertEq(keys element.type.getDataProviderType().getFields(), keys constrained.getFields());
+        assertEq("hash", constrained.getInfo().base_type);
+        assertTrue(constrained.getFields()."^attributes^".getType().getFields().unit.isMandatory());
+        hash<SerializationInfo> state = constrained.serializeToData();
+        hash<SerializationInfo> reordered = state;
+        auto root = remove reordered._index."0";
+        reordered._index = {"0":root} + reordered._index;
+        AbstractDataProviderType forward = Serializable::deserialize(reordered);
+        assertEq({"^value^":17,"^attributes^":{"unit":"kg"}},
+            forward.acceptsValue({"^value^":17,"^attributes^":{"unit":"kg"}}));
+        foreach string member in ("element", "value_type", "optional") {
+            hash<SerializationInfo> invalid = state;
+            remove invalid._index."0"._class_data."WSDL::XsdFixedElementDataType"{member};
+            assertThrows("DESERIALIZATION-ERROR", \Serializable::deserialize(), (invalid,));
+        }
+        int removed = 0;
+        foreach string index in (keys state._index) {
+            if (state._index{index}.hasKey("_class_data")
+                    && state._index{index}._class_data."WSDL::XsdElement".hasKey("value_constraint")) {
+                remove state._index{index}._class_data."WSDL::XsdElement".value_constraint;
+                ++removed;
+            }
+        }
+        assertGt(0, removed);
+        AbstractDataProviderType invalid_declaration = Serializable::deserialize(state);
+        assertThrows("DESERIALIZATION-ERROR", \invalid_declaration.acceptsValue(),
+            ({"^value^":17,"^attributes^":{"unit":"kg"}},));
+    }
+
+}

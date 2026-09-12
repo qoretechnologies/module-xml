@@ -80,6 +80,9 @@ module WSDL {
     @section wsdlrelnotes WSDL Module Release Notes
 
     @subsection wsdl_0_5_8 WSDL v0.5.8
+    - explicit nonempty element values enforce fixed constraints by their selected XSD value space,
+      including unions, lists, mixed text and dynamic types; ordinary/native providers and saved graphs
+      perform the same checks and generate constrained examples
     - complex-content extensions of anyType inherit its mixed lax wildcard particle, including empty
       compositors and transitive derivation; mixed-content and ambiguity constraints remain enforced
     - element wildcard metadata follows active inherited particles and resolved model groups, preserving
@@ -6878,6 +6881,12 @@ public class XsdListDataType inherits AbstractDataProviderType {
         return "list";
     }
 
+    #! reports native list behavior while requiring item validation
+    /** @return True */
+    bool isList() {
+        return True;
+    }
+
     #! requires validation for all values
     /** @return an empty map */
     *hash<string, bool> getDirectTypeHash() {
@@ -9567,6 +9576,9 @@ class XsdGenericValueHelper {
     }
 
     static hash<auto> encode(XsdBaseType type, Namespaces output, hash<auto> value, *softbool omit_type) {
+        *XsdDocumentValueResult receiver = GenericDocumentValueResult;
+        GenericDocumentValueResult = NOTHING;
+        on_exit GenericDocumentValueResult = receiver;
         try {
             checkXmlData(value);
             hash<auto> wire = XsdBase::restoreElementNamespaces(value);
@@ -9579,7 +9591,8 @@ class XsdGenericValueHelper {
                 XsdWildcardElementHelper::validateLaxContent(type.nsc, types, NOTHING, assessed,
                     XsdBase::getExpandedAttributes(assessed."^attributes^"));
             } else {
-                auto checked = XsdDocumentValueHelper::deserializeValue(selected, type.name, types, NOTHING, assessed);
+                auto checked = XsdDocumentValueHelper::deserializeValue(selected, type.name, types, NOTHING, assessed,
+                    False, receiver);
             }
             if (XsdQNameOutputScope::retains(output)) {
                 wire = retainLexicalContext(wire);
@@ -10882,6 +10895,9 @@ class XsdElementFieldHelper {
         AbstractDataProviderType result = NativeTypeProviderContext
             ? new XsdNativeTypeDataType(NativeTypeProviderContext.getDefinition(element.type), element)
             : element.type.getDataProviderType();
+        if (!NativeTypeProviderContext && element.getValueConstraint().fixed) {
+            result = new XsdFixedElementDataType(element, result);
+        }
         if (!NativeTypeProviderContext && element.nillable) {
             result = new XsdNillableDataType(element, result);
         }
@@ -11125,6 +11141,8 @@ public class XsdElement inherits WSDL::XsdTypedData {
 
     private {
         *hash<XsdElementValueConstraintInfo> value_constraint;
+        *hash<XsdUnionValueIdentity> constraint_identity;
+        transient *Mutex constraint_mutex;
         hash<string, bool> blocked_substitutions();
         bool abstract_element = False;
         hash<string, bool> substitution_exclusions();
@@ -11132,6 +11150,13 @@ public class XsdElement inherits WSDL::XsdTypedData {
         *XsdElement substitution_head;
         *XsdElement declaration_ref;
         hash<string, XsdElement> substitution_members();
+    }
+
+    private:internal deserializeMembers(hash<auto> members) {
+        self += members;
+        # This hook restores only local state: referenced types may not yet have
+        # their members restored. Legacy constraint identity is resolved on use.
+        constraint_mutex = exists value_constraint ? new Mutex() : NOTHING;
     }
 
     #! constructs an element declaration or a reference to a global element
@@ -11206,6 +11231,7 @@ public class XsdElement inherits WSDL::XsdTypedData {
             string lexical = a.fixed ?? a.default;
             value_constraint = <XsdElementValueConstraintInfo>{"fixed": exists a.fixed, "lexical": lexical,
                 "namespaces": XsdQNameContextHelper::capture(lexical, nsc)};
+            constraint_mutex = new Mutex();
         }
         on_success {
             if (value_constraint) {
@@ -11241,6 +11267,11 @@ public class XsdElement inherits WSDL::XsdTypedData {
         if (!value_constraint) {
             return;
         }
+        AutoLock lock(constraint_mutex);
+        resolveValueConstraint();
+    }
+
+    private resolveValueConstraint() {
         XsdAbstractType content = type;
         if (type instanceof XsdComplexType) {
             XsdComplexType complex_type = cast<XsdComplexType>(type);
@@ -11260,9 +11291,13 @@ public class XsdElement inherits WSDL::XsdTypedData {
                 XsdQNameContextHelper::attributes(value_constraint.namespaces), True);
             # Schema declarations require datatype validity. Document-dependent ENTITY
             # requirements apply when an instance uses the constraint, as for attributes.
+            XsdDocumentValueCapture capture(content);
             auto converted = content.deserializeValue(name, new hash<string, XsdAbstractType>(), NOTHING,
                 value_constraint.lexical);
+            *hash<XsdUnionValueIdentity> identity = capture.valueIdentity(value_constraint.lexical, converted,
+                SOAP_DESERIALIZATION_ERROR);
             value_constraint.value = converted;
+            constraint_identity = identity;
         } catch (hash<ExceptionInfo> error) {
             if (error.err == "PROGRAM-INTERRUPTED" || error.err == "THREAD-CANCELLED") {
                 rethrow;
@@ -11281,6 +11316,37 @@ public class XsdElement inherits WSDL::XsdTypedData {
     */
     *hash<XsdElementValueConstraintInfo> getValueConstraint() {
         return declaration_ref ? declaration_ref.getValueConstraint() : value_constraint;
+    }
+
+    private *hash<XsdUnionValueIdentity> getConstraintIdentity() {
+        if (declaration_ref) {
+            return declaration_ref.getConstraintIdentity();
+        }
+        if (!value_constraint) {
+            return;
+        }
+        AutoLock lock(constraint_mutex);
+        if (!constraint_identity) {
+            # Providers saved before computed identity metadata existed retain the
+            # declaration's lexical form and type graph. Resolve only after that
+            # graph is fully reconstructed; publish once, and retry after errors.
+            resolveValueConstraint();
+        }
+        return constraint_identity;
+    }
+
+    private checkFixedValue(auto content, *hash<XsdUnionValueIdentity> actual, string error) {
+        if (!getValueConstraint().fixed) {
+            return;
+        }
+        string text = XsdFixedValueHelper::text(content, error);
+        if (!text.length()) {
+            return;
+        }
+        *hash<XsdUnionValueIdentity> expected = getConstraintIdentity();
+        if (!actual || !expected || !XsdUnionValueHelper::same(expected, actual)) {
+            throw error, sprintf("element %Y does not match its fixed value", name);
+        }
     }
 
     AbstractDataProviderType getDataProviderType() {
@@ -11680,7 +11746,10 @@ public class XsdElement inherits WSDL::XsdTypedData {
         # An anonymous simple type cannot be named by xsi:type. Its restriction
         # base or union member must not be substituted for that anonymous component.
         bool omit_selected_type = omitType || (selected instanceof XsdSimpleType && !selected.hasRealName());
-        auto converted = XsdDocumentValueHelper::serializeValue(selected, namespaces, value, omit_selected_type);
+        *XsdDocumentValueResult captured = getValueConstraint().fixed ? new XsdDocumentValueResult() : NOTHING;
+        auto converted = XsdDocumentValueHelper::serializeValue(selected, namespaces, value, omit_selected_type,
+            captured);
+        checkFixedValue(converted, captured.identity, SOAP_SERIALIZATION_ERROR);
         if (!type_attributes) {
             return converted;
         }
@@ -11772,8 +11841,11 @@ public class XsdElement inherits WSDL::XsdTypedData {
                 && XsdTypeDerivationHelper::sameType(type, selected)) ? nil : NOTHING;
             return XsdNativeTypeValueHelper::retain(type, selected, retained);
         }
-        return XsdNativeTypeValueHelper::retain(type, selected,
-            XsdDocumentValueHelper::deserializeValue(selected, name, tmap, references, value));
+        *XsdDocumentValueResult captured = getValueConstraint().fixed ? new XsdDocumentValueResult() : NOTHING;
+        auto converted = XsdDocumentValueHelper::deserializeValue(selected, name, tmap, references, value, False,
+            captured);
+        checkFixedValue(value, captured.identity, SOAP_DESERIALIZATION_ERROR);
+        return XsdNativeTypeValueHelper::retain(type, selected, converted);
     }
 
     private *XsdNilValue assessNil(XsdAbstractType selected, auto value) {
@@ -11988,6 +12060,183 @@ class XsdNativeTypeProviderHelper {
             value = value."^val^";
         }
         return value instanceof XsdNilValue ? NOTHING : value;
+    }
+}
+
+#! An ordinary native value constrained by its receiving element's fixed value
+/** Preserves the underlying scalar, list or record conversion and metadata, while
+    validating the result against the receiving declaration before returning it.
+    @par Example
+    An invoice connector accepts only the schema's fixed currency, including after
+    soft conversion or Serializable reconstruction.
+    @since %WSDL 0.5.8
+*/
+public class XsdFixedElementDataType inherits AbstractDataProviderType {
+    private {
+        XsdElement element;
+        AbstractDataProviderType value_type;
+        bool optional;
+    }
+    #! wraps the native provider of a constrained receiving element
+    /** @param element the receiving declaration
+        @param value_type the ordinary native conversion provider
+        @throw XSD-SIMPLETYPE-ERROR the element has no fixed constraint
+    */
+    constructor(XsdElement element, AbstractDataProviderType value_type) {
+        if (!element.getValueConstraint().fixed) {
+            throw "XSD-SIMPLETYPE-ERROR", "a fixed element provider requires a fixed constraint";
+        }
+        self.element = element;
+        self.value_type = value_type;
+        optional = value_type.isOrNothingType();
+    }
+    private:internal deserializeMembers(hash<auto> members) {
+        if (!(members.element instanceof XsdElement) || !(members.value_type instanceof AbstractDataProviderType)
+                || members.optional.typeCode() != NT_BOOLEAN) {
+            throw "DESERIALIZATION-ERROR", "a fixed element provider requires its constraint, value type and optionality";
+        }
+        element = members.element;
+        value_type = members.value_type;
+        optional = members.optional;
+    }
+    private checkDeclaration() {
+        # Referenced declarations may be restored later than this provider.
+        if (!element.getValueConstraint().fixed) {
+            throw "DESERIALIZATION-ERROR", "a fixed element provider requires a fixed receiving declaration";
+        }
+    }
+    #! returns the receiving native type name
+    /** @return the underlying provider's name */
+    string getName() {
+        return (optional ? value_type.getOrNothingType() : value_type.getMandatoryType()).getName();
+    }
+    #! describes the receiving value constraint
+    /** @return the fixed-value contract */
+    string getDesc() { return "Accepts the declared native value only when it satisfies the element's fixed value."; }
+    #! preserves underlying semantic tags
+    /** @return the native provider tags */
+    *hash<auto> getTags() { return value_type.getTags(); }
+    #! preserves the native value category independently of validation
+    /** @return the underlying Qore base type name */
+    string getBaseTypeName() { return value_type.getBaseTypeName(); }
+    #! preserves the native value category independently of validation
+    /** @return the underlying Qore base type code */
+    int getBaseTypeCode() { return value_type.getBaseTypeCode(); }
+    #! preserves whether the native value has a defined type
+    /** @return the underlying type's specificity */
+    bool hasType() { return value_type.hasType(); }
+    #! includes native tags in recursively generated provider metadata
+    /** @param simple whether simplified type names are requested
+        @return this constrained provider's metadata
+    */
+    hash<DataTypeInfo> getInfo(*bool simple) {
+        hash<DataTypeInfo> result = AbstractDataProviderType::getInfo(simple);
+        result.tags = getTags();
+        return result;
+    }
+    #! requires constraint checking for each value
+    /** @return NOTHING */
+    *Type getValueType() { return; }
+    #! prevents direct primitive acceptance from bypassing the fixed value
+    /** @return an empty map */
+    *hash<string, bool> getDirectTypeHash() { return {}; }
+    #! preserves record field metadata
+    /** @return the underlying fields */
+    *hash<string, AbstractDataField> getFields() { return value_type.getFields(); }
+    #! preserves list item metadata
+    /** @return the underlying list item type */
+    *AbstractDataProviderType getElementType() { return value_type.getElementType(); }
+    #! preserves native list behavior
+    /** @return whether the value is a list */
+    bool isList() { return value_type.isList(); }
+    #! reports omission permission
+    /** @return True for an optional variant */
+    bool isOrNothingType() { return optional; }
+    #! reports requiredness
+    /** @return True for a mandatory variant */
+    bool isMandatory() { return !optional; }
+    #! returns accepted native input types
+    /** @param simple whether simplified names are requested
+        @return the native input types and this variant's optionality
+    */
+    hash<string, bool> getAcceptTypeHash(*bool simple) {
+        return (optional ? value_type.getOrNothingType() : value_type.getMandatoryType()).getAcceptTypeHash(simple);
+    }
+    #! returns produced native types
+    /** @param simple whether simplified names are requested
+        @return the native output types and this variant's optionality
+    */
+    hash<string, bool> getReturnTypeHash(*bool simple) {
+        return (optional ? value_type.getOrNothingType() : value_type.getMandatoryType()).getReturnTypeHash(simple);
+    }
+    #! creates an example using the declared fixed value
+    /** @param emap declarations visited during sample generation
+        @param fname optional field name
+        @return a constrained example, or NOTHING for an optional variant
+        @throw DATA-ERROR required attributes cannot be generated
+        @throw DESERIALIZATION-ERROR the restored receiving declaration has no fixed constraint
+    */
+    auto getExampleValue(*hash<string, bool> emap, *string fname) {
+        if (optional) {
+            return;
+        }
+        checkDeclaration();
+        auto value = element.getValueConstraint().value;
+        if (element.type instanceof XsdComplexType) {
+            auto example = value_type.getMandatoryType().getExampleValue(emap, fname);
+            value = {"^value^":value, "^attributes^":example.typeCode() == NT_HASH ? example."^attributes^" : NOTHING};
+        }
+        return acceptsValue(value);
+    }
+    #! converts and checks a native value against the receiving declaration
+    /** @param value the native value
+        @return its validated native conversion
+        @throw MISSING-VALUE-ERROR an omitted mandatory value
+        @throw RUNTIME-TYPE-ERROR the value violates the fixed constraint
+        @throw DESERIALIZATION-ERROR the restored receiving declaration has no fixed constraint
+        @note Cancellation and custom conversion errors propagate unchanged.
+    */
+    auto acceptsValue(auto value) {
+        if (!exists value) {
+            if (optional) {
+                return;
+            }
+            throw "MISSING-VALUE-ERROR", sprintf("value %Y must be supplied", getName());
+        }
+        checkDeclaration();
+        value = value_type.acceptsValue(value);
+        try {
+            Namespaces output = element.type.nsc.copy();
+            XsdQNameOutputScope scope(output);
+            element.serializeOccurrence(output, value, True, element.name, getName());
+        } catch (hash<ExceptionInfo> error) {
+            if (error.err == SOAP_SERIALIZATION_ERROR) {
+                rethrow "RUNTIME-TYPE-ERROR", error.desc, error.arg;
+            }
+            rethrow;
+        }
+        return value;
+    }
+    #! permits omission
+    /** @return an optional copy */
+    AbstractDataProviderType getOrNothingType() {
+        XsdFixedElementDataType result = self.copy();
+        result.optional = True;
+        return result;
+    }
+    #! requires a value
+    /** @return a mandatory copy */
+    AbstractDataProviderType getMandatoryType() {
+        XsdFixedElementDataType result = self.copy();
+        result.optional = False;
+        return result;
+    }
+    #! softens native conversion while retaining the fixed check
+    /** @return a copy with the soft native provider */
+    AbstractDataProviderType getSoftType() {
+        XsdFixedElementDataType result = self.copy();
+        result.value_type = value_type.getSoftType();
+        return result;
     }
 }
 
@@ -12565,6 +12814,9 @@ public class XsdNativeTypeDataType inherits AbstractDataProviderType {
             return;
         }
         if (!definition.declared.isAbstract()) {
+            if (element && element.getValueConstraint().fixed) {
+                return new XsdFixedElementDataType(element, nativeType()).getMandatoryType().getExampleValue(emap, fname);
+            }
             return nativeType().getMandatoryType().getExampleValue(emap, fname);
         }
         foreach XsdAbstractType candidate in (definition.owner.types.iterator()) {
@@ -13692,10 +13944,19 @@ class XsdUnionInputHelper {
     }
 }
 
-hashdecl XsdUnionValueIdentity {
+#! Computed XSD value identity retained by a union or element constraint
+/** The value-space family keeps distinct primitive values separate even when
+    their lexical spellings match. Public visibility permits Serializable to
+    reconstruct provider graphs containing resolved element constraints.
+    @since %WSDL 0.5.8
+*/
+public hashdecl XsdUnionValueIdentity {
+    #! The primitive family, list variety or custom native conversion identity
     string family;
+    #! The already computed comparable value
     auto value;
-    # Instance obligations are independent of primitive value equality.
+    #! Unparsed entity names requiring containing-document declarations
+    /** These instance obligations are independent of primitive value equality. */
     *list<string> entities;
 }
 
@@ -13760,6 +14021,35 @@ thread_local *XsdProviderUnionItemCapture ProviderUnionItemCapture;
 # Scoped to retained XML validation; no namespace allocations reach shared schema state.
 thread_local *Namespaces RetainedXmlValidationNamespaces;
 
+class XsdFixedValueHelper {
+    static string text(auto data, string error) {
+        if (data.typeCode() != NT_HASH) {
+            return exists data ? XsdUnionValueHelper::text(data, error) : "";
+        }
+        list<string> fragments();
+        foreach string key in (keys data) {
+            if (key == "^attributes^" || key == ".ns" || key.startsWith("^comment")) {
+                continue;
+            }
+            if (!key.startsWith("^value") && !key.startsWith("^cdata")) {
+                throw error, "an element with a fixed value cannot contain child elements";
+            }
+            if (exists data{key}) {
+                fragments += XsdUnionValueHelper::text(data{key}, error);
+            }
+        }
+        return fragments.join("");
+    }
+}
+
+class XsdDocumentValueResult {
+    public {
+        *hash<XsdUnionValueIdentity> identity;
+    }
+}
+
+thread_local *XsdDocumentValueResult GenericDocumentValueResult;
+
 class XsdDocumentValueHelper {
     static hash<auto> typeAttributes(XsdAbstractType type, Namespaces output, *string local_name) {
         string uri = type.ons ? type.nsc.getOutputNamespaceUri(type.ons) : "";
@@ -13768,13 +14058,20 @@ class XsdDocumentValueHelper {
             (prefix ? prefix + ":" : "") + (local_name ?? type.name)};
     }
 
-    static auto serializeValue(XsdAbstractType type, Namespaces nsc, auto value, *softbool omitType) {
+    static auto serializeValue(XsdAbstractType type, Namespaces nsc, auto value, *softbool omitType,
+            *XsdDocumentValueResult captured) {
         if (type.isAbstract()) {
             throw SOAP_SERIALIZATION_ERROR, sprintf("abstract type %Y cannot validate an instance", type.name);
         }
+        *XsdDocumentValueResult caller = GenericDocumentValueResult;
+        on_exit GenericDocumentValueResult = caller;
+        GenericDocumentValueResult = XsdGenericValueHelper::isGeneric(type) ? captured : NOTHING;
         XsdDocumentValueCapture capture(type);
         auto converted = type.serializeValue(nsc, value, omitType);
         capture.validate(value, converted, SOAP_SERIALIZATION_ERROR);
+        if (captured && !captured.identity) {
+            captured.identity = capture.valueIdentity(value, converted, SOAP_SERIALIZATION_ERROR, True);
+        }
         return converted;
     }
 
@@ -13806,13 +14103,17 @@ class XsdDocumentValueHelper {
     }
 
     static auto deserializeValue(XsdAbstractType type, string name, hash<string, XsdAbstractType> tmap,
-            *hash<auto> references, auto value, bool retain_selection = False) {
+            *hash<auto> references, auto value, bool retain_selection = False,
+            *XsdDocumentValueResult captured) {
         XsdQNameNamespaceScope scope(value.typeCode() == NT_HASH ? value."^attributes^" : NOTHING);
         XsdAbstractType declared = type;
         type = XsdTypeSubstitutionHelper::select(\value, type, tmap, name);
         XsdDocumentValueCapture capture(type);
         auto converted = type.deserializeValue(name, tmap, references, value);
         capture.validate(value, converted, SOAP_DESERIALIZATION_ERROR);
+        if (captured) {
+            captured.identity = capture.valueIdentity(value, converted, SOAP_DESERIALIZATION_ERROR);
+        }
         # Generic XML decoding assesses the complete content. Re-encoding its
         # retained lexical tree would duplicate that assessment at every depth.
         if (RetainedXmlValidationNamespaces && !XsdGenericValueHelper::isGeneric(type)) {
@@ -13836,15 +14137,19 @@ class XsdDocumentValueCapture {
     }
 
     constructor(XsdAbstractType type) {
+        if (type instanceof XsdComplexType && cast<XsdComplexType>(type).simpleType) {
+            type = cast<XsdComplexType>(type).simpleType;
+        }
         self.type = type;
         caller_item = SchemaUnionItemCapture;
         caller_list = SchemaUnionListCapture;
         if (XsdUnionValueHelper::schemaUnionItem(type)) {
-            item = new XsdSchemaUnionItemCapture(type);
+            item = caller_item && caller_item.target === type ? caller_item : new XsdSchemaUnionItemCapture(type);
         }
         *XsdSimpleType list_type = XsdUnionValueHelper::listType(type);
         if (list_type && XsdUnionValueHelper::schemaUnionItem(list_type.listItemType)) {
-            list = new XsdSchemaUnionItemCapture(list_type);
+            list = caller_list && caller_list.target === list_type ? caller_list
+                : new XsdSchemaUnionItemCapture(list_type);
         }
         SchemaUnionItemCapture = item;
         SchemaUnionListCapture = list;
@@ -13853,6 +14158,36 @@ class XsdDocumentValueCapture {
     destructor() {
         SchemaUnionItemCapture = caller_item;
         SchemaUnionListCapture = caller_list;
+    }
+
+    *hash<XsdUnionValueIdentity> valueIdentity(auto input, auto converted, string error, bool serialized = False) {
+        if (item || list) {
+            return item ? item.identity : list.identity;
+        }
+        *hash<XsdUnionAtomicInfo> atomic = XsdUnionValueHelper::describeAtomic(type);
+        if (atomic) {
+            return XsdUnionValueHelper::atomicIdentity(atomic, input, converted, error);
+        }
+        *hash<XsdUnionListInfo> info = XsdUnionValueHelper::describeList(type);
+        if (info) {
+            return XsdUnionValueHelper::listIdentity(info, input, converted, error);
+        }
+        if (XsdGenericValueHelper::isGeneric(type)
+                || (type instanceof XsdComplexType && cast<XsdComplexType>(type).hasMixedContent())) {
+            return <XsdUnionValueIdentity>{"family": "string", "value":
+                XsdFixedValueHelper::text(input, error)};
+        }
+        if (type instanceof XsdBaseType && XsdUnionValueHelper::supports(type.name)) {
+            # Custom native conversions still exchange the declared builtin's XML
+            # value space. Assess that XML without invoking the custom converter again.
+            hash<XsdUnionAtomicInfo> builtin_info = <XsdUnionAtomicInfo>{"builtin":type.name, "white_space":type.getWhiteSpace(),
+                "preserve_lexical":False};
+            auto lexical = serialized ? converted : input;
+            return XsdUnionValueHelper::atomicIdentity(builtin_info, lexical, lexical, error);
+        }
+        return <XsdUnionValueIdentity>{"family": "native:" + Class::getClass(type).getPathName()
+            + ":" + type_qname(type.ons ? type.nsc.getOutputNamespaceUri(type.ons) : "", type.name),
+            "value": serialized ? input : converted};
     }
 
     validate(auto input, auto converted, string error) {
@@ -13880,7 +14215,7 @@ class XsdUnionValueHelper {
         "Name": True, "NCName": True, "NMTOKEN": True, "ID": True, "IDREF": True, "ENTITY": True};
 
     static bool supports(string builtin) {
-        return builtin == "QName" || XsdNumericFacetHelper::isType(builtin) || builtin == "boolean" || builtin == "duration" || builtin == "hexBinary"
+        return builtin == "QName" || builtin == "anyURI" || builtin == "anySimpleType" || XsdNumericFacetHelper::isType(builtin) || builtin == "boolean" || builtin == "duration" || builtin == "hexBinary"
             || builtin == "base64Binary" || StringFamily{builtin} || XsdBuiltinListHelper::isType(builtin)
             || XsdCalendarLexicalHelper::isType(builtin);
     }
@@ -14147,10 +14482,10 @@ class XsdUnionValueHelper {
             return <XsdUnionValueIdentity>{"family": "list", "value": values,
                 "entities": builtin == "ENTITIES" ? lexical.split(" ") : NOTHING};
         }
-        if (StringFamily{builtin}) {
+        if (StringFamily{builtin} || builtin == "anyURI" || builtin == "anySimpleType") {
             string lexical = XsdSimpleType::normalizeWhiteSpace(
                 string(XsdScalarTextHelper::value(input, error)), info.white_space);
-            return <XsdUnionValueIdentity>{"family": "string", "value": lexical,
+            return <XsdUnionValueIdentity>{"family": builtin == "anyURI" ? "anyURI" : "string", "value": lexical,
                 "entities": builtin == "ENTITY" ? (lexical,) : NOTHING};
         }
         if (builtin == "hexBinary" || builtin == "base64Binary") {

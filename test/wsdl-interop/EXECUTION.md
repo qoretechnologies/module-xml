@@ -7550,3 +7550,36 @@ See [inheritance evidence](anytype-inheritance-evidence.md),
 Remote was fetched with no incoming commits. No main-Qore mutation, installation
 or push was made. Next: instance fixed/default value semantics and identities,
 the remaining dynamic-type legacy projection result, then P6-P9 acceptance.
+
+
+## P5-16g — receiving-element fixed-value identity
+
+2026-09-12; parent `46f73cd`. Explicit nonempty fixed content now compares computed
+XSD identities after its original conversion. Union member identity, ordered
+lists, expanded QNames, mixed text and generic selected types remain distinct.
+Ordinary/native providers enforce the receiving constraint and generate fixed
+examples with required attributes. Old saved providers migrate missing identity
+once under a lock after graph reconstruction; cancellation permits retry.
+
+The audit fixed provider base-category metadata, native XSD list classification
+and premature foreign-object inspection during restoration. Exact old provider
+bytes, forward provider references, custom conversion counts, malformed state,
+concurrent first use and cancellation recovery are tested. A separate Qore
+transient-initializer crash is root-caused with a standalone reproducer in
+`/tmp/wsdl-transient-member-restore/README.md`; no core change is included.
+
+Final acceptance passes 146 source suites (1,387 cases/67,922 reported assertions),
+AST/IR/JIT and compiled-module unit/HTTP consumers. Source and AOT independent
+matrices pass 53 schemas/172 documents/688 real SOAP directions/1,257 outputs.
+Sixteen survey tests, native values and union identity matrices pass. The final
+new Qore suite has zero Valgrind errors/lost blocks. WSDL qmod/Doxygen and the
+executed invoice example are warning-free. Full audit: 19 Pass, 43 N/A, 0 Fail.
+
+Every diagnostic survey row and coverage case object is unchanged from P5-16f:
+144 selected WSDLs/1,388 directions pass, with four valid-input directions and
+twenty broader failures still visible. Historical fixtures, catalogs and findings
+are unchanged. Earlier runs are superseded by frozen-source `final/` evidence.
+See [fixed-value evidence](fixed-values-evidence.md), [inventory](P5-16g-validation.json)
+and [audit](audits/P5-16g-fixed-values.md). Remote was fetched with no incoming
+commit; no push, installation or main-Qore mutation. Next: empty-element defaults,
+identity constraints, the legacy dynamic-type projection decision and P6-P9.
