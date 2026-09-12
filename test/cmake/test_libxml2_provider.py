@@ -162,6 +162,8 @@ include("{REPO}/cmake/QoreXmlLibXml2TimeValueFix.cmake")
 qore_xml_fix_libxml2_time_values("{cls.source}" "${{CMAKE_CURRENT_BINARY_DIR}}/libxml")
 include("{REPO}/cmake/QoreXmlLibXml2ValueAllocationFix.cmake")
 qore_xml_fix_libxml2_value_allocation("{cls.source}" "${{CMAKE_CURRENT_BINARY_DIR}}/libxml")
+include("{REPO}/cmake/QoreXmlLibXml2ParticleLayoutFix.cmake")
+qore_xml_fix_libxml2_particle_layout("{cls.source}" "${{CMAKE_CURRENT_BINARY_DIR}}/libxml")
 ''')
         cls.fixed = cls.root / "fixed/build-debug"
         cls.run_command(["cmake", "-S", fixed_project, "-B", cls.fixed, "-DCMAKE_BUILD_TYPE=Debug",
@@ -206,6 +208,7 @@ qore_xml_fix_libxml2_value_allocation("{cls.source}" "${{CMAKE_CURRENT_BINARY_DI
         self.assertIn("time_values=PASS", output)
         self.assertIn("value_allocation=PASS", output)
         self.assertIn("unsigned_values=PASS", output)
+        self.assertIn("builtin_particles=PASS", output)
         stage = self.root / "stage"
         self.run_command(["cmake", "--install", self.root / "bundled", "--prefix", stage])
         self.assertEqual(["bin/probe", "share/licenses/qore-xml/libxml2-NOTICES.txt"],
@@ -645,9 +648,78 @@ qore_xml_fix_libxml2_uris("{self.source}" "${{CMAKE_CURRENT_BINARY_DIR}}/libxml"
                        f"-DFETCHCONTENT_SOURCE_DIR_QORE_XML_LIBXML2={self.source}")
         self.assertEqual(stamps, [(p.stat().st_mtime_ns, hashlib.sha256(p.read_bytes()).hexdigest()) for p in paths])
 
+    def test_builtin_particle_layout_detection_and_idempotence(self):
+        import hashlib
+        project = self.root / "particle-layout-broken/source"
+        project.mkdir(parents=True)
+        (project / "CMakeLists.txt").write_text(self.previous_particle_layout_fixture())
+        build = self.root / "particle-layout-broken/build-debug"
+        self.run_command(["cmake", "-S", project, "-B", build, "-DCMAKE_BUILD_TYPE=Debug",
+                          "-DBUILD_SHARED_LIBS=ON", "-DLIBXML2_WITH_PROGRAMS=OFF",
+                          "-DLIBXML2_WITH_TESTS=OFF", "-DLIBXML2_WITH_PYTHON=OFF"])
+        self.run_command(["cmake", "--build", build, "--target", "LibXml2", "-j4"])
+        libraries = list((build / "libxml").glob("libxml2.so")) + list((build / "libxml").glob("libxml2.dylib"))
+        self.assertEqual(1, len(libraries))
+        options = [f"-DLIBXML2_LIBRARY={libraries[0]}", f"-DLIBXML2_INCLUDE_DIR={self.fixed_include}",
+                   f"-DFETCHCONTENT_SOURCE_DIR_QORE_XML_LIBXML2={self.source}"]
+        output = self.configure("particle-layout-broken-auto", "-DQORE_XML_LIBXML2_PROVIDER=AUTO", *options)
+        self.assertIn("using private static libxml2 2.15.4", output)
+        probe = (self.root / "particle-layout-broken-auto/system-libxml2/namespace-probe.log").read_text()
+        self.assertIn("fixed_values=PASS", probe)
+        self.assertIn("value_allocation=PASS", probe)
+        self.assertNotIn("builtin_particles=PASS", probe)
+        self.configure("particle-layout-broken-system", "-DQORE_XML_LIBXML2_PROVIDER=SYSTEM", *options, success=False)
+        folder = self.root / "bundled/_deps/qore_xml_libxml2-build/qore-particle-layout-fix"
+        paths = [folder / name for name in ("xmlschemas.c", "xmlschemastypes.c", "libxml2-particle-layout.h")]
+        stamps = [(p.stat().st_mtime_ns, hashlib.sha256(p.read_bytes()).hexdigest()) for p in paths]
+        self.configure("bundled", "-DQORE_XML_LIBXML2_PROVIDER=BUNDLED",
+                       f"-DFETCHCONTENT_SOURCE_DIR_QORE_XML_LIBXML2={self.source}")
+        self.assertEqual(stamps, [(p.stat().st_mtime_ns, hashlib.sha256(p.read_bytes()).hexdigest()) for p in paths])
+
+    def previous_particle_layout_fixture(self):
+        """Keep all previous corrections with the inconsistent builtin particle layout."""
+        fixed = (self.root / "fixed/source/CMakeLists.txt").read_text()
+        fixed = fixed.replace(f'include("{REPO}/cmake/QoreXmlLibXml2ParticleLayoutFix.cmake")\n', "")
+        return fixed.replace(f'qore_xml_fix_libxml2_particle_layout("{self.source}" '
+                             '"${CMAKE_CURRENT_BINARY_DIR}/libxml")\n', "")
+
+    def test_group_content_detection_with_correct_particle_layout(self):
+        project = self.root / "group-content-broken/source"
+        project.mkdir(parents=True)
+        fixture = (self.root / "fixed/source/CMakeLists.txt").read_text()
+        fixture += '''
+get_target_property(native_sources LibXml2 SOURCES)
+set(original "${CMAKE_CURRENT_BINARY_DIR}/libxml/qore-particle-layout-fix/xmlschemas.c")
+file(READ "${original}" source)
+string(REPLACE [=[((particle->node == NULL) || !xmlStrEqual(particle->node->name, BAD_CAST "group")) &&]=]
+               "" source "${source}")
+set(replacement "${CMAKE_CURRENT_BINARY_DIR}/group-content-broken.c")
+file(WRITE "${replacement}" "${source}")
+list(REMOVE_ITEM native_sources "${original}")
+list(APPEND native_sources "${replacement}")
+set_property(TARGET LibXml2 PROPERTY SOURCES "${native_sources}")
+'''
+        (project / "CMakeLists.txt").write_text(fixture)
+        build = self.root / "group-content-broken/build-debug"
+        self.run_command(["cmake", "-S", project, "-B", build, "-DCMAKE_BUILD_TYPE=Debug",
+                          "-DBUILD_SHARED_LIBS=ON", "-DLIBXML2_WITH_PROGRAMS=OFF",
+                          "-DLIBXML2_WITH_TESTS=OFF", "-DLIBXML2_WITH_PYTHON=OFF"])
+        self.run_command(["cmake", "--build", build, "--target", "LibXml2", "-j4"])
+        libraries = list((build / "libxml").glob("libxml2.so")) + list((build / "libxml").glob("libxml2.dylib"))
+        self.assertEqual(1, len(libraries))
+        options = [f"-DLIBXML2_LIBRARY={libraries[0]}", f"-DLIBXML2_INCLUDE_DIR={self.fixed_include}",
+                   f"-DFETCHCONTENT_SOURCE_DIR_QORE_XML_LIBXML2={self.source}"]
+        output = self.configure("group-content-broken-auto", "-DQORE_XML_LIBXML2_PROVIDER=AUTO", *options)
+        self.assertIn("using private static libxml2 2.15.4", output)
+        probe = (self.root / "group-content-broken-auto/system-libxml2/namespace-probe.log").read_text()
+        self.assertIn("fixed_values=PASS", probe)
+        self.assertIn("value_allocation=PASS", probe)
+        self.assertIn("builtin_particles=FAIL", probe)
+        self.configure("group-content-broken-system", "-DQORE_XML_LIBXML2_PROVIDER=SYSTEM", *options, success=False)
+
     def previous_value_space_fixture(self):
         """Build earlier corrections without time/unsigned/allocation corrections."""
-        fixed = (self.root / "fixed/source/CMakeLists.txt").read_text()
+        fixed = self.previous_particle_layout_fixture()
         fixed = fixed.replace(f'include("{REPO}/cmake/QoreXmlLibXml2ValueAllocationFix.cmake")\n', "")
         fixed = fixed.replace(f'qore_xml_fix_libxml2_value_allocation("{self.source}" '
                               '"${CMAKE_CURRENT_BINARY_DIR}/libxml")\n', "")

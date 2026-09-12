@@ -1,0 +1,148 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires xml
+%exec-class XmlAnyTypeParticlesTest
+
+class XmlAnyTypeParticlesTest inherits QUnit::Test {
+    constructor() : Test("Native builtin anyType particles", "1.0") {
+        addTestCase("Direct, empty, grouped and transitive extensions retain lax content", \extensions());
+        addTestCase("Restrictions replace the builtin wildcard", \restrictions());
+        addTestCase("Nonempty extensions still enforce unique particle attribution", \ambiguity());
+        addTestCase("Concurrent schema compilation and cancelled readers leave builtins usable", \concurrency());
+        set_return_value(main());
+    }
+
+    private string schema(string content = "<xs:sequence/>", string base = "xs:anyType",
+            string declarations = "", bool restrict = False, bool mixed = False) {
+        string method = restrict ? "restriction" : "extension";
+        return '<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">'
+            '<xs:element name="known" type="xs:int"/><xs:attribute name="code" type="xs:int"/>'
+            + declarations + '<xs:element name="r"><xs:complexType><xs:complexContent'
+            + (mixed ? ' mixed="true"' : '') + '><xs:' + method
+            + ' base="' + base + '">' + content + '</xs:' + method
+            + '></xs:complexContent></xs:complexType></xs:element></xs:schema>';
+    }
+
+    private bool consume(string source, string xml) {
+        XmlReader reader(new StringInputStream(xml), {"xsd": source});
+        int roots = 0;
+        while (reader.read()) {
+            if (reader.nodeType() == XML_NODE_TYPE_ELEMENT && reader.depth() == 0) {
+                ++roots;
+            }
+        }
+        return roots == 1 && reader.isValid();
+    }
+
+    private check(string source, string xml, bool valid) {
+        XmlDoc document(xml);
+        if (valid) {
+            assertTrue(consume(source, xml));
+            assertEq(parse_xml(xml), parse_xml_with_schema(xml, source));
+            document.validateSchema(source);
+            assertEq(parse_xml(xml), parse_xml(document.toString()));
+        } else {
+            assertThrows("PARSE-XML-EXCEPTION", \consume(), (source, xml));
+            assertThrows("PARSE-XML-EXCEPTION", \parse_xml_with_schema(), (xml, source));
+            assertThrows("XSD-ERROR", \document.validateSchema(), (source,));
+        }
+    }
+
+    extensions() {
+        foreach string source in (
+                '<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">'
+                '<xs:element name="known" type="xs:int"/><xs:attribute name="code" type="xs:int"/>'
+                '<xs:element name="r" type="xs:anyType"/></xs:schema>',
+                schema(""), schema(),
+                schema('<xs:group ref="Empty"/>', "xs:anyType",
+                    '<xs:group name="Empty"><xs:sequence/></xs:group>', False, True),
+                schema("", "Base", '<xs:complexType name="Base"><xs:complexContent>'
+                    '<xs:extension base="xs:anyType"><xs:sequence/></xs:extension>'
+                    '</xs:complexContent></xs:complexType>')) {
+            foreach string xml in ('<r/>', '<r>before<unknown/><known>17</known>after</r>',
+                    '<r code="17" other="shipment"><unknown><known>23</known></unknown></r>',
+                    '<r xmlns:p="urn:shipment"><p:part>17</p:part><p:part>18</p:part></r>') {
+                check(source, xml, True);
+            }
+            foreach string xml in ('<r><known>bad</known></r>', '<r code="bad"/>',
+                    '<r><unknown><known>bad</known></unknown></r>') {
+                check(source, xml, False);
+            }
+        }
+    }
+
+    restrictions() {
+        foreach string base in ("xs:anyType", "Base") {
+            string source = schema('<xs:sequence><xs:element ref="known"/></xs:sequence>', base,
+                '<xs:complexType name="Base"><xs:complexContent><xs:extension base="xs:anyType"/>'
+                '</xs:complexContent></xs:complexType>', True);
+            check(source, '<r><known>17</known></r>', True);
+            foreach string xml in ('<r/>', '<r><unknown/></r>', '<r><known>17</known><unknown/></r>',
+                    '<r><known>bad</known></r>', '<r>text<known>17</known></r>') {
+                check(source, xml, False);
+            }
+        }
+    }
+
+    ambiguity() {
+        foreach string source in (
+                schema('<xs:sequence><xs:element ref="known"/></xs:sequence>', "xs:anyType", "", False, True),
+                schema('<xs:group ref="Empty"/>', "xs:anyType",
+                    '<xs:group name="Empty"><xs:sequence/></xs:group>')) {
+            assertThrows("XSD-SYNTAX-ERROR", \consume(), (source, "<r/>"));
+            assertThrows("XSD-SYNTAX-ERROR", \parse_xml_with_schema(), ("<r/>", source));
+            XmlDoc document("<r/>");
+            assertThrows("XSD-SYNTAX-ERROR", \document.validateSchema(), (source,));
+        }
+    }
+
+    concurrency() {
+        string source = schema();
+        string xml = '<r>before<unknown/><known>17</known>after</r>';
+        Program program();
+        program.parse("%modern\n%requires xml\n"
+            "bool sub validate(string source, string xml, SandboxManager manager, bool cancel) {\n"
+            "    if (cancel) { manager.requestInterrupt(); }\n"
+            "    XmlReader reader(xml); reader.schemaValidateString(source);\n"
+            "    while (reader.read()) {} return reader.isValid();\n"
+            "}\n", get_script_dir() + "/anytype-cancellation.qr");
+        SandboxManager manager();
+        on_exit manager.clearInterrupt();
+        program.setSandboxManager(manager);
+        try {
+            program.callFunction("validate", source, xml, manager, True);
+            fail("expected cancellation");
+        } catch (hash<ExceptionInfo> ex) {
+            assertTrue(ex.err == "THREAD-CANCELLED" || ex.err == "PROGRAM-INTERRUPTED", ex.err);
+        }
+        manager.clearInterrupt();
+        assertTrue(program.callFunction("validate", source, xml, manager, False));
+        Qore::Thread::Queue results();
+        Qore::Thread::Counter running();
+        on_exit assertEq(0, running.waitForZero(30s));
+        for (int worker = 0; worker < 4; ++worker) {
+            running.inc();
+            background sub() {
+                on_exit running.dec();
+                try {
+                    for (int iteration = 0; iteration < 12; ++iteration) {
+                        @assert(consume(source, xml));
+                        @assert(parse_xml_with_schema(xml, source) == parse_xml(xml));
+                        XmlDoc document(xml);
+                        document.validateSchema(source);
+                    }
+                    results.push(True);
+                } catch (hash<ExceptionInfo> ex) {
+                    results.push(ex);
+                }
+            }();
+        }
+        for (int worker = 0; worker < 4; ++worker) {
+            assertEq(True, results.get(30s));
+        }
+        check(source, xml, True);
+    }
+}

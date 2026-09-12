@@ -110,6 +110,37 @@ static void check_all_summary(int optional) {
     xmlSchemaFreeParserCtxt(parser);
     xmlResetLastError();
 }
+static size_t check_builtin_particles(void) {
+    xmlSchemaTypePtr type = xmlSchemaGetBuiltInType(XML_SCHEMAS_ANYTYPE);
+    xmlSchemaParticlePtr outer, inner;
+    xmlSchemaParticle before_outer, before_inner;
+    size_t total, baseline = live;
+    assert(type != NULL);
+    outer = (xmlSchemaParticlePtr)type->subtypes;
+    assert(outer != NULL && outer->children != NULL);
+    inner = (xmlSchemaParticlePtr)outer->children->children;
+    assert(inner != NULL);
+    assert(outer->isBuiltin && inner->isBuiltin);
+    assert(outer->countSource == NULL && inner->countSource == NULL);
+    assert(outer->termNullable == 1 && inner->termNullable == 0);
+    assert(outer->maxFinite == 1 && inner->maxFinite == 0);
+    memcpy(&before_outer, outer, sizeof(before_outer));
+    memcpy(&before_inner, inner, sizeof(before_inner));
+    total = exercise(type, 0);
+    assert(total > 0 && live == baseline);
+    for (size_t fault = 1; fault <= total; ++fault) {
+        exercise(type, fault);
+        assert(live == baseline);
+        assert(memcmp(outer, &before_outer, sizeof(*outer)) == 0);
+        assert(memcmp(inner, &before_inner, sizeof(*inner)) == 0);
+    }
+    assert(exercise(type, 0) == total);
+    assert(memcmp(outer, &before_outer, sizeof(*outer)) == 0);
+    assert(memcmp(inner, &before_inner, sizeof(*inner)) == 0);
+    assert(live == baseline);
+    return total;
+}
+
 int main(void) {
     const char *source = "<xs:schema xmlns:xs='http://www.w3.org/2001/XMLSchema'>"
         "<xs:group name='G'><xs:choice><xs:element name='x'/><xs:any namespace='urn:a' processContents='skip'/></xs:choice></xs:group>"
@@ -146,6 +177,7 @@ int main(void) {
     xmlSchemaFree(schema);
     check_all_summary(0);
     check_all_summary(1);
+    total += check_builtin_particles();
     xmlCleanupParser();
     assert(live == 0);
     printf("Native particle attribution cleanup: PASS (%zu fault points)\n", total);

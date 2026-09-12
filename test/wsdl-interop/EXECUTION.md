@@ -7487,3 +7487,31 @@ See [requirement evidence](native-value-spaces-evidence.md),
 [audit](audits/P5-16d-native-value-spaces.md). No main-Qore source change,
 installation or push was made. Next: WSDL instance fixed/default conversion and
 identity constraints, remaining P5 corpus findings, then P6-P9 acceptance.
+
+## P5-16e — native builtin particle ownership
+
+2026-09-12; parent `8619697`. The private dependency now shares its particle
+layout between builtin types and schema compilation, initializes builtin
+occurrence metadata once and prevents per-schema writes to it. This fixes the
+native anyType-extension invalid read recorded under
+`/tmp/wsdl-anytype-particle-layout/`. No Qore change is required.
+Independent testing additionally identified and fixed native collapse of empty
+group references; effective-content mapping now preserves their mixed-content
+derivation constraint.
+
+Final acceptance passes 143 suites (1,370 cases/66,622 reported assertions),
+all three source execution modes, two AOT consumers, 16 survey unit tests,
+49 provider tests and 10 schemas/100 independently checked documents. The prior
+95-schema/774-document value matrix also passes. All 284 attribution allocation
+faults recover cleanly. Valgrind reports zero errors/lost blocks for the allocation
+test, full configure probe and new Qore suite. The executed shipment example and
+final documentation build are warning-free. Full audit: 18 Pass, 44 N/A, 0 Fail.
+
+The complete both-version survey and strict coverage JSON objects are identical
+to P5-16d, including all remaining failures. See [native evidence](native-anytype-evidence.md),
+[inventory](P5-16e-validation.json) and [audit](audits/P5-16e-native-anytype.md).
+Remote was fetched and has no new commits to integrate; no push or main-Qore
+mutation was made. The following WSDL reproductions now run safely and show
+missing inherited particles for absent/empty/group/transitive extensions, plus
+missing schema rejection for mixed and ambiguous derivations. Those are the next
+bounded P5 increment, followed by remaining fixed/default/identity and P6-P9 work.

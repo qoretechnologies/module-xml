@@ -189,6 +189,11 @@ including native carriers, providers and actual SOAP consumers. See
 [nil and mixed evidence](nil-mixed-values-evidence.md). Instance default/fixed
 conversion and identity constraints remain the next P5 requirements.
 
+P5-16e fixes private builtin particle layout/ownership and native empty-group
+effective-content mapping; see [native anyType evidence](native-anytype-evidence.md).
+WSDL's missing inherited anyType wildcard is the next bounded prerequisite to
+the remaining instance default/fixed and identity work.
+
 ## P6 — Complete WSDL component and binding interoperability
 
 **Depends on P2-P5.** This covers behavior the current W3C echo survey does not exercise.

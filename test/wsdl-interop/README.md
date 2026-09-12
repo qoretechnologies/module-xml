@@ -1571,6 +1571,17 @@ and the allocation-failure executable it builds. See
 [validation inventory](P5-16d-validation.json) and
 [full audit](audits/P5-16d-native-value-spaces.md).
 
+### Native builtin particle inheritance
+
+`../xml-anytype-particles.qtest` covers builtin particle ownership, direct and
+inherited lax content, group references, restrictions, invalid declared children,
+cancellation and concurrent parsing. `test_anytype_particles.py` compares ten
+schemas and 100 documents through all native XML APIs and pinned Xerces.
+The provider suite independently rejects the former inconsistent particle layout
+and an otherwise corrected library which still collapses empty group references.
+See [native anyType evidence](native-anytype-evidence.md),
+[inventory](P5-16e-validation.json) and [audit](audits/P5-16e-native-anytype.md).
+
 [Default/identity semantics](default-identity-investigation.md) remain an open
 P5 adjudication; instance default application, WSDL fixed-value enforcement,
 identity constraints, the remaining valid corpus failures and P6-P9 stay required.

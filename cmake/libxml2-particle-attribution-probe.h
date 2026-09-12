@@ -78,3 +78,64 @@ static int check_particle_attribution(void) {
     }
     return result;
 }
+
+/* Keep this independent from earlier checks: defective private backports can
+ * crash while traversing builtin particles, and earlier diagnostics remain useful. */
+static int check_builtin_particles(void) {
+    static const char *source =
+        "<xs:schema xmlns:xs='http://www.w3.org/2001/XMLSchema'>"
+        "<xs:element name='known' type='xs:int'/>"
+        "<xs:element name='r'><xs:complexType><xs:complexContent>"
+        "<xs:extension base='xs:anyType'><xs:sequence/></xs:extension>"
+        "</xs:complexContent></xs:complexType></xs:element></xs:schema>";
+    xmlSchemaParserCtxtPtr parser = xmlSchemaNewMemParserCtxt(source, (int)strlen(source));
+    xmlSchemaPtr schema;
+    int diagnostics = 0, result;
+    if (parser == NULL) {
+        return 1;
+    }
+    xmlSchemaSetParserErrors(parser, qname_schema_error, qname_schema_error, &diagnostics);
+    schema = xmlSchemaParse(parser);
+    xmlSchemaFreeParserCtxt(parser);
+    if (schema == NULL || diagnostics != 0) {
+        xmlSchemaFree(schema);
+        return 1;
+    }
+    result = check_qname_document(schema, "<r>before<unknown/><known>17</known>after</r>", 1);
+    result |= check_qname_document(schema, "<r><known>bad</known></r>", 0);
+    xmlSchemaFree(schema);
+    /* An empty group reference still supplies effective content. Its derived
+     * type must explicitly remain mixed, unlike an absent/empty sequence. */
+    for (int mixed = 0; mixed <= 1; ++mixed) {
+        char grouped[768];
+        int size = snprintf(grouped, sizeof(grouped),
+            "<xs:schema xmlns:xs='http://www.w3.org/2001/XMLSchema'>"
+            "<xs:element name='known' type='xs:int'/>"
+            "<xs:group name='Empty'><xs:sequence/></xs:group>"
+            "<xs:element name='r'><xs:complexType><xs:complexContent mixed='%s'>"
+            "<xs:extension base='xs:anyType'><xs:group ref='Empty'/></xs:extension>"
+            "</xs:complexContent></xs:complexType></xs:element></xs:schema>", mixed ? "true" : "false");
+        if (size < 0 || (size_t)size >= sizeof(grouped)) {
+            return 1;
+        }
+        parser = xmlSchemaNewMemParserCtxt(grouped, size);
+        if (parser == NULL) {
+            return 1;
+        }
+        diagnostics = 0;
+        xmlSchemaSetParserErrors(parser, qname_schema_error, qname_schema_error, &diagnostics);
+        schema = xmlSchemaParse(parser);
+        xmlSchemaFreeParserCtxt(parser);
+        if ((schema != NULL) != mixed || (diagnostics == 0) != mixed) {
+            result = 1;
+        }
+        if (schema != NULL) {
+            if (mixed) {
+                result |= check_qname_document(schema, "<r>before<unknown/><known>17</known>after</r>", 1);
+                result |= check_qname_document(schema, "<r><known>bad</known></r>", 0);
+            }
+            xmlSchemaFree(schema);
+        }
+    }
+    return result;
+}

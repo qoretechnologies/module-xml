@@ -81,6 +81,13 @@ int main(void) {
             LIBXML_DOTTED_VERSION, xmlParserVersion, result ? "FAIL" : "PASS", qnames ? "FAIL" : "PASS",
             unions ? "FAIL" : "PASS", uris ? "FAIL" : "PASS", entities ? "FAIL" : "PASS", occurs ? "FAIL" : "PASS", particles ? "FAIL" : "PASS", attribution ? "FAIL" : "PASS", ranges ? "FAIL" : "PASS", finals ? "FAIL" : "PASS", substitutions ? "FAIL" : "PASS", consistency ? "FAIL" : "PASS", wildcard_ids ? "FAIL" : "PASS", wildcard_types ? "FAIL" : "PASS", schema_whitespace ? "FAIL" : "PASS", character_content ? "FAIL" : "PASS", fixed_values ? "FAIL" : "PASS", time_values ? "FAIL" : "PASS", value_allocation ? "FAIL" : "PASS", unsigned_values ? "FAIL" : "PASS");
     }
+    /* Flush completed checks before probing a library's builtin particle paths. */
+    fflush(stdout);
+    {
+        int builtin_particles = check_builtin_particles();
+        result |= builtin_particles;
+        printf("builtin_particles=%s\n", builtin_particles ? "FAIL" : "PASS");
+    }
     xmlCleanupParser();
     return result;
 }
