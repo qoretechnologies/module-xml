@@ -1435,3 +1435,8 @@ validator differences and local build commands. The additional core cyclic
 error-cleanup failure is fixed by the [P5-12 prerequisite](core-graph-cleanup-evidence.md).
 The complete wildcard consumer, HTTP and registry suites now pass Valgrind.
 The next native finding is [strict wildcard instance types](p5-native-wildcard-type-finding.md).
+
+The 2.x issue #5452 element-order fixes are covered by `test/soap.qtest` and
+`test/wsdl-element-order.qtest`, with source normalization and complete flat-record
+validation. [Port evidence](element-order-port-evidence.md) records both bindings,
+imports, native field/provider/sample order, performance and corpus comparisons.

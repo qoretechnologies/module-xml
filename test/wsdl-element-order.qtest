@@ -1,0 +1,156 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires xml
+%requires ../qlib/WSDL.qm
+%exec-class ElementOrderTest
+
+class ElementOrderTest inherits QUnit::Test {
+    private {
+        const Uri = "urn:qore:enum-provisioning";
+        const Choice = '<xs:choice><xs:element name="msisdn" type="xs:string"/>'
+            '<xs:element name="e164" type="xs:string"/></xs:choice>';
+        const Subscription = '<xs:complexType name="Subscription"><xs:sequence>' + Choice
+            + '<xs:element name="dnsname" type="xs:string" minOccurs="0"/>'
+            '<xs:element name="domainName" type="xs:string" minOccurs="0"/>'
+            '<xs:element name="records" type="t:Record" nillable="true" minOccurs="0" maxOccurs="unbounded"/>'
+            '</xs:sequence><xs:attribute name="msisdn" type="xs:string"/></xs:complexType>';
+        const Customer = '<xs:element name="Create"><xs:complexType><xs:sequence>'
+            '<xs:element name="MOType" type="xs:string"/><xs:element name="MOId"><xs:complexType>'
+            '<xs:sequence><xs:element name="msisdn" type="xs:string"/></xs:sequence></xs:complexType></xs:element>'
+            '<xs:element name="MOAttributes"><xs:complexType><xs:sequence>'
+            '<xs:element name="createDNSSubscription" type="t:Subscription"/>'
+            '</xs:sequence></xs:complexType></xs:element></xs:sequence></xs:complexType></xs:element>'
+            + Subscription + '<xs:element name="createDNSSubscription" type="t:Subscription"/>'
+            '<xs:complexType name="Record"><xs:sequence><xs:element name="publicId" type="xs:string"/>'
+            '<xs:element name="flags" type="xs:string"/><xs:element name="order" type="xs:int"/>'
+            '<xs:element name="preference" type="xs:int"/><xs:element name="service" type="xs:string"/>'
+            '<xs:element name="naptrTxt" type="xs:string"/></xs:sequence></xs:complexType>';
+    }
+    constructor() : Test("Element order port from 2.x", "1.0") {
+        addTestCase("Nested ENUM provisioning retains choice order in both SOAP directions", \customer());
+        addTestCase("Choice-only parts and restricted choices retain presence and exclusivity", \choices());
+        addTestCase("Standalone and imported schemas retain declaration order after reconstruction", \schemas());
+        set_return_value(main());
+    }
+    private string schema(string declarations) {
+        return '<xs:schema xmlns:xs="' + XSD_NS + '" xmlns:t="' + Uri + '" targetNamespace="' + Uri
+            + '" elementFormDefault="qualified">' + declarations + '</xs:schema>';
+    }
+    private WebService service(string declarations, string element, bool soap12, bool external) {
+        string source = schema(declarations);
+        string types = external ? schema('<xs:include schemaLocation="http://example.invalid/order.xsd"/>') : source;
+        string soap_ns = "http://schemas.xmlsoap.org/wsdl/soap" + (soap12 ? "12" : "") + "/";
+        return new WebService('<w:definitions xmlns:w="http://schemas.xmlsoap.org/wsdl/" xmlns:s="' + soap_ns
+            + '" xmlns:xs="' + XSD_NS + '" xmlns:t="' + Uri + '" targetNamespace="' + Uri + '">'
+            '<w:types>' + types + '</w:types><w:message name="Message"><w:part name="body" element="t:'
+            + element + '"/></w:message><w:portType name="Port"><w:operation name="submit">'
+            '<w:input message="t:Message"/><w:output message="t:Message"/></w:operation></w:portType>'
+            '<w:binding name="Soap" type="t:Port"><s:binding style="document" transport="http://schemas.xmlsoap.org/soap/http"/>'
+            '<w:operation name="submit"><s:operation soapAction="urn:submit"/>'
+            '<w:input><s:body use="literal"/></w:input><w:output><s:body use="literal"/></w:output>'
+            '</w:operation></w:binding></w:definitions>',
+            {"async_only": True, "xsd_cache": {"http://example.invalid/order.xsd": source}});
+    }
+    private string encode(WSOperation operation, hash<auto> value, bool response) {
+        return (response ? operation.serializeResponse(value, NOTHING, NOTHING, NOTHING, NOTHING, NOTHING, "Soap")
+            : operation.serializeRequest(value, NOTHING, NOTHING, NOTHING, NOTHING, NOTHING, "Soap")).body;
+    }
+    private hash<auto> decode(WSOperation operation, string xml, bool response) {
+        return response ? operation.deserializeResponse(parse_xml(xml, XPF_PRESERVE_ORDER), "Soap")
+            : operation.deserializeRequest(parse_xml(xml, XPF_PRESERVE_ORDER), "Soap");
+    }
+    private hash<auto> subscription() {
+        return {"^attributes^": {"msisdn": "tel:+436600000007"}, "msisdn": "tel:+436600000007",
+            "records": {"publicId": "sip:+436600000007@example.com", "flags": "nu", "order": 100,
+                "preference": 10, "service": "E2U+SIP", "naptrTxt": "sip:subscriber@example.com"}};
+    }
+    customer() {
+        hash<auto> value = {"MOType": "DNSSubscription@http://schemas.ericsson.com/activation/enum/",
+            "MOId": {"msisdn": "tel:+436600000007"},
+            "MOAttributes": {"createDNSSubscription": subscription()}};
+        foreach bool soap12 in (False, True) {
+            foreach bool external in (False, True) {
+                WebService original = service(Customer, "Create", soap12, external);
+                foreach WebService ws in (original, Serializable::deserialize(original.serialize())) {
+                    WSOperation op = ws.getBindingOperation("Soap", "submit");
+                    foreach bool response in (False, True) {
+                        string xml = encode(op, value, response);
+                        assertTrue(xml.find(soap12 ? SOAP_12_ENV : SOAP_11_ENV) >= 0);
+                        hash<auto> envelope = parse_xml(xml).firstValue();
+                        hash<auto> payload = envelope."soapenv:Body"."ns:Create";
+                        hash<auto> complete = payload;
+                        complete."^attributes^" += envelope."^attributes^";
+                        XmlDoc document(make_xml({"ns:Create": complete}));
+                        document.validateSchema(schema(Customer));
+                        hash<auto> child = payload."ns:MOAttributes"."ns:createDNSSubscription";
+                        assertEq(("^attributes^", "ns:msisdn", "ns:records"), keys child);
+                        assertEq("tel:+436600000007", child."ns:msisdn");
+                        assertEq("100", child."ns:records"."ns:order");
+                        assertEq(("ns:publicId", "ns:flags", "ns:order", "ns:preference", "ns:service", "ns:naptrTxt"),
+                            keys child."ns:records");
+                        hash<auto> decoded = decode(op, xml, response);
+                        hash<auto> native = decoded.MOAttributes.createDNSSubscription;
+                        assertEq(("msisdn", "dnsname", "domainName", "records", "^attributes^"), keys native);
+                        assertEq(subscription() + {"dnsname": NOTHING, "domainName": NOTHING}, native);
+                        hash<auto> invalid = value;
+                        invalid.MOAttributes.createDNSSubscription.e164 = "436600000007";
+                        assertThrows("SOAP-SERIALIZATION-ERROR", \encode(), (op, invalid, response));
+                        invalid = value;
+                        remove invalid.MOAttributes.createDNSSubscription.msisdn;
+                        assertThrows("SOAP-SERIALIZATION-ERROR", \encode(), (op, invalid, response));
+                    }
+                }
+            }
+        }
+    }
+    choices() {
+        string declarations = '<xs:element name="Only"><xs:complexType><xs:sequence>' + Choice
+            + '</xs:sequence><xs:attribute name="tag" type="xs:string"/></xs:complexType></xs:element>'
+            '<xs:complexType name="Base"><xs:sequence>' + Choice
+            + '<xs:element name="extra" type="xs:string" minOccurs="0"/></xs:sequence></xs:complexType>'
+            '<xs:element name="Restricted"><xs:complexType><xs:complexContent><xs:restriction base="t:Base">'
+            '<xs:sequence>' + Choice + '</xs:sequence></xs:restriction></xs:complexContent></xs:complexType></xs:element>';
+        foreach string root in ("Only", "Restricted") {
+            foreach bool soap12 in (False, True) {
+                WebService original = service(declarations, root, soap12, False);
+                foreach WebService ws in (original, Serializable::deserialize(original.serialize())) {
+                    WSOperation op = ws.getBindingOperation("Soap", "submit");
+                    foreach bool response in (False, True) {
+                        foreach string field in ("msisdn", "e164") {
+                            hash<auto> value();
+                            value{field} = "436600000007";
+                            if (root == "Only") {
+                                value."^attributes^" = {"tag": "provisioning"};
+                            }
+                            string xml = encode(op, value, response);
+                            assertEq(value, decode(op, xml, response));
+                            assertEq(keys value, keys decode(op, xml, response));
+                            string empty = xml;
+                            empty =~ s/<ns:(msisdn|e164)>[^<]*<\/ns:(msisdn|e164)>//;
+                            assertThrows("SOAP-DESERIALIZATION-ERROR", \decode(), (op, empty, response));
+                        }
+                        assertThrows("SOAP-SERIALIZATION-ERROR", \encode(), (op, {}, response));
+                        assertThrows("SOAP-SERIALIZATION-ERROR", \encode(),
+                            (op, {"msisdn": "43", "e164": "43"}, response));
+                    }
+                }
+            }
+        }
+    }
+    schemas() {
+        foreach bool external in (False, True) {
+            XsdSchema original(external ? schema('<xs:include schemaLocation="http://example.invalid/order.xsd"/>')
+                : schema(Customer), {"async_only": True, "xsd_cache": {"http://example.invalid/order.xsd": schema(Customer)}});
+            foreach XsdSchema source in (original, Serializable::deserialize(original.serialize())) {
+                XsdXmlValue encoded = source.serializeXmlValue(Uri, "createDNSSubscription", subscription());
+                assertTrue(encoded.getXml().find(":msisdn>") < encoded.getXml().find(":records>"));
+                hash<auto> decoded = source.getElement(Uri, "createDNSSubscription").validateXmlValue(encoded, source.nsc, source.getTypeMap());
+                assertEq(("msisdn", "dnsname", "domainName", "records", "^attributes^"), keys decoded);
+                assertEq(subscription() + {"dnsname": NOTHING, "domainName": NOTHING}, decoded);
+            }
+        }
+    }
+}

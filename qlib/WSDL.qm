@@ -80,6 +80,11 @@ module WSDL {
     @section wsdlrelnotes WSDL Module Release Notes
 
     @subsection wsdl_0_5_8 WSDL v0.5.8
+    - fixed native deserialized field order for choices declared before or between sequence members (issue #5452);
+      selected alternatives now appear at their schema position while absent ordinary fields retain NOTHING
+    - explicitly empty flat document records now validate their required particle instead of silently omitting the part
+    - reduced schema source normalization work by merging only containers with separated child runs; ordered
+      sequence, choice and all declarations retain their namespace-aware particle positions
     - effective attribute wildcards enforce namespace and strict/lax/skip processing in schema, SOAP and provider
       values; known global attributes retain typed values and unassessed attributes retain lexical namespace context
     - wildcard attributes use expanded names in ^attributes^; inherited groups, imports and added declarations
@@ -18850,47 +18855,65 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
 # inside XSD compositors; other WSDL/schema consumers retain their grouped interfaces.
 class XsdSchemaSource {
     static hash<auto> parse(string xml) {
-        return convert(parse_xml(xml, XPF_PRESERVE_ORDER), "", {});
+        hash<auto> value = parse_xml(xml, XPF_PRESERVE_ORDER);
+        convert(\value, "", {});
+        return value;
     }
 
-    private static auto convert(auto value, string name, hash<string, string> namespaces) {
+    private static convert(reference<auto> value, string name, hash<string, string> namespaces) {
         if (value.typeCode() == NT_LIST) {
-            return map convert($1, name, namespaces), value;
+            foreach auto child in (\value) {
+                convert(\child, name, namespaces);
+            }
+            return;
         }
         if (value.typeCode() != NT_HASH) {
-            return value;
+            return;
         }
         foreach string key in (keys value."^attributes^") {
             if (key == "xmlns") {
                 namespaces{""} = value."^attributes^"{key};
-            } else if (key =~ /^xmlns:/) {
+            } else if (key.startsWith("xmlns:")) {
                 namespaces{substr(key, 6)} = value."^attributes^"{key};
             }
         }
-        list<string> qname = name.split(":");
-        string local = qname[qname.size() - 1] ?? "";
-        string uri = namespaces{qname.size() == 2 ? qname[0] : ""} ?? "";
+        int colon = name.find(":");
+        string local = colon < 0 ? name : substr(name, colon + 1);
+        string uri = namespaces{colon < 0 ? "" : substr(name, 0, colon)} ?? "";
         bool ordered = uri == XSD_NS && (local == "sequence" || local == "choice" || local == "all");
-        hash<auto> result();
+        bool rewrite = False;
         foreach string key in (keys value) {
-            if (key =~ /^\^/) {
-                result{key} = value{key};
+            if (key[0] == "^") {
                 continue;
             }
-            string child_name = key.split("^")[0];
-            auto child = convert(value{key}, child_name, namespaces);
-            string output_key = ordered ? key : child_name;
+            int suffix = key.rfind("^");
+            string child_name = suffix < 0 ? key : substr(key, 0, suffix);
+            convert(\value{key}, child_name, namespaces);
+            if (!ordered && suffix >= 0) {
+                rewrite = True;
+            }
+        }
+        # Most nodes have no separated runs of the same child name. Recurse through
+        # those nodes in place; only the hashes with ordered suffixes need merging.
+        if (!rewrite) {
+            return;
+        }
+        hash<auto> result();
+        foreach string key in (keys value) {
+            int suffix = key[0] == "^" ? -1 : key.rfind("^");
+            string output_key = suffix < 0 ? key : substr(key, 0, suffix);
             if (!result.hasKey(output_key)) {
-                result{output_key} = child;
+                result{output_key} = value{key};
             } else {
                 # Explicit wrapping preserves NOTHING for repeated empty declarations.
                 if (result{output_key}.typeCode() != NT_LIST) {
                     result{output_key} = (result{output_key},);
                 }
+                auto child = value{key};
                 result{output_key} += child.typeCode() == NT_LIST ? child : (child,);
             }
         }
-        return result;
+        value = result;
     }
 }
 
@@ -23146,12 +23169,22 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
         # Preserve the existing absent native field contract; choice-only fields
         # remain absent until selected. Actual group validity was checked above.
         if (cx_type != XET_CHOICE && !result) {
+            hash<string, bool> present = map {$1: True}, field_names;
+            hash<string, bool> absent();
             foreach XsdElement element in (elementmap.iterator()) {
                 string identity = element.getExpandedName();
                 # A substitution field's presence selects an element even when its value is NOTHING.
                 # Do not invent absent head fields that would add a second member during serialization.
-                if (fields.hasKey(identity) && !substitution_fields{identity}) {
-                    result{fields{identity}} = NOTHING;
+                if (!substitution_fields{identity}) {
+                    absent{identity} = True;
+                }
+            }
+            # Initialize both ordinary fields and selected alternatives in particle order.
+            # Adding choice fields after elementmap would move them behind the sequence's suffix.
+            foreach string identity in (keys declarations) {
+                string field = fields{identity};
+                if (present{field} || absent{identity}) {
+                    result{field} = NOTHING;
                 }
             }
         }
@@ -24257,8 +24290,10 @@ public class WSMessage inherits WSDL::XsdNamedData {
                     }
                 }
             }
-            if (!exists rv && type.getParticle() && type.getParticle().matchesElementNames(())) {
-                # A present single part can have no child fields; preserve its enclosing element.
+            if (!exists rv && type.getParticle() && ((v.typeCode() == NT_HASH && !v)
+                    || type.getParticle().matchesElementNames(()))) {
+                # Preserve an explicitly empty flat record so its required particle is validated.
+                # A model admitting no children also retains its enclosing element.
                 return new hash<auto>();
             }
             return rv;

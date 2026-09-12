@@ -7076,3 +7076,17 @@ prevents valid xsi:type assessment; moving that check after type resolution
 matches the specification and Xerces while retaining negative outcomes.
 P5 then retains element wildcard, mixed/generic, complete nil/default/fixed and
 identity requirements. P6-P9 remain required; this increment is not phase closure.
+
+## 2026-09-12 — issue #5452 port from 2.x
+
+Completed equivalents of fb20cc8 and 3d07e70 using the existing ordered particles.
+Native decode field order and explicitly empty required flat records are fixed;
+source normalization only rewrites containers needing suffix merging. Original
+34-assertion regression and 284-assertion expanded schema/SOAP cases pass.
+128-suite gate, 13 mode/AOT/independent supplements, both-version corpus and
+warning-free WSDL docs pass. See [evidence](element-order-port-evidence.md),
+[inventory](element-order-port-validation.json) and [all 62 audit checks](audits/element-order-port.md).
+The deployed Qore is 0eb8abb81. No push/install; concurrent main Qore work remains
+outside this port. Next: fix the independently reduced schema-whitespace parser
+finding, then finish P5-13 native wildcard assessment with phase-correct allocation
+tests from the separate investigation. P5-P9 acceptance remains open.

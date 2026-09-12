@@ -498,3 +498,28 @@ wildcards, empty/impossible models, shared groups, depth, cancellation and
 concurrency. `test_particle_samples.py` independently enumerates complete finite
 languages under both repetition limits and six child budgets; every construction
 and original/reconstructed sample has an explicitly accounted result.
+
+## Native record field order
+
+Native record decoding initializes ordinary fields and selected choice fields in
+particle declaration order. Absent ordinary fields retain the existing `NOTHING`
+contract; unselected choices and substitution members remain absent. Root
+`^attributes^` follows child fields. A repeated native field still groups its
+occurrences, so callers requiring the complete interleaving use `XsdXmlValue`.
+
+An explicitly empty flat document record remains a supplied value and is checked
+against the complete particle. A required choice therefore rejects `{}` with
+`SOAP-SERIALIZATION-ERROR`; optional and empty models retain their enclosing XML
+element. Choice-only parts can carry root attributes. Extension and restriction
+continue to use the authoritative particle graph for exclusivity and ordering.
+
+The namespace-aware source adapter recurses through existing containers and only
+rebuilds a non-compositor hash when an ordered suffix requires grouping. It uses
+string prefix/position operations for XML keys and preserves explicit empty
+children when grouping repeated declarations. Standalone schemas, external
+schemas and WSDL construction share this adapter.
+
+The 2.x issue #5452 regression is retained in `test/element-order.wsdl` and
+`test/soap.qtest`. `test/wsdl-element-order.qtest` additionally checks nested ENUM
+provisioning, explicit empty records, restricted choices, schema imports,
+reconstruction and both directions of actual SOAP 1.1/1.2 bindings.
