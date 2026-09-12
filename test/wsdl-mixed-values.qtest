@@ -1,0 +1,286 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires xml
+%requires ../qlib/WSDL.qm
+%exec-class MixedValuesTest
+
+class InterruptingMixedChildType inherits XsdBaseType {
+    private {
+        SandboxManager manager;
+    }
+    constructor(SandboxManager manager) : XsdBaseType("int", new Namespaces({})) {
+        self.manager = manager;
+    }
+    auto serializeValue(Namespaces namespaces, auto value, *softbool omit_type) {
+        manager.requestInterrupt();
+        return XsdBaseType::serializeValue(namespaces, value, omit_type);
+    }
+}
+
+class MixedValuesTest inherits Test {
+    constructor() : Test("Ordered native mixed content", "1.0") {
+        addTestCase("Text and repeated typed children retain their exact order", \order());
+        addTestCase("Empty and text-only mixed models retain their content", \text());
+        addTestCase("Repeated list-valued children retain occurrence boundaries", \lists());
+        addTestCase("Complete mixed particles reject wrong order and occurrence counts", \particles());
+        addTestCase("Mixed providers preserve segments, choices and soft conversions", \providers());
+        addTestCase("Mixed text retains lexical namespace context through reconstruction", \namespaces());
+        addTestCase("Mixed wildcard positions preserve XML and assessed typed values", \wildcards());
+        addTestCase("Mixed metadata and malformed provider graphs fail without corrupting reuse", \invalid());
+        addTestCase("Mixed child cancellation preserves caller data and restores namespace state", \cancellation());
+        addTestCase("Mixed sample generation retains complete group and list occurrences", \samples());
+        set_return_value(main());
+    }
+    private XsdSchema schema(string content, string extra = "") {
+        return new XsdSchema('<xs:schema xmlns:xs="' + XSD_NS + '">'
+            '<xs:element name="value"><xs:complexType mixed="true">' + content
+            + '</xs:complexType></xs:element>' + extra + '</xs:schema>', {"async_only": True});
+    }
+    private auto decode(XsdSchema model, string xml) {
+        auto data = XsdBase::expandElementNamespaces(parse_xml(xml, XPF_PRESERVE_ORDER | XPF_ADD_COMMENTS)){"{}value"};
+        return model.getElement("", "value").deserializeValue(model.getTypeMap(), NOTHING, data, True, True);
+    }
+    private order() {
+        XsdSchema model = schema('<xs:sequence minOccurs="0" maxOccurs="unbounded"><xs:choice>'
+            '<xs:element name="number" type="xs:int"/><xs:element name="name" type="xs:QName"/>'
+            '</xs:choice></xs:sequence>');
+        string xml = '<value xmlns:p="urn:products">before<number>17</number>between'
+            '<name>p:Part</name><![CDATA[after]]><number>29</number>end</value>';
+        auto value = decode(model, xml);
+        assertEq(("^value^", "number", "^value1^", "name", "^cdata^", "number^1", "^value2^"), keys value);
+        assertEq(17, value.number);
+        assertEq(29, value."number^1");
+        assertEq("urn:products", cast<XsdQNameValue>(value.name).getNamespaceUri());
+        assertEq("between", cast<XsdScopedLexicalValue>(value."^value1^").getLexicalValue());
+        XsdXmlValue output = model.serializeXmlValue("", "value", value);
+        assertEq("17", parse_xml(output.getXml(), XPF_PRESERVE_ORDER).value.number,
+            "inherited namespace bindings do not wrap unrelated scalar children");
+        assertEq("29", parse_xml(output.getXml(), XPF_PRESERVE_ORDER).value."number^1");
+        auto reread = decode(model, output.getXml());
+        assertEq(keys value, keys reread);
+        assertEq(29, reread."number^1");
+        assertEq("end", cast<XsdScopedLexicalValue>(reread."^value2^").getLexicalValue());
+        assertEq("urn:products", cast<XsdQNameValue>(reread.name).getNamespaceUri());
+    }
+    private text() {
+        XsdSchema model = schema("");
+        foreach string text in ("", "before", "<![CDATA[]]>", "<!--kept-->", " ") {
+            auto value = decode(model, '<value>' + text + '</value>');
+            XsdXmlValue output = model.serializeXmlValue("", "value", value);
+            auto restored = decode(model, output.getXml());
+            assertEq(keys value, keys restored);
+            foreach string key in (keys value) {
+                assertEq(value{key} instanceof XsdScopedLexicalValue ? value{key}.getLexicalValue() : value{key},
+                    restored{key} instanceof XsdScopedLexicalValue ? restored{key}.getLexicalValue() : restored{key});
+            }
+        }
+        assertThrows("SOAP-DESERIALIZATION-ERROR", \decode(), (model, '<value><child/></value>'));
+        assertThrows("SOAP-SERIALIZATION-ERROR", \model.serializeXmlValue(),
+            ("", "value", {"^value^": "before", "child": NOTHING}));
+        assertEq({}, model.getElement("", "value").deserializeValue(model.getTypeMap(), NOTHING,
+            {"^attributes^": {}}, True, True));
+        XsdElement element = model.getElement("", "value");
+        assertEq("legacy text", element.deserializeValue(model.getTypeMap(), NOTHING, "legacy text", True, False));
+        assertEq(NOTHING, element.deserializeValue(model.getTypeMap(), NOTHING, NOTHING, True, False));
+        foreach auto scalar in (17, True, 2.5, 1.25n, 2026-01-15T10:30:00Z) {
+            auto wire = element.type.serializeValue(model.nsc, scalar, True);
+            assertEq(scalar, wire."^value^");
+            assertEq(parse_xml(make_xml("value", {"^value^": scalar})), parse_xml(make_xml("value", wire)));
+        }
+        assertThrows("SOAP-SERIALIZATION-ERROR", \model.serializeXmlValue(), ("", "value", <00017FFF>));
+        XsdSchema required = schema('<xs:sequence><xs:element name="child" type="xs:int"/></xs:sequence>');
+        assertThrows("SOAP-SERIALIZATION-ERROR", \required.serializeXmlValue(), ("", "value", 17));
+    }
+    private lists() {
+        XsdSchema model = schema('<xs:sequence><xs:element name="codes" type="Codes" maxOccurs="3"/>'
+            '</xs:sequence>', '<xs:simpleType name="Codes"><xs:list itemType="xs:int"/></xs:simpleType>');
+        auto value = decode(model, '<value>before<codes>1 2</codes><codes>3 4</codes>after</value>');
+        assertEq(("^value^", "codes", "codes^1", "^value1^"), keys value);
+        assertEq((1, 2), value.codes);
+        assertEq((3, 4), value."codes^1");
+        XsdXmlValue output = model.serializeXmlValue("", "value", value);
+        auto restored = decode(model, output.getXml());
+        assertEq((1, 2), restored.codes);
+        assertEq((3, 4), restored."codes^1");
+        foreach AbstractDataProviderType provider in (model.getElement("", "value").getDataProviderType(),
+                model.getNativeDataProviderType("", "value")) {
+            auto checked = provider.acceptsValue(value);
+            assertEq(keys value, keys checked);
+            assertEq((1, 2), checked.codes);
+            assertEq((3, 4), checked."codes^1");
+        }
+    }
+    private particles() {
+        XsdSchema model = schema('<xs:sequence minOccurs="2" maxOccurs="2"><xs:element name="a" type="xs:int"/>'
+            '<xs:element name="b" type="xs:int"/></xs:sequence>');
+        string valid = '<value>x<a>1</a>y<b>2</b>z<a>3</a><b>4</b>q</value>';
+        auto value = decode(model, valid);
+        assertEq(("^value^", "a", "^value1^", "b", "^value2^", "a^1", "b^1", "^value3^"), keys value);
+        assertEq(3, decode(model, model.serializeXmlValue("", "value", value).getXml())."a^1");
+        foreach string content in ("", "text", "<a>1</a><b>2</b>", "<a>1</a><a>2</a><b>3</b><b>4</b>",
+                "<a>1</a><b>2</b><b>3</b><a>4</a>", "<a>1</a><b>2</b><a>3</a><b>4</b><a>5</a><b>6</b>",
+                "<a>1</a><b>2</b><a>bad</a><b>4</b>", "<a>1</a><b>2</b><unknown/><a>3</a><b>4</b>") {
+            assertThrows("SOAP-DESERIALIZATION-ERROR", \decode(), (model, '<value>' + content + '</value>'));
+        }
+        foreach hash<auto> bad in ({}, {"a": (1, 3), "b": (2, 4)}, {"a": 1, "b": 2},
+                {"a": 1, "b": 2, "a^1": "bad", "b^1": 4}, {"a": (), "b": 2}) {
+            assertThrows("SOAP-SERIALIZATION-ERROR", \model.serializeXmlValue(), ("", "value", bad));
+            AbstractDataProviderType provider = model.getNativeDataProviderType("", "value");
+            assertThrows("RUNTIME-TYPE-ERROR", \provider.acceptsValue(), (bad,));
+        }
+    }
+    private providers() {
+        XsdSchema model = schema('<xs:sequence><xs:element name="number" type="xs:int" minOccurs="1" maxOccurs="3"/>'
+            '</xs:sequence><xs:attribute name="unit" type="xs:string" default="kg"/>');
+        hash<auto> value = {"^value^": "before", "number": 17, "^comment^": "between",
+            "number^1": 29, "^value1^": "after"};
+        foreach AbstractDataProviderType provider in (model.getElement("", "value").getDataProviderType(),
+                model.getNativeDataProviderType("", "value")) {
+            foreach AbstractDataProviderType variant in (provider, provider.getSoftType(), provider.getMandatoryType(),
+                    Serializable::deserialize(provider.serialize())) {
+                auto checked = variant.acceptsValue(value);
+                assertEq((keys value) + ("^attributes^",), keys checked);
+                assertEq(17, checked.number);
+                assertEq(29, checked."number^1");
+                assertEq("kg", checked."^attributes^".unit);
+                assertEq(("^value^", "number", "^comment^", "number^1", "^value1^"), keys value);
+                auto reread = decode(model, model.serializeXmlValue("", "value", checked).getXml());
+                assertEq(keys checked, keys reread);
+                assertEq(29, reread."number^1");
+                assertThrows("RUNTIME-TYPE-ERROR", \variant.acceptsValue(), ({"^value^": "no required number"},));
+            }
+        }
+        HashDataType ordinary = cast<HashDataType>(model.getElement("", "value").getDataProviderType());
+        ordinary.getField("number").setElementAllowedValues((17, 29));
+        assertEq(29, ordinary.acceptsValue(value)."number^1");
+        auto bad = value;
+        bad."number^1" = 31;
+        assertThrows("RUNTIME-TYPE-ERROR", \ordinary.acceptsValue(), (bad,));
+        AbstractDataProviderType soft = ordinary.getSoftType();
+        auto strings = value;
+        strings.number = "17";
+        strings."number^1" = "29";
+        assertEq(29, soft.acceptsValue(strings)."number^1");
+        assertEq("29", strings."number^1");
+        AbstractDataProviderType optional = ordinary.getOrNothingType();
+        assertEq(NOTHING, optional.acceptsValue(NOTHING));
+        AbstractDataProviderType mandatory = optional.getMandatoryType();
+        assertThrows("MISSING-VALUE-ERROR", \mandatory.acceptsValue(), (NOTHING,));
+        ordinary.setRequiredGroups((("number",),));
+        assertEq(29, ordinary.acceptsValue({"number^3": 29})."number^3");
+    }
+    private namespaces() {
+        XsdSchema model = schema('<xs:sequence><xs:element name="category" type="xs:QName"/></xs:sequence>');
+        auto value = decode(model, '<value xmlns:p="urn:text">p:Before'
+            '<category xmlns:p="urn:typed">p:Part</category><![CDATA[p:After]]></value>');
+        assertEq("urn:text", cast<XsdScopedLexicalValue>(value."^value^").getNamespaceBindings().p);
+        assertEq("urn:typed", cast<XsdQNameValue>(value.category).getNamespaceUri());
+        auto retained = Serializable::deserialize(Serializable::serialize(value));
+        XsdSchema receiver = Serializable::deserialize(model.serialize());
+        XsdXmlValue output = receiver.serializeXmlValue("", "value", retained);
+        assertEq("{urn:text}Before", output.resolveQName("p:Before"));
+        assertEq("{urn:text}After", output.resolveQName("p:After"));
+        auto typed = decode(receiver, output.getXml());
+        assertEq("urn:typed", cast<XsdQNameValue>(typed.category).getNamespaceUri());
+        auto unbound = decode(model, '<value>xsd:Before<category>Part</category>xsi:After</value>');
+        output = receiver.serializeXmlValue("", "value", unbound);
+        assertThrows("WSDL-NAMESPACE-ERROR", \output.resolveQName(), ("xsd:Before",));
+        assertThrows("WSDL-NAMESPACE-ERROR", \output.resolveQName(), ("xsi:After",));
+    }
+    private wildcards() {
+        foreach string mode in ("skip", "lax", "strict") {
+            XsdSchema model = schema('<xs:sequence><xs:any processContents="' + mode
+                + '" minOccurs="1" maxOccurs="3"/></xs:sequence>', '<xs:element name="code" type="xs:int"/>');
+            auto value = decode(model, '<value>before<code>17</code><!--between--><code>29</code>after</value>');
+            assertEq(("^value^", "{}code", "^comment^", "{}code^1", "^value1^"), keys value);
+            XsdXmlValue output = model.serializeXmlValue("", "value", value);
+            assertEq("17", childText(output.getChildValues()[0]));
+            assertEq("29", childText(output.getChildValues()[1]));
+            AbstractDataProviderType provider = model.getNativeDataProviderType("", "value");
+            assertEq(keys value, keys provider.acceptsValue(value));
+            auto native = {"^value^": "before", "{}code": new XsdXmlValue('<code>017</code>'),
+                "^comment^": "between", "{}code^1": new XsdXmlValue('<code>029</code>'), "^value1^": "after"};
+            output = model.serializeXmlValue("", "value", native);
+            assertEq("017", childText(output.getChildValues()[0]));
+            assertEq("029", childText(output.getChildValues()[1]));
+            assertTrue(output.getXml().find("<!--between-->") >= 0);
+        }
+    }
+    private string childText(XsdXmlValue child) {
+        auto data = child.getXmlDataView().firstValue();
+        return data.typeCode() == NT_HASH ? data."^value^" : data;
+    }
+    private invalid() {
+        XsdSchema model = schema("");
+        foreach hash<auto> value in ({"^value^": 0}, {"^cdata^": False}, {"^valuebad^": "bad"},
+                {"^xml^": "<bad/>"}, {".ns": "injected"}, {"^comment^": "bad--comment"},
+                {"^comment^": "bad-"}, {"^comment^": new XsdScopedLexicalValue("comment", {})}) {
+            assertThrows("SOAP-SERIALIZATION-ERROR", \model.serializeXmlValue(), ("", "value", value));
+            AbstractDataProviderType provider = model.getElement("", "value").getDataProviderType();
+            assertThrows("RUNTIME-TYPE-ERROR", \provider.acceptsValue(), (value,));
+        }
+        AbstractDataProviderType provider = model.getElement("", "value").getDataProviderType();
+        hash<SerializationInfo> metadata = provider.serializeToData();
+        metadata._index."0"._class_data."WSDL::XsdMixedContentDataType".component = "bad";
+        assertThrows("DESERIALIZATION-ERROR", \Serializable::deserialize(), (metadata,));
+        assertEq({"^value^": "still valid"}, provider.acceptsValue({"^value^": "still valid"}));
+    }
+    private cancellation() {
+        XsdSchema model = schema('<xs:sequence><xs:element name="number" type="xs:int"/></xs:sequence>');
+        XsdComplexType complex_type = cast<XsdComplexType>(model.getElement("", "value").type);
+        XsdElement child = complex_type.getParticle().getChildren()[0].getElement();
+        XsdAbstractType original = child.type;
+        Program program(PO_MODERN | PO_ENABLE_DEBUG);
+        SandboxManager manager();
+        on_exit {
+            manager.clearInterrupt();
+            child.type = original;
+        }
+        program.setSandboxManager(manager);
+        program.parse("%modern\nsub execute(code<nothing()> work) { work(); }\n", "mixed-child-interrupt.qr");
+        hash<auto> value = {"^value^": "before", "number": 17, "^value1^": "after"};
+        hash<auto> namespaces = model.nsc.getOutputNamespaceHash(NOTHING);
+        foreach AbstractDataProviderType provider in (model.getElement("", "value").getDataProviderType(),
+                model.getNativeDataProviderType("", "value")) {
+            child.type = new InterruptingMixedChildType(manager);
+            code<nothing()> work = sub() {
+                provider.acceptsValue(value);
+            };
+            *hash<ExceptionInfo> error;
+            try {
+                program.callFunction("execute", work);
+            } catch (hash<ExceptionInfo> ex) {
+                error = ex;
+            }
+            manager.clearInterrupt();
+            assertEq("PROGRAM-INTERRUPTED", error.err);
+            assertEq({"^value^": "before", "number": 17, "^value1^": "after"}, value);
+            child.type = original;
+            assertEq(value, provider.acceptsValue(value));
+            assertEq(namespaces, model.nsc.getOutputNamespaceHash(NOTHING));
+        }
+    }
+    private samples() {
+        XsdSchema nullable = new XsdSchema('<xs:schema xmlns:xs="' + XSD_NS + '">'
+            '<xs:element name="value" nillable="true"><xs:complexType mixed="true"/></xs:element></xs:schema>');
+        foreach XsdSchema model in (schema(""), nullable, schema('<xs:sequence minOccurs="2" maxOccurs="2">'
+                '<xs:element name="a" type="xs:int"/><xs:element name="b" type="xs:int"/></xs:sequence>'),
+                schema('<xs:sequence><xs:element name="codes" type="Codes" minOccurs="2" maxOccurs="2"/>'
+                    '</xs:sequence>', '<xs:simpleType name="Codes"><xs:list itemType="xs:int"/></xs:simpleType>')) {
+            foreach AbstractDataProviderType provider in (model.getElement("", "value").getDataProviderType(),
+                    model.getNativeDataProviderType("", "value")) {
+                provider = provider.getMandatoryType();
+                auto sample = provider.getExampleValue();
+                assertEq(NT_HASH, sample.typeCode());
+                auto value = provider.acceptsValue(sample);
+                XsdXmlValue xml = model.serializeXmlValue("", "value", value);
+                auto decoded = decode(model, xml.getXml());
+                assertEq(keys value, keys decoded);
+                assertEq(value, decoded);
+            }
+        }
+    }
+}

@@ -7405,3 +7405,53 @@ See [declaration evidence](element-constraints-evidence.md),
 Next: receiving-element nil permission, occurrence presence and default/fixed
 instance values, including required attributes and lossless native carriers.
 Complete P5 and all P6–P9 acceptance remain required.
+
+
+## P5-16c — receiving-element nil and ordered native mixed values
+
+P5-16b committed as `c587d09`; no push. Receiving declarations now enforce nil
+permission, lexical validity, content/fixed exclusion, attributes and occurrences.
+`XsdNilValue` preserves presence and attributes. Mixed values retain ordered
+text/CDATA/comments and typed child segments through providers, samples, saved
+graphs and actual SOAP/HTTP consumers. The deployed Qore cycle fixes remain in
+place; both complete new unit suites have zero Valgrind errors/lost blocks.
+
+All 141 source suites pass: 1,362 cases and
+66,046 reported assertions. The four new
+suites contribute 29 cases/721 assertions. Both documented examples and qdx/Doxygen
+pass without warnings. The final source stayed frozen throughout acceptance.
+Initial regressions and an interrupted intermediate gate are retained under
+`/tmp/wsdl-p5-16-values-validation/`. The audit caught a temporary `corpus.py`
+import collision that exited two AOT matrix commands before their tests ran.
+Renaming the runner and requiring a test summary fixed the harness; both actual
+matrices were rerun successfully on unchanged artifacts. The original unexecuted
+results remain recorded. For production, final fixes preserve legacy scalar/omission,
+empty-container, namespace and provider metadata contracts. The SOAP comparator
+now checks complete namespace-normalized values and includes new negative checks;
+its assertion total is consequently not directly comparable to the old helper.
+
+Of 52 supplements, 51 pass, including every new test in AST/IR/JIT/tiered and
+default AOT, affected existing consumers, and both strict matrices in all those
+modes. The unchanged 128-level QName AOT test again fails with its documented
+baseline stack-limit error; it remains a failed P9 runtime result. No stack limit,
+fixture depth or default compiler setting was changed to hide it.
+
+The nil matrix covers 20 schemas/1,264 documents/5,056 actual SOAP directions and
+1,062 independently valid outputs. The mixed matrix covers 12 schemas/480
+documents/1,920 actual SOAP directions and 852 independently valid outputs.
+Expanded names, text/order, nil attributes, typed children and list boundaries
+are independently compared. Missing or duplicate records fail the matrices.
+The complete 62-item audit has 29 Pass, 33 N/A and zero Fail.
+
+Keyed corpus comparison preserves prior successful stages and closes twenty
+request/response directions for MixedComplexContent and MixedContentType. All
+144 selected WSDLs/1,388 directions pass; eight valid-input directions and 24
+broader failure records remain. Original fixtures, adjudication and historical
+reports are unchanged. The older complete nil/default diagnostic remains visible
+for subsequent instance-value work.
+
+See [requirement evidence](nil-mixed-values-evidence.md),
+[inventory](P5-16c-validation.json) and
+[audit](audits/P5-16c-nil-mixed-values.md). No C++ or main-Qore source change,
+installation or push was made. Next: instance defaults/fixed values, identity
+constraints and the remaining P5 findings, then all P6–P9 acceptance criteria.

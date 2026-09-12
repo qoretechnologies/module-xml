@@ -1524,3 +1524,32 @@ See [the implemented contract](../../design/wsdl-element-constraints.md),
 [validation inventory](P5-16b-validation.json) and
 [full audit](audits/P5-16b-element-constraints.md). Instance default application,
 fixed-value comparison and nil handling remain open P5 work.
+
+
+## Nilled elements and ordered native mixed values (P5-16c)
+
+`XsdNilValue` preserves a present nilled element and its validated native attributes.
+Receiving declarations check nillability, boolean lexical forms, content, fixed
+constraints, occurrences and required attributes. `XsdMixedContentDataType` keeps
+ordered text/CDATA/comment segments and typed child occurrences, including repeated
+list values, selected types, substitution members and wildcard XML. Namespace
+contexts, saved providers, samples and real HTTP consumers retain these contracts.
+
+See the [nil design](../../design/wsdl-element-nil.md),
+[mixed design](../../design/wsdl-mixed-content.md),
+[requirement evidence](nil-mixed-values-evidence.md),
+[validation inventory](P5-16c-validation.json) and
+[full audit](audits/P5-16c-nil-mixed-values.md).
+
+```sh
+qore -b --enable-debug test/wsdl-element-nil.qtest
+qore -b --enable-debug test/wsdl-element-nil-http.qtest
+qore -b --enable-debug test/wsdl-mixed-values.qtest
+qore -b --enable-debug test/wsdl-mixed-http.qtest
+python3 test/wsdl-interop/test_element_nil.py -v
+python3 test/wsdl-interop/test_mixed_values.py -v
+```
+
+Use the local debug XML module and local `qlib` in `QORE_MODULE_DIR`, with the
+pinned independent validator setup documented above. Element default/fixed
+instance conversion, identity constraints and P6–P9 acceptance remain open.

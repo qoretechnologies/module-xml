@@ -1,0 +1,328 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires xml
+%requires ../qlib/WSDL.qm
+%exec-class ElementNilTest
+
+class InterruptingNilAttributeType inherits XsdBaseType {
+    private {
+        SandboxManager manager;
+    }
+    constructor(SandboxManager manager) : XsdBaseType("int", new Namespaces({})) {
+        self.manager = manager;
+    }
+    auto serializeValue(Namespaces namespaces, auto value, *softbool omit_type) {
+        manager.requestInterrupt();
+        return XsdBaseType::serializeValue(namespaces, value, omit_type);
+    }
+}
+
+class ElementNilTest inherits Test {
+    constructor() : Test("Element nil semantics", "1.0") {
+        addTestCase("Required occurrences remain required when nillable", \presence());
+        addTestCase("Nillability belongs to the receiving element", \receiving());
+        addTestCase("Nil uses its expanded name and boolean lexical space", \lexical());
+        addTestCase("Nilled values have no characters or child elements", \content());
+        addTestCase("Fixed constraints prohibit nil even when nillable", \fixed());
+        addTestCase("Nilled complex values validate and retain attributes", \attributes());
+        addTestCase("Explicit carriers preserve optional nil occurrences", \carriers());
+        addTestCase("Raw generic nil values enforce receiving declarations", \generic());
+        addTestCase("Ordinary and native providers validate nil carriers and copied variants", \providers());
+        addTestCase("Invalid serialized carriers and provider metadata are rejected", \reconstruction());
+        addTestCase("Nil attribute cancellation preserves caller values and restores conversion", \cancellation());
+        addTestCase("False nil values enforce the ordinary empty content model", \emptyContent());
+        addTestCase("Nil occurrences obey complete ranges and selected optional presence", \ranges());
+        set_return_value(main());
+    }
+    private XsdSchema schema(string declarations) {
+        return new XsdSchema('<xs:schema xmlns:xs="' + XSD_NS + '">' + declarations + '</xs:schema>',
+            {"async_only": True});
+    }
+    private XsdSchema scalar(bool nillable, string constraint = "") {
+        return schema('<xs:element name="value" type="xs:int" nillable="'
+            + (nillable ? "true" : "false") + '" ' + constraint + '/>');
+    }
+    private auto decode(XsdSchema schema, string attributes, string content = "", *bool preserve) {
+        auto value = parse_xml('<value xmlns:i="' + XSI_NS + '" xmlns:other="urn:other" '
+            + attributes + '>' + content + '</value>', XPF_PRESERVE_ORDER).value;
+        return schema.getElement("", "value").deserializeValue(schema.getTypeMap(), NOTHING, value, True, preserve);
+    }
+    private presence() {
+        foreach bool nullable in (False, True) {
+            XsdSchema model = scalar(nullable);
+            XsdElement element = model.getElement("", "value");
+            assertThrows("SOAP-DESERIALIZATION-ERROR", \element.deserializeValue(),
+                (model.getTypeMap(), NOTHING, NOTHING, False));
+        }
+        XsdSchema model = schema('<xs:complexType name="Record"><xs:sequence>'
+            '<xs:element name="value" type="xs:int" nillable="true" minOccurs="0"/>'
+            '</xs:sequence></xs:complexType>');
+        XsdComplexType record = cast<XsdComplexType>(model.findType("Record"));
+        assertEq(NOTHING, record.elementmap.value.deserializeValue(model.getTypeMap(), NOTHING, NOTHING, False));
+    }
+    private receiving() {
+        string content = '<xs:sequence><xs:element name="child" type="xs:int" nillable="true"/></xs:sequence>';
+        foreach string declaration in ('<xs:element name="value"><xs:complexType>' + content
+                    + '</xs:complexType></xs:element>',
+                '<xs:complexType name="Record">' + content + '</xs:complexType>'
+                    + '<xs:element name="value" type="Record"/>') {
+            XsdSchema model = schema(declaration);
+            foreach XsdSchema copy in (model, Serializable::deserialize(model.serialize())) {
+                assertFalse(copy.getElement("", "value").nillable);
+                foreach string lexical in ("true", "1", "false", "0") {
+                    assertThrows("SOAP-DESERIALIZATION-ERROR", \decode(), (copy, 'i:nil="' + lexical + '"'));
+                }
+            }
+        }
+    }
+    private lexical() {
+        foreach bool nullable in (False, True) {
+            XsdSchema model = scalar(nullable);
+            foreach string lexical in ("true", "1", " true ", "\t1\t", "false", "0", " false ", "\t0\t") {
+                string text = lexical =~ /false|0/ ? "17" : "";
+                if (nullable) {
+                    assertEq(text ? 17 : NOTHING, decode(model, 'i:nil="' + lexical + '"', text));
+                } else {
+                    assertThrows("SOAP-DESERIALIZATION-ERROR", \decode(), (model, 'i:nil="' + lexical + '"', text));
+                }
+            }
+            foreach string lexical in ("", "TRUE", "False", "yes", "2", "1.0", "tr ue") {
+                assertThrows("SOAP-DESERIALIZATION-ERROR", \decode(), (model, 'i:nil="' + lexical + '"', "17"));
+            }
+            foreach string attribute in ('nil="true"', 'other:nil="true"') {
+                assertThrows("SOAP-DESERIALIZATION-ERROR", \decode(), (model, attribute));
+            }
+        }
+    }
+    private content() {
+        XsdSchema model = scalar(True);
+        foreach string text in ("", "<![CDATA[]]>", "<!--shipment-->", "<![CDATA[]]><!--shipment--><![CDATA[]]>") {
+            assertEq(NOTHING, decode(model, 'i:nil="true"', text));
+        }
+        foreach string text in ("17", " ", "\t", "<![CDATA[ ]]>", "<child/>", "<!--x-->17") {
+            assertThrows("SOAP-DESERIALIZATION-ERROR", \decode(), (model, 'i:nil="true"', text));
+        }
+    }
+    private fixed() {
+        XsdSchema model = scalar(True, 'fixed="17"');
+        foreach string lexical in ("true", "1", " true ") {
+            assertThrows("SOAP-DESERIALIZATION-ERROR", \decode(), (model, 'i:nil="' + lexical + '"'));
+        }
+        assertEq(17, decode(model, 'i:nil="false"', "17"));
+        assertThrows("SOAP-SERIALIZATION-ERROR", \model.serializeXmlValue(), ("", "value", NOTHING));
+    }
+    private attributes() {
+        XsdSchema model = schema('<xs:element name="value" nillable="true"><xs:complexType>'
+            '<xs:sequence><xs:element name="child" type="xs:int"/></xs:sequence>'
+            '<xs:attribute name="tag" type="xs:int" use="required"/>'
+            '<xs:attribute name="category" type="xs:QName" default="xs:int"/>'
+            '<xs:attribute name="prohibited" use="prohibited"/>'
+            '</xs:complexType></xs:element>');
+        foreach string supplied in ("", 'tag="bad"', 'tag="17" prohibited="no"', 'tag="17" unknown="no"') {
+            assertThrows("SOAP-DESERIALIZATION-ERROR", \decode(), (model, 'i:nil="true" ' + supplied));
+        }
+        auto nil = decode(model, 'i:nil="true" tag="17"');
+        hash<auto> attributes = nil.getAttributes();
+        assertEq(17, attributes.tag);
+        assertEq(XSD_NS, cast<XsdQNameValue>(attributes.category).getNamespaceUri());
+        assertEq("int", cast<XsdQNameValue>(attributes.category).getLocalName());
+        assertThrows("SOAP-SERIALIZATION-ERROR", \model.serializeXmlValue(), ("", "value", NOTHING));
+        XsdNilValue saved = Serializable::deserialize(nil.serialize());
+        assertEq(17, saved.getAttributes().tag);
+        assertTrue(cast<XsdQNameValue>(attributes.category).equals(saved.getAttributes().category));
+        attributes.tag = 99;
+        assertEq(17, nil.getAttributes().tag);
+        XsdXmlValue xml = model.serializeXmlValue("", "value", saved);
+        auto received = decode(model, 'i:nil="true" tag="17"');
+        hash<auto> wire = XsdBase::getExpandedAttributes(parse_xml(xml.getXml()).value."^attributes^");
+        assertEq("true", wire{"{" + XSI_NS + "}nil"});
+        assertEq("17", wire{"{}tag"});
+        assertEq(17, received.getAttributes().tag);
+        foreach hash<auto> bad in ({}, {"tag": "bad"}, {"tag": 17, "prohibited": "no"}) {
+            assertThrows("SOAP-SERIALIZATION-ERROR", \model.serializeXmlValue(),
+                ("", "value", new XsdNilValue(bad)));
+        }
+    }
+    private carriers() {
+        XsdSchema model = schema('<xs:element name="value"><xs:complexType><xs:sequence>'
+            '<xs:element name="item" type="xs:int" minOccurs="0" maxOccurs="3" nillable="true"/>'
+            '</xs:sequence></xs:complexType></xs:element>');
+        XsdNilValue nil();
+        XsdXmlValue xml = model.serializeXmlValue("", "value", {"item": (17, nil, 29)});
+        auto parsed = XsdBase::expandElementNamespaces(parse_xml(xml.getXml(), XPF_PRESERVE_ORDER)){"{}value"};
+        auto record = model.getElement("", "value").deserializeValue(model.getTypeMap(), NOTHING, parsed, True, True);
+        assertEq(3, record.item.size());
+        assertEq(17, record.item[0]);
+        assertTrue(record.item[1] instanceof XsdNilValue);
+        assertEq(29, record.item[2]);
+        assertEq({}, cast<XsdNilValue>(record.item[1]).getAttributes());
+        XsdSchema receiver = Serializable::deserialize(model.serialize());
+        XsdXmlValue emitted = receiver.serializeXmlValue("", "value", Serializable::deserialize(
+            Serializable::serialize(record)));
+        assertEq(parse_xml(xml.getXml()), parse_xml(emitted.getXml()));
+        XsdSchema prohibited = scalar(False);
+        assertThrows("SOAP-SERIALIZATION-ERROR", \prohibited.serializeXmlValue(), ("", "value", nil));
+        foreach string key in ("bad:name", "xmlns", "{" + XSI_NS + "}nil") {
+            assertThrows("XSD-NIL-VALUE-ERROR", sub() { new XsdNilValue({key: "value"}); });
+        }
+    }
+    private ranges() {
+        XsdSchema model = schema('<xs:element name="value"><xs:complexType><xs:sequence>'
+            '<xs:element name="item" type="xs:anyType" nillable="true" minOccurs="0" maxOccurs="3"/>'
+            '</xs:sequence></xs:complexType></xs:element>');
+        auto original = XsdBase::expandElementNamespaces(parse_xml('<value xmlns:i="' + XSI_NS
+            + '" xmlns:xs="' + XSD_NS + '"><item i:nil="true" i:type="xs:int"/></value>', XPF_PRESERVE_ORDER)){"{}value"};
+        auto value = model.getElement("", "value").deserializeValue(model.getTypeMap(), NOTHING, original, True, True);
+        XsdXmlValue output = model.serializeXmlValue("", "value", value);
+        assertEq(1, output.getChildValues().size());
+        assertEq("true", XsdBase::getExpandedAttributes(output.getChildValues()[0].getElementData()."^attributes^"){
+            "{" + XSI_NS + "}nil"});
+        XsdElement element = cast<XsdComplexType>(model.getElement("", "value").type).getParticle().getChildren()[0].getElement();
+        Namespaces namespaces = model.nsc.copy();
+        auto selected = {"^type^":new XsdQNameValue(XSD_NS, "int"), "^val^":NOTHING};
+        assertTrue(exists element.serializeValue(namespaces, selected, True, "item", "value", model.getTypeMap()));
+        assertEq(NOTHING, element.serializeValue(namespaces,
+            {"^type^": element.type, "^val^": NOTHING}, True, "item", "value", model.getTypeMap()));
+        element.minOccurs = 2;
+        foreach auto bad in (NOTHING, (), new XsdNilValue(), selected) {
+            assertThrows("SOAP-SERIALIZATION-ERROR", \element.serializeValue(),
+                (namespaces, bad, True, "item", "value", model.getTypeMap()));
+        }
+        assertEq(2, element.serializeValue(namespaces, (new XsdNilValue(), new XsdNilValue()), True,
+            "item", "value", model.getTypeMap()).size());
+        element.minOccurs = 0;
+        element.maxOccurs = 0;
+        assertEq(NOTHING, element.serializeValue(namespaces, (), True, "item", "value", model.getTypeMap()));
+        assertThrows("SOAP-SERIALIZATION-ERROR", \element.serializeValue(),
+            (namespaces, new XsdNilValue(), True, "item", "value", model.getTypeMap()));
+    }
+    private generic() {
+        foreach bool nullable in (False, True) {
+            XsdSchema model = schema('<xs:element name="value" type="xs:anyType" nillable="'
+                + (nullable ? "true" : "false") + '"/>');
+            foreach string text in ("", "17", " ", "<child/>") {
+                auto input = parse_xml('<value xmlns:i="' + XSI_NS + '" i:nil="true">'
+                    + text + '</value>', XPF_PRESERVE_ORDER).value;
+                if (nullable && !text) {
+                    XsdXmlValue result = model.serializeXmlValue("", "value", input);
+                    assertEq("true", XsdBase::getExpandedAttributes(parse_xml(result.getXml()).value."^attributes^"){
+                        "{" + XSI_NS + "}nil"});
+                } else {
+                    assertThrows("SOAP-SERIALIZATION-ERROR", \model.serializeXmlValue(), ("", "value", input));
+                }
+            }
+        }
+    }
+    private providers() {
+        XsdSchema model = schema('<xs:element name="value" nillable="true"><xs:complexType>'
+            '<xs:sequence><xs:element name="child" type="xs:int"/></xs:sequence>'
+            '<xs:attribute name="tag" type="xs:int" use="required"/>'
+            '</xs:complexType></xs:element>');
+        foreach AbstractDataProviderType provider in (model.getElement("", "value").getDataProviderType(),
+                model.getNativeDataProviderType("", "value")) {
+            foreach AbstractDataProviderType variant in (provider, provider.getSoftType(), provider.getMandatoryType(),
+                    Serializable::deserialize(provider.serialize())) {
+                XsdNilValue nil({"tag": 17});
+                assertTrue(nil === variant.acceptsValue(nil));
+                assertThrows("RUNTIME-TYPE-ERROR", \variant.acceptsValue(), (new XsdNilValue(),));
+                assertThrows("RUNTIME-TYPE-ERROR", \variant.acceptsValue(), (new XsdNilValue({"tag": "bad"}),));
+                assertTrue(exists variant.getInfo().union_types);
+            }
+        }
+        XsdSchema enumeration = schema('<xs:element name="value"><xs:complexType><xs:sequence>'
+            '<xs:element name="item" nillable="true" maxOccurs="3"><xs:simpleType><xs:restriction base="xs:int">'
+            '<xs:enumeration value="17"/></xs:restriction></xs:simpleType></xs:element>'
+            '</xs:sequence></xs:complexType></xs:element>');
+        foreach AbstractDataProviderType provider in (enumeration.getElement("", "value").getDataProviderType(),
+                enumeration.getNativeDataProviderType("", "value")) {
+            hash<auto> accepted = provider.acceptsValue({"item": (17, new XsdNilValue())});
+            assertEq(17, accepted.item[0]);
+            assertTrue(accepted.item[1] instanceof XsdNilValue);
+            assertThrows("RUNTIME-TYPE-ERROR", \provider.acceptsValue(), ({"item": (18, new XsdNilValue())},));
+        }
+    }
+    private reconstruction() {
+        XsdNilValue nil({"tag": 17});
+        foreach auto invalid in (NOTHING, "attributes", 0, {"bad:name": 17}, {"xmlns": "urn:bad"},
+                {"{" + XSI_NS + "}type": "xs:int"}) {
+            hash<SerializationInfo> state = nil.serializeToData();
+            state._index."0"._class_data."WSDL::XsdNilValue".attributes = invalid;
+            assertThrows("DESERIALIZATION-ERROR", \Serializable::deserialize(), (state,));
+        }
+        AbstractDataProviderType provider = scalar(True).getElement("", "value").getDataProviderType();
+        foreach hash<auto> invalid in ({"element": "invalid"}, {"value_type": 0}, {"optional": "yes"}) {
+            hash<SerializationInfo> state = provider.serializeToData();
+            state._index."0"._class_data."WSDL::XsdNillableDataType" += invalid;
+            assertThrows("DESERIALIZATION-ERROR", \Serializable::deserialize(), (state,));
+        }
+        assertEq(17, Serializable::deserialize(nil.serialize()).getAttributes().tag);
+        AbstractDataProviderType mandatory = provider.getMandatoryType();
+        assertThrows("MISSING-VALUE-ERROR", \mandatory.acceptsValue(), (NOTHING,));
+        assertEq(NOTHING, provider.getOrNothingType().acceptsValue(NOTHING));
+        assertTrue(mandatory.getInfo().union_types[0].mandatory);
+        assertFalse(provider.getOrNothingType().getInfo().union_types[0].mandatory);
+    }
+    private cancellation() {
+        XsdSchema model = schema('<xs:element name="value" nillable="true"><xs:complexType>'
+            '<xs:attribute name="tag" type="xs:int" use="required"/></xs:complexType></xs:element>');
+        XsdComplexType complex_type = cast<XsdComplexType>(model.getElement("", "value").type);
+        XsdAbstractType original = complex_type.attrs.tag.type;
+        XsdNilValue nil({"tag": 17});
+        Program program(PO_MODERN | PO_ENABLE_DEBUG);
+        SandboxManager manager();
+        on_exit {
+            manager.clearInterrupt();
+            complex_type.attrs.tag.type = original;
+        }
+        program.setSandboxManager(manager);
+        program.parse("%modern\nsub execute(code<nothing()> work) { work(); }\n", "nil-attribute-interrupt.qr");
+        foreach AbstractDataProviderType provider in (model.getElement("", "value").getDataProviderType(),
+                model.getNativeDataProviderType("", "value")) {
+            complex_type.attrs.tag.type = new InterruptingNilAttributeType(manager);
+            code<nothing()> work = sub() {
+                provider.acceptsValue(nil);
+            };
+            *hash<ExceptionInfo> error;
+            try {
+                program.callFunction("execute", work);
+            } catch (hash<ExceptionInfo> ex) {
+                error = ex;
+            }
+            manager.clearInterrupt();
+            assertEq("PROGRAM-INTERRUPTED", error.err);
+            assertEq(17, nil.getAttributes().tag);
+            complex_type.attrs.tag.type = original;
+            assertTrue(nil === provider.acceptsValue(nil));
+            assertEq(17, nil.getAttributes().tag);
+        }
+    }
+    private emptyContent() {
+        XsdSchema empty = schema('<xs:element name="value"><xs:complexType><xs:sequence>'
+            '<xs:element name="child" type="xs:string" minOccurs="0"/>'
+            '</xs:sequence></xs:complexType></xs:element>');
+        XsdElement declaration = empty.getElement("", "value");
+        assertEq(NOTHING, declaration.deserializeValue(empty.getTypeMap(), NOTHING, NOTHING, True, False));
+        foreach hash<auto> wire in ({}, {"^attributes^": {"xmlns:p": "urn:example"}}) {
+            assertEq({"child": NOTHING}, declaration.deserializeValue(empty.getTypeMap(), NOTHING, wire, True, False));
+        }
+        assertThrows("SOAP-DESERIALIZATION-ERROR", \declaration.deserializeValue(),
+            (empty.getTypeMap(), NOTHING, {"^attributes^": {"unknown": "17"}}, True, False));
+        XsdSchema model = schema('<xs:element name="value" nillable="true"><xs:complexType>'
+            '<xs:attribute name="tag" type="xs:int" use="required"/></xs:complexType></xs:element>');
+        foreach string text in ("", "<!--shipment-->", "<![CDATA[]]>") {
+            assertEq({"^attributes^": {"tag": 17}}, decode(model, 'i:nil="false" tag="17"', text));
+        }
+        foreach string text in ("17", " ", "<![CDATA[ ]]>", "<child/>") {
+            assertThrows("SOAP-DESERIALIZATION-ERROR", \decode(), (model, 'i:nil="false" tag="17"', text));
+        }
+        foreach auto content in ("17", " ", 0, False) {
+            assertThrows("SOAP-SERIALIZATION-ERROR", \model.serializeXmlValue(),
+                ("", "value", {"^attributes^": {"tag": 17}, "^value^": content}));
+        }
+        assertThrows("SOAP-SERIALIZATION-ERROR", \model.serializeXmlValue(),
+            ("", "value", {"^attributes^": {"tag": 17}, "child": NOTHING}));
+    }
+}

@@ -1,0 +1,109 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../../qlib"
+%requires xml
+%requires ../../qlib/WSDL.qm
+%try-module json
+%define NoJson
+%endtry
+%ifdef NoJson
+throw "MISSING-MODULE", "element nil interoperability tests require json";
+%else
+auto sub describe(auto value) {
+    if (value instanceof XsdNilValue) {
+        return {"nil": True, "attributes": describe(value.getAttributes())};
+    }
+    if (value instanceof XsdQNameValue) {
+        return {"qname": (value.getNamespaceUri(), value.getLocalName())};
+    }
+    if (value instanceof XsdScopedLexicalValue) {
+        return {"lexical": value.getLexicalValue(), "namespaces": value.getNamespaceBindings()};
+    }
+    if (value.typeCode() == NT_HASH) {
+        return map {$1.key: describe($1.value)}, value.pairIterator();
+    }
+    if (value.typeCode() == NT_LIST) {
+        return map describe($1), value;
+    }
+    return value;
+}
+foreach hash<auto> model in (parse_json(ReadOnlyFile::readTextFile(ARGV[0]))) {
+    XsdSchema schema(model.schema, {"async_only": True});
+    XsdSchema restored_schema = Serializable::deserialize(schema.serialize());
+    hash<string, WebService> services();
+    foreach string binding in (keys model.bindings) {
+        services{binding} = new WebService(model.bindings{binding}, {"async_only": True});
+    }
+    foreach hash<auto> document in (model.documents) {
+        hash<auto> row = {} + {"name": document.name};
+        XsdXmlValue original(document.xml);
+        XsdElement root = schema.getElement(original.getNamespaceUri(), original.getLocalName());
+        auto data = XsdBase::expandElementNamespaces(parse_xml(document.xml, XPF_PRESERVE_ORDER)){
+            original.getExpandedName()};
+        try {
+            auto value = root.deserializeValue(schema.getTypeMap(), NOTHING, data, True, True);
+            row.decoded = True;
+            row.value = describe(value);
+            auto retained = Serializable::deserialize(Serializable::serialize(value));
+            row.output = restored_schema.serializeXmlValue(original.getNamespaceUri(), original.getLocalName(), retained).getXml();
+            auto checked = restored_schema.getNativeDataProviderType(original.getNamespaceUri(), original.getLocalName())
+                .acceptsValue(retained);
+            row.provider_value = describe(checked);
+        } catch (hash<ExceptionInfo> error) {
+            if (error.err == "THREAD-CANCELLED" || error.err == "PROGRAM-INTERRUPTED") {
+                rethrow;
+            }
+            row.error = error.err;
+            row.description = error.desc;
+        }
+        if (model.generic) {
+            try {
+                row.direct_output = schema.serializeXmlValue(original.getNamespaceUri(), original.getLocalName(), data).getXml();
+                row.encoded = True;
+            } catch (hash<ExceptionInfo> error) {
+                if (error.err == "THREAD-CANCELLED" || error.err == "PROGRAM-INTERRUPTED") {
+                    rethrow;
+                }
+                row.encode_error = error.err;
+                row.encode_description = error.desc;
+            }
+        }
+        try {
+            row.retained_output = schema.validateXmlValue(original).getXml();
+            row.retained = True;
+        } catch (hash<ExceptionInfo> error) {
+            if (error.err == "THREAD-CANCELLED" || error.err == "PROGRAM-INTERRUPTED") {
+                rethrow;
+            }
+            row.retained_error = error.err;
+        }
+        list<hash<auto>> messages();
+        foreach hash<auto> message in (document.messages) {
+            hash<auto> result = {} + {"binding": message.binding, "direction": message.direction};
+            bool response = message.direction == "response";
+            WSOperation operation = services{message.binding}.getBindingOperation(message.binding, "submit");
+            try {
+                auto value = response
+                    ? operation.deserializeResponse(parse_xml(message.xml, XPF_PRESERVE_ORDER), message.binding, True)
+                    : operation.deserializeRequest(parse_xml(message.xml, XPF_PRESERVE_ORDER), message.binding, True);
+                result.decoded = True;
+                result.value = describe(value);
+                auto retained = Serializable::deserialize(Serializable::serialize(value));
+                result.output = (response
+                    ? operation.serializeResponse({"body": retained}, NOTHING, NOTHING, NOTHING, NOTHING, NOTHING, message.binding)
+                    : operation.serializeRequest({"body": retained}, NOTHING, NOTHING, NOTHING, NOTHING, NOTHING, message.binding)).body;
+            } catch (hash<ExceptionInfo> error) {
+                if (error.err == "THREAD-CANCELLED" || error.err == "PROGRAM-INTERRUPTED") {
+                    rethrow;
+                }
+                result.error = error.err;
+                result.description = error.desc;
+            }
+            push messages, result;
+        }
+        row.messages = messages;
+        printf("%s\n", make_json(row));
+    }
+}
+%endif

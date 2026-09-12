@@ -80,6 +80,14 @@ module WSDL {
     @section wsdlrelnotes WSDL Module Release Notes
 
     @subsection wsdl_0_5_8 WSDL v0.5.8
+    - receiving elements enforce xsi:nil's boolean lexical space, nillability and fixed-value exclusion;
+      true nil values reject character/element content and still validate required, fixed and wildcard attributes
+    - XsdNilValue preserves explicitly present nil occurrences and their native attributes through saved values,
+      optional/repeated fields, selected types, providers and SOAP clients/handlers
+    - mixed native records retain ordered text, CDATA and typed child segments; repeated list-valued children
+      preserve occurrence boundaries, and explicit native capture retains uninterpreted text's namespace context
+    - mixed providers and bounded examples preserve complete particle order, including repeated groups,
+      wildcard/substitution children and selected types; soft and reconstructed providers retain validation
     - element default/fixed declarations validate their lexical values after type resolution, including
       restrictions, lists, unions and complex simple/mixed content eligibility
     - XsdElement::getValueConstraint() retains each declaration's typed value, lexical form and namespace
@@ -2527,6 +2535,13 @@ public class XsdAbstractType inherits WSDL::XsdNamedData {
 
 #! obtains a scalar value from the parser's ordered text and CDATA fragments
 class XsdScalarTextHelper {
+    static requireEmpty(auto data, string description, string error) {
+        auto content = value(data, error);
+        if (exists content && (content.typeCode() != NT_STRING || content.length())) {
+            throw error, sprintf("%s cannot contain characters", description);
+        }
+    }
+
     static *hash<auto> elementContent(auto data, string description, string error = SOAP_DESERIALIZATION_ERROR) {
         if (!exists data) {
             return;
@@ -5751,6 +5766,16 @@ class XsdQNameXmlOutputHelper {
             }
         }
         hash<string, string> output_declarations = XsdBase::getElementNamespaces(attributes);
+        # The effective parent binding already covers this node. Avoid adding
+        # namespace-only wrappers to every scalar/empty native value in the tree.
+        foreach string prefix in (keys output_declarations) {
+            if (!original.hasKey(prefix ? "xmlns:" + prefix : "xmlns")
+                    && ((output.hasKey(prefix) && output{prefix} == output_declarations{prefix})
+                        || (!prefix && !output.hasKey(prefix) && !output_declarations{prefix}))) {
+                remove attributes{prefix ? "xmlns:" + prefix : "xmlns"};
+                remove output_declarations{prefix};
+            }
+        }
         foreach string prefix in (keys output_declarations) {
             if (output.hasKey(prefix)) {
                 output_previous{prefix} = output{prefix};
@@ -10853,6 +10878,9 @@ class XsdElementFieldHelper {
         AbstractDataProviderType result = NativeTypeProviderContext
             ? new XsdNativeTypeDataType(NativeTypeProviderContext.getDefinition(element.type), element)
             : element.type.getDataProviderType();
+        if (!NativeTypeProviderContext && element.nillable) {
+            result = new XsdNillableDataType(element, result);
+        }
         if (repeated && (element.type.hasNativeListValue()
                 || (!(result instanceof ListDataType) && !result.isList()))) {
             result = new SoftListDataType(result.getName(), result, False, NOTHING, result.getTags());
@@ -10958,6 +10986,103 @@ class XsdElementConsistencyHelper {
     }
 }
 
+#! An explicitly present nilled element with optional native attribute values
+/** This immutable carrier distinguishes a present nilled element from an omitted optional field.
+    The receiving declaration validates nillability, fixed constraints and every attribute on output.
+    Type and substitution identity use the existing outer wrappers.
+    @par Example
+    Preserve an unavailable shipment weight and its required measurement unit:
+    @code{.py}
+    XsdNilValue weight({"unit": "kg"});
+    @endcode
+    @since %WSDL 0.5.8
+*/
+public final class XsdNilValue inherits Serializable {
+    private {
+        hash<auto> attributes;
+    }
+    #! constructs a present nilled value
+    /** @param attributes native declared attribute fields or expanded wildcard names
+        @throw XSD-NIL-VALUE-ERROR invalid attribute names or schema-instance metadata
+        @note Attribute datatypes and required uses are checked by the receiving schema.
+    */
+    constructor(*hash<auto> attributes) {
+        initialize(attributes ?? {}, "XSD-NIL-VALUE-ERROR");
+    }
+    private initialize(hash<auto> attributes, string error) {
+        foreach string key in (keys attributes) {
+            XsdQNameValue identity = XsdWildcardAttributeHelper::name(key, error);
+            if (identity.getNamespaceUri() == XSI_NS) {
+                throw error, "a nil carrier's attributes cannot replace schema-instance metadata";
+            }
+        }
+        self.attributes = attributes;
+    }
+    private:internal deserializeMembers(hash<auto> members) {
+        if (members.attributes.typeCode() != NT_HASH) {
+            throw "DESERIALIZATION-ERROR", "a nilled value requires an attribute hash";
+        }
+        initialize(members.attributes, "DESERIALIZATION-ERROR");
+    }
+    #! returns the native attribute values
+    /** @return a copy-on-write hash of attribute values */
+    hash<auto> getAttributes() {
+        return attributes;
+    }
+}
+
+class XsdNilValueHelper {
+    private static hash<XsdAttributeWildcardInfo> anyWildcard() {
+        return <XsdAttributeWildcardInfo>{"processing": XsdWildcardProcessing::Lax};
+    }
+    static *hash<auto> decodeAttributes(XsdAbstractType type, *hash<auto> attributes) {
+        if (type instanceof XsdComplexType) {
+            return cast<XsdComplexType>(type).deserializeAttributeValues(attributes);
+        }
+        if (!XsdTypeSubstitutionHelper::builtin(type, "anyType")) {
+            XsdBase::validateSimpleAttributes(attributes, type.name);
+            return;
+        }
+        hash<auto> expanded = XsdBase::getExpandedAttributes(attributes);
+        hash<auto> result();
+        foreach string identity in (keys expanded) {
+            if (!XsdBase::isInstanceAttribute(identity)) {
+                result{identity} = XsdWildcardAttributeHelper::decode(type.nsc, anyWildcard(), identity,
+                    expanded{identity});
+            }
+        }
+        XsdWildcardAttributeHelper::checkIds(type.nsc, anyWildcard(), {}, keys result, SOAP_DESERIALIZATION_ERROR);
+        return result;
+    }
+    static *hash<auto> encodeAttributes(XsdAbstractType type, Namespaces output, hash<auto> attributes) {
+        if (type instanceof XsdComplexType) {
+            return cast<XsdComplexType>(type).serializeAttributeValues(output, attributes);
+        }
+        if (!XsdTypeSubstitutionHelper::builtin(type, "anyType")) {
+            if (attributes) {
+                throw SOAP_SERIALIZATION_ERROR, sprintf("simple type %Y cannot contain ordinary attributes", type.name);
+            }
+            return;
+        }
+        hash<auto> result();
+        hash<string, bool> identities();
+        foreach string field in (keys attributes) {
+            XsdQNameValue identity = XsdWildcardAttributeHelper::name(field, SOAP_SERIALIZATION_ERROR);
+            string expanded = type_qname(identity.getNamespaceUri(), identity.getLocalName());
+            if (identities{expanded}) {
+                throw SOAP_SERIALIZATION_ERROR, sprintf("duplicate expanded attribute %Y", expanded);
+            }
+            identities{expanded} = True;
+            string name = (identity.getNamespaceUri() ? output.getOutputNamespacePrefix(identity.getNamespaceUri())
+                + ":" : "") + identity.getLocalName();
+            result{name} = XsdWildcardAttributeHelper::encode(type.nsc, output, anyWildcard(), identity,
+                attributes{field});
+        }
+        XsdWildcardAttributeHelper::checkIds(type.nsc, anyWildcard(), {}, keys identities, SOAP_SERIALIZATION_ERROR);
+        return result;
+    }
+}
+
 #! Resolved default or fixed value belonging to an element declaration
 /** The lexical form and its declaration namespace bindings accompany the typed value.
     This distinguishes an empty constraint from the absence of a constraint and keeps
@@ -10973,6 +11098,12 @@ public hashdecl XsdElementValueConstraintInfo {
     hash<string, string> namespaces;
     #! The value converted with the resolved simple content type
     auto value;
+}
+
+hashdecl XsdMixedContentItem {
+    string key;
+    auto value;
+    *string identity;
 }
 
 #! XSD element class
@@ -11085,9 +11216,6 @@ public class XsdElement inherits WSDL::XsdTypedData {
             type = new XsdSimpleType(e.simpleType ?? {}, nsc, unresolved, usedocns, sprintf("simpleType for element %Y", name));
         } else if (e.hasKey("complexType")) {
             type = new XsdComplexType(e.complexType, nsc, unresolved, usedocns, sprintf("complexType for element %Y", name));
-            if (type.isNillable() && !exists a.nillable) {
-                nillable = True;
-            }
         } else if (exists a.ref) {
             hash<auto> identity = nsc.getTypeHash(a.ref);
             ref = identity.val;
@@ -11410,7 +11538,13 @@ public class XsdElement inherits WSDL::XsdTypedData {
             if (XsdTypeDerivationHelper::sameType(ntype, type)) {
                 ntype = type;
             }
-            return serializeAsIntern(nsc, ntype, h."^val^", omitType, key, name, minimum, maximum);
+            # Portable captured wrappers preserve presence. Legacy component-object
+            # wrappers retain their established optional-omission behavior.
+            auto value = h."^val^";
+            if (!exists value && nillable && h."^type^" instanceof XsdQNameValue) {
+                value = new XsdNilValue();
+            }
+            return serializeAsIntern(nsc, ntype, value, omitType, key, name, minimum, maximum);
         }
 
         return serializeAsIntern(nsc, type, h, omitType, key, typename, minimum, maximum);
@@ -11431,6 +11565,15 @@ public class XsdElement inherits WSDL::XsdTypedData {
         if (!minOccurs && (!exists h || (tc == NT_LIST && h.empty() && !is_list_type))) {
             return;
         }
+        if (maxOccurs == 0) {
+            throw SOAP_SERIALIZATION_ERROR, sprintf("element %Y has maxOccurs 0", name);
+        }
+        if (tc == NT_LIST && h.empty() && !is_list_type
+                && !(maxOccurs == 1 && minOccurs == 1 && !nillable
+                    && type instanceof XsdComplexType && !type.requiresValue())) {
+            throw SOAP_SERIALIZATION_ERROR, sprintf("empty occurrence collection for element %Y with minOccurs %d",
+                name, minOccurs);
+        }
         if (abstract_element) {
             throw SOAP_SERIALIZATION_ERROR, sprintf("abstract element %Y cannot occur directly", name);
         }
@@ -11445,13 +11588,16 @@ public class XsdElement inherits WSDL::XsdTypedData {
             if (!minOccurs)
                 return;
 
-            if (nillable || type.isNillable()) {
-                string instance_prefix = nsc.getOutputNamespacePrefix(XSI_NS);
-                hash<auto> rh = {instance_prefix + ":nil": "true"};
-                if ((!omitType || type != self.type) && type.hasRealName()) {
-                    rh += XsdDocumentValueHelper::typeAttributes(type, nsc);
+            if (nillable) {
+                if (minOccurs > 1) {
+                    throw SOAP_SERIALIZATION_ERROR, sprintf("one nilled occurrence supplied for element %Y "
+                        "with minOccurs %d", name, minOccurs);
                 }
-                return ("^attributes^": rh);
+                hash<auto> rh = serializeNil(type, nsc, new XsdNilValue());
+                if ((!omitType || type != self.type) && type.hasRealName()) {
+                    rh."^attributes^" += XsdDocumentValueHelper::typeAttributes(type, nsc);
+                }
+                return rh;
             }
 
             if (!type.isRequired())
@@ -11503,6 +11649,30 @@ public class XsdElement inherits WSDL::XsdTypedData {
 
     private auto serializeTypedValue(XsdAbstractType selected, Namespaces namespaces, auto value,
             *softbool omitType, *hash<auto> type_attributes) {
+        if (value instanceof XsdNilValue || (!exists value && nillable)) {
+            hash<auto> nil = serializeNil(selected, namespaces, value ?? new XsdNilValue());
+            nil."^attributes^" += type_attributes;
+            return nil;
+        }
+        if (XsdTypeSubstitutionHelper::builtin(selected, "anyType") && value.typeCode() == NT_HASH) {
+            # Generic XML values can carry an explicit xsi:nil and xsi:type. Assess
+            # the receiving declaration before a type converter examines content.
+            try {
+                hash<auto> wire = XsdBase::restoreElementNamespaces(value);
+                hash<auto> assessed = XsdBase::expandElementNamespaces(wire);
+                XsdQNameNamespaceScope scope(assessed."^attributes^", True);
+                XsdAbstractType actual = XsdTypeSubstitutionHelper::select(\assessed, selected,
+                    NativeTypeOutputTypes ?? selected.nsc.getInstanceTypes(), name, blocked_substitutions);
+                if (assessNil(actual, assessed)) {
+                    return wire;
+                }
+            } catch (hash<ExceptionInfo> error) {
+                if (error.err == SOAP_DESERIALIZATION_ERROR) {
+                    rethrow SOAP_SERIALIZATION_ERROR, error.desc, error.arg;
+                }
+                rethrow;
+            }
+        }
         # An anonymous simple type cannot be named by xsi:type. Its restriction
         # base or union member must not be substituted for that anonymous component.
         bool omit_selected_type = omitType || (selected instanceof XsdSimpleType && !selected.hasRealName());
@@ -11562,10 +11732,13 @@ public class XsdElement inherits WSDL::XsdTypedData {
     private auto deserializeOccurrences(hash<string, XsdAbstractType> tmap, *hash<auto> mrh, auto val,
             bool present, int minOccurs, int maxOccurs) {
         if (!exists val && !present) {
-            if (nillable || type.isNillable() || !minOccurs) {
+            if (!minOccurs) {
                 return;
             }
             throw SOAP_DESERIALIZATION_ERROR, sprintf("missing element %Y with minOccurs %d", name, minOccurs);
+        }
+        if (maxOccurs == 0) {
+            throw SOAP_DESERIALIZATION_ERROR, sprintf("element %Y has maxOccurs 0", name);
         }
         if (val.typeCode() == NT_LIST) {
             int count = val.size();
@@ -11588,16 +11761,47 @@ public class XsdElement inherits WSDL::XsdTypedData {
         }
         XsdQNameNamespaceScope scope(value.typeCode() == NT_HASH ? value."^attributes^" : NOTHING);
         XsdAbstractType selected = XsdTypeSubstitutionHelper::select(\value, type, tmap, name, blocked_substitutions);
-        *hash<auto> attributes = value."^attributes^";
-        XsdBase::removeNS(\attributes);
-        if (attributes.nil == "true") {
-            if (nillable || selected.isNillable() || !minOccurs) {
-                return XsdNativeTypeValueHelper::retain(type, selected, NOTHING);
-            }
-            throw SOAP_DESERIALIZATION_ERROR, sprintf("element %Y is not nillable", name);
+        if (*XsdNilValue nil = assessNil(selected, value)) {
+            # Keep the established bare and selected-type nil projections. Explicit
+            # capture retains same-type presence, and attributes always need a carrier.
+            auto retained = nil.getAttributes() || (PreserveNativeTypes
+                && XsdTypeDerivationHelper::sameType(type, selected)) ? nil : NOTHING;
+            return XsdNativeTypeValueHelper::retain(type, selected, retained);
         }
         return XsdNativeTypeValueHelper::retain(type, selected,
             XsdDocumentValueHelper::deserializeValue(selected, name, tmap, references, value));
+    }
+
+    private *XsdNilValue assessNil(XsdAbstractType selected, auto value) {
+        *hash<auto> attributes = value.typeCode() == NT_HASH ? value."^attributes^" : NOTHING;
+        hash<auto> expanded = XsdBase::getExpandedAttributes(attributes);
+        string identity = type_qname(XSI_NS, "nil");
+        if (!expanded.hasKey(identity)) {
+            return;
+        }
+        if (!nillable) {
+            throw SOAP_DESERIALIZATION_ERROR, sprintf("element %Y is not nillable", name);
+        }
+        if (expanded{identity}.typeCode() != NT_STRING) {
+            throw SOAP_DESERIALIZATION_ERROR, "xsi:nil requires a boolean lexical value";
+        }
+        if (!XsdBooleanLexicalHelper::decode(expanded{identity}, SOAP_DESERIALIZATION_ERROR)) {
+            return;
+        }
+        if (getValueConstraint().fixed) {
+            throw SOAP_DESERIALIZATION_ERROR, sprintf("element %Y with a fixed value cannot be nilled", name);
+        }
+        XsdScalarTextHelper::requireEmpty(value, sprintf("nilled element %Y", name), SOAP_DESERIALIZATION_ERROR);
+        return new XsdNilValue(XsdNilValueHelper::decodeAttributes(selected, attributes));
+    }
+
+    private hash<auto> serializeNil(XsdAbstractType selected, Namespaces namespaces, XsdNilValue value) {
+        if (!nillable || getValueConstraint().fixed) {
+            throw SOAP_SERIALIZATION_ERROR, sprintf("element %Y does not permit a nilled value", name);
+        }
+        hash<auto> attributes = XsdNilValueHelper::encodeAttributes(selected, namespaces, value.getAttributes()) ?? {};
+        attributes{namespaces.getOutputNamespacePrefix(XSI_NS) + ":nil"} = "true";
+        return {"^attributes^": attributes};
     }
 }
 
@@ -11765,16 +11969,187 @@ class XsdNativeTypeProviderHelper {
             ? cast<XsdNativeTypeDataType>(result.getOrNothingType()) : result;
     }
     static bool isNative(AbstractDataProviderType type) {
-        if (type instanceof XsdNativeTypeDataType || type instanceof XsdElementDataType) {
+        if (type instanceof XsdNativeTypeDataType || type instanceof XsdElementDataType
+                || type instanceof XsdNillableDataType) {
             return True;
         }
-        return type instanceof ListDataType && type.getElementType() instanceof XsdNativeTypeDataType;
+        return type instanceof ListDataType && (type.getElementType() instanceof XsdNativeTypeDataType
+            || type.getElementType() instanceof XsdNillableDataType);
     }
     static auto unwrap(auto value) {
         if (XsdElementValueHelper::isWrapper(value)) {
             value = value."^val^";
         }
-        return XsdNativeTypeValueHelper::isWrapper(value) ? value."^val^" : value;
+        if (XsdNativeTypeValueHelper::isWrapper(value)) {
+            value = value."^val^";
+        }
+        return value instanceof XsdNilValue ? NOTHING : value;
+    }
+}
+
+#! A declared native value or an explicitly present nilled value
+/** The original value provider retains scalar/record conversions and field metadata.
+    Explicit nil values are checked against their receiving element and attribute declarations.
+    @par Example
+    A shipment connector accepts an explicitly nilled weight with a required unit attribute.
+    @since %WSDL 0.5.8
+*/
+public class XsdNillableDataType inherits AbstractDataProviderType {
+    private {
+        XsdElement element;
+        AbstractDataProviderType value_type;
+        bool optional;
+    }
+    #! wraps an element's ordinary native value provider
+    /** @param element the receiving declaration
+        @param value_type its non-nil native provider
+    */
+    constructor(XsdElement element, AbstractDataProviderType value_type) {
+        self.element = element;
+        self.value_type = value_type;
+        optional = value_type.isOrNothingType();
+    }
+    private:internal deserializeMembers(hash<auto> members) {
+        if (!(members.element instanceof XsdElement) || !(members.value_type instanceof AbstractDataProviderType)
+                || members.optional.typeCode() != NT_BOOLEAN) {
+            throw "DESERIALIZATION-ERROR", "a nillable provider requires its element, value type and optionality";
+        }
+        element = members.element;
+        value_type = members.value_type;
+        optional = members.optional;
+    }
+    #! returns the native type's name with nil support
+    /** @return the provider name */
+    string getName() { return value_type.getName() + " or nilled element"; }
+    #! describes the explicit nil representation
+    /** @return the value contract */
+    string getDesc() {
+        return "Accepts the declared native value or `XsdNilValue` with validated attributes. "
+            "An explicit nil carrier preserves an optional element's presence.";
+    }
+    #! requires conversion for every value
+    /** @return NOTHING */
+    *Type getValueType() { return; }
+    #! prevents native containers from bypassing nil validation
+    /** @return an empty map */
+    *hash<string, bool> getDirectTypeHash() { return {}; }
+    #! preserves the ordinary value's child fields
+    /** @return the native record fields, if any */
+    *hash<string, AbstractDataField> getFields() { return value_type.getFields(); }
+    #! preserves the ordinary value's list element metadata
+    /** @return the native list item provider, if any */
+    *AbstractDataProviderType getElementType() { return value_type.getElementType(); }
+    #! preserves native list occurrence behavior
+    /** @return whether the ordinary value is a list */
+    bool isList() { return value_type.isList(); }
+    #! returns whether omission is accepted
+    /** @return the explicit optionality */
+    bool isOrNothingType() { return optional; }
+    #! returns whether a value must be provided
+    /** @return the inverse of optionality */
+    bool isMandatory() { return !optional; }
+    #! returns accepted native types
+    /** @param simple whether simplified names are requested
+        @return the native names plus the explicit nil carrier
+    */
+    hash<string, bool> getAcceptTypeHash(*bool simple) {
+        hash<string, bool> result = value_type.getAcceptTypeHash(simple)
+            + new QoreDataType(new Type("WSDL::XsdNilValue")).getAcceptTypeHash(simple);
+        if (optional) {
+            result.nothing = True;
+        } else {
+            remove result.nothing;
+            remove result.null;
+        }
+        return result;
+    }
+    #! returns produced native types
+    /** @param simple whether simplified names are requested
+        @return the native names plus the explicit nil carrier
+    */
+    hash<string, bool> getReturnTypeHash(*bool simple) {
+        hash<string, bool> result = value_type.getReturnTypeHash(simple)
+            + new QoreDataType(new Type("WSDL::XsdNilValue")).getReturnTypeHash(simple);
+        if (optional) {
+            result.nothing = True;
+        } else {
+            remove result.nothing;
+            remove result.null;
+        }
+        return result;
+    }
+    #! describes both native and nil alternatives
+    /** @param simple whether simplified names are requested
+        @return provider metadata with both alternatives
+    */
+    hash<DataTypeInfo> getInfo(*bool simple) {
+        hash<DataTypeInfo> result = AbstractDataProviderType::getInfo(simple);
+        if (!result.recursive) {
+            AbstractDataProviderType native_type = optional ? value_type.getOrNothingType()
+                : value_type.getMandatoryType();
+            result.union_types = (native_type.getInfo(simple),
+                new QoreDataType(new Type("WSDL::XsdNilValue")).getInfo(simple));
+        }
+        return result;
+    }
+    #! returns an ordinary native example
+    /** @param emap visited declarations
+        @param fname optional field name
+        @return NOTHING for optional fields or the ordinary provider's example
+        @throw DATA-ERROR the declared provider cannot construct an example
+    */
+    auto getExampleValue(*hash<string, bool> emap, *string fname) {
+        return optional ? NOTHING : value_type.getMandatoryType().getExampleValue(emap, fname);
+    }
+    #! validates native values and explicit nil attributes
+    /** @param value the supplied native value
+        @return the converted value, or the checked immutable nil carrier
+        @throw MISSING-VALUE-ERROR an omitted mandatory value
+        @throw RUNTIME-TYPE-ERROR invalid nil permission, attributes or native value
+        @note Cancellation and custom conversion exceptions propagate unchanged.
+    */
+    auto acceptsValue(auto value) {
+        if (!exists value) {
+            if (optional) {
+                return;
+            }
+            throw "MISSING-VALUE-ERROR", sprintf("value %Y must be supplied", getName());
+        }
+        if (!(value instanceof XsdNilValue)) {
+            return value_type.acceptsValue(value);
+        }
+        try {
+            Namespaces output = element.type.nsc.copy();
+            XsdQNameOutputScope scope(output);
+            element.serializeOccurrence(output, value, True, element.name, getName());
+        } catch (hash<ExceptionInfo> error) {
+            if (error.err == SOAP_SERIALIZATION_ERROR) {
+                rethrow "RUNTIME-TYPE-ERROR", error.desc, error.arg;
+            }
+            rethrow;
+        }
+        return value;
+    }
+    #! permits omission without changing the source provider
+    /** @return an optional copy */
+    AbstractDataProviderType getOrNothingType() {
+        XsdNillableDataType result = self.copy();
+        result.optional = True;
+        return result;
+    }
+    #! requires a value without changing the source provider
+    /** @return a mandatory copy */
+    AbstractDataProviderType getMandatoryType() {
+        XsdNillableDataType result = self.copy();
+        result.optional = False;
+        return result;
+    }
+    #! softens native conversion while retaining nil validation
+    /** @return a copy with the soft native provider */
+    AbstractDataProviderType getSoftType() {
+        XsdNillableDataType result = self.copy();
+        result.value_type = value_type.getSoftType();
+        return result;
     }
 }
 
@@ -12112,6 +12487,9 @@ public class XsdNativeTypeDataType inherits AbstractDataProviderType {
     */
     hash<string, bool> getAcceptTypeHash(*bool simple) {
         hash<string, bool> result = nativeType().getAcceptTypeHash(simple) + {"hash":True};
+        if (element && element.nillable) {
+            result += new QoreDataType(new Type("WSDL::XsdNilValue")).getAcceptTypeHash(simple);
+        }
         if (isOrNothingType()) {
             result.nothing = True;
         } else {
@@ -12126,6 +12504,9 @@ public class XsdNativeTypeDataType inherits AbstractDataProviderType {
     */
     hash<string, bool> getReturnTypeHash(*bool simple) {
         hash<string, bool> result = nativeType().getReturnTypeHash(simple) + {"hash":True};
+        if (element && element.nillable) {
+            result += new QoreDataType(new Type("WSDL::XsdNilValue")).getReturnTypeHash(simple);
+        }
         if (isOrNothingType()) {
             result.nothing = True;
         } else {
@@ -12162,6 +12543,9 @@ public class XsdNativeTypeDataType inherits AbstractDataProviderType {
             });
             result.union_types = definition.declared.isAbstract() ? (wrapper.getInfo(simple),)
                 : (nativeType().getInfo(simple), wrapper.getInfo(simple));
+            if (element && element.nillable && !definition.declared.isAbstract()) {
+                push result.union_types, new QoreDataType(new Type("WSDL::XsdNilValue")).getInfo(simple);
+            }
         }
         return result;
     }
@@ -12177,7 +12561,7 @@ public class XsdNativeTypeDataType inherits AbstractDataProviderType {
             return;
         }
         if (!definition.declared.isAbstract()) {
-            return nativeType().getExampleValue(emap, fname);
+            return nativeType().getMandatoryType().getExampleValue(emap, fname);
         }
         foreach XsdAbstractType candidate in (definition.owner.types.iterator()) {
             *AbstractDataProviderType selected;
@@ -12191,7 +12575,7 @@ public class XsdNativeTypeDataType inherits AbstractDataProviderType {
             }
             return {"^type^":new XsdQNameValue(candidate.ons
                 ? candidate.nsc.getOutputNamespaceUri(candidate.ons) : "", candidate.name),
-                "^val^":selected.getExampleValue(emap, fname)};
+                "^val^":selected.getMandatoryType().getExampleValue(emap, fname)};
         }
         throw "XSD-SAMPLE-ERROR", sprintf("abstract type %Y has no permitted concrete example", definition.declared.name);
     }
@@ -12241,10 +12625,11 @@ public class XsdNativeTypeDataType inherits AbstractDataProviderType {
             if (XsdNativeTypeValueHelper::isWrapper(value)) {
                 XsdNativeTypeValueHelper::checkWrapper(value);
                 AbstractDataProviderType selected = getSelectedValueType(value."^type^");
-                if (exists value."^val^" || !(element && element.nillable)) {
+                if (!(value."^val^" instanceof XsdNilValue)
+                        && (exists value."^val^" || !(element && element.nillable))) {
                     value."^val^" = selected.acceptsValue(value."^val^");
                 }
-            } else {
+            } else if (!(value instanceof XsdNilValue)) {
                 value = nativeType().acceptsValue(value);
             }
             if (element) {
@@ -12704,6 +13089,171 @@ public class XsdWildcardContentDataType inherits HashDataType {
     /** @param emap enclosing example context
         @param fname optional field context
         @return a native record, or NOTHING for an optional provider
+        @throw XSD-SAMPLE-ERROR no valid instance is available within the sample bounds
+    */
+    auto getExampleValue(*hash<string, bool> emap, *string fname) {
+        return isOrNothingType() ? NOTHING : WSMessageHelper::getTypeExample(component);
+    }
+}
+
+#! Record provider preserving text and typed children in XML order
+/** Content keys keep their insertion order. Character fragments use \c ^value^ or \c ^cdata^,
+    with numbered variants for later fragments. A child occurring again after other content uses
+    \c name^1, \c name^2 and so on. Each segment of an XSD list-valued child is one occurrence.
+    Declared field metadata and conversions remain available through the ordinary provider API.
+    @par Example
+    A product description retains text before and after a typed product reference through a connector.
+    @since %WSDL 0.5.8
+*/
+public class XsdMixedContentDataType inherits HashDataType {
+    private {
+        XsdComplexType component;
+    }
+    #! constructs a provider for a resolved mixed content model
+    /** @param component receiving mixed type and declaration context */
+    constructor(XsdComplexType component) : HashDataType(component.name) {
+        self.component = component;
+        setDefaultOtherFieldType(AbstractDataProviderTypeMap.any);
+    }
+    private:internal deserializeMembers(hash<auto> members) {
+        if (!(members.component instanceof XsdComplexType)) {
+            throw "DESERIALIZATION-ERROR", "a mixed content provider requires its complex type";
+        }
+        component = members.component;
+    }
+    #! describes the ordered native representation
+    /** @return the field, character-fragment and repeated-segment contract */
+    string getDesc() {
+        return "An ordered hash of typed children and XML text. Text, CDATA and comments use `^value^`, `^cdata^` "
+            "and `^comment^` keys with numbered variants. Repeated child segments use `name^1`, `name^2`, etc. "
+            "Each segment of an XSD list-valued child is one occurrence.";
+    }
+    #! requires complete content-model validation for each assignment
+    /** @return NOTHING */
+    *Type getValueType() {
+        return;
+    }
+    #! returns whether a complete record must be supplied
+    /** @return False for an optional provider copy */
+    bool isMandatory() {
+        return !or_nothing_type;
+    }
+    #! returns whether the complete record can be omitted
+    /** @return True for an optional provider copy */
+    bool isOrNothingType() {
+        return or_nothing_type;
+    }
+    #! prevents enclosing providers from bypassing ordered-content validation
+    /** @return an empty map */
+    *hash<string, bool> getDirectTypeHash() {
+        return {};
+    }
+    #! converts each content segment without changing its position
+    /** @param input an ordered native hash
+        @return the converted hash, or NOTHING for an optional omission
+        @throw RUNTIME-TYPE-ERROR invalid fields, values, metadata, order or occurrences
+        @throw MISSING-VALUE-ERROR an omitted mandatory value or attribute
+        @throw REQUIRED-FIELD-GROUP-ERROR a caller-defined required group has no value
+        @note Cancellation and unrelated exceptions propagate unchanged.
+    */
+    auto acceptsValue(auto input) {
+        if (!exists input) {
+            if (isOrNothingType()) {
+                return;
+            }
+            throw "MISSING-VALUE-ERROR", sprintf("mixed content %Y must be supplied", getName());
+        }
+        if (input.typeCode() != NT_HASH) {
+            throw "RUNTIME-TYPE-ERROR", sprintf("mixed content %Y requires an ordered hash", getName());
+        }
+        *XsdParticle particle = component.getParticle();
+        *hash<string, hash<XsdParticleOccurrenceRange>> ranges = particle ? particle.getElementOccurrenceRanges() : NOTHING;
+        hash<string, XsdElement> declarations = particle
+            ? XsdElementFieldHelper::getParticleDeclarations(particle, ranges) : new hash<string, XsdElement>();
+        hash<string, string> fields = XsdElementFieldHelper::getFieldNames(declarations);
+        hash<string, string> identities = map {$1.value: $1.key}, fields.pairIterator();
+        hash<auto> result();
+        hash<string, bool> supplied();
+        foreach string key in (keys input) {
+            string base = key;
+            base =~ s/\^[0-9]+$//;
+            string identity = identities{base} ?? base;
+            *XsdElement declaration = declarations{identity};
+            string field_name = declaration ? fields{identity} : key;
+            *AbstractDataField field = getField(field_name);
+            auto value = input{key};
+            if (field) {
+                bool repeated = declaration && (!exists ranges{identity}.maximum
+                    || XsdIntegerLexicalHelper::compare(ranges{identity}.maximum, "1") > 0);
+                bool single = repeated && (declaration.type.hasNativeListValue() || value.typeCode() != NT_LIST);
+                try {
+                    value = field.acceptsValue(single ? (value,) : value);
+                } catch (hash<ExceptionInfo> ex) {
+                    if (ex.err == "FIELD-VALUE-ERROR") {
+                        rethrow "RUNTIME-TYPE-ERROR", ex.desc, ex.arg;
+                    }
+                    rethrow;
+                }
+                if (single) {
+                    value = value[0];
+                }
+                if (exists value && value.val()) {
+                    supplied{field_name} = True;
+                }
+            } else if (!key.startsWith("^") && !key.startsWith(".")) {
+                if (*AbstractDataProviderType other = getDefaultOtherFieldType()) {
+                    value = other.acceptsValue(value);
+                }
+            }
+            result{key} = value;
+        }
+        # Attribute defaults add no content position. Child defaults cannot invent a
+        # position in an ordered model; required child occurrences are assessed below.
+        if (!input.hasKey("^attributes^") && (*AbstractDataField attributes = getField("^attributes^"))) {
+            auto value = attributes.acceptsValue(NOTHING);
+            if (exists value) {
+                result."^attributes^" = value;
+                supplied."^attributes^" = value.val();
+            }
+        }
+        foreach list<string> group in (getRequiredGroups()) {
+            if (!(select group, supplied{$1})) {
+                throw "REQUIRED-FIELD-GROUP-ERROR", sprintf("mixed content %Y requires a value in group %Y",
+                    getName(), group);
+            }
+        }
+        Namespaces output = component.nsc.copy();
+        XsdQNameOutputScope output_scope(output);
+        try {
+            component.serializeValue(output, result, True);
+        } catch (hash<ExceptionInfo> ex) {
+            if (ex.err == SOAP_SERIALIZATION_ERROR || ex.err == "XSD-PARTICLE-ERROR") {
+                rethrow "RUNTIME-TYPE-ERROR", ex.desc, ex.arg;
+            }
+            rethrow;
+        }
+        return result;
+    }
+    #! returns a copy retaining order and occurrence validation with soft fields
+    /** @return a provider with soft declared-field conversions */
+    AbstractDataProviderType getSoftType() {
+        if (soft_type) {
+            return self;
+        }
+        XsdMixedContentDataType result = self.copy();
+        foreach AbstractDataField field in (getFields().iterator()) {
+            result.replaceField(field.getSoftType());
+        }
+        if (*AbstractDataProviderType other = getDefaultOtherFieldType()) {
+            result.setDefaultOtherFieldType(other.getSoftType());
+        }
+        result.soft_type = True;
+        return result;
+    }
+    #! generates a bounded example through the receiving model
+    /** @param emap enclosing example context
+        @param fname optional field context
+        @return an ordered native record, or NOTHING for an optional provider
         @throw XSD-SAMPLE-ERROR no valid instance is available within the sample bounds
     */
     auto getExampleValue(*hash<string, bool> emap, *string fname) {
@@ -22571,6 +23121,14 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
         return particle;
     }
 
+    #! returns whether character fragments and child elements share an ordered content model
+    /** @return True for mixed complex content, False for simple or element-only content
+        @since %WSDL 0.5.8
+    */
+    bool hasMixedContent() {
+        return mixed && cx_type != XET_SIMPLE;
+    }
+
     *list<auto> getAllowedValues() {
         if (simpleType) {
             return simpleType.getAllowedValues();
@@ -23191,7 +23749,8 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
             *hash<string, hash<XsdParticleOccurrenceRange>> ranges = particle.getElementOccurrenceRanges();
             hash<string, XsdElement> declarations = getParticleDeclarations(ranges);
             hash<string, string> fields = XsdElementFieldHelper::getFieldNames(declarations);
-            HashDataType result = has_element_wildcard ? new XsdWildcardContentDataType(self) : new HashDataType(name);
+            HashDataType result = mixed ? new XsdMixedContentDataType(self)
+                : has_element_wildcard ? new XsdWildcardContentDataType(self) : new HashDataType(name);
             foreach string identity in (keys declarations) {
                 XsdElement declaration = declarations{identity};
                 hash<XsdParticleOccurrenceRange> range = ranges{identity};
@@ -23199,11 +23758,20 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
                 hash<auto> info = {"name": fields{identity},
                     "type": XsdElementFieldHelper::getOccurrenceType(declaration, range.minimum == "0",
                         repeated)};
+                if (mixed) {
+                    info.display_name = fields{identity};
+                    info.short_desc = "XML child element";
+                    info.desc = "The declared child value in its position among surrounding text. "
+                        "Use numbered keys such as `name^1` for later segments of the same child.";
+                }
                 info{repeated ? "element_allowed_values" : "allowed_values"} =
                     declaration.getDataProviderAllowedValues();
                 result.addField(XsdDataFieldHelper::create(declaration.type, info));
             }
             return addAttributeFields(result);
+        }
+        if (mixed && cx_type != XET_SIMPLE) {
+            return addAttributeFields(new XsdMixedContentDataType(self));
         }
         switch (cx_type) {
             case XET_SIMPLE:
@@ -23282,6 +23850,108 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
         return rv;
     }
 
+    #! converts native attributes independently of the element's content
+    /** @param nsc the output namespace registry
+        @param attributes native declared fields or expanded wildcard attribute names
+        @return converted XML attributes, including declaration defaults
+        @throw SOAP-SERIALIZATION-ERROR missing, prohibited or invalid attributes
+        @note Nilled elements still require normal attribute assessment.
+        @since %WSDL 0.5.8
+    */
+    *hash<auto> serializeAttributeValues(Namespaces nsc, *hash<auto> attributes) {
+        *hash<auto> ah;
+        if (attributes) {
+            hash<auto> mah = attributes;
+            hash<string, XsdAttribute> declared_attributes();
+            foreach XsdAttribute attribute in (attrs.iterator()) {
+                declared_attributes{type_qname(attribute.namespaceUri, attribute.name)} = attribute;
+            }
+            list<string> wildcard_names();
+            foreach string k in (keys mah) {
+                *XsdAttribute attribute = attrs{k} ?? declared_attributes{k};
+                string wire_name;
+                auto value;
+                if (attribute) {
+                    if (attribute.use == "prohibited") {
+                        throw SOAP_SERIALIZATION_ERROR, sprintf("cannot set prohibited attribute %Y", k);
+                    }
+                    wire_name = attribute.getXmlName(nsc);
+                    value = exists mah{k} ? attribute.serializeAttributeValue(nsc, mah{k}) : mah{k};
+                } else {
+                    XsdQNameValue identity = XsdWildcardAttributeHelper::name(k, SOAP_SERIALIZATION_ERROR);
+                    push wildcard_names, type_qname(identity.getNamespaceUri(), identity.getLocalName());
+                    wire_name = identity.getNamespaceUri()
+                        ? nsc.getOutputNamespacePrefix(identity.getNamespaceUri()) + ":" + identity.getLocalName()
+                        : identity.getLocalName();
+                    value = XsdWildcardAttributeHelper::encode(self.nsc, nsc, attribute_wildcard, identity, mah{k});
+                }
+                if (ah.hasKey(wire_name)) {
+                    throw SOAP_SERIALIZATION_ERROR, sprintf("duplicate attribute %Y", wire_name);
+                }
+                ah{wire_name} = value;
+            }
+            XsdWildcardAttributeHelper::checkIds(self.nsc, attribute_wildcard, attrs, wildcard_names,
+                SOAP_SERIALIZATION_ERROR);
+        }
+        foreach XsdAttribute attr in (attrs.iterator()) {
+            string wire_name = attr.getXmlName(nsc);
+            if (attr.use == "required" && !exists ah{wire_name}) {
+                throw SOAP_SERIALIZATION_ERROR, sprintf("cannot serialize element %Y without required attribute %Y",
+                    getName(), attr.name);
+            }
+            if (attr.use == "optional" && !exists ah{wire_name} && attr.hasValueConstraint()) {
+                ah{wire_name} = attr.serializeAttributeValue(nsc, attr.getDefaultValue());
+            }
+        }
+
+        return ah;
+    }
+
+    #! converts XML attributes independently of the element's content
+    /** @param attributes XML attributes with their namespace context
+        @return typed declared fields and expanded wildcard fields, including defaults
+        @throw SOAP-DESERIALIZATION-ERROR missing, prohibited or invalid attributes
+        @note The caller's instance namespace scope remains active during conversion.
+        @since %WSDL 0.5.8
+    */
+    *hash<auto> deserializeAttributeValues(*hash<auto> attributes) {
+        *hash<auto> ah;
+        hash<auto> expanded_attributes = XsdBase::getExpandedAttributes(attributes);
+        hash<string, bool> declared_attributes();
+        foreach string field in (keys attrs) {
+            XsdAttribute xa = attrs{field};
+            string identity = type_qname(xa.namespaceUri, xa.name);
+            declared_attributes{identity} = True;
+            *string attr_val = expanded_attributes{identity};
+            if (xa.use == "required" && !exists attr_val) {
+                throw SOAP_DESERIALIZATION_ERROR, sprintf("cannot deserialize element %Y without required attribute %Y",
+                    getName(), xa.name);
+            }
+            if (exists attr_val) {
+                if (xa.use == "prohibited") {
+                    throw SOAP_DESERIALIZATION_ERROR, sprintf("cannot deserialize element %Y with prohibited attribute %Y",
+                        getName(), xa.name);
+                }
+                ah{field} = xa.getValue(attr_val);
+            } else if (xa.use == "optional" && xa.hasValueConstraint()) {
+                ah{field} = xa.getInstanceDefaultValue();
+            }
+        }
+
+        list<string> wildcard_names();
+        foreach string identity in (keys expanded_attributes) {
+            if (!declared_attributes{identity} && !XsdBase::isInstanceAttribute(identity)) {
+                push wildcard_names, identity;
+                ah{identity} = XsdWildcardAttributeHelper::decode(nsc, attribute_wildcard, identity,
+                    expanded_attributes{identity});
+            }
+        }
+
+        XsdWildcardAttributeHelper::checkIds(nsc, attribute_wildcard, attrs, wildcard_names,
+            SOAP_DESERIALIZATION_ERROR);
+        return ah;
+    }
+
     #! serializes a complex value with this component's attributes and content
     /** @param nsc the output namespace registry
         @param h the native record or simple-content value
@@ -23304,43 +23974,9 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
             mergeRetainedWildcardContext(\h);
         }
 
-        # process attributes first
-        *hash<auto> ah;
+        *hash<auto> ah = serializeAttributeValues(nsc, h.typeCode() == NT_HASH ? remove h."^attributes^" : NOTHING);
         hash<auto> rh;
-        if (h.typeCode() == NT_HASH) {
-            if (h."^attributes^") {
-                hash<auto> mah = remove h."^attributes^";
-                hash<string, XsdAttribute> declared_attributes();
-                foreach XsdAttribute attribute in (attrs.iterator()) {
-                    declared_attributes{type_qname(attribute.namespaceUri, attribute.name)} = attribute;
-                }
-                list<string> wildcard_names();
-                foreach string k in (keys mah) {
-                    *XsdAttribute attribute = attrs{k} ?? declared_attributes{k};
-                    string wire_name;
-                    auto value;
-                    if (attribute) {
-                        if (attribute.use == "prohibited") {
-                            throw SOAP_SERIALIZATION_ERROR, sprintf("cannot set prohibited attribute %Y", k);
-                        }
-                        wire_name = attribute.getXmlName(nsc);
-                        value = exists mah{k} ? attribute.serializeAttributeValue(nsc, mah{k}) : mah{k};
-                    } else {
-                        XsdQNameValue identity = XsdWildcardAttributeHelper::name(k, SOAP_SERIALIZATION_ERROR);
-                        push wildcard_names, type_qname(identity.getNamespaceUri(), identity.getLocalName());
-                        wire_name = identity.getNamespaceUri()
-                            ? nsc.getOutputNamespacePrefix(identity.getNamespaceUri()) + ":" + identity.getLocalName()
-                            : identity.getLocalName();
-                        value = XsdWildcardAttributeHelper::encode(self.nsc, nsc, attribute_wildcard, identity, mah{k});
-                    }
-                    if (ah.hasKey(wire_name)) {
-                        throw SOAP_SERIALIZATION_ERROR, sprintf("duplicate attribute %Y", wire_name);
-                    }
-                    ah{wire_name} = value;
-                }
-                XsdWildcardAttributeHelper::checkIds(self.nsc, attribute_wildcard, attrs, wildcard_names,
-                    SOAP_SERIALIZATION_ERROR);
-            }
+        if (!mixed && h.typeCode() == NT_HASH) {
             foreach string k in (keys h) {
                 if (k =~ /^\^comment/) {
                     rh{k} = remove h{k};
@@ -23348,18 +23984,9 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
             }
         }
 
-        foreach XsdAttribute attr in (attrs.iterator()) {
-            string wire_name = attr.getXmlName(nsc);
-            if (attr.use == "required" && !exists ah{wire_name}) {
-                throw SOAP_SERIALIZATION_ERROR, sprintf("cannot serialize element %Y without required attribute %Y",
-                    getName(), attr.name);
-            }
-            if (attr.use == "optional" && !exists ah{wire_name} && attr.hasValueConstraint()) {
-                ah{wire_name} = attr.serializeAttributeValue(nsc, attr.getDefaultValue());
-            }
-        }
-
-        if (cx_type == XET_SIMPLE) {
+        if (mixed && cx_type != XET_SIMPLE) {
+            rh = convertMixedContent(h, nsc, NativeTypeOutputTypes ?? self.nsc.getInstanceTypes(), NOTHING, omitType);
+        } else if (cx_type == XET_SIMPLE) {
             h = XsdScalarTextHelper::value(h, SOAP_SERIALIZATION_ERROR);
             # The containing complex type owns xsi:type. Its simple content is
             # text with optional lexical namespace bindings, never a nested XML value.
@@ -23462,6 +24089,9 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
                 }
             }
         } else { # "none"
+            if (!mixed) {
+                XsdScalarTextHelper::requireEmpty(h, sprintf("empty-content type %Y", name), SOAP_SERIALIZATION_ERROR);
+            }
             rh."^value^" = NOTHING;
         }
 
@@ -23647,6 +24277,158 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
         return result;
     }
 
+    private hash<auto> convertMixedContent(auto value, *Namespaces output,
+            hash<string, XsdAbstractType> types, *hash<auto> references, *softbool omitType) {
+        string error = output ? SOAP_SERIALIZATION_ERROR : SOAP_DESERIALIZATION_ERROR;
+        # Whole native scalars retain the established make_xml() text conversion.
+        # Explicit XML fragment metadata must still carry text, never a coerced value.
+        int tc = value.typeCode();
+        bool native_scalar = output && (tc == NT_INT || tc == NT_FLOAT || tc == NT_BOOLEAN
+            || tc == NT_DATE || tc == NT_NUMBER);
+        if (!exists value) {
+            value = {};
+        } else if (native_scalar || tc == NT_STRING || value instanceof XsdScopedLexicalValue) {
+            value = {} + {"^value^": value};
+        } else if (value.typeCode() != NT_HASH) {
+            throw error, sprintf("mixed type %Y requires ordered content or text", name);
+        }
+        hash<string, XsdElement> declarations = particle
+            ? getParticleDeclarations(particle.getElementOccurrenceRanges()) : new hash<string, XsdElement>();
+        hash<string, string> fields = XsdElementFieldHelper::getFieldNames(declarations);
+        hash<string, string> identities = map {$1.value: $1.key}, fields.pairIterator();
+        hash<string, bool> ambiguous();
+        foreach XsdElement declaration in (declarations.iterator()) {
+            if (fields{declaration.getExpandedName()} != declaration.name) {
+                ambiguous{declaration.name} = True;
+            }
+        }
+        list<hash<XsdMixedContentItem>> items();
+        list<string> names();
+        foreach string key in (keys value) {
+            if (key.startsWith("^") || key.startsWith(".")) {
+                if (key !~ /^\^(value|cdata|comment)[0-9]*\^$/) {
+                    throw error, sprintf("invalid mixed content metadata %Y", key);
+                }
+                if (!native_scalar && value{key}.typeCode() != NT_STRING && !(output && !key.startsWith("^comment")
+                        && value{key} instanceof XsdScopedLexicalValue)) {
+                    throw error, sprintf("mixed content fragment %Y requires XML text", key);
+                }
+                push items, <XsdMixedContentItem>{"key": key, "value": value{key}};
+                continue;
+            }
+            string base = key;
+            base =~ s/\^[0-9]+$//;
+            if (ambiguous{base}) {
+                throw error, sprintf("ambiguous mixed child %Y requires its expanded name", base);
+            }
+            string identity = identities{base} ?? (base.startsWith("{") ? base : type_qname("", base));
+            bool list_value = output && declarations{identity} && declarations{identity}.type.hasNativeListValue();
+            list<auto> children = value{key}.typeCode() == NT_LIST && !list_value ? value{key} : (value{key},);
+            if (!children) {
+                throw error, sprintf("empty occurrence collection for mixed child %Y", key);
+            }
+            foreach auto child in (children) {
+                push names, identity;
+                push items, <XsdMixedContentItem>{"key": key, "identity": identity, "value": child};
+            }
+        }
+        *list<XsdParticle> positions;
+        try {
+            positions = particle ? particle.attributeElementNames(names) : names ? NOTHING : new list<XsdParticle>();
+        } catch (hash<ExceptionInfo> ex) {
+            if (ex.err == "XSD-PARTICLE-ERROR") {
+                rethrow error, ex.desc, ex.arg;
+            }
+            rethrow;
+        }
+        if (!exists positions) {
+            throw error, sprintf("ordered mixed children %Y do not match type %Y", names, name);
+        }
+        hash<auto> result();
+        hash<string, int> segments();
+        hash<string, int> counts();
+        string previous;
+        string previous_key;
+        int position = 0;
+        foreach hash<XsdMixedContentItem> item in (items) {
+            if (!exists item.identity) {
+                bool comment = item.key.startsWith("^comment");
+                auto text = item.value;
+                if (text.typeCode() == NT_STRING) {
+                    if (comment && (text.find("--") >= 0 || text.endsWith("-"))) {
+                        throw error, "a mixed XML comment cannot contain -- or end with a hyphen";
+                    }
+                    try {
+                        XsdScopedLexicalValue scoped(text, output ? {"": ""} : {"": ""} + (QNameInputNamespaces ?? {}));
+                        if (!comment && (output ? XsdQNameOutputScope::retains(output) : PreserveNativeTypes)) {
+                            text = scoped;
+                        }
+                    } catch (hash<ExceptionInfo> ex) {
+                        if (ex.err == "XSD-SCOPED-VALUE-ERROR") {
+                            rethrow error, ex.desc, ex.arg;
+                        }
+                        rethrow;
+                    }
+                }
+                result{item.key} = text;
+                previous = "";
+                continue;
+            }
+            XsdParticle terminal = positions[position++];
+            string key;
+            auto converted;
+            bool list_value = False;
+            if (terminal.getKind() == XsdParticleKind::Element) {
+                *XsdElement declaration = terminal.getElement().getInstanceDeclaration(item.identity);
+                @assert(declaration);
+                list_value = declaration.type.hasNativeListValue();
+                converted = output ? declaration.serializeOccurrence(output, item.value, omitType,
+                    fields{item.identity}, name) : declaration.deserializeOccurrence(types, references,
+                        getValue(references, item.value));
+                key = output ? declaration.getXmlName(output) : fields{item.identity};
+            } else {
+                @assert(terminal.getKind() == XsdParticleKind::Any);
+                if (output) {
+                    hash<auto> wire = XsdWildcardElementHelper::encode(nsc, output, terminal.getWildcard(),
+                        item.identity, item.value, omitType);
+                    if (wire."^xml^" instanceof XsdQNameXmlFragment) {
+                        XsdQNameXmlFragment fragment = wire."^xml^";
+                        result{"^xml^mixed:" + position} = XsdQNameOutputScope::retains(output)
+                            ? fragment : fragment.getXml();
+                        previous = "";
+                        continue;
+                    }
+                    key = wire.firstKey();
+                    converted = wire{key};
+                } else {
+                    key = PreserveNativeTypes ? item.identity : item.key;
+                    key =~ s/\^[0-9]+$//;
+                    converted = XsdWildcardElementHelper::decode(nsc, terminal.getWildcard(), item.identity,
+                        types, references, item.value);
+                }
+            }
+            if (previous == key && !list_value) {
+                if (counts{previous_key} == 1) {
+                    list<auto> adjacent();
+                    push adjacent, result{previous_key};
+                    result{previous_key} = adjacent;
+                }
+                push result{previous_key}, converted;
+                ++counts{previous_key};
+            } else {
+                previous = key;
+                if (result.hasKey(key)) {
+                    key += "^" + (++segments{key}).toString();
+                }
+                result{key} = converted;
+                counts{key} = 1;
+                previous_key = key;
+            }
+        }
+        @assert(position == positions.size());
+        return result;
+    }
+
     private *hash<auto> serializeChoice(Namespaces nsc, hash<string, XsdElement> emap, hash<auto> h,
             *softbool omitType, bool all_members, *list<hash<string, XsdElement>> alts) {
         *hash<string, XsdElement> alt;
@@ -23708,7 +24490,7 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
             return XsdDocumentValueHelper::deserializeValue(selected, en, tmap, mrh, oval);
         }
 
-        if (!exists oval) {
+        if (!mixed && !exists oval) {
             if (!required && !attrs) {
                 if (particle && !particle.matchesElementNames(())) {
                     throw SOAP_DESERIALIZATION_ERROR, sprintf("empty content does not match the complete "
@@ -23721,7 +24503,9 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
         hash<auto> rh;
 
         # to avoid "RUNTIME-TYPE-ERROR" exceptions in the next line`
-        if (cx_type == XET_SIMPLE && oval.typeCode() != NT_HASH) {
+        if (mixed && cx_type != XET_SIMPLE && !exists oval) {
+            oval = {};
+        } else if ((cx_type == XET_SIMPLE || mixed) && oval.typeCode() != NT_HASH) {
             oval = {"^value^": oval};
         }
         if (exists oval && oval.typeCode() != NT_HASH) {
@@ -23741,47 +24525,8 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
             }
         }
         *hash<auto> val = particle ? oval : mapExpandedElementNames(oval);
-        *hash<auto> attr = val."^attributes^";
-
-        # attribute hash
-        *hash<auto> ah;
-        hash<auto> expanded_attributes = XsdBase::getExpandedAttributes(attr);
-        hash<string, bool> declared_attributes();
-        foreach string field in (keys attrs) {
-            XsdAttribute xa = attrs{field};
-            string identity = type_qname(xa.namespaceUri, xa.name);
-            declared_attributes{identity} = True;
-            *string attr_val = expanded_attributes{identity};
-            if (xa.use == "required" && !exists attr_val) {
-                throw SOAP_DESERIALIZATION_ERROR, sprintf("cannot deserialize element %Y without required attribute %Y",
-                    getName(), xa.name);
-            }
-            if (exists attr_val) {
-                if (xa.use == "prohibited") {
-                    throw SOAP_DESERIALIZATION_ERROR, sprintf("cannot deserialize element %Y with prohibited attribute %Y",
-                        getName(), xa.name);
-                }
-                ah{field} = xa.getValue(attr_val);
-            } else if (xa.use == "optional" && xa.hasValueConstraint()) {
-                ah{field} = xa.getInstanceDefaultValue();
-            }
-        }
-
-        list<string> wildcard_names();
-        foreach string identity in (keys expanded_attributes) {
-            if (!declared_attributes{identity} && !XsdBase::isInstanceAttribute(identity)) {
-                push wildcard_names, identity;
-                ah{identity} = XsdWildcardAttributeHelper::decode(nsc, attribute_wildcard, identity,
-                    expanded_attributes{identity});
-            }
-        }
-
-        XsdWildcardAttributeHelper::checkIds(nsc, attribute_wildcard, attrs, wildcard_names,
-            SOAP_DESERIALIZATION_ERROR);
-        if (attr) {
-            remove val."^attributes^";
-        }
-
+        *hash<auto> attr = remove val."^attributes^";
+        *hash<auto> ah = deserializeAttributeValues(attr);
         if (val.typeCode() == NT_HASH) {
             WSDL::XsdBase::removeNS2(\val);
 
@@ -23789,7 +24534,9 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
             val -= ".ns";
         }
 
-        if (cx_type == XET_SIMPLE) {
+        if (mixed && cx_type != XET_SIMPLE) {
+            rh = convertMixedContent(val, NOTHING, tmap, mrh);
+        } else if (cx_type == XET_SIMPLE) {
             if (!exists val && !required)
                 return;
             auto sv = XsdDocumentValueHelper::deserializeValue(simpleType, name, tmap, mrh,
@@ -23848,6 +24595,9 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
             }
         }
 
+        if (cx_type == XET_NONE && !particle && !mixed) {
+            XsdScalarTextHelper::requireEmpty(val, sprintf("empty-content type %Y", name), SOAP_DESERIALIZATION_ERROR);
+        }
         if (ah) {
             if (RetainedXmlValidationNamespaces && particle) {
                 foreach string field in (keys ah) {
@@ -23861,7 +24611,10 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
             }
             rh."^attributes^" = ah;
         }
-        if (rh.size() == 1 && rh.hasKey("^value^")) {
+        if (mixed && !PreserveNativeTypes && rh.empty()) {
+            return;
+        }
+        if ((!mixed || !PreserveNativeTypes) && rh.size() == 1 && rh.hasKey("^value^")) {
             return rh."^value^";
         }
         return rh;
@@ -29781,7 +30534,7 @@ public class WSMessageHelper {
 
     private hash<auto> getTypeInfo(XsdComplexType t) {
         hash<auto> res;
-        if (t.elementmap || (t.getParticle() && !t.array)) {
+        if (t.elementmap || (t.getParticle() && !t.array) || (t.hasMixedContent() && !t.array)) {
             res.type = "hash";
         } else if (t.simpleType) {
             res = getTypeInfo(t.simpleType);
@@ -29984,6 +30737,17 @@ public class WSMessageHelper {
                 True){fields{identity}};
         }
         hash<auto> result();
+        if (type.hasMixedContent()) {
+            # Mixed native records retain the selected schedule. A later occurrence
+            # gets its own key, including when the child value is itself an XSD list.
+            hash<string, int> offsets();
+            foreach string identity in (ordered) {
+                int offset = offsets{identity}++;
+                string field = fields{identity} + (offset ? "^" + offset.toString() : "");
+                result{field} = values{identity}[offset];
+            }
+            return result;
+        }
         foreach string identity in (keys values) {
             bool single = ranges.hasKey(identity) ? ranges{identity}.maximum == "1" : counts{identity} == 1;
             result{fields{identity}} = single ? values{identity}[0] : values{identity};

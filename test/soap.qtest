@@ -21,9 +21,9 @@
 class NsMap {
     public {
         # maps from prefixes to URIs
-        hash pmap;
+        hash<string, string> pmap;
         # maps from URIs to prefixes
-        hash umap;
+        hash<string, string> umap;
 
         # soap envelope name
         string se;
@@ -565,6 +565,7 @@ class SoapTest inherits QUnit::Test {
         addTestCase("multi", \multiTest());
         addTestCase("dateTimeValidation", \dateTimeValidationTest());
         addTestCase("soapFaultDetection", \soapFaultDetectionTest());
+        addTestCase("SOAP comparison resolves local namespace declarations", \localNamespaces());
         set_return_value(main());
     }
 
@@ -1512,8 +1513,10 @@ class SoapTest inherits QUnit::Test {
         {
             hash h1 = op.serializeRequest(req, NOTHING, NOTHING, NOTHING, XGF_ADD_FORMATTING, "TEST");
             # dynamically replace using actual prefix
-            h1.body = regex_subst(h1.body, "<" + st_prefix + ":i2754_2_e2>str</" + st_prefix + ":i2754_2_e2>",
-                "<" + st_prefix + ":i2754_2_e2/>");
+            string original_body = h1.body;
+            h1.body = regex_subst(h1.body, "<" + st_prefix + ":i2754_2_e2(?: [^>]*)?>str</"
+                + st_prefix + ":i2754_2_e2>", "<" + st_prefix + ":i2754_2_e2/>");
+            assertFalse(original_body == h1.body, "the empty-string fixture replaces the selected text");
             #printf("body: %s\n", h1.body);
             hash xh1 = parse_xml(h1.body);
             #printf("xh1: %N\n", xh1);
@@ -1564,7 +1567,11 @@ class SoapTest inherits QUnit::Test {
             "issue4452-3": {"^cdata^": "some data"},
         );
 
-        assertEq(req_r, h, "attr-deser-our");
+        # A wildcard retains explicit namespace context, so its XML-data shape can
+        # differ from a bare scalar while preserving exactly the same XML value.
+        compareSoapValue("wildcard XML", "issue4452-2", req_r."issue4452-2", h."issue4452-2",
+            SoapTest::getNamespaceMap(Req_1), SoapTest::getNamespaceMap(xh));
+        assertEq(req_r - "issue4452-2", h - "issue4452-2", "attr-deser-our");
 
         # do negative tests to ensure that namespace handling is correct in our test code
         {
@@ -1597,7 +1604,7 @@ class SoapTest inherits QUnit::Test {
 
             # rename key with an undefined namespace
             xh{ek}{bk}{sik1}."xxx:SetInfo" = remove xh{ek}{bk}{sik1}{sik2};
-            assertThrows("TEST-EXCEPTION", \compareSoapMsgs(), ("attr-ser", Req_1, xh), "attr-ser-neg-3");
+            assertThrows("SOAP-NAMESPACE-ERROR", \compareSoapMsgs(), ("attr-ser", Req_1, xh), "attr-ser-neg-3");
 
             # rename key with a defined but incorrect namespace
             pfx = nh.umap."http://www.w3.org/2003/05/soap-envelope";
@@ -1923,73 +1930,110 @@ class SoapTest inherits QUnit::Test {
         }
     }
 
-    compareSoapValue(string assert, string loc, auto v1, auto v2, NsMap nh1, NsMap nh2) {
-        if (v1.typeCode() == NT_STRING) {
-            # check if value is a namespace-prefixed string and processing accordingly if so
-            if ((*string nv1, *string kv1) = (v1 =~ x/^(\w+):(\w+(\[\])?)$/)) {
-                *string uri1 = nh1.pmap{nv1};
-                if (!exists uri1)
-                    throw "SOAP-NAMESPACE-ERROR", sprintf("%s (%s) namespace prefix in %y in the expected value is not defined", assert, loc, v1);
-                *string nv2 = nh2.umap{uri1};
-                if (!exists nv2)
-                    throw "SOAP-NAMESPACE-ERROR", sprintf("%s (%s) expected namespace URI %y in value %y is not defined in the given value", assert, loc, uri1, v1);
-                # generate expected value
-                string str = sprintf("%s:%s", nv2, kv1);
-                assertEq(str, v2);
-            }
-            else
-                assertEq(v1, v2, sprintf("%s (%s) values match", assert, loc));
-            return;
-        }
-
-        if (v1.typeCode() == NT_LIST) {
-            if (v2.typeCode() != NT_LIST || v2.size() != v1.size()) {
-                assertEq(v1, v2, sprintf("%s (%s)", assert, loc));
-            }
-            map compareSoapValue(assert, sprintf("%s[%d]", loc, $#), $1, v2[$#], nh1, nh2), v1;
-            return;
-        }
-
-        if (v1.typeCode() != NT_HASH) {
-            assertEq(v1, v2, sprintf("%s (%s)", assert, loc));
-            return;
-        }
-
-        # check attributes
-        foreach hash h in (v2."^attributes^".pairIterator()) {
-            (*string nsp1, *string key) = (h.key =~ x/^(\w+):(\w+)$/);
-            if (nsp1 && key) {
-                *string uri2 = nh2.pmap{nsp1};
-                if (!uri2)
-                    throw "SOAP-NAMESPACE-ERROR", sprintf("%s (%s) namespace prefix in %y in the generated value is not defined", assert, loc, h.key);
-
-                # check type value
-                if (key == "type" && uri2 == XSI_NS && h.value =~ / /)
-                    throw "SOAP-TYPE-ERROR", sprintf("%s (%s) xsi:type=%y is invalid", assert, loc, h.value);
+    # Local declarations apply to the element itself and its descendants, but not siblings.
+    private static hash<string, string> soapScope(auto value, hash<string, string> inherited) {
+        if (value.typeCode() == NT_HASH) {
+            foreach hash<auto> attribute in (value."^attributes^".pairIterator()) {
+                if (attribute.key == "xmlns") {
+                    inherited{""} = attribute.value;
+                } else if (attribute.key.startsWith("xmlns:")) {
+                    inherited{attribute.key.substr(6)} = attribute.value;
+                }
             }
         }
+        return inherited;
+    }
 
-        foreach string rkey in (v1.keyIterator()) {
-            (*string nsp1, *string key) = (rkey =~ x/^(\w+):(\w+)$/);
-            if (!nsp1) {
-                assertTrue(v2.hasKey(rkey), sprintf("%s (%s) has element %y", assert, loc, rkey));
-                compareSoapValue(assert, sprintf("%s.%s", loc, rkey), v1{rkey}, v2{rkey}, nh1, nh2);
-                remove v2{rkey};
+    private static string soapExpandedName(string key, hash<string, string> scope, bool attribute = False) {
+        if (key.startsWith("^") || key.startsWith(".")) {
+            return key;
+        }
+        int colon = key.find(":");
+        if (colon >= 0) {
+            string prefix = key.substr(0, colon);
+            if (!scope{prefix}) {
+                throw "SOAP-NAMESPACE-ERROR", sprintf("undefined SOAP comparison prefix %Y in %Y", prefix, key);
+            }
+            return "{" + scope{prefix} + "}" + key.substr(colon + 1);
+        }
+        return !attribute && scope{""} ? "{" + scope{""} + "}" + key : key;
+    }
+
+    private static auto soapComparable(auto value, hash<string, string> inherited) {
+        if (value.typeCode() == NT_STRING) {
+            return value =~ /^\w+:\w+(\[\])?$/ ? soapExpandedName(value, inherited) : value;
+        }
+        if (value.typeCode() != NT_HASH) {
+            return value;
+        }
+        hash<string, string> scope = SoapTest::soapScope(value, inherited);
+        hash<auto> result();
+        hash<auto> attributes();
+        foreach hash<auto> attribute in (value."^attributes^".pairIterator()) {
+            if (attribute.key == "xmlns" || attribute.key.startsWith("xmlns:")) {
                 continue;
             }
-            *string uri1 = nh1.pmap{nsp1};
-            if (!exists uri1)
-                throw "SOAP-NAMESPACE-ERROR", sprintf("%s (%s) namespace prefix in %y in the expected value is not defined", assert, loc, rkey);
-            *string nsp2 = nh2.umap{uri1};
-            if (!exists nsp2)
-                throw "SOAP-NAMESPACE-ERROR", sprintf("%s (%s) expected namespace URI %y in key %y is not defined in the given value", assert, loc, uri1, rkey);
-            string k2 = SoapTest::getKey(nsp2, key);
-            assertTrue(v2.hasKey(k2), sprintf("expected value %s has key %y", loc, k2));
-            compareSoapValue(assert, sprintf("%s.%s", loc, key), v1{rkey}, v2{k2}, nh1, nh2);
-            remove v2{k2};
+            string name = SoapTest::soapExpandedName(attribute.key, scope, True);
+            if (name == "{" + XSI_NS + "}type" && attribute.value =~ / /) {
+                throw "SOAP-TYPE-ERROR", sprintf("invalid xsi:type %Y", attribute.value);
+            }
+            attributes{name} = SoapTest::soapComparable(attribute.value, scope);
         }
+        if (attributes) {
+            result."^attributes^" = attributes;
+        }
+        hash<string, int> counts();
+        foreach string key in (keys value) {
+            if (key == "^attributes^") {
+                continue;
+            }
+            list<auto> children = value{key}.typeCode() == NT_LIST ? value{key} : (value{key},);
+            foreach auto child in (children) {
+                string name = SoapTest::soapExpandedName(key, SoapTest::soapScope(child, scope));
+                auto converted = SoapTest::soapComparable(child, scope);
+                if (counts{name} == 1) {
+                    list<auto> occurrences();
+                    push occurrences, result{name};
+                    result{name} = occurrences;
+                }
+                if (counts{name}++) {
+                    push result{name}, converted;
+                } else {
+                    result{name} = converted;
+                }
+            }
+        }
+        if (result.size() == 1 && result.hasKey("^value^")) {
+            return result."^value^";
+        }
+        return result.empty() ? NOTHING : result;
+    }
 
-        assertEq((), v2.keys(), sprintf("%s all keys matched", loc));
+    compareSoapValue(string assert, string loc, auto v1, auto v2, NsMap nh1, NsMap nh2) {
+        hash<string, string> namespaces = {"xml": "http://www.w3.org/XML/1998/namespace"};
+        assertEq(SoapTest::soapComparable(v1, namespaces + nh1.pmap),
+            SoapTest::soapComparable(v2, namespaces + nh2.pmap), sprintf("%s (%s)", assert, loc));
+    }
+
+    private localNamespaces() {
+        string envelope = '<s:Envelope xmlns:s="' + SOAP_12_ENV + '" xmlns:p="urn:outer"><s:Body>';
+        string suffix = '</s:Body></s:Envelope>';
+        hash<auto> expected = parse_xml(envelope + '<p:item xmlns:p="urn:inner" p:id="17">p:Code</p:item>'
+            '<p:next>p:Other</p:next>' + suffix);
+        string equivalent = '<q:item xmlns:q="urn:inner" xmlns:s="' + SOAP_12_ENV
+            + '" q:id="17">q:Code</q:item><r:next xmlns:r="urn:outer">r:Other</r:next>';
+        compareSoapMsgs("local scopes", expected, parse_xml(envelope + equivalent + suffix));
+        foreach string bad in (
+                replace(equivalent, "urn:inner", "urn:incorrect"),
+                replace(equivalent, 'q:id="17"', 'q:id="18"'),
+                replace(equivalent, 'q:id="17"', 'id="17"'),
+                replace(equivalent, "q:Code", "s:Code"),
+                replace(equivalent, "urn:outer", "urn:inner")) {
+            assertThrows("TEST-EXCEPTION", \compareSoapMsgs(),
+                ("wrong scoped value", expected, parse_xml(envelope + bad + suffix)));
+        }
+        assertThrows("SOAP-NAMESPACE-ERROR", \compareSoapMsgs(),
+            ("unbound value", expected, parse_xml(envelope + replace(equivalent, "q:Code", "absent:Code") + suffix)));
     }
 
     dateTimeValidationTest() {

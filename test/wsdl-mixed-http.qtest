@@ -1,0 +1,201 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires xml
+%requires ../qlib/WSDL.qm
+%requires ../qlib/SoapClient.qm
+%requires ../qlib/SoapHandler.qm
+%requires ../qlib/SoapDataProvider
+%requires HttpServer
+%exec-class MixedHttpTest
+
+class MixedHttpTest inherits QUnit::Test {
+    const Uri = "urn:qore:mixed-http";
+    constructor() : Test("Mixed values through HTTP consumers", "1.0") {
+        addTestCase("Mixed text and typed children survive both SOAP bindings and providers", \native());
+        addTestCase("Concurrent mixed values retain caller namespaces and content order", \concurrent());
+        addTestCase("Retained mixed XML keeps comments and lexical values through HTTP", \retained());
+        set_return_value(main());
+    }
+    private auto saved(auto value) {
+        return Serializable::deserialize(Serializable::serialize(value));
+    }
+    private WebService service(string version) {
+        string soap = "http://schemas.xmlsoap.org/wsdl/soap" + (version == "12" ? "12" : "") + "/";
+        return new WebService('<w:definitions xmlns:w="http://schemas.xmlsoap.org/wsdl/" xmlns:s="' + soap
+            + '" xmlns:xs="' + XSD_NS + '" xmlns:t="' + Uri + '" targetNamespace="' + Uri + '">'
+            '<w:types><xs:schema targetNamespace="' + Uri + '">'
+            '<xs:element name="record"><xs:complexType mixed="true">'
+            '<xs:choice minOccurs="1" maxOccurs="4"><xs:element name="child" type="xs:int"/><xs:element name="category" type="xs:QName"/></xs:choice>'
+            '<xs:attribute name="tag" type="xs:int" use="required"/>'
+            '</xs:complexType></xs:element>'
+            '</xs:schema></w:types>'
+            '<w:message name="Input"><w:part name="body" element="t:record"/></w:message>'
+            '<w:message name="Output"><w:part name="body" element="t:record"/></w:message>'
+            '<w:portType name="Port"><w:operation name="submit"><w:input message="t:Input"/>'
+            '<w:output message="t:Output"/></w:operation></w:portType>'
+            '<w:binding name="Soap" type="t:Port"><s:binding style="document" transport="http://schemas.xmlsoap.org/soap/http"/>'
+            '<w:operation name="submit"><s:operation soapAction="urn:submit"' + (version == "12"
+                ? ' soapActionRequired="false"' : '') + '/><w:input><s:body use="literal"/></w:input>'
+            '<w:output><s:body use="literal"/></w:output></w:operation></w:binding>'
+            '<w:service name="Service"><w:port name="Port" binding="t:Soap">'
+            '<s:address location="http://example.invalid/"/></w:port></w:service></w:definitions>', {"async_only": True});
+    }
+    private hash<auto> value(string uri = "urn:products") {
+        return {"^value^": new XsdScopedLexicalValue("p:Before", {"p":uri}), "child":17,
+            "^cdata^": new XsdScopedLexicalValue("p:Between", {"p":uri}),
+            "category":new XsdQNameValue(uri, "p:Category"), "child^1":29,
+            "^value1^":new XsdScopedLexicalValue("p:After", {"p":uri}), "^attributes^":{"tag":17}};
+    }
+    private string lexical(auto text) {
+        return text instanceof XsdScopedLexicalValue ? text.getLexicalValue() : text;
+    }
+    private check(auto input, string uri = "urn:products") {
+        assertEq(("^value^", "child", "^cdata^", "category", "child^1", "^value1^", "^attributes^"), keys input);
+        assertEq(17, input.child);
+        assertEq(29, input."child^1");
+        assertEq("p:Before", lexical(input."^value^"));
+        assertEq("p:Between", lexical(input."^cdata^"));
+        assertEq("p:After", lexical(input."^value1^"));
+        assertEq(17, input."^attributes^".tag);
+        if (input.category instanceof XsdQNameValue) {
+            assertEq(uri, input.category.getNamespaceUri());
+            assertEq("Category", input.category.getLocalName());
+        } else {
+            assertTrue(input.category.endsWith(":Category"));
+        }
+        if (input."^value^" instanceof XsdScopedLexicalValue) {
+            assertEq(uri, input."^value^".getNamespaceBindings().p);
+        }
+    }
+    private native() {
+        foreach string version in ("11", "12") {
+            WebService ws = service(version);
+            WSOperation operation = ws.getBindingOperation("Soap", "submit");
+            AbstractDataProviderType input = saved(operation.input.getDataProviderType(True));
+            AbstractDataProviderType output = saved(operation.output.getDataProviderType(True));
+            HttpServer server();
+            on_exit server.stop();
+            SoapHandler handler(new PermissiveAuthenticator());
+            server.setDefaultHandler("soap", handler);
+            Queue observed();
+            code<auto(hash<auto>, auto)> callback = auto sub(hash<auto> cx, auto message) {
+                auto checked = input.acceptsValue({"body":message});
+                observed.push(checked.body);
+                return output.acceptsValue(checked);
+            };
+            handler.addMethod(ws, operation, callback, NOTHING, NOTHING, NOTHING, "Service", NOTHING,
+                NOTHING, "Soap", NOTHING, False, True);
+            server.addListener(0);
+            string url = sprintf("http://127.0.0.1:%d/Service", server.getListenerInfo(0).port);
+            SoapClient client({"wsdl":saved(ws), "url":url, "timeout":30000, "connect_timeout":30000});
+            foreach bool preserve in (False, True) {
+                auto result = client.callOperation("submit", input.acceptsValue({"body":value()}),
+                    {"binding":"Soap", "preserve_types":preserve});
+                check(observed.pop(30000));
+                check(result);
+                check(output.acceptsValue({"body":saved(result)}).body);
+            }
+            SoapDataProvider data_provider(ws, client);
+            AbstractDataProvider request = data_provider.getChildProviderEx("submit");
+            auto response = request.doRequest(request.getRequestType().acceptsValue({"body":value()}),
+                {"binding":"Soap"});
+            check(observed.pop(30000));
+            check(request.getResponseType().acceptsValue({"body":response}).body);
+            assertThrows("RUNTIME-TYPE-ERROR", \input.acceptsValue(),
+                ({"body":{"^value^":"missing children", "^attributes^":{"tag":17}}},));
+            assertThrows("RUNTIME-TYPE-ERROR", \output.acceptsValue(),
+                ({"body":{"^value^":"missing children", "^attributes^":{"tag":17}}},));
+        }
+    }
+    private concurrent() {
+        foreach string version in ("11", "12") {
+            WebService ws = service(version);
+            WSOperation operation = ws.getBindingOperation("Soap", "submit");
+            hash<auto> before = ws.nsc.getOutputNamespaceHash(NOTHING);
+            Queue ready();
+            Queue start();
+            Queue results();
+            Counter running();
+            on_exit {
+                for (int worker = 0; worker < 4; ++worker) {
+                    start.push(True);
+                }
+                assertEq(0, running.waitForZero(30s));
+            }
+            for (int worker = 0; worker < 4; ++worker) {
+                running.inc();
+                background sub(int id) {
+                    on_exit running.dec();
+                    try {
+                        ready.push(True);
+                        start.pop(30000);
+                        for (int index = 0; index < 4; ++index) {
+                            string uri = sprintf("urn:partner:%d:%d", id, index);
+                            string xml = operation.serializeRequest({"body":value(uri)}, NOTHING,
+                                NOTHING, NOTHING, NOTHING, NOTHING, "Soap").body;
+                            auto decoded = operation.deserializeRequest(parse_xml(xml, XPF_PRESERVE_ORDER), "Soap", True);
+                            @assert(decoded.child == 17);
+                            @assert(decoded."child^1" == 29);
+                            @assert(decoded.category.getNamespaceUri() == uri);
+                            @assert(decoded."^value^".getNamespaceBindings().p == uri);
+                            @assert(decoded."^value1^".getLexicalValue() == "p:After");
+                        }
+                        results.push(True);
+                    } catch (hash<ExceptionInfo> ex) {
+                        results.push(ex);
+                    }
+                }(worker);
+            }
+            for (int worker = 0; worker < 4; ++worker) {
+                ready.pop(30000);
+            }
+            for (int worker = 0; worker < 4; ++worker) {
+                start.push(True);
+            }
+            for (int worker = 0; worker < 4; ++worker) {
+                assertEq(True, results.pop(30000));
+            }
+            assertEq(before, ws.nsc.getOutputNamespaceHash(NOTHING));
+        }
+    }
+    private retained() {
+        foreach string version in ("11", "12") {
+            WebService ws = service(version);
+            WSOperation operation = ws.getBindingOperation("Soap", "submit");
+            AbstractDataProviderType provider = saved(ws.getXmlDataProviderType(Uri, "record"));
+            HttpServer server();
+            on_exit server.stop();
+            SoapHandler handler(new PermissiveAuthenticator());
+            server.setDefaultHandler("soap", handler);
+            Queue observed();
+            code<auto(hash<auto>, auto)> callback = auto sub(hash<auto> cx, auto message) {
+                XsdXmlValue received = provider.acceptsValue(message.body.body);
+                observed.push(received);
+                return {"body":received};
+            };
+            handler.addMethod(ws, operation, callback, NOTHING, NOTHING, NOTHING, "Service", NOTHING,
+                NOTHING, "Soap", NOTHING, True);
+            server.addListener(0);
+            string url = sprintf("http://127.0.0.1:%d/Service", server.getListenerInfo(0).port);
+            SoapClient client({"wsdl":saved(ws), "url":url, "timeout":30000, "connect_timeout":30000});
+            XsdXmlValue input('<t:record xmlns:t="' + Uri + '" xmlns:p="urn:products" tag="+017">'
+                'before<child>017</child><!--between--><![CDATA[p:Stock]]>'
+                '<category>p:Category</category>after<child>029</child>end</t:record>');
+            hash<SoapXmlMessageInfo> response = client.callOperation("submit", {"body":input},
+                {"binding":"Soap", "xml_values":True});
+            foreach XsdXmlValue received in (observed.pop(30000), response.body.body) {
+                assertEq(Uri, received.getNamespaceUri());
+                assertTrue(received.getXml().find('<!--between-->') >= 0);
+                assertTrue(received.getXml().find('<![CDATA[p:Stock]]>') >= 0);
+                assertEq("{urn:products}Stock", received.resolveQName("p:Stock"));
+                assertEq(("child", "category", "child"), map $1.getLocalName(), received.getChildValues());
+                assertEq("017", received.getChildValues()[0].getElementData()."^value^");
+                assertEq("029", received.getChildValues()[2].getElementData()."^value^");
+                assertEq(received.getXml(), provider.acceptsValue(saved(received)).getXml());
+            }
+        }
+    }
+}
