@@ -1440,3 +1440,19 @@ The 2.x issue #5452 element-order fixes are covered by `test/soap.qtest` and
 `test/wsdl-element-order.qtest`, with source normalization and complete flat-record
 validation. [Port evidence](element-order-port-evidence.md) records both bindings,
 imports, native field/provider/sample order, performance and corpus comparisons.
+
+
+## Native wildcard instance types and schema declaration whitespace (P5-13)
+
+`xml-wildcard-types.qtest` and `test_native_wildcard_types.py` cover native strict
+instance-type assessment, all processing modes, six namespace constraints,
+known/unknown types, invalid content and recovery. `wsdl-schema-whitespace.qtest`
+and `test_schema_whitespace.py` cover declaration text/CDATA, annotations,
+providers, reconstruction, imports and the original enterprise/partner contracts.
+The native allocation test distinguishes required validation from optional
+post-validation reset, repeating every fault through the public API.
+See [evidence](native-wildcard-types-evidence.md),
+[design](../../design/native-wildcard-types.md) and
+[the full audit](audits/P5-13-native-wildcard-types.md). P5 element wildcard values,
+mixed/generic content, complete nil/default/fixed and identity semantics remain
+open, followed by P6-P9 acceptance.

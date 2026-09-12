@@ -14,6 +14,8 @@
 #include "libxml2-element-substitution-probe.h"
 #include "libxml2-element-consistency-probe.h"
 #include "libxml2-wildcard-id-probe.h"
+#include "libxml2-wildcard-type-probe.h"
+#include "libxml2-schema-whitespace-probe.h"
 
 static int check_namespace(const char* source, const char* expected) {
     xmlTextReaderPtr reader = xmlReaderForMemory(source, (int)strlen(source), NULL, "UTF-8", 0);
@@ -58,12 +60,14 @@ int main(void) {
         int substitutions = check_element_substitution();
         int consistency = check_element_consistency();
         int wildcard_ids = (check_wildcard_ids() | check_id_type_schemas());
+        int wildcard_types = check_wildcard_types();
+        int schema_whitespace = check_schema_whitespace();
         uris |= check_schema_uri_values();
         uris |= check_schema_uri_hints();
-        result |= qnames | unions | uris | entities | occurs | particles | attribution | ranges | finals | substitutions | consistency | wildcard_ids;
-        printf("libxml2 headers=%s runtime=%s namespace_identity=%s qname_values=%s qname_unions=%s uri_identity=%s entity_values=%s occurs_values=%s particle_identity=%s particle_attribution=%s particle_ranges=%s type_final_defaults=%s element_substitution=%s element_consistency=%s wildcard_ids=%s\n",
+        result |= qnames | unions | uris | entities | occurs | particles | attribution | ranges | finals | substitutions | consistency | wildcard_ids | wildcard_types | schema_whitespace;
+        printf("libxml2 headers=%s runtime=%s namespace_identity=%s qname_values=%s qname_unions=%s uri_identity=%s entity_values=%s occurs_values=%s particle_identity=%s particle_attribution=%s particle_ranges=%s type_final_defaults=%s element_substitution=%s element_consistency=%s wildcard_ids=%s wildcard_types=%s schema_whitespace=%s\n",
             LIBXML_DOTTED_VERSION, xmlParserVersion, result ? "FAIL" : "PASS", qnames ? "FAIL" : "PASS",
-            unions ? "FAIL" : "PASS", uris ? "FAIL" : "PASS", entities ? "FAIL" : "PASS", occurs ? "FAIL" : "PASS", particles ? "FAIL" : "PASS", attribution ? "FAIL" : "PASS", ranges ? "FAIL" : "PASS", finals ? "FAIL" : "PASS", substitutions ? "FAIL" : "PASS", consistency ? "FAIL" : "PASS", wildcard_ids ? "FAIL" : "PASS");
+            unions ? "FAIL" : "PASS", uris ? "FAIL" : "PASS", entities ? "FAIL" : "PASS", occurs ? "FAIL" : "PASS", particles ? "FAIL" : "PASS", attribution ? "FAIL" : "PASS", ranges ? "FAIL" : "PASS", finals ? "FAIL" : "PASS", substitutions ? "FAIL" : "PASS", consistency ? "FAIL" : "PASS", wildcard_ids ? "FAIL" : "PASS", wildcard_types ? "FAIL" : "PASS", schema_whitespace ? "FAIL" : "PASS");
     }
     xmlCleanupParser();
     return result;

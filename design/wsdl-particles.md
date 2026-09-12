@@ -523,3 +523,20 @@ The 2.x issue #5452 regression is retained in `test/element-order.wsdl` and
 `test/soap.qtest`. `test/wsdl-element-order.qtest` additionally checks nested ENUM
 provisioning, explicit empty records, restricted choices, schema imports,
 reconstruction and both directions of actual SOAP 1.1/1.2 bindings.
+
+## Character content in schema declarations
+
+The source adapter distinguishes the schema's own declaration content from XML
+instance values. Within a schema, XML whitespace text/CDATA between declaration
+children is omitted from the component-construction view. Non-whitespace text is
+rejected. Scalar whitespace in an empty declaration becomes an empty value;
+metadata beside attributes or child declarations is removed without rebuilding
+unaffected hashes. Original source bytes remain available for reconstruction and
+native schema validation.
+
+Annotation `documentation` and `appinfo` subtrees retain their character content,
+including embedded markup in the XSD namespace. WSDL documentation likewise
+remains outside schema declaration processing. Namespace identity and inherited
+annotation scope determine this boundary; prefix spellings do not. Ordered
+schema grammar checks precede the adapter, preserving existing facet/restriction
+error categories while the adapter checks other declaration text.

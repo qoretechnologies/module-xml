@@ -7090,3 +7090,52 @@ The deployed Qore is 0eb8abb81. No push/install; concurrent main Qore work remai
 outside this port. Next: fix the independently reduced schema-whitespace parser
 finding, then finish P5-13 native wildcard assessment with phase-correct allocation
 tests from the separate investigation. P5-P9 acceptance remains open.
+
+
+## P5-13 — native wildcard instance types and schema declaration whitespace
+
+After port commit `5c283bf`, strict native wildcard assessment now considers an
+available xsi:type before rejecting a missing declaration. Namespace constraints,
+known declarations, invalid selected types/content/attributes and skip semantics
+remain enforced. Native schema cleanup accepts whitespace-only CDATA and retains
+complete annotation subtrees. The Qore source adapter applies declaration character
+rules and retains annotation scope, with consistent grammar error categories and
+restored ordinary complex-type documentation. Original enterprise/partner WSDLs
+now parse without modifying their sources.
+
+The separate allocation investigation is integrated as a test correction: all
+131 fault positions per API distinguish required work from optional context reset.
+Both private phases and public validation agree, live allocations return to
+baseline, and Valgrind reports zero errors/all heap blocks freed. The upstream
+failed-reset context-reuse observation remains a separate follow-up before any
+future module-xml context reuse; current contexts are per validation call.
+
+All 130 suites pass 1,286 cases/64,035 reported assertions, with the existing three
+caught SOAP comparator negatives retained. All 27 mode/AOT/consumer/matrix
+supplements and 43 provider tests pass. The new independent matrices check 36
+wildcard schemas/684 documents and 96 whitespace schemas in all execution modes;
+Xerces agrees with normative expectations and lxml's 32 strict-type disagreements
+remain explicit. Seven memory checks (six native/Qore/probe/consumer runs plus
+allocation injection) have zero errors and no lost blocks. The full enterprise/
+partner whitespace run exercises over 101 million allocations. WSDL/native docs
+and the shipment example pass without warnings.
+
+Both-version corpus outcomes are unchanged: 2,455 survey rows, 144 strict-selected
+WSDLs/1,388 directions, zero selected failures and 60 broader failures. Only
+runtime/source version metadata changes. Both remotes were fetched with no
+incoming develop commits; main Qore is clean at observed `c65fc6b04`, and the
+installed/tested runtime remains `0eb8abb81`. No Qore edit, install or push was made.
+See [evidence](native-wildcard-types-evidence.md), [inventory](P5-13-validation.json)
+and [the complete 62-check audit](audits/P5-13-native-wildcard-types.md).
+
+Next: P5-14 element wildcard value processing. A read-only 684-document diagnostic
+finds 184 invalid inputs accepted by the existing raw-value branch in
+XsdComplexType::deserializeParticle(); namespace/particle checks reject the other
+234 invalid cases. Every row is identical using the parent WSDL source, confirming
+this existing P5 gap is independent of P5-13. The emitter likewise uses legacy
+raw-member fallback and samples do not select assessable wildcard candidates.
+Reproduction and preparation are under `/tmp/wsdl-p5-14-native-view*`,
+`/tmp/wsdl-p5-14-before*` and `/tmp/wsdl-p5-14-preparation.md`. Add the full WSDL/
+provider/both-binding value/order matrix and fix these paths before closing P5.
+Mixed/generic, complete nil/default/fixed and identity behavior, then P6-P9,
+remain required. No phase closure or complete-conformance claim is made.
