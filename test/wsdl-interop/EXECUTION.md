@@ -7515,3 +7515,38 @@ mutation was made. The following WSDL reproductions now run safely and show
 missing inherited particles for absent/empty/group/transitive extensions, plus
 missing schema rejection for mixed and ambiguous derivations. Those are the next
 bounded P5 increment, followed by remaining fixed/default/identity and P6-P9 work.
+
+## P5-16f — WSDL effective wildcard inheritance
+
+2026-09-12; parent `ad3d574`. WSDL now builds the inherited anyType particle,
+uses effective extension content and publishes wildcard metadata from active
+inherited/group particles. Zero-occurrence compositors and group references
+follow the XSD mapping; incompatible mixed derivations and ambiguity reject
+during construction. Providers, saved schemas/values, bounded samples and actual
+SOAP consumers retain the existing XML values and namespace context.
+
+Final acceptance passes 144 suites (1,375 cases/67,720 reported assertions),
+AST/IR/JIT, two compiled-module consumers, sixteen survey tests and independent
+matrices. The new matrix covers 17 schemas/119 documents/476 actual SOAP binding
+directions and 1,020 independently valid outputs in source and AOT modes. The
+original mixed matrix retains all 12 schemas/480 documents/1,920 directions and
+852 outputs. The final new Qore suite has zero Valgrind errors/lost blocks.
+The compiled WSDL/Doxygen build and executed shipment example are warning-free.
+Full audit: 19 Pass, 43 N/A, 0 Fail.
+
+Complete keyed corpus comparison closes four request/response directions for
+GlobalElementComplexTypeSequenceExtension and preserves every other coverage
+case object. All 144 selected WSDLs/1,388 directions pass; four valid-input
+directions and twenty broader failure records remain visible. Original fixtures
+and catalogs are unchanged. Superseded early runs are retained. The full gate
+exposed one invalid handwritten receiver-test schema; pinned Xerces confirms
+its rejection. Its source remains a new schema-negative assertion, while a valid
+unrelated base preserves the original receiver mismatch checks. That suite was
+rerun in AST/IR/JIT/AOT; all other suites and production source were unchanged.
+The original failed gate and final targeted acceptance are both recorded.
+
+See [inheritance evidence](anytype-inheritance-evidence.md),
+[inventory](P5-16f-validation.json) and [audit](audits/P5-16f-anytype-inheritance.md).
+Remote was fetched with no incoming commits. No main-Qore mutation, installation
+or push was made. Next: instance fixed/default value semantics and identities,
+the remaining dynamic-type legacy projection result, then P6-P9 acceptance.

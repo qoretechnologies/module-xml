@@ -1,0 +1,177 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires xml
+%requires ../qlib/WSDL.qm
+%exec-class AnyTypeInheritanceTest
+
+class AnyTypeInheritanceTest inherits QUnit::Test {
+    constructor() : Test("Effective anyType and group wildcard inheritance", "1.0") {
+        addTestCase("Empty and transitive extensions retain mixed wildcard values", \inheritance());
+        addTestCase("Inherited wildcard providers retain values and reject invalid declarations", \providers());
+        addTestCase("Group wildcard metadata follows active resolved particles", \groups());
+        addTestCase("Mixed derivation and attribution errors are rejected during construction", \invalid());
+        set_return_value(main());
+    }
+
+    private string wrap(string content, string declarations = "", bool mixed = False) {
+        return '<xs:schema xmlns:xs="' + XSD_NS + '"><xs:element name="known" type="xs:int"/>'
+            '<xs:attribute name="code" type="xs:int"/>' + declarations
+            + '<xs:complexType name="Open"' + (mixed ? ' mixed="true"' : '') + '>' + content
+            + '</xs:complexType><xs:element name="value" type="Open"/></xs:schema>';
+    }
+
+    private string extension(string content = "", string base = "xs:anyType", string declarations = "",
+            bool mixed = False) {
+        return wrap('<xs:complexContent><xs:extension base="' + base + '">' + content
+            + '</xs:extension></xs:complexContent>', declarations, mixed);
+    }
+
+    private list<string> schemas() {
+        list<string> sources();
+        foreach string content in ("", '<xs:sequence/>', '<xs:all/>', '<xs:choice minOccurs="0"/>',
+                '<xs:sequence minOccurs="0" maxOccurs="0"><xs:element name="tail"/></xs:sequence>',
+                '<xs:choice minOccurs="0" maxOccurs="0"><xs:element name="tail"/></xs:choice>') {
+            foreach bool mixed in (False, True) {
+                sources += extension(content, "xs:anyType", "", mixed);
+            }
+        }
+        sources += extension('<xs:group ref="Empty"/>', "xs:anyType",
+            '<xs:group name="Empty"><xs:sequence/></xs:group>', True);
+        foreach bool mixed in (False, True) {
+            sources += extension('<xs:group ref="Populated" minOccurs="0" maxOccurs="0"/>', "xs:anyType",
+                '<xs:group name="Populated"><xs:sequence><xs:element name="tail"/></xs:sequence></xs:group>', mixed);
+        }
+        string base = '<xs:complexType name="Base"><xs:complexContent><xs:extension base="xs:anyType"/>'
+            '</xs:complexContent></xs:complexType>';
+        foreach string content in ("", '<xs:sequence/>', '<xs:all/>', '<xs:choice minOccurs="0"/>') {
+            sources += extension(content, "Base", base);
+        }
+        return sources;
+    }
+
+    private XsdSchema schema(string source) {
+        return new XsdSchema(source, {"async_only": True});
+    }
+
+    private auto decode(XsdSchema model, string xml) {
+        auto data = XsdBase::expandElementNamespaces(parse_xml(xml, XPF_PRESERVE_ORDER | XPF_ADD_COMMENTS)){"{}value"};
+        return model.getElement("", "value").deserializeValue(model.getTypeMap(), NOTHING, data, True, True);
+    }
+
+    private string text(auto value) {
+        auto data = value instanceof XsdXmlValue ? value.getXmlDataView().firstValue() : value;
+        return data.typeCode() == NT_HASH ? data."^value^" : data;
+    }
+
+    private checkValue(auto value) {
+        assertEq(("^value^", "{}known", "^comment^", "{urn:partner}unknown", "^value1^"), keys value);
+        assertEq("p:Before", cast<XsdScopedLexicalValue>(value."^value^").getLexicalValue());
+        assertEq("urn:partner", cast<XsdScopedLexicalValue>(value."^value^").getNamespaceBindings().p);
+        assertEq("+0017", text(value."{}known"));
+        assertEq("between", value."^comment^");
+        assertEq("007", text(value."{urn:partner}unknown"));
+        assertEq("p:After", cast<XsdScopedLexicalValue>(value."^value1^").getLexicalValue());
+    }
+
+    inheritance() {
+        string xml = '<value xmlns:p="urn:partner">p:Before<known>+0017</known><!--between-->'
+            '<p:unknown>007</p:unknown>p:After</value>';
+        foreach string source in (schemas()) {
+            new XmlDoc(xml).validateSchema(source);
+            XsdSchema original = schema(source);
+            foreach XsdSchema model in (original, Serializable::deserialize(original.serialize())) {
+                XsdComplexType type = cast<XsdComplexType>(model.findType("Open"));
+                assertTrue(type.hasElementWildcard());
+                assertTrue(type.hasMixedContent());
+                assertFalse(type.isEmpty());
+                assertTrue(type.getParticle().matchesElementNames(()));
+                assertTrue(type.getParticle().matchesElementNames(("{}known", "{urn:partner}unknown")));
+                auto value = decode(model, xml);
+                checkValue(value);
+                auto saved = Serializable::deserialize(Serializable::serialize(value));
+                XsdXmlValue output = model.serializeXmlValue("", "value", saved);
+                assertEq(("{}known", "{urn:partner}unknown"), map $1.getExpandedName(), output.getChildValues());
+                new XmlDoc(output.getXml()).validateSchema(source);
+                checkValue(decode(model, output.getXml()));
+                foreach string bad in ('<value><known>bad</known></value>', '<value code="bad"/>',
+                        '<value><unknown><known>bad</known></unknown></value>') {
+                    assertThrows("SOAP-DESERIALIZATION-ERROR", \decode(), (model, bad));
+                }
+            }
+        }
+    }
+
+    providers() {
+        XsdSchema model = schema(extension());
+        string xml = '<value xmlns:p="urn:partner">p:Before<known>+0017</known><!--between-->'
+            '<p:unknown>007</p:unknown>p:After</value>';
+        auto value = decode(model, xml);
+        foreach AbstractDataProviderType provider in (model.getNativeDataProviderType("", "value"),
+                model.getElement("", "value").getDataProviderType()) {
+            foreach AbstractDataProviderType variant in (provider, provider.getSoftType(), provider.getMandatoryType(),
+                    Serializable::deserialize(provider.serialize())) {
+                auto result = variant.acceptsValue(value);
+                checkValue(decode(model, model.serializeXmlValue("", "value", result).getXml()));
+                assertThrows("RUNTIME-TYPE-ERROR", \variant.acceptsValue(),
+                    ({"{}known": new XsdXmlValue("<known>bad</known>")},));
+                assertEq({}, variant.acceptsValue({}));
+                auto sample = variant.getExampleValue();
+                XsdXmlValue example = model.serializeXmlValue("", "value", variant.acceptsValue(sample));
+                new XmlDoc(example.getXml()).validateSchema(extension());
+                assertEq(3, example.getChildValues().size());
+                auto decoded = decode(model, example.getXml());
+                XsdXmlValue repeated = model.serializeXmlValue("", "value", decoded);
+                assertEq((map $1.getExpandedName(), example.getChildValues()),
+                    (map $1.getExpandedName(), repeated.getChildValues()));
+                assertEq((map text($1), example.getChildValues()), (map text($1), repeated.getChildValues()));
+            }
+        }
+        checkValue(value);
+    }
+
+    groups() {
+        string declarations = '<xs:group name="Inner"><xs:sequence><xs:any minOccurs="0"'
+            ' maxOccurs="unbounded" processContents="lax"/></xs:sequence></xs:group>'
+            '<xs:group name="Outer"><xs:sequence><xs:group ref="Inner"/></xs:sequence></xs:group>';
+        foreach bool active in (False, True) {
+            string source = wrap('<xs:sequence><xs:group ref="Outer" minOccurs="0" maxOccurs="0"/>'
+                + (active ? '<xs:group ref="Outer"/>' : '') + '</xs:sequence>', declarations);
+            XsdSchema original = schema(source);
+            foreach XsdSchema model in (original, Serializable::deserialize(original.serialize())) {
+                XsdComplexType type = cast<XsdComplexType>(model.findType("Open"));
+                assertEq(active, type.hasElementWildcard());
+                assertEq(active, type.getParticle().matchesElementNames(("{}known",)));
+                if (active) {
+                    string xml = '<value><known>+0017</known></value>';
+                    auto value = decode(model, xml);
+                    XsdXmlValue output = model.serializeXmlValue("", "value", value);
+                    new XmlDoc(output.getXml()).validateSchema(source);
+                    assertEq("+0017", text(output.getChildValues()[0]));
+                    AbstractDataProviderType provider = model.getElement("", "value").getDataProviderType();
+                    assertEq(keys value, keys provider.acceptsValue(value));
+                } else {
+                    assertThrows("SOAP-DESERIALIZATION-ERROR", \decode(), (model, '<value><known>17</known></value>'));
+                }
+            }
+        }
+    }
+
+    invalid() {
+        string group = '<xs:group name="Empty"><xs:sequence/></xs:group>';
+        string mixed_base = '<xs:complexType name="Base" mixed="true"><xs:sequence><xs:element name="a"/>'
+            '</xs:sequence></xs:complexType>';
+        foreach string source in (extension('<xs:group ref="Empty"/>', "xs:anyType", group),
+                extension('<xs:sequence maxOccurs="0"><xs:element name="tail"/></xs:sequence>'),
+                extension('<xs:sequence><xs:element ref="known"/></xs:sequence>', "xs:anyType", "", True),
+                extension('<xs:group ref="Empty"/>', "Base", group + mixed_base)) {
+            assertThrows("WSDL-ERROR", \schema(), (source,));
+            XmlDoc document("<value/>");
+            assertThrows("XSD-SYNTAX-ERROR", \document.validateSchema(), (source,));
+        }
+        XsdSchema recovered = schema(extension());
+        assertEq("17", text(decode(recovered, '<value><known>17</known></value>')."{}known"));
+    }
+}

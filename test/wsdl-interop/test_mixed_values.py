@@ -141,8 +141,11 @@ def meaning(node, model, root=True):
 class MixedValuesTest(unittest.TestCase):
     def test_mixed_values_order_and_both_bindings(self):
         models = list(fixtures())
-        cases = {document['name']: (model, document) for model in models for document in model['documents']}
         self.assertEqual(12, len(models))
+        self.check_models(models)
+
+    def check_models(self, models, compare=meaning):
+        cases = {document['name']: (model, document) for model in models for document in model['documents']}
         self.assertEqual(sum(len(model['documents']) for model in models), len(cases))
         jobs = [SchemaJob(model['name'], f'http://example.invalid/mixed/{index}.xsd', model['schema'].encode(),
                           {document['name']: document['xml'].encode() for document in model['documents']})
@@ -188,10 +191,10 @@ class MixedValuesTest(unittest.TestCase):
                     continue
                 self.assertNotIn('error', row, row)
                 self.assertEqual(5 if model['selected'] else 8, len(row['outputs']))
-                expected = meaning(etree.fromstring(document['xml'].encode()), model)
+                expected = compare(etree.fromstring(document['xml'].encode()), model)
                 for key, output in row['outputs'].items():
                     actual = etree.fromstring(output.encode())
-                    self.assertEqual(expected, meaning(actual, model), (key, row))
+                    self.assertEqual(expected, compare(actual, model), (key, row))
                     self.assertTrue(validators[model['name']].validate(actual), validators[model['name']].error_log)
                     outputs[model['name']][row['name'] + '/' + key] = output.encode()
                 for message in row['messages']:
@@ -201,7 +204,7 @@ class MixedValuesTest(unittest.TestCase):
                     self.assertEqual('{' + survey.SOAP_NAMESPACES[message['binding'] == 'Soap12'] + '}Envelope', envelope.tag)
                     payload = envelope.find('{*}Body')[0]
                     self.assertEqual('{' + NS + '}' + ('Reply' if message['direction'] == 'response' else 'Submit'), payload.tag)
-                    self.assertEqual(expected, meaning(payload, model), message)
+                    self.assertEqual(expected, compare(payload, model), message)
                     self.assertTrue(validators[model['name']].validate(payload), validators[model['name']].error_log)
                     outputs[model['name']][row['name'] + '/' + message['binding'] + '/' + message['direction']] = etree.tostring(payload)
         oracle = independent([SchemaJob(model['name'], f'http://example.invalid/mixed/{index}.xsd', model['schema'].encode(),

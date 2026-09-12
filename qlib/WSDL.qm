@@ -80,6 +80,10 @@ module WSDL {
     @section wsdlrelnotes WSDL Module Release Notes
 
     @subsection wsdl_0_5_8 WSDL v0.5.8
+    - complex-content extensions of anyType inherit its mixed lax wildcard particle, including empty
+      compositors and transitive derivation; mixed-content and ambiguity constraints remain enforced
+    - element wildcard metadata follows active inherited particles and resolved model groups, preserving
+      XML values through native providers, saved schemas and both SOAP bindings
     - receiving elements enforce xsi:nil's boolean lexical space, nillability and fixed-value exclusion;
       true nil values reject character/element content and still validate required, fixed and wildcard attributes
     - XsdNilValue preserves explicitly present nil occurrences and their native attributes through saved values,
@@ -21491,10 +21495,13 @@ class XsdEmptiabilityHelper {
             if (!data.hasKey(kind)) {
                 continue;
             }
+            *hash<auto> model = data{kind};
+            if (zeroOccurs(model."^attributes^".maxOccurs)) {
+                return True;
+            }
             if (kind == "group") {
                 return False;
             }
-            *hash<auto> model = data{kind};
             WSDL::XsdBase::removeNS(\model);
             if (select keys model, $1 != "^attributes^" && $1 != "annotation" && $1 != "ns") {
                 return False;
@@ -23252,8 +23259,13 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
                 }
                 attrs = mergeInheritedAttributeUses(base);
                 if (extension) {
+                    if (!content_empty && !base.content_empty
+                            && (base.cx_type == XET_SIMPLE || mixed != base.mixed)) {
+                        throw WSDL_ERROR, sprintf("nonempty complexContent extension %Y and its base %Y "
+                            "must both have mixed content or both have element-only content", name, base.name);
+                    }
                     content_emptiable = content_emptiable && base.content_emptiable;
-                    particle = XsdParticle::concatenate(base.particle, particle);
+                    particle = XsdParticle::concatenate(base.particle, getExtensionParticle(nsc, unresolved));
                     if (content_empty) {
                         mixed = base.mixed;
                         content_empty = base.content_empty;
@@ -23273,10 +23285,19 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
             } else {
                 wildcard = XsdAttributeWildcardHelper::derive(wildcard, XsdAttributeWildcardHelper::urType(),
                     boolean(restriction), True);
-                if (extension && content_empty) {
-                    # An empty extension inherits the ur-type's mixed, emptiable wildcard particle.
-                    mixed = True;
-                    content_empty = False;
+                if (extension) {
+                    if (!content_empty && !mixed) {
+                        throw WSDL_ERROR, sprintf("nonempty complexContent extension %Y of anyType "
+                            "must have mixed content", name);
+                    }
+                    XsdParticle builtin("sequence", {"any": {"^attributes^": {
+                        "minOccurs": "0", "maxOccurs": "unbounded", "processContents": "lax"}}},
+                        nsc, unresolved ?? new XsdLateResolverHelper(), usedocns);
+                    particle = XsdParticle::concatenate(builtin, getExtensionParticle(nsc, unresolved));
+                    if (content_empty) {
+                        mixed = True;
+                        content_empty = False;
+                    }
                 }
             }
             # Publish the link only after validation; failed cycles must not retain cyclic base links.
@@ -23306,6 +23327,46 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
         element_declarations = declarations;
         finalizeElementFields();
         attribute_wildcard = wildcard;
+        has_element_wildcard = particleHasWildcard();
+    }
+
+    # XSD 1.0 effective content distinguishes absent/empty compositors from a
+    # reference to a group, even when the referenced group's language is empty.
+    private *XsdParticle getExtensionParticle(Namespaces nsc, *XsdLateResolverHelper unresolved) {
+        if (content_empty) {
+            return NOTHING;
+        }
+        if (!particle || particle.getMaxOccurs() == "0" || (!particle.getChildren()
+                && (particle.getKind() == XsdParticleKind::All || particle.getKind() == XsdParticleKind::Sequence
+                    || (particle.getKind() == XsdParticleKind::Choice && particle.getMinOccurs() == "0")))) {
+            return new XsdParticle("sequence", NOTHING, nsc, unresolved ?? new XsdLateResolverHelper(), usedocns);
+        }
+        return particle;
+    }
+
+    private bool particleHasWildcard() {
+        if (!particle) {
+            return False;
+        }
+        list<XsdParticle> pending = (particle,);
+        hash<string, bool> seen();
+        while (pending) {
+            XsdParticle node = pop pending;
+            if (node.getMaxOccurs() == "0" || seen{node.uniqueHash()}) {
+                continue;
+            }
+            seen{node.uniqueHash()} = True;
+            if (node.getKind() == XsdParticleKind::Any) {
+                return True;
+            }
+            if (node.getKind() == XsdParticleKind::Group) {
+                @assert(node.getGroupDefinition());
+                pending += node.getGroupDefinition();
+            } else {
+                pending += node.getChildren();
+            }
+        }
+        return False;
     }
 
     private finalizeElementFields() {
@@ -23644,10 +23705,10 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
         return requires_value;
     }
 
-    #! returns whether the currently parsed content has an explicit element wildcard
-    /** @return True for an element wildcard in the parsed sequence/all content
-        @note Attribute wildcards do not make this true. Group particle expansion and wildcard runtime
-        constraints are handled separately from unwrapped message argument selection.
+    #! returns whether the effective content has an element wildcard
+    /** @return True for an active element wildcard, including inherited particles and resolved group references
+        @note Attribute wildcards and particles with maxOccurs zero do not make this true.
+        Wildcard namespace and processing constraints still apply to every occurrence.
         @since %WSDL 0.5.8
     */
     bool hasElementWildcard() {

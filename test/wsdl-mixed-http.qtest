@@ -17,20 +17,27 @@ class MixedHttpTest inherits QUnit::Test {
         addTestCase("Mixed text and typed children survive both SOAP bindings and providers", \native());
         addTestCase("Concurrent mixed values retain caller namespaces and content order", \concurrent());
         addTestCase("Retained mixed XML keeps comments and lexical values through HTTP", \retained());
+        addTestCase("Transitive anyType wildcards survive HTTP consumers and reject invalid requests", \inherited());
         set_return_value(main());
     }
     private auto saved(auto value) {
         return Serializable::deserialize(Serializable::serialize(value));
     }
-    private WebService service(string version) {
+    private WebService service(string version, bool inherited = False) {
         string soap = "http://schemas.xmlsoap.org/wsdl/soap" + (version == "12" ? "12" : "") + "/";
+        string content = inherited
+            ? '<xs:element name="known" type="xs:int"/><xs:complexType name="Base"><xs:complexContent>'
+                '<xs:extension base="xs:anyType"><xs:sequence/></xs:extension></xs:complexContent></xs:complexType>'
+                '<xs:element name="record"><xs:complexType><xs:complexContent><xs:extension base="t:Base">'
+                '<xs:all/></xs:extension></xs:complexContent></xs:complexType></xs:element>'
+            : '<xs:element name="record"><xs:complexType mixed="true">'
+                '<xs:choice minOccurs="1" maxOccurs="4"><xs:element name="child" type="xs:int"/>'
+                '<xs:element name="category" type="xs:QName"/></xs:choice>'
+                '<xs:attribute name="tag" type="xs:int" use="required"/></xs:complexType></xs:element>';
         return new WebService('<w:definitions xmlns:w="http://schemas.xmlsoap.org/wsdl/" xmlns:s="' + soap
             + '" xmlns:xs="' + XSD_NS + '" xmlns:t="' + Uri + '" targetNamespace="' + Uri + '">'
             '<w:types><xs:schema targetNamespace="' + Uri + '">'
-            '<xs:element name="record"><xs:complexType mixed="true">'
-            '<xs:choice minOccurs="1" maxOccurs="4"><xs:element name="child" type="xs:int"/><xs:element name="category" type="xs:QName"/></xs:choice>'
-            '<xs:attribute name="tag" type="xs:int" use="required"/>'
-            '</xs:complexType></xs:element>'
+            + content +
             '</xs:schema></w:types>'
             '<w:message name="Input"><w:part name="body" element="t:record"/></w:message>'
             '<w:message name="Output"><w:part name="body" element="t:record"/></w:message>'
@@ -108,6 +115,66 @@ class MixedHttpTest inherits QUnit::Test {
                 ({"body":{"^value^":"missing children", "^attributes^":{"tag":17}}},));
             assertThrows("RUNTIME-TYPE-ERROR", \output.acceptsValue(),
                 ({"body":{"^value^":"missing children", "^attributes^":{"tag":17}}},));
+        }
+    }
+    private inheritedCheck(auto value) {
+        assertEq(("^value^", "{" + Uri + "}known", "^value1^"), keys value);
+        assertEq("p:Before", lexical(value."^value^"));
+        assertEq("p:After", lexical(value."^value1^"));
+        auto child = value{"{" + Uri + "}known"};
+        assertEq("+0017", child.typeCode() == NT_HASH ? child."^value^" : child);
+    }
+    private inherited() {
+        foreach string version in ("11", "12") {
+            WebService ws = service(version, True);
+            WSOperation operation = ws.getBindingOperation("Soap", "submit");
+            AbstractDataProviderType input = saved(operation.input.getDataProviderType(True));
+            AbstractDataProviderType output = saved(operation.output.getDataProviderType(True));
+            HttpServer server();
+            on_exit server.stop();
+            SoapHandler handler(new PermissiveAuthenticator());
+            server.setDefaultHandler("soap", handler);
+            Queue observed();
+            code<auto(hash<auto>, auto)> callback = auto sub(hash<auto> cx, auto message) {
+                auto checked = input.acceptsValue({"body":message});
+                observed.push(checked.body);
+                return output.acceptsValue(checked);
+            };
+            handler.addMethod(ws, operation, callback, NOTHING, NOTHING, NOTHING, "Service", NOTHING,
+                NOTHING, "Soap", NOTHING, False, True);
+            server.addListener(0);
+            string url = sprintf("http://127.0.0.1:%d/Service", server.getListenerInfo(0).port);
+            SoapClient client({"wsdl":saved(ws), "url":url, "timeout":30000, "connect_timeout":30000});
+            hash<auto> value = {"^value^":new XsdScopedLexicalValue("p:Before", {"p":"urn:partner"}),
+                "{" + Uri + "}known":"+0017", "^value1^":new XsdScopedLexicalValue("p:After", {"p":"urn:partner"})};
+            foreach bool preserve in (False, True) {
+                auto result = client.callOperation("submit", input.acceptsValue({"body":value}),
+                    {"binding":"Soap", "preserve_types":preserve});
+                inheritedCheck(observed.pop(30000));
+                inheritedCheck(result);
+                inheritedCheck(output.acceptsValue({"body":saved(result)}).body);
+            }
+            SoapDataProvider provider(ws, client);
+            AbstractDataProvider request = provider.getChildProviderEx("submit");
+            auto result = request.doRequest(request.getRequestType().acceptsValue({"body":value}), {"binding":"Soap"});
+            inheritedCheck(observed.pop(30000));
+            inheritedCheck(request.getResponseType().acceptsValue({"body":result}).body);
+
+            # Send invalid XML directly so the server's inherited wildcard performs the rejection.
+            hash<auto> wire = operation.serializeRequest({"body":value}, NOTHING, NOTHING, NOTHING,
+                NOTHING, NOTHING, "Soap");
+            string bad = replace(wire.body, "+0017", "bad");
+            assertFalse(bad == wire.body);
+            HTTPClient raw({"url":url, "error_passthru":True, "timeout":30000, "connect_timeout":30000});
+            hash<auto> info;
+            string fault = raw.post("/Service", bad, wire.hdr, \info);
+            assertEq(version == "11" ? 500 : 400, info."response-headers".status_code);
+            assertTrue(fault.find("SOAP-DESERIALIZATION-ERROR") >= 0);
+            string response = raw.post("/Service", wire.body, wire.hdr, \info);
+            assertEq(200, info."response-headers".status_code);
+            inheritedCheck(observed.pop(30000));
+            inheritedCheck(operation.deserializeResponse(parse_xml(response, XPF_PRESERVE_ORDER), "Soap", True));
+            inheritedCheck(value);
         }
     }
     private concurrent() {
