@@ -7247,3 +7247,83 @@ The full 62-item audit now has 28 Pass, 34 N/A and 0 Fail. See
 Next is generic anyType/anySimpleType conversion/provider validation, with
 reproduced positive/negative gaps in `/tmp/wsdl-p5-15-preparation/`. Complete P5
 mixed/nil/default/fixed/identity and every P6-P9 criterion remain required.
+
+
+## P5-15 — generic XML values (in progress)
+
+P5-14 committed as `3d8e57d` after the complete final gate and 62-item audit; no
+push. Generic-value work now starts from that parent. The initial three-case
+positive/provider negative diagnostic fails in all three cases on the parent.
+`/tmp/wsdl-p5-15-preparation/` preserves the original diagnostics and subsequent
+runs. A corrected 38-document oracle comparison confirms native DOM/reader agree
+with pinned Xerces; WSDL rejects eight valid generic values and accepts two
+invalid anySimpleType nil instances. The initial diagnostic's expectation for
+xsi:nil="false" on a non-nillable element was corrected to rejection per cvc-elt
+3.1 before judging implementations. Worker diagnostic warnings/inferred-hash
+issues were fixed without suppressions.
+
+The current uncommitted implementation replaces anyType's scalar extraction and
+unqualified type lookup with lexical XML-data preservation and lax assessment of
+known attributes/descendants. Raw anySimpleType XML allows namespace/instance
+metadata and enforces simple content. A validating ordinary generic provider
+retains the receiving declaration registry through saved/soft/native consumers.
+Generic XML validation avoids a redundant retained-value scalar re-encoding pass;
+same-type portable wrappers keep their original declaration context. The shared
+QName output adapter now covers all mixed text/CDATA fragments, so generated
+ancestor namespace bindings cannot capture originally unbound lexical tokens.
+The initial expanded unit suite passes 9 cases/223 assertions; broader independent,
+consumer, mode and regression validation is still required before any commit.
+
+The separate diagnostic still records four nil mismatches after generic values
+become decodable: anyType/anySimpleType xsi:nil=false and invalid lexical nil on
+non-nillable elements. Existing element decoding strips namespaces and recognizes
+only the literal true spelling. Nil/declaration checks must be completed; these
+remain failures and are not part of a complete generic/P5 acceptance claim.
+Default/fixed and full mixed/identity behavior, plus all P6-P9 requirements, remain
+in scope. No main-Qore or C++ change is made by this increment.
+
+
+### P5-15 completion and independent finding ownership
+
+The final generic increment passes 135 suites (1,319 cases/65,233 reported
+assertions) on frozen WSDL SHA-256
+`edb4a3f264177ece0849d2e962546d3f58724af70b63d0c48cf69da28507a832`.
+The two new suites have 10 cases/271 assertions and 4 cases/214 assertions.
+All 27 relevant supplements pass: four source modes, five default-AOT consumers,
+particle/survey/wildcard matrices, and the 112-document generic matrix in four
+source modes and AOT. The affected 684-document element wildcard matrix also
+passes. qdx/Doxygen and the shipment code example pass without warnings.
+Both new complete Valgrind suites report zero errors and zero lost blocks;
+HTTP retains only the previously traced SSSD fstat(-1) environment warning.
+The deployed Qore runtime remains 783ecefc0 and the native XML hash is unchanged.
+
+Broader AOT coverage also ran the existing 128-level QName output test. It fails
+at the normal stack limit, identically on parent 3d8e57d, independent of generic
+changes. Native disassembly records approximately 69 KiB of stack allocations
+per recursive serialization level. A fully optimized control still fails, so
+changing the compiler threshold is not a fix. `/tmp/wsdl-p5-15-aot-stack/` keeps
+the exact parent source, test, both compiled artifacts, logs and frame evidence.
+This independent finding is explicitly assigned to P9 runtime acceptance and
+remains a failure in the inventory. No stack limit, test depth or default
+compiler setting changed. No main-Qore edit was made; concurrent work is intact.
+
+The 12-schema/756-document nil/fixed diagnostic agrees with pinned Xerces and
+retains 415 WSDL mismatches (15 valid rejected, 400 invalid accepted) plus 18
+native DOM/reader false rejections, all involving empty CDATA. Native handlers
+clear the element-empty flag even for zero-length events; their shared text
+validator checks nilled/empty content before discarding zero-length values.
+This belongs to the next P5-16 element nil/default/fixed increment, including
+native event ownership and all validation entry paths. Failures stay visible;
+there is no input rewriting or validation bypass.
+
+Keyed corpus comparison shows only six formerly rejected inputs now accepted
+and six newly reachable valid outputs. Strict coverage improves twelve request/
+response directions for AnyTypeElement and GlobalElementAbstract, from 40 to 28
+valid directions needing fixes and from 56 to 44 broader failure records. All
+144 selected WSDLs/1,388 directions still pass. Prior successful output rows,
+source fixtures, adjudication and historical findings are unchanged.
+
+The complete audit has 27 Pass, 35 N/A and zero failures in this increment. See
+[generic evidence](generic-values-evidence.md), [inventory](P5-15-validation.json)
+and [audit](audits/P5-15-generic-values.md). Independent finding ownership follows
+the execution prompt; complete P5 and all P6-P9 acceptance remain required.

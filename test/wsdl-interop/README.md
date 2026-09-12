@@ -1473,3 +1473,21 @@ See [requirement evidence](wildcard-elements-evidence.md), the
 [validation inventory](P5-14-validation.json) and [full audit](audits/P5-14-element-wildcards.md).
 Generic values and remaining P5-P9 requirements stay open; the known system SSSD
 Valgrind warning retains its P9 environment ownership.
+
+
+## Generic XML values (P5-15)
+
+`../wsdl-generic-values.qtest`, `../wsdl-generic-http.qtest` and
+`test_generic_values.py` cover generic scalar/structured XML, known declarations,
+selected types, exact numbers, namespace preservation, providers and real SOAP
+1.1/1.2 consumers. The independent matrix has four schemas/112 documents and
+compares typed values and XML content through native/direct/retained paths.
+
+See [the implemented contract](../../design/wsdl-generic-values.md),
+[requirement evidence](generic-values-evidence.md),
+[validation inventory](P5-15-validation.json) and
+[full audit](audits/P5-15-generic-values.md). All 135 source suites and 27 relevant
+supplements pass; both new suites have clean Valgrind error/lost-block summaries.
+The separate baseline-reproduced QName AOT stack failure remains a P9 runtime
+finding. P5-16 owns nil/default/fixed and the native empty-CDATA correction;
+remaining P5-P9 acceptance is still required.

@@ -1,0 +1,246 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires xml
+%requires ../qlib/WSDL.qm
+%exec-class GenericValuesTest
+
+class GenericValuesTest inherits QUnit::Test {
+    constructor() : Test("Generic XML values", "1.0") {
+        addTestCase("Generic types accept empty and scalar XML text", \scalar());
+        addTestCase("AnyType preserves attributed mixed and ordered child content", \structured());
+        addTestCase("AnyType assesses known attributes and descendants through unknown wrappers", \assessment());
+        addTestCase("AnySimpleType accepts namespace metadata and rejects complex content", \simple());
+        addTestCase("Selected generic types preserve their identity and typed values", \selection());
+        addTestCase("Ordinary, native, saved and soft providers validate generic values", \providers());
+        addTestCase("Detached providers retain declarations and reject malformed reconstruction", \detached());
+        addTestCase("Native generic records preserve inherited and rebound lexical namespaces", \namespaces());
+        addTestCase("Generic XML rejects malformed metadata and recovers without changing callers", \invalid());
+        addTestCase("Nested declared anyType values receive one recursive assessment", \recursive());
+        set_return_value(main());
+    }
+    private string source(string datatype = "anyType") {
+        return '<xs:schema xmlns:xs="' + XSD_NS + '">'
+            '<xs:element name="root" type="xs:' + datatype + '"/>'
+            '<xs:element name="known" type="xs:int"/>'
+            '<xs:attribute name="count" type="xs:int"/>'
+            '<xs:simpleType name="Positive"><xs:restriction base="xs:int"><xs:minInclusive value="0"/>'
+            '</xs:restriction></xs:simpleType>'
+            '<xs:complexType name="Record"><xs:sequence><xs:element name="code" type="xs:int"/>'
+            '</xs:sequence><xs:attribute name="tag" use="required"/></xs:complexType>'
+            '</xs:schema>';
+    }
+    private auto data(string xml) {
+        return XsdBase::expandElementNamespaces(parse_xml(xml, XPF_PRESERVE_ORDER))."{}root";
+    }
+    private auto decode(XsdSchema schema, string xml, bool preserve = False) {
+        return schema.getElement("", "root").deserializeValue(schema.getTypeMap(), NOTHING, data(xml), True, preserve);
+    }
+    private string encode(XsdSchema schema, auto value) {
+        return schema.serializeXmlValue("", "root", value).getXml();
+    }
+    private auto saved(auto value) {
+        return Serializable::deserialize(Serializable::serialize(value));
+    }
+    private scalar() {
+        foreach string datatype in ("anyType", "anySimpleType") {
+            XsdSchema schema(source(datatype));
+            foreach string value in ("", "  shipment  ", "017", "false") {
+                assertEq(value, decode(schema, "<root>" + value + "</root>"));
+                assertEq(value, decode(schema, encode(schema, value)));
+            }
+            assertEq("", decode(schema, "<root/>"));
+            assertEq("", new XsdXmlValue(encode(schema, {})).getElementData()."^value^" ?? "");
+            assertEq("a b c", datatype == "anySimpleType"
+                ? decode(schema, '<root>a<![CDATA[ b]]> c</root>')
+                : XsdScalarTextForTest(decode(schema, '<root>a<![CDATA[ b]]> c</root>')));
+        }
+        XsdSchema schema(source());
+        foreach auto native in (17, True, 1.25, <0001ff>) {
+            assertEq(native, decode(schema, encode(schema, native)));
+        }
+        foreach number native in (number("1.00000000000000000001"), number("-0.000000000000000000023")) {
+            string expected = native.toStringRoundTrip();
+            XsdXmlValue output(encode(schema, native));
+            assertEq(expected, output.getElementData()."^value^");
+            XsdBaseType decimal = schema.nsc.getBaseType("decimal");
+            assertEq(expected, decimal.serializeValue(schema.nsc, decode(schema, output.getXml()), True));
+        }
+        foreach auto native in (@nan@, @inf@, -@inf@, number(@nan@), number(@inf@)) {
+            auto decoded = decode(schema, encode(schema, native));
+            assertEq(NT_FLOAT, decoded.typeCode());
+            assertTrue(native.nanp() ? decoded.nanp() : decoded == native);
+        }
+    }
+    private string XsdScalarTextForTest(auto value) {
+        list<string> text();
+        foreach string key in (keys value) {
+            if (key =~ /^\^(value|cdata)[0-9]*\^$/) {
+                push text, string(value{key});
+            }
+        }
+        return text.join("");
+    }
+    private structured() {
+        XsdSchema schema(source());
+        string xml = '<root count="017" xmlns:p="urn:partner">before<p:item>p:Stock</p:item>'
+            '<known>023</known>between<p:item>p:Part</p:item>after</root>';
+        assertEq(parse_xml(xml), parse_xml_with_schema(xml, source()));
+        XsdXmlValue retained(xml);
+        assertEq(retained, schema.validateXmlValue(retained));
+        auto value = decode(schema, xml);
+        assertEq("017", value."^attributes^".count);
+        assertEq("023", value."{}known");
+        assertEq("between", value."^value1^");
+        assertEq("after", value."^value2^");
+        assertEq("p:Part", value."{urn:partner}item^1");
+        XsdXmlValue output(encode(schema, value));
+        assertEq(("item", "known", "item"), map $1.getLocalName(), output.getChildValues());
+        assertEq("{urn:partner}Stock", output.getChildValues()[0].resolveQName("p:Stock"));
+        assertEq("023", output.getChildValues()[1].getElementData()."^value^");
+        assertEq("017", output.getElementData()."^attributes^".count);
+        schema.validateXmlValue(output);
+    }
+    private assessment() {
+        XsdSchema schema(source());
+        foreach string xml in ('<root count="bad"/>', '<root><known>bad</known></root>',
+                '<root><free><known>bad</known></free></root>',
+                '<root xmlns:xsi="' + XSI_NS + '" xmlns:xs="' + XSD_NS
+                    + '"><free xsi:type="xs:int">bad</free></root>',
+                '<root xmlns:xsi="' + XSI_NS + '"><free xsi:type="Missing"/></root>') {
+            assertThrows("SOAP-DESERIALIZATION-ERROR", \decode(), (schema, xml));
+            assertThrows("SOAP-SERIALIZATION-ERROR", \encode(), (schema, data(xml)));
+            assertThrows("SOAP-SERIALIZATION-ERROR", \schema.validateXmlValue(), (new XsdXmlValue(xml),));
+        }
+        foreach string xml in ('<root count="017"><free><known>023</known></free></root>',
+                '<root><free own="017">before<other/>after</free></root>') {
+            XsdXmlValue output(encode(schema, decode(schema, xml)));
+            assertEq(output, schema.validateXmlValue(output));
+        }
+    }
+    private simple() {
+        XsdSchema schema(source("anySimpleType"));
+        foreach string xml in ('<root/>', '<root xmlns:p="urn:partner">p:Stock</root>',
+                '<root xmlns:xsi="' + XSI_NS + '" xsi:noNamespaceSchemaLocation="urn:schema">text</root>',
+                '<root> A<!--comment--><![CDATA[ B]]> C </root>') {
+            XsdXmlValue output(encode(schema, data(xml) ?? ""));
+            assertEq(output, schema.validateXmlValue(output));
+            assertEq(decode(schema, xml), decode(schema, output.getXml()));
+        }
+        foreach string xml in ('<root free="x">text</root>', '<root count="017"/>',
+                '<root><free/></root>', '<root>before<free/>after</root>') {
+            assertThrows("SOAP-DESERIALIZATION-ERROR", \decode(), (schema, xml));
+            assertThrows("SOAP-SERIALIZATION-ERROR", \encode(), (schema, data(xml)));
+        }
+    }
+    private selection() {
+        foreach string datatype in ("anyType", "anySimpleType") {
+            XsdSchema schema(source(datatype));
+            foreach list<string> row in (("xs:int", "017"), ("xs:QName", "p:Stock"), ("Positive", "023")) {
+                string xml = '<root xmlns:xs="' + XSD_NS + '" xmlns:xsi="' + XSI_NS
+                    + '" xmlns:p="urn:products" xsi:type="' + row[0] + '">' + row[1] + '</root>';
+                auto value = decode(schema, xml, True);
+                assertTrue(value."^type^" instanceof XsdQNameValue);
+                string output = encode(schema, saved(value));
+                auto again = decode(schema, output, True);
+                assertTrue(value."^type^".equals(again."^type^"));
+                if (value."^val^" instanceof XsdQNameValue) {
+                    assertTrue(value."^val^".equals(again."^val^"));
+                } else {
+                    assertEq(value."^val^", again."^val^");
+                }
+                assertEq(new XsdXmlValue(output).getLocalName(), "root");
+            }
+        }
+        XsdSchema schema(source());
+        string xml = '<root xmlns:xsi="' + XSI_NS + '" xsi:type="Record" tag="shipment"><code>017</code></root>';
+        auto value = decode(schema, xml, True);
+        assertEq(17, value."^val^".code);
+        assertEq(value."^val^", decode(schema, encode(schema, saved(value)), True)."^val^");
+        assertThrows("SOAP-SERIALIZATION-ERROR", \encode(), (schema,
+            {"^type^":new XsdQNameValue("", "Positive"), "^val^":-1}));
+    }
+    private providers() {
+        foreach string datatype in ("anyType", "anySimpleType") {
+            XsdSchema schema(source(datatype));
+            AbstractDataProviderType original = schema.getElement("", "root").type.getDataProviderType();
+            foreach AbstractDataProviderType variant in (original, original.getSoftType(),
+                    original.getOrNothingType(), original.getOrNothingType().getMandatoryType(),
+                    schema.getNativeDataProviderType("", "root")) {
+                foreach AbstractDataProviderType type in (variant, saved(variant)) {
+                    assertEq(" text ", type.acceptsValue(" text "));
+                    auto value = datatype == "anyType" ? {"{}known":"017"} : {"^value^":" text "};
+                    assertEq(value, type.acceptsValue(value));
+                    assertEq(value, new QoreDataField({"name":"payload", "type":type}).acceptsValue(value));
+                    assertEq(value, new ListDataType(type).acceptsValue((value,))[0]);
+                    assertThrows("RUNTIME-TYPE-ERROR", \type.acceptsValue(), ({"{}known":"bad"},));
+                }
+            }
+            assertEq(NOTHING, original.getOrNothingType().acceptsValue(NOTHING));
+            assertThrows("MISSING-VALUE-ERROR", \original.acceptsValue(), (NOTHING,));
+            assertEq(NOTHING, original.getValueType());
+            assertEq({}, original.getDirectTypeHash());
+            assertEq("sample", original.acceptsValue(original.getExampleValue()));
+        }
+    }
+    private detached() {
+        XsdSchema schema(source());
+        AbstractDataProviderType provider = saved(schema.getElement("", "root").type.getDataProviderType());
+        remove schema;
+        assertEq({"{}known":"017"}, saved(provider).acceptsValue({"{}known":"017"}));
+        assertThrows("RUNTIME-TYPE-ERROR", \provider.acceptsValue(), ({"{}known":"bad"},));
+        hash<SerializationInfo> info = provider.serializeToData();
+        bool found = False;
+        foreach string index in (keys info._index) {
+            if (info._index{index}.hasKey("_class_data")
+                    && info._index{index}._class_data.hasKey("WSDL::XsdGenericDataType")) {
+                found = True;
+                info._index{index}._class_data{"WSDL::XsdGenericDataType"}.component = 17;
+            }
+        }
+        assertTrue(found);
+        assertThrows("DESERIALIZATION-ERROR", \Serializable::deserialize(), (info,));
+    }
+    private namespaces() {
+        XsdSchema schema(source());
+        string xml = '<root xmlns:p="urn:outer">p:Start<item>p:Stock</item>p:Middle'
+            '<item xmlns:p="urn:inner">p:Part</item>p:End</root>';
+        XsdXmlValue output(encode(schema, decode(schema, xml)));
+        assertEq("{urn:outer}Stock", output.getChildValues()[0].resolveQName("p:Stock"));
+        assertEq("{urn:inner}Part", output.getChildValues()[1].resolveQName("p:Part"));
+        xml = '<root xmlns:p="urn:outer">before<item>xsd:Stock</item>after</root>';
+        XsdXmlValue unbound(encode(schema, decode(schema, xml)));
+        XsdXmlValue child = unbound.getChildValues()[0];
+        assertThrows("WSDL-NAMESPACE-ERROR", \child.resolveQName(), ("xsd:Stock",));
+    }
+    private invalid() {
+        XsdSchema schema(source());
+        foreach auto value in ({"^attributes^":17}, {"^attributes^":{"count":()}}, {"^value^":()},
+                {"^xml^":"<known>bad</known>"}, {"unbound:child":"text"}, {"{urn:partner}bad:name":"text"},
+                {"{}known":()}) {
+            assertThrows("SOAP-SERIALIZATION-ERROR", \encode(), (schema, value));
+        }
+        hash<string, string> inferred = {"{}known":"017"};
+        auto before = inferred;
+        string output = encode(schema, inferred);
+        assertEq(before, inferred);
+        assertEq("017", decode(schema, output)."{}known"."^value^");
+    }
+    private recursive() {
+        XsdSchema schema(source());
+        string xml = strmul("<root>", 32) + "leaf" + strmul("</root>", 32);
+        XsdXmlValue output(encode(schema, decode(schema, xml)));
+        int depth = 1;
+        while (output.getChildValues()) {
+            assertEq(1, output.getChildValues().size());
+            output = output.getChildValues()[0];
+            ++depth;
+        }
+        assertEq(32, depth);
+        assertEq("leaf", output.getElementData()."^value^");
+        assertThrows("SOAP-DESERIALIZATION-ERROR", \decode(),
+            (schema, strmul("<root>", 32) + "<known>bad</known>" + strmul("</root>", 32)));
+    }
+}

@@ -80,6 +80,12 @@ module WSDL {
     @section wsdlrelnotes WSDL Module Release Notes
 
     @subsection wsdl_0_5_8 WSDL v0.5.8
+    - xs:anyType accepts empty, scalar, attributed and mixed XML content, assesses known declarations,
+      and preserves ordered XML-data fields and lexical namespace context through SOAP and provider consumers
+    - generic providers enforce anySimpleType's simple-content rules and validate saved/soft/native values;
+      complete XML values retain schema hints, comments and CDATA alongside generic text
+    - anyType infers decimal for arbitrary-precision numbers and double for non-finite numeric values;
+      existing finite scalar mappings and exact decimal/IEEE conversion rules remain in use
     - element wildcards assess available global declarations and xsi:type under strict/lax/skip rules;
       element-only serialization schedules wildcard and declared fields through the complete particle
     - wildcard XML-data fields retain lexical values and structured namespace context; explicit XsdXmlValue
@@ -675,6 +681,7 @@ public const any_type_map = (
     Type::Boolean     : "boolean",
     Type::Date        : "dateTime",
     Type::Float       : "decimal",
+    Type::Number      : "decimal",
     Type::NothingType : "string",
     Type::NullType    : "string",
     Type::Binary      : "base64Binary",
@@ -5596,6 +5603,8 @@ class XsdQNameXmlOutputHelper {
                 if (tree{key} instanceof XsdQNameXmlFragment) {
                     checkFragmentContext(tree{key}.getNativeValue(), output);
                     result{key} = tree{key}.getXml();
+                } else if (tree{key} instanceof XsdScopedLexicalValue) {
+                    result{key} = tree{key}.getLexicalValue();
                 } else {
                     result{key} = tree{key};
                 }
@@ -5662,9 +5671,21 @@ class XsdQNameXmlOutputHelper {
             input{prefix} = declared{prefix};
         }
         auto scalar = value.typeCode() == NT_HASH ? value."^value^" : value;
+        list<auto> lexical_values();
+        push lexical_values, scalar;
+        if (value.typeCode() == NT_HASH) {
+            foreach string fragment in (keys value) {
+                if (fragment != "^value^" && fragment =~ /^\^(value|cdata)[0-9]*\^$/) {
+                    push lexical_values, value{fragment};
+                }
+            }
+        }
         hash<string, string> data();
-        if ((scalar instanceof XsdQNameValue || scalar instanceof XsdQNameOutputText || scalar instanceof XsdScopedLexicalValue)) {
-            bind(scalar, \data);
+        foreach auto lexical in (lexical_values) {
+            if (lexical instanceof XsdQNameValue || lexical instanceof XsdQNameOutputText
+                    || lexical instanceof XsdScopedLexicalValue) {
+                bind(lexical, \data);
+            }
         }
         foreach auto attribute_value in (original.iterator()) {
             if ((attribute_value instanceof XsdQNameValue || attribute_value instanceof XsdQNameOutputText || attribute_value instanceof XsdScopedLexicalValue)) {
@@ -5734,8 +5755,7 @@ class XsdQNameXmlOutputHelper {
             }
             output{prefix} = output_declarations{prefix};
         }
-        list<auto> pending_context();
-        push pending_context, scalar;
+        list<auto> pending_context = lexical_values;
         foreach auto contextual_attribute in (original.iterator()) {
             push pending_context, contextual_attribute;
         }
@@ -9494,6 +9514,284 @@ class XsdDataFieldHelper {
     }
 }
 
+# Generic XML content has lexical values rather than an inferred scalar shape.
+class XsdGenericValueHelper {
+    static bool isGeneric(XsdAbstractType type) {
+        return XsdTypeSubstitutionHelper::builtin(type, "anyType")
+            || XsdTypeSubstitutionHelper::builtin(type, "anySimpleType");
+    }
+
+    static auto decode(XsdBaseType type, hash<string, XsdAbstractType> types, *hash<auto> references, auto value) {
+        XsdWildcardElementHelper::validateLaxContent(type.nsc, types, references, value,
+            XsdBase::getExpandedAttributes(value.typeCode() == NT_HASH ? value."^attributes^" : NOTHING));
+        if (value.typeCode() == NT_HASH) {
+            return XsdWildcardElementHelper::retainNamespaces(value);
+        }
+        if (exists value && !value.strp()) {
+            throw SOAP_DESERIALIZATION_ERROR, "generic XML text requires a scalar value";
+        }
+        return type.nsc.opt_empty_string_is_nothing ? value : string(value);
+    }
+
+    static hash<auto> encode(XsdBaseType type, Namespaces output, hash<auto> value, *softbool omit_type) {
+        try {
+            checkXmlData(value);
+            hash<auto> wire = XsdBase::restoreElementNamespaces(value);
+            hash<auto> assessed = XsdBase::expandElementNamespaces(wire);
+            XsdQNameNamespaceScope scope(assessed."^attributes^", True);
+            hash<string, XsdAbstractType> types = NativeTypeOutputTypes ?? type.nsc.getInstanceTypes();
+            XsdNativeTypeValueScope native_projection(False);
+            XsdAbstractType selected = XsdTypeSubstitutionHelper::select(\assessed, type, types, type.name);
+            if (XsdTypeSubstitutionHelper::builtin(selected, "anyType")) {
+                XsdWildcardElementHelper::validateLaxContent(type.nsc, types, NOTHING, assessed,
+                    XsdBase::getExpandedAttributes(assessed."^attributes^"));
+            } else {
+                auto checked = XsdDocumentValueHelper::deserializeValue(selected, type.name, types, NOTHING, assessed);
+            }
+            if (XsdQNameOutputScope::retains(output)) {
+                wire = retainLexicalContext(wire);
+            }
+            if (!omit_type && !XsdBase::getExpandedAttributes(wire."^attributes^").hasKey(type_qname(XSI_NS, "type"))) {
+                wire."^attributes^" += XsdDocumentValueHelper::typeAttributes(type, output);
+            }
+            return wire;
+        } catch (hash<ExceptionInfo> error) {
+            if (error.err == SOAP_DESERIALIZATION_ERROR || error.err == "XSD-PARTICLE-ERROR") {
+                rethrow SOAP_SERIALIZATION_ERROR, error.desc, error.arg;
+            }
+            rethrow;
+        }
+    }
+
+    private static auto retainLexicalContext(auto value) {
+        XsdQNameNamespaceScope scope(value.typeCode() == NT_HASH ? value."^attributes^" : NOTHING);
+        if (value.typeCode() == NT_LIST) {
+            list<auto> result();
+            foreach auto child in (value) {
+                push result, retainLexicalContext(child);
+            }
+            return result;
+        }
+        if (value.typeCode() == NT_STRING) {
+            hash<string, string> bindings = {"":QNameInputNamespaces{""} ?? ""};
+            foreach string token in (XsdListValueHelper::tokens(value)) {
+                int colon = token.find(":");
+                if (colon > 0) {
+                    string prefix = token.substr(0, colon);
+                    if (QNameInputNamespaces.hasKey(prefix)) {
+                        bindings{prefix} = QNameInputNamespaces{prefix};
+                    }
+                }
+            }
+            return new XsdScopedLexicalValue(value, bindings);
+        }
+        if (value.typeCode() != NT_HASH) {
+            return value;
+        }
+        value = {} + value;
+        foreach string key in (keys value) {
+            if (key == "^attributes^") {
+                hash<auto> attributes = {} + value{key};
+                foreach string attribute in (keys attributes) {
+                    list<string> parts = attribute.split(":");
+                    string identity = attribute.startsWith("{") ? attribute
+                        : type_qname(parts.size() == 2 ? QNameInputNamespaces{parts[0]} : "", parts[-1]);
+                    if (attribute != "xmlns" && !attribute.startsWith("xmlns:")
+                            && !XsdBase::isInstanceAttribute(identity)) {
+                        attributes{attribute} = retainLexicalContext(attributes{attribute});
+                    }
+                }
+                value{key} = attributes;
+            } else if ((!key.startsWith("^") && !key.startsWith(".")) || key =~ /^\^(value|cdata)[0-9]*\^$/) {
+                value{key} = retainLexicalContext(value{key});
+            }
+        }
+        return value;
+    }
+
+    private static checkXmlData(auto value) {
+        if (value.typeCode() == NT_LIST) {
+            foreach auto child in (value) {
+                checkXmlData(child);
+            }
+            return;
+        }
+        if (value.typeCode() != NT_HASH) {
+            if (exists value && !value.strp()) {
+                throw SOAP_SERIALIZATION_ERROR, "generic XML content requires text or XML data";
+            }
+            return;
+        }
+        foreach string key in (keys value) {
+            if (key == "^attributes^") {
+                if (value{key}.typeCode() != NT_HASH) {
+                    throw SOAP_SERIALIZATION_ERROR, "generic XML attributes require a hash";
+                }
+                foreach auto attribute in (value{key}.iterator()) {
+                    if (!attribute.strp()) {
+                        throw SOAP_SERIALIZATION_ERROR, "generic XML attributes require scalar text";
+                    }
+                }
+            } else if (key =~ /^\^(value|cdata|comment)[0-9]*\^$/) {
+                if (exists value{key} && !value{key}.strp()) {
+                    throw SOAP_SERIALIZATION_ERROR, "generic XML text fragments require scalar text";
+                }
+            } else if (key == ".ns") {
+                continue;
+            } else if (key.startsWith("^") || key.startsWith(".")) {
+                throw SOAP_SERIALIZATION_ERROR, sprintf("invalid generic XML metadata %Y", key);
+            } else {
+                checkXmlData(value{key});
+            }
+        }
+    }
+}
+
+#! Validating provider for generic XML content
+/** Accepts scalar text and XML-data records with the receiving generic type's content rules.
+    @par Example
+    A shipment connector carries partner XML extensions in an anyType field while validating
+    globally declared quantities. An anySimpleType field accepts text without child elements.
+    @since %WSDL 0.5.8
+*/
+public class XsdGenericDataType inherits AbstractDataProviderType {
+    private {
+        XsdBaseType component;
+        bool optional;
+    }
+    #! constructs a provider for a generic builtin type
+    /** @param component the receiving anyType or anySimpleType definition
+        @param optional whether omission is permitted
+        @throw XSD-SIMPLETYPE-ERROR the component is not a generic builtin
+    */
+    constructor(XsdBaseType component, bool optional = False) {
+        if (!XsdGenericValueHelper::isGeneric(component)) {
+            throw "XSD-SIMPLETYPE-ERROR", "a generic provider requires anyType or anySimpleType";
+        }
+        self.component = component;
+        self.optional = optional;
+    }
+    private:internal deserializeMembers(hash<auto> members) {
+        if (!(members.component instanceof XsdBaseType) || members.optional.typeCode() != NT_BOOLEAN) {
+            throw "DESERIALIZATION-ERROR", "a generic provider requires its builtin component and optionality";
+        }
+        component = members.component;
+        optional = members.optional;
+    }
+    #! returns the receiving builtin type's name
+    /** @return xsd:anyType or xsd:anySimpleType with optionality */
+    string getName() {
+        return (optional ? "*" : "") + "xsd:" + component.name;
+    }
+    #! describes the generic content contract
+    /** @return a description of supported XML data */
+    string getDesc() {
+        return component.name == "anyType"
+            ? "Preserves XML text, attributes and child elements; known declarations are validated. "
+                "Use `XsdXmlValue` through the XML provider to retain the complete document."
+            : "Accepts XML text without child elements or ordinary XML attributes.";
+    }
+    #! requires validation for every value
+    /** @return NOTHING */
+    *Type getValueType() {
+        return;
+    }
+    #! prevents enclosing fields from bypassing validation
+    /** @return an empty map */
+    *hash<string, bool> getDirectTypeHash() {
+        return {};
+    }
+    #! returns no outer list item type
+    /** @return NOTHING */
+    *AbstractDataProviderType getElementType() {
+        return;
+    }
+    #! returns no fixed record fields
+    /** @return NOTHING */
+    *hash<string, AbstractDataField> getFields() {
+        return;
+    }
+    #! reports scalar and XML-data input categories
+    /** @param simple request simplified names
+        @return accepted categories and optional omission
+    */
+    hash<string, bool> getAcceptTypeHash(*bool simple) {
+        hash<string, bool> result = AbstractDataProviderType::get(SoftStringType).getAcceptTypeHash(simple);
+        result.hash = True;
+        if (optional) {
+            result.nothing = True;
+        } else {
+            remove result.nothing;
+        }
+        return result;
+    }
+    #! reports the preserved native categories
+    /** @param simple request simplified names
+        @return scalar and XML-data categories and optional omission
+    */
+    hash<string, bool> getReturnTypeHash(*bool simple) {
+        return getAcceptTypeHash(simple);
+    }
+    #! validates generic text or XML data without changing the input's shape
+    /** @param value a scalar or XML-data record
+        @return the checked input, or optional omission
+        @throw MISSING-VALUE-ERROR a required value is absent
+        @throw RUNTIME-TYPE-ERROR invalid generic content or selected type
+    */
+    auto acceptsValue(auto value) {
+        if (!exists value) {
+            if (optional) {
+                return;
+            }
+            throw "MISSING-VALUE-ERROR", "a generic XML value must be supplied";
+        }
+        Namespaces output = component.nsc.copy();
+        XsdQNameOutputScope output_scope(output);
+        XsdNativeTypeOutputScope types(component.nsc.getInstanceTypes());
+        try {
+            auto checked = XsdDocumentValueHelper::serializePartValue(component, output, value, True);
+        } catch (hash<ExceptionInfo> error) {
+            if (error.err == SOAP_SERIALIZATION_ERROR || error.err == "XSD-PARTICLE-ERROR") {
+                rethrow "RUNTIME-TYPE-ERROR", error.desc, error.arg;
+            }
+            rethrow;
+        }
+        return value;
+    }
+    #! returns whether the value is required
+    /** @return True for a mandatory provider */
+    bool isMandatory() {
+        return !optional;
+    }
+    #! returns whether omission is permitted
+    /** @return True for an optional provider */
+    bool isOrNothingType() {
+        return optional;
+    }
+    #! returns an optional provider retaining all content rules
+    /** @return the optional variant */
+    AbstractDataProviderType getOrNothingType() {
+        XsdGenericDataType result = self.copy();
+        result.optional = True;
+        return result;
+    }
+    #! returns a mandatory provider retaining all content rules
+    /** @return the mandatory variant */
+    AbstractDataProviderType getMandatoryType() {
+        XsdGenericDataType result = self.copy();
+        result.optional = False;
+        return result;
+    }
+    #! returns a simple example accepted by either generic type
+    /** @param emap enclosing example context
+        @param fname optional field context
+        @return sample text, or optional omission
+    */
+    auto getExampleValue(*hash<string, bool> emap, *string fname) {
+        return optional ? NOTHING : "sample";
+    }
+}
+
 #! class for XSD base types
 public class XsdBaseType inherits WSDL::XsdAbstractType {
     public {
@@ -9527,7 +9825,7 @@ public class XsdBaseType inherits WSDL::XsdAbstractType {
         };
     }
 
-    #! constructs a builtin scalar type with independent input and output prefix handling
+    #! constructs a builtin XSD type with independent input and output prefix handling
     /** @param t the builtin local type name
         @param nsc the input/output namespace registry
         @param ns an explicit input prefix, or the canonical builtin prefix xsd
@@ -9551,10 +9849,16 @@ public class XsdBaseType inherits WSDL::XsdAbstractType {
     /** @param nsc the output namespace registry
         @param val the native or lexical input
         @param omitType omit the explicit XML type attribute
-        @return the serialized scalar or its XML value/attribute hash
+        @return the serialized scalar or XML-data value/attribute/child hash
         @throw SOAP-SERIALIZATION-ERROR the value cannot be converted to this builtin
+        @note anyType XML-data records retain mixed content and namespace bindings; scalar inputs infer
+        an available builtin type. anySimpleType permits text and instance metadata, without ordinary
+        attributes or child elements. Complete XML carriers use the explicit schema/message XML APIs.
     */
     auto serializeValue(Namespaces nsc, auto val, *softbool omitType) {
+        if ((name == "anyType" || name == "anySimpleType") && val.typeCode() == NT_HASH) {
+            return XsdGenericValueHelper::encode(self, nsc, val, omitType);
+        }
         if (name == "QName") {
             hash<string, string> bindings = XsdScopedLexicalContext::serializationBindings(nsc,
                 val.typeCode() == NT_HASH ? val."^attributes^" : NOTHING);
@@ -9587,15 +9891,12 @@ public class XsdBaseType inherits WSDL::XsdAbstractType {
         }
         *hash<auto> comments;
         if (val.typeCode() == NT_HASH) {
-            if (name == "anySimpleType" && val.hasKey("^attributes^")) {
-                throw SOAP_SERIALIZATION_ERROR, "anySimpleType cannot contain attributes";
-            }
             foreach string k in (keys val) {
                 if (k =~ /^\^comment/) {
                     comments{k} = val{k};
                 }
             }
-            val = name == "anyType" ? val."^value^" : XsdScalarTextHelper::value(val, SOAP_SERIALIZATION_ERROR);
+            val = XsdScalarTextHelper::value(val, SOAP_SERIALIZATION_ERROR);
         }
         # issue #5411: apply "whiteSpace" processing to the lexical value
         if (val.typeCode() == NT_STRING && !XsdBinaryLexicalHelper::isType(name)) {
@@ -9607,8 +9908,12 @@ public class XsdBaseType inherits WSDL::XsdAbstractType {
             # we have to specify the type in this case
             omitType = False;
             type = any_type_map{val.type()};
-            if (!type)
+            if ((val.typeCode() == NT_FLOAT || val.typeCode() == NT_NUMBER) && (val.nanp() || val.infp())) {
+                type = "double";
+            }
+            if (!type) {
                 throw SOAP_SERIALIZATION_ERROR, sprintf("cannot serialize xsd type anyType from Qore type %y", val.type());
+            }
         } else {
             type = name;
         }
@@ -9742,7 +10047,7 @@ public class XsdBaseType inherits WSDL::XsdAbstractType {
         @param tmap the resolved type map
         @param mrh the multireference value map
         @param val the scalar input or its XML value/attribute hash
-        @return the converted builtin value
+        @return the converted builtin value, or lexical XML data for structured anyType content
         @throw SOAP-DESERIALIZATION-ERROR the value cannot be converted to this builtin
     */
     auto deserializeValue(string en, hash<string, XsdAbstractType> tmap, *hash<auto> mrh, auto val) {
@@ -9751,12 +10056,13 @@ public class XsdBaseType inherits WSDL::XsdAbstractType {
         if (selected !== self) {
             return XsdDocumentValueHelper::deserializeValue(selected, en, tmap, mrh, val);
         }
+        if (name == "anyType") {
+            return XsdGenericValueHelper::decode(self, tmap, mrh, val);
+        }
         string type = name;
         if (val.typeCode() == NT_HASH) {
-            if (name != "anyType") {
-                XsdBase::validateSimpleAttributes(val."^attributes^", name);
-            }
-            val = name == "anyType" ? val."^value^" : XsdScalarTextHelper::value(val, SOAP_DESERIALIZATION_ERROR);
+            XsdBase::validateSimpleAttributes(val."^attributes^", name);
+            val = XsdScalarTextHelper::value(val, SOAP_DESERIALIZATION_ERROR);
         }
 
         # issue #5411: apply "whiteSpace" processing to the lexical value
@@ -9830,12 +10136,6 @@ public class XsdBaseType inherits WSDL::XsdAbstractType {
                 return XsdDurationLexicalHelper::lexical(val, SOAP_DESERIALIZATION_ERROR);
 
             default: {
-                if (name == "anyType")  {
-                    *XsdAbstractType t = tmap_try_get(tmap, type);
-                    if (t) {
-                        return t.deserializeValue(en, tmap, mrh, val);
-                    }
-                }
                 throw SOAP_DESERIALIZATION_ERROR, sprintf("don't know how to handle type %y", name);
             }
         }
@@ -9859,8 +10159,13 @@ public class XsdBaseType inherits WSDL::XsdAbstractType {
         IEEE providers validate complete lexical input and round at the declared float/double precision.
         Duration providers retain exact XML text and validate relative-date conversion without losing microseconds.
         Text providers apply the builtin whitespace rule; builtin token lists require at least one item.
+        Generic providers validate XML-data shapes and anyType's known declarations. Use explicit XML
+        providers to retain complete XML metadata around an anySimpleType scalar.
     */
     AbstractDataProviderType getDataProviderType() {
+        if (name == "anyType" || name == "anySimpleType") {
+            return new XsdGenericDataType(self);
+        }
         if (name == "QName") {
             return new XsdQNameDataType();
         }
@@ -12869,6 +13174,8 @@ class XsdDocumentValueHelper {
                     throw SOAP_SERIALIZATION_ERROR, "an anonymous selected type cannot supply xsi:type";
                 }
                 annotation = typeAttributes(selected, nsc);
+            } else {
+                selected = type;
             }
             type = selected;
             value = value."^val^";
@@ -12891,7 +13198,9 @@ class XsdDocumentValueHelper {
         XsdDocumentValueCapture capture(type);
         auto converted = type.deserializeValue(name, tmap, references, value);
         capture.validate(value, converted, SOAP_DESERIALIZATION_ERROR);
-        if (RetainedXmlValidationNamespaces) {
+        # Generic XML decoding assesses the complete content. Re-encoding its
+        # retained lexical tree would duplicate that assessment at every depth.
+        if (RetainedXmlValidationNamespaces && !XsdGenericValueHelper::isGeneric(type)) {
             *XsdComplexType complex_type = type instanceof XsdComplexType ? cast<XsdComplexType>(type) : NOTHING;
             if (!complex_type || Class::getClass(complex_type).getPathName() != "WSDL::XsdComplexType"
                     || !complex_type.getParticle() || complex_type.array) {
@@ -20808,6 +21117,10 @@ class XsdWildcardElementHelper {
             hash<string, XsdAbstractType> types, *hash<auto> references, auto value) {
         XsdQNameNamespaceScope scope(value.typeCode() == NT_HASH ? value."^attributes^" : NOTHING);
         validate(namespaces, wildcard, identity, types, references, value);
+        return retainNamespaces(value);
+    }
+
+    static auto retainNamespaces(auto value) {
         if (value.typeCode() == NT_HASH) {
             # Public component callers can supply an inferred hash<string>.
             # Namespace metadata needs a heterogeneous XML-data hash.
@@ -20926,12 +21239,6 @@ class XsdWildcardElementHelper {
         *XsdElement declaration = namespaces.getGlobalElement(identity);
         if (declaration) {
             declaration.deserializeOccurrence(types, references, value);
-            auto assessed = value;
-            XsdAbstractType selected = XsdTypeSubstitutionHelper::select(\assessed, declaration.type, types, identity);
-            if (XsdTypeSubstitutionHelper::builtin(selected, "anyType")) {
-                validateLaxContent(namespaces, types, references, value,
-                    XsdBase::getExpandedAttributes(value.typeCode() == NT_HASH ? value."^attributes^" : NOTHING));
-            }
             return;
         }
         hash<auto> attributes = XsdBase::getExpandedAttributes(value.typeCode() == NT_HASH
@@ -20953,7 +21260,7 @@ class XsdWildcardElementHelper {
         validateLaxContent(namespaces, types, references, value, attributes);
     }
 
-    private static validateLaxContent(Namespaces namespaces, hash<string, XsdAbstractType> types,
+    static validateLaxContent(Namespaces namespaces, hash<string, XsdAbstractType> types,
             *hash<auto> references, auto value, hash<auto> attributes) {
         hash<XsdAttributeWildcardInfo> lax = <XsdAttributeWildcardInfo>{"processing": XsdWildcardProcessing::Lax};
         list<string> attribute_names();
