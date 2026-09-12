@@ -1456,3 +1456,20 @@ See [evidence](native-wildcard-types-evidence.md),
 [the full audit](audits/P5-13-native-wildcard-types.md). P5 element wildcard values,
 mixed/generic content, complete nil/default/fixed and identity semantics remain
 open, followed by P6-P9 acceptance.
+
+
+## Element wildcard values (P5-14)
+
+`../wsdl-wildcard-elements.qtest`, `../wsdl-wildcard-element-values.qtest` and
+`../wsdl-wildcard-element-http.qtest` cover strict/lax/skip assessment, detached
+registry lifetime, reconstruction, lexical XML data and explicit retained XML,
+provider variants, portable type wrappers, bounded samples and both SOAP
+bindings through real HTTP consumers. `test_wildcard_elements.py` checks 36
+schemas/684 documents with independent validity and value/name/order assertions.
+The [implemented representation](../../design/wsdl-element-wildcards.md) includes
+examples and explains when complete XML values are necessary for lossless output.
+The deployed Qore shared-container cycle fix closes the provider lifecycle leak.
+See [requirement evidence](wildcard-elements-evidence.md), the
+[validation inventory](P5-14-validation.json) and [full audit](audits/P5-14-element-wildcards.md).
+Generic values and remaining P5-P9 requirements stay open; the known system SSSD
+Valgrind warning retains its P9 environment ownership.

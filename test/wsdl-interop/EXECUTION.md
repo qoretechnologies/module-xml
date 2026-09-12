@@ -7139,3 +7139,111 @@ Reproduction and preparation are under `/tmp/wsdl-p5-14-native-view*`,
 provider/both-binding value/order matrix and fix these paths before closing P5.
 Mixed/generic, complete nil/default/fixed and identity behavior, then P6-P9,
 remain required. No phase closure or complete-conformance claim is made.
+
+
+## P5-14 — element wildcard values (uncommitted; cleanup gate open)
+
+Parent: `8101f81`. Element wildcard processing now uses shared completed global
+name/type registries, strict/lax/skip assessment, complete particle emission,
+retained XML fragments, ordinary/soft/native providers and bounded sample
+selection. The implementation and tests are present in the working tree; this is
+not a completed increment or a passing memory audit.
+
+The final focused test passes 11 cases/530 assertions, retained-value tests pass
+4/26, and actual SOAP 1.1/1.2 HTTP tests pass 4/157. All four execution modes and
+rebuilt AOT pass those suites. All 27 consumer/mode/AOT/independent supplements
+pass; the independent matrix covers 36 schemas and 684 documents with conversion,
+provider, expanded-name/value/order and native/Xerces output checks. Final source
+and AOT include the inferred-hash widening and lexical-child QName assessment
+fixes found during audit. The final 133-suite gate passes 1,305 cases/64,748 reported assertions
+without warnings or failed cases; `/tmp/wsdl-p5-14-final-gate*` records unchanged
+source and exact results. The SOAP suite retains three intentionally caught
+negative assertion outcomes. Only three documentation examples were added after
+that gate; focused source/AOT and documentation checks cover those additions.
+
+The final both-version survey and strict coverage pass their execution gates on
+unchanged source. All 144 selected WSDLs/1,388 message directions pass. The only
+survey changes are correct rejection of the two invalid
+`ExtendedSequenceStrictOther` inputs and removal of their unreachable output
+rows: 2,453 rows, 56 broader failure records, 40 valid-input directions still
+requiring later P5 work. No historical fixture or finding was rewritten.
+Exact comparison: `/tmp/wsdl-p5-14-corpus-comparison.json`.
+
+A new memory finding is isolated at
+`/tmp/wsdl-wildcard-registry-leak/README.md`, with frozen P5-14 and parent WSDL
+sources, commented test-case reductions, hashes, bounded runners and Valgrind
+logs. The committed parent passes the complete wildcard-attribute suite with
+zero errors/lost blocks. P5-14 leaks in valid simple-content/provider lifecycle
+cases; the malformed-metadata case and its group are clean. Root cause is not
+yet established. Per the user's separate-investigation instruction, resolve
+this finding before committing P5-14 and before accepting exception safety.
+Do not suppress the leaks or weaken registry lifetime/validation to close it.
+
+This is distinct from `/tmp/wsdl-native-allocation-investigation/ROOT-CAUSE.md`:
+that optional reset-allocation test expectation is already corrected and
+committed in P5-13. The old upstream validation-context reuse observation needs
+separate work before introducing context reuse; current module-xml contexts are
+per-call and do not reach it.
+
+The existing declared `xs:anyType` converter gap is independently recorded in
+`/tmp/wsdl-p5-14-known-anytype.md`: its current scalar extraction/type lookup
+cannot represent generic complex content. It remains the next generic-value P5
+increment, with its historical/current failures retained. Remaining mixed,
+nil/default/fixed and document-identity semantics, and all P6-P9 criteria, retain
+their full original scope. No C++ or main-Qore code was changed, installed or
+pushed for P5-14. Other developers' current main-Qore changes are untouched.
+
+
+P5-14 handoff update: the verified 16-line `minimal.qtest` in the separate
+investigation reconstructs a valid ordinary provider from `serializeToData()`
+and confirms its declared field. It leaks in default and AST execution modes;
+the identical parent control is clean. No invalid input, failed reconstruction,
+HTTP or binary serialization is required. This is the starting reproducer for
+the separate fix, needed now before P5-14 commit/acceptance. The full HTTP
+Valgrind run has zero memory errors/lost blocks but records an unresolved
+`fstat(-1)` warning; it must not be described as warning-free. The final focused
+source and rebuilt-AOT suites both pass 11 cases/530 assertions, and qdx/Doxygen
+are clean. [Validation inventory](P5-14-validation.json) and the
+[open 62-item audit](audits/P5-14-element-wildcards.md) retain the evidence and
+26 Pass / 34 N/A / 2 Fail result. No P5-14 commit was made.
+
+
+### P5-14 completion after deployed Qore cycle fix
+
+Installed Qore `783ecefc0194e970ecdc79bd61c5d310854bb017` fixes recursive-reference
+scans through shared containers and stale recursive-set reference snapshots.
+The original 16-line default/AST reproducer and complete wildcard attribute
+provider suite now have zero Valgrind errors/lost blocks. All three new element
+wildcard suites also have zero errors/lost blocks. The original failed logs and
+reductions remain unchanged; `/tmp/wsdl-wildcard-registry-leak/RESOLUTION.md`
+records the core cause and clean controls, with fresh evidence separate in
+`/tmp/wsdl-p5-14-qore-fixed/`. Core shared-container regression passes 6 cases/8
+assertions. No main-Qore change or installation was made here; the concurrent
+Function.cpp/recursive-closure developer work is untouched. Both develop remotes
+were fetched; XML was 99 commits ahead with no incoming changes, main Qore was
+current. Nothing was pushed.
+
+The exact final WSDL source and rebuilt AOT pass all 133 suites (1,305 cases and
+64,748 reported assertions), all 27 execution-mode/AOT/independent supplements,
+and qdx/Doxygen without warnings. Three caught negative SOAP assertions remain
+intentional historical test behavior. The unchanged HTTP concurrency test first
+exceeded its 30-second result deadline while competing heavy gates ran; it passes
+Valgrind in isolation with all 4 cases/157 assertions, without altering deadlines.
+A fresh syscall stack traces its fstat(-1) warning to system libnss_sss during
+c-ares service lookup, exactly the P3-36 environment finding already assigned
+to P9. This warning is retained and is separate from resolved Qore memory errors.
+
+The refreshed both-version survey/strict coverage has 2,453 diagnostic rows,
+144 selected WSDLs/1,388 directions passing, 56 broader failure records and 40
+valid-input directions requiring later P5 work. Only version metadata differs
+from the prior P5-14 run; compared with P5-13, only two invalid strict wildcard
+inputs change to rejection and lose their unreachable output rows. Fixtures,
+historical findings and source adjudications are unchanged.
+
+The full 62-item audit now has 28 Pass, 34 N/A and 0 Fail. See
+[wildcard evidence](wildcard-elements-evidence.md),
+[validation inventory](P5-14-validation.json) and
+[audit](audits/P5-14-element-wildcards.md). P5-14 is complete as an increment.
+Next is generic anyType/anySimpleType conversion/provider validation, with
+reproduced positive/negative gaps in `/tmp/wsdl-p5-15-preparation/`. Complete P5
+mixed/nil/default/fixed/identity and every P6-P9 criterion remain required.

@@ -1,0 +1,271 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires xml
+%requires ../qlib/WSDL.qm
+%exec-class WildcardElementsTest
+
+class WildcardElementsTest inherits QUnit::Test {
+    constructor() : Test("Wildcard element instances", "1.0") {
+        addTestCase("Processing modes assess declarations and instance types", \processing());
+        addTestCase("Ordered native output validates wildcard values", \ordered());
+        addTestCase("Detached wildcard trees preserve lexical namespace bindings", \namespaces());
+        addTestCase("Lax unknown trees assess available descendant declarations", \nested());
+        addTestCase("Global element registries survive additions and reconstruction", \registry());
+        addTestCase("Ordinary and selected-type providers validate wildcard values", \providers());
+        addTestCase("Explicit type wrappers serialize wildcard values in the receiving schema", \typedValues());
+        addTestCase("Samples satisfy wildcard namespace, processing and generation bounds", \samples());
+        addTestCase("Malformed provider and registry graphs fail without affecting recovery", \malformed());
+        addTestCase("Inferred XML-data hashes retain values when namespace metadata is added", \inferredHashes());
+        addTestCase("Outgoing lexical and expanded XML names share QName assessment", \lexicalChildren());
+        set_return_value(main());
+    }
+    private auto saved(auto value) {
+        return Serializable::deserialize(Serializable::serialize(value));
+    }
+    private string source(string process = "strict", string constraint = "##any", bool ordered = False) {
+        return '<xs:schema xmlns:xs="' + XSD_NS + '">'
+            '<xs:element name="known" type="xs:int"/>'
+            '<xs:attribute name="count" type="xs:int"/>'
+            '<xs:complexType name="Record"><xs:sequence><xs:element name="code" type="xs:int"/>'
+            '</xs:sequence><xs:attribute name="tag" type="xs:string" use="required"/></xs:complexType>'
+            '<xs:complexType name="Abstract" abstract="true"/>'
+            '<xs:element name="root"><xs:complexType><xs:sequence>'
+            + (ordered ? '<xs:element name="before" type="xs:int"/>' : "")
+            + '<xs:any namespace="' + constraint + '" processContents="' + process
+            + '" minOccurs="0" maxOccurs="unbounded"/>'
+            + (ordered ? '<xs:element name="after" type="xs:int"/>' : "")
+            + '</xs:sequence></xs:complexType></xs:element></xs:schema>';
+    }
+    private string xml(string content) {
+        return '<root xmlns:xs="' + XSD_NS + '" xmlns:xsi="' + XSI_NS
+            + '" xmlns:p="urn:products" xmlns:q="urn:partner">' + content + '</root>';
+    }
+    private auto decode(XsdSchema schema, string input) {
+        hash<auto> expanded = XsdBase::expandElementNamespaces(parse_xml(input, XPF_PRESERVE_ORDER));
+        return schema.getElement("", "root").deserializeValue(schema.getTypeMap(), NOTHING, expanded."{}root", True);
+    }
+    private string encode(XsdSchema schema, auto value) {
+        return schema.serializeXmlValue("", "root", value).getXml();
+    }
+    private nativeCheck(string schema, string document) {
+        assertEq(parse_xml(document), parse_xml_with_schema(document, schema));
+        XmlReader reader(new StringInputStream(document), {"xsd":schema});
+        while (reader.read()) {
+        }
+        assertTrue(reader.isValid());
+    }
+    private processing() {
+        foreach string process in ("strict", "lax", "skip") {
+            XsdSchema initial(source(process));
+            foreach XsdSchema schema in (initial, saved(initial)) {
+                auto known = decode(schema, xml('<known>017</known>'));
+                assertEq("017", known."{}known");
+                nativeCheck(source(process), encode(schema, known));
+                foreach string content in ('<known>bad</known>', '<q:value xsi:type="xs:int">bad</q:value>',
+                        '<q:value xsi:type="Missing"/>', '<q:value xsi:type="unbound:Missing"/>',
+                        '<q:value xsi:type="Abstract"/>', '<known xsi:type="xs:string">17</known>',
+                        '<q:value xsi:type="Record"><code>17</code></q:value>') {
+                    if (process == "skip") {
+                        nativeCheck(source(process), encode(schema, decode(schema, xml(content))));
+                    } else {
+                        assertThrows("SOAP-DESERIALIZATION-ERROR", \decode(), (schema, xml(content)));
+                    }
+                }
+                foreach string content in ('<q:value xsi:type="xs:int">017</q:value>',
+                        '<q:value xsi:type="Record" tag="shipment"><code>17</code></q:value>') {
+                    auto value = decode(schema, xml(content));
+                    nativeCheck(source(process), encode(schema, saved(value)));
+                }
+                if (process == "strict") {
+                    assertThrows("SOAP-DESERIALIZATION-ERROR", \decode(), (schema, xml('<q:unknown>free</q:unknown>')));
+                    assertThrows("SOAP-SERIALIZATION-ERROR", \encode(), (schema, {"{urn:partner}unknown":"free"}));
+                } else {
+                    assertEq("free", decode(schema, xml('<q:unknown>free</q:unknown>'))."{urn:partner}unknown");
+                }
+                assertEq("19", decode(schema, xml('<known>19</known>'))."{}known");
+            }
+        }
+    }
+    private ordered() {
+        XsdSchema schema(source("lax", "urn:partner", True));
+        auto value = decode(schema, xml('<before>1</before><q:extension>first</q:extension>'
+            '<q:extension>second</q:extension><after>2</after>'));
+        assertEq(("first", "second"), value."{urn:partner}extension");
+        string output = encode(schema, value);
+        nativeCheck(source("lax", "urn:partner", True), output);
+        hash<auto> expanded = XsdBase::expandElementNamespaces(parse_xml(output, XPF_PRESERVE_ORDER));
+        remove expanded."{}root"."^attributes^";
+        assertEq(("{}before", "{urn:partner}extension", "{}after"), keys expanded."{}root");
+        assertThrows("SOAP-SERIALIZATION-ERROR", \encode(), (schema, {"before":1,"{urn:wrong}value":"bad","after":2}));
+        XsdSchema strict(source());
+        assertThrows("SOAP-SERIALIZATION-ERROR", \encode(), (strict, {"{}known":"bad"}));
+        assertThrows("SOAP-SERIALIZATION-ERROR", \encode(), (strict, {"{}known":"1","known":"2"}));
+    }
+    private namespaces() {
+        XsdSchema schema(source());
+        string input = xml('<q:value xsi:type="xs:QName">p:Stock</q:value>');
+        auto value = saved(decode(schema, input));
+        assertEq("p:Stock", value."{urn:partner}value"."^value^");
+        assertEq("urn:products", value."{urn:partner}value"."^attributes^"."xmlns:p");
+        string output = encode(schema, value);
+        nativeCheck(source(), output);
+        assertEq("p:Stock", decode(schema, output)."{urn:partner}value"."^value^");
+        auto rebound = decode(schema, xml('<q:value xmlns:p="urn:local" xsi:type="xs:QName">p:Stock</q:value>'));
+        assertEq("urn:local", rebound."{urn:partner}value"."^attributes^"."xmlns:p");
+        nativeCheck(source(), encode(schema, rebound));
+        XsdXmlValue retained('<q:value xmlns:q="urn:partner" xmlns:xsi="' + XSI_NS
+            + '" xmlns:xs="' + XSD_NS + '" xmlns:p="urn:retained" xsi:type="xs:QName">p:Stock</q:value>');
+        nativeCheck(source(), encode(schema, {"{urn:partner}value":retained}));
+        assertThrows("SOAP-SERIALIZATION-ERROR", \encode(), (schema, {"{urn:partner}wrong":retained}));
+    }
+    private nested() {
+        XsdSchema lax(source("lax"));
+        foreach string content in ('<q:unknown><known>bad</known></q:unknown>',
+                '<q:unknown count="bad"/>', '<q:unknown><q:value xsi:type="xs:int">bad</q:value></q:unknown>') {
+            assertThrows("SOAP-DESERIALIZATION-ERROR", \decode(), (lax, xml(content)));
+            XsdSchema skip(source("skip"));
+            nativeCheck(source("skip"), encode(skip, decode(skip, xml(content))));
+        }
+        nativeCheck(source("lax"), encode(lax, decode(lax, xml('<q:unknown count="17"><known>19</known></q:unknown>'))));
+        XsdSchema declared(source());
+        assertThrows("SOAP-DESERIALIZATION-ERROR", \decode(),
+            (declared, xml('<q:unknown xsi:type="xs:anyType"><known>bad</known></q:unknown>')));
+        nativeCheck(source(), encode(declared, decode(declared,
+            xml('<q:unknown xsi:type="xs:anyType"><known>19</known></q:unknown>'))));
+    }
+    private registry() {
+        *XsdSchema schema = new XsdSchema(source("lax"));
+        XsdElement root = schema.getElement("", "root");
+        XsdElement detached = saved(root);
+        schema.addSchemaString('<xs:schema xmlns:xs="' + XSD_NS + '"><xs:element name="added" type="xs:int"/></xs:schema>');
+        assertThrows("SOAP-DESERIALIZATION-ERROR", \decode(), (schema, xml('<added>bad</added>')));
+        assertEq("17", decode(schema, xml('<added>17</added>'))."{}added");
+        assertEq("17", decode(saved(schema), xml('<added>17</added>'))."{}added");
+        string invalid = '<xs:schema xmlns:xs="' + XSD_NS + '"><xs:element name="failed" type="xs:int"/>'
+            '<xs:element name="broken" type="Missing"/></xs:schema>';
+        assertThrows("WSDL-ERROR", \schema.addSchemaString(), (invalid,));
+        assertEq("bad", decode(schema, xml('<failed>bad</failed>'))."{}failed");
+        assertEq("bad", detached.deserializeValue({}, NOTHING, {"{}added":"bad"}, True)."{}added");
+        schema = NOTHING;
+        assertThrows("SOAP-DESERIALIZATION-ERROR", \root.deserializeValue(), ({}, NOTHING, {"{}added":"bad"}, True));
+        assertEq("17", saved(root).deserializeValue({}, NOTHING, {"{}added":"17"}, True)."{}added");
+    }
+    private providers() {
+        foreach string process in ("strict", "lax", "skip") {
+            XsdSchema schema(source(process));
+            AbstractDataProviderType ordinary = schema.getElement("", "root").type.getDataProviderType();
+            AbstractDataProviderType native = schema.getNativeDataProviderType("", "root");
+            foreach AbstractDataProviderType provider in (ordinary, saved(ordinary), ordinary.getSoftType(),
+                    native, saved(native), native.getSoftType()) {
+                auto value = provider.acceptsValue({"{}known":"017"});
+                assertEq("017", value."{}known");
+                nativeCheck(source(process), encode(schema, value));
+                if (process != "skip") {
+                    assertThrows("RUNTIME-TYPE-ERROR", \provider.acceptsValue(), ({"{}known":"bad"},));
+                }
+                if (process == "strict") {
+                    assertThrows("RUNTIME-TYPE-ERROR", \provider.acceptsValue(), ({"{}unknown":"bad"},));
+                }
+                auto named = decode(schema, xml('<q:value xsi:type="Record" tag="shipment"><code>19</code></q:value>'));
+                nativeCheck(source(process), encode(schema, provider.acceptsValue(named)));
+            }
+        }
+    }
+    private typedValues() {
+        XsdSchema schema(source());
+        auto integer = {"^type^":new XsdQNameValue(XSD_NS, "int"), "^val^":17};
+        nativeCheck(source(), encode(schema, {"{urn:partner}value":integer}));
+        nativeCheck(source(), encode(schema, {"{}known":integer}));
+        auto record = {"^type^":new XsdQNameValue("", "Record"),
+            "^val^":{"code":19,"^attributes^":{"tag":"shipment"}}};
+        nativeCheck(source(), encode(schema, {"{urn:partner}value":record}));
+        auto bad = {"^type^":new XsdQNameValue(XSD_NS, "string"), "^val^":"17"};
+        assertThrows("SOAP-SERIALIZATION-ERROR", \encode(), (schema, {"{}known":bad}));
+        AbstractDataProviderType provider = saved(schema.getElement("", "root").type.getDataProviderType());
+        nativeCheck(source(), encode(schema, provider.acceptsValue({"{urn:partner}value":record})));
+    }
+    private samples() {
+        foreach string process in ("strict", "lax", "skip") {
+            foreach string constraint in ("##any", "##other", "##local", "##targetNamespace", "urn:partner") {
+                string xsd = source(process, constraint);
+                xsd =~ s/minOccurs="0"/minOccurs="2"/;
+                xsd =~ s/<xs:element name="known"/<xs:element name="sample" type="xs:int"\/><xs:element name="known"/;
+                XsdSchema schema(xsd);
+                XsdComplexType component = schema.getElement("", "root").type;
+                foreach XsdComplexType type in (component, saved(component)) {
+                    auto sample = WSMessageHelper::getTypeExample(type, {"max_items":2});
+                    assertEq(1, sample.size());
+                    assertEq(2, sample.firstValue().size());
+                    nativeCheck(xsd, encode(schema, sample));
+                    assertThrows("XSD-SAMPLE-ERROR", \WSMessageHelper::getTypeExample(), (type, {"max_items":1}));
+                    assertThrows("XSD-SAMPLE-ERROR", \WSMessageHelper::getTypeExample(), (type, {"max_elements":2}));
+                    AbstractDataProviderType provider = saved(type.getDataProviderType().getMandatoryType());
+                    nativeCheck(xsd, encode(schema, provider.acceptsValue(provider.getExampleValue())));
+                }
+            }
+        }
+    }
+    private malformed() {
+        XsdSchema schema(source());
+        AbstractDataProviderType provider = schema.getElement("", "root").type.getDataProviderType();
+        foreach string field in ("declarations", "types") {
+            hash<SerializationInfo> state = provider.serializeToData();
+            bool found = False;
+            foreach string index in (keys state._index) {
+                if (state._index{index}.hasKey("_class_data")
+                        && state._index{index}._class_data.hasKey("WSDL::XsdGlobalElementRegistry")) {
+                    found = True;
+                    state._index{index}._class_data."WSDL::XsdGlobalElementRegistry"{field} = "invalid";
+                    break;
+                }
+            }
+            assertTrue(found);
+            assertThrows("DESERIALIZATION-ERROR", \Serializable::deserialize(), (state,));
+        }
+        hash<SerializationInfo> state = provider.serializeToData();
+        state._index."0"._class_data."WSDL::XsdWildcardContentDataType".component = "invalid";
+        assertThrows("DESERIALIZATION-ERROR", \Serializable::deserialize(), (state,));
+        assertEq("17", saved(provider).acceptsValue({"{}known":"17"})."{}known");
+    }
+    private inferredHashes() {
+        XsdSchema schema(source("lax"));
+        XsdElement root = schema.getElement("", "root");
+        auto input = {"{}unknown":{"{}known":"017"}};
+        auto before = input;
+        auto result = root.deserializeValue(schema.getTypeMap(), NOTHING, input, True);
+        assertEq("017", result."{}unknown"."{}known");
+        assertEq(before, input);
+        nativeCheck(source("lax"), encode(schema, result));
+        assertThrows("SOAP-DESERIALIZATION-ERROR", \root.deserializeValue(),
+            (schema.getTypeMap(), NOTHING, {"{}unknown":{"{}known":"bad"}}, True));
+        assertEq("017", root.deserializeValue(schema.getTypeMap(), NOTHING, input, True)."{}unknown"."{}known");
+    }
+    private lexicalChildren() {
+        XsdSchema schema(source("lax"));
+        auto input = {"{urn:partner}wrapper":{"^attributes^":{"xmlns:p":"urn:child"}, "p:item":"017"}};
+        auto before = input;
+        string output = encode(schema, input);
+        nativeCheck(source("lax"), output);
+        assertEq(before, input);
+        auto decoded = decode(schema, output);
+        assertEq("017", decoded."{urn:partner}wrapper"."{urn:child}item"."^value^"
+            ?? decoded."{urn:partner}wrapper"."{urn:child}item");
+        assertThrows("SOAP-SERIALIZATION-ERROR", \encode(),
+            (schema, {"{urn:partner}wrapper":{"p:item":"017"}}));
+        string uri = "urn:qualified-record";
+        string xsd = '<xs:schema xmlns:xs="' + XSD_NS + '" xmlns:t="' + uri + '" targetNamespace="' + uri
+            + '" elementFormDefault="qualified"><xs:complexType name="Record"><xs:sequence>'
+            '<xs:element name="code" type="xs:int"/></xs:sequence></xs:complexType>'
+            '<xs:element name="root"><xs:complexType><xs:sequence><xs:any processContents="strict"/>'
+            '</xs:sequence></xs:complexType></xs:element></xs:schema>';
+        XsdSchema qualified(xsd);
+        auto typed = {"{urn:partner}record":{"^type^":new XsdQNameValue(uri, "Record"), "^val^":{"code":17}}};
+        nativeCheck(xsd, qualified.serializeXmlValue(uri, "root", typed).getXml());
+        auto raw = {"{urn:partner}record":{"^attributes^":{"xmlns:t":uri,"xmlns:xsi":XSI_NS,"xsi:type":"t:Record"},
+            "t:code":"017"}};
+        nativeCheck(xsd, qualified.serializeXmlValue(uri, "root", raw).getXml());
+    }
+}
