@@ -269,6 +269,12 @@ corpus reports retain the parent's results. See [declaration evidence](notation-
 NOTATION value/type-use/provider/HTTP integration remains the next P5 increment,
 followed by key/unique/keyref and complete typed accounting.
 
+P5-19c fixes the QName attribute-choice wrapper defect independently reproduced
+during NOTATION record tests. All 38 affected Qore suites and six supplements pass;
+saved providers and both HTTP directions retain QName identity. Corpus results
+are unchanged; see [evidence](qname-attribute-provider-evidence.md). NOTATION
+integration remains next, then identity constraints and complete typed accounting.
+
 ## P6 — Complete WSDL component and binding interoperability
 
 **Depends on P2-P5.** This covers behavior the current W3C echo survey does not exercise.

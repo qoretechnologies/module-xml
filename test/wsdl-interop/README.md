@@ -1864,3 +1864,14 @@ rollback, cancellation, concurrent copies and both inline SOAP binding descripti
 All 167 regression suites and eight supplements pass. Corpus results remain
 unchanged in both decoding modes; see [acceptance evidence](notation-declarations-evidence.md).
 NOTATION value conversion and its provider/HTTP integration remain the next P5 work.
+
+## QName attribute provider choices (P5-19c)
+
+Enumerated and fixed QName attributes now expose their scalar validator through
+attribute-use wrappers when building finite choices. Saved fields and providers
+retain namespace-aware validation and required/optional semantics. The focused
+provider and actual SOAP HTTP suites pass 437 and 468 assertions; all 38 affected
+suites and six supplements pass. Both decoding-mode corpus results are unchanged.
+See [evidence](qname-attribute-provider-evidence.md),
+[implemented design](../../design/wsdl-qname-values.md) and
+[audit](audits/P5-19c-qname-attributes.md). NOTATION integration remains next.

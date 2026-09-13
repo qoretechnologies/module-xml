@@ -8023,3 +8023,25 @@ uses, remaining declaration annotation/document-ID checks, list/union/default/fi
 semantics, saved providers and real SOAP consumers. An isolated value/base-provider
 prototype is under `/tmp/wsdl-p5-19c-notation-values/`; it is not part of this acceptance.
 Key/unique/keyref and complete typed accounting must follow before P6. P6-P9 remain open.
+
+## P5-19c — QName attribute provider prerequisite (2026-09-13)
+
+P5-19b committed as `36bc967`. NOTATION record tests exposed an independent
+QName bug: finite-choice construction could not see an atomic validator hidden
+by `XsdAttributeDataType`. A typed `getWrappedType()` accessor and local unwrapping
+fix the abstraction while preserving presence checks and list item semantics.
+
+Acceptance: 38 affected Qore suites and six supplements pass, including 437 focused
+unit assertions, 468 HTTP assertions and four execution modes. Ordinary/native and
+saved providers cover enum/fixed/default/reference/group/simple-content attributes.
+Both SOAP bindings exercise request and response providers. All four corpus reports
+match the parent except the expected WSDL source hash. Documentation and metadata
+build cleanly; no C++ change. Full audit: 20 Pass, 42 N/A, zero Fail.
+See [evidence](qname-attribute-provider-evidence.md), [inventory](P5-19c-validation.json)
+and [audit](audits/P5-19c-qname-attributes.md).
+
+Installed Qore matches the verified fixed runtime; main Qore remains read-only.
+No install or push; unrelated `test/cmake/__pycache__/` stays excluded. NOTATION
+conversion remains isolated in `/tmp/wsdl-p5-19c-notation-values/` pending the next
+integration increment. Remaining declaration grammar, identity constraints and
+complete typed accounting must follow before P6–P9. No outstanding user question.

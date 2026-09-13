@@ -80,6 +80,22 @@ XsdQNameDataType restored = Serializable::deserialize(category.serialize());
 @assert(restored.acceptsValue("alias:Product").equals(product));
 ```
 
+## Attribute provider choices
+
+`XsdAttributeDataType` separates attribute presence from scalar conversion.
+`getWrappedType()` exposes the underlying validator; `getElementType()` still
+returns only a collection's item provider. `XsdQNameDataField` unwraps attribute
+presence before resolving its finite choices, then uses the same namespace and
+expanded-name rules as an element field. Presence checks stay on the original
+wrapper. Optional/mandatory copies and saved fields retain this behavior.
+
+This applies to enumerated and fixed QName attributes, including references,
+attribute groups and simple content. Record keys remain local names unless
+attribute names collide. For example, a required attribute restricted to
+`c:Product` in `urn:catalog` accepts an explicit `alias:Product` value in that URI,
+but rejects the same local name in another URI and rejects omission. An optional
+attribute with that default supplies the declared QName when omitted.
+
 ## SOAP and standalone XML
 
 Ordinary SOAP decoding retains namespace-qualified QName values as
