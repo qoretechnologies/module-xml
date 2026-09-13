@@ -1598,6 +1598,25 @@ values. It precedes the remaining WSDL instance-default work. See
 [design](../../design/native-numeric-defaults.md) and
 [the separate PSVI investigation](default-identity-investigation.md).
 
+## WSDL canonical numeric declarations (P5-18b)
+
+WSDL checks the same 396 declarations as the native compiler. Canonical validation
+uses the actual selected list/union members and retains the first conversion's
+value even when canonical text selects a different union member. Saved schemas,
+message providers and both actual SOAP bindings preserve the constrained values.
+
+```sh
+QORE_MODULE_DIR=build-debug:qlib qore -b --enable-debug test/wsdl-numeric-constraints.qtest
+QORE_MODULE_DIR=build-debug:qlib qore -b --enable-debug test/wsdl-numeric-constraints-http.qtest
+QORE_MODULE_DIR=build-debug:qlib python3 -B test/wsdl-interop/test_numeric_constraints.py -v
+```
+
+The independent matrix checks 2,804 construction/direction records and validates
+1,616 serialized SOAP payloads with pinned Xerces, comparing their values and
+expanded QName identities independently. See [design](../../design/wsdl-canonical-constraints.md)
+and [acceptance evidence](wsdl-canonical-constraints-evidence.md). Empty-element
+default projection and other canonical datatype families remain separate P5 work.
+
 ## Native fixed values and scalar validation (P5-16d)
 
 `../xml-value-space.qtest` checks typed fixed-value equality, empty lists,

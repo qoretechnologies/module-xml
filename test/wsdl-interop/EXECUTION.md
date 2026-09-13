@@ -7708,3 +7708,23 @@ Next: the corresponding WSDL declaration checks, then instance-default PSVI and
 key/unique/keyref work. The WSDL declaration prototype already agrees with all
 396 schema expectations in `/tmp/wsdl-p5-18-defaults/declarations/`; it is not yet
 part of this increment. No installation, push or main-Qore change.
+
+## P5-18b — WSDL canonical numeric declarations (2026-09-13)
+
+On `2513dc2`, implemented the WSDL declaration counterpart of P5-18a. Original
+and canonical numeric/boolean values are checked after type resolution, with
+selected list/union members and declaration namespace context. The canonical
+trial cannot replace the original constraint's value or fixed-value identity.
+
+Acceptance: 152 Qore suites and 16 execution-mode/AOT/Python supplements pass
+without warnings. The new suites pass 1,646 unit and 88 HTTP assertions. The
+396-schema independent matrix checks 2,804 construction/direction records and
+1,616 value-preserving SOAP payloads. Both complete corpus modes match P5-18a
+at every case and stage; affected AOT and documentation builds are clean.
+The installed Qore scope-release fix remains verified in all execution modes.
+
+See [evidence](wsdl-canonical-constraints-evidence.md),
+[inventory](P5-18b-validation.json) and
+[full audit](audits/P5-18b-wsdl-canonical-constraints.md): 15 Pass, 47 N/A, zero Fail.
+No C++ or main-Qore change, installation or push. Next: remaining canonical
+datatype families and empty-element defaults, then key/unique/keyref and P6–P9.

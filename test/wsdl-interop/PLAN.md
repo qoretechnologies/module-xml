@@ -216,6 +216,12 @@ selected list/union values and all element/attribute constraint paths. This is a
 prerequisite for empty-element defaults; instance PSVI/type adjudication remains
 separate. See [native numeric constraint design](../../design/native-numeric-defaults.md).
 
+P5-18b applies those declaration checks to WSDL construction and saved schemas,
+preserving the original selected value through canonical reassessment, message
+providers and both SOAP bindings. See [evidence](wsdl-canonical-constraints-evidence.md).
+Float/calendar/binary canonical declaration spellings, empty-element defaults,
+key/unique/keyref and complete typed-preservation accounting remain required.
+
 ## P6 — Complete WSDL component and binding interoperability
 
 **Depends on P2-P5.** This covers behavior the current W3C echo survey does not exercise.
