@@ -1,0 +1,123 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../../qlib"
+%requires xml
+%requires ../../qlib/WSDL.qm
+%try-module json
+%define NoJson
+%endtry
+%ifdef NoJson
+throw "MISSING-MODULE", "NOTATION interoperability requires the json module";
+%else
+WebService sub service(hash<auto> model, string version, string uri, string local) {
+    string soap = "http://schemas.xmlsoap.org/wsdl/soap" + (version == "12" ? "12" : "") + "/";
+    string part = uri.empty() ? local : "v:" + local;
+    return new WebService('<w:definitions xmlns:w="http://schemas.xmlsoap.org/wsdl/" xmlns:s="' + soap
+        + '" xmlns:t="urn:notation-service"' + (uri.empty() ? "" : ' xmlns:v="' + uri + '"') + ' targetNamespace="urn:notation-service">'
+        '<w:types>' + model.schema + '</w:types>'
+        '<w:message name="Input"><w:part name="body" element="' + part + '"/></w:message>'
+        '<w:message name="Output"><w:part name="body" element="' + part + '"/></w:message>'
+        '<w:portType name="Port"><w:operation name="submit"><w:input message="t:Input"/>'
+        '<w:output message="t:Output"/></w:operation></w:portType>'
+        '<w:binding name="Soap" type="t:Port"><s:binding style="document" transport="http://schemas.xmlsoap.org/soap/http"/>'
+        '<w:operation name="submit"><s:operation soapAction="submit"/><w:input><s:body use="literal"/></w:input>'
+        '<w:output><s:body use="literal"/></w:output></w:operation></w:binding>'
+        '<w:service name="Service"><w:port name="Port" binding="t:Soap"><s:address location="http://example.invalid/"/>'
+        '</w:port></w:service></w:definitions>', {"async_only": True,
+            "def_path": "http://example.invalid/notations/", "xsd_cache": model.resources});
+}
+auto sub saved(auto value) {
+    return Serializable::deserialize(Serializable::serialize(value));
+}
+auto sub identity(auto value) {
+    if (value instanceof XsdNotationValue || value instanceof XsdQNameValue) {
+        return {"primitive": value instanceof XsdNotationValue ? "NOTATION" : "QName",
+            "uri": value.getNamespaceUri(), "local": value.getLocalName()};
+    }
+    if (value instanceof XsdScopedLexicalValue) {
+        return value.getLexicalValue();
+    }
+    if (value instanceof XsdDefaultValue) {
+        return {"default": identity(value.getValue())};
+    }
+    if (value.typeCode() == NT_HASH) {
+        hash<auto> result();
+        foreach string key in (keys value) {
+            result{key} = identity(value{key});
+        }
+        return result;
+    }
+    if (value.typeCode() == NT_LIST) {
+        return map identity($1), value;
+    }
+    return value;
+}
+if (ARGV.size() != 1) {
+    throw "USAGE", "notation-values.qr FIXTURES.json";
+}
+foreach hash<auto> model in (parse_json(ReadOnlyFile::readTextFile(ARGV[0]))) {
+    hash<auto> result = {"name": model.name, "schema_valid": False, "documents": ()};
+    try {
+        XsdSchema schema(model.schema, {"async_only": True, "def_path": "http://example.invalid/notations/",
+            "xsd_cache": model.resources});
+        result.schema_valid = True;
+    } catch (hash<ExceptionInfo> error) {
+        result.error = error.err;
+        result.description = error.desc;
+    }
+    if (result.schema_valid && model.documents) {
+        XsdXmlValue first(model.documents[0].xml);
+        foreach string version in ("11", "12") {
+            WebService original = service(model, version, first.getNamespaceUri(), first.getLocalName());
+            foreach bool reconstructed in (False, True) {
+                WebService current = reconstructed ? saved(original) : original;
+                WSOperation operation = current.getBindingOperation("Soap", "submit");
+                foreach bool response in (False, True) {
+                    AbstractDataProviderType provider = saved((response ? operation.output : operation.input).getDataProviderType(True));
+                    foreach bool preserve in (False, True) {
+                        foreach hash<auto> document in (model.documents) {
+                            hash<auto> row = {"name": document.name, "version": version, "saved": reconstructed,
+                                "response": response, "preserve": preserve, "decoded": False};
+                            try {
+                                string envelope = '<s:Envelope xmlns:s="' + (version == "11" ? SOAP_11_ENV : SOAP_12_ENV)
+                                    + '"><s:Body>' + document.xml + '</s:Body></s:Envelope>';
+                                auto input = parse_xml(envelope, XPF_PRESERVE_ORDER);
+                                auto value = response ? operation.deserializeResponse(input, "Soap", preserve)
+                                    : operation.deserializeRequest(input, "Soap", preserve);
+                                row.decoded = True;
+                                row.identity = identity(value);
+                                auto prepared = provider.acceptsValue({"body": saved(value)});
+                                row.xml = (response ? operation.serializeResponse(prepared, NOTHING, NOTHING,
+                                    NOTHING, NOTHING, NOTHING, "Soap") : operation.serializeRequest(prepared, NOTHING,
+                                    NOTHING, NOTHING, NOTHING, NOTHING, "Soap")).body;
+                                auto wire = parse_xml(row.xml, XPF_PRESERVE_ORDER);
+                                auto decoded = response ? operation.deserializeResponse(wire, "Soap", preserve)
+                                    : operation.deserializeRequest(wire, "Soap", preserve);
+                                row.output_identity = identity(decoded);
+                                XsdXmlValue envelope_value(row.xml);
+                                XsdXmlValue payload = envelope_value.getChildValues()[0].getChildValues()[0];
+                                string source = replace(model.schema, "notations-import.xsd",
+                                    get_script_dir() + "/fixtures/notations-import.xsd");
+                                row.output_valid = False;
+                                try {
+                                    XmlDoc native(payload.getXml());
+                                    native.validateSchema(source);
+                                    row.output_valid = True;
+                                } catch (hash<ExceptionInfo> error) {
+                                    row.output_error = error.err;
+                                }
+                            } catch (hash<ExceptionInfo> error) {
+                                row.error = error.err;
+                                row.description = error.desc;
+                            }
+                            push result.documents, row;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    printf("%s\n", make_json(result));
+}
+%endif

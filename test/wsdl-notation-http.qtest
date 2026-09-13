@@ -1,0 +1,118 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires xml
+%requires ../qlib/WSDL.qm
+%requires ../qlib/SoapClient.qm
+%requires ../qlib/SoapHandler.qm
+%requires HttpServer
+%exec-class NotationHttpTest
+
+class NotationHttpTest inherits QUnit::Test {
+    constructor() : Test("NOTATION SOAP consumers", "1.0") {
+        addTestCase("Both SOAP HTTP bindings preserve declared notation values in both directions", \http());
+        set_return_value(main());
+    }
+
+    private auto saved(auto value) {
+        return Serializable::deserialize(Serializable::serialize(value));
+    }
+
+    private WebService service(string version) {
+        string soap = "http://schemas.xmlsoap.org/wsdl/soap" + (version == "12" ? "12" : "") + "/";
+        return new WebService('<w:definitions xmlns:w="http://schemas.xmlsoap.org/wsdl/" xmlns:s="' + soap
+            + '" xmlns:xs="' + XSD_NS + '" xmlns:t="urn:media" targetNamespace="urn:media">'
+            '<w:types><xs:schema targetNamespace="urn:media">'
+            '<xs:notation name="jpeg" public="image/jpeg"/><xs:notation name="png" public="image/png"/>'
+            '<xs:simpleType name="Format"><xs:restriction base="xs:NOTATION"><xs:enumeration value="t:jpeg"/>'
+            '<xs:enumeration value="t:png"/></xs:restriction></xs:simpleType>'
+            '<xs:simpleType name="Formats"><xs:list itemType="t:Format"/></xs:simpleType>'
+            '<xs:simpleType name="Either"><xs:union memberTypes="t:Format xs:QName"/></xs:simpleType>'
+            '<xs:complexType name="Record"><xs:sequence><xs:element name="format" type="t:Format"/>'
+            '<xs:element name="formats" type="t:Formats"/><xs:element name="either" type="t:Either"/>'
+            '<xs:element name="dynamic" type="xs:anyType"/></xs:sequence><xs:attribute name="format" type="t:Format" default="t:jpeg"/>'
+            '</xs:complexType><xs:element name="value" type="t:Record"/></xs:schema></w:types>'
+            '<w:message name="Input"><w:part name="body" element="t:value"/></w:message>'
+            '<w:message name="Output"><w:part name="body" element="t:value"/></w:message>'
+            '<w:portType name="Port"><w:operation name="submit"><w:input message="t:Input"/>'
+            '<w:output message="t:Output"/></w:operation></w:portType>'
+            '<w:binding name="Soap" type="t:Port"><s:binding style="document" transport="http://schemas.xmlsoap.org/soap/http"/>'
+            '<w:operation name="submit"><s:operation soapAction="submit"/><w:input><s:body use="literal"/></w:input>'
+            '<w:output><s:body use="literal"/></w:output></w:operation></w:binding>'
+            '<w:service name="Service"><w:port name="Port" binding="t:Soap"><s:address location="http://example.invalid/"/>'
+            '</w:port></w:service></w:definitions>', {"async_only": True});
+    }
+
+    private hash<auto> record(bool response) {
+        return {"format": new XsdNotationValue("urn:media", response ? "a:png" : "a:jpeg"),
+            "formats": (new XsdNotationValue("urn:media", "a:jpeg"), new XsdNotationValue("urn:media", "a:png")),
+            "either": new XsdNotationValue("urn:media", response ? "a:png" : "a:jpeg"),
+            "dynamic": {"^type^": new XsdQNameValue("urn:media", "Format"),
+                "^val^": new XsdNotationValue("urn:media", response ? "a:png" : "a:jpeg")}};
+    }
+
+    private auto unwrap(auto value) {
+        return value.typeCode() == NT_HASH && value.hasKey("^val^") ? value."^val^" : value;
+    }
+
+    private check(auto value, bool response) {
+        value = unwrap(value);
+        foreach string field in ("format", "either", "dynamic") {
+            auto actual = unwrap(value{field});
+            assertTrue(actual instanceof XsdNotationValue);
+            assertEq("urn:media", actual.getNamespaceUri());
+            assertEq(response ? "png" : "jpeg", actual.getLocalName());
+        }
+        list<auto> formats = unwrap(value.formats);
+        assertEq(2, formats.size());
+        assertTrue(formats[0].equals(new XsdNotationValue("urn:media", "b:jpeg")));
+        assertTrue(formats[1].equals(new XsdNotationValue("urn:media", "b:png")));
+        assertTrue(value."^attributes^".format.equals(new XsdNotationValue("urn:media", "b:jpeg")));
+    }
+
+    private http() {
+        foreach string version in ("11", "12") {
+            WebService original = service(version);
+            foreach WebService ws in (original, saved(original)) {
+                WSOperation op = ws.getBindingOperation("Soap", "submit");
+                AbstractDataProviderType input = saved(op.input.getDataProviderType(True));
+                AbstractDataProviderType output = saved(op.output.getDataProviderType(True));
+                HttpServer server();
+                on_exit server.stop();
+                SoapHandler handler(new PermissiveAuthenticator());
+                server.setDefaultHandler("soap", handler);
+                Queue observed();
+                Queue responses();
+                code<auto(hash<auto>, auto)> callback = auto sub(hash<auto> cx, auto value) {
+                    observed.push(input.acceptsValue({"body": value}).body);
+                    return output.acceptsValue({"body": responses.pop(30000)});
+                };
+                handler.addMethod(ws, op, callback, NOTHING, NOTHING, NOTHING, "Service", NOTHING,
+                    NOTHING, "Soap", NOTHING, False, True);
+                server.addListener(0);
+                string url = sprintf("http://127.0.0.1:%d/Service", server.getListenerInfo(0).port);
+                SoapClient client({"wsdl": saved(ws), "url": url, "timeout": 30000, "connect_timeout": 30000});
+                foreach bool preserve in (False, True) {
+                    responses.push(record(True));
+                    check(client.callOperation("submit", input.acceptsValue({"body": record(False)}),
+                        {"binding": "Soap", "preserve_types": preserve}), True);
+                    check(observed.pop(30000), False);
+                    foreach AbstractDataProviderType provider in (input, output) {
+                        hash<auto> invalid = record(False);
+                        invalid.format = new XsdNotationValue("urn:other", "a:jpeg");
+                        assertThrows("RUNTIME-TYPE-ERROR", \provider.acceptsValue(), ({"body": invalid},));
+                    }
+                    hash<auto> invalid = record(False);
+                    invalid.format = new XsdNotationValue("urn:media", "a:undeclared");
+                    assertThrows("SOAP-SERIALIZATION-ERROR", \client.callOperation(), ("submit", invalid));
+                    responses.push(record(True));
+                    check(client.callOperation("submit", input.acceptsValue({"body": saved(record(False))}),
+                        {"binding": "Soap", "preserve_types": preserve}), True);
+                    check(observed.pop(30000), False);
+                }
+            }
+        }
+    }
+}

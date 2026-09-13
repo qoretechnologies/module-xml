@@ -47,3 +47,13 @@ The remaining required increment includes NOTATION value identity and conversion
 enumeration-derived component uses, remaining annotation/document-ID grammar checks,
 list/union/default/fixed values, saved provider metadata and both SOAP HTTP directions.
 Declaration storage does not count any previously failing NOTATION conversion as a pass.
+
+P5-19d completes NOTATION value conversion, distinct primitive identity,
+enumeration-derived use checks, saved scalar/list/union providers, default/fixed
+handling, validated examples and both SOAP HTTP directions; see
+[value evidence](notation-values-evidence.md). The qualified NOTATION default
+fixtures are now exercised by the dedicated binding worker. The historical
+`wsdl=False` selector remains unchanged for the older unqualified-root worker.
+Remaining declaration annotation/document-ID grammar is assigned to the next P5
+increment. Duplicate identity and legacy selected-type losses remain explicit
+failed rows in the new report; key/unique/keyref and typed accounting must follow.

@@ -275,6 +275,14 @@ saved providers and both HTTP directions retain QName identity. Corpus results
 are unchanged; see [evidence](qname-attribute-provider-evidence.md). NOTATION
 integration remains next, then identity constraints and complete typed accounting.
 
+P5-19d implements distinct NOTATION values, enum-derived uses and scalar/list/union/
+constraint/provider/HTTP integration. The 169-suite broad run and final 57 affected
+suites pass; eight supplements include 2,736 binding rows. The report retains 24
+identity/legacy-projection failures and 48 classified default-context oracle
+disagreements. See [evidence](notation-values-evidence.md). Remaining declaration
+annotation/document-ID grammar, key/unique/keyref and typed accounting must finish
+before P5 closes.
+
 ## P6 — Complete WSDL component and binding interoperability
 
 **Depends on P2-P5.** This covers behavior the current W3C echo survey does not exercise.

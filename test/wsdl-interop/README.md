@@ -1875,3 +1875,28 @@ suites and six supplements pass. Both decoding-mode corpus results are unchanged
 See [evidence](qname-attribute-provider-evidence.md),
 [implemented design](../../design/wsdl-qname-values.md) and
 [audit](audits/P5-19c-qname-attributes.md). NOTATION integration remains next.
+
+## WSDL NOTATION values (P5-19d)
+
+`XsdNotationValue` preserves notation identity independently of QName. Scalar,
+list, union, default/fixed, saved providers and both SOAP HTTP bindings validate
+schema-declared names. Enum-derived schema uses are checked after resolution;
+unused intermediate restrictions and dynamic builtin assessment remain supported.
+Examples are validated notation values. See [design](../../design/wsdl-notation-values.md),
+[evidence](notation-values-evidence.md), [inventory](P5-19d-validation.json) and
+[audit](audits/P5-19d-notation-values.md).
+
+Run `wsdl-notation-values.qtest`, `wsdl-notation-http.qtest` and
+`python3 -B test/wsdl-interop/test_wsdl_notation_values.py -v` with local modules.
+The two Qore suites pass 435 and 440 assertions. The Python matrix covers 66
+schemas and 2,736 binding rows; 24 identity/legacy-projection failures remain
+explicitly failed rows assigned to subsequent P5 work. A separate reduction
+records 48 [default namespace oracle disagreements](notation-default-context-evidence.md).
+The original NOTATION default fixtures keep their historical `wsdl=False` selector
+for the older unqualified-root default worker; this dedicated worker now covers
+both qualified NOTATION default/fixed models without altering the source fixtures.
+
+All 169 suites in the broad run passed across implementation revisions, followed
+by 57 affected suites on frozen final inputs and eight supplemental checks. Both
+corpus modes retain their prior results. P5 declaration grammar, identity
+constraints and complete typed accounting remain open; P6–P9 remain required.

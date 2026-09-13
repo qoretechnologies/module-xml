@@ -8045,3 +8045,30 @@ No install or push; unrelated `test/cmake/__pycache__/` stays excluded. NOTATION
 conversion remains isolated in `/tmp/wsdl-p5-19c-notation-values/` pending the next
 integration increment. Remaining declaration grammar, identity constraints and
 complete typed accounting must follow before P6–P9. No outstanding user question.
+
+## P5-19d — WSDL NOTATION conversion (2026-09-14)
+
+P5-19c committed as `7db7ddb`. NOTATION now has a distinct carrier, validating
+scalar/restriction/field providers, enumeration-derived schema-use checks,
+list/union identities and default/fixed/sample conversion. Saved providers retain
+only the declaration registry needed for lookup. Dynamic builtin contexts retain
+receiving registries; identity element wrappers establish their own named-type
+scope, fixing a separately reproduced QName/NOTATION message-provider failure.
+
+Acceptance: 169 broad suites pass across implementation revisions; example/API
+tests and Python oracle expectations changed during that run and the manifest
+records those changes. Final 57 affected suites use frozen final sources. Eight
+supplements pass, including AST/IR/JIT/tiered, native/declaration matrices and
+2,736 binding rows over 66 schemas. The new unit/HTTP suites pass 435/440 assertions.
+Native and pinned Xerces assess 1,312 outputs. The 24 identity/legacy-projection
+failures and 48 default-context oracle disagreements remain separately visible.
+Both corpus modes retain all parent results except the WSDL source hash. Docs and
+metadata are clean. Full audit: 20 Pass, 42 N/A, zero Fail.
+See [evidence](notation-values-evidence.md), [inventory](P5-19d-validation.json) and
+[audit](audits/P5-19d-notation-values.md). Artifacts:
+`/tmp/wsdl-p5-19d-notation-values/final/`.
+
+No C++ changes, main-Qore mutation, installation or push. Unrelated
+`test/cmake/__pycache__/` is excluded. Next: remaining annotation/document-ID
+grammar, identity constraints and typed accounting in P5, then P6–P9. Python CI
+wiring and supported-environment acceptance remain P9 work. No pending question.
