@@ -1777,3 +1777,23 @@ All 48 pinned Xerces differences remain explicit. Separately identified schema
 derivatives assess explicit instances without changing the original declaration
 results. See [evidence](wsdl-ieee-constraints-evidence.md),
 [design](../../design/wsdl-canonical-constraints.md) and [inventory](P5-18f-validation.json).
+
+## WSDL calendar constraints (P5-18g)
+
+WSDL uses exact calendar arithmetic to validate canonical dateTime/time/date
+constraints while retaining selected values, fractional digits, absent timezones
+and recoverable date offsets. Tests cover 306 schemas, 18 boundaries and 1,296
+SOAP payloads, including saved providers and actual HTTP consumers.
+
+```sh
+QORE_MODULE_DIR=build-debug:qlib qore -b --enable-debug test/wsdl-calendar-constraints.qtest
+QORE_MODULE_DIR=build-debug:qlib qore -b --enable-debug test/wsdl-calendar-constraints-http.qtest
+QORE_MODULE_DIR=build-debug:qlib python3 -B test/wsdl-interop/test_calendar_constraints.py -v
+QORE_MODULE_DIR=build-debug:qlib python3 -B test/wsdl-interop/test_wsdl_calendar_constraints.py -v
+```
+
+The 48 Xerces declaration and 30 fixed-instance differences remain explicit.
+See [evidence](wsdl-calendar-constraints-evidence.md),
+[design](../../design/wsdl-canonical-constraints.md) and [inventory](P5-18g-validation.json).
+The [native calendar defect](p5-native-calendar-constraints-finding.md) remains
+required P5 work, independently of the corrected WSDL declaration path.

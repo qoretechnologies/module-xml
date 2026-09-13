@@ -1,0 +1,143 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires xml
+%requires ../qlib/WSDL.qm
+%requires ../qlib/SoapClient.qm
+%requires ../qlib/SoapHandler.qm
+%requires ../qlib/SoapDataProvider
+%requires HttpServer
+%exec-class CalendarConstraintsHttpTest
+
+class CalendarConstraintsHttpTest inherits QUnit::Test {
+    constructor() : Test("Canonical constraints through HTTP consumers", "1.0") {
+        addTestCase("Clients, handlers and providers retain constrained values in both SOAP bindings", \consumers());
+        set_return_value(main());
+    }
+    private WebService service(string version, bool invalid = False) {
+        string soap = "http://schemas.xmlsoap.org/wsdl/soap" + (version == "12" ? "12" : "") + "/";
+        return new WebService('<w:definitions xmlns:w="http://schemas.xmlsoap.org/wsdl/" xmlns:s="' + soap
+            + '" xmlns:xs="' + XSD_NS + '" xmlns:t="urn:qore:calendar-http" targetNamespace="urn:qore:calendar-http">'
+            '<w:types><xs:schema targetNamespace="urn:qore:calendar-http">'
+            '<xs:simpleType name="Count"><xs:restriction base="xs:time">'
+            '<xs:pattern value="24:00:00' + (invalid ? '' : '|00:00:00') + '"/></xs:restriction></xs:simpleType>'
+            '<xs:simpleType name="Amount"><xs:restriction base="xs:dateTime">'
+            '<xs:pattern value="2000-01-01T00:00:00[.]100[+]01:00|1999-12-31T23:00:00[.]1Z"/></xs:restriction></xs:simpleType>'
+            '<xs:simpleType name="One"><xs:restriction base="xs:time"><xs:pattern value="24:00:00"/>'
+            '</xs:restriction></xs:simpleType>'
+            '<xs:simpleType name="Either"><xs:union memberTypes="t:One xs:string"/></xs:simpleType>'
+            '<xs:element name="value"><xs:complexType><xs:sequence>'
+            '<xs:element name="code" type="t:Count" default="24:00:00"/>'
+            '</xs:sequence><xs:attribute name="amount" type="t:Amount" default="2000-01-01T00:00:00.100+01:00"/>'
+            '<xs:attribute name="flag" type="t:Either" fixed="24:00:00"/>'
+            '</xs:complexType></xs:element></xs:schema></w:types>'
+            '<w:message name="Input"><w:part name="body" element="t:value"/></w:message>'
+            '<w:message name="Output"><w:part name="body" element="t:value"/></w:message>'
+            '<w:portType name="Port"><w:operation name="submit"><w:input message="t:Input"/>'
+            '<w:output message="t:Output"/></w:operation></w:portType>'
+            '<w:binding name="Soap" type="t:Port"><s:binding style="document" transport="http://schemas.xmlsoap.org/soap/http"/>'
+            '<w:operation name="submit"><s:operation soapAction="submit"/><w:input><s:body use="literal"/></w:input>'
+            '<w:output><s:body use="literal"/></w:output></w:operation></w:binding>'
+            '<w:service name="Service"><w:port name="Port" binding="t:Soap">'
+            '<s:address location="http://example.invalid/Service"/></w:port></w:service></w:definitions>',
+            {"async_only":True});
+    }
+    private auto saved(auto value) {
+        return Serializable::deserialize(Serializable::serialize(value));
+    }
+    private checkValue(auto value) {
+        assertEq("24:00:00", value.code);
+        assertEq("2000-01-01T00:00:00.100+01:00", value."^attributes^".amount);
+        assertEq("24:00:00", value."^attributes^".flag);
+    }
+    private consumers() {
+        foreach string version in ("11", "12") {
+            assertThrows("WSDL-ERROR", \service(), (version, True));
+            WebService ws = saved(service(version));
+            WSOperation operation = ws.getBindingOperation("Soap", "submit");
+            AbstractDataProviderType input = saved(operation.input.getDataProviderType(True));
+            AbstractDataProviderType output = saved(operation.output.getDataProviderType(True));
+            HttpServer server();
+            on_exit server.stop();
+            SoapHandler handler(new PermissiveAuthenticator());
+            server.setDefaultHandler("soap", handler);
+            Queue observed();
+            code<auto(hash<auto>, auto)> callback = auto sub(hash<auto> cx, auto value) {
+                auto checked = input.acceptsValue({"body":value});
+                observed.push(checked.body);
+                return output.acceptsValue(checked);
+            };
+            handler.addMethod(ws, operation, callback, NOTHING, NOTHING, NOTHING, "Service", NOTHING,
+                NOTHING, "Soap", NOTHING, False, True);
+            server.addListener(0);
+            string url = sprintf("http://127.0.0.1:%d/Service", server.getListenerInfo(0).port);
+            SoapClient client({"wsdl":ws,"url":url,"timeout":30000,"connect_timeout":30000});
+            hash<auto> value = {"code":"24:00:00", "^attributes^":{"amount":"2000-01-01T00:00:00.100+01:00", "flag":"24:00:00"}};
+            foreach bool preserve in (False, True) {
+                checkValue(client.callOperation("submit", input.acceptsValue({"body":value}),
+                    {"binding":"Soap","preserve_types":preserve}));
+                checkValue(observed.pop(30000));
+            }
+            checkValue(client.callOperation("submit", {"body":{"code":"24:00:00"}}, {"binding":"Soap"}));
+            checkValue(observed.pop(30000));
+            SoapDataProvider provider(ws, client);
+            AbstractDataProvider request = provider.getChildProviderEx("submit");
+            checkValue(request.doRequest({"body":value}, {"binding":"Soap"}));
+            checkValue(observed.pop(30000));
+            AbstractDataProviderType request_type = request.getRequestType();
+            hash<auto> invalid = value;
+            invalid."^attributes^".flag = "00:00:00";
+            assertThrows("RUNTIME-TYPE-ERROR", \request_type.acceptsValue(), ({"body":invalid},));
+            assertThrows("SOAP-SERIALIZATION-ERROR", \client.callOperation(),
+                ("submit", {"body":invalid}, {"binding":"Soap"}));
+            hash<auto> wire = operation.serializeRequest({"body":value}, NOTHING, NOTHING, NOTHING,
+                NOTHING, NOTHING, "Soap");
+            string bad = replace(wire.body, 'flag="24:00:00"', 'flag="00:00:00"');
+            assertFalse(bad == wire.body);
+            HTTPClient raw({"url":url,"error_passthru":True,"timeout":30000,"connect_timeout":30000});
+            hash<auto> info;
+            string fault = raw.post("/Service", bad, wire.hdr, \info);
+            assertEq(version == "11" ? 500 : 400, info."response-headers".status_code);
+            assertTrue(fault.find("SOAP-DESERIALIZATION-ERROR") >= 0);
+            string good = raw.post("/Service", wire.body, wire.hdr, \info);
+            assertEq(200, info."response-headers".status_code);
+            checkValue(operation.deserializeResponse(parse_xml(good, XPF_PRESERVE_ORDER), "Soap", True));
+            checkValue(observed.pop(30000));
+            checkValue(value);
+            assertEq(0, observed.size());
+            hash<auto> response = operation.serializeResponse({"body":value}, NOTHING, NOTHING, NOTHING,
+                NOTHING, NOTHING, "Soap");
+            string invalid_response = replace(response.body, 'flag="24:00:00"', 'flag="00:00:00"');
+            assertFalse(invalid_response == response.body);
+            HttpServer peer();
+            on_exit peer.stop();
+            peer.setDefaultHandler("peer", new CalendarConstraintPeer(invalid_response,
+                version == "11" ? "text/xml; charset=utf-8" : "application/soap+xml; charset=utf-8"));
+            peer.addListener(0);
+            SoapClient peer_client({"wsdl":ws,
+                "url":sprintf("http://127.0.0.1:%d/Service", peer.getListenerInfo(0).port),
+                "timeout":30000,"connect_timeout":30000});
+            foreach bool preserve in (False, True) {
+                assertThrows("SOAP-DESERIALIZATION-ERROR", \peer_client.callOperation(),
+                    ("submit", {"body":value}, {"binding":"Soap", "preserve_types":preserve}));
+            }
+        }
+    }
+}
+
+# Immutable after construction; HTTP worker threads only read the response.
+class CalendarConstraintPeer inherits AbstractHttpRequestHandler {
+    private {
+        string response;
+        string content_type;
+    }
+    constructor(string response, string content_type) {
+        self.response = response;
+        self.content_type = content_type;
+    }
+    hash<HttpResponseInfo> handleRequest(hash<auto> cx, hash<auto> hdr, *data body) {
+        return makeResponse({"Content-Type":content_type}, 200, response);
+    }
+}

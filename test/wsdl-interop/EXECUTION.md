@@ -7841,3 +7841,34 @@ Next: calendar canonical declarations. Raw native formatting defects and exact
 fraction/offset requirements are recorded in `/tmp/wsdl-p5-18g-calendar-constraints/`.
 Empty-element default PSVI, key/unique/keyref, typed-preservation accounting and
 all P6–P9 requirements remain active; no outstanding user question.
+
+## P5-18g — WSDL canonical calendar declarations (2026-09-13)
+
+P5-18f committed as `6bcb9f5`; no push. Installed Qore still matches verified
+`8c0c22c15`. WSDL now uses exact calendar parsing, integer-minute shifts and
+rendering for dateTime/time/date canonical assessment. Original selected values,
+lexical context and saved metadata remain intact. Parent WSDL accepted all 144
+invalid declarations in the 306-schema fixture. Duration/partial calendars retain
+their XSD 1.0 lexical context; no rounding heuristic is used.
+
+All 161 Qore suites and 20 supplements pass on frozen source. New unit and HTTP
+suites pass 1,477 and 88 assertions. Forced modes, compiled WSDL and the independent
+matrix pass; 2,214 records include 1,296 preserved SOAP payloads. Eighteen exact
+boundaries include leap centuries, year-zero crossings, fractional precision and
+1,000-digit years. All 48 Xerces schema and 30 instance differences remain explicit;
+78 separately identified constraint-free derivatives validate 702 instances.
+Both corpus modes equal all parent case/stage/count/scope records. Documentation
+builds without warnings. The initial full calendar supplement exceeded its
+600-second process deadline; the complete unchanged run was repeated with an
+1,800-second deadline and the initial partial log remains excluded. No C++
+changes or additional Valgrind required.
+
+See [evidence](wsdl-calendar-constraints-evidence.md),
+[inventory](P5-18g-validation.json) and
+[full audit](audits/P5-18g-wsdl-calendar-constraints.md): 15 Pass, 47 N/A, zero Fail.
+No main-Qore mutation, installation or push. Next is the independently root-caused
+[native calendar defect](p5-native-calendar-constraints-finding.md): the native
+306-schema matrix still has 432 invalid acceptances across conversion, DOM and
+reader paths. Exact fractional/year ownership must be resolved before canonical
+checks are enabled. This is a required fix, not a passing result or scope removal.
+Default PSVI, key/unique/keyref, typed accounting and all P6–P9 remain active.

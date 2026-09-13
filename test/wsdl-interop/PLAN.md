@@ -235,8 +235,11 @@ locale/rounding-state independence, complete exponent syntax and explicit
 shortest-round-trip precision policy; see [evidence](native-ieee-constraints-evidence.md).
 P5-18f implements the corresponding WSDL canonical capture, preserving original
 IEEE values through saved schemas/providers and both SOAP bindings; see
-[evidence](wsdl-ieee-constraints-evidence.md). Calendar canonical forms and
-instance-default PSVI, remaining identity constraints and typed accounting stay open.
+[evidence](wsdl-ieee-constraints-evidence.md). P5-18g implements exact WSDL calendar canonical forms; see
+[evidence](wsdl-calendar-constraints-evidence.md). The separately root-caused
+[native calendar counterpart](p5-native-calendar-constraints-finding.md) is next
+and remains required. Instance-default PSVI, remaining identity constraints
+and typed accounting stay open.
 
 ## P6 — Complete WSDL component and binding interoperability
 
