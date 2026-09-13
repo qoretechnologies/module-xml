@@ -2,6 +2,13 @@
 
 Copyright (C) 2026 Qore Technologies, s.r.o. The W3C fixtures retain their original copyright notices.
 
+Native empty defaults and declaration-scoped QName identity use
+`qore -b --enable-debug test/xml-element-defaults.qtest` and
+`python3 test/wsdl-interop/test_element_defaults.py -v`. The latter reproduces
+263 documents and checks native verdicts, preserved XML and explicit pinned-Xerces
+differences; see [evidence](native-element-defaults-evidence.md) and
+[the approved interpretation](default-identity-investigation.md).
+
 Particle construction checks run with `qore -b --enable-debug test/wsdl-particle-model.qtest`
 and `python3 test/wsdl-interop/test_particle_model.py -v`. Native occurrence validation
 uses `test/xml-particle-counts.qtest` and `test/wsdl-interop/test_particle_counts.py`.

@@ -78,6 +78,9 @@ EXTRA_DIST = COPYING.LGPL COPYING.MIT AUTHORS README \
     cmake/QoreXmlLibXml2IdBindingFix.cmake cmake/libxml2-id-binding-probe.h \
     cmake/QoreXmlLibXml2IeeeFix.cmake cmake/libxml2-ieee.cpp cmake/libxml2-ieee-validation.inc cmake/libxml2-ieee-probe.h \
     cmake/QoreXmlLibXml2CalendarFix.cmake cmake/libxml2-calendar-type.inc \
+    cmake/QoreXmlLibXml2ElementDefaultsFix.cmake cmake/libxml2-qname-owned.inc \
+    cmake/libxml2-default-namespace.inc cmake/libxml2-element-default.inc \
+    cmake/libxml2-element-defaults-probe.h \
     cmake/libxml2-calendar.inc cmake/libxml2-calendar-probe.h \
     cmake/QoreXmlLibXml2NumericDefaultsFix.cmake cmake/libxml2-numeric-defaults.inc \
     cmake/libxml2-numeric-defaults-probe.h \

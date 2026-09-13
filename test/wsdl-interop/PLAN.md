@@ -242,6 +242,12 @@ resolved by P5-18h with exact owned year/fraction components, independent
 reference checks and allocation recovery; see [evidence](native-calendar-constraints-evidence.md). Instance-default PSVI, remaining identity constraints
 and typed accounting stay open.
 
+P5-18i implements native canonical actual-type defaults, declaration-scoped
+QName/NOTATION identity, checked type expansion and complete value-copy ownership;
+see [evidence](native-element-defaults-evidence.md). The PSVI interpretation is
+approved. WSDL default application and retained empty values, remaining identity
+constraints and complete typed accounting remain P5 work.
+
 ## P6 — Complete WSDL component and binding interoperability
 
 **Depends on P2-P5.** This covers behavior the current W3C echo survey does not exercise.

@@ -7900,3 +7900,34 @@ See [evidence](native-calendar-constraints-evidence.md),
 [full audit](audits/P5-18h-native-calendar.md): 19 Pass, 43 N/A, zero Fail.
 No main-Qore mutation, installation or push. Next: empty-element default assessment
 and PSVI, key/unique/keyref, remaining typed accounting, followed by P6–P9.
+
+### P5-18i default interpretation approved (2026-09-13)
+
+P5-18h committed as `ebaf11a`. The user approved canonical default values under
+the actual selected type, with original declaration metadata retained separately.
+The [default identity decision](default-identity-investigation.md) is resolved.
+Native and WSDL implementation, namespace/identity/consumer/cleanup tests remain
+active; there is no outstanding approval question.
+
+### P5-18i native element defaults accepted (2026-09-13)
+
+Native end-element validation now uses canonical default/fixed spellings under
+the actual type and retains declaration QName/NOTATION namespace identity.
+Namespace scope restoration, checked QName construction/type expansion and
+complete value-copy ownership handle both single and persistent allocation
+failures without changing original declaration data or parsed XML.
+
+All 163 Qore suites, 63 provider checks and 11 supplements pass. The 68-schema,
+263-document matrix asserts validity, identity, preserved input and 15 explicit
+Xerces differences. The new suite has 911 assertions in all four execution modes.
+Four Valgrind runs have zero errors/lost memory, including 204 allocation failures
+with successful recovery. Both corpus modes match every parent semantic record;
+documentation builds cleanly. See [evidence](native-element-defaults-evidence.md),
+[inventory](P5-18i-validation.json) and
+[full audit](audits/P5-18i-native-element-defaults.md): 19 Pass, 43 N/A, zero Fail.
+
+WSDL continuation is isolated under `/tmp/wsdl-p5-18j-wsdl-element-defaults/`:
+the initial 200-document validity matrix now passes, and a retained-empty-value
+prototype successfully re-emits fixed boolean-union defaults assessed as string
+or QName. Provider/consumer integration and acceptance remain required. No main
+Qore mutation, installation or push. P5 identity/typed accounting and P6–P9 remain.

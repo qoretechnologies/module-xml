@@ -1,10 +1,11 @@
-# Default values, actual types and identity constraints: open P5 question
+# Default values, actual types and identity constraints: approved interpretation
 
 Copyright (C) 2026 Qore Technologies, s.r.o.
 
-This investigation is not accepted behavior. Native canonical-default changes
-remain outside P5-16d's fixed-value increment until the interaction below is
-adjudicated. WSDL instance defaults and identity constraints remain required.
+This record preserves the investigation that preceded the approved interpretation
+at the end of this document. Native canonical-default changes were kept outside
+P5-16d's fixed-value increment pending that decision. Implementation and acceptance
+are tracked separately; WSDL instance defaults and identity constraints remain required.
 
 XSD 1.0 [cvc-elt 5.1.1/5.1.2](https://www.w3.org/TR/2004/REC-xmlschema-1-20041028/#cvc-elt)
 requires assessment of a default's canonical lexical representation against the
@@ -81,3 +82,12 @@ The missing erratum property prevents claiming that this choice follows an
 unambiguous normative PSVI rule. It requires an explicit decision before the
 prototype is integrated; no validator-specific fallback or scope reduction is
 proposed. Default PSVI, identity constraints and full P5 acceptance remain open.
+
+## Approved interpretation
+
+On 2026-09-13 the user explicitly approved the proposed canonical-actual-type
+interpretation above. Empty defaults use the canonical spelling validated under
+the actual type for the instance value and identity. Original declaration text,
+namespace context and declared constraint value remain separately preserved.
+This resolves the policy decision; implementation and acceptance are in progress.
+No additional confirmation is required for this interpretation.

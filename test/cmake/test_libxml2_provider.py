@@ -97,12 +97,14 @@ if(TARGET LibXml2)
     target_compile_definitions(ieee-values PRIVATE QORE_XML_TYPES_SOURCE="${{types_source}}")
     target_include_directories(ieee-values PRIVATE ${{native_includes}})
     target_link_libraries(ieee-values PRIVATE ${{QORE_XML_LIBXML2_TARGET}})
-    foreach(part attribution-schema-allocation counter-schema-allocation counter-execution edc-schema-allocation wildcard-id-allocation wildcard-type-allocation character-content value-allocation id-binding-allocation numeric-defaults-allocation)
+    foreach(part attribution-schema-allocation counter-schema-allocation counter-execution edc-schema-allocation wildcard-id-allocation wildcard-type-allocation character-content value-allocation id-binding-allocation numeric-defaults-allocation element-defaults-allocation)
         string(REPLACE "-" "_" suffix "${{part}}")
         if(part STREQUAL "wildcard-id-allocation")
             add_executable(${{part}} "{REPO}/test/cmake/libxml2_wildcard_id_allocation.c")
         elseif(part STREQUAL "wildcard-type-allocation")
             add_executable(${{part}} "{REPO}/test/cmake/libxml2_wildcard_type_allocation.c")
+        elseif(part STREQUAL "element-defaults-allocation")
+            add_executable(${{part}} "{REPO}/test/cmake/libxml2_element_defaults_allocation.c")
         elseif(part STREQUAL "numeric-defaults-allocation")
             add_executable(${{part}} "{REPO}/test/cmake/libxml2_numeric_defaults_allocation.c")
         elseif(part STREQUAL "id-binding-allocation")
@@ -186,6 +188,8 @@ include("{REPO}/cmake/QoreXmlLibXml2IeeeFix.cmake")
 qore_xml_fix_libxml2_ieee("{cls.source}" "${{CMAKE_CURRENT_BINARY_DIR}}/libxml")
 include("{REPO}/cmake/QoreXmlLibXml2CalendarFix.cmake")
 qore_xml_fix_libxml2_calendar("{cls.source}" "${{CMAKE_CURRENT_BINARY_DIR}}/libxml")
+include("{REPO}/cmake/QoreXmlLibXml2ElementDefaultsFix.cmake")
+qore_xml_fix_libxml2_element_defaults("{cls.source}" "${{CMAKE_CURRENT_BINARY_DIR}}/libxml")
 ''')
         cls.fixed = cls.root / "fixed/build-debug"
         cls.run_command(["cmake", "-S", fixed_project, "-B", cls.fixed, "-DCMAKE_BUILD_TYPE=Debug",
@@ -741,7 +745,7 @@ qore_xml_fix_libxml2_uris("{self.source}" "${{CMAKE_CURRENT_BINARY_DIR}}/libxml"
         fixture = (self.root / "fixed/source/CMakeLists.txt").read_text()
         fixture += '''
 get_target_property(native_sources LibXml2 SOURCES)
-set(original "${CMAKE_CURRENT_BINARY_DIR}/libxml/qore-calendar-fix/xmlschemas.c")
+set(original "${CMAKE_CURRENT_BINARY_DIR}/libxml/qore-element-default-fix/xmlschemas.c")
 file(READ "${original}" source)
 string(REPLACE [=[qoreXmlNeedsCanonicalDefault(xmlSchemaValPtr val)
 {
@@ -791,9 +795,50 @@ set_property(TARGET LibXml2 PROPERTY SOURCES "${native_sources}")
         self.assertIn("allocation failures propagated with intact ownership and successful recovery",
                       self.run_command([self.root / "bundled/calendar-allocation"]))
 
+    def test_element_defaults_detection_and_idempotence(self):
+        project = self.root / "element-defaults-broken/source"
+        project.mkdir(parents=True)
+        (project / "CMakeLists.txt").write_text(self.previous_element_defaults_fixture())
+        build = self.root / "element-defaults-broken/build-debug"
+        self.run_command(["cmake", "-S", project, "-B", build, "-DCMAKE_BUILD_TYPE=Debug",
+                          "-DBUILD_SHARED_LIBS=ON", "-DLIBXML2_WITH_PROGRAMS=OFF",
+                          "-DLIBXML2_WITH_TESTS=OFF", "-DLIBXML2_WITH_PYTHON=OFF"])
+        self.run_command(["cmake", "--build", build, "--target", "LibXml2", "-j4"])
+        libraries = list((build / "libxml").glob("libxml2.so")) + list((build / "libxml").glob("libxml2.dylib"))
+        self.assertEqual(1, len(libraries))
+        options = [f"-DLIBXML2_INCLUDE_DIR={self.fixed_include}", f"-DLIBXML2_LIBRARY={libraries[0]}",
+                   f"-DFETCHCONTENT_SOURCE_DIR_QORE_XML_LIBXML2={self.source}"]
+        output = self.configure("element-defaults-broken-auto", "-DQORE_XML_LIBXML2_PROVIDER=AUTO", *options)
+        self.assertIn("using private static libxml2 2.15.4", output)
+        probe = (self.root / "element-defaults-broken-auto/system-libxml2/namespace-probe.log").read_text()
+        self.assertIn("calendar_constraints=PASS", probe)
+        self.assertIn("element_defaults=FAIL", probe)
+        self.assertIn("default_namespaces=FAIL", probe)
+        self.assertIn("qname_allocation=FAIL", probe)
+        self.configure("element-defaults-broken-system", "-DQORE_XML_LIBXML2_PROVIDER=SYSTEM", *options,
+                       success=False)
+        folder = self.root / "bundled/_deps/qore_xml_libxml2-build/qore-element-default-fix"
+        before = {name: (folder / name).stat().st_mtime_ns for name in ("xmlschemas.c", "xmlschemastypes.c")}
+        self.configure("bundled", "-DQORE_XML_LIBXML2_PROVIDER=BUNDLED",
+                       f"-DFETCHCONTENT_SOURCE_DIR_QORE_XML_LIBXML2={self.source}")
+        self.assertEqual(before, {name: (folder / name).stat().st_mtime_ns for name in before})
+
+    def test_element_defaults_allocation_cleanup(self):
+        self.run_command(["cmake", "--build", self.root / "bundled", "--target",
+                          "element-defaults-allocation", "-j4"])
+        self.assertIn("element-default/QName allocation failures propagated with intact scope and recovery",
+                      self.run_command([self.root / "bundled/element-defaults-allocation"]))
+
+    def previous_element_defaults_fixture(self):
+        """Calendar fixes, before canonical actual-type defaults and checked QNames."""
+        fixed = (self.root / "fixed/source/CMakeLists.txt").read_text()
+        fixed = fixed.replace(f'include("{REPO}/cmake/QoreXmlLibXml2ElementDefaultsFix.cmake")\n', "")
+        return fixed.replace(f'qore_xml_fix_libxml2_element_defaults("{self.source}" '
+                             '"${CMAKE_CURRENT_BINARY_DIR}/libxml")\n', "")
+
     def previous_calendar_fixture(self):
         """All prior corrections, before exact calendar ownership and constraints."""
-        fixed = (self.root / "fixed/source/CMakeLists.txt").read_text()
+        fixed = self.previous_element_defaults_fixture()
         fixed = fixed.replace(f'include("{REPO}/cmake/QoreXmlLibXml2CalendarFix.cmake")\n', "")
         return fixed.replace(f'qore_xml_fix_libxml2_calendar("{self.source}" '
                              '"${CMAKE_CURRENT_BINARY_DIR}/libxml")\n', "")
@@ -920,7 +965,7 @@ set_property(TARGET LibXml2 PROPERTY SOURCES "${native_sources}")
         fixture = (self.root / "fixed/source/CMakeLists.txt").read_text()
         fixture += '''
 get_target_property(native_sources LibXml2 SOURCES)
-set(original "${CMAKE_CURRENT_BINARY_DIR}/libxml/qore-calendar-fix/xmlschemas.c")
+set(original "${CMAKE_CURRENT_BINARY_DIR}/libxml/qore-element-default-fix/xmlschemas.c")
 file(READ "${original}" source)
 string(REPLACE [=[        case XML_SCHEMAS_HEXBINARY:
         case XML_SCHEMAS_BASE64BINARY:
@@ -956,7 +1001,7 @@ set_property(TARGET LibXml2 PROPERTY SOURCES "${native_sources}")
         fixture = (self.root / "fixed/source/CMakeLists.txt").read_text()
         fixture += '''
 get_target_property(native_sources LibXml2 SOURCES)
-set(original "${CMAKE_CURRENT_BINARY_DIR}/libxml/qore-calendar-fix/xmlschemastypes.c")
+set(original "${CMAKE_CURRENT_BINARY_DIR}/libxml/qore-element-default-fix/xmlschemastypes.c")
 file(READ "${original}" source)
 string(REPLACE [=[            if (ret < 0) {
                 goto error;
@@ -997,7 +1042,7 @@ set_property(TARGET LibXml2 PROPERTY SOURCES "${native_sources}")
         fixture = (self.root / "fixed/source/CMakeLists.txt").read_text()
         fixture += '''
 get_target_property(native_sources LibXml2 SOURCES)
-set(original "${CMAKE_CURRENT_BINARY_DIR}/libxml/qore-calendar-fix/xmlschemas.c")
+set(original "${CMAKE_CURRENT_BINARY_DIR}/libxml/qore-element-default-fix/xmlschemas.c")
 file(READ "${original}" source)
 string(REPLACE [=[((particle->node == NULL) || !xmlStrEqual(particle->node->name, BAD_CAST "group")) &&]=]
                "" source "${source}")
