@@ -22,6 +22,7 @@
 #include "libxml2-value-space-probe.h"
 #include "libxml2-value-allocation-probe.h"
 #include "libxml2-numeric-defaults-probe.h"
+#include "libxml2-ieee-probe.h"
 
 static int check_namespace(const char* source, const char* expected) {
     xmlTextReaderPtr reader = xmlReaderForMemory(source, (int)strlen(source), NULL, "UTF-8", 0);
@@ -99,6 +100,11 @@ int main(void) {
         int numeric_defaults = check_numeric_defaults();
         result |= numeric_defaults;
         printf("numeric_defaults=%s\n", numeric_defaults ? "FAIL" : "PASS");
+    }
+    {
+        int ieee = check_ieee_values();
+        result |= ieee;
+        printf("ieee_values=%s\n", ieee ? "FAIL" : "PASS");
     }
     xmlCleanupParser();
     return result;

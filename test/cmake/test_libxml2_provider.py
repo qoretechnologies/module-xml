@@ -24,7 +24,7 @@ class SourceDistributionTest(unittest.TestCase):
         self.assertEqual(1, len(declarations))
         distributed = set(declarations[0].split())
         inputs = {str(path.relative_to(REPO)) for path in (REPO / "cmake").rglob("*")
-                  if path.is_file() and path.suffix in (".cmake", ".c", ".h", ".inc", ".txt")}
+                  if path.is_file() and path.suffix in (".cmake", ".c", ".cpp", ".h", ".inc", ".txt")}
         self.assertTrue(inputs)
         self.assertEqual(set(), inputs - distributed, "CMake dependency input missing from source archive")
 
@@ -59,7 +59,7 @@ if(NOT BUILD_SHARED_LIBS)
     message(FATAL_ERROR "Dependency changed parent BUILD_SHARED_LIBS")
 endif()
 add_executable(probe "{REPO}/cmake/libxml2-namespace-probe.c")
-target_link_libraries(probe PRIVATE ${{QORE_XML_LIBXML2_TARGET}})
+target_link_libraries(probe PRIVATE ${{QORE_XML_LIBXML2_TARGET}} ${{QORE_XML_PROBE_LIBRARIES}})
 add_executable(catalog-cleanup "{REPO}/test/cmake/libxml2_catalog_cleanup.c")
 target_link_libraries(catalog-cleanup PRIVATE ${{QORE_XML_LIBXML2_TARGET}})
 add_executable(entity-allocation "{REPO}/test/cmake/libxml2_entity_allocation.c")
@@ -81,12 +81,18 @@ if(TARGET LibXml2)
         get_filename_component(native_name "${{native_source}}" NAME)
         if(native_name STREQUAL "xmlschemas.c")
             set(schema_source "${{native_source}}")
+        elseif(native_name STREQUAL "xmlschemastypes.c")
+            set(types_source "${{native_source}}")
         elseif(native_name STREQUAL "xmlregexp.c")
             set(regexp_source "${{native_source}}")
         endif()
     endforeach()
     get_target_property(native_includes LibXml2 INCLUDE_DIRECTORIES)
     get_target_property(native_options LibXml2 COMPILE_OPTIONS)
+    add_executable(ieee-values "{REPO}/test/cmake/libxml2_ieee_values.c")
+    target_compile_definitions(ieee-values PRIVATE QORE_XML_TYPES_SOURCE="${{types_source}}")
+    target_include_directories(ieee-values PRIVATE ${{native_includes}})
+    target_link_libraries(ieee-values PRIVATE ${{QORE_XML_LIBXML2_TARGET}})
     foreach(part attribution-schema-allocation counter-schema-allocation counter-execution edc-schema-allocation wildcard-id-allocation wildcard-type-allocation character-content value-allocation id-binding-allocation numeric-defaults-allocation)
         string(REPLACE "-" "_" suffix "${{part}}")
         if(part STREQUAL "wildcard-id-allocation")
@@ -128,7 +134,7 @@ install(TARGETS probe RUNTIME DESTINATION bin)
         fixed_project = cls.root / "fixed/source"
         fixed_project.mkdir(parents=True)
         (fixed_project / "CMakeLists.txt").write_text(f'''cmake_minimum_required(VERSION 3.18...3.31)
-project(libxml2_backport_fixture C)
+project(libxml2_backport_fixture C CXX)
 add_subdirectory("{cls.source}" libxml)
 include("{REPO}/cmake/QoreXmlLibXml2QNameFix.cmake")
 qore_xml_fix_libxml2_qnames("{cls.source}" "${{CMAKE_CURRENT_BINARY_DIR}}/libxml")
@@ -172,6 +178,8 @@ include("{REPO}/cmake/QoreXmlLibXml2IdBindingFix.cmake")
 qore_xml_fix_libxml2_id_bindings("{cls.source}" "${{CMAKE_CURRENT_BINARY_DIR}}/libxml")
 include("{REPO}/cmake/QoreXmlLibXml2NumericDefaultsFix.cmake")
 qore_xml_fix_libxml2_numeric_defaults("{cls.source}" "${{CMAKE_CURRENT_BINARY_DIR}}/libxml")
+include("{REPO}/cmake/QoreXmlLibXml2IeeeFix.cmake")
+qore_xml_fix_libxml2_ieee("{cls.source}" "${{CMAKE_CURRENT_BINARY_DIR}}/libxml")
 ''')
         cls.fixed = cls.root / "fixed/build-debug"
         cls.run_command(["cmake", "-S", fixed_project, "-B", cls.fixed, "-DCMAKE_BUILD_TYPE=Debug",
@@ -218,6 +226,7 @@ qore_xml_fix_libxml2_numeric_defaults("{cls.source}" "${{CMAKE_CURRENT_BINARY_DI
         self.assertIn("unsigned_values=PASS", output)
         self.assertIn("builtin_particles=PASS", output)
         self.assertIn("numeric_defaults=PASS", output)
+        self.assertIn("ieee_values=PASS", output)
         stage = self.root / "stage"
         self.run_command(["cmake", "--install", self.root / "bundled", "--prefix", stage])
         self.assertEqual(["bin/probe", "share/licenses/qore-xml/libxml2-NOTICES.txt"],
@@ -693,9 +702,53 @@ qore_xml_fix_libxml2_uris("{self.source}" "${{CMAKE_CURRENT_BINARY_DIR}}/libxml"
     def previous_numeric_defaults_fixture(self):
         """All previous fixes, before canonical constraint declaration checks."""
         fixed = (self.root / "fixed/source/CMakeLists.txt").read_text()
+        fixed = fixed.replace(f'include("{REPO}/cmake/QoreXmlLibXml2IeeeFix.cmake")\n', "")
+        fixed = fixed.replace(f'qore_xml_fix_libxml2_ieee("{self.source}" '
+                              '"${CMAKE_CURRENT_BINARY_DIR}/libxml")\n', "")
         fixed = fixed.replace(f'include("{REPO}/cmake/QoreXmlLibXml2NumericDefaultsFix.cmake")\n', "")
         return fixed.replace(f'qore_xml_fix_libxml2_numeric_defaults("{self.source}" '
                              '"${CMAKE_CURRENT_BINARY_DIR}/libxml")\n', "")
+
+    def test_ieee_detection_and_idempotence(self):
+        import hashlib
+        project = self.root / "ieee-broken/source"
+        project.mkdir(parents=True)
+        fixture = (self.root / "fixed/source/CMakeLists.txt").read_text()
+        fixture = fixture.replace(f'include("{REPO}/cmake/QoreXmlLibXml2IeeeFix.cmake")\n', "")
+        fixture = fixture.replace(f'qore_xml_fix_libxml2_ieee("{self.source}" '
+                                  '"${CMAKE_CURRENT_BINARY_DIR}/libxml")\n', "")
+        (project / "CMakeLists.txt").write_text(fixture)
+        build = self.root / "ieee-broken/build-debug"
+        self.run_command(["cmake", "-S", project, "-B", build, "-DCMAKE_BUILD_TYPE=Debug",
+                          "-DBUILD_SHARED_LIBS=ON", "-DLIBXML2_WITH_PROGRAMS=OFF",
+                          "-DLIBXML2_WITH_TESTS=OFF", "-DLIBXML2_WITH_PYTHON=OFF"])
+        self.run_command(["cmake", "--build", build, "--target", "LibXml2", "-j4"])
+        libraries = list((build / "libxml").glob("libxml2.so")) + list((build / "libxml").glob("libxml2.dylib"))
+        self.assertEqual(1, len(libraries))
+        options = [f"-DLIBXML2_LIBRARY={libraries[0]}", f"-DLIBXML2_INCLUDE_DIR={self.fixed_include}",
+                   f"-DFETCHCONTENT_SOURCE_DIR_QORE_XML_LIBXML2={self.source}"]
+        output = self.configure("ieee-broken-auto", "-DQORE_XML_LIBXML2_PROVIDER=AUTO", *options)
+        self.assertIn("using private static libxml2 2.15.4", output)
+        probe = (self.root / "ieee-broken-auto/system-libxml2/namespace-probe.log").read_text()
+        self.assertIn("id_bindings=PASS", probe)
+        self.assertIn("ieee_values=FAIL", probe)
+        self.configure("ieee-broken-system", "-DQORE_XML_LIBXML2_PROVIDER=SYSTEM", *options, success=False)
+        path = self.root / "bundled/_deps/qore_xml_libxml2-build/qore-ieee-fix/xmlschemastypes.c"
+        before = (path.stat().st_mtime_ns, hashlib.sha256(path.read_bytes()).hexdigest())
+        self.configure("bundled", "-DQORE_XML_LIBXML2_PROVIDER=BUNDLED",
+                       f"-DFETCHCONTENT_SOURCE_DIR_QORE_XML_LIBXML2={self.source}")
+        self.assertEqual(before, (path.stat().st_mtime_ns, hashlib.sha256(path.read_bytes()).hexdigest()))
+
+    def test_ieee_values_against_integer_rational_reference(self):
+        import ieee_reference_cases as reference
+        self.run_command(["cmake", "--build", self.root / "bundled", "--target", "ieee-values", "-j4"])
+        rows = reference.cases()
+        self.assertEqual(1314, len(rows))
+        source = "".join(str(int(wide)) + "\t" + text + "\n" for wide, text, _, _ in rows)
+        (self.root / "ieee-input.txt").write_text(source)
+        output = self.run_command([self.root / "bundled/ieee-values", "C"], input=source)
+        (self.root / "ieee-output.txt").write_text(output)
+        reference.check(self, rows, output)
 
     def test_numeric_defaults_allocation_cleanup(self):
         self.run_command(["cmake", "--build", self.root / "bundled", "--target",
@@ -804,7 +857,7 @@ set_property(TARGET LibXml2 PROPERTY SOURCES "${native_sources}")
         fixture = (self.root / "fixed/source/CMakeLists.txt").read_text()
         fixture += '''
 get_target_property(native_sources LibXml2 SOURCES)
-set(original "${CMAKE_CURRENT_BINARY_DIR}/libxml/qore-particle-layout-fix/xmlschemastypes.c")
+set(original "${CMAKE_CURRENT_BINARY_DIR}/libxml/qore-ieee-fix/xmlschemastypes.c")
 file(READ "${original}" source)
 string(REPLACE [=[            if (ret < 0) {
                 goto error;

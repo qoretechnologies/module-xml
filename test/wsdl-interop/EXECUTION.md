@@ -7781,3 +7781,35 @@ typed-preservation accounting and P6–P9. Float canonicalization investigation
 is under `/tmp/wsdl-p5-18e-ieee/`; pinned Xerces returns `0.0E1` for zero,
 contrary to XSD 1.0's required `0.0E0`, so oracle agreement will not replace the
 normative expectation.
+
+## P5-18e — Native IEEE conversion and canonical constraints (2026-09-13)
+
+P5-18d committed as `602868e`; no push. Native float/double values now use direct
+nearest IEEE conversion independently of locale, rounding mode, flags and traps.
+The lexical scan rejects missing exponent digits with or without a requested
+computed value. Canonical default/fixed assessment uses shortest round-trip
+digits, XSD scientific syntax and unsigned canonical zero, retaining source XML
+and the original computed value. The private C++17 helper adds no Qore dependency.
+
+The independent 1,314-case rational reference produces 5,256 records in each of
+C and German numeric locales. Native conversion, DOM and reader tests cover 300
+declarations and 90 lexical cases with 970 assertions. Pinned Xerces differences
+remain explicit: 24 zero-spelling defects and 24 smallest-subnormal precision
+choices; all 90 lexical validity expectations agree.
+
+Final provider acceptance passes 57 checks. The source-distribution check was
+then extended to include C++ inputs and rerun independently; its new helper was
+already explicitly distributed. Native datatype and canonical declaration sweeps
+pass 167 and 2,907 injected failures respectively. Native IEEE, both allocation
+sweeps and direct Qore Valgrind runs report zero errors and no lost memory.
+Both full corpus modes match P5-18d at every case and stage. Earlier provider
+failures exposed CMake language-initialization order and missing explicit libm
+probe linkage; both were fixed before the final provider run.
+
+See [evidence](native-ieee-constraints-evidence.md),
+[inventory](P5-18e-validation.json) and
+[full audit](audits/P5-18e-native-ieee-constraints.md) for the final broad gate,
+supplements, source hashes and all 62 checklist results. No main-Qore change,
+installation or push. Next: WSDL IEEE canonical capture, calendar canonical forms,
+empty-element default PSVI, key/unique/keyref, complete typed-preservation
+accounting and P6–P9. Concrete notes are in `/tmp/wsdl-p5-18e-ieee/next-wsdl.md`.

@@ -14,7 +14,7 @@ unset(_qore_xml_namespace_compiled CACHE)
 try_run(_qore_xml_namespace_run _qore_xml_namespace_compiled
     "${CMAKE_CURRENT_BINARY_DIR}/namespace-probe"
     "${CMAKE_CURRENT_LIST_DIR}/../libxml2-namespace-probe.c"
-    LINK_LIBRARIES LibXml2::LibXml2
+    LINK_LIBRARIES LibXml2::LibXml2 ${QORE_XML_PROBE_LIBRARIES}
     RUN_OUTPUT_VARIABLE _qore_xml_namespace_output
     COMPILE_OUTPUT_VARIABLE _qore_xml_namespace_compile_output)
 file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/namespace-probe.log"

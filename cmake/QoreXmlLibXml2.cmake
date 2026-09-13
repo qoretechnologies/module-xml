@@ -3,6 +3,13 @@
 include_guard(GLOBAL)
 set(_qore_xml_libxml2_cmake_dir "${CMAKE_CURRENT_LIST_DIR}")
 
+# The behavior probe changes the floating-point environment directly. A shared
+# libxml2 dependency does not supply its own libm link flags to that executable.
+set(QORE_XML_PROBE_LIBRARIES "")
+if(UNIX)
+    list(APPEND QORE_XML_PROBE_LIBRARIES m)
+endif()
+
 set(QORE_XML_LIBXML2_PROVIDER AUTO CACHE STRING "libxml2 provider: AUTO, SYSTEM, or BUNDLED")
 set_property(CACHE QORE_XML_LIBXML2_PROVIDER PROPERTY STRINGS AUTO SYSTEM BUNDLED)
 if(NOT QORE_XML_LIBXML2_PROVIDER MATCHES "^(AUTO|SYSTEM|BUNDLED)$")
@@ -24,6 +31,9 @@ elseif(QORE_XML_LIBXML2_PROVIDER STREQUAL "SYSTEM")
         "Install a fixed libxml2 or use QORE_XML_LIBXML2_PROVIDER=AUTO/BUNDLED. "
         "Cross builds need CMAKE_CROSSCOMPILING_EMULATOR to verify the system library.")
 else()
+    # Enable C++ before FetchContent creates libxml2's directory scope. Its
+    # private IEEE conversion unit needs the standard C++17 charconv runtime.
+    enable_language(CXX)
     include(FetchContent)
     if(POLICY CMP0135)
         cmake_policy(SET CMP0135 NEW)
@@ -58,6 +68,7 @@ else()
     include("${_qore_xml_libxml2_cmake_dir}/QoreXmlLibXml2ParticleLayoutFix.cmake")
     include("${_qore_xml_libxml2_cmake_dir}/QoreXmlLibXml2IdBindingFix.cmake")
     include("${_qore_xml_libxml2_cmake_dir}/QoreXmlLibXml2NumericDefaultsFix.cmake")
+    include("${_qore_xml_libxml2_cmake_dir}/QoreXmlLibXml2IeeeFix.cmake")
 
     function(qore_xml_fetch_libxml2)
         # Normal variables are scoped to this function; do not overwrite the
@@ -110,6 +121,7 @@ else()
         qore_xml_fix_libxml2_particle_layout("${qore_xml_libxml2_SOURCE_DIR}" "${qore_xml_libxml2_BINARY_DIR}")
         qore_xml_fix_libxml2_id_bindings("${qore_xml_libxml2_SOURCE_DIR}" "${qore_xml_libxml2_BINARY_DIR}")
         qore_xml_fix_libxml2_numeric_defaults("${qore_xml_libxml2_SOURCE_DIR}" "${qore_xml_libxml2_BINARY_DIR}")
+        qore_xml_fix_libxml2_ieee("${qore_xml_libxml2_SOURCE_DIR}" "${qore_xml_libxml2_BINARY_DIR}")
         # Neither upstream tools nor headers/libraries belong in our install.
         set_property(DIRECTORY "${qore_xml_libxml2_SOURCE_DIR}" PROPERTY EXCLUDE_FROM_ALL TRUE)
         set_target_properties(LibXml2 PROPERTIES POSITION_INDEPENDENT_CODE ON C_VISIBILITY_PRESET hidden)

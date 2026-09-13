@@ -1637,6 +1637,26 @@ expanded QName identities independently. See [design](../../design/wsdl-canonica
 and [acceptance evidence](wsdl-canonical-constraints-evidence.md). Empty-element
 default projection and other canonical datatype families remain separate P5 work.
 
+## Native IEEE constraints (P5-18e)
+
+Native float/double conversion validates complete XML lexical forms and preserves
+the selected IEEE value independently of process locale and rounding state.
+Canonical default/fixed declarations use shortest round-trip digits with XSD 1.0
+scientific syntax. The private library build uses a C++17 charconv helper.
+
+```sh
+QORE_MODULE_DIR=build-debug:qlib qore -b --enable-debug test/xml-ieee-constraints.qtest
+python3 -B test/wsdl-interop/test_ieee_constraints.py -v
+python3 -B test/cmake/test_libxml2_provider.py -v
+```
+
+The native suite covers 300 declarations and 90 lexical cases. The provider suite
+adds 1,314 integer-rational expectations in four rounding modes and tests caller
+environment preservation. Pinned Xerces's zero defect and smallest-subnormal
+precision differences are recorded explicitly in the declaration fixtures.
+See [design](../../design/native-ieee-constraints.md),
+[evidence](native-ieee-constraints-evidence.md) and [inventory](P5-18e-validation.json).
+
 ## WSDL canonical binary declarations (P5-18d)
 
 Binary default/fixed declarations validate uppercase hexadecimal and unwrapped

@@ -190,6 +190,21 @@ int main(void) {
     count += check(XML_SCHEMAS_BASE64BINARY, "YQ==!", 0);
     count += check(XML_SCHEMAS_BASE64BINARY, "YWJj\302\240", 0);
     count += check(XML_SCHEMAS_BASE64BINARY, "YR==", 0);
+    {
+        static const xmlSchemaValType ieee[] = {XML_SCHEMAS_FLOAT, XML_SCHEMAS_DOUBLE};
+        for (index = 0; index < sizeof(ieee) / sizeof(ieee[0]); ++index) {
+            count += check(ieee[index], "0.1", 1);
+            count += check(ieee[index], " \tNaN\r\n ", 1);
+            count += check(ieee[index], "-INF", 1);
+            count += check(ieee[index], "1e9999999999999999999999", 1);
+            count += check(ieee[index], "-1e-9999999999999999999999", 1);
+            count += check(ieee[index], "1e", 0);
+            count += check(ieee[index], "1e+", 0);
+            count += check(ieee[index], "+INF", 0);
+        }
+    }
+    count += check_computed("xs:float", "16777216", "16777217");
+    count += check_computed("xs:double", "1.2345678901234567", "1.2345678901234567");
     count += check_computed("xs:hexBinary", "AB00FF", "ab00ff");
     count += check_computed("xs:base64Binary", "YWJj", "Y W J j");
     count += check_computed("List", "17 0", "+0017 -0");

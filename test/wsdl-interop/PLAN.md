@@ -230,6 +230,11 @@ selected octets, lexical carriers and saved providers; see
 [evidence](wsdl-binary-constraints-evidence.md). Float/calendar canonical forms
 and instance-default PSVI remain open.
 
+P5-18e implements native IEEE conversion and canonical declarations, including
+locale/rounding-state independence, complete exponent syntax and explicit
+shortest-round-trip precision policy; see [evidence](native-ieee-constraints-evidence.md).
+The corresponding WSDL canonical capture and calendar/default PSVI work remain open.
+
 ## P6 — Complete WSDL component and binding interoperability
 
 **Depends on P2-P5.** This covers behavior the current W3C echo survey does not exercise.

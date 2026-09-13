@@ -28,7 +28,7 @@ original lexical string, computed value, namespace context or selected member.
 The temporary buffer and canonical item strings have one owner and are freed on
 success, rejection and allocation failure. All state is local to the call, and
 traversal and storage are linear in the constraint's size. Native entry and I/O
-cancellation boundaries remain unchanged; the standalone libxml2 C dependency
+cancellation boundaries remain unchanged; the private libxml2 dependency
 does not acquire a Qore runtime dependency.
 
 CMake tests the installed provider with positive and negative element/attribute
@@ -50,3 +50,5 @@ checks each declaration entry point, exact temporary spellings, empty/singleton
 lists, mixed QName/numeric lists, buffer growth and recovery after failure.
 The [binary extension](native-binary-constraints.md) adds declaration, lexical
 and allocation regressions for hexadecimal and Base64 values.
+The [IEEE extension](native-ieee-constraints.md) adds float/double canonical
+declarations and locale-independent, correctly rounded native conversion.

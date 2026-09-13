@@ -199,6 +199,25 @@ int main(void) {
     faults += sweep("<xs:simpleType name='Item'><xs:union memberTypes='xs:hexBinary xs:QName'/></xs:simpleType>"
         "<xs:simpleType name='Value'><xs:list itemType='Item'/></xs:simpleType>",
         "ab00ff p:Part 00aa", "AB00FF p:Part 00AA", 1);
+    faults += sweep("<xs:simpleType name='Value'><xs:restriction base='xs:float'/></xs:simpleType>",
+        "16777217", "1.6777216E7", 1);
+    faults += sweep("<xs:simpleType name='Value'><xs:restriction base='xs:double'/></xs:simpleType>",
+        "1.2345678901234567", "1.2345678901234567E0", 1);
+    faults += sweep("<xs:simpleType name='Value'><xs:restriction base='xs:float'/></xs:simpleType>",
+        "1e-45", "1.0E-45", 1);
+    faults += sweep("<xs:simpleType name='Value'><xs:restriction base='xs:double'/></xs:simpleType>",
+        "5e-324", "5.0E-324", 1);
+    faults += sweep("<xs:simpleType name='Value'><xs:restriction base='xs:float'/></xs:simpleType>",
+        "-0", "0.0E0", 1);
+    faults += sweep("<xs:simpleType name='Value'><xs:restriction base='xs:double'/></xs:simpleType>",
+        "NaN", "NaN", 1);
+    faults += sweep("<xs:simpleType name='Value'><xs:restriction base='xs:double'/></xs:simpleType>",
+        "-INF", "-INF", 1);
+    faults += sweep("<xs:simpleType name='Value'><xs:restriction base='xs:float'>"
+        "<xs:pattern value='16777217'/></xs:restriction></xs:simpleType>", "16777217", "1.6777216E7", 0);
+    faults += sweep("<xs:simpleType name='Item'><xs:union memberTypes='xs:float xs:QName'/></xs:simpleType>"
+        "<xs:simpleType name='Value'><xs:list itemType='Item'/></xs:simpleType>",
+        "17 p:Part -0", "1.7E1 p:Part 0.0E0", 1);
     {
         char lexical[2048] = "", canonical[2048] = "";
         unsigned int index;

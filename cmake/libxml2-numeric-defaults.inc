@@ -1,5 +1,5 @@
 /* Copyright (C) 2026 Qore Technologies, s.r.o.
- * XSD 1.0 numeric/boolean/binary constraint lexicals, including list/union members.
+ * XSD 1.0 numeric/boolean/binary/IEEE constraint lexicals, including list/union members.
  * Keep the schema spelling of other atomic families: QName, in particular,
  * has no context-independent canonical lexical representation in XSD 1.0.
  */
@@ -7,6 +7,8 @@ static int
 qoreXmlNeedsCanonicalDefault(xmlSchemaValPtr val)
 {
     switch (xmlSchemaGetValType(val)) {
+        case XML_SCHEMAS_FLOAT:
+        case XML_SCHEMAS_DOUBLE:
         case XML_SCHEMAS_HEXBINARY:
         case XML_SCHEMAS_BASE64BINARY:
         case XML_SCHEMAS_DECIMAL:
@@ -30,7 +32,7 @@ qoreXmlNeedsCanonicalDefault(xmlSchemaValPtr val)
     }
 }
 
-/* A NULL result means that there is no numeric/boolean/binary member to rewrite.
+/* A NULL result means that there is no numeric/boolean/binary/IEEE member to rewrite.
  * All allocation failures leave the output NULL; schema/instance owners keep
  * their original constraint and computed value throughout this operation. */
 static int

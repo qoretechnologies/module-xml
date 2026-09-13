@@ -68,7 +68,7 @@ static int check_value_allocation(void) {
     static const xmlSchemaValType types[] = {
         XML_SCHEMAS_ANYSIMPLETYPE, XML_SCHEMAS_STRING, XML_SCHEMAS_NORMSTRING,
         XML_SCHEMAS_TOKEN, XML_SCHEMAS_NCNAME, XML_SCHEMAS_ANYURI,
-        XML_SCHEMAS_HEXBINARY, XML_SCHEMAS_BASE64BINARY
+        XML_SCHEMAS_HEXBINARY, XML_SCHEMAS_BASE64BINARY, XML_SCHEMAS_FLOAT, XML_SCHEMAS_DOUBLE
     };
     size_t index;
     if (check_integer_allocation()) {
@@ -88,7 +88,9 @@ static int check_value_allocation(void) {
             value_probe_fail_at = fault;
             value_probe_armed = 1;
             result = xmlSchemaValPredefTypeNodeNoNorm(type,
-                types[index] == XML_SCHEMAS_HEXBINARY ? BAD_CAST "abcd" : BAD_CAST "part", &value, NULL);
+                types[index] == XML_SCHEMAS_HEXBINARY ? BAD_CAST "abcd"
+                    : (types[index] == XML_SCHEMAS_FLOAT || types[index] == XML_SCHEMAS_DOUBLE)
+                        ? BAD_CAST "0.1" : BAD_CAST "part", &value, NULL);
             value_probe_armed = 0;
             if (fault == 0) {
                 count = value_probe_attempts;

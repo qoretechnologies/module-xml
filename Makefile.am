@@ -76,6 +76,7 @@ EXTRA_DIST = COPYING.LGPL COPYING.MIT AUTHORS README \
     cmake/libxml2-value-space-probe.h cmake/libxml2-value-allocation-probe.h \
     cmake/QoreXmlLibXml2ParticleLayoutFix.cmake cmake/libxml2-particle-layout.h \
     cmake/QoreXmlLibXml2IdBindingFix.cmake cmake/libxml2-id-binding-probe.h \
+    cmake/QoreXmlLibXml2IeeeFix.cmake cmake/libxml2-ieee.cpp cmake/libxml2-ieee-validation.inc cmake/libxml2-ieee-probe.h \
     cmake/QoreXmlLibXml2NumericDefaultsFix.cmake cmake/libxml2-numeric-defaults.inc \
     cmake/libxml2-numeric-defaults-probe.h \
     cmake/QoreXmlLibXml2ParticleRangeFix.cmake cmake/libxml2-particle-range-probe.h \
