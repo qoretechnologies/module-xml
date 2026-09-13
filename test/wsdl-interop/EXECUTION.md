@@ -8072,3 +8072,23 @@ No C++ changes, main-Qore mutation, installation or push. Unrelated
 `test/cmake/__pycache__/` is excluded. Next: remaining annotation/document-ID
 grammar, identity constraints and typed accounting in P5, then P6–P9. Python CI
 wiring and supported-environment acceptance remain P9 work. No pending question.
+
+## P5-19e — Native annotation attributes (2026-09-14)
+
+P5-19d committed as `6dfcc3b`. The annotation probes found two native defects:
+foreign attributes named `lang` were rejected; documentation `source` bypassed
+URI validation. The private dependency corrects both, and CMake detects the
+behavior before system selection. No annotation URI is dereferenced.
+
+Acceptance: 117-schema native/Xerces agreement, 415 new assertions, 20 affected
+Qore suites, 66 provider tests and three Python supplements pass. The direct-ELF
+Valgrind has zero errors or lost memory. Debug build/docs are clean. All four
+corpus reports are byte-identical to the parent. Full audit: 18 Pass, 44 N/A,
+zero Fail. See [evidence](native-annotations-evidence.md),
+[inventory](P5-19e-validation.json) and [audit](audits/P5-19e-native-annotations.md).
+
+Main Qore is read-only and the installed library matches the frozen fixed runtime.
+No installation or push; unrelated `test/cmake/__pycache__/` is excluded. Next:
+[WSDL annotation/document-ID grammar](p5-wsdl-annotation-finding.md), then remaining
+P5 identity constraints and typed accounting. P6–P9 remain required. No question
+is pending. Artifacts: `/tmp/wsdl-p5-19e-schema-annotations/`.

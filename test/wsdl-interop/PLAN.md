@@ -283,6 +283,12 @@ disagreements. See [evidence](notation-values-evidence.md). Remaining declaratio
 annotation/document-ID grammar, key/unique/keyref and typed accounting must finish
 before P5 closes.
 
+P5-19e fixes native annotation foreign attributes and documentation URI checking.
+The 117-schema independent matrix, 20 affected suites and 66 provider tests pass;
+Valgrind is clean and corpus reports are unchanged. See
+[evidence](native-annotations-evidence.md). The [WSDL grammar counterpart](p5-wsdl-annotation-finding.md),
+key/unique/keyref and typed accounting remain open before P6.
+
 ## P6 — Complete WSDL component and binding interoperability
 
 **Depends on P2-P5.** This covers behavior the current W3C echo survey does not exercise.

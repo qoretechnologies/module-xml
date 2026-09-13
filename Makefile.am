@@ -81,6 +81,7 @@ EXTRA_DIST = COPYING.LGPL COPYING.MIT AUTHORS README \
     cmake/QoreXmlLibXml2ElementDefaultsFix.cmake cmake/libxml2-qname-owned.inc \
     cmake/libxml2-default-namespace.inc cmake/libxml2-element-default.inc \
     cmake/libxml2-element-defaults-probe.h \
+    cmake/QoreXmlLibXml2AnnotationFix.cmake cmake/libxml2-annotation-probe.h \
     cmake/QoreXmlLibXml2NotationFix.cmake cmake/libxml2-notation-parse.inc \
     cmake/libxml2-notation-use.inc cmake/libxml2-notation-probe.h \
     cmake/libxml2-calendar.inc cmake/libxml2-calendar-probe.h \

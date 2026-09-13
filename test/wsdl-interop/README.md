@@ -1900,3 +1900,15 @@ All 169 suites in the broad run passed across implementation revisions, followed
 by 57 affected suites on frozen final inputs and eight supplemental checks. Both
 corpus modes retain their prior results. P5 declaration grammar, identity
 constraints and complete typed accounting remain open; P6–P9 remain required.
+
+## Native annotation attributes (P5-19e)
+
+The 117 authored schemas in `fixtures/annotations.json` are Copyright (C) 2026
+Qore Technologies, s.r.o. Three native APIs and pinned Xerces agree on 54 valid
+and 63 invalid schemas. Foreign `lang` attributes are accepted; documentation
+`source` values are validated without retrieval. Run `test/xml-annotations.qtest`
+and `python3 test/wsdl-interop/test_annotations.py -v`. See
+[evidence](native-annotations-evidence.md), [inventory](P5-19e-validation.json),
+[full audit](audits/P5-19e-native-annotations.md) and the open
+[WSDL counterpart](p5-wsdl-annotation-finding.md). Existing corpus results are
+unchanged in both decoding modes. Python CI integration remains P9 work.
