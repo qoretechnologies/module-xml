@@ -262,6 +262,13 @@ clean Valgrinds. Both decoding-mode corpus reports are unchanged; see
 [evidence](native-notations-evidence.md). WSDL NOTATION declaration storage and
 conversion remain next, followed by key/unique/keyref and typed accounting.
 
+P5-19b retains WSDL notation declaration identifiers in a shared typed registry,
+including normalized/empty identifiers, imports, chameleon includes, saved contexts
+and atomic rollback. All 167 Qore suites and eight supplements pass; the four
+corpus reports retain the parent's results. See [declaration evidence](notation-declarations-evidence.md).
+NOTATION value/type-use/provider/HTTP integration remains the next P5 increment,
+followed by key/unique/keyref and complete typed accounting.
+
 ## P6 — Complete WSDL component and binding interoperability
 
 **Depends on P2-P5.** This covers behavior the current W3C echo survey does not exercise.

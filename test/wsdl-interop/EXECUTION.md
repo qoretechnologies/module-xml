@@ -7998,3 +7998,28 @@ Next: implement the WSDL NOTATION registry, lossless value/provider conversion,
 saved metadata and both SOAP consumers. Then complete key/unique/keyref and typed
 accounting before P5 can close. P6–P9 remain required. Main Qore was read-only;
 unrelated `test/cmake/__pycache__/` remains outside the commit.
+
+
+## P5-19b — WSDL notation declaration registry (2026-09-13)
+
+Based on `b8b006a`, this increment retains notation expanded names and normalized
+public/system identifiers in `XsdNotationInfo` and a shared `XsdNotationRegistry`.
+Names, IDs, identifier presence, own attributes, optional direct annotation shape
+and duplicate declarations are checked. Imports/chameleons retain distinct identities;
+failed additions restore the table through existing contexts. Saved schemas and
+detached contexts retain the same metadata; malformed saved maps reject atomically.
+
+Acceptance: 167 Qore suites; 391 focused assertions; 54 independent schema cases;
+eight supplements including all four execution modes; clean native/WSDL docs and
+WSDL metadata generation. Both-version legacy/native corpus reports differ from
+P5-19a only in the expected WSDL source hash. Every applicable full-audit item passes.
+See [evidence](notation-declarations-evidence.md), [inventory](P5-19b-validation.json)
+and [audit](audits/P5-19b-notation-declarations.md). Artifacts:
+`/tmp/wsdl-p5-19b-notation-declarations/final/`. No native code changed, installation,
+push or main-Qore mutation. Unrelated `test/cmake/__pycache__/` is excluded.
+
+Next: NOTATION value conversion and distinct primitive identity, enum-derived type
+uses, remaining declaration annotation/document-ID checks, list/union/default/fixed
+semantics, saved providers and real SOAP consumers. An isolated value/base-provider
+prototype is under `/tmp/wsdl-p5-19c-notation-values/`; it is not part of this acceptance.
+Key/unique/keyref and complete typed accounting must follow before P6. P6-P9 remain open.

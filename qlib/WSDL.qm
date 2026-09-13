@@ -80,6 +80,9 @@ module WSDL {
     @section wsdlrelnotes WSDL Module Release Notes
 
     @subsection wsdl_0_5_8 WSDL v0.5.8
+    - Schema notation declarations retain expanded names and normalized public/system identifiers through
+      imports, chameleon includes, saved schemas and detached namespace contexts; invalid declaration
+      names, identifiers, attributes and duplicate names reject atomically
     - Empty default/fixed elements assess canonical declaration text under their actual type, keeping
       declaration namespaces separate from instance attributes and preserving original constraint metadata
     - With \c preserve_types=True, XsdDefaultValue retains an explicitly present empty element and its
@@ -28972,6 +28975,127 @@ public class XsdGlobalElementRegistry inherits Serializable {
     }
 }
 
+#! Expanded identity and identifiers of a schema notation declaration
+/** Identifier strings use XSD whitespace collapse. An empty identifier is distinct from an absent one.
+    @since %WSDL 0.5.8
+*/
+public hashdecl XsdNotationInfo {
+    #! Namespace URI, or the empty string for no namespace
+    string namespace_uri;
+    #! Normalized NCName
+    string local_name;
+    #! Public identifier, if present
+    *string public_id;
+    #! System identifier, if present
+    *string system_id;
+}
+
+class XsdNotationDeclarationHelper {
+    static hash<XsdNotationInfo> normalize(auto input, string error) {
+        if (input.typeCode() != NT_HASH || input.namespace_uri.typeCode() != NT_STRING
+                || input.local_name.typeCode() != NT_STRING) {
+            throw error, "a notation declaration requires namespace URI and local name strings";
+        }
+        string name = XsdSimpleType::normalizeWhiteSpace(input.local_name, "collapse");
+        if (!Namespaces::isNCName(name)) {
+            throw error, sprintf("invalid notation declaration name %Y", name);
+        }
+        if (input.namespace_uri =~ /[^\x{9}\x{A}\x{D}\x{20}-\x{D7FF}\x{E000}-\x{FFFD}\x{10000}-\x{10FFFF}]/) {
+            throw error, "a notation namespace URI must contain XML 1.0 characters";
+        }
+        if (!exists input.public_id && !exists input.system_id) {
+            throw error, "a notation declaration requires a public or system identifier";
+        }
+        hash<XsdNotationInfo> result = <XsdNotationInfo>{"namespace_uri": input.namespace_uri,
+            "local_name": name, "public_id": NOTHING, "system_id": NOTHING};
+        foreach string key in ("public_id", "system_id") {
+            if (exists input{key}) {
+                if (input{key}.typeCode() != NT_STRING
+                        || input{key} =~ /[^\x{9}\x{A}\x{D}\x{20}-\x{D7FF}\x{E000}-\x{FFFD}\x{10000}-\x{10FFFF}]/) {
+                    throw error, sprintf("notation %s requires XML character text", key);
+                }
+                result{key} = XsdSimpleType::normalizeWhiteSpace(input{key}, "collapse");
+            }
+        }
+        return result;
+    }
+
+    static attributes(XmlReader reader) {
+        hash<auto> values();
+        if (reader.moveToFirstAttribute()) {
+            on_exit reader.moveToElement();
+            do {
+                string uri = reader.namespaceUri() ?? "";
+                string local = reader.localName();
+                if (uri && uri != XSD_NS) {
+                    continue;
+                }
+                if (uri || (local != "name" && local != "id" && local != "public" && local != "system")) {
+                    throw WSDL_ERROR, sprintf("unexpected notation attribute {%s}%s", uri, local);
+                }
+                values{local} = reader.value();
+            } while (reader.moveToNextAttribute());
+        }
+        hash<XsdNotationInfo> checked = normalize({"namespace_uri": "", "local_name": values.name,
+            "public_id": values.public, "system_id": values.system}, WSDL_ERROR);
+        if (exists values.id) {
+            string id = XsdSimpleType::normalizeWhiteSpace(values.id, "collapse");
+            if (!Namespaces::isNCName(id)) {
+                throw WSDL_ERROR, sprintf("invalid notation declaration ID %Y", values.id);
+            }
+        }
+    }
+}
+
+#! Shared notation declarations retained by detached schema types and providers
+/** Construction publishes complete maps before concurrent reads, like the global element registry.
+    Returned metadata hashes use value semantics; changing a returned hash does not modify the registry.
+    @par Example
+    A saved catalog field can resolve \c "{urn:media}jpeg" without retaining its original schema object.
+    @since %WSDL 0.5.8
+*/
+public class XsdNotationRegistry inherits Serializable {
+    private {
+        hash<string, hash<XsdNotationInfo>> declarations();
+    }
+
+    private:internal deserializeMembers(hash<auto> members) {
+        declarations = checked(members.declarations, "DESERIALIZATION-ERROR");
+    }
+
+    private static hash<string, hash<XsdNotationInfo>> checked(auto input, string error) {
+        if (input.typeCode() != NT_HASH) {
+            throw error, "a notation registry requires a declaration map";
+        }
+        hash<string, hash<XsdNotationInfo>> result();
+        foreach string key in (keys input) {
+            hash<XsdNotationInfo> value = XsdNotationDeclarationHelper::normalize(input{key}, error);
+            if (key != type_qname(value.namespace_uri, value.local_name)) {
+                throw error, sprintf("notation registry key %Y does not match its declaration", key);
+            }
+            result{key} = value;
+        }
+        return result;
+    }
+
+    #! Atomically publishes completed notation declarations
+    /** @param declarations metadata indexed by expanded name
+        @throw WSDL-ERROR invalid declaration metadata or an inconsistent key
+        @note Call only during schema construction, before concurrent reads.
+    */
+    replace(hash<string, hash<XsdNotationInfo>> declarations) {
+        self.declarations = checked(declarations, WSDL_ERROR);
+    }
+
+    #! Resolves notation metadata by expanded name
+    /** @param identity expanded name, in \c "{namespace}local" notation
+        @return declaration metadata, or NOTHING when absent
+    */
+    *hash<XsdNotationInfo> get(string identity) {
+        return declarations{identity};
+    }
+}
+
 #! namespace container class
 public class Namespaces inherits Serializable {
     public {
@@ -29002,6 +29126,7 @@ public class Namespaces inherits Serializable {
     private {
         XsdGlobalAttributeRegistry global_attributes();
         XsdGlobalElementRegistry global_elements();
+        XsdNotationRegistry notations();
 
         #! maps output namespace prefixes to namespace URIs
         hash<string, string> ns = {
@@ -29075,6 +29200,7 @@ public class Namespaces inherits Serializable {
             nsr = nsc.nsr;
             global_attributes = nsc.global_attributes;
             global_elements = nsc.global_elements;
+            notations = nsc.notations;
         }
         if (!nsh.targetNamespace && targetNamespace) {
             chameleon_ns = targetNamespace;
@@ -29146,6 +29272,25 @@ public class Namespaces inherits Serializable {
     */
     hash<string, XsdAbstractType> getInstanceTypes() {
         return global_elements.getTypes();
+    }
+
+    #! Publishes completed notation declarations to all retained namespace contexts
+    /** @param declarations notation metadata indexed by expanded name
+        @throw WSDL-ERROR invalid declaration metadata
+        @note Schema construction must finish before concurrent reads.
+        @since %WSDL 0.5.8
+    */
+    setNotations(hash<string, hash<XsdNotationInfo>> declarations) {
+        notations.replace(declarations);
+    }
+
+    #! Resolves a schema notation independently of prefix spelling
+    /** @param identity expanded notation name
+        @return declaration metadata, or NOTHING when absent
+        @since %WSDL 0.5.8
+    */
+    *hash<XsdNotationInfo> getNotation(string identity) {
+        return notations.get(identity);
     }
 
     *string getDefaultNs() {
@@ -29965,6 +30110,10 @@ public class XsdSchema inherits WSDL::XsdBase {
         /** @since %WSDL 0.5.8 */
         transient hash<string, XsdAttribute> attributeMap();
 
+        #! Notation identifiers indexed by expanded namespace/local name
+        /** @since %WSDL 0.5.8 */
+        transient hash<string, hash<XsdNotationInfo>> notationMap();
+
         #! optional closure/call reference to try to resolve import declarations
         transient *code try_import;
 
@@ -30012,6 +30161,7 @@ public class XsdSchema inherits WSDL::XsdBase {
         groupMap = {};
         attrGroupMap = {};
         attributeMap = {};
+        notationMap = {};
         import_map = {};
         schema_sources = ();
         schema_dependencies = members.schema_dependencies ?? {};
@@ -30097,6 +30247,7 @@ public class XsdSchema inherits WSDL::XsdBase {
         hash<string, XsdGroup> old_groups = groupMap;
         hash<string, XsdAttributeGroup> old_attribute_groups = attrGroupMap;
         hash<string, XsdAttribute> old_attributes = attributeMap;
+        hash<string, hash<XsdNotationInfo>> old_notations = notationMap;
         hash<string, bool> old_imports = import_map;
         hash<string, string> old_dependencies = schema_dependencies;
         list<hash<XsdSourceInfo>> old_sources = schema_sources;
@@ -30111,6 +30262,8 @@ public class XsdSchema inherits WSDL::XsdBase {
             groupMap = old_groups;
             attrGroupMap = old_attribute_groups;
             attributeMap = old_attributes;
+            notationMap = old_notations;
+            nsc.setNotations(old_notations);
             nsc.setGlobalAttributes(old_attributes);
             nsc.setGlobalElements(old_elements, old_types);
             import_map = old_imports;
@@ -30373,6 +30526,8 @@ public class XsdSchema inherits WSDL::XsdBase {
         XmlReader reader(xml);
         XsdFacetGrammarHelper facet_grammar();
         int schema_depth = -1;
+        int notation_depth = -1;
+        bool notation_annotation = False;
         bool declared = False;
         bool definitions = False;
         bool types = False;
@@ -30386,6 +30541,9 @@ public class XsdSchema inherits WSDL::XsdBase {
                 facet_grammar.consume(reader);
             }
             if (kind == XML_NODE_TYPE_END_ELEMENT) {
+                if (depth == notation_depth) {
+                    notation_depth = -1;
+                }
                 if (depth == schema_depth) {
                     schema_depth = -1;
                 }
@@ -30418,9 +30576,19 @@ public class XsdSchema inherits WSDL::XsdBase {
                     }
                 } else if (declarations{local}) {
                     declared = True;
+                    if (local == "notation") {
+                        XsdNotationDeclarationHelper::attributes(reader);
+                        notation_depth = reader.isEmptyElement() ? -1 : depth;
+                        notation_annotation = False;
+                    }
                 } else if (local != "annotation") {
                     throw WSDL_ERROR, sprintf("schema grammar: unexpected child {%s}%s", uri, local);
                 }
+            } else if (notation_depth >= 0 && depth == notation_depth + 1) {
+                if (uri != XSD_NS || local != "annotation" || notation_annotation) {
+                    throw WSDL_ERROR, "notation content permits only one optional XSD annotation";
+                }
+                notation_annotation = True;
             }
         }
     }
@@ -30941,6 +31109,17 @@ public class XsdSchema inherits WSDL::XsdBase {
             }
 
             *string tns_uri = nsc.getTargetNamespaceUri();
+            foreach hash<auto> declaration in (schema.notation) {
+                hash<auto> attributes = declaration."^attributes^";
+                hash<XsdNotationInfo> notation = XsdNotationDeclarationHelper::normalize({
+                    "namespace_uri": tns_uri ?? "", "local_name": attributes.name,
+                    "public_id": attributes.public, "system_id": attributes.system}, WSDL_ERROR);
+                string key = type_qname(notation.namespace_uri, notation.local_name);
+                if (notationMap.hasKey(key)) {
+                    throw WSDL_ERROR, sprintf("notation %Y declared twice", key);
+                }
+                notationMap{key} = notation;
+            }
             if (schema.hasKey("attribute") && !schema.attribute) {
                 throw WSDL_ERROR, "global attribute declaration requires a name";
             }
@@ -31027,6 +31206,7 @@ public class XsdSchema inherits WSDL::XsdBase {
             return;
         }
         # Resolve only after every document has contributed its declarations, allowing dependency cycles.
+        nsc.setNotations(notationMap);
         list<XsdElement> global_declarations = resolveElementDeclarations();
         map resolveType($1), unresolved.getList();
         unresolved.clearResolved();

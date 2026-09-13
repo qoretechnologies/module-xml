@@ -1843,3 +1843,24 @@ canonical-declaration allocation failures tested separately. See
 [design](../../design/native-calendar-constraints.md) and [inventory](P5-18h-validation.json).
 The preceding native calendar finding is resolved; default PSVI and the remaining
 P5–P9 requirements remain active.
+
+## WSDL notation declaration metadata (P5-19b)
+
+`test/wsdl-notation-declarations.qtest` checks notation identifier storage through
+schema composition, failed additions, saved schemas and detached namespace contexts.
+`XsdNotationInfo` keeps expanded names and public/system identifiers, including the
+distinction between absent and empty identifiers. Lookup uses `"{namespace}name"`,
+including `"{}name"` for no namespace. See the [API design](../../design/wsdl-notation-declarations.md).
+
+```sh
+qore -b --enable-debug test/wsdl-notation-declarations.qtest
+python3 -B test/wsdl-interop/test_notation_declarations.py -v
+```
+
+The executable Python suite generates 54 independent schema cases and compares
+native/WSDL rejection categories, six metadata reconstruction paths and pinned
+Xerces 2.12.2. The Qore suite adds 391 assertions for imports/includes, duplicates,
+rollback, cancellation, concurrent copies and both inline SOAP binding descriptions.
+All 167 regression suites and eight supplements pass. Corpus results remain
+unchanged in both decoding modes; see [acceptance evidence](notation-declarations-evidence.md).
+NOTATION value conversion and its provider/HTTP integration remain the next P5 work.

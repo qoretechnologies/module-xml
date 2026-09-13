@@ -4,9 +4,9 @@ Copyright (C) 2026 Qore Technologies, s.r.o.
 
 During P5-18j, inspection of `BuiltinTypes`, `XsdBaseType::deserializeValue()` and
 the native element-default fixture identified a separate WSDL gap. NOTATION is
-advertised as a builtin, but the WSDL value converter has no NOTATION dispatch and
-the schema model does not yet maintain the notation declarations needed to
-validate expanded-name values. Native XML validation already covers these
+advertised as a builtin. At the finding revision, the WSDL value converter had no
+NOTATION dispatch and the schema model discarded the notation declarations needed
+to validate expanded-name values. Native XML validation already covers these
 declarations and their default namespace context in P5-18i.
 
 Constructing an `XsdSchema` from the committed `notation/default` fixture with
@@ -39,3 +39,11 @@ enumeration-derived schema uses and allocation-error handling. The native
 64-schema/231-document matrix and provider probe now cover them; see
 [native evidence](native-notations-evidence.md). The WSDL conversion requirements
 above remain open and are the next increment.
+
+P5-19b completes WSDL declaration identifier storage, normalized-name/identifier
+checks, duplicate detection, shared namespace registries, schema reconstruction and
+failed-addition rollback; see [declaration evidence](notation-declarations-evidence.md).
+The remaining required increment includes NOTATION value identity and conversion,
+enumeration-derived component uses, remaining annotation/document-ID grammar checks,
+list/union/default/fixed values, saved provider metadata and both SOAP HTTP directions.
+Declaration storage does not count any previously failing NOTATION conversion as a pass.

@@ -1,0 +1,278 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires xml
+%requires ../qlib/WSDL.qm
+%exec-class NotationDeclarationsTest
+
+class NotationDeclarationsTest inherits QUnit::Test {
+    constructor() : Test("XSD notation declaration registries", "1.0") {
+        addTestCase("Identifiers and expanded names survive saved schemas and namespace contexts", \identifiers());
+        addTestCase("Malformed declarations reject with schema errors", \invalid());
+        addTestCase("Duplicate expanded names reject without colliding with other symbol spaces", \duplicates());
+        addTestCase("Imports and chameleon includes retain independent notation identities", \dependencies());
+        addTestCase("Failed additions restore shared registries and dependency marks", \rollback());
+        addTestCase("Saved registries reject corrupt keys and metadata atomically", \metadata());
+        addTestCase("Both WSDL SOAP bindings retain inline notation declarations", \services());
+        addTestCase("Large registries preserve their first, middle and last declarations", \large());
+        addTestCase("Cancellation propagates and the same addition can be retried", \cancellation());
+        addTestCase("Concurrent reconstructed schemas keep independent declaration maps", \concurrency());
+        set_return_value(main());
+    }
+
+    private static string document(string content, string uri = "urn:notations") {
+        return '<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"'
+            + (uri ? ' targetNamespace="' + uri + '"' : "") + '>' + content + '</xs:schema>';
+    }
+
+    private static XsdSchema schema(string content, string uri = "urn:notations") {
+        return new XsdSchema(document(content, uri), {"async_only": True});
+    }
+
+    private identifiers() {
+        foreach hash<auto> item in (
+                {"attrs": 'public="urn:jpeg"', "public_id": "urn:jpeg"},
+                {"attrs": 'system="images/jpeg"', "system_id": "images/jpeg"},
+                {"attrs": 'public=""', "public_id": ""},
+                {"attrs": 'system=""', "system_id": ""},
+                {"attrs": 'public=" [bad] &#x9; public " system=" relative/&#xA;image "',
+                    "public_id": "[bad] public", "system_id": "relative/ image"}) {
+            foreach string uri in ("", "urn:notations", "urn:Other", "urn:a}b") {
+                string source = document('<xs:notation name=" &#x9;jpeg &#xA;" id=" id &#x9;" '
+                    + item.attrs + ' xmlns:app="urn:app" app:version="1"><xs:annotation>'
+                    + '<xs:documentation xml:lang="en">JPEG image <app:label>photo</app:label>'
+                    + '</xs:documentation></xs:annotation></xs:notation>', uri);
+                # Native schema compilation independently checks the declaration grammar.
+                if (!uri) {
+                    hash<auto> native = parse_xml_with_schema('<anything/>', replace(source, '</xs:schema>',
+                    '<xs:element name="anything" type="xs:string"/></xs:schema>'));
+                }
+                XsdSchema original(source);
+                foreach XsdSchema current in (original, Serializable::deserialize(original.serialize())) {
+                    string key = sprintf("{%s}jpeg", uri);
+                    hash<XsdNotationInfo> expected = <XsdNotationInfo>{"namespace_uri": uri,
+                        "local_name": "jpeg", "public_id": item.public_id, "system_id": item.system_id};
+                    assertEq(expected, current.nsc.getNotation(key));
+                    Namespaces copy({}, current.nsc);
+                    foreach Namespaces registry_context in (copy, Serializable::deserialize(copy.serialize())) {
+                        assertEq(expected, registry_context.getNotation(key));
+                        assertNothing(registry_context.getNotation(sprintf("{%s}missing", uri)));
+                        hash<XsdNotationInfo> changed = registry_context.getNotation(key);
+                        changed.public_id = "changed";
+                        assertEq(expected, registry_context.getNotation(key));
+                    }
+                }
+            }
+        }
+    }
+
+    private invalid() {
+        foreach string declaration in (
+                '<xs:notation/>', '<xs:notation name="jpeg"/>',
+                '<xs:notation name="" public="p"/>', '<xs:notation name="a:b" public="p"/>',
+                '<xs:notation name="0name" public="p"/>', '<xs:notation name="two names" public="p"/>',
+                '<xs:notation name="jpeg" public="p" id="a:b"/>',
+                '<xs:notation name="jpeg" public="p" id=""/>',
+                '<xs:notation name="jpeg" public="p" unknown="x"/>',
+                '<xs:notation name="jpeg" public="p" xs:unknown="x"/>',
+                '<xs:notation name="jpeg" xs:public="p"/>',
+                '<xs:notation name="jpeg" xmlns:a="urn:a" a:public="p"/>',
+                '<xs:notation name="jpeg" public="p"><xs:element/></xs:notation>',
+                '<xs:notation name="jpeg" public="p"><annotation/></xs:notation>',
+                '<xs:notation name="jpeg" public="p"><xs:annotation/><xs:annotation/></xs:notation>',
+                '<xs:notation name="jpeg" public="p">text</xs:notation>',
+                '<xs:notation name="jpeg" public="p"><![CDATA[text]]></xs:notation>') {
+            assertThrows("WSDL-ERROR", \schema(), (declaration,));
+            assertThrows("XSD-SYNTAX-ERROR", \parse_xml_with_schema(),
+                ("<anything/>", document(declaration)));
+        }
+    }
+
+    private duplicates() {
+        XsdSchema original = schema('<xs:notation name="jpeg" public="p"/>'
+            + '<xs:element name="jpeg" type="xs:string"/><xs:attribute name="jpeg" type="xs:string"/>'
+            + '<xs:simpleType name="jpeg"><xs:restriction base="xs:string"/></xs:simpleType>');
+        assertEq("p", original.nsc.getNotation("{urn:notations}jpeg").public_id);
+        foreach string name in ("jpeg", " jpeg &#x9;") {
+            assertThrows("WSDL-ERROR", \original.addSchemaString(),
+                (document('<xs:notation name="' + name + '" system="p"/>'),));
+        }
+        original.addSchemaString(document('<xs:notation name="jpeg" system="other"/>', "urn:other"));
+        assertEq("other", original.nsc.getNotation("{urn:other}jpeg").system_id);
+        assertEq("p", original.nsc.getNotation("{urn:notations}jpeg").public_id);
+    }
+
+    private dependencies() {
+        string common = document('<xs:notation name="jpeg" public="shared"/>', "");
+        string imported = document('<xs:notation name="jpeg" public="imported"/>', "urn:imported");
+        string parent = document('<xs:import namespace="urn:imported" schemaLocation="imported.xsd"/>'
+            + '<xs:include schemaLocation="common.xsd"/><xs:include schemaLocation="common.xsd"/>');
+        XsdSchema original(parent, {"async_only": True, "def_path": "https://example.invalid/notations/",
+            "xsd_cache": {"https://example.invalid/notations/common.xsd": common,
+                "https://example.invalid/notations/imported.xsd": imported}});
+        original.addSchemaString(replace(parent, 'targetNamespace="urn:notations"', 'targetNamespace="urn:second"'));
+        original.addSchemaString(document('<xs:import namespace="urn:imported" schemaLocation="imported.xsd"/>', ""));
+        foreach XsdSchema current in (original, Serializable::deserialize(original.serialize())) {
+            assertEq("shared", current.nsc.getNotation("{urn:notations}jpeg").public_id);
+            assertEq("shared", current.nsc.getNotation("{urn:second}jpeg").public_id);
+            assertEq("imported", current.nsc.getNotation("{urn:imported}jpeg").public_id);
+            assertNothing(current.nsc.getNotation("{}jpeg"));
+        }
+    }
+
+    private rollback() {
+        foreach XsdSchema current in (schema('<xs:notation name="base" public="base"/>'),
+                Serializable::deserialize(schema('<xs:notation name="base" public="base"/>').serialize())) {
+            Namespaces retained({}, current.nsc);
+            string declaration = '<xs:notation name="new" public="new"/>';
+            assertThrows("WSDL-ERROR", \current.addSchemaString(),
+                (document(declaration + '<xs:element name="broken" type="xs:noSuchType"/>'),));
+            assertNothing(current.nsc.getNotation("{urn:notations}new"));
+            assertNothing(retained.getNotation("{urn:notations}new"));
+            assertEq("base", retained.getNotation("{urn:notations}base").public_id);
+            current.addSchemaString(document(declaration));
+            assertEq("new", retained.getNotation("{urn:notations}new").public_id);
+            assertEq("new", Serializable::deserialize(current.serialize()).nsc.getNotation("{urn:notations}new").public_id);
+        }
+        string included = document('<xs:notation name="included" public="cached"/>', "");
+        XsdSchema original(document('<xs:notation name="base" public="base"/>'), {"async_only": True,
+            "def_path": "https://example.invalid/notations/",
+            "xsd_cache": {"https://example.invalid/notations/included.xsd": included}});
+        string import_source = document('<xs:include schemaLocation="included.xsd"/>');
+        string bad = replace(import_source, '</xs:schema>',
+            '<xs:element name="broken" type="xs:noSuchType"/></xs:schema>');
+        assertThrows("WSDL-ERROR", \original.addSchemaString(), (bad,));
+        assertNothing(original.nsc.getNotation("{urn:notations}included"));
+        original.addSchemaString(import_source);
+        assertEq("cached", original.nsc.getNotation("{urn:notations}included").public_id);
+    }
+
+    private metadata() {
+        XsdNotationRegistry original();
+        hash<XsdNotationInfo> valid = <XsdNotationInfo>{"namespace_uri": "urn:notations", "local_name": "jpeg",
+            "public_id": "", "system_id": NOTHING};
+        original.replace({"{urn:notations}jpeg": valid});
+        assertEq(valid, Serializable::deserialize(original.serialize()).get("{urn:notations}jpeg"));
+        foreach auto bad in (NOTHING, (), "bad", {"wrong-key": valid},
+                {"{urn:notations}jpeg": "bad"},
+                {"{urn:notations}jpeg": {"namespace_uri": "urn:notations", "local_name": "jpeg"}},
+                {"{urn:notations}jpeg": {"namespace_uri": "urn:notations", "local_name": "jpeg", "public_id": 3}}) {
+            hash<SerializationInfo> data = original.serializeToData();
+            data._index{"0"}._class_data{"WSDL::XsdNotationRegistry"}.declarations = bad;
+            assertThrows("DESERIALIZATION-ERROR", \Serializable::deserialize(), (data,));
+            assertEq(valid, original.get("{urn:notations}jpeg"));
+        }
+        assertThrows("WSDL-ERROR", \original.replace(), ({"wrong-key": valid},));
+        assertEq(valid, original.get("{urn:notations}jpeg"));
+    }
+
+    private services() {
+        foreach string version in ("1.1", "1.2") {
+            string binding = version == "1.1" ? "http://schemas.xmlsoap.org/wsdl/soap/"
+                : "http://schemas.xmlsoap.org/wsdl/soap12/";
+            string source = '<definitions xmlns="http://schemas.xmlsoap.org/wsdl/" xmlns:t="urn:notations"'
+                + ' xmlns:s="' + binding + '" targetNamespace="urn:notations"><types>'
+                + document('<xs:notation name="jpeg" public="image/jpeg"/>'
+                    + '<xs:element name="value" type="xs:string"/>')
+                + '</types><message name="Value"><part name="body" element="t:value"/></message>'
+                + '<portType name="Port"><operation name="echo"><input message="t:Value"/>'
+                + '<output message="t:Value"/></operation></portType><binding name="Binding" type="t:Port">'
+                + '<s:binding style="document" transport="http://schemas.xmlsoap.org/soap/http"/>'
+                + '<operation name="echo"><s:operation soapAction="urn:echo"/><input><s:body use="literal"/>'
+                + '</input><output><s:body use="literal"/></output></operation></binding>'
+                + '<service name="Service"><port name="Port" binding="t:Binding">'
+                + '<s:address location="http://example.invalid/echo"/></port></service></definitions>';
+            WebService original(source);
+            foreach WebService current in (original, Serializable::deserialize(original.serialize())) {
+                assertEq("image/jpeg", current.nsc.getNotation("{urn:notations}jpeg").public_id);
+                assertEq("echo", current.listOperations()[0].operation.name);
+            }
+        }
+    }
+
+    private large() {
+        list<string> declarations();
+        for (int i = 0; i < 1024; ++i) {
+            declarations += sprintf('<xs:notation name="image%d" public="format %d"/>', i, i);
+        }
+        XsdSchema original = schema(declarations.join(""));
+        foreach XsdSchema current in (original, Serializable::deserialize(original.serialize())) {
+            foreach int i in (0, 511, 1023) {
+                assertEq(sprintf("format %d", i), current.nsc.getNotation(sprintf("{urn:notations}image%d", i)).public_id);
+            }
+        }
+    }
+
+    private cancellation() {
+        XsdSchema original = schema('<xs:notation name="base" public="base"/>');
+        string addition = document('<xs:notation name="new" public="new"/>');
+        SandboxManager manager();
+        on_exit manager.clearInterrupt();
+        Program program(PO_NEW_STYLE | PO_STRICT_ARGS | PO_REQUIRE_TYPES);
+        program.setSandboxManager(manager);
+        program.parse("%modern\n%requires ../qlib/WSDL.qm\n"
+            "sub addNotation(XsdSchema schema, string source, SandboxManager manager, bool cancel) {\n"
+            "    if (cancel) { manager.requestInterrupt(); }\n"
+            "    schema.addSchemaString(source);\n"
+            "}\n", get_script_dir() + "/wsdl-notation-interrupt.qr");
+        *hash<ExceptionInfo> error;
+        try {
+            program.callFunction("addNotation", original, addition, manager, True);
+        } catch (hash<ExceptionInfo> ex) {
+            error = ex;
+        }
+        manager.clearInterrupt();
+        assertEq("PROGRAM-INTERRUPTED", error.err);
+        assertNothing(original.nsc.getNotation("{urn:notations}new"));
+        program.callFunction("addNotation", original, addition, manager, False);
+        assertEq("new", original.nsc.getNotation("{urn:notations}new").public_id);
+    }
+
+    private concurrency() {
+        XsdSchema original = schema('<xs:notation name="base" public="base"/>');
+        Qore::Thread::Queue ready();
+        Qore::Thread::Queue start();
+        Qore::Thread::Queue results();
+        Qore::Thread::Counter running();
+        on_exit {
+            for (int i = 0; i < 4; ++i) {
+                start.push(True);
+            }
+            assertEq(0, running.waitForZero(30s));
+        }
+        for (int i = 0; i < 4; ++i) {
+            running.inc();
+            background sub(int index) {
+                on_exit running.dec();
+                try {
+                    XsdSchema current = Serializable::deserialize(original.serialize());
+                    ready.push(True);
+                    start.get(30s);
+                    current.addSchemaString(document(sprintf('<xs:notation name="own" public="%d"/>', index)));
+                    results.push((index, current.nsc.getNotation("{urn:notations}own").public_id,
+                        current.nsc.getNotation("{urn:notations}base").public_id));
+                } catch (hash<ExceptionInfo> ex) {
+                    results.push({"error": ex});
+                }
+            }(i);
+        }
+        for (int i = 0; i < 4; ++i) {
+            ready.get(30s);
+        }
+        for (int i = 0; i < 4; ++i) {
+            start.push(True);
+        }
+        hash<string, bool> seen();
+        for (int i = 0; i < 4; ++i) {
+            auto result = results.get(30s);
+            assertEq(NT_LIST, result.typeCode());
+            assertEq(string(result[0]), result[1]);
+            assertEq("base", result[2]);
+            seen{result[1]} = True;
+        }
+        assertEq(4, seen.size());
+        assertNothing(original.nsc.getNotation("{urn:notations}own"));
+    }
+}
