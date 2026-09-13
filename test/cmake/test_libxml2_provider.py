@@ -87,12 +87,14 @@ if(TARGET LibXml2)
     endforeach()
     get_target_property(native_includes LibXml2 INCLUDE_DIRECTORIES)
     get_target_property(native_options LibXml2 COMPILE_OPTIONS)
-    foreach(part attribution-schema-allocation counter-schema-allocation counter-execution edc-schema-allocation wildcard-id-allocation wildcard-type-allocation character-content value-allocation)
+    foreach(part attribution-schema-allocation counter-schema-allocation counter-execution edc-schema-allocation wildcard-id-allocation wildcard-type-allocation character-content value-allocation id-binding-allocation)
         string(REPLACE "-" "_" suffix "${{part}}")
         if(part STREQUAL "wildcard-id-allocation")
             add_executable(${{part}} "{REPO}/test/cmake/libxml2_wildcard_id_allocation.c")
         elseif(part STREQUAL "wildcard-type-allocation")
             add_executable(${{part}} "{REPO}/test/cmake/libxml2_wildcard_type_allocation.c")
+        elseif(part STREQUAL "id-binding-allocation")
+            add_executable(${{part}} "{REPO}/test/cmake/libxml2_id_binding_allocation.c")
         elseif(part STREQUAL "character-content")
             add_executable(${{part}} "{REPO}/test/cmake/libxml2_character_content.c")
         elseif(part STREQUAL "value-allocation")
@@ -164,6 +166,8 @@ include("{REPO}/cmake/QoreXmlLibXml2ValueAllocationFix.cmake")
 qore_xml_fix_libxml2_value_allocation("{cls.source}" "${{CMAKE_CURRENT_BINARY_DIR}}/libxml")
 include("{REPO}/cmake/QoreXmlLibXml2ParticleLayoutFix.cmake")
 qore_xml_fix_libxml2_particle_layout("{cls.source}" "${{CMAKE_CURRENT_BINARY_DIR}}/libxml")
+include("{REPO}/cmake/QoreXmlLibXml2IdBindingFix.cmake")
+qore_xml_fix_libxml2_id_bindings("{cls.source}" "${{CMAKE_CURRENT_BINARY_DIR}}/libxml")
 ''')
         cls.fixed = cls.root / "fixed/build-debug"
         cls.run_command(["cmake", "-S", fixed_project, "-B", cls.fixed, "-DCMAKE_BUILD_TYPE=Debug",
@@ -612,6 +616,11 @@ qore_xml_fix_libxml2_uris("{self.source}" "${{CMAKE_CURRENT_BINARY_DIR}}/libxml"
         self.assertIn("Native element consistency cleanup: PASS",
                       self.run_command([self.root / "bundled/edc-schema-allocation"]))
 
+    def test_id_binding_allocation_cleanup(self):
+        self.run_command(["cmake", "--build", self.root / "bundled", "--target", "id-binding-allocation", "-j4"])
+        self.assertIn("Native ID binding allocation: PASS",
+                      self.run_command([self.root / "bundled/id-binding-allocation"]))
+
     def test_value_allocation_cleanup(self):
         self.run_command(["cmake", "--build", self.root / "bundled", "--target", "value-allocation", "-j4"])
         self.assertIn("Native datatype allocation cleanup: PASS",
@@ -676,9 +685,42 @@ qore_xml_fix_libxml2_uris("{self.source}" "${{CMAKE_CURRENT_BINARY_DIR}}/libxml"
                        f"-DFETCHCONTENT_SOURCE_DIR_QORE_XML_LIBXML2={self.source}")
         self.assertEqual(stamps, [(p.stat().st_mtime_ns, hashlib.sha256(p.read_bytes()).hexdigest()) for p in paths])
 
+    def previous_id_binding_fixture(self):
+        """All previous fixes, before document ID/IDREF closure."""
+        fixed = (self.root / "fixed/source/CMakeLists.txt").read_text()
+        fixed = fixed.replace(f'include("{REPO}/cmake/QoreXmlLibXml2IdBindingFix.cmake")\n', "")
+        return fixed.replace(f'qore_xml_fix_libxml2_id_bindings("{self.source}" '
+                             '"${CMAKE_CURRENT_BINARY_DIR}/libxml")\n', "")
+
+    def test_id_binding_detection_and_idempotence(self):
+        import hashlib
+        project = self.root / "id-binding-broken/source"
+        project.mkdir(parents=True)
+        (project / "CMakeLists.txt").write_text(self.previous_id_binding_fixture())
+        build = self.root / "id-binding-broken/build-debug"
+        self.run_command(["cmake", "-S", project, "-B", build, "-DCMAKE_BUILD_TYPE=Debug",
+                          "-DBUILD_SHARED_LIBS=ON", "-DLIBXML2_WITH_PROGRAMS=OFF",
+                          "-DLIBXML2_WITH_TESTS=OFF", "-DLIBXML2_WITH_PYTHON=OFF"])
+        self.run_command(["cmake", "--build", build, "--target", "LibXml2", "-j4"])
+        libraries = list((build / "libxml").glob("libxml2.so")) + list((build / "libxml").glob("libxml2.dylib"))
+        self.assertEqual(1, len(libraries))
+        options = [f"-DLIBXML2_LIBRARY={libraries[0]}", f"-DLIBXML2_INCLUDE_DIR={self.fixed_include}",
+                   f"-DFETCHCONTENT_SOURCE_DIR_QORE_XML_LIBXML2={self.source}"]
+        output = self.configure("id-binding-broken-auto", "-DQORE_XML_LIBXML2_PROVIDER=AUTO", *options)
+        self.assertIn("using private static libxml2 2.15.4", output)
+        probe = (self.root / "id-binding-broken-auto/system-libxml2/namespace-probe.log").read_text()
+        self.assertIn("builtin_particles=PASS", probe)
+        self.assertIn("id_bindings=FAIL", probe)
+        self.configure("id-binding-broken-system", "-DQORE_XML_LIBXML2_PROVIDER=SYSTEM", *options, success=False)
+        path = self.root / "bundled/_deps/qore_xml_libxml2-build/qore-id-binding-fix/xmlschemas.c"
+        before = (path.stat().st_mtime_ns, hashlib.sha256(path.read_bytes()).hexdigest())
+        self.configure("bundled", "-DQORE_XML_LIBXML2_PROVIDER=BUNDLED",
+                       f"-DFETCHCONTENT_SOURCE_DIR_QORE_XML_LIBXML2={self.source}")
+        self.assertEqual(before, (path.stat().st_mtime_ns, hashlib.sha256(path.read_bytes()).hexdigest()))
+
     def previous_particle_layout_fixture(self):
         """Keep all previous corrections with the inconsistent builtin particle layout."""
-        fixed = (self.root / "fixed/source/CMakeLists.txt").read_text()
+        fixed = self.previous_id_binding_fixture()
         fixed = fixed.replace(f'include("{REPO}/cmake/QoreXmlLibXml2ParticleLayoutFix.cmake")\n', "")
         return fixed.replace(f'qore_xml_fix_libxml2_particle_layout("{self.source}" '
                              '"${CMAKE_CURRENT_BINARY_DIR}/libxml")\n', "")
@@ -689,7 +731,7 @@ qore_xml_fix_libxml2_uris("{self.source}" "${{CMAKE_CURRENT_BINARY_DIR}}/libxml"
         fixture = (self.root / "fixed/source/CMakeLists.txt").read_text()
         fixture += '''
 get_target_property(native_sources LibXml2 SOURCES)
-set(original "${CMAKE_CURRENT_BINARY_DIR}/libxml/qore-particle-layout-fix/xmlschemas.c")
+set(original "${CMAKE_CURRENT_BINARY_DIR}/libxml/qore-id-binding-fix/xmlschemas.c")
 file(READ "${original}" source)
 string(REPLACE [=[((particle->node == NULL) || !xmlStrEqual(particle->node->name, BAD_CAST "group")) &&]=]
                "" source "${source}")

@@ -7613,3 +7613,33 @@ Qore suites (250 cases / 2,686 reported assertions). All legacy corpus rows and
 case objects are unchanged. Type capture resolves all four dynamic-type corpus
 directions; the 16 invalid IDREF/IDREFS acceptances remain visible. The full audit
 is 15 Pass / 47 N/A / 0 Fail. No C/C++ or Qore changes, install or push.
+
+
+### P5-17a native document ID bindings (2026-09-13)
+
+Parent `6a41ffc`. The private libxml2 validator now collects selected computed
+ID/IDREF values and closes the validation-root table after traversal. Context-owned
+numeric owner identities support DOM, reader/SAX recycling and subtree validation.
+Union member trials cannot register premature IDs; defaults, list items, dynamic
+types and assessed wildcards participate. The implementation follows XSD 1.0
+owner semantics, including same-parent ID children and the root-ID edge case.
+Ten pinned Xerces disagreements are explicit normative tests.
+
+The full gate passed 147 Qore suites (1,389 cases / 68,197 reported assertions).
+Review restored the existing DOM reference marker; all 21 native suites then
+passed with AST/IR/JIT fixture matrices and zero Qore Valgrind errors/lost blocks.
+The provider suite passed 51 tests; after removing a deprecated API call from the
+new test helper, four affected provider/distribution tests and the strict probe
+compile passed without warnings. Standalone 78-case probe and 1,347-position
+allocation sweep have zero Valgrind errors and zero live blocks at exit.
+Doxygen passed without warnings. The full 62-check audit has 18 Pass, 44 N/A,
+0 Fail. A temporary quota interruption was resolved by retaining logs and removing
+superseded investigation builds; interrupted checks were rerun successfully.
+
+Every survey row and coverage case object remains unchanged in both modes from
+P5-16h. Native correctness is a prerequisite; WSDL's 16 invalid reference
+acceptances, empty-element defaults, remaining identity constraints and P6–P9
+remain required. See [evidence](native-id-bindings-evidence.md),
+[inventory](P5-17a-validation.json) and [audit](audits/P5-17a-native-id-bindings.md).
+No install, push or main-Qore mutation. Fetched module-xml origin with no incoming
+commit. Next: WSDL document identity processing.

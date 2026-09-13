@@ -1620,3 +1620,25 @@ providers, forward object references, cancellation and concurrent first use.
 See [the fixed-value contract](../../design/element-fixed-values.md) and
 [acceptance evidence](fixed-values-evidence.md). Empty-element default processing
 and the documented default/identity interaction remain separate P5 work.
+
+## Native document ID bindings (P5-17a)
+
+The native XML APIs enforce document ID/IDREF closure after selecting actual
+datatypes, including defaults, unions, lists, wildcards and dynamic types.
+`test_native_id_bindings.py` checks 21 schemas and 68 documents against pinned
+Xerces and records ten explicit disagreements with the XSD 1.0 owner/default
+rules. Independent agreement never replaces the normative native expectations.
+The configure probe also checks subtree isolation, nil and DOM type markers.
+
+```sh
+qore -b --enable-debug test/xml-id-bindings.qtest
+python3 test/wsdl-interop/test_native_id_bindings.py -v
+python3 test/cmake/test_libxml2_provider.py -v
+```
+
+Use the local Debug module and pinned runtime/validator setup above. See the
+[implemented design](../../design/native-id-bindings.md),
+[evidence](native-id-bindings-evidence.md), [inventory](P5-17a-validation.json)
+and [full audit](audits/P5-17a-native-id-bindings.md). This native prerequisite
+does not close WSDL identity processing: the 16 invalid reference acceptances
+remain visible in both corpus modes. Empty-element defaults and P6–P9 remain open.

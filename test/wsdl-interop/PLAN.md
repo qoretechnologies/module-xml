@@ -198,6 +198,11 @@ empty-element defaults and identity processing remain open. The approved API
 policy keeps legacy decoding as the default and uses explicit `preserve_types=True` for native type retention; both corpus modes
 must be reported separately, retaining legacy failures.
 
+P5-17a implements native document ID/IDREF bindings with selected computed values,
+validation-root owner identity, defaults, subtree isolation and checked cleanup.
+See [native ID evidence](native-id-bindings-evidence.md). WSDL identity processing
+remains required; its invalid reference acceptances are still reported.
+
 ## P6 — Complete WSDL component and binding interoperability
 
 **Depends on P2-P5.** This covers behavior the current W3C echo survey does not exercise.

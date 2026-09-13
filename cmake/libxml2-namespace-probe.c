@@ -7,6 +7,7 @@
 #include "libxml2-uri-probe.h"
 #include "libxml2-schema-uri-probe.h"
 #include "libxml2-entity-probe.h"
+#include "libxml2-id-binding-probe.h"
 #include "libxml2-occurs-probe.h"
 #include "libxml2-particle-identity-probe.h"
 #include "libxml2-particle-attribution-probe.h"
@@ -87,6 +88,11 @@ int main(void) {
         int builtin_particles = check_builtin_particles();
         result |= builtin_particles;
         printf("builtin_particles=%s\n", builtin_particles ? "FAIL" : "PASS");
+    }
+    {
+        int id_bindings = check_id_bindings();
+        result |= id_bindings;
+        printf("id_bindings=%s\n", id_bindings ? "FAIL" : "PASS");
     }
     xmlCleanupParser();
     return result;
