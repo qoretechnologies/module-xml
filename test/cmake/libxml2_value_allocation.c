@@ -79,11 +79,19 @@ static size_t check(xmlSchemaValType code, const char *lexical, int valid) {
                 assert(valid ? result == 0 : result > 0);
                 assert((output != NULL) == (valid && with_value));
             } else {
+                if (result != -1) {
+                    fprintf(stderr, "datatype %d lexical '%s' computed %d fault %zu/%zu returned %d\n",
+                        (int)code, lexical, with_value, fault, allocations, result);
+                }
                 assert(result == -1);
                 assert(output == NULL);
             }
             xmlSchemaFreeValue(output);
             xmlResetLastError();
+            if (live != baseline) {
+                fprintf(stderr, "datatype %d lexical '%s' computed %d fault %zu/%zu live %zu baseline %zu\n",
+                    (int)code, lexical, with_value, fault, allocations, live, baseline);
+            }
             assert(live == baseline);
         }
         count += allocations;
@@ -164,6 +172,26 @@ int main(void) {
     /* ID constraints cannot have a fixed declaration; exercise its shared
      * string-value ownership path through the public datatype API instead. */
     count += check(XML_SCHEMAS_ID, "part", 1);
+    count += check(XML_SCHEMAS_INT, " \t0017\r\n ", 1);
+    count += check(XML_SCHEMAS_INT, " \t17x\n ", 0);
+    count += check(XML_SCHEMAS_NORMSTRING, "part\tcode", 1);
+    count += check(XML_SCHEMAS_TOKEN, " \tpart  code\n ", 1);
+    count += check(XML_SCHEMAS_NCNAME, " \tpart\n ", 1);
+    count += check(XML_SCHEMAS_ANYURI, " \turn:part\n ", 1);
+    count += check(XML_SCHEMAS_HEXBINARY, "ab00FF", 1);
+    count += check(XML_SCHEMAS_HEXBINARY, "", 1);
+    count += check(XML_SCHEMAS_HEXBINARY, "0g", 0);
+    count += check(XML_SCHEMAS_HEXBINARY, "f", 0);
+    count += check(XML_SCHEMAS_BASE64BINARY, " Y W\tJ\nj\r ", 1);
+    count += check(XML_SCHEMAS_BASE64BINARY, "YQ==", 1);
+    count += check(XML_SCHEMAS_BASE64BINARY, "YWI=", 1);
+    count += check(XML_SCHEMAS_BASE64BINARY, "", 1);
+    count += check(XML_SCHEMAS_BASE64BINARY, "YW!Jj", 0);
+    count += check(XML_SCHEMAS_BASE64BINARY, "YQ==!", 0);
+    count += check(XML_SCHEMAS_BASE64BINARY, "YWJj\302\240", 0);
+    count += check(XML_SCHEMAS_BASE64BINARY, "YR==", 0);
+    count += check_computed("xs:hexBinary", "AB00FF", "ab00ff");
+    count += check_computed("xs:base64Binary", "YWJj", "Y W J j");
     count += check_computed("List", "17 0", "+0017 -0");
     count += check_computed("xs:anySimpleType", "part", "part");
     count += check_computed("xs:string", "part", "part");

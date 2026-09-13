@@ -762,6 +762,76 @@ qore_xml_fix_libxml2_uris("{self.source}" "${{CMAKE_CURRENT_BINARY_DIR}}/libxml"
                        f"-DFETCHCONTENT_SOURCE_DIR_QORE_XML_LIBXML2={self.source}")
         self.assertEqual(before, (path.stat().st_mtime_ns, hashlib.sha256(path.read_bytes()).hexdigest()))
 
+    def test_binary_defaults_detection(self):
+        project = self.root / "binary-defaults-broken/source"
+        project.mkdir(parents=True)
+        fixture = (self.root / "fixed/source/CMakeLists.txt").read_text()
+        fixture += '''
+get_target_property(native_sources LibXml2 SOURCES)
+set(original "${CMAKE_CURRENT_BINARY_DIR}/libxml/qore-numeric-defaults-fix/xmlschemas.c")
+file(READ "${original}" source)
+string(REPLACE [=[        case XML_SCHEMAS_HEXBINARY:
+        case XML_SCHEMAS_BASE64BINARY:
+        case XML_SCHEMAS_DECIMAL:]=]
+               [=[        case XML_SCHEMAS_DECIMAL:]=] source "${source}")
+set(replacement "${CMAKE_CURRENT_BINARY_DIR}/binary-defaults-broken.c")
+file(WRITE "${replacement}" "${source}")
+list(REMOVE_ITEM native_sources "${original}")
+list(APPEND native_sources "${replacement}")
+set_property(TARGET LibXml2 PROPERTY SOURCES "${native_sources}")
+'''
+        (project / "CMakeLists.txt").write_text(fixture)
+        build = self.root / "binary-defaults-broken/build-debug"
+        self.run_command(["cmake", "-S", project, "-B", build, "-DCMAKE_BUILD_TYPE=Debug",
+                          "-DBUILD_SHARED_LIBS=ON", "-DLIBXML2_WITH_PROGRAMS=OFF",
+                          "-DLIBXML2_WITH_TESTS=OFF", "-DLIBXML2_WITH_PYTHON=OFF"])
+        self.run_command(["cmake", "--build", build, "--target", "LibXml2", "-j4"])
+        libraries = list((build / "libxml").glob("libxml2.so")) + list((build / "libxml").glob("libxml2.dylib"))
+        self.assertEqual(1, len(libraries))
+        options = [f"-DLIBXML2_LIBRARY={libraries[0]}", f"-DLIBXML2_INCLUDE_DIR={self.fixed_include}",
+                   f"-DFETCHCONTENT_SOURCE_DIR_QORE_XML_LIBXML2={self.source}"]
+        output = self.configure("binary-defaults-broken-auto", "-DQORE_XML_LIBXML2_PROVIDER=AUTO", *options)
+        self.assertIn("using private static libxml2 2.15.4", output)
+        probe = (self.root / "binary-defaults-broken-auto/system-libxml2/namespace-probe.log").read_text()
+        self.assertIn("value_allocation=PASS", probe)
+        self.assertIn("id_bindings=PASS", probe)
+        self.assertIn("numeric_defaults=FAIL", probe)
+        self.configure("binary-defaults-broken-system", "-DQORE_XML_LIBXML2_PROVIDER=SYSTEM", *options, success=False)
+
+    def test_normalization_allocation_detection(self):
+        project = self.root / "normalization-allocation-broken/source"
+        project.mkdir(parents=True)
+        fixture = (self.root / "fixed/source/CMakeLists.txt").read_text()
+        fixture += '''
+get_target_property(native_sources LibXml2 SOURCES)
+set(original "${CMAKE_CURRENT_BINARY_DIR}/libxml/qore-particle-layout-fix/xmlschemastypes.c")
+file(READ "${original}" source)
+string(REPLACE [=[            if (ret < 0) {
+                goto error;
+            }]=] "" source "${source}")
+set(replacement "${CMAKE_CURRENT_BINARY_DIR}/normalization-allocation-broken.c")
+file(WRITE "${replacement}" "${source}")
+list(REMOVE_ITEM native_sources "${original}")
+list(APPEND native_sources "${replacement}")
+set_property(TARGET LibXml2 PROPERTY SOURCES "${native_sources}")
+'''
+        (project / "CMakeLists.txt").write_text(fixture)
+        build = self.root / "normalization-allocation-broken/build-debug"
+        self.run_command(["cmake", "-S", project, "-B", build, "-DCMAKE_BUILD_TYPE=Debug",
+                          "-DBUILD_SHARED_LIBS=ON", "-DLIBXML2_WITH_PROGRAMS=OFF",
+                          "-DLIBXML2_WITH_TESTS=OFF", "-DLIBXML2_WITH_PYTHON=OFF"])
+        self.run_command(["cmake", "--build", build, "--target", "LibXml2", "-j4"])
+        libraries = list((build / "libxml").glob("libxml2.so")) + list((build / "libxml").glob("libxml2.dylib"))
+        self.assertEqual(1, len(libraries))
+        options = [f"-DLIBXML2_LIBRARY={libraries[0]}", f"-DLIBXML2_INCLUDE_DIR={self.fixed_include}",
+                   f"-DFETCHCONTENT_SOURCE_DIR_QORE_XML_LIBXML2={self.source}"]
+        output = self.configure("normalization-allocation-broken-auto", "-DQORE_XML_LIBXML2_PROVIDER=AUTO", *options)
+        self.assertIn("using private static libxml2 2.15.4", output)
+        probe = (self.root / "normalization-allocation-broken-auto/system-libxml2/namespace-probe.log").read_text()
+        self.assertIn("value_allocation=FAIL", probe)
+        self.assertIn("id_bindings=PASS", probe)
+        self.configure("normalization-allocation-broken-system", "-DQORE_XML_LIBXML2_PROVIDER=SYSTEM", *options, success=False)
+
     def previous_particle_layout_fixture(self):
         """Keep all previous corrections with the inconsistent builtin particle layout."""
         fixed = self.previous_id_binding_fixture()

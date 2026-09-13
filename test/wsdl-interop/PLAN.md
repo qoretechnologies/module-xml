@@ -222,6 +222,12 @@ providers and both SOAP bindings. See [evidence](wsdl-canonical-constraints-evid
 Float/calendar/binary canonical declaration spellings, empty-element defaults,
 key/unique/keyref and complete typed-preservation accounting remain required.
 
+P5-18c extends native canonical declaration checks to binary values, enforces
+the XSD Base64 alphabet, and fixes binary/whitespace allocation-error propagation
+and normalized-string buffer ownership. See [native binary design](../../design/native-binary-constraints.md).
+The corresponding WSDL binary canonicalization remains the next increment;
+float/calendar canonical forms and instance-default PSVI remain open.
+
 ## P6 — Complete WSDL component and binding interoperability
 
 **Depends on P2-P5.** This covers behavior the current W3C echo survey does not exercise.

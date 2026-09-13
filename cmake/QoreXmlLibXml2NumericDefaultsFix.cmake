@@ -1,5 +1,5 @@
 # Copyright (C) 2026 Qore Technologies, s.r.o.
-# Assess canonical numeric/boolean constraints under XSD 1.0.
+# Assess canonical numeric/boolean/binary constraints under XSD 1.0.
 function(qore_xml_fix_libxml2_numeric_defaults source_dir binary_dir)
     get_target_property(_sources LibXml2 SOURCES)
     set(_input "")
@@ -21,7 +21,7 @@ function(qore_xml_fix_libxml2_numeric_defaults source_dir binary_dir)
         set(_path "${source_dir}/${_input}")
     endif()
     file(SHA256 "${_path}" _hash)
-    if(_hash STREQUAL "f70746a673acd9e5011d88372a2b4a895b7c8e7425645bdf8da09de8ab9f0b6b")
+    if(_hash STREQUAL "537c2cf44895f487c66c1fd2b07e76f87f408e264e75ce3cdb7a9f5ab0e6e11d")
         return()
     endif()
     if(NOT _hash STREQUAL "600f8d93bc1c8baf799e7de148e07ac3cda456b472d14b485498e20d8fd77583")
@@ -73,7 +73,7 @@ xmlSchemaParseCheckCOSValidDefault(]==]
         [==[	* Numeric and boolean members are checked in canonical form below.
 ]==] _source "${_source}")
     string(SHA256 _hash "${_source}")
-    if(NOT _hash STREQUAL "f70746a673acd9e5011d88372a2b4a895b7c8e7425645bdf8da09de8ab9f0b6b")
+    if(NOT _hash STREQUAL "537c2cf44895f487c66c1fd2b07e76f87f408e264e75ce3cdb7a9f5ab0e6e11d")
         message(FATAL_ERROR "Pinned libxml2 numeric defaults fix did not match")
     endif()
     file(MAKE_DIRECTORY "${binary_dir}/qore-numeric-defaults-fix")

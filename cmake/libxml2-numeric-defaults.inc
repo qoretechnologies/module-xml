@@ -1,12 +1,14 @@
 /* Copyright (C) 2026 Qore Technologies, s.r.o.
- * XSD 1.0 numeric/boolean constraint lexicals, including list/union members.
+ * XSD 1.0 numeric/boolean/binary constraint lexicals, including list/union members.
  * Keep the schema spelling of other atomic families: QName, in particular,
  * has no context-independent canonical lexical representation in XSD 1.0.
  */
 static int
-qoreXmlIsNumericDefault(xmlSchemaValPtr val)
+qoreXmlNeedsCanonicalDefault(xmlSchemaValPtr val)
 {
     switch (xmlSchemaGetValType(val)) {
+        case XML_SCHEMAS_HEXBINARY:
+        case XML_SCHEMAS_BASE64BINARY:
         case XML_SCHEMAS_DECIMAL:
         case XML_SCHEMAS_BOOLEAN:
         case XML_SCHEMAS_INTEGER:
@@ -28,7 +30,7 @@ qoreXmlIsNumericDefault(xmlSchemaValPtr val)
     }
 }
 
-/* A NULL result means that there is no numeric/boolean member to rewrite.
+/* A NULL result means that there is no numeric/boolean/binary member to rewrite.
  * All allocation failures leave the output NULL; schema/instance owners keep
  * their original constraint and computed value throughout this operation. */
 static int
@@ -41,7 +43,7 @@ qoreXmlNumericDefaultLexical(xmlSchemaValPtr val, const xmlChar *lexical,
     int numeric = 0, list, first = 1;
     *result = NULL;
     for (item = val; item != NULL; item = xmlSchemaValueGetNext(item)) {
-        numeric |= qoreXmlIsNumericDefault(item);
+        numeric |= qoreXmlNeedsCanonicalDefault(item);
     }
     if (!numeric) {
         return (0);
@@ -67,7 +69,7 @@ qoreXmlNumericDefaultLexical(xmlSchemaValPtr val, const xmlChar *lexical,
             text = lexical;
             length = strlen((const char *)text);
         }
-        if (qoreXmlIsNumericDefault(item)) {
+        if (qoreXmlNeedsCanonicalDefault(item)) {
             if (xmlSchemaGetCanonValue(item, &canonical) != 0 || canonical == NULL) {
                 xmlFree((void *)canonical);
                 xmlBufFree(buffer);

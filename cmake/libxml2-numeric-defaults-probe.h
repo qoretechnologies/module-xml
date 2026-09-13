@@ -3,13 +3,13 @@
  * Included after libxml2-qname-probe.h for schema diagnostics.
  */
 static int check_numeric_defaults(void) {
-    static const char *types[] = {"int", "boolean", "decimal"};
-    static const char *values[] = {"+017", "1", "017.00"};
-    static const char *patterns[] = {"\\+017", "1", "017\\.00"};
-    static const char *canonical[] = {"17", "true", "17\\.0"};
+    static const char *types[] = {"int", "boolean", "decimal", "hexBinary", "base64Binary"};
+    static const char *values[] = {"+017", "1", "017.00", "ab00ff", "Y W J j"};
+    static const char *patterns[] = {"\\+017", "1", "017\\.00", "ab00ff", "Y W J j"};
+    static const char *canonical[] = {"17", "true", "17\\.0", "AB00FF", "YWJj"};
     unsigned int kind, item, valid, attribute;
     for (kind = 0; kind < 2; ++kind) {
-        for (item = 0; item < 3; ++item) {
+        for (item = 0; item < sizeof(types) / sizeof(types[0]); ++item) {
             for (valid = 0; valid < 2; ++valid) {
                 for (attribute = 0; attribute < 2; ++attribute) {
                     char source[1024];

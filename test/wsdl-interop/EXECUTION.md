@@ -7728,3 +7728,29 @@ See [evidence](wsdl-canonical-constraints-evidence.md),
 [full audit](audits/P5-18b-wsdl-canonical-constraints.md): 15 Pass, 47 N/A, zero Fail.
 No C++ or main-Qore change, installation or push. Next: remaining canonical
 datatype families and empty-element defaults, then key/unique/keyref and P6–P9.
+
+## P5-18c — Native binary constraints and normalization ownership (2026-09-13)
+
+On `8cec041`, extended native canonical declaration assessment to hexadecimal
+and Base64 values, including selected list/union members. Fixed Base64's ignored
+non-alphabet characters, binary allocation-error classification, normalization
+failure propagation and repeated-normalization buffer ownership. Public libxml2
+normalization signatures and source XML remain unchanged.
+
+The 206 declaration and 23 lexical cases pass native conversion, DOM and reader
+checks with 570 assertions and agree with pinned Xerces. The final acceptance
+inventory records 153 Qore suites, 55 provider checks, 151 datatype and 2,688
+canonical allocation faults, clean native/direct-Qore Valgrind and affected docs.
+Both full corpus modes retain exact parent case/stage results. A CMake refactor's
+temporary hash-guard failure was corrected before the full provider rerun.
+
+See [evidence](native-binary-constraints-evidence.md),
+[inventory](P5-18c-validation.json) and
+[full audit](audits/P5-18c-native-binary-constraints.md). No installation, push or
+main-Qore change. The allocation root causes are documented in
+`/tmp/wsdl-p5-18c-binary/README.md` and handled in this XML increment.
+
+Next: WSDL binary canonical declarations. The prototype already passes its
+206-schema matrix and independently preserves 880 SOAP payloads. It remains
+outside this native commit. Other canonical families, instance-default PSVI,
+key/unique/keyref, complete typed preservation and P6–P9 remain required.

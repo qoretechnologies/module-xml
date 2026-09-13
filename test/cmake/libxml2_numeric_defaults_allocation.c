@@ -130,7 +130,7 @@ static size_t sweep(const char *definition, const char *lexical, const char *can
     type = xmlHashLookup(schema->typeDecl, BAD_CAST "Value");
     assert(type != NULL);
     /* Check the exact temporary lexical and preserve the original computed value.
-     * A NULL output explicitly means no numeric/boolean member needed rewriting. */
+     * A NULL output explicitly means no numeric/boolean/binary member needed rewriting. */
     {
         xmlSchemaValPtr value = NULL;
         xmlChar *text = NULL;
@@ -184,6 +184,21 @@ int main(void) {
     faults += sweep("<xs:simpleType name='Item'><xs:union memberTypes='xs:boolean xs:QName'/></xs:simpleType>"
         "<xs:simpleType name='Value'><xs:list itemType='Item'/></xs:simpleType>",
         "1 p:Part 0", "true p:Part false", 1);
+    faults += sweep("<xs:simpleType name='Value'><xs:restriction base='xs:hexBinary'/></xs:simpleType>",
+        "ab00ff", "AB00FF", 1);
+    faults += sweep("<xs:simpleType name='Value'><xs:restriction base='xs:base64Binary'/></xs:simpleType>",
+        "Y W J j", "YWJj", 1);
+    faults += sweep("<xs:simpleType name='Value'><xs:restriction base='xs:hexBinary'/></xs:simpleType>",
+        "", "", 1);
+    faults += sweep("<xs:simpleType name='Value'><xs:restriction base='xs:base64Binary'/></xs:simpleType>",
+        "", "", 1);
+    faults += sweep("<xs:simpleType name='Value'><xs:restriction base='xs:hexBinary'>"
+        "<xs:pattern value='ab00ff'/></xs:restriction></xs:simpleType>", "ab00ff", "AB00FF", 0);
+    faults += sweep("<xs:simpleType name='Value'><xs:restriction base='xs:base64Binary'>"
+        "<xs:pattern value='Y W J j'/></xs:restriction></xs:simpleType>", "Y W J j", "YWJj", 0);
+    faults += sweep("<xs:simpleType name='Item'><xs:union memberTypes='xs:hexBinary xs:QName'/></xs:simpleType>"
+        "<xs:simpleType name='Value'><xs:list itemType='Item'/></xs:simpleType>",
+        "ab00ff p:Part 00aa", "AB00FF p:Part 00AA", 1);
     {
         char lexical[2048] = "", canonical[2048] = "";
         unsigned int index;

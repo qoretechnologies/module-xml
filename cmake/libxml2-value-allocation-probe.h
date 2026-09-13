@@ -67,7 +67,8 @@ static int check_integer_allocation(void) {
 static int check_value_allocation(void) {
     static const xmlSchemaValType types[] = {
         XML_SCHEMAS_ANYSIMPLETYPE, XML_SCHEMAS_STRING, XML_SCHEMAS_NORMSTRING,
-        XML_SCHEMAS_TOKEN, XML_SCHEMAS_NCNAME, XML_SCHEMAS_ANYURI
+        XML_SCHEMAS_TOKEN, XML_SCHEMAS_NCNAME, XML_SCHEMAS_ANYURI,
+        XML_SCHEMAS_HEXBINARY, XML_SCHEMAS_BASE64BINARY
     };
     size_t index;
     if (check_integer_allocation()) {
@@ -86,7 +87,8 @@ static int check_value_allocation(void) {
             value_probe_attempts = 0;
             value_probe_fail_at = fault;
             value_probe_armed = 1;
-            result = xmlSchemaValPredefTypeNodeNoNorm(type, BAD_CAST "part", &value, NULL);
+            result = xmlSchemaValPredefTypeNodeNoNorm(type,
+                types[index] == XML_SCHEMAS_HEXBINARY ? BAD_CAST "abcd" : BAD_CAST "part", &value, NULL);
             value_probe_armed = 0;
             if (fault == 0) {
                 count = value_probe_attempts;
@@ -98,6 +100,40 @@ static int check_value_allocation(void) {
             if (failed) {
                 return 1;
             }
+        }
+    }
+    {
+        static const xmlSchemaValType normalized_types[] = {
+            XML_SCHEMAS_NORMSTRING, XML_SCHEMAS_TOKEN, XML_SCHEMAS_BASE64BINARY
+        };
+        for (index = 0; index < sizeof(normalized_types) / sizeof(normalized_types[0]); ++index) {
+            xmlSchemaTypePtr type = xmlSchemaGetBuiltInType(normalized_types[index]);
+            unsigned int count = 0, fault;
+            for (fault = 0; fault <= count; ++fault) {
+                int result;
+                value_probe_failures = 0;
+                value_probe_attempts = 0;
+                value_probe_fail_at = fault;
+                value_probe_armed = 1;
+                result = xmlSchemaValidatePredefinedType(type, BAD_CAST " Y\tW\nJj ", NULL);
+                value_probe_armed = 0;
+                if (fault == 0) {
+                    count = value_probe_attempts;
+                    if (result != 0) {
+                        return 1;
+                    }
+                } else if (value_probe_failures == 0 || result != -1) {
+                    return 1;
+                }
+            }
+        }
+    }
+    {
+        xmlSchemaTypePtr type = xmlSchemaGetBuiltInType(XML_SCHEMAS_BASE64BINARY);
+        if (xmlSchemaValidatePredefinedType(type, BAD_CAST "YW!Jj", NULL) <= 0 ||
+            xmlSchemaValidatePredefinedType(type, BAD_CAST "YQ==!", NULL) <= 0 ||
+            xmlSchemaValidatePredefinedType(type, BAD_CAST "Y W J j", NULL) != 0) {
+            return 1;
         }
     }
     return 0;

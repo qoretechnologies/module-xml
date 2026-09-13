@@ -1598,6 +1598,26 @@ values. It precedes the remaining WSDL instance-default work. See
 [design](../../design/native-numeric-defaults.md) and
 [the separate PSVI investigation](default-identity-investigation.md).
 
+## Native binary constraints (P5-18c)
+
+`xml-binary-constraints.qtest` checks 206 canonical declaration cases and 23
+binary lexical cases through conversion, DOM and streaming validation. The
+independent Python test reproduces both committed fixtures and checks them with
+pinned Xerces. Hexadecimal canonical forms use uppercase; Base64 canonical forms
+omit whitespace. Non-alphabet punctuation and non-XML whitespace are rejected.
+
+```sh
+QORE_MODULE_DIR=build-debug:qlib qore -b --enable-debug test/xml-binary-constraints.qtest
+python3 -B test/wsdl-interop/test_binary_constraints.py -v
+python3 -B test/cmake/test_libxml2_provider.py -v
+```
+
+Binary and whitespace normalization allocation failures retain their internal
+error status. The normalized-string path retains its owned buffer through
+cleanup. See [design](../../design/native-binary-constraints.md) and
+[acceptance evidence](native-binary-constraints-evidence.md). WSDL binary canonical
+checks, other canonical families and instance defaults remain P5 work.
+
 ## WSDL canonical numeric declarations (P5-18b)
 
 WSDL checks the same 396 declarations as the native compiler. Canonical validation
