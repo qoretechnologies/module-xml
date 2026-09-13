@@ -7872,3 +7872,31 @@ No main-Qore mutation, installation or push. Next is the independently root-caus
 reader paths. Exact fractional/year ownership must be resolved before canonical
 checks are enabled. This is a required fix, not a passing result or scope removal.
 Default PSVI, key/unique/keyref, typed accounting and all P6–P9 remain active.
+
+## P5-18h — Exact native calendar values and constraints (2026-09-13)
+
+P5-18g committed as `454486b`; no push. Installed Qore still matches verified
+`8c0c22c15`. Native calendars now own exact year/fraction strings throughout
+parsing, copying, normalization, comparison and formatting. Canonical dateTime,
+time and date declarations are assessed without losing the original value or
+namespace context. The 432 invalid acceptances recorded in P5-18g now reject.
+
+The expanded matrix also root-caused and fixed the independent reference's
+unknown-zone leap-second endpoints: each assumed offset must normalize its own
+leap value. Explicit reversed endpoint regressions pass; WSDL's existing handling
+was already correct. Historical external-validator findings remain unchanged.
+
+All 162 Qore suites, 16 supplements and 61 provider checks pass. The new native
+suite has 1,083 assertions and passes all four forced execution modes. Compiled
+WSDL and independent calendar consumers pass. Six Valgrind runs have zero errors
+and no lost memory, including 9,807 exact C records, 105 datatype allocation faults
+and 3,273 declaration faults with successful recovery. Both corpus modes equal
+every parent semantic record. The initial native strict-coverage command timed
+out during concurrent testing; its unchanged isolated rerun passed with the same
+60-second worker deadline. Both attempts remain recorded. Documentation is clean.
+
+See [evidence](native-calendar-constraints-evidence.md),
+[inventory](P5-18h-validation.json) and
+[full audit](audits/P5-18h-native-calendar.md): 19 Pass, 43 N/A, zero Fail.
+No main-Qore mutation, installation or push. Next: empty-element default assessment
+and PSVI, key/unique/keyref, remaining typed accounting, followed by P6–P9.

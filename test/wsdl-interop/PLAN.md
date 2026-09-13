@@ -237,8 +237,9 @@ P5-18f implements the corresponding WSDL canonical capture, preserving original
 IEEE values through saved schemas/providers and both SOAP bindings; see
 [evidence](wsdl-ieee-constraints-evidence.md). P5-18g implements exact WSDL calendar canonical forms; see
 [evidence](wsdl-calendar-constraints-evidence.md). The separately root-caused
-[native calendar counterpart](p5-native-calendar-constraints-finding.md) is next
-and remains required. Instance-default PSVI, remaining identity constraints
+[native calendar counterpart](p5-native-calendar-constraints-finding.md) is
+resolved by P5-18h with exact owned year/fraction components, independent
+reference checks and allocation recovery; see [evidence](native-calendar-constraints-evidence.md). Instance-default PSVI, remaining identity constraints
 and typed accounting stay open.
 
 ## P6 — Complete WSDL component and binding interoperability

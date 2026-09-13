@@ -49,3 +49,35 @@ are in `/tmp/wsdl-p5-16d-values/pending`, with the complete pre-split snapshot i
 `/tmp/wsdl-p5-16d-values/before-native-split`. Restore them by integrating only
 the remaining canonical-default changes on top of P5-16d; do not overwrite the
 completed fixed, time, unsigned or allocation corrections with the older snapshot.
+
+## Reduced implementation and decision boundary (2026-09-13)
+
+After P5-18h's exact calendar correction, the unchanged-source reduction under
+`/tmp/wsdl-p5-18i-default-assessment/` covers 40 valid schemas and 200 documents.
+Each native conversion/DOM/reader path has 54 invalid acceptances and 54 valid
+rejections; WSDL rejects 66 valid documents. The native root cause is the explicit
+noncanonical shortcut in `xmlSchemaValidatorPopElem`; WSDL sends empty content
+to the datatype without applying its element constraint.
+
+The isolated canonical-assessment prototype corrects every native verdict
+(600 stage records), with unchanged DOM text. It is not integrated or accepted
+as PSVI behavior. Seven additional identity documents reproduce the distinction
+on both the current provider and prototype, across all three native APIs, with
+pinned Xerces results recorded separately in `identity-comparison.json`.
+
+For an empty boolean-or-string element with default `1` and actual `xs:string`:
+
+| Interpretation | Resulting value | Duplicate explicit string `1` | Duplicate explicit string `true` | Duplicate explicit boolean `true` |
+| --- | --- | --- | --- | --- |
+| Original spelling under actual type (current native) | string `1` | yes | no | no |
+| Canonical assessment under actual type (prototype) | string `true` | no | yes | no |
+| Declared constraint value (Xerces) | boolean true | no | no | yes |
+
+The proposed interpretation is the canonical value assessed under the actual
+type, retaining the original spelling, declaration namespaces and original
+constraint value separately. This is coherent with the unchanged XSD 1.0
+validity clauses and avoids assigning an invalid lexical `1` to an actual QName.
+The missing erratum property prevents claiming that this choice follows an
+unambiguous normative PSVI rule. It requires an explicit decision before the
+prototype is integrated; no validator-specific fallback or scope reduction is
+proposed. Default PSVI, identity constraints and full P5 acceptance remain open.

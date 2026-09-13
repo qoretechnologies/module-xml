@@ -7,7 +7,7 @@ addition does not define timezone-equivalent leap seconds consistently.
 
 Copyright (C) 2026 Qore Technologies, s.r.o.
 """
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from fractions import Fraction
 import re
 
@@ -23,17 +23,17 @@ class TemporalValue:
     zoned: bool
     minute: int
     second: Fraction
+    lower: tuple[int, Fraction] = field(compare=False, repr=False)
+    upper: tuple[int, Fraction] = field(compare=False, repr=False)
 
     def compare(self, other):
         left = self.minute, self.second
         right = other.minute, other.second
         if self.zoned == other.zoned:
             return (left > right) - (left < right)
-        uncertainty_left = 0 if self.zoned else 840
-        uncertainty_right = 0 if other.zoned else 840
-        if (self.minute + uncertainty_left, self.second) < (other.minute - uncertainty_right, other.second):
+        if self.upper < other.lower:
             return -1
-        if (self.minute - uncertainty_left, self.second) > (other.minute + uncertainty_right, other.second):
+        if self.lower > other.upper:
             return 1
         return None
 
@@ -64,21 +64,37 @@ def value(builtin, text):
         if h > 14 or m > 59 or h == 14 and m:
             raise ValueError('invalid XML timezone')
         offset = (h * 60 + m) * (1 if zone[0] == '+' else -1)
-    result = ordinal(year, month, day) * 1440 + hour * 60 + minute - offset
-    if second == 60:
-        # Candidate UTC instants use exact ordinal arithmetic, independent of the
-        # production implementation's calendar carry and string comparisons.
-        quarter_days = {ordinal(y, m, d) for y in (year - 1 or -1, year, year + 1 or 1)
-                        for m, d in ((3, 31), (6, 30), (9, 30), (12, 31))}
-        if zone:
-            candidate_day, candidate_minute = divmod(result, 1440)
-            possible = candidate_minute == 1439 and (builtin == 'time' or candidate_day in quarter_days)
-        else:
-            possible = builtin == 'time' or any(abs(result - (day * 1440 + 1439)) <= 840
-                                                 for day in quarter_days)
-        if not possible:
-            result += 1
-            seconds -= 60
+    anchor = ordinal(year, month, day) * 1440
+    # A time value repeats daily: lexical 24:00 is the same anchor as 00:00.
+    local = anchor + (hour % 24 if builtin == 'time' else hour) * 60 + minute
+    quarter_days = {ordinal(y, m, d) for y in (year - 1 or -1, year, year + 1 or 1)
+                    for m, d in ((3, 31), (6, 30), (9, 30), (12, 31))}
+
+    def assumed(shift, endpoint=False):
+        result = local - shift
+        exact_seconds = seconds
+        if second == 60:
+            if zone or endpoint:
+                candidate_day, candidate_minute = divmod(result, 1440)
+                possible = candidate_minute == 1439 and (builtin == 'time' or candidate_day in quarter_days)
+            else:
+                possible = builtin == 'time' or any(abs(result - (day * 1440 + 1439)) <= 840
+                                                     for day in quarter_days)
+            if not possible:
+                result += 1
+                exact_seconds -= 60
+        return result, exact_seconds
+
+    result, seconds_value = assumed(offset)
     if builtin == 'time':
         result %= 1440
-    return TemporalValue(zone is not None, result, seconds)
+    if zone is not None:
+        lower = upper = result, seconds_value
+    else:
+        # Attach each permitted extreme zone before normalizing leap seconds.
+        # Daily comparison uses the common date and retains endpoint day carries.
+        lower, upper = assumed(840, True), assumed(-840, True)
+        if builtin == 'time':
+            lower = lower[0] - anchor, lower[1]
+            upper = upper[0] - anchor, upper[1]
+    return TemporalValue(zone is not None, result, seconds_value, lower, upper)

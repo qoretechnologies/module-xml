@@ -218,6 +218,25 @@ int main(void) {
     faults += sweep("<xs:simpleType name='Item'><xs:union memberTypes='xs:float xs:QName'/></xs:simpleType>"
         "<xs:simpleType name='Value'><xs:list itemType='Item'/></xs:simpleType>",
         "17 p:Part -0", "1.7E1 p:Part 0.0E0", 1);
+    faults += sweep("<xs:simpleType name='Value'><xs:restriction base='xs:dateTime'/></xs:simpleType>",
+        "2000-01-01T00:00:00.100+01:00", "1999-12-31T23:00:00.1Z", 1);
+    faults += sweep("<xs:simpleType name='Value'><xs:restriction base='xs:dateTime'/></xs:simpleType>",
+        "-0001-12-31T24:00:00Z", "0001-01-01T00:00:00Z", 1);
+    faults += sweep("<xs:simpleType name='Value'><xs:restriction base='xs:time'/></xs:simpleType>",
+        "00:00:00.123456789012345678900+01:00", "23:00:00.1234567890123456789Z", 1);
+    faults += sweep("<xs:simpleType name='Value'><xs:restriction base='xs:date'/></xs:simpleType>",
+        "2002-10-10+13:00", "2002-10-09-11:00", 1);
+    faults += sweep("<xs:simpleType name='Value'><xs:restriction base='xs:time'>"
+        "<xs:pattern value='24:00:00'/></xs:restriction></xs:simpleType>", "24:00:00", "00:00:00", 0);
+    faults += sweep("<xs:simpleType name='Item'><xs:union memberTypes='xs:time xs:QName'/></xs:simpleType>"
+        "<xs:simpleType name='Value'><xs:list itemType='Item'/></xs:simpleType>",
+        "24:00:00 p:Part 00:00:00.100+01:00", "00:00:00 p:Part 23:00:00.1Z", 1);
+    faults += sweep("<xs:simpleType name='Item'><xs:restriction base='xs:time'>"
+        "<xs:pattern value='24:00:00'/></xs:restriction></xs:simpleType>"
+        "<xs:simpleType name='Value'><xs:union memberTypes='Item xs:string'/></xs:simpleType>",
+        "24:00:00", "00:00:00", 1);
+    faults += sweep("<xs:simpleType name='Value'><xs:restriction base='xs:gYear'/></xs:simpleType>",
+        "2000+01:00", NULL, 1);
     {
         char lexical[2048] = "", canonical[2048] = "";
         unsigned int index;

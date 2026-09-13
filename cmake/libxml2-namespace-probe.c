@@ -23,6 +23,7 @@
 #include "libxml2-value-allocation-probe.h"
 #include "libxml2-numeric-defaults-probe.h"
 #include "libxml2-ieee-probe.h"
+#include "libxml2-calendar-probe.h"
 
 static int check_namespace(const char* source, const char* expected) {
     xmlTextReaderPtr reader = xmlReaderForMemory(source, (int)strlen(source), NULL, "UTF-8", 0);
@@ -105,6 +106,13 @@ int main(void) {
         int ieee = check_ieee_values();
         result |= ieee;
         printf("ieee_values=%s\n", ieee ? "FAIL" : "PASS");
+    }
+    {
+        int calendar = check_calendar_values();
+        int constraints = check_calendar_constraints();
+        result |= calendar | constraints;
+        printf("calendar_values=%s\n", calendar ? "FAIL" : "PASS");
+        printf("calendar_constraints=%s\n", constraints ? "FAIL" : "PASS");
     }
     xmlCleanupParser();
     return result;

@@ -142,6 +142,18 @@ class TemporalValuesTest(lists.ListValuesTest):
         self.assertLess(temporal.value('dateTime', '1998-12-31T22:59:60.999999999').compare(
                         temporal.value('dateTime', '1998-12-31T23:00:00')), 0)
 
+    def test_leap_uncertainty_normalizes_each_assumed_endpoint(self):
+        for builtin, prefix in [('time', ''), ('dateTime', '2000-03-31T'), ('dateTime', '2000-04-01T')]:
+            for clock in ['00:11:60.56', '09:39:60.22', '23:59:60.1234567890123456789']:
+                unknown = temporal.value(builtin, prefix + clock)
+                for zone in ['+14:00', '-14:00']:
+                    endpoint = temporal.value(builtin, prefix + clock + zone)
+                    # The exact assumed endpoint belongs to the uncertainty interval.
+                    self.assertIsNone(unknown.compare(endpoint), (builtin, prefix, clock, zone))
+                    self.assertIsNone(endpoint.compare(unknown), (builtin, prefix, clock, zone))
+        self.assertEqual(temporal.value('time', '09:39:60.22-14:00'),
+                         temporal.value('time', '23:40:00.22Z'))
+
     def test_native_schema_validator_precision_reductions(self):
         fixture = Path(__file__).with_name('temporal-validator-defects.json')
         result = subprocess.run(['qore', '-b', '--enable-debug',
@@ -155,7 +167,8 @@ class TemporalValuesTest(lists.ListValuesTest):
         self.assertEqual(list(range(4)), [row['id'] for row in rows])
         for row, value in zip(rows, values):
             self.assertFalse(value['expected'])
-            self.assertEqual(value['libxml2'], row['valid'])
+            # Preserve the historical external-validator finding; require the corrected native verdict.
+            self.assertEqual(value['expected'], row['valid'])
 
     def test_independent_decimal_value_api(self):
         pairs = []

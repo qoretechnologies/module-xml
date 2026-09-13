@@ -1797,3 +1797,24 @@ See [evidence](wsdl-calendar-constraints-evidence.md),
 [design](../../design/wsdl-canonical-constraints.md) and [inventory](P5-18g-validation.json).
 The [native calendar defect](p5-native-calendar-constraints-finding.md) remains
 required P5 work, independently of the corrected WSDL declaration path.
+
+## Exact native calendars (P5-18h)
+
+Native schema validation now preserves arbitrary calendar years and fractional
+seconds through parsing, copy, comparison and canonical formatting. Complete
+calendar declarations receive canonical assessment; dates retain recoverable
+offsets. Provider checks detect both value and declaration defects independently.
+
+```sh
+QORE_MODULE_DIR=build-debug:qlib qore -b --enable-debug test/xml-calendar-constraints.qtest
+QORE_MODULE_DIR=build-debug:qlib python3 -B test/wsdl-interop/test_temporal_values.py -v
+python3 -B test/cmake/test_libxml2_provider.py -v
+```
+
+The native suite covers 306 declarations across conversion, DOM and reader APIs.
+The direct C matrix checks 9,807 exact records, with 105 datatype and 3,273
+canonical-declaration allocation failures tested separately. See
+[evidence](native-calendar-constraints-evidence.md),
+[design](../../design/native-calendar-constraints.md) and [inventory](P5-18h-validation.json).
+The preceding native calendar finding is resolved; default PSVI and the remaining
+P5–P9 requirements remain active.

@@ -1,14 +1,15 @@
-# Native calendar constraints and formatting: outstanding P5 work
+# Native calendar constraints and formatting: resolved in P5-18h
 
 Copyright (C) 2026 Qore Technologies, s.r.o.
 
-This finding records the native counterpart of WSDL calendar canonical capture.
-It is not a passing conformance result. The private dependency is unchanged by
-the WSDL correction. Fixing these native paths is the next P5 increment; it is
-required before P5 acceptance and has not been dropped from scope.
+The baseline observations below are retained as historical evidence. P5-18h
+resolves the exact calendar representation, declaration checks and independent
+reference endpoint issue; see [accepted evidence](native-calendar-constraints-evidence.md)
+and [validation inventory](P5-18h-validation.json). At P5-18g, these native
+failures remained independently reproducible after the WSDL correction.
 
 The committed 306-schema calendar matrix contains 162 valid and 144 invalid
-declarations. The current native conversion, DOM and reader paths accept every
+declarations. The P5-18g native conversion, DOM and reader paths accepted every
 one: 432 invalid schema acceptances across 918 stage records. The native
 canonical-default selector excludes calendar values. Diagnostic source, exact
 results and stderr are under `/tmp/wsdl-p5-18g-calendar-constraints/` as
