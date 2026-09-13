@@ -25,6 +25,7 @@
 #include "libxml2-ieee-probe.h"
 #include "libxml2-calendar-probe.h"
 #include "libxml2-element-defaults-probe.h"
+#include "libxml2-notation-probe.h"
 
 static int check_namespace(const char* source, const char* expected) {
     xmlTextReaderPtr reader = xmlReaderForMemory(source, (int)strlen(source), NULL, "UTF-8", 0);
@@ -123,6 +124,11 @@ int main(void) {
         printf("element_defaults=%s\n", defaults ? "FAIL" : "PASS");
         printf("default_namespaces=%s\n", namespaces ? "FAIL" : "PASS");
         printf("qname_allocation=%s\n", allocation ? "FAIL" : "PASS");
+    }
+    {
+        int notations = check_notations();
+        result |= notations;
+        printf("notations=%s\n", notations ? "FAIL" : "PASS");
     }
     xmlCleanupParser();
     return result;

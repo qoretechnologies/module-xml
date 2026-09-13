@@ -7963,3 +7963,38 @@ See [evidence](wsdl-element-defaults-evidence.md),
 No main-Qore mutation, installation or push. Next: the independently reproduced
 [WSDL NOTATION gap](p5-wsdl-notation-finding.md), remaining identity constraints
 and typed accounting. P6–P9 remain required; there is no outstanding user question.
+
+
+### P5-19a native NOTATION prerequisites accepted (2026-09-13)
+
+P5-18j committed as `16be41b`; no push. The installed/frozen Qore remains
+`8c0c22c150c6e51ed09976ca99d74041ec074620`. The native library now checks notation
+identifiers, normalized NCNames, declaration attributes and enumeration-derived
+schema type uses. It retains unused intermediate restrictions and separately
+assesses instance-selected types against the declared-notation value space.
+
+Fault injection root-caused and fixed schema attribute extraction that treated
+allocation failure as empty content, while preserving the distinct absent-node
+contract needed by wildcards. ID extraction reports allocation failure and trims
+its validated owned buffer in place. Iterative component and ancestry caches
+avoid repeated walks and stop at builtin types. No public dependency ABI changed.
+
+The final 64-schema/231-document matrix covers three native validation APIs,
+imports, defaults/fixed, aliases and primitive identity with seven explicit Xerces
+schema disagreements. Acceptance: all 166 Qore suites, 65 provider tests and 13
+supplements pass; the new suite has 848 assertions. All 1064 single/persistent
+allocation failures clean up with recovery; three Valgrinds have zero errors or
+lost memory. Both-version survey and strict coverage reports are byte-identical
+to the parent in legacy and native decoding modes. Debug build and documentation
+are clean. See [evidence](native-notations-evidence.md),
+[inventory](P5-19a-validation.json) and [full audit](audits/P5-19a-native-notations.md)
+(19 Pass, 43 N/A, zero Fail).
+
+The final Qore source manifest honestly records an independent Python test change:
+three backport fixtures now select the active target source. No executed Qore input
+changed; the complete final provider run verifies the final Python hash separately.
+
+Next: implement the WSDL NOTATION registry, lossless value/provider conversion,
+saved metadata and both SOAP consumers. Then complete key/unique/keyref and typed
+accounting before P5 can close. P6–P9 remain required. Main Qore was read-only;
+unrelated `test/cmake/__pycache__/` remains outside the commit.

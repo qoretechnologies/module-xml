@@ -31,3 +31,11 @@ key/unique/keyref similarly remain required before P5 closes.
 
 This finding is independent of the default carrier. It does not authorize
 removing NOTATION from supported scope or advancing past P5 with the gap open.
+
+
+P5-19a completes additional native prerequisites discovered while implementing
+this finding: declaration attributes/identifiers, normalized notation names,
+enumeration-derived schema uses and allocation-error handling. The native
+64-schema/231-document matrix and provider probe now cover them; see
+[native evidence](native-notations-evidence.md). The WSDL conversion requirements
+above remain open and are the next increment.

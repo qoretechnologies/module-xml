@@ -18,6 +18,15 @@ decoding modes and source/saved services. See the
 [implemented design](../../design/wsdl-element-defaults.md). The separate
 [NOTATION finding](p5-wsdl-notation-finding.md) and key/unique/keyref remain P5 work.
 
+Native NOTATION declaration, type-use and value checks run with
+`qore -b --enable-debug test/xml-notations.qtest` and
+`python3 -B test/wsdl-interop/test_notations.py -v`. The authored fixtures cover
+64 schemas and 231 documents, including imports and primitive value identity.
+The fixture JSON and companion XSD are Copyright (C) 2026 Qore Technologies, s.r.o.
+See [the native design](../../design/native-notations.md) and
+[evidence](native-notations-evidence.md). WSDL conversion remains assigned to the
+separate NOTATION increment.
+
 Particle construction checks run with `qore -b --enable-debug test/wsdl-particle-model.qtest`
 and `python3 test/wsdl-interop/test_particle_model.py -v`. Native occurrence validation
 uses `test/xml-particle-counts.qtest` and `test/wsdl-interop/test_particle_counts.py`.
@@ -815,7 +824,7 @@ recorded in [the string/length adjudication](sized-facets-adjudication.md), with
 normative references. No Qore verdict is waived. Repeated string choice fields
 require the core DataProvider setter correction in `cbb8aceb2`.
 
-The current string/length matrix covers 163 schemas and 326 actual contracts,
+The current string/length matrix covers 164 schemas and 326 actual contracts,
 with 1,400 independently checked input/output documents across parsing, value
 conversion, providers, reconstruction and examples. The selected corpus gate
 covers 88 descriptions / 752 directions; the broad diagnostic ledger remains
