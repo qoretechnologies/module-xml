@@ -1,0 +1,117 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires xml
+%requires ../qlib/WSDL.qm
+%requires ../qlib/SoapClient.qm
+%requires ../qlib/SoapHandler.qm
+%requires ../qlib/SoapDataProvider
+%requires HttpServer
+%exec-class ElementDefaultsHttpTest
+
+class ElementDefaultsHttpTest inherits QUnit::Test {
+    constructor() : Test("Empty element defaults through HTTP consumers", "1.0") {
+        addTestCase("Both SOAP bindings preserve default state through saved providers and live HTTP", \consumers());
+        set_return_value(main());
+    }
+    private WebService service(string version) {
+        string soap = "http://schemas.xmlsoap.org/wsdl/soap" + (version == "12" ? "12" : "") + "/";
+        return new WebService('<w:definitions xmlns:w="http://schemas.xmlsoap.org/wsdl/" xmlns:s="' + soap
+            + '" xmlns:xs="' + XSD_NS + '" xmlns:t="urn:qore:defaults-http" targetNamespace="urn:qore:defaults-http">'
+            '<w:types><xs:schema targetNamespace="urn:qore:defaults-http">'
+            '<xs:simpleType name="Either"><xs:union memberTypes="xs:boolean xs:string"/></xs:simpleType>'
+            '<xs:element name="value"><xs:complexType><xs:sequence>'
+            '<xs:element name="code" type="xs:int" default="+017"/>'
+            '<xs:element name="flag" type="t:Either" fixed="1"/>'
+            '</xs:sequence></xs:complexType></xs:element></xs:schema></w:types>'
+            '<w:message name="Input"><w:part name="body" element="t:value"/></w:message>'
+            '<w:message name="Output"><w:part name="body" element="t:value"/></w:message>'
+            '<w:portType name="Port"><w:operation name="submit"><w:input message="t:Input"/>'
+            '<w:output message="t:Output"/></w:operation></w:portType>'
+            '<w:binding name="Soap" type="t:Port"><s:binding style="document" transport="http://schemas.xmlsoap.org/soap/http"/>'
+            '<w:operation name="submit"><s:operation soapAction="submit"/><w:input><s:body use="literal"/></w:input>'
+            '<w:output><s:body use="literal"/></w:output></w:operation></w:binding>'
+            '<w:service name="Service"><w:port name="Port" binding="t:Soap">'
+            '<s:address location="http://example.invalid/Service"/></w:port></w:service></w:definitions>',
+            {"async_only":True});
+    }
+    private static auto saved(auto value) {
+        return Serializable::deserialize(Serializable::serialize(value));
+    }
+    private checkValue(auto value, bool retained, bool selected = True) {
+        assertEq(retained, value.code instanceof XsdDefaultValue);
+        assertEq(17, retained ? value.code.getValue() : value.code);
+        if (!selected) {
+            assertEq(retained, value.flag instanceof XsdDefaultValue);
+            assertEq(True, retained ? value.flag.getValue() : value.flag);
+        } else if (retained) {
+            assertEq("string", value.flag."^type^".getLocalName());
+            assertTrue(value.flag."^val^" instanceof XsdDefaultValue);
+            assertEq("true", value.flag."^val^".getValue());
+        } else {
+            assertEq("true", value.flag);
+        }
+    }
+    private consumers() {
+        foreach string version in ("11", "12") {
+            WebService ws = saved(service(version));
+            WSOperation operation = ws.getBindingOperation("Soap", "submit");
+            AbstractDataProviderType input = saved(operation.input.getDataProviderType(True));
+            AbstractDataProviderType output = saved(operation.output.getDataProviderType(True));
+            HttpServer server();
+            on_exit server.stop();
+            SoapHandler handler(new PermissiveAuthenticator());
+            server.setDefaultHandler("soap", handler);
+            Queue observed();
+            code<auto(hash<auto>, auto)> callback = auto sub(hash<auto> cx, auto value) {
+                auto checked = input.acceptsValue({"body":value});
+                observed.push(checked.body);
+                return output.acceptsValue(saved(checked));
+            };
+            handler.addMethod(ws, operation, callback, NOTHING, NOTHING, NOTHING, "Service", NOTHING,
+                NOTHING, "Soap", NOTHING, False, True);
+            server.addListener(0);
+            string url = sprintf("http://127.0.0.1:%d/Service", server.getListenerInfo(0).port);
+            SoapClient client({"wsdl":ws,"url":url,"timeout":30000,"connect_timeout":30000});
+            hash<auto> value = {"code":new XsdDefaultValue(17), "flag":{
+                "^type^":new XsdQNameValue(XSD_NS, "string"), "^val^":new XsdDefaultValue("true")}};
+            foreach bool preserve in (False, True) {
+                checkValue(client.callOperation("submit", input.acceptsValue({"body":value}),
+                    {"binding":"Soap","preserve_types":preserve}), preserve);
+                checkValue(observed.pop(30000), True);
+            }
+            SoapDataProvider provider(ws, client);
+            AbstractDataProvider request = provider.getChildProviderEx("submit");
+            hash<auto> ordinary = value;
+            ordinary.flag = new XsdDefaultValue(True);
+            checkValue(request.doRequest({"body":ordinary}, {"binding":"Soap"}), False, False);
+            checkValue(observed.pop(30000), True, False);
+            hash<auto> invalid = value;
+            invalid.code = new XsdDefaultValue(18);
+            assertThrows("RUNTIME-TYPE-ERROR", \input.acceptsValue(), ({"body":invalid},));
+            assertThrows("SOAP-SERIALIZATION-ERROR", \client.callOperation(),
+                ("submit", {"body":invalid}, {"binding":"Soap"}));
+            hash<auto> wire = operation.serializeRequest({"body":value}, NOTHING, NOTHING, NOTHING,
+                NOTHING, NOTHING, "Soap");
+            XmlDoc doc(wire.body);
+            XmlNode code = doc.getRootElement().firstElementChild().firstElementChild().firstElementChild();
+            assertEq("code", code.getName());
+            assertEq("", code.getContent());
+            string bad = replace(wire.body, code.getXML(), "<code>bad</code>");
+            assertFalse(bad == wire.body);
+            HTTPClient raw({"url":url,"error_passthru":True,"timeout":30000,"connect_timeout":30000});
+            hash<auto> info;
+            string fault = raw.post("/Service", bad, wire.hdr, \info);
+            assertEq(version == "11" ? 500 : 400, info."response-headers".status_code);
+            assertTrue(fault.find("SOAP-DESERIALIZATION-ERROR") >= 0);
+            string good = raw.post("/Service", wire.body, wire.hdr, \info);
+            assertEq(200, info."response-headers".status_code);
+            checkValue(operation.deserializeResponse(parse_xml(good, XPF_PRESERVE_ORDER), "Soap", True), True);
+            checkValue(observed.pop(30000), True);
+            checkValue(value, True);
+            assertEq(0, observed.size());
+        }
+    }
+}

@@ -80,6 +80,10 @@ module WSDL {
     @section wsdlrelnotes WSDL Module Release Notes
 
     @subsection wsdl_0_5_8 WSDL v0.5.8
+    - Empty default/fixed elements assess canonical declaration text under their actual type, keeping
+      declaration namespaces separate from instance attributes and preserving original constraint metadata
+    - With \c preserve_types=True, XsdDefaultValue retains an explicitly present empty element and its
+      complete native value; saved values and providers validate it against the receiving declaration
     - dateTime, time and date default/fixed declarations validate canonical forms using exact calendar
       arithmetic, retaining fractional digits, absent timezones and recoverable date offsets
     - float and double default/fixed declarations validate canonical scientific text at the selected
@@ -10961,6 +10965,9 @@ class XsdElementFieldHelper {
         if (!NativeTypeProviderContext && element.nillable) {
             result = new XsdNillableDataType(element, result);
         }
+        if (!NativeTypeProviderContext && element.getValueConstraint()) {
+            result = new XsdDefaultDataType(element, result);
+        }
         if (repeated && (element.type.hasNativeListValue() || result.getBaseTypeCode() != NT_LIST)) {
             result = new SoftListDataType(result.getName(), result, False, NOTHING, result.getTags());
         }
@@ -11787,6 +11794,11 @@ public class XsdElement inherits WSDL::XsdTypedData {
             *softbool omitType, *hash<auto> type_attributes) {
         XsdIdentityElementScope identity_scope();
         on_success identity_scope.finish(SOAP_SERIALIZATION_ERROR);
+        if (value instanceof XsdDefaultValue) {
+            hash<auto> empty = serializeDefault(selected, namespaces, value);
+            empty."^attributes^" += type_attributes;
+            return empty;
+        }
         if (value instanceof XsdNilValue || (!exists value && nillable)) {
             hash<auto> nil = serializeNil(selected, namespaces, value ?? new XsdNilValue());
             nil."^attributes^" += type_attributes;
@@ -11911,11 +11923,63 @@ public class XsdElement inherits WSDL::XsdTypedData {
                 && XsdTypeDerivationHelper::sameType(type, selected)) ? nil : NOTHING;
             return XsdNativeTypeValueHelper::retain(type, selected, retained);
         }
-        *XsdDocumentValueResult captured = getValueConstraint().fixed ? new XsdDocumentValueResult() : NOTHING;
+        auto original = value;
+        *hash<XsdElementValueConstraintInfo> constraint = getValueConstraint();
+        bool defaulted = constraint && XsdEmptyElementDefaultHelper::empty(value);
+        if (defaulted) {
+            string lexical = getConstraintIdentity().constraint_lexical ?? constraint.lexical;
+            value = XsdEmptyElementDefaultHelper::apply(selected, value, lexical, constraint.namespaces);
+        }
+        *XsdDocumentValueResult captured = constraint.fixed ? new XsdDocumentValueResult() : NOTHING;
         auto converted = XsdDocumentValueHelper::deserializeValue(selected, name, tmap, references, value, False,
             captured);
-        checkFixedValue(value, captured.identity, SOAP_DESERIALIZATION_ERROR);
-        return XsdNativeTypeValueHelper::retain(type, selected, converted);
+        checkFixedValue(original, captured.identity, SOAP_DESERIALIZATION_ERROR);
+        return XsdNativeTypeValueHelper::retain(type, selected,
+            defaulted && PreserveNativeTypes ? new XsdDefaultValue(converted) : converted);
+    }
+
+    private hash<auto> serializeDefault(XsdAbstractType selected, Namespaces namespaces, XsdDefaultValue value) {
+        *hash<XsdElementValueConstraintInfo> constraint = getValueConstraint();
+        if (!constraint) {
+            throw SOAP_SERIALIZATION_ERROR, sprintf("element %Y has no default or fixed constraint", name);
+        }
+        XsdAbstractType content = selected;
+        if (selected instanceof XsdComplexType) {
+            XsdComplexType complex_type = cast<XsdComplexType>(selected);
+            if (!complex_type.allowsElementValueConstraint()) {
+                throw SOAP_SERIALIZATION_ERROR, "an empty default requires simple or emptiable mixed content";
+            }
+            content = complex_type.simpleType ?? new XsdBaseType("string", new Namespaces({}));
+        } else if (XsdGenericValueHelper::isGeneric(selected)) {
+            content = new XsdBaseType("string", new Namespaces({}));
+        }
+        XsdDocumentValueResult actual();
+        auto encoded = XsdDocumentValueHelper::serializeValue(selected, namespaces, value.getValue(), True, actual);
+        # This also rules out children hidden in a supplied native mixed value.
+        XsdFixedValueHelper::text(encoded, SOAP_SERIALIZATION_ERROR);
+        XsdDocumentValueResult expected();
+        try {
+            XsdIdentitySuspendScope identity_check();
+            XsdQNameNamespaceScope declaration_scope(XsdQNameContextHelper::attributes(constraint.namespaces), True);
+            XsdDocumentValueHelper::deserializeValue(content, name, selected.nsc.getInstanceTypes(), NOTHING,
+                getConstraintIdentity().constraint_lexical ?? constraint.lexical, False, expected);
+        } catch (hash<ExceptionInfo> error) {
+            if (error.err == SOAP_DESERIALIZATION_ERROR) {
+                rethrow SOAP_SERIALIZATION_ERROR, error.desc, error.arg;
+            }
+            rethrow;
+        }
+        if (!actual.identity || !expected.identity || !XsdUnionValueHelper::same(actual.identity, expected.identity)) {
+            throw SOAP_SERIALIZATION_ERROR, sprintf("empty element %Y would produce a different default value", name);
+        }
+        hash<auto> result = encoded.typeCode() == NT_HASH ? encoded : {};
+        foreach string key in (keys result) {
+            if (key.startsWith("^value") || key.startsWith("^cdata")) {
+                remove result{key};
+            }
+        }
+        remove result."^attributes^"{namespaces.getOutputNamespacePrefix(XSI_NS) + ":type"};
+        return result;
     }
 
     private *XsdNilValue assessNil(XsdAbstractType selected, auto value) {
@@ -12118,11 +12182,12 @@ class XsdNativeTypeProviderHelper {
     }
     static bool isNative(AbstractDataProviderType type) {
         if (type instanceof XsdNativeTypeDataType || type instanceof XsdElementDataType
-                || type instanceof XsdNillableDataType) {
+                || type instanceof XsdNillableDataType || type instanceof XsdDefaultDataType) {
             return True;
         }
         return type instanceof ListDataType && (type.getElementType() instanceof XsdNativeTypeDataType
-            || type.getElementType() instanceof XsdNillableDataType);
+            || type.getElementType() instanceof XsdNillableDataType
+            || type.getElementType() instanceof XsdDefaultDataType);
     }
     static auto unwrap(auto value) {
         if (XsdElementValueHelper::isWrapper(value)) {
@@ -12131,7 +12196,7 @@ class XsdNativeTypeProviderHelper {
         if (XsdNativeTypeValueHelper::isWrapper(value)) {
             value = value."^val^";
         }
-        return value instanceof XsdNilValue ? NOTHING : value;
+        return value instanceof XsdNilValue ? NOTHING : value instanceof XsdDefaultValue ? value.getValue() : value;
     }
 }
 
@@ -12638,6 +12703,192 @@ public class XsdNillableDataType inherits AbstractDataProviderType {
     }
 }
 
+#! A declared native value or an explicitly present defaulted empty element
+/** Retains ordinary value and field conversion. Empty carriers are assessed under
+    their receiving element's actual type and must match its canonical constraint.
+    @par Example
+    Store an empty partner status without turning its defaulted value into explicit text.
+    @since %WSDL 0.5.8
+*/
+public class XsdDefaultDataType inherits AbstractDataProviderType {
+    private {
+        XsdElement element;
+        AbstractDataProviderType value_type;
+        bool optional;
+    }
+    #! wraps an element's ordinary native value provider
+    /** @param element the receiving declaration
+        @param value_type its ordinary native provider
+    */
+    constructor(XsdElement element, AbstractDataProviderType value_type) {
+        self.element = element;
+        self.value_type = value_type;
+        optional = value_type.isOrNothingType();
+    }
+    private:internal deserializeMembers(hash<auto> members) {
+        if (!(members.element instanceof XsdElement) || !(members.value_type instanceof AbstractDataProviderType)
+                || members.optional.typeCode() != NT_BOOLEAN) {
+            throw "DESERIALIZATION-ERROR", "a default-value provider requires its element, value type and optionality";
+        }
+        element = members.element;
+        value_type = members.value_type;
+        optional = members.optional;
+    }
+    #! returns the ordinary native type name with this provider's optionality
+    /** @return the provider name */
+    string getName() {
+        return (optional ? value_type.getOrNothingType() : value_type.getMandatoryType()).getName();
+    }
+    #! describes the explicit empty-default representation
+    /** @return the value contract */
+    string getDesc() {
+        return "Accepts the declared native value or `XsdDefaultValue` with the complete native value. "
+            "The carrier preserves an empty element whose declaration supplies its value.";
+    }
+    #! preserves native semantic tags
+    /** @return the underlying provider tags */
+    *hash<auto> getTags() { return value_type.getTags(); }
+    #! preserves the native value category
+    /** @return the underlying Qore base type name */
+    string getBaseTypeName() { return value_type.getBaseTypeName(); }
+    #! preserves the native value category
+    /** @return the underlying Qore base type code */
+    int getBaseTypeCode() { return value_type.getBaseTypeCode(); }
+    #! preserves native type specificity
+    /** @return whether the underlying value has a defined type */
+    bool hasType() { return value_type.hasType(); }
+    #! requires conversion for every value
+    /** @return NOTHING */
+    *Type getValueType() { return; }
+    #! prevents native containers from bypassing default validation
+    /** @return an empty map */
+    *hash<string, bool> getDirectTypeHash() { return {}; }
+    #! preserves the ordinary value's child fields
+    /** @return the native record fields, if any */
+    *hash<string, AbstractDataField> getFields() { return value_type.getFields(); }
+    #! preserves the ordinary value's list element metadata
+    /** @return the native list item provider, if any */
+    *AbstractDataProviderType getElementType() { return value_type.getElementType(); }
+    #! preserves native list occurrence behavior
+    /** @return whether the ordinary value is a list */
+    bool isList() { return value_type.isList(); }
+    #! returns whether omission is accepted
+    /** @return the explicit optionality */
+    bool isOrNothingType() { return optional; }
+    #! returns whether a value must be provided
+    /** @return the inverse of optionality */
+    bool isMandatory() { return !optional; }
+    #! returns accepted native types
+    /** @param simple whether simplified names are requested
+        @return the native names plus the explicit empty-default carrier
+    */
+    hash<string, bool> getAcceptTypeHash(*bool simple) {
+        hash<string, bool> result = value_type.getAcceptTypeHash(simple)
+            + new QoreDataType(new Type("WSDL::XsdDefaultValue")).getAcceptTypeHash(simple);
+        if (optional) {
+            result.nothing = True;
+        } else {
+            remove result.nothing;
+            remove result.null;
+        }
+        return result;
+    }
+    #! returns produced native types
+    /** @param simple whether simplified names are requested
+        @return the native names plus the explicit empty-default carrier
+    */
+    hash<string, bool> getReturnTypeHash(*bool simple) {
+        hash<string, bool> result = value_type.getReturnTypeHash(simple)
+            + new QoreDataType(new Type("WSDL::XsdDefaultValue")).getReturnTypeHash(simple);
+        if (optional) {
+            result.nothing = True;
+        } else {
+            remove result.nothing;
+            remove result.null;
+        }
+        return result;
+    }
+    #! describes both native and default alternatives
+    /** @param simple whether simplified names are requested
+        @return provider metadata with both alternatives
+    */
+    hash<DataTypeInfo> getInfo(*bool simple) {
+        hash<DataTypeInfo> result = AbstractDataProviderType::getInfo(simple);
+        result.tags = getTags();
+        if (!result.recursive) {
+            AbstractDataProviderType native_type = optional ? value_type.getOrNothingType()
+                : value_type.getMandatoryType();
+            result.union_types = (native_type.getInfo(simple),
+                new QoreDataType(new Type("WSDL::XsdDefaultValue")).getInfo(simple));
+        }
+        return result;
+    }
+    #! returns an ordinary native example
+    /** @param emap visited declarations
+        @param fname optional field name
+        @return NOTHING for optional fields or the ordinary provider's example
+        @throw DATA-ERROR the declared provider cannot construct an example
+    */
+    auto getExampleValue(*hash<string, bool> emap, *string fname) {
+        return optional ? NOTHING : value_type.getMandatoryType().getExampleValue(emap, fname);
+    }
+    #! validates native values and explicit empty-default values
+    /** @param value the supplied native value
+        @return the converted value, or the checked immutable empty-default carrier
+        @throw MISSING-VALUE-ERROR an omitted mandatory value
+        @throw RUNTIME-TYPE-ERROR invalid default constraint, attributes or native value
+        @throw DESERIALIZATION-ERROR a reconstructed provider has no receiving constraint
+        @note Cancellation and custom conversion exceptions propagate unchanged.
+    */
+    auto acceptsValue(auto value) {
+        # Saved references may be populated after this provider's own members.
+        if (!element.getValueConstraint()) {
+            throw "DESERIALIZATION-ERROR", "a default-value provider requires a constrained receiving declaration";
+        }
+        if (!exists value) {
+            if (optional) {
+                return;
+            }
+            throw "MISSING-VALUE-ERROR", sprintf("value %Y must be supplied", getName());
+        }
+        if (!(value instanceof XsdDefaultValue)) {
+            return value_type.acceptsValue(value);
+        }
+        try {
+            Namespaces output = element.type.nsc.copy();
+            XsdQNameOutputScope scope(output);
+            element.serializeOccurrence(output, value, True, element.name, getName());
+        } catch (hash<ExceptionInfo> error) {
+            if (error.err == SOAP_SERIALIZATION_ERROR) {
+                rethrow "RUNTIME-TYPE-ERROR", error.desc, error.arg;
+            }
+            rethrow;
+        }
+        return value;
+    }
+    #! permits omission without changing the source provider
+    /** @return an optional copy */
+    AbstractDataProviderType getOrNothingType() {
+        XsdDefaultDataType result = self.copy();
+        result.optional = True;
+        return result;
+    }
+    #! requires a value without changing the source provider
+    /** @return a mandatory copy */
+    AbstractDataProviderType getMandatoryType() {
+        XsdDefaultDataType result = self.copy();
+        result.optional = False;
+        return result;
+    }
+    #! softens native conversion while retaining default validation
+    /** @return a copy with the soft native provider */
+    AbstractDataProviderType getSoftType() {
+        XsdDefaultDataType result = self.copy();
+        result.value_type = value_type.getSoftType();
+        return result;
+    }
+}
+
 #! Provider retaining the selected declaration of a complete global element
 /** Ordinary values use the declared element. A `^element^` / `^val^` wrapper selects a concrete
     substitution member by expanded QName. Child particle fields already identify their declarations.
@@ -12978,6 +13229,9 @@ public class XsdNativeTypeDataType inherits AbstractDataProviderType {
         if (element && element.nillable) {
             result += new QoreDataType(new Type("WSDL::XsdNilValue")).getAcceptTypeHash(simple);
         }
+        if (element && element.getValueConstraint()) {
+            result += new QoreDataType(new Type("WSDL::XsdDefaultValue")).getAcceptTypeHash(simple);
+        }
         if (isOrNothingType()) {
             result.nothing = True;
         } else {
@@ -12994,6 +13248,9 @@ public class XsdNativeTypeDataType inherits AbstractDataProviderType {
         hash<string, bool> result = nativeType().getReturnTypeHash(simple) + {"hash":True};
         if (element && element.nillable) {
             result += new QoreDataType(new Type("WSDL::XsdNilValue")).getReturnTypeHash(simple);
+        }
+        if (element && element.getValueConstraint()) {
+            result += new QoreDataType(new Type("WSDL::XsdDefaultValue")).getReturnTypeHash(simple);
         }
         if (isOrNothingType()) {
             result.nothing = True;
@@ -13033,6 +13290,9 @@ public class XsdNativeTypeDataType inherits AbstractDataProviderType {
                 : (nativeType().getInfo(simple), wrapper.getInfo(simple));
             if (element && element.nillable && !definition.declared.isAbstract()) {
                 push result.union_types, new QoreDataType(new Type("WSDL::XsdNilValue")).getInfo(simple);
+            }
+            if (element && element.getValueConstraint() && !definition.declared.isAbstract()) {
+                push result.union_types, new QoreDataType(new Type("WSDL::XsdDefaultValue")).getInfo(simple);
             }
         }
         return result;
@@ -13118,11 +13378,11 @@ public class XsdNativeTypeDataType inherits AbstractDataProviderType {
             if (XsdNativeTypeValueHelper::isWrapper(value)) {
                 XsdNativeTypeValueHelper::checkWrapper(value);
                 AbstractDataProviderType selected = getSelectedValueType(value."^type^");
-                if (!(value."^val^" instanceof XsdNilValue)
+                if (!(value."^val^" instanceof XsdNilValue) && !(value."^val^" instanceof XsdDefaultValue)
                         && (exists value."^val^" || !(element && element.nillable))) {
                     value."^val^" = selected.acceptsValue(value."^val^");
                 }
-            } else if (!(value instanceof XsdNilValue)) {
+            } else if (!(value instanceof XsdNilValue) && !(value instanceof XsdDefaultValue)) {
                 value = nativeType().acceptsValue(value);
             }
             *XsdIdentityDocumentScope identity_document = check_identity ? new XsdIdentityDocumentScope() : NOTHING;
@@ -14279,6 +14539,93 @@ thread_local *XsdProviderUnionItemCapture ProviderUnionItemCapture;
 # Scoped to retained XML validation; no namespace allocations reach shared schema state.
 thread_local *Namespaces RetainedXmlValidationNamespaces;
 
+#! An explicitly present empty element assessed using its declaration's constraint
+/** The native value accompanies the empty-element state. Use this carrier when
+    serialization must preserve default application, including fixed constraints
+    whose canonical value has a different actual type.
+    @par Example
+    Preserve an empty partner status that becomes a string through xsi:type,
+    while its original union declaration has a boolean fixed value.
+    @since %WSDL 0.5.8
+*/
+public final class XsdDefaultValue inherits Serializable {
+    private {
+        auto value;
+    }
+    #! retains the native value of a defaulted empty occurrence
+    /** @param value the complete converted native value, including any attributes
+        @throw XSD-DEFAULT-VALUE-ERROR nested default or nil carriers are not allowed
+    */
+    constructor(auto value) {
+        initialize(value, "XSD-DEFAULT-VALUE-ERROR");
+    }
+    private initialize(auto value, string error) {
+        if (value instanceof XsdDefaultValue || value instanceof XsdNilValue) {
+            throw error, "an empty default carrier requires an ordinary native value";
+        }
+        self.value = value;
+    }
+    private:internal deserializeMembers(hash<auto> members) {
+        # Serializable omits members whose value is NOTHING. That is a valid
+        # native projection of an empty lexical value, checked by its receiver.
+        if (members.size() > 1 || (members && !members.hasKey("value"))) {
+            throw "DESERIALIZATION-ERROR", "an empty default carrier contains invalid members";
+        }
+        initialize(members.value, "DESERIALIZATION-ERROR");
+    }
+    #! returns the native value assessed under the actual type
+    /** @return the retained scalar, list or complete record */
+    auto getValue() {
+        return value;
+    }
+}
+
+class XsdEmptyElementDefaultHelper {
+    static bool empty(auto value) {
+        if (!exists value) {
+            return True;
+        }
+        if (value.typeCode() != NT_HASH) {
+            return value.typeCode() == NT_STRING && value == "";
+        }
+        foreach string key in (keys value) {
+            if (key == "^attributes^" || key == ".ns" || key.startsWith("^comment")) {
+                continue;
+            }
+            if ((!key.startsWith("^value") && !key.startsWith("^cdata"))
+                    || (exists value{key} && (value{key}.typeCode() != NT_STRING || value{key} != ""))) {
+                return False;
+            }
+        }
+        return True;
+    }
+
+    static auto apply(XsdAbstractType selected, auto value, string lexical,
+            hash<string, string> namespaces) {
+        bool scoped = True;
+        if (selected instanceof XsdComplexType) {
+            XsdComplexType complex_type = cast<XsdComplexType>(selected);
+            if (!complex_type.allowsElementValueConstraint()) {
+                throw SOAP_DESERIALIZATION_ERROR, "an empty element default requires simple or emptiable mixed content";
+            }
+            scoped = exists complex_type.simpleType;
+        } else if (XsdGenericValueHelper::isGeneric(selected)) {
+            scoped = False;
+        }
+        auto text = scoped ? new XsdScopedLexicalValue(lexical, namespaces) : lexical;
+        if (value.typeCode() != NT_HASH) {
+            return text;
+        }
+        foreach string key in (keys value) {
+            if (key.startsWith("^value") || key.startsWith("^cdata")) {
+                remove value{key};
+            }
+        }
+        value."^value^" = text;
+        return value;
+    }
+}
+
 class XsdFixedValueHelper {
     static string text(auto data, string error) {
         if (data.typeCode() != NT_HASH) {
@@ -14541,6 +14888,16 @@ class XsdDocumentValueHelper {
         XsdQNameNamespaceScope scope(value.typeCode() == NT_HASH ? value."^attributes^" : NOTHING);
         XsdAbstractType declared = type;
         type = XsdTypeSubstitutionHelper::select(\value, type, tmap, name);
+        *XsdScopedLexicalContext lexical_scope;
+        if (!(type instanceof XsdComplexType) && !XsdGenericValueHelper::isGeneric(type)
+                && value.typeCode() == NT_HASH && value."^value^" instanceof XsdScopedLexicalValue) {
+            XsdBase::validateSimpleAttributes(value."^attributes^", type.name);
+            value = value."^value^";
+        }
+        if (value instanceof XsdScopedLexicalValue) {
+            lexical_scope = new XsdScopedLexicalContext(value, NOTHING);
+            value = value.getLexicalValue();
+        }
         XsdDocumentValueCapture capture(type);
         auto converted = type.deserializeValue(name, tmap, references, value);
         capture.validate(value, converted, SOAP_DESERIALIZATION_ERROR, attribute);
@@ -14613,6 +14970,17 @@ class XsdDocumentValueCapture {
     }
 
     *hash<XsdUnionValueIdentity> valueIdentity(auto input, auto converted, string error, bool serialized = False) {
+        # Mixed/generic content can have multiple independent text fragments.
+        # Only simple values use one scoped lexical carrier as their entire value.
+        bool simple = !XsdGenericValueHelper::isGeneric(type)
+            && !(type instanceof XsdComplexType && cast<XsdComplexType>(type).hasMixedContent());
+        *XsdScopedLexicalValue scoped = !simple ? NOTHING : input instanceof XsdScopedLexicalValue ? input
+            : input.typeCode() == NT_HASH && input."^value^" instanceof XsdScopedLexicalValue ? input."^value^" : NOTHING;
+        *XsdScopedLexicalContext lexical_scope;
+        if (scoped) {
+            lexical_scope = new XsdScopedLexicalContext(scoped, NOTHING);
+            input = scoped.getLexicalValue();
+        }
         if (item || list) {
             return item ? item.identity : list.identity;
         }
@@ -14643,6 +15011,17 @@ class XsdDocumentValueCapture {
     }
 
     validate(auto input, auto converted, string error, bool attribute = False, bool serialized = False) {
+        # Mixed/generic content can have multiple independent text fragments.
+        # Only simple values use one scoped lexical carrier as their entire value.
+        bool simple = !XsdGenericValueHelper::isGeneric(type)
+            && !(type instanceof XsdComplexType && cast<XsdComplexType>(type).hasMixedContent());
+        *XsdScopedLexicalValue scoped = !simple ? NOTHING : input instanceof XsdScopedLexicalValue ? input
+            : input.typeCode() == NT_HASH && input."^value^" instanceof XsdScopedLexicalValue ? input."^value^" : NOTHING;
+        *XsdScopedLexicalContext lexical_scope;
+        if (scoped) {
+            lexical_scope = new XsdScopedLexicalContext(scoped, NOTHING);
+            input = scoped.getLexicalValue();
+        }
         if (IdentityElement && !IdentityChecksSuspended) {
             *hash<XsdUnionValueIdentity> identity = item ? item.identity : list ? list.identity : NOTHING;
             if (!item && !list) {

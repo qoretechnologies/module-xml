@@ -7931,3 +7931,35 @@ the initial 200-document validity matrix now passes, and a retained-empty-value
 prototype successfully re-emits fixed boolean-union defaults assessed as string
 or QName. Provider/consumer integration and acceptance remain required. No main
 Qore mutation, installation or push. P5 identity/typed accounting and P6–P9 remain.
+
+### P5-18j WSDL element defaults accepted (2026-09-13)
+
+P5-18i committed as `3767c18`; no push. Installed Qore still matches the verified
+fixed runtime `8c0c22c15`. WSDL empty elements now assess canonical constraints
+under their actual types. Opt-in `XsdDefaultValue` retains the empty occurrence
+and complete native value through saved schemas/providers and both SOAP bindings.
+Legacy decoding remains the default. Declaration QName scope is independent of
+instance attributes; absence, nil, characters and required particles keep their
+own validation rules.
+
+The broader regressions caught and fixed mixed-text truncation and lost provider
+metadata before acceptance. Saved NOTHING carrier values and nested fixed-provider
+reconstruction are covered. All 165 Qore suites and 18 supplements pass, including
+four execution modes, compiled WSDL and independent source/compiled consumers.
+New unit and HTTP suites have 1,077 and 100 assertions. The matrix covers 3,200
+binding records and 1,760 output payloads, with 120 explicit existing Xerces
+calendar disagreements. Documentation builds without warnings. No C++ changed.
+
+Both corpus modes retain all parent verdict/count/failure/stage/scope records.
+Only four GlobalElementDefault payloads per mode change: legacy writes the
+canonical default; preservation mode emits the retained empty occurrence.
+All other case fields match. The Qore gate's broad manifest records a changed
+supplemental Python file; actual Qore inputs stayed unchanged, and final Python
+sources passed their separately frozen supplement run.
+
+See [evidence](wsdl-element-defaults-evidence.md),
+[inventory](P5-18j-validation.json) and
+[full audit](audits/P5-18j-wsdl-element-defaults.md): 20 Pass, 42 N/A, zero Fail.
+No main-Qore mutation, installation or push. Next: the independently reproduced
+[WSDL NOTATION gap](p5-wsdl-notation-finding.md), remaining identity constraints
+and typed accounting. P6–P9 remain required; there is no outstanding user question.

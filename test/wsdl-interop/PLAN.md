@@ -248,6 +248,13 @@ see [evidence](native-element-defaults-evidence.md). The PSVI interpretation is
 approved. WSDL default application and retained empty values, remaining identity
 constraints and complete typed accounting remain P5 work.
 
+P5-18j implements WSDL canonical actual-type defaults and `XsdDefaultValue`
+empty-state preservation, with saved providers, independent instance/declaration
+namespace scopes and both SOAP HTTP bindings. All 165 Qore suites and 18
+supplements pass; see [evidence](wsdl-element-defaults-evidence.md). The separately
+reproduced [NOTATION gap](p5-wsdl-notation-finding.md), key/unique/keyref and complete
+typed-preservation accounting remain required before P5 can close.
+
 ## P6 — Complete WSDL component and binding interoperability
 
 **Depends on P2-P5.** This covers behavior the current W3C echo survey does not exercise.

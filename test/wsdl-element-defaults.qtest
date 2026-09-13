@@ -1,0 +1,352 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires ../qlib/WSDL.qm
+%requires xml
+%try-module json
+%define NoJson
+%endtry
+%ifdef NoJson
+throw "MISSING-MODULE", "Element-default tests require json";
+%else
+%exec-class ElementDefaultsTest
+
+class DefaultConversionType inherits XsdBaseType {
+    public {
+        *code<nothing()> action;
+    }
+    constructor() : XsdBaseType("int", new Namespaces({})) {
+    }
+    auto deserializeValue(string name, hash<string, XsdAbstractType> types, *hash<auto> references, auto value) {
+        if (action) {
+            action();
+        }
+        return XsdBaseType::deserializeValue(name, types, references, value);
+    }
+    auto serializeValue(Namespaces namespaces, auto value, *softbool omit_type) {
+        if (action) {
+            action();
+        }
+        return XsdBaseType::serializeValue(namespaces, value, omit_type);
+    }
+}
+
+class ElementDefaultsTest inherits QUnit::Test {
+    constructor() : Test("WSDL canonical empty-element defaults", "1.0") {
+        addTestCase("Canonical defaults obey actual-type patterns", \matrix());
+        addTestCase("Default application distinguishes absent, nil and character content", \presence());
+        addTestCase("Fixed union defaults retain empty state and actual typed values", \fixedTypes());
+        addTestCase("QName defaults and attributes have independent namespace scopes", \namespaces());
+        addTestCase("List defaults preserve items and declaration namespaces", \lists());
+        addTestCase("Simple and mixed content still require valid attributes and particles", \complexContent());
+        addTestCase("Ordinary and selected-type providers preserve carriers and variants", \providers());
+        addTestCase("Saved carriers preserve values and reject malformed reconstruction", \savedValues());
+        addTestCase("Defaulted identities belong to the instance document", \identities());
+        addTestCase("Empty strings and lists preserve explicit occurrence state", \emptyValues());
+        addTestCase("Custom errors and cancellation restore default conversion scopes", \cancellation());
+        set_return_value(main());
+    }
+    private static XsdSchema schema(string body, string namespaces = "") {
+        return new XsdSchema('<xs:schema xmlns:xs="' + XSD_NS + '" ' + namespaces + '>' + body + '</xs:schema>',
+            {"async_only":True});
+    }
+    private static auto saved(auto value) {
+        return Serializable::deserialize(Serializable::serialize(value));
+    }
+    private static auto decode(XsdSchema model, string xml, bool retain = True) {
+        auto wire = XsdBase::expandElementNamespaces(parse_xml(xml, XPF_PRESERVE_ORDER));
+        return model.getElement("", "value").deserializeValue(model.getTypeMap(), NOTHING, wire."{}value", True, retain);
+    }
+    private static auto actual(auto value) {
+        if (value.typeCode() == NT_HASH && value.hasKey("^val^")) {
+            value = value."^val^";
+        }
+        return value instanceof XsdDefaultValue ? value.getValue() : value;
+    }
+    private checkOutput(XsdSchema model, auto value, string source, bool empty = True) {
+        XsdXmlValue output = model.serializeXmlValue("", "value", value);
+        assertEq(parse_xml(output.getXml()), parse_xml_with_schema(output.getXml(), source));
+        if (empty) {
+            XmlDoc doc(output.getXml());
+            assertEq("", doc.getRootElement().getContent());
+        }
+    }
+    private matrix() {
+        list<hash<auto>> models = parse_json(ReadOnlyFile::readTextFile(
+            get_script_dir() + "/wsdl-interop/fixtures/element-defaults.json"));
+        int count = 0;
+        foreach hash<auto> row in (models) {
+            if (!row.wsdl) {
+                continue;
+            }
+            XsdSchema model(row.schema, {"async_only":True});
+            hash<XsdElementValueConstraintInfo> before = model.getElement("", "value").getValueConstraint();
+            foreach hash<auto> document in (row.documents) {
+                ++count;
+                if (!document.expected) {
+                    assertThrows("SOAP-DESERIALIZATION-ERROR", \decode(), (model, document.xml));
+                    continue;
+                }
+                auto value = decode(model, document.xml);
+                bool empty = document.name.endsWith("/empty") || document.name.endsWith("/comment")
+                    || document.name.endsWith("/cdata");
+                assertEq(empty, value."^val^" instanceof XsdDefaultValue, document.name);
+                checkOutput(model, saved(value), row.schema, empty);
+                AbstractDataProviderType provider = model.getNativeDataProviderType("", "value");
+                checkOutput(model, provider.acceptsValue(value), row.schema, empty);
+                assertEq(before, model.getElement("", "value").getValueConstraint(), document.name);
+                auto legacy = actual(decode(model, document.xml, False));
+                auto native = actual(value);
+                if (native instanceof XsdBinaryValue) {
+                    assertTrue(legacy instanceof XsdBinaryValue);
+                    assertEq(native.getBuiltinName(), legacy.getBuiltinName(), document.name);
+                    assertEq(native.getLexicalValue(), legacy.getLexicalValue(), document.name);
+                    assertEq(native.getBinaryValue(), legacy.getBinaryValue(), document.name);
+                } else {
+                    assertEq(native, legacy, document.name);
+                }
+            }
+        }
+        assertEq(200, count);
+    }
+    private presence() {
+        XsdSchema model = schema('<xs:element name="value" type="xs:int" default="+017" nillable="true"/>');
+        XsdElement element = model.getElement("", "value");
+        assertThrows("SOAP-DESERIALIZATION-ERROR", \element.deserializeValue(),
+            (model.getTypeMap(), NOTHING, NOTHING, False, True));
+        foreach string content in ("", "<!--empty-->", "<![CDATA[]]>", "<!--one--><![CDATA[]]><!--two-->") {
+            auto value = decode(model, "<value>" + content + "</value>");
+            assertTrue(value instanceof XsdDefaultValue);
+            assertEq(17, value.getValue());
+            assertEq(17, decode(model, "<value>" + content + "</value>", False));
+        }
+        assertThrows("SOAP-DESERIALIZATION-ERROR", \decode(), (model, "<value> </value>"));
+        assertThrows("SOAP-DESERIALIZATION-ERROR", \decode(), (model, "<value><child/></value>"));
+        assertEq(18, decode(model, "<value>18</value>"));
+        auto nil = decode(model, '<value xmlns:i="' + XSI_NS + '" i:nil="true"/>');
+        assertTrue(nil instanceof XsdNilValue);
+        assertTrue(decode(model, '<value xmlns:i="' + XSI_NS + '" i:nil="false"/>') instanceof XsdDefaultValue);
+        XsdSchema optional = schema('<xs:element name="value"><xs:complexType><xs:sequence>'
+            '<xs:element name="item" type="xs:int" minOccurs="0" default="17"/>'
+            '</xs:sequence></xs:complexType></xs:element>');
+        assertEq(NOTHING, decode(optional, "<value/>").item);
+        assertEq(17, decode(optional, "<value><item/></value>").item.getValue());
+        XsdSchema text = schema('<xs:element name="value" type="xs:string" default="default"/>');
+        assertEq(" ", decode(text, "<value> </value>"));
+        assertEq("default", decode(text, "<value/>").getValue());
+    }
+    private fixedTypes() {
+        foreach string type in ("string", "QName") {
+            string body = '<xs:simpleType name="Base"><xs:union memberTypes="xs:boolean xs:' + type
+                + '"/></xs:simpleType><xs:element name="value" type="Base" fixed="1"/>';
+            XsdSchema original = schema(body);
+            string source = '<xs:schema xmlns:xs="' + XSD_NS + '">' + body + '</xs:schema>';
+            string attributes = ' xmlns:xsi="' + XSI_NS + '" xmlns:xs="' + XSD_NS + '" xsi:type="xs:' + type + '"';
+            foreach XsdSchema model in (original, saved(original)) {
+                auto value = decode(model, "<value" + attributes + "/>");
+                assertEq(type, value."^type^".getLocalName());
+                assertTrue(value."^val^" instanceof XsdDefaultValue);
+                assertEq("true", value."^val^".getValue());
+                assertEq(True, model.getElement("", "value").getValueConstraint().value);
+                checkOutput(model, saved(value), source);
+                assertThrows("SOAP-DESERIALIZATION-ERROR", \decode(),
+                    (model, "<value" + attributes + ">true</value>"));
+                value."^val^" = new XsdDefaultValue("different");
+                assertThrows("SOAP-SERIALIZATION-ERROR", \model.serializeXmlValue(), ("", "value", value));
+            }
+        }
+    }
+    private namespaces() {
+        string body = '<xs:element name="value" default="p:item"><xs:complexType><xs:simpleContent>'
+            '<xs:extension base="xs:QName"><xs:attribute name="tag" type="xs:QName" use="required"/>'
+            '</xs:extension></xs:simpleContent></xs:complexType></xs:element>';
+        string source = '<xs:schema xmlns:xs="' + XSD_NS + '" xmlns:p="urn:part">' + body + '</xs:schema>';
+        XsdSchema original(source, {"async_only":True});
+        foreach XsdSchema model in (original, saved(original)) {
+            auto value = decode(model, '<value xmlns:p="urn:instance" tag="p:tag"/>');
+            assertTrue(value instanceof XsdDefaultValue);
+            auto native = value.getValue();
+            assertEq("urn:part", native."^value^".getNamespaceUri());
+            assertEq("item", native."^value^".getLocalName());
+            assertEq("urn:instance", native."^attributes^".tag.getNamespaceUri());
+            assertEq("tag", native."^attributes^".tag.getLocalName());
+            checkOutput(model, saved(value), source);
+            auto output = model.serializeXmlValue("", "value", value);
+            assertEq("urn:instance", decode(model, output.getXml()).getValue()."^attributes^".tag.getNamespaceUri());
+            assertThrows("SOAP-DESERIALIZATION-ERROR", \decode(), (model, '<value tag="unbound:tag"/>'));
+            assertThrows("SOAP-DESERIALIZATION-ERROR", \decode(), (model, '<value/>'));
+        }
+    }
+    private lists() {
+        foreach string source_value in ("p:item", "+017 p:item") {
+            string body = '<xs:simpleType name="Member"><xs:union memberTypes="xs:int xs:QName"/></xs:simpleType>'
+                '<xs:simpleType name="Items"><xs:list itemType="Member"/></xs:simpleType>'
+                '<xs:element name="value" type="Items" default="' + source_value + '"/>';
+            string source = '<xs:schema xmlns:xs="' + XSD_NS + '" xmlns:p="urn:part">' + body + '</xs:schema>';
+            XsdSchema model(source, {"async_only":True});
+            auto value = decode(model, '<value xmlns:p="urn:shadow"/>');
+            assertTrue(value instanceof XsdDefaultValue);
+            auto items = value.getValue();
+            assertEq(source_value.startsWith("+") ? 2 : 1, items.size());
+            assertEq("urn:part", items[-1].getNamespaceUri());
+            assertEq("item", items[-1].getLocalName());
+            checkOutput(model, saved(value), source);
+        }
+    }
+    private complexContent() {
+        XsdSchema mixed = schema('<xs:element name="value" default="text"><xs:complexType mixed="true">'
+            '<xs:sequence><xs:element name="child" type="xs:string" minOccurs="0"/></xs:sequence>'
+            '<xs:attribute name="tag" type="xs:int" use="required"/></xs:complexType></xs:element>');
+        auto value = decode(mixed, '<value tag="17"/>');
+        assertTrue(value instanceof XsdDefaultValue);
+        assertEq("text", value.getValue()."^value^".getLexicalValue());
+        assertEq(17, value.getValue()."^attributes^".tag);
+        assertEq("", new XmlDoc(mixed.serializeXmlValue("", "value", value).getXml()).getRootElement().getContent());
+        assertThrows("SOAP-DESERIALIZATION-ERROR", \decode(), (mixed, "<value/>"));
+        assertThrows("SOAP-DESERIALIZATION-ERROR", \decode(), (mixed, '<value tag="wrong"/>'));
+        auto child = decode(mixed, '<value tag="17"><child>explicit</child></value>');
+        assertFalse(child instanceof XsdDefaultValue);
+        XsdSchema required = schema('<xs:complexType name="Base" mixed="true"><xs:sequence>'
+            '<xs:element name="child" type="xs:string" minOccurs="0"/></xs:sequence></xs:complexType>'
+            '<xs:complexType name="Required"><xs:complexContent><xs:restriction base="Base">'
+            '<xs:sequence><xs:element name="child" type="xs:string"/></xs:sequence>'
+            '</xs:restriction></xs:complexContent></xs:complexType>'
+            '<xs:element name="value" type="Base" default="text"/>');
+        assertThrows("SOAP-DESERIALIZATION-ERROR", \decode(),
+            (required, '<value xmlns:i="' + XSI_NS + '" i:type="Required"/>'));
+    }
+    private providers() {
+        XsdSchema model = schema('<xs:element name="value" type="xs:int" default="+017"/>');
+        XsdDefaultValue value(17);
+        foreach AbstractDataProviderType original in (model.getElement("", "value").getDataProviderType(),
+                model.getNativeDataProviderType("", "value")) {
+            foreach AbstractDataProviderType provider in (original, saved(original), original.getSoftType(),
+                    saved(original.getSoftType()), original.getMandatoryType(), original.getOrNothingType()) {
+                assertTrue(value === provider.acceptsValue(value));
+                assertEq(18, provider.acceptsValue(18));
+                assertThrows("RUNTIME-TYPE-ERROR", \provider.acceptsValue(), (new XsdDefaultValue(18),));
+                assertTrue(provider.getAcceptTypeHash().hasKey("XsdDefaultValue"));
+                assertTrue(provider.getReturnTypeHash().hasKey("XsdDefaultValue"));
+            }
+        }
+        XsdSchema missing = schema('<xs:element name="value" type="xs:int"/>');
+        assertThrows("SOAP-SERIALIZATION-ERROR", \missing.serializeXmlValue(), ("", "value", value));
+        AbstractDataProviderType missing_provider = missing.getNativeDataProviderType("", "value");
+        assertThrows("RUNTIME-TYPE-ERROR", \missing_provider.acceptsValue(), (value,));
+    }
+    private savedValues() {
+        foreach auto value in (17, "", NOTHING, (), {"^value^":17, "^attributes^":{"tag":"x"}}) {
+            XsdDefaultValue restored = saved(new XsdDefaultValue(value));
+            assertEq(value, restored.getValue());
+        }
+        assertThrows("XSD-DEFAULT-VALUE-ERROR", code<nothing()> sub() {
+            XsdDefaultValue nested(new XsdDefaultValue(17));
+        });
+        assertThrows("XSD-DEFAULT-VALUE-ERROR", code<nothing()> sub() {
+            XsdDefaultValue nil(new XsdNilValue());
+        });
+        XsdDefaultValue original(17);
+        foreach hash<auto> invalid in ({"unknown":17}, {"value":17, "extra":True}) {
+            hash<SerializationInfo> state = original.serializeToData();
+            state._index."0"._class_data."WSDL::XsdDefaultValue" = invalid;
+            assertThrows("DESERIALIZATION-ERROR", \Serializable::deserialize(), (state,));
+        }
+        XsdSchema model = schema('<xs:element name="value" type="xs:int" default="17"/>');
+        AbstractDataProviderType provider = model.getElement("", "value").getDataProviderType();
+        foreach hash<auto> invalid in ({"element":"invalid"}, {"value_type":0}, {"optional":"yes"}) {
+            hash<SerializationInfo> state = provider.serializeToData();
+            state._index."0"._class_data."WSDL::XsdDefaultDataType" += invalid;
+            assertThrows("DESERIALIZATION-ERROR", \Serializable::deserialize(), (state,));
+        }
+        AbstractDataProviderType mandatory = provider.getMandatoryType();
+        assertThrows("MISSING-VALUE-ERROR", \mandatory.acceptsValue(), (NOTHING,));
+        assertEq(NOTHING, provider.getOrNothingType().acceptsValue(NOTHING));
+        assertTrue(mandatory.getInfo().union_types[0].mandatory);
+        assertFalse(provider.getOrNothingType().getInfo().union_types[0].mandatory);
+    }
+    private identities() {
+        string body = '<xs:element name="value"><xs:complexType><xs:sequence>'
+            '<xs:element name="id" type="xs:ID"/>'
+            '<xs:element name="ref" type="xs:IDREF" default="target"/>'
+            '</xs:sequence></xs:complexType></xs:element>';
+        string source = '<xs:schema xmlns:xs="' + XSD_NS + '">' + body + '</xs:schema>';
+        XsdSchema model(source, {"async_only":True});
+        foreach bool retain in (False, True) {
+            auto value = decode(model, '<value><id>target</id><ref/></value>', retain);
+            assertEq("target", actual(value.id));
+            assertEq("target", actual(value.ref));
+            checkOutput(model, value, source, False);
+            assertThrows("SOAP-DESERIALIZATION-ERROR", \decode(),
+                (model, '<value><id>other</id><ref/></value>', retain));
+            value.id = "other";
+            assertThrows("SOAP-SERIALIZATION-ERROR", \model.serializeXmlValue(), ("", "value", value));
+            assertEq("target", actual(decode(model, '<value><id>target</id><ref/></value>', retain).ref));
+        }
+    }
+    private emptyValues() {
+        foreach string type in ("xs:string", "Items", "xs:anyType") {
+            string body = '<xs:simpleType name="Items"><xs:list itemType="xs:int"/></xs:simpleType>'
+                '<xs:element name="value" type="' + type + '" default=""/>';
+            string source = '<xs:schema xmlns:xs="' + XSD_NS + '">' + body + '</xs:schema>';
+            XsdSchema model(source, {"async_only":True});
+            auto value = decode(model, '<value/>');
+            assertTrue(value instanceof XsdDefaultValue);
+            if (type == "Items") {
+                assertEq(NT_LIST, value.getValue().typeCode());
+                assertEq(0, value.getValue().size());
+            }
+            checkOutput(model, saved(value), source);
+            AbstractDataProviderType provider = saved(model.getElement("", "value").getDataProviderType());
+            assertTrue(value === provider.acceptsValue(value));
+        }
+    }
+    private cancellation() {
+        XsdSchema model = schema('<xs:element name="value" type="xs:int" default="17"/>');
+        XsdElement element = model.getElement("", "value");
+        XsdAbstractType original = element.type;
+        DefaultConversionType custom();
+        Program program(PO_MODERN | PO_ENABLE_DEBUG);
+        SandboxManager manager();
+        on_exit {
+            manager.clearInterrupt();
+            element.type = original;
+        }
+        program.setSandboxManager(manager);
+        program.parse("%modern\nsub execute(code<nothing()> work) { work(); }\n", "default-interrupt.qr");
+        XsdDefaultValue value(17);
+        foreach bool interrupt in (False, True) {
+            foreach bool encoding in (False, True) {
+                element.type = custom;
+                custom.action = sub() {
+                    if (interrupt) {
+                        manager.requestInterrupt();
+                    } else {
+                        throw "DEFAULT-CUSTOM-ERROR", "custom conversion failed";
+                    }
+                };
+                code<nothing()> work = sub() {
+                    if (encoding) {
+                        model.serializeXmlValue("", "value", value);
+                    } else {
+                        decode(model, '<value/>');
+                    }
+                };
+                *hash<ExceptionInfo> error;
+                try {
+                    program.callFunction("execute", work);
+                } catch (hash<ExceptionInfo> ex) {
+                    error = ex;
+                }
+                manager.clearInterrupt();
+                assertEq(interrupt ? "PROGRAM-INTERRUPTED" : "DEFAULT-CUSTOM-ERROR", error.err);
+                element.type = original;
+                assertEq(17, decode(model, '<value/>').getValue());
+                assertEq(17, value.getValue());
+                assertEq("", new XmlDoc(model.serializeXmlValue("", "value", value).getXml()).getRootElement().getContent());
+            }
+        }
+    }
+}
+%endif

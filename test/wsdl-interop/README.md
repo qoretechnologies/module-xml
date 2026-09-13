@@ -9,6 +9,15 @@ Native empty defaults and declaration-scoped QName identity use
 differences; see [evidence](native-element-defaults-evidence.md) and
 [the approved interpretation](default-identity-investigation.md).
 
+WSDL default application and explicit empty-value carriers use
+`qore -b --enable-debug test/wsdl-element-defaults.qtest`,
+`qore -b --enable-debug test/wsdl-element-defaults-http.qtest` and
+`python3 -B test/wsdl-interop/test_wsdl_element_defaults.py -v`.
+The binding matrix assesses 200 documents through both SOAP versions, directions,
+decoding modes and source/saved services. See the
+[implemented design](../../design/wsdl-element-defaults.md). The separate
+[NOTATION finding](p5-wsdl-notation-finding.md) and key/unique/keyref remain P5 work.
+
 Particle construction checks run with `qore -b --enable-debug test/wsdl-particle-model.qtest`
 and `python3 test/wsdl-interop/test_particle_model.py -v`. Native occurrence validation
 uses `test/xml-particle-counts.qtest` and `test/wsdl-interop/test_particle_counts.py`.
