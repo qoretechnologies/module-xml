@@ -17,11 +17,18 @@ the original ordered representation.
 
 The same probes independently found native libxml2 rejecting foreign `lang` and
 accepting malformed documentation `source`. P5-19e corrects those native checks.
-The WSDL counterpart is the next P5 increment, with exact grammar, ID scope,
-saved-schema and SOAP contract tests. This finding remains open until those
-checks pass; native acceptance does not close it.
+The WSDL counterpart is implemented in P5-19f, with ordered grammar, ID scope,
+saved-schema, native URI and SOAP contract tests. The separate regrouping defect
+for mixed empty/nonempty documentation is also fixed. Complex types no longer
+pass empty, attributed or repeated documentation directly to trim(); ordered
+plain-text extraction accepts these valid forms. See
+[implemented design](../../design/wsdl-schema-annotations.md).
 
-Original probe inputs and complete diagnostics:
-`/tmp/wsdl-p5-19e-schema-annotations/models.json`, `native-wsdl.jsonl`, `xerces.json`.
+Original probe inputs and independent diagnostics:
+`/tmp/wsdl-p5-19e-schema-annotations/models.json` and `xerces.json`.
+The scratch native/WSDL output was overwritten during the next prototype run;
+`/tmp/wsdl-p5-19f-wsdl-annotations/baseline/native-wsdl.jsonl` reproducibly records
+WSDL `9ed2230` against the now-corrected native validator, with the original input
+bytes. It distinguishes the still-broken WSDL grammar from the accepted native fix.
 Requirements: [XSD 1.0 annotations](https://www.w3.org/TR/2004/REC-xmlschema-1-20041028/#cAnnotations)
 and [validation-root ID uniqueness](https://www.w3.org/TR/2004/REC-xmlschema-1-20041028/#cvc-id).

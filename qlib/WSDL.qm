@@ -80,6 +80,11 @@ module WSDL {
     @section wsdlrelnotes WSDL Module Release Notes
 
     @subsection wsdl_0_5_8 WSDL v0.5.8
+    - Schema annotations validate ordered content, allowed attributes, URI sources, language tags and
+      normalized declaration IDs before component conversion; arbitrary annotation payloads remain data
+    - Complex-type documentation accepts empty, attributed and mixed content, retaining ordered plain text
+    - Repeated schema children retain heterogeneous values when later occurrences are empty,
+      including interleaved documentation, saved schemas and actual SOAP consumer contracts
     - NOTATION values retain a distinct primitive identity with XsdNotationValue; scalar, list, union,
       default/fixed and saved provider conversions validate declared notation names and enumeration-derived uses
     - Identity-checking element providers retain their receiving named-type context when validating selected values
@@ -19148,6 +19153,128 @@ hashdecl XsdFacetGrammarFrame {
     bool any_attribute = False;
 }
 
+hashdecl XsdAnnotationGrammarFrame {
+    string name;
+    bool annotation = False;
+    bool content = False;
+}
+
+#! Validate annotation markup and declaration IDs before the XML tree is grouped by child name.
+class XsdAnnotationGrammarHelper {
+    private {
+        hash<string, bool> ids;
+        hash<string, hash<XsdAnnotationGrammarFrame>> frames;
+        int annotation_depth = -1;
+        int payload_depth = -1;
+    }
+
+    consume(XmlReader reader) {
+        int depth = reader.depth();
+        int kind = reader.nodeType();
+        if (payload_depth >= 0) {
+            if (kind == XML_NODE_TYPE_END_ELEMENT && depth == payload_depth) {
+                payload_depth = -1;
+            }
+            return;
+        }
+        if (kind == XML_NODE_TYPE_END_ELEMENT) {
+            remove frames{string(depth)};
+            if (depth == annotation_depth) {
+                annotation_depth = -1;
+            }
+            return;
+        }
+        if (kind != XML_NODE_TYPE_ELEMENT) {
+            if (annotation_depth >= 0 && (kind == XML_NODE_TYPE_TEXT || kind == XML_NODE_TYPE_CDATA
+                    || kind == XML_NODE_TYPE_SIGNIFICANT_WHITESPACE)
+                    && XsdSimpleType::normalizeWhiteSpace(reader.value() ?? "", "collapse")) {
+                throw WSDL_ERROR, "annotation cannot contain character data outside appinfo or documentation";
+            }
+            return;
+        }
+        string local = reader.localName();
+        bool xsd = reader.namespaceUri() == XSD_NS;
+        if (annotation_depth >= 0) {
+            if (!xsd || (local != "appinfo" && local != "documentation")) {
+                throw WSDL_ERROR, "annotation content must be XSD appinfo or documentation";
+            }
+            attributes(reader, local);
+            payload_depth = reader.isEmptyElement() ? -1 : depth;
+            return;
+        }
+        if (!xsd) {
+            return;
+        }
+        *hash<XsdAnnotationGrammarFrame> parent = frames{string(depth - 1)};
+        if (parent) {
+            if (local == "annotation") {
+                if (parent.name != "schema" && parent.name != "redefine"
+                        && (parent.annotation || parent.content)) {
+                    throw WSDL_ERROR, "annotation must occur once before other schema component content";
+                }
+                parent.annotation = True;
+            } else {
+                parent.content = True;
+            }
+            frames{string(depth - 1)} = parent;
+        }
+        if (!reader.isEmptyElement()) {
+            frames{string(depth)} = <XsdAnnotationGrammarFrame>{"name": local};
+        }
+        if (local == "appinfo" || local == "documentation") {
+            throw WSDL_ERROR, sprintf("XSD %s must be a direct annotation child", local);
+        }
+        if (local == "annotation") {
+            attributes(reader, local);
+            annotation_depth = reader.isEmptyElement() ? -1 : depth;
+        }
+        if (reader.moveToAttribute("id")) {
+            on_exit reader.moveToElement();
+            string id = XsdNameLexicalHelper::lexical("ID", reader.value(), WSDL_ERROR);
+            if (ids{id}) {
+                throw WSDL_ERROR, sprintf("duplicate schema declaration ID %Y", id);
+            }
+            ids{id} = True;
+        }
+    }
+
+    private static attributes(XmlReader reader, string element) {
+        if (!reader.moveToFirstAttribute()) {
+            return;
+        }
+        on_exit reader.moveToElement();
+        do {
+            *string uri = reader.namespaceUri();
+            string local = reader.localName();
+            if (uri && uri != XSD_NS) {
+                if (element == "documentation" && uri == "http://www.w3.org/XML/1998/namespace"
+                        && local == "lang") {
+                    string language = XsdSimpleType::normalizeWhiteSpace(reader.value() ?? "", "collapse");
+                    if (!(language =~ /\A[a-zA-Z]{1,8}(-[a-zA-Z0-9]{1,8})*\z/)) {
+                        throw WSDL_ERROR, sprintf("invalid XSD documentation language %Y", language);
+                    }
+                }
+                continue;
+            }
+            if (!uri && element == "annotation" && local == "id") {
+                continue;
+            }
+            if (!uri && element != "annotation" && local == "source") {
+                try {
+                    string normalized = normalize_xsd_uri(reader.value() ?? "");
+                } catch (hash<ExceptionInfo> ex) {
+                    if (ex.err != "XSD-URI-LEXICAL-ERROR") {
+                        rethrow;
+                    }
+                    throw WSDL_ERROR, ex.desc;
+                }
+                continue;
+            }
+            throw WSDL_ERROR, sprintf("unexpected attribute {%s}%s on XSD %s", uri ?? "", local, element);
+        } while (reader.moveToNextAttribute());
+    }
+}
+
 #! Check the ordered XML representation before parseTypes merges namespace-qualified child names.
 class XsdFacetGrammarHelper {
     private {
@@ -21872,6 +21999,35 @@ class XsdSchemaSource {
         return value;
     }
 
+    # Extract plain text while retaining the original XML view in the saved source.
+    static string documentationText(auto value) {
+        list<auto> pending();
+        push pending, value;
+        list<string> text();
+        while (pending) {
+            auto node = pop pending;
+            if (node.typeCode() == NT_LIST) {
+                for (int i = node.size() - 1; i >= 0; --i) {
+                    push pending, node[i];
+                }
+            } else if (node.typeCode() == NT_HASH) {
+                list<string> names = keys node;
+                for (int i = names.size() - 1; i >= 0; --i) {
+                    string name = names[i];
+                    if ((!name.startsWith("^") && !name.startsWith("."))
+                            || name =~ /^\^(value|cdata)[0-9]*\^$/) {
+                        push pending, node{name};
+                    }
+                }
+            } else if (node.typeCode() == NT_STRING) {
+                push text, node;
+            } else if (exists node) {
+                throw WSDL_ERROR, "invalid schema documentation data";
+            }
+        }
+        return text.join("");
+    }
+
     private static convert(reference<auto> value, string name, hash<string, string> namespaces,
             bool annotation_content = False, bool in_schema = False) {
         if (value.typeCode() == NT_LIST) {
@@ -21901,7 +22057,8 @@ class XsdSchemaSource {
             }
             return;
         }
-        bool ordered = uri == XSD_NS && (local == "sequence" || local == "choice" || local == "all");
+        bool ordered = annotation_content
+            || (uri == XSD_NS && (local == "sequence" || local == "choice" || local == "all"));
         bool rewrite = False;
         foreach string key in (keys value) {
             if (key[0] == "^") {
@@ -21928,14 +22085,30 @@ class XsdSchemaSource {
             int suffix = key[0] == "^" ? -1 : key.rfind("^");
             string output_key = suffix < 0 ? key : substr(key, 0, suffix);
             if (!result.hasKey(output_key)) {
-                result{output_key} = value{key};
-            } else {
-                # Explicit wrapping preserves NOTHING for repeated empty declarations.
-                if (result{output_key}.typeCode() != NT_LIST) {
-                    result{output_key} = (result{output_key},);
+                if (value{key}.typeCode() == NT_LIST) {
+                    # XML may infer list<hash<auto>> from this run, while a later run
+                    # contains an empty element. Give the grouped list its actual union type.
+                    list<auto> children();
+                    foreach auto child in (value{key}) {
+                        push children, child;
+                    }
+                    result{output_key} = children;
+                } else {
+                    result{output_key} = value{key};
                 }
-                auto child = value{key};
-                result{output_key} += child.typeCode() == NT_LIST ? child : (child,);
+            } else {
+                if (result{output_key}.typeCode() != NT_LIST) {
+                    list<auto> children();
+                    push children, result{output_key};
+                    result{output_key} = children;
+                }
+                if (value{key}.typeCode() == NT_LIST) {
+                    foreach auto child in (value{key}) {
+                        push result{output_key}, child;
+                    }
+                } else {
+                    push result{output_key}, value{key};
+                }
             }
         }
         value = result;
@@ -25493,12 +25666,19 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
         emptiability = XsdEmptiabilityHelper::parse(d, nsc);
         content_empty = XsdEmptiabilityHelper::hasEmptyContent(d, mixed);
         delete d.ns;
-        if (d.annotation) {
+        if (d.hasKey("annotation")) {
             *hash<auto> ah = remove d.annotation;
-            remove ah.ns;
-            remove ah."^attributes^";
-            if (ah.size() == 1 && ah.firstKey() =~ /documentation$/) {
-                documentation = trim(ah.firstValue());
+            list<string> descriptions();
+            foreach string key in (keys ah) {
+                if (key == "documentation" || key.endsWith(":documentation")) {
+                    list<auto> documents = ah{key}.typeCode() == NT_LIST ? ah{key} : (ah{key},);
+                    foreach auto value in (documents) {
+                        push descriptions, trim(XsdSchemaSource::documentationText(value));
+                    }
+                }
+            }
+            if (descriptions) {
+                documentation = descriptions.join("\n");
             }
         }
         if (!d) {
@@ -31384,6 +31564,7 @@ public class XsdSchema inherits WSDL::XsdBase {
     private validateSchemaGrammar(string xml) {
         XmlReader reader(xml);
         XsdFacetGrammarHelper facet_grammar();
+        XsdAnnotationGrammarHelper annotations();
         int schema_depth = -1;
         int notation_depth = -1;
         bool notation_annotation = False;
@@ -31398,6 +31579,7 @@ public class XsdSchema inherits WSDL::XsdBase {
             int kind = reader.nodeType();
             if (schema_depth >= 0) {
                 facet_grammar.consume(reader);
+                annotations.consume(reader);
             }
             if (kind == XML_NODE_TYPE_END_ELEMENT) {
                 if (depth == notation_depth) {
@@ -31423,6 +31605,7 @@ public class XsdSchema inherits WSDL::XsdBase {
                 types = definitions && uri == wsdl_namespace && local == "types";
             }
             if (uri == XSD_NS && local == "schema" && (depth == 0 || (depth == 2 && types))) {
+                annotations.consume(reader);
                 schema_depth = reader.isEmptyElement() ? -1 : depth;
                 declared = False;
             } else if (schema_depth >= 0 && depth == schema_depth + 1) {

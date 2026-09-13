@@ -1909,6 +1909,19 @@ and 63 invalid schemas. Foreign `lang` attributes are accepted; documentation
 `source` values are validated without retrieval. Run `test/xml-annotations.qtest`
 and `python3 test/wsdl-interop/test_annotations.py -v`. See
 [evidence](native-annotations-evidence.md), [inventory](P5-19e-validation.json),
-[full audit](audits/P5-19e-native-annotations.md) and the open
+[full audit](audits/P5-19e-native-annotations.md) and the resolved
 [WSDL counterpart](p5-wsdl-annotation-finding.md). Existing corpus results are
 unchanged in both decoding modes. Python CI integration remains P9 work.
+
+## WSDL annotations and URI API (P5-19f)
+
+Ordered annotation grammar and document IDs are checked before component grouping.
+Complex-type documentation accepts empty and mixed content while retaining text
+order. `normalize_xsd_uri()` validates and collapses URI whitespace without
+retrieving references. Run `test/wsdl-annotations.qtest` and
+`test/xml-uri-values.qtest`; annotated real HTTP coverage is in
+`test/wsdl-notation-http.qtest`. See [evidence](wsdl-annotations-evidence.md),
+[inventory](P5-19f-validation.json), [audit](audits/P5-19f-wsdl-annotations.md)
+and [design/example](../../design/wsdl-schema-annotations.md).
+The [scalar URI/language gap](p5-wsdl-uri-language-finding.md) is next, followed by
+remaining P5 identity constraints and typed accounting. P6-P9 remain required.

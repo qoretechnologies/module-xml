@@ -8092,3 +8092,23 @@ No installation or push; unrelated `test/cmake/__pycache__/` is excluded. Next:
 [WSDL annotation/document-ID grammar](p5-wsdl-annotation-finding.md), then remaining
 P5 identity constraints and typed accounting. P6–P9 remain required. No question
 is pending. Artifacts: `/tmp/wsdl-p5-19e-schema-annotations/`.
+
+## P5-19f — WSDL annotation grammar and documentation (2026-09-14)
+
+P5-19e committed as `9ed2230`. Ordered annotations, document IDs, heterogeneous
+child grouping and complex-type documentation are now validated/preserved before
+component construction. A native URI API validates without retrieving references.
+
+Final acceptance: 55 affected Qore suites plus xsd-compliance, 12 supplemental
+checks, clean native build/docs and direct-ELF Valgrinds. Annotation/URI suites
+pass 1,362/35 assertions in all four execution modes; actual SOAP HTTP coverage
+passes 440. The earlier broad 172-suite run preceded the final documentation fix
+and is recorded separately. Both-mode corpus results retain the parent outcomes.
+Full audit: 22 Pass, 40 N/A, zero Fail. See [evidence](wsdl-annotations-evidence.md),
+[inventory](P5-19f-validation.json) and [audit](audits/P5-19f-wsdl-annotations.md).
+
+Qore remains clean/read-only; installed and frozen libraries match. No installation
+or push; unrelated `test/cmake/__pycache__/` is excluded. Next is the confirmed
+[scalar URI/language gap](p5-wsdl-uri-language-finding.md), then key/unique/keyref
+and complete typed accounting. P6-P9 remain required, including Python CI wiring.
+No question is pending. Artifacts: `/tmp/wsdl-p5-19f-wsdl-annotations/`.

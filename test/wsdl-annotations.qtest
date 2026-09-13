@@ -1,0 +1,281 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires ../qlib/WSDL.qm
+%requires xml
+%try-module json
+%define NoJson
+%endtry
+%ifdef NoJson
+throw "MISSING-MODULE", "Annotation tests require json";
+%else
+%exec-class WsdlAnnotationsTest
+
+class WsdlAnnotationsTest inherits QUnit::Test {
+    constructor() : Test("WSDL annotation and declaration ID grammar", "1.0") {
+        addTestCase("Annotation matrix preserves scalar values and saved providers", \matrix());
+        addTestCase("Declaration IDs are normalized and unique within their document", \ids());
+        addTestCase("Annotation placement is checked before child grouping", \placement());
+        addTestCase("Independent documents and failed additions retain correct ID scope", \documents());
+        addTestCase("Imports and chameleon includes keep document IDs independent", \dependencies());
+        addTestCase("Cancelled additions can be retried without retained IDs", \cancellation());
+        addTestCase("Concurrent schema reconstruction keeps annotation and ID state local", \concurrency());
+        addTestCase("Both WSDL binding contracts validate inline annotation grammar", \services());
+        addTestCase("Repeated empty and nonempty documentation regroup without narrowing list values", \grouping());
+        addTestCase("Complex types accept empty documentation and retain ordered text", \documentation());
+        set_return_value(main());
+    }
+    private static XsdSchema parse(string source) {
+        return new XsdSchema(source, {"async_only": True});
+    }
+    private static string document(string body, string attrs = "") {
+        return '<xs:schema xmlns:xs="' + XSD_NS + '" ' + attrs + '>' + body + '</xs:schema>';
+    }
+    private matrix() {
+        list<hash<auto>> models = parse_json(ReadOnlyFile::readTextFile(
+            get_script_dir() + "/wsdl-interop/fixtures/annotations.json"));
+        assertEq(117, models.size());
+        foreach hash<auto> model in (models) {
+            if (!model.schema_valid) {
+                assertThrows("WSDL-ERROR", \parse(), (model.schema,));
+                continue;
+            }
+            XsdSchema original = parse(model.schema);
+            foreach XsdSchema current in (original, Serializable::deserialize(original.serialize())) {
+                XsdElement element = current.getElement("", "value");
+                AbstractDataProviderType provider = element.getDataProviderType();
+                foreach AbstractDataProviderType type in (provider, Serializable::deserialize(provider.serialize())) {
+                    assertEq("kept", type.acceptsValue("kept"));
+                }
+                XsdXmlValue output = current.serializeXmlValue("", "value", "kept");
+                assertEq(parse_xml(output.getXml()), parse_xml_with_schema(output.getXml(), model.schema));
+                auto wire = XsdBase::expandElementNamespaces(parse_xml(output.getXml(), XPF_PRESERVE_ORDER));
+                foreach bool retain in (False, True) {
+                    assertEq("kept", element.deserializeValue(current.getTypeMap(), NOTHING, wire."{}value", True, retain));
+                }
+            }
+        }
+    }
+    private ids() {
+        string value = '<xs:element name="value" type="xs:string" id=" duplicate "/>';
+        foreach string declaration in (
+                '<xs:annotation id="duplicate"/>',
+                '<xs:simpleType name="T" id="duplicate"><xs:restriction base="xs:string"/></xs:simpleType>',
+                '<xs:simpleType name="T"><xs:restriction base="xs:string" id="duplicate"/></xs:simpleType>',
+                '<xs:simpleType name="T"><xs:restriction base="xs:string"><xs:pattern value=".*" id="duplicate"/>'
+                    + '</xs:restriction></xs:simpleType>',
+                '<xs:notation name="N" public="p" id="duplicate"/>',
+                '<xs:attribute name="A" type="xs:string" id="duplicate"/>') {
+            assertThrows("WSDL-ERROR", \parse(), (document(declaration + value),));
+            assertThrows("XSD-SYNTAX-ERROR", \parse_xml_with_schema(), ("<value/>", document(declaration + value)));
+        }
+        assertThrows("WSDL-ERROR", \parse(), (document(value, 'id="duplicate"'),));
+        foreach string id in ("", "a:b", "0id", "two ids") {
+            assertThrows("WSDL-ERROR", \parse(), (document('<xs:element name="value" type="xs:string" id="'
+                + id + '"/>'),));
+        }
+        XsdSchema valid = parse(document('<xs:annotation id="same"><xs:appinfo>'
+            + '<xs:element id="same"/><xs:annotation id="same">payload</xs:annotation>'
+            + '</xs:appinfo></xs:annotation><xs:element name="value" type="xs:string" id="different"/>'));
+        assertEq("value", valid.getElement("", "value").name);
+    }
+    private placement() {
+        foreach string body in (
+                '<xs:complexType name="T"><xs:sequence/><xs:annotation/></xs:complexType>',
+                '<xs:complexType name="T"><xs:annotation/><xs:annotation/></xs:complexType>',
+                '<xs:element name="value"><xs:simpleType><xs:restriction base="xs:string"/></xs:simpleType>'
+                    + '<xs:annotation/></xs:element>',
+                '<xs:attribute name="A"><xs:annotation/><xs:annotation/></xs:attribute>',
+                '<xs:documentation/>', '<xs:appinfo/>') {
+            assertThrows("WSDL-ERROR", \parse(), (document(body),));
+            assertThrows("XSD-SYNTAX-ERROR", \parse_xml_with_schema(), ("<value/>", document(body)));
+        }
+        XsdSchema valid = parse(document('<xs:annotation/><xs:element name="value" type="xs:string"/>'
+            + '<xs:annotation/><xs:annotation/>'));
+        assertEq("value", valid.getElement("", "value").name);
+    }
+    private documents() {
+        string first = document('<xs:element name="first" type="xs:string" id="same"/>');
+        string second = document('<xs:element name="second" type="xs:string" id="same"/>');
+        XsdSchema original = parse(first);
+        original.addSchemaString(second);
+        foreach XsdSchema current in (original, Serializable::deserialize(original.serialize())) {
+            assertEq("first", current.getElement("", "first").name);
+            assertEq("second", current.getElement("", "second").name);
+            string addition = document('<xs:annotation id="new"/><xs:element name="third" type="xs:string" id="new"/>');
+            assertThrows("WSDL-ERROR", \current.addSchemaString(), (addition,));
+            current.addSchemaString(document('<xs:element name="third" type="xs:string" id="new"/>'));
+            assertEq("third", current.getElement("", "third").name);
+        }
+    }
+    private dependencies() {
+        string included = document('<xs:simpleType name="Text" id="same"><xs:restriction base="xs:string"/></xs:simpleType>',
+            'id="root"');
+        string imported = document('<xs:element name="other" type="xs:string" id="same"/>',
+            'targetNamespace="urn:other" id="root"');
+        string parent = document('<xs:include schemaLocation="included.xsd"/>'
+            + '<xs:import namespace="urn:other" schemaLocation="imported.xsd"/>'
+            + '<xs:element name="value" type="Text" id="same"/>', 'id="root"');
+        XsdSchema original(parent, {"async_only": True, "def_path": "https://example.invalid/annotations/",
+            "xsd_cache": {"https://example.invalid/annotations/included.xsd": included,
+                "https://example.invalid/annotations/imported.xsd": imported}});
+        foreach XsdSchema current in (original, Serializable::deserialize(original.serialize())) {
+            assertEq("other", current.getElement("urn:other", "other").name);
+            assertEq("kept", current.getElement("", "value").getDataProviderType().acceptsValue("kept"));
+        }
+    }
+    private cancellation() {
+        XsdSchema original = parse(document('<xs:element name="first" type="xs:string" id="first"/>'));
+        string addition = document('<xs:annotation id="new"><xs:documentation source="../manual"/></xs:annotation>'
+            + '<xs:element name="second" type="xs:string"/>');
+        SandboxManager manager();
+        on_exit manager.clearInterrupt();
+        Program program(PO_NEW_STYLE | PO_STRICT_ARGS | PO_REQUIRE_TYPES);
+        program.setSandboxManager(manager);
+        program.parse("%modern\n%requires ../qlib/WSDL.qm\n"
+            "sub add(XsdSchema schema, string source, SandboxManager manager, bool cancel) {\n"
+            "    if (cancel) { manager.requestInterrupt(); }\n"
+            "    schema.addSchemaString(source);\n}\n", get_script_dir() + "/annotation-interrupt.qr");
+        *hash<ExceptionInfo> error;
+        try {
+            program.callFunction("add", original, addition, manager, True);
+        } catch (hash<ExceptionInfo> ex) {
+            error = ex;
+        }
+        manager.clearInterrupt();
+        assertEq("PROGRAM-INTERRUPTED", error.err);
+        assertEq("first", original.getElement("", "first").name);
+        program.callFunction("add", original, addition, manager, False);
+        assertEq("second", original.getElement("", "second").name);
+    }
+
+    private concurrency() {
+        XsdSchema original = parse(document('<xs:annotation id="info"><xs:documentation source="../manual"/>'
+            + '</xs:annotation><xs:element name="first" type="xs:string" id="same"/>'));
+        Qore::Thread::Queue ready();
+        Qore::Thread::Queue start();
+        Qore::Thread::Queue results();
+        Qore::Thread::Counter running();
+        on_exit {
+            for (int i = 0; i < 4; ++i) {
+                start.push(True);
+            }
+            assertEq(0, running.waitForZero(30s));
+        }
+        for (int i = 0; i < 4; ++i) {
+            running.inc();
+            background sub(int index) {
+                on_exit running.dec();
+                try {
+                    ready.push(True);
+                    start.get(30s);
+                    XsdSchema current = Serializable::deserialize(original.serialize());
+                    current.addSchemaString(document(sprintf('<xs:annotation id="info"><xs:documentation'
+                        ' source="../manual/%d"/></xs:annotation><xs:element name="own%d" type="xs:string" id="same"/>',
+                        index, index)));
+                    results.push((index, current.getElement("", sprintf("own%d", index)).name,
+                        current.getElement("", "first").name));
+                } catch (hash<ExceptionInfo> ex) {
+                    results.push({"error": ex});
+                }
+            }(i);
+        }
+        for (int i = 0; i < 4; ++i) {
+            ready.get(30s);
+        }
+        for (int i = 0; i < 4; ++i) {
+            start.push(True);
+        }
+        hash<string, bool> seen();
+        for (int i = 0; i < 4; ++i) {
+            auto result = results.get(30s);
+            assertEq(NT_LIST, result.typeCode());
+            assertEq(sprintf("own%d", result[0]), result[1]);
+            assertEq("first", result[2]);
+            seen{result[1]} = True;
+        }
+        assertEq(4, seen.size());
+    }
+
+    private static WebService service(string schema, string version) {
+        string binding = version == "1.1" ? "http://schemas.xmlsoap.org/wsdl/soap/"
+            : "http://schemas.xmlsoap.org/wsdl/soap12/";
+        return new WebService('<w:definitions xmlns:w="http://schemas.xmlsoap.org/wsdl/" xmlns:t="urn:service"'
+            + ' xmlns:s="' + binding + '" targetNamespace="urn:service"><w:types>' + schema
+            + '</w:types><w:message name="Value"><w:part name="body" element="value"/></w:message>'
+            + '<w:portType name="Port"><w:operation name="echo"><w:input message="t:Value"/>'
+            + '<w:output message="t:Value"/></w:operation></w:portType><w:binding name="Binding" type="t:Port">'
+            + '<s:binding style="document" transport="http://schemas.xmlsoap.org/soap/http"/>'
+            + '<w:operation name="echo"><s:operation soapAction="urn:echo"/><w:input><s:body use="literal"/>'
+            + '</w:input><w:output><s:body use="literal"/></w:output></w:operation></w:binding></w:definitions>',
+            {"async_only": True});
+    }
+    private services() {
+        list<hash<auto>> models = parse_json(ReadOnlyFile::readTextFile(
+            get_script_dir() + "/wsdl-interop/fixtures/annotations.json"));
+        foreach string version in ("1.1", "1.2") {
+            foreach hash<auto> model in (models) {
+                if (!model.schema_valid) {
+                    assertThrows("WSDL-ERROR", \service(), (model.schema, version));
+                    continue;
+                }
+                WebService original = service(model.schema, version);
+                foreach WebService current in (original, Serializable::deserialize(original.serialize())) {
+                    assertEq("value", current.messages.Value.args.firstValue().element.name);
+                    assertEq("echo", current.listOperations()[0].operation.name);
+                }
+            }
+        }
+    }
+
+    private grouping() {
+        foreach string content in (
+                '<xs:documentation source="one"/><xs:documentation source="two"/><xs:appinfo/><xs:documentation/>',
+                '<xs:documentation/><xs:appinfo/><xs:documentation source="one"/><xs:documentation source="two"/>',
+                '<xs:documentation>one</xs:documentation><xs:appinfo/><xs:documentation/>',
+                '<xs:documentation/><xs:appinfo/><xs:documentation>two</xs:documentation>') {
+            XsdSchema original = parse(document('<xs:annotation>' + content + '</xs:annotation>'
+                + '<xs:element name="value" type="xs:string"/>'));
+            foreach XsdSchema current in (original, Serializable::deserialize(original.serialize())) {
+                assertEq("kept", current.getElement("", "value").getDataProviderType().acceptsValue("kept"));
+            }
+        }
+    }
+
+    private documentation() {
+        foreach hash<auto> row in (
+                {"content": "", "text": NOTHING},
+                {"content": '<xs:documentation/>', "text": ""},
+                {"content": '<xs:documentation source="../manual">text</xs:documentation>', "text": "text"},
+                {"content": '<xs:documentation xml:lang="en">  inner  spacing' + "\n" + 'and line </xs:documentation>',
+                    "text": "inner  spacing\nand line"},
+                {"content": '<xs:documentation>first</xs:documentation><xs:appinfo>ignored</xs:appinfo>'
+                    + '<xs:documentation>second</xs:documentation>', "text": "first\nsecond"},
+                {"content": '<xs:documentation>before <b>bold</b> after</xs:documentation>', "text": "before bold after"},
+                {"content": '<xs:documentation>a <b>one</b> middle <b>two</b> z</xs:documentation>',
+                    "text": "a one middle two z"},
+                {"content": '<xs:documentation>before<![CDATA[<raw>]]> after</xs:documentation>',
+                    "text": "before<raw> after"},
+                {"content": '<xs:documentation><b>one</b><b>two</b></xs:documentation>', "text": "onetwo"},
+                {"content": '<xs:documentation>first</xs:documentation><xs:documentation/>'
+                    + '<xs:documentation>last</xs:documentation>', "text": "first\n\nlast"},
+                {"content": '<xs:documentation><ns>kept</ns> 中文</xs:documentation>', "text": "kept 中文"}) {
+            foreach string particles in ("", '<xs:sequence/>') {
+                string source = document('<xs:complexType name="T"><xs:annotation>' + row.content
+                    + '</xs:annotation>' + particles + '</xs:complexType><xs:element name="value" type="T"/>');
+                XsdSchema original = parse(source);
+                foreach XsdSchema current in (original, Serializable::deserialize(original.serialize())) {
+                    XsdComplexType type = cast<XsdComplexType>(current.findType("T"));
+                    assertEq(row.text, type.documentation);
+                    assertTrue(type.isEmpty());
+                    XsdXmlValue output = current.serializeXmlValue("", "value", {});
+                    assertEq(parse_xml(output.getXml()), parse_xml_with_schema(output.getXml(), source));
+                }
+            }
+        }
+    }
+
+}
+%endif
