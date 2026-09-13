@@ -7643,3 +7643,45 @@ remain required. See [evidence](native-id-bindings-evidence.md),
 [inventory](P5-17a-validation.json) and [audit](audits/P5-17a-native-id-bindings.md).
 No install, push or main-Qore mutation. Fetched module-xml origin with no incoming
 commit. Next: WSDL document identity processing.
+
+### P5-17b WSDL document ID bindings (2026-09-13)
+
+Based on native prerequisite `e1c58e8`, WSDL records actual selected ID and
+reference values in per-root owner tables and checks closure after traversal.
+Field-provider preparation and repeated retained/wildcard validation do not
+contribute duplicate owners. Ordinary element providers retain identity checks
+through serialization, soft/optional variants and saved metadata. Repeated
+optional record occurrence lists use the base kind instead of the broader
+Qore output-compatibility test.
+
+An earlier JIT acceptance run exposed a Qore scope lifetime defect before any
+commit. Qore `c203380c4` fixes lexical release of assigned IR-only objects and
+owned-alloca registration across block layout. The user's installed build
+`8c0c22c150c6e51ed09976ca99d74041ec074620` passes all 15 original scope/mode
+reproducers with synchronous compilation and thresholds of one. The old failure
+and corrected results remain in `/tmp/wsdl-qore-scope-cleanup/README.md` and
+`/tmp/wsdl-p5-17b-identities/final/scope-check/`. No XML workaround was introduced.
+
+The final 149-suite regression gate, eight new unit/HTTP cases (1,267 assertions)
+in AST/IR/JIT/tiered/AOT, 340-row source/AOT independent serialization matrix and
+affected Python tests pass without warnings. All final source/runtime guards
+remain unchanged. Both complete corpus modes reject the 16 invalid identity
+directions; native mode emits 2,096 independently valid directions, with 824
+still unassessed for typed preservation. Legacy mode retains four known dynamic
+type serialization failures. The selected strict scope remains 144 WSDLs and
+1,388 directions. Affected documentation and the executed example pass.
+
+The earlier broad `docs` build reported 22 documentation warnings in unchanged
+WebDavClient, WebDavHandler, SaxDataProvider, XmlRpcConnection,
+WebDavClientDataProvider, CargoXmlDataProvider and SalesforceSoapClient. Exact
+historical diagnostics remain in
+`/tmp/wsdl-p5-17b-identities/documentation-warnings.json` for P9 documentation
+integration. The final affected WSDL/native docs are warning-free; no broad docs
+warning-free claim is made.
+
+See [evidence](id-bindings-evidence.md), [inventory](P5-17b-validation.json) and
+[full audit](audits/P5-17b-id-bindings.md). Audit: 15 Pass, 47 N/A, zero Fail.
+This XML session made no C++/main-Qore change, installation or push. Origin was
+fetched; there is no incoming module-xml develop commit. Next: remaining P5
+defaults and key/unique/keyref constraints, then P6–P9. Initial default fixtures
+and the independent baseline are in `/tmp/wsdl-p5-18-defaults/`.

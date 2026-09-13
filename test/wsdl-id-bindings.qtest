@@ -1,0 +1,339 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires xml
+%requires ../qlib/WSDL.qm
+%try-module json
+%define NoJson
+%endtry
+%ifdef NoJson
+throw "MISSING-MODULE", "ID binding regressions require the json module";
+%else
+%exec-class WsdlIdBindingsTest
+
+class IdentityCountingType inherits XsdBaseType {
+    public {
+        int decoded = 0;
+        int encoded = 0;
+        bool cancel = False;
+        *code<nothing()> action;
+    }
+    constructor() : XsdBaseType("IDREF", new Namespaces({})) {
+    }
+    auto deserializeValue(string name, hash<string, XsdAbstractType> types, *hash<auto> references, auto value) {
+        ++decoded;
+        if (cancel) {
+            throw "THREAD-CANCELLED", "identity conversion cancelled";
+        }
+        if (action) {
+            action();
+        }
+        return XsdBaseType::deserializeValue(name, types, references, value);
+    }
+    auto serializeValue(Namespaces namespaces, auto value, *softbool omitType) {
+        ++encoded;
+        if (cancel) {
+            throw "THREAD-CANCELLED", "identity conversion cancelled";
+        }
+        if (action) {
+            action();
+        }
+        return XsdBaseType::serializeValue(namespaces, value, omitType);
+    }
+}
+
+class WsdlIdBindingsTest inherits QUnit::Test {
+    private {
+        list<hash<auto>> models;
+        hash<string, auto> inputs;
+    }
+    constructor() : Test("WSDL document ID bindings", "1.0") {
+        models = parse_json(ReadOnlyFile::readTextFile(get_script_dir()
+            + "/wsdl-interop/fixtures/id-bindings.json")).models;
+        inputs = parse_json(ReadOnlyFile::readTextFile(get_script_dir()
+            + "/wsdl-interop/fixtures/id-binding-native-values.json")).values;
+        addTestCase("Selected identity values survive both conversion directions and retained XML", \values());
+        addTestCase("Native and ordinary providers assess complete documents after field conversion", \providers());
+        addTestCase("Real SOAP 1.1 and 1.2 bindings reject unresolved references in both directions", \soap());
+        addTestCase("Custom converters run once and restore independent validation scopes", \scopes());
+        addTestCase("Nilled values contribute attribute bindings but no simple value", \nil());
+        addTestCase("Concurrent saved providers keep document bindings isolated", \concurrency());
+        addTestCase("Repeated optional records retain their occurrence-list metadata", \repeatedRecords());
+        set_return_value(main());
+    }
+    private static auto native(auto value) {
+        if (value.typeCode() == NT_HASH) {
+            if (value."@class" == "QName") {
+                return new XsdQNameValue(value.uri, (value.prefix ? value.prefix + ":" : "") + value.name);
+            }
+            if (value."@class" == "Scoped") {
+                hash<string, string> bindings = value.namespaces;
+                return new XsdScopedLexicalValue(value.text, bindings);
+            }
+            hash<auto> result();
+            foreach string key in (keys value) {
+                result{key} = native(value{key});
+            }
+            return result;
+        }
+        return value.typeCode() == NT_LIST ? (map native($1), value) : value;
+    }
+    private static auto plain(auto value) {
+        if (value instanceof XsdQNameValue) {
+            return {"@class":"QName", "uri":value.getNamespaceUri(), "name":value.getLocalName(), "prefix":""};
+        }
+        if (value instanceof XsdScopedLexicalValue) {
+            # These fixtures contain NCName identity tokens, never QName text.
+            return value.getLexicalValue();
+        }
+        if (value.typeCode() == NT_HASH) {
+            hash<auto> result();
+            foreach string key in (keys value) {
+                if (key == "xmlns" || key.startsWith("xmlns:") || key == ".ns") {
+                    continue;
+                }
+                auto item = plain(value{key});
+                if (exists item) {
+                    result{key} = item;
+                }
+            }
+            if (!result) {
+                return;
+            }
+            return result.size() == 1 && result.hasKey("^value^") ? result."^value^" : result;
+        }
+        return value.typeCode() == NT_LIST ? (map plain($1), value) : value;
+    }
+    private static auto decode(XsdSchema schema, string xml) {
+        auto wire = XsdBase::expandElementNamespaces(parse_xml(xml, XPF_PRESERVE_ORDER));
+        return schema.getElement("", "value").deserializeValue(schema.getTypeMap(), NOTHING, wire."{}value", True, True);
+    }
+    private static auto saved(auto value) {
+        return Serializable::deserialize(Serializable::serialize(value));
+    }
+    private values() {
+        int count = 0;
+        foreach hash<auto> model in (models) {
+            XsdSchema schema(model.schema, {"async_only":True});
+            foreach hash<auto> document in (model.documents) {
+                ++count;
+                auto value = native(inputs{document.name});
+                if (document.valid) {
+                    assertEq(plain(value), plain(decode(schema, document.xml)));
+                    XsdXmlValue output = schema.serializeXmlValue("", "value", value);
+                    assertEq(plain(value), plain(decode(schema, output.getXml())));
+                    assertEq(parse_xml(output.getXml()), parse_xml_with_schema(output.getXml(), model.schema));
+                    XsdXmlValue retained = schema.getXmlValue(document.xml);
+                    assertEq(parse_xml(document.xml), parse_xml(retained.getXml()));
+                } else {
+                    assertThrows("SOAP-DESERIALIZATION-ERROR", \decode(), (schema, document.xml));
+                    assertThrows("SOAP-SERIALIZATION-ERROR", \schema.serializeXmlValue(), ("", "value", value));
+                    assertThrows("SOAP-SERIALIZATION-ERROR", \schema.getXmlValue(), (document.xml,));
+                }
+            }
+        }
+        assertEq(68, count);
+    }
+    private providers() {
+        foreach hash<auto> model in (models) {
+            XsdSchema schema(model.schema, {"async_only":True});
+            AbstractDataProviderType ordinary = saved(schema.getElement("", "value").getDataProviderType());
+            AbstractDataProviderType provider = saved(schema.getNativeDataProviderType("", "value"));
+            AbstractDataProviderType retained = saved(schema.getXmlDataProviderType("", "value"));
+            foreach hash<auto> document in (model.documents) {
+                auto value = native(inputs{document.name});
+                if (document.valid) {
+                    auto accepted = provider.acceptsValue(value);
+                    assertEq(plain(value), plain(decode(schema, schema.serializeXmlValue("", "value", accepted).getXml())));
+                    XsdXmlValue xml(document.xml);
+                    assertTrue(xml === retained.acceptsValue(xml));
+                } else {
+                    assertThrows("RUNTIME-TYPE-ERROR", \provider.acceptsValue(), (value,));
+                    assertThrows("SOAP-SERIALIZATION-ERROR", \retained.acceptsValue(), (new XsdXmlValue(document.xml),));
+                }
+                if (model.name == "dynamic-types" && document.name != "dynamic-types/untyped") {
+                    # Ordinary fields retain their declared token shape. The explicit
+                    # native provider above owns selected-type wrapper acceptance.
+                    assertThrows("RUNTIME-TYPE-ERROR", \ordinary.acceptsValue(), (value,));
+                } else if (document.valid) {
+                    auto accepted = ordinary.acceptsValue(value);
+                    assertEq(plain(value), plain(decode(schema, schema.serializeXmlValue("", "value", accepted).getXml())));
+                } else {
+                    assertThrows("RUNTIME-TYPE-ERROR", \ordinary.acceptsValue(), (value,));
+                }
+            }
+        }
+    }
+    private static WebService service(string schema, string version) {
+        string soap = "http://schemas.xmlsoap.org/wsdl/soap" + (version == "12" ? "12" : "") + "/";
+        return new WebService('<w:definitions xmlns:w="http://schemas.xmlsoap.org/wsdl/" xmlns:s="' + soap
+            + '" xmlns:t="urn:qore:id-bindings" targetNamespace="urn:qore:id-bindings">'
+            '<w:types>' + schema + '</w:types>'
+            '<w:message name="Input"><w:part name="body" element="value"/></w:message>'
+            '<w:message name="Output"><w:part name="body" element="value"/></w:message>'
+            '<w:portType name="Port"><w:operation name="submit"><w:input message="t:Input"/>'
+            '<w:output message="t:Output"/></w:operation></w:portType>'
+            '<w:binding name="Soap" type="t:Port"><s:binding style="document" transport="http://schemas.xmlsoap.org/soap/http"/>'
+            '<w:operation name="submit"><s:operation soapAction="submit"/><w:input><s:body use="literal"/></w:input>'
+            '<w:output><s:body use="literal"/></w:output></w:operation></w:binding>'
+            '<w:service name="Service"><w:port name="Port" binding="t:Soap">'
+            '<s:address location="http://example.invalid/Service"/></w:port></w:service></w:definitions>',
+            {"async_only":True});
+    }
+    private static auto decodeSoap(WSOperation operation, string xml, bool response) {
+        return response ? operation.deserializeResponse(parse_xml(xml, XPF_PRESERVE_ORDER), "Soap", True)
+            : operation.deserializeRequest(parse_xml(xml, XPF_PRESERVE_ORDER), "Soap", True);
+    }
+    private static string encodeSoap(WSOperation operation, auto value, bool response) {
+        return (response ? operation.serializeResponse({"body":value}, NOTHING, NOTHING, NOTHING, NOTHING, NOTHING, "Soap")
+            : operation.serializeRequest({"body":value}, NOTHING, NOTHING, NOTHING, NOTHING, NOTHING, "Soap")).body;
+    }
+    private soap() {
+        int directions = 0;
+        foreach hash<auto> model in (models) {
+            foreach string version in ("11", "12") {
+                WebService ws = saved(service(model.schema, version));
+                WSOperation operation = ws.getBindingOperation("Soap", "submit");
+                string ns = version == "11" ? "http://schemas.xmlsoap.org/soap/envelope/" : "http://www.w3.org/2003/05/soap-envelope";
+                foreach hash<auto> document in (model.documents) {
+                    string xml = '<env:Envelope xmlns:env="' + ns + '"><env:Body>' + document.xml + '</env:Body></env:Envelope>';
+                    foreach bool response in (False, True) {
+                        ++directions;
+                        auto value = native(inputs{document.name});
+                        if (document.valid) {
+                            auto decoded = decodeSoap(operation, xml, response);
+                            assertEq(plain(value), plain(decoded));
+                            string output = encodeSoap(operation, value, response);
+                            assertTrue(output.find(ns) >= 0);
+                            assertEq(plain(value), plain(decodeSoap(operation, output, response)));
+                        } else {
+                            assertThrows("SOAP-DESERIALIZATION-ERROR", \decodeSoap(), (operation, xml, response));
+                            assertThrows("SOAP-SERIALIZATION-ERROR", \encodeSoap(), (operation, value, response));
+                        }
+                    }
+                }
+            }
+        }
+        assertEq(272, directions);
+    }
+    private scopes() {
+        string source = '<xs:schema xmlns:xs="' + XSD_NS + '"><xs:element name="value"><xs:complexType>'
+            '<xs:sequence><xs:element name="id" type="xs:ID" minOccurs="0"/>'
+            '<xs:element name="ref" type="xs:IDREF" minOccurs="0"/></xs:sequence>'
+            '</xs:complexType></xs:element></xs:schema>';
+        XsdSchema schema(source, {"async_only":True});
+        XsdSchema inner(source, {"async_only":True});
+        IdentityCountingType type();
+        XsdElement reference = cast<XsdComplexType>(schema.getElement("", "value").type).elementmap.ref;
+        reference.type = type;
+        type.action = nothing sub() {
+            # The caller already binds a; a complete nested document must still
+            # reject its own missing binding and release its successful b binding.
+            assertThrows("SOAP-SERIALIZATION-ERROR", \inner.getXmlValue(), ("<value><ref>a</ref></value>",));
+            assertTrue(inner.getXmlValue("<value><id>b</id><ref>b</ref></value>") instanceof XsdXmlValue);
+        };
+        string good = "<value><id>a</id><ref>a</ref></value>";
+        hash<auto> value = {"id":"a", "ref":"a"};
+        assertEq(value, plain(decode(schema, good)));
+        assertEq(1, type.decoded);
+        assertTrue(schema.serializeXmlValue("", "value", value) instanceof XsdXmlValue);
+        assertEq(1, type.encoded);
+        assertThrows("SOAP-DESERIALIZATION-ERROR", \decode(), (schema, "<value><id>a</id><ref>b</ref></value>"));
+        type.cancel = True;
+        assertThrows("THREAD-CANCELLED", \decode(), (schema, good));
+        assertThrows("THREAD-CANCELLED", \schema.serializeXmlValue(), ("", "value", value));
+        type.cancel = False;
+        assertThrows("SOAP-DESERIALIZATION-ERROR", \decode(), (schema, "<value><ref>a</ref></value>"));
+        assertThrows("SOAP-SERIALIZATION-ERROR", \schema.serializeXmlValue(), ("", "value", {"ref":"a"}));
+        assertEq(value, plain(decode(schema, good)));
+        assertTrue(schema.serializeXmlValue("", "value", value) instanceof XsdXmlValue);
+        assertEq(5, type.decoded);
+        assertEq(4, type.encoded);
+        # Detached simple types have lexical/value semantics without a document.
+        assertEq("a", inner.nsc.getBaseType("IDREF").deserializeValue("ref", inner.getTypeMap(), NOTHING, "a"));
+        assertEq("a", inner.nsc.getBaseType("ID").serializeValue(inner.nsc.copy(), "a", True));
+    }
+    private nil() {
+        string source = '<xs:schema xmlns:xs="' + XSD_NS + '"><xs:element name="value"><xs:complexType>'
+            '<xs:sequence><xs:element name="id" type="xs:ID" nillable="true"/>'
+            '<xs:element name="ref" type="xs:IDREF" minOccurs="0"/></xs:sequence>'
+            '<xs:attribute name="id" type="xs:ID"/></xs:complexType></xs:element></xs:schema>';
+        XsdSchema schema(source, {"async_only":True});
+        string nil = '<id xmlns:i="' + XSI_NS + '" i:nil="true"/>';
+        assertTrue(schema.getXmlValue("<value>" + nil + "</value>") instanceof XsdXmlValue);
+        assertTrue(schema.getXmlValue('<value id="a">' + nil + "<ref>a</ref></value>") instanceof XsdXmlValue);
+        assertThrows("SOAP-SERIALIZATION-ERROR", \schema.getXmlValue(), ("<value>" + nil + "<ref>a</ref></value>",));
+        assertTrue(schema.serializeXmlValue("", "value", {"id":new XsdNilValue()}) instanceof XsdXmlValue);
+        assertTrue(schema.serializeXmlValue("", "value", {"id":new XsdNilValue(), "ref":"a",
+            "^attributes^":{"id":"a"}}) instanceof XsdXmlValue);
+        assertThrows("SOAP-SERIALIZATION-ERROR", \schema.serializeXmlValue(),
+            ("", "value", {"id":new XsdNilValue(), "ref":"a"}));
+    }
+    private concurrency() {
+        XsdSchema schema(models[0].schema, {"async_only":True});
+        AbstractDataProviderType provider = saved(schema.getNativeDataProviderType("", "value"));
+        Qore::Thread::Queue ready();
+        Qore::Thread::Queue start();
+        Qore::Thread::Queue results();
+        Qore::Thread::Counter running();
+        on_exit {
+            start.push(True);
+            start.push(True);
+            assertEq(0, running.waitForZero(30s));
+        }
+        for (int worker = 0; worker < 2; ++worker) {
+            running.inc();
+            background sub() {
+                on_exit running.dec();
+                try {
+                    ready.push(True);
+                    start.get(30s);
+                    for (int index = 0; index < 20; ++index) {
+                        auto accepted = provider.acceptsValue({"ref":("a", "b"), "id":("a", "b")});
+                        if (accepted.ref != ("a", "b") || accepted.id != ("a", "b")) {
+                            throw "TEST-ERROR", "identity provider changed token order";
+                        }
+                        bool rejected = False;
+                        try {
+                            provider.acceptsValue({"ref":"a"});
+                        } catch (hash<ExceptionInfo> error) {
+                            if (error.err != "RUNTIME-TYPE-ERROR") {
+                                rethrow;
+                            }
+                            rejected = True;
+                        }
+                        if (!rejected) {
+                            throw "TEST-ERROR", "a different validation's ID escaped its context";
+                        }
+                    }
+                    results.push(True);
+                } catch (hash<ExceptionInfo> error) {
+                    results.push(error);
+                }
+            }();
+        }
+        assertTrue(ready.get(30s));
+        assertTrue(ready.get(30s));
+        start.push(True);
+        start.push(True);
+        assertEq(True, results.get(30s));
+        assertEq(True, results.get(30s));
+        assertThrows("RUNTIME-TYPE-ERROR", \provider.acceptsValue(), ({"ref":"a"},));
+    }
+    private repeatedRecords() {
+        XsdSchema schema(models[1].schema, {"async_only":True});
+        AbstractDataProviderType provider = schema.getElement("", "value").getDataProviderType();
+        AbstractDataProviderType field = provider.getFields().item.getType();
+        assertEq(NT_LIST, field.getBaseTypeCode());
+        assertEq(NT_HASH, field.getElementType().getBaseTypeCode());
+        hash<auto> input = {"item":({"^attributes^":{"ref":"a"}}, {"^attributes^":{"id":"a"}})};
+        auto accepted = provider.acceptsValue(input);
+        assertEq(2, accepted.item.size());
+        assertEq("a", accepted.item[0]."^attributes^".ref);
+        assertEq("a", accepted.item[1]."^attributes^".id);
+        assertTrue(schema.serializeXmlValue("", "value", accepted) instanceof XsdXmlValue);
+    }
+}
+%endif

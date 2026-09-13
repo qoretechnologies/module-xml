@@ -1642,3 +1642,20 @@ Use the local Debug module and pinned runtime/validator setup above. See the
 and [full audit](audits/P5-17a-native-id-bindings.md). This native prerequisite
 does not close WSDL identity processing: the 16 invalid reference acceptances
 remain visible in both corpus modes. Empty-element defaults and P6–P9 remain open.
+
+## WSDL document ID bindings (P5-17b)
+
+Qore's scope-cleanup prerequisite is verified in installed build `8c0c22c15`.
+The final 149-suite gate and forced AST/IR/JIT/tiered/AOT checks pass.
+
+WSDL checks selected ID/IDREF/IDREFS values within the assessed XML root,
+including forward references, same-parent ownership, lists/unions, nil and
+assessed wildcards. Ordinary/native/retained providers and actual SOAP 1.1/1.2
+HTTP consumers enforce the same checks after conversion. The 16 invalid corpus
+identity directions are rejected; native mode has no remaining validity-stage
+failure, while legacy mode retains its four documented dynamic-type failures.
+Typed preservation is still unassessed for 824 native directions. See
+[evidence and reproduction](id-bindings-evidence.md),
+[design](../../design/wsdl-id-bindings.md), [inventory](P5-17b-validation.json)
+and [full audit](audits/P5-17b-id-bindings.md). Empty-element defaults and
+key/unique/keyref constraints remain P5 work; P6–P9 are not complete.
