@@ -205,7 +205,8 @@ def validate_selection(selection: dict, records: dict) -> None:
                     raise ValueError("malformed strict list item assertion")
 
 
-def assess(root: Path, source: dict, selection: dict, catalog: corpus.Catalog, qore: str = "qore") -> dict:
+def assess(root: Path, source: dict, selection: dict, catalog: corpus.Catalog, qore: str = "qore",
+           *, preserve_types: bool = False) -> dict:
     """Run all cases and both directions; strict selection is a gate over the complete report."""
     cases, records = prepare(root, source)
     validate_selection(selection, records)
@@ -214,7 +215,8 @@ def assess(root: Path, source: dict, selection: dict, catalog: corpus.Catalog, q
         if uri in resources and resources[uri] != data:
             raise ValueError("conflicting corpus resource")
         resources[uri] = data
-    rows = survey.run_worker(cases, {uri: data.decode("utf-8") for uri, data in resources.items()}, qore)
+    rows = survey.run_worker(cases, {uri: data.decode("utf-8") for uri, data in resources.items()}, qore,
+                             preserve_types=preserve_types)
     accounting = survey.stage_accounting(cases, rows)
     indexed = {(r["case"], r.get("file"), r.get("direction"), r["stage"]): r for r in rows}
     jobs, schemas = [], {}
@@ -354,6 +356,7 @@ def assess(root: Path, source: dict, selection: dict, catalog: corpus.Catalog, q
         raise RuntimeError("missing Qore version or unexpected version diagnostics")
     return {"format": 1, "scope": {"wsdls": len(cases), "input_files": sum(len(c["messages"]) for c in cases) // 2,
                 "directions": list(DIRECTIONS), "input_soap_versions": ["11", "12"], "network": False,
+                "preserve_types": preserve_types,
                 "not_assessed": ["full typed/infoset preservation outside explicit assertions", "HTTP", "SOAP processing",
                                  "actual SOAP 1.2 binding interoperability in the W3C echo set"]},
             "source_report_sha256": hashlib.sha256(json.dumps(source, sort_keys=True).encode()).hexdigest(),
@@ -375,15 +378,18 @@ def main() -> None:
     cli.add_argument("--selection", type=Path, default=ROOT / "strict-selection.json")
     cli.add_argument("--output", type=Path, required=True)
     cli.add_argument("--strict", action="store_true", help="require every selected Qore requirement to pass")
+    cli.add_argument("--preserve-types", action="store_true",
+                     help="retain selected XSD types during decoding (default: legacy native projection)")
     args = cli.parse_args()
     root = args.corpus.resolve()
     adjudicate.verify_original_corpus(root)
     source = corpus.read_manifest(args.source_report)
     if source["unclassified"]:
         raise ValueError("source report contains unclassified disagreements")
-    result = assess(root, source, corpus.read_manifest(args.selection), corpus.Catalog())
+    result = assess(root, source, corpus.read_manifest(args.selection), corpus.Catalog(),
+                    preserve_types=args.preserve_types)
     args.output.write_text(json.dumps(result, indent=2) + "\n")
-    print(json.dumps({"counts": result["counts"], "stages": result["stage_accounting"]["counts"],
+    print(json.dumps({"scope": result["scope"], "counts": result["counts"], "stages": result["stage_accounting"]["counts"],
                       "failures": len(result["failures"]), "selected_failures": result["selected_failures"]}, indent=2))
     if args.strict and result["selected_failures"]:
         raise SystemExit(1)

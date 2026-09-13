@@ -38,6 +38,7 @@ class CoverageTest(unittest.TestCase):
 
     def test_strict_positive_both_directions_and_value_change_detection(self):
         report = coverage.assess(self.root, self.source, self.selection, corpus.Catalog())
+        self.assertIs(False, report["scope"]["preserve_types"])
         self.assertEqual([], report["selected_failures"])
         self.assertEqual([], report["failures"])
         self.assertEqual({"wsdls": 1, "message_directions": 16}, report["selected_scope"])
@@ -56,6 +57,15 @@ class CoverageTest(unittest.TestCase):
         self.assertTrue(row["output_xerces"]["ok"])
         self.assertTrue(row["output_lxml"]["ok"])
         self.assertFalse(row["values"]["ok"])
+
+    def test_explicit_type_preservation_report(self):
+        legacy = coverage.assess(self.root, self.source, self.selection, corpus.Catalog())
+        typed = coverage.assess(self.root, self.source, self.selection, corpus.Catalog(), preserve_types=True)
+        self.assertIs(False, legacy["scope"]["preserve_types"])
+        self.assertIs(True, typed["scope"]["preserve_types"])
+        for key in ("cases", "counts", "stage_accounting", "selected_scope", "source_report_sha256",
+                    "selection_sha256", "catalog_sha256", "failures", "selected_failures"):
+            self.assertEqual(legacy[key], typed[key], key)
 
     def test_strict_selection_and_source_integrity(self):
         _, records = coverage.prepare(self.root, self.source)
@@ -457,7 +467,7 @@ class CoverageTest(unittest.TestCase):
         self.assertEqual("", process.stderr)
         report = json.loads(output.read_text())
         self.assertEqual([], report["selected_failures"])
-        self.assertEqual({"wsdls": 143, "message_directions": 1384}, report["selected_scope"])
+        self.assertEqual({"wsdls": 144, "message_directions": 1388}, report["selected_scope"])
         self.assertEqual(293, len(report["cases"]))
         self.assertEqual(2272, sum(len(c["messages"]) for c in report["cases"]))
         for stage, counts in report["stage_accounting"]["counts"].items():

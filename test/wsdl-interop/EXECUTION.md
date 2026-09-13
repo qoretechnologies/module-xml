@@ -7583,3 +7583,33 @@ See [fixed-value evidence](fixed-values-evidence.md), [inventory](P5-16g-validat
 and [audit](audits/P5-16g-fixed-values.md). Remote was fetched with no incoming
 commit; no push, installation or main-Qore mutation. Next: empty-element defaults,
 identity constraints, the legacy dynamic-type projection decision and P6-P9.
+
+
+### P5-16h approved native type projection policy (2026-09-13)
+
+The user approved retaining the existing `preserve_types=False` default and
+explicit type capture for lossless native type/value round trips. No API default
+or returned shape changes. `survey.py` and `coverage.py` now accept
+`--preserve-types`, forward a checked boolean to both worker directions and
+record it in report scope. Reports for the two modes remain separate; legacy
+failures are not reclassified as successful results.
+
+The new worker regression verifies expanded selected type names and unchanged
+text through actual SOAP 1.1/1.2 bindings in both directions. Omitted and explicit
+false settings agree; true retains the selected QName; invalid selected types
+and pattern values reject in both modes. Malformed option values reject before
+work. CLI/report tests check the selected mode and complete unchanged manifests.
+The strict-selection count assertion was stale after P5-10's addition; it now
+matches the existing 144 WSDLs/1,388 directions without changing the selection.
+
+The complete coverage test run still exposes its two explicitly labelled
+P6-selected-binding-version failures in the dual-binding simple-content fixture:
+SOAP 1.1 request/response serialization uses the SOAP 1.2 envelope. These remain
+failing assertions and assigned P6 work; this increment does not claim phase
+acceptance. The remaining 15 test methods pass. The [final evidence](type-projection-evidence.md) and
+[P5-16h inventory](P5-16h-validation.json) record 17 passing survey methods, the
+original dynamic-type fixture, both independent native matrices and 11 affected
+Qore suites (250 cases / 2,686 reported assertions). All legacy corpus rows and
+case objects are unchanged. Type capture resolves all four dynamic-type corpus
+directions; the 16 invalid IDREF/IDREFS acceptances remain visible. The full audit
+is 15 Pass / 47 N/A / 0 Fail. No C/C++ or Qore changes, install or push.

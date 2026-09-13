@@ -19,7 +19,12 @@ The wrapper has exactly those two keys. Its native value cannot itself be a type
 wrapper, but nested element fields and individual occurrences can have their own
 wrappers. An identical selected type keeps the ordinary native value. A selected
 nilled value uses `NOTHING` in `^val^`. Existing calls continue to return their
-established scalar, list and record shapes.
+established scalar, list and record shapes. This compatibility default is intentional:
+applications that need to retain a different selected `xsi:type` must enable
+`preserve_types=True`. A legacy value alone may no longer identify the selected
+type, so serializing it can lose the annotation or fail when derived fields or
+an abstract declaration require that identity. Use native capture for selected
+type/value round trips and `XsdXmlValue` when the complete XML infoset is needed.
 
 The expanded QName can be saved through `Serializable` independently of the
 schema. Serialization resolves it against the receiving schema, then checks the

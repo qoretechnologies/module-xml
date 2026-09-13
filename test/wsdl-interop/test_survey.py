@@ -108,6 +108,81 @@ class SurveyTest(unittest.TestCase):
                 self.assertFalse(row["input_validation"]["ok"], row)
             self.assertEqual(80, len(result["source_sha256"]))
             self.assertEqual(False, result["scope"]["network"])
+            self.assertIs(False, result["scope"]["preserve_types"])
+            lossless = subprocess.run([sys.executable, str(ROOT / "survey.py"), str(FIXTURES),
+                                      "--output", str(output), "--soap-version", "both", "--preserve-types"],
+                                     text=True, capture_output=True, timeout=30, check=True)
+            self.assertEqual("", lossless.stderr)
+            typed = json.loads(output.read_text())
+            self.assertIs(True, typed["scope"]["preserve_types"])
+            self.assertEqual(result["rows"], typed["rows"])
+            self.assertEqual(result["source_sha256"], typed["source_sha256"])
+
+    def test_worker_type_projection_modes(self):
+        source = f'''<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:t="{NS}"
+            targetNamespace="{NS}">
+          <xs:simpleType name="Code"><xs:restriction base="xs:string">
+            <xs:pattern value="[A-Z]+"/></xs:restriction></xs:simpleType>
+          <xs:element name="Submit" type="xs:string"/><xs:element name="Reply" type="xs:string"/>
+        </xs:schema>'''
+        compiled = etree.XMLSchema(etree.fromstring(source.encode()))
+        xsi = "http://www.w3.org/2001/XMLSchema-instance"
+        cases = []
+        with tempfile.TemporaryDirectory(prefix="wsdl-worker-types-") as temporary:
+            root = Path(temporary)
+            for version, namespace in zip(("11", "12"), survey.SOAP_NAMESPACES):
+                wsdl = root / (version + ".wsdl")
+                wsdl.write_text(description(version, source))
+                messages = []
+                for direction, wrapper in (("request", "Submit"), ("response", "Reply")):
+                    for name, selected, text in (("valid", "Code", "ABC"),
+                                                  ("facet", "Code", "123"),
+                                                  ("unknown", "Missing", "ABC")):
+                        key = version + "/" + direction + "/" + name
+                        path = root / key.replace("/", "-")
+                        wire = (f'<s:Envelope xmlns:s="{namespace}" xmlns:t="{NS}" xmlns:i="{xsi}">'
+                                f'<s:Body><t:{wrapper} i:type="t:{selected}">{text}</t:{wrapper}>'
+                                '</s:Body></s:Envelope>')
+                        path.write_text(wire)
+                        self.assertEqual(name == "valid", compiled.validate(
+                            survey.payload(wire.encode(), survey.parser(root))))
+                        messages.append({"file": key, "path": str(path), "direction": direction})
+                cases.append({"name": "Types" + version, "wsdl": str(wsdl), "base": "http://example.invalid/",
+                              "operation": "submit", "binding": "Soap" + version, "messages": messages})
+            legacy = survey.run_worker(cases, {})
+            self.assertEqual(legacy, survey.run_worker(cases, {}, preserve_types=False))
+            for preserve, rows in ((False, legacy), (True, survey.run_worker(cases, {}, preserve_types=True))):
+                counts = survey.stage_accounting(cases, rows)["counts"]
+                self.assertEqual(4, counts["serialize"]["ok"])
+                self.assertEqual(8, counts["deserialize"]["failed"])
+                self.assertEqual(8, counts["serialize"]["unreachable"])
+                for row in rows:
+                    if row["stage"] == "parse":
+                        self.assertTrue(row["ok"], row)
+                    elif not row["file"].endswith("/valid"):
+                        self.assertEqual("SOAP-DESERIALIZATION-ERROR", row["err"], row)
+                    else:
+                        self.assertTrue(row["ok"], row)
+                        if row["stage"] == "serialize":
+                            node = survey.payload(row["body"].encode(), survey.parser(root))
+                            self.assertTrue(compiled.validate(node), str(compiled.error_log))
+                            self.assertEqual("ABC", node.text)
+                            selected = node.get(f"{{{xsi}}}type")
+                            if preserve:
+                                self.assertIsNotNone(selected)
+                                prefix, local = selected.split(":")
+                                self.assertEqual((NS, "Code"), (node.nsmap[prefix], local))
+                            else:
+                                self.assertIsNone(selected)
+            for invalid in (None, 0, 1, "true", [], {}):
+                with self.subTest(invalid=invalid), self.assertRaisesRegex(ValueError, "preserve_types"):
+                    survey.run_worker(cases, {}, preserve_types=invalid)
+            manifest = root / "bad.json"
+            manifest.write_text(json.dumps({"cases": [], "cache": {}, "preserve_types": "true"}))
+            bad = subprocess.run(["qore", "-b", "--enable-debug", str(ROOT / "probe.qr"), str(manifest)],
+                                 text=True, capture_output=True, timeout=30)
+            self.assertNotEqual(0, bad.returncode)
+            self.assertIn("INVALID-MANIFEST", bad.stderr)
 
     def test_worker_output_completeness(self):
         cases = [{"name": "A", "messages": [{"file": "A/one.xml"}, {"file": "A/two.xml"}]},

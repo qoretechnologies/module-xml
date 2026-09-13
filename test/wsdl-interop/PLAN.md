@@ -194,8 +194,9 @@ effective-content mapping; see [native anyType evidence](native-anytype-evidence
 P5-16f completes WSDL effective anyType inheritance and active inherited/group
 wildcard metadata, including providers, saved schemas and both actual SOAP
 bindings; see [inheritance evidence](anytype-inheritance-evidence.md). Instance
-default/fixed constraints, identity processing and the remaining dynamic-type
-legacy projection result remain open.
+empty-element defaults and identity processing remain open. The approved API
+policy keeps legacy decoding as the default and uses explicit `preserve_types=True` for native type retention; both corpus modes
+must be reported separately, retaining legacy failures.
 
 ## P6 — Complete WSDL component and binding interoperability
 

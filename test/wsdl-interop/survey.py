@@ -214,14 +214,16 @@ class WorkerProcessError(subprocess.CalledProcessError):
         return message
 
 
-def run_worker(cases, cache, qore="qore"):
+def run_worker(cases, cache, qore="qore", *, preserve_types=False):
     """Run one bounded offline worker; cleanup happens on success, failure and cancellation."""
     validate_cases(cases)
+    if type(preserve_types) is not bool:
+        raise ValueError("invalid worker preserve_types: expected boolean")
     if not isinstance(cache, dict) or any(not isinstance(k, str) or not isinstance(v, str) for k, v in cache.items()):
         raise ValueError("invalid worker resource cache")
     with tempfile.TemporaryDirectory(prefix="qore-wsdl-survey-") as temporary:
         manifest = Path(temporary) / "manifest.json"
-        manifest.write_text(json.dumps({"cases": cases, "cache": cache}))
+        manifest.write_text(json.dumps({"cases": cases, "cache": cache, "preserve_types": preserve_types}))
         try:
             run = subprocess.run([qore, "--enable-debug", str(Path(__file__).with_name("probe.qr")),
                                   str(manifest)], text=True, capture_output=True, timeout=60, check=True)
@@ -268,6 +270,8 @@ def main():
     cli.add_argument("--soap-version", choices=("11", "12", "both"), default="11")
     cli.add_argument("--qore", default="qore")
     cli.add_argument("--catalog", type=Path, help="checksum-verified offline import catalog")
+    cli.add_argument("--preserve-types", action="store_true",
+                     help="retain selected XSD types during decoding (default: legacy native projection)")
     args = cli.parse_args()
     corpus = args.corpus.resolve()
     cases = inventory(corpus, args.soap_version)
@@ -281,7 +285,7 @@ def main():
             if uri in cache and cache[uri] != content:
                 raise ValueError(f"catalog conflicts with corpus resource: {uri}")
             cache[uri] = content
-    rows = run_worker(cases, cache, args.qore)
+    rows = run_worker(cases, cache, args.qore, preserve_types=args.preserve_types)
     result = examine(corpus, cases, rows, catalog)
     result["catalog_sha256"] = dict(catalog.sha256) if catalog is not None else {}
     sources = sorted({Path(c["wsdl"]) for c in cases}
@@ -296,6 +300,7 @@ def main():
                               Path(__file__).resolve().parents[2].joinpath("qlib/WSDL.qm").read_bytes()).hexdigest()}
     result["scope"] = {"wsdls": len(cases), "messages": sum(len(c["messages"]) for c in cases),
                        "soap_version": args.soap_version, "network": False,
+                       "preserve_types": args.preserve_types,
                        "checks": "WSDL 1.1 parse; request decode/encode; independent payload XSD validation"}
     args.output.write_text(json.dumps(result, indent=2) + "\n")
     print(json.dumps({"scope": result["scope"], "counts": result["counts"]}, indent=2))

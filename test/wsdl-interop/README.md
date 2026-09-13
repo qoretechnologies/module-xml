@@ -103,6 +103,30 @@ provider metadata, cancellation and real bindings in both directions.
 validators' count limits and separately identified length-bounded references.
 The `XsdPatternConstraint` metadata union preserves existing PCRE strings.
 
+## Native type projection modes
+
+The public decoding default remains `preserve_types=False` for compatibility.
+Enable `preserve_types=True` to retain selected dynamic types in native values;
+see the [API contract and examples](../../design/wsdl-native-type-values.md).
+Type capture alone does not retain the complete XML infoset.
+
+Both `survey.py` and `coverage.py` accept `--preserve-types`. Run each mode into
+a separate report; `scope.preserve_types` records the setting. For example:
+
+```sh
+python3 test/wsdl-interop/coverage.py /tmp/module-xml-wsdl-survey/databinding/examples/6/09 \
+  --strict --output /tmp/wsdl-coverage-legacy.json
+python3 test/wsdl-interop/coverage.py /tmp/module-xml-wsdl-survey/databinding/examples/6/09 \
+  --strict --preserve-types --output /tmp/wsdl-coverage-types.json
+```
+
+Each mode runs the same complete manifest and strict selection. Legacy failures
+remain failures in its report; choosing compatibility does not turn information
+loss into a passing result. An enabled type-capture report is not a claim of
+complete type/infoset coverage outside its explicit assertions. The survey tests
+also check expanded selected type names and unchanged values through actual SOAP
+1.1/1.2 bindings in both directions, including invalid selections and facets.
+
 ## Sources and intended coverage
 
 | Source | Use |
