@@ -7685,3 +7685,26 @@ This XML session made no C++/main-Qore change, installation or push. Origin was
 fetched; there is no incoming module-xml develop commit. Next: remaining P5
 defaults and key/unique/keyref constraints, then P6–P9. Initial default fixtures
 and the independent baseline are in `/tmp/wsdl-p5-18-defaults/`.
+
+## P5-18a — Native canonical numeric declaration checks (2026-09-13)
+
+On `ace866d`, fixed native schema construction's missing canonical integer,
+decimal and boolean default/fixed validation, including selected list/union
+members, simple content and element/attribute/reference declarations. Original
+computed values and namespace context remain owned by their declarations.
+CMake detects the behavior before accepting a provider and applies a checked
+build-tree correction to the pinned private dependency when needed.
+
+Acceptance: all 396 schemas agree with pinned Xerces; 987 native assertions,
+2,394 allocation faults, direct Qore/native Valgrind, 150 Qore suites and 53
+provider checks pass. Both preservation modes' complete corpus results match
+the parent at every recorded case and stage. Build and affected docs are clean.
+Two provider checks and 22 Qore suites were rerun after `/tmp` quota exhaustion
+interrupted tests or their output; only complete passing evidence is accepted.
+
+See [evidence](native-numeric-defaults-evidence.md),
+[inventory](P5-18a-validation.json) and [full audit](audits/P5-18a-native-numeric-defaults.md).
+Next: the corresponding WSDL declaration checks, then instance-default PSVI and
+key/unique/keyref work. The WSDL declaration prototype already agrees with all
+396 schema expectations in `/tmp/wsdl-p5-18-defaults/declarations/`; it is not yet
+part of this increment. No installation, push or main-Qore change.

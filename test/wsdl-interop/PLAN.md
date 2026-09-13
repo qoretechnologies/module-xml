@@ -211,6 +211,11 @@ invalid identity corpus directions without changing the legacy preservation
 default. See [WSDL ID evidence](id-bindings-evidence.md). Empty-element defaults,
 key/unique/keyref and complete typed-preservation accounting remain P5 work.
 
+P5-18a adds native canonical integer/decimal/boolean declaration checks, including
+selected list/union values and all element/attribute constraint paths. This is a
+prerequisite for empty-element defaults; instance PSVI/type adjudication remains
+separate. See [native numeric constraint design](../../design/native-numeric-defaults.md).
+
 ## P6 — Complete WSDL component and binding interoperability
 
 **Depends on P2-P5.** This covers behavior the current W3C echo survey does not exercise.

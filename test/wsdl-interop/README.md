@@ -1578,6 +1578,26 @@ Use the local debug XML module and local `qlib` in `QORE_MODULE_DIR`, with the
 pinned independent validator setup documented above. Element default/fixed
 instance conversion, identity constraints and P6–P9 acceptance remain open.
 
+## Canonical numeric constraint declarations (P5-18a)
+
+`xml-numeric-defaults.qtest` checks 396 positive/negative schemas through native
+conversion, DOM and streaming validation. `test_numeric_defaults.py` checks the
+same committed fixture against pinned Xerces and verifies that its generator
+reproduces the exact matrix. The cases include every integer family, exact large
+numbers, decimal signed zero, booleans, lists/unions, QName context controls and
+element/attribute/reference/simple-content declarations. Run:
+
+```sh
+QORE_MODULE_DIR=build-debug:qlib qore -b --enable-debug test/xml-numeric-defaults.qtest
+python3 test/wsdl-interop/test_numeric_defaults.py -v
+python3 -B test/cmake/test_libxml2_provider.py -v
+```
+
+The native correction checks canonical validity without replacing declaration
+values. It precedes the remaining WSDL instance-default work. See
+[design](../../design/native-numeric-defaults.md) and
+[the separate PSVI investigation](default-identity-investigation.md).
+
 ## Native fixed values and scalar validation (P5-16d)
 
 `../xml-value-space.qtest` checks typed fixed-value equality, empty lists,

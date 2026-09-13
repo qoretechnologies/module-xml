@@ -21,6 +21,7 @@
 #include "libxml2-character-content-probe.h"
 #include "libxml2-value-space-probe.h"
 #include "libxml2-value-allocation-probe.h"
+#include "libxml2-numeric-defaults-probe.h"
 
 static int check_namespace(const char* source, const char* expected) {
     xmlTextReaderPtr reader = xmlReaderForMemory(source, (int)strlen(source), NULL, "UTF-8", 0);
@@ -93,6 +94,11 @@ int main(void) {
         int id_bindings = check_id_bindings();
         result |= id_bindings;
         printf("id_bindings=%s\n", id_bindings ? "FAIL" : "PASS");
+    }
+    {
+        int numeric_defaults = check_numeric_defaults();
+        result |= numeric_defaults;
+        printf("numeric_defaults=%s\n", numeric_defaults ? "FAIL" : "PASS");
     }
     xmlCleanupParser();
     return result;
