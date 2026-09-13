@@ -1,0 +1,214 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires ../qlib/WSDL.qm
+%requires xml
+%try-module json
+%define NoJson
+%endtry
+%ifdef NoJson
+throw "MISSING-MODULE", "URI/language tests require json";
+%else
+%exec-class UriLanguageTest
+
+class UriLanguageTest inherits QUnit::Test {
+    constructor() : Test("XSD URI and language values", "1.0") {
+        addTestCase("Lexical and typed values agree across schemas, saved providers and native validation", \matrix());
+        addTestCase("Empty URI compatibility and nonscalar inputs retain their contracts", \boundaries());
+        addTestCase("Optional, list and reconstructed provider metadata retain lexical checks", \providers());
+        addTestCase("Invalid declarations reject and failed additions preserve valid state", \declarations());
+        addTestCase("Element constraints and attribute choices preserve text identity", \constraints());
+        addTestCase("Generated examples satisfy builtin and derived text types", \examples());
+        addTestCase("URI provider cancellation restores conversion state", \cancellation());
+        set_return_value(main());
+    }
+    private static XsdSchema schema(string source) {
+        return new XsdSchema(source, {"async_only": True});
+    }
+    private static auto saved(auto value) {
+        return Serializable::deserialize(Serializable::serialize(value));
+    }
+    private static auto decode(XsdSchema model, string xml, bool retain) {
+        auto wire = XsdBase::expandElementNamespaces(parse_xml(xml, XPF_PRESERVE_ORDER));
+        return model.getElement("", "value").deserializeValue(model.getTypeMap(), NOTHING, wire."{}value", True, retain);
+    }
+    private static auto actual(auto value) {
+        if (value.typeCode() == NT_HASH && value.hasKey("^val^")) {
+            value = value."^val^";
+        }
+        return value instanceof XsdDefaultValue ? value.getValue() : value;
+    }
+    private matrix() {
+        list<hash<auto>> models = parse_json(ReadOnlyFile::readTextFile(
+            get_script_dir() + "/wsdl-interop/fixtures/uri-language.json"));
+        assertEq(8, models.size());
+        int documents = 0;
+        foreach hash<auto> row in (models) {
+            XsdSchema original = schema(row.schema);
+            foreach hash<auto> document in (row.documents) {
+                ++documents;
+                if (document.valid) {
+                    assertEq(parse_xml(document.xml), parse_xml_with_schema(document.xml, row.schema));
+                } else {
+                    assertThrows("PARSE-XML-EXCEPTION", \parse_xml_with_schema(), (document.xml, row.schema));
+                }
+                foreach XsdSchema model in (original, saved(original)) {
+                    XsdAbstractType type = model.getElement("", "value").type;
+                    AbstractDataProviderType provider = type.getDataProviderType();
+                    auto input = row.name.endsWith("-list")
+                        ? (document.valid ? document.value : document.lexical.split(" ")) : document.lexical;
+                    foreach AbstractDataProviderType current in (provider, saved(provider)) {
+                        if (document.valid) {
+                            assertEq(document.value, current.acceptsValue(input));
+                            if (document.identity) {
+                                assertEq(document.identity, cast<UnionDataType>(current).valueKey(input));
+                            }
+                        } else {
+                            assertThrows("RUNTIME-TYPE-ERROR", \current.acceptsValue(), (input,));
+                        }
+                    }
+                    foreach bool retain in (False, True) {
+                        if (!document.valid) {
+                            assertThrows("SOAP-DESERIALIZATION-ERROR", \decode(), (model, document.xml, retain));
+                            continue;
+                        }
+                        auto value = decode(model, document.xml, retain);
+                        assertEq(document.value, actual(value));
+                        XsdXmlValue output = model.serializeXmlValue("", "value", value);
+                        assertEq(parse_xml(output.getXml()), parse_xml_with_schema(output.getXml(), row.schema));
+                        assertEq(document.value, actual(decode(model, output.getXml(), retain)));
+                    }
+                    if (!document.valid) {
+                        assertThrows("SOAP-SERIALIZATION-ERROR", \model.serializeXmlValue(), ("", "value", input));
+                    }
+                }
+            }
+        }
+        assertEq(73, documents);
+    }
+    private examples() {
+        list<hash<auto>> models = parse_json(ReadOnlyFile::readTextFile(
+            get_script_dir() + "/wsdl-interop/fixtures/uri-language.json"));
+        foreach hash<auto> row in (models) {
+            XsdSchema original = schema(row.schema);
+            foreach XsdSchema model in (original, saved(original)) {
+                auto example = WSMessageHelper::getTypeExample(model.getElement("", "value").type);
+                XsdXmlValue output = model.serializeXmlValue("", "value", example);
+                assertEq(parse_xml(output.getXml()), parse_xml_with_schema(output.getXml(), row.schema));
+            }
+        }
+    }
+    private cancellation() {
+        Namespaces ns({});
+        AbstractDataProviderType provider = saved(ns.getBaseType("anyURI").getDataProviderType());
+        SandboxManager manager();
+        on_exit manager.clearInterrupt();
+        Program program(PO_NEW_STYLE | PO_STRICT_ARGS | PO_REQUIRE_TYPES);
+        program.setSandboxManager(manager);
+        program.parse("%modern\n%requires ../qlib/WSDL.qm\n"
+            + "auto sub convert(AbstractDataProviderType provider, SandboxManager manager, bool cancel) {\n"
+            + "    if (cancel) { manager.requestInterrupt(); }\n"
+            + "    return provider.acceptsValue(\"a%2Fb\");\n}\n", get_script_dir() + "/uri-interrupt.qr");
+        assertThrows("PROGRAM-INTERRUPTED", \program.callFunction(), ("convert", provider, manager, True));
+        manager.clearInterrupt();
+        assertEq("a%2Fb", program.callFunction("convert", provider, manager, False));
+        assertThrows("RUNTIME-TYPE-ERROR", \provider.acceptsValue(), ("http://[bad",));
+        assertEq("a/b", provider.acceptsValue("a/b"));
+    }
+    private boundaries() {
+        foreach bool compat in (False, True) {
+            Namespaces ns({});
+            ns.opt_empty_string_is_nothing = compat;
+            XsdBaseType uri = ns.getBaseType("anyURI");
+            assertEq(compat ? NOTHING : "", uri.deserializeValue("value", {}, NOTHING, NOTHING));
+            assertEq("", uri.deserializeValue("value", {}, NOTHING, ""));
+            assertEq("", uri.deserializeValue("value", {}, NOTHING, " \t "));
+            XsdBaseType language = ns.getBaseType("language");
+            assertThrows("SOAP-DESERIALIZATION-ERROR", \language.deserializeValue(), ("value", {}, NOTHING, NOTHING));
+            foreach XsdBaseType type in (uri, language) {
+                foreach auto value in (("a", "b"), <0001>, {"bad": "value"}) {
+                    assertThrows("SOAP-SERIALIZATION-ERROR", \type.serializeValue(), (ns, value, True));
+                    assertThrows("SOAP-DESERIALIZATION-ERROR", \type.deserializeValue(), ("value", {}, NOTHING, value));
+                    AbstractDataProviderType provider = type.getDataProviderType();
+                    assertThrows("RUNTIME-TYPE-ERROR", \provider.acceptsValue(), (value,));
+                }
+            }
+        }
+    }
+    private providers() {
+        Namespaces ns({});
+        foreach string name in ("anyURI", "language") {
+            AbstractDataProviderType original = ns.getBaseType(name).getDataProviderType();
+            string valid = name == "anyURI" ? "a%2Fb" : "en-US";
+            string invalid = name == "anyURI" ? "http://[bad" : "bad_lang";
+            foreach AbstractDataProviderType provider in (original, saved(original)) {
+                assertEq({}, provider.getDirectTypeHash());
+                assertEq(NOTHING, provider.getValueType());
+                assertEq(NT_STRING, provider.getBaseTypeCode());
+                assertThrows("MISSING-VALUE-ERROR", \provider.acceptsValue(), (NOTHING,));
+                AbstractDataProviderType optional = saved(provider.getOrNothingType());
+                assertEq(NOTHING, optional.acceptsValue(NOTHING));
+                assertEq(valid, optional.acceptsValue(valid));
+                assertThrows("RUNTIME-TYPE-ERROR", \optional.acceptsValue(), (invalid,));
+                AbstractDataProviderType mandatory = saved(optional.getMandatoryType());
+                assertThrows("MISSING-VALUE-ERROR", \mandatory.acceptsValue(), (NOTHING,));
+                AbstractDataProviderType list_type = saved(new ListDataType(provider));
+                assertEq((valid,), list_type.acceptsValue((valid,)));
+                assertThrows("RUNTIME-TYPE-ERROR", \list_type.acceptsValue(), ((valid, invalid),));
+            }
+            hash<SerializationInfo> original_data = original.serializeToData();
+            foreach hash<auto> change in ({"text_type": "NCName"}, {"kind": "binary"},
+                    {"white_space": "preserve"}, {"name_type": "ID"}) {
+                hash<SerializationInfo> data = original_data;
+                string index = data._index."0"._class_data."WSDL::XsdSizedRestrictionDataType".facets._index;
+                data._index{index}._members += change;
+                assertThrows("DESERIALIZATION-ERROR", \Serializable::deserialize(), (data,));
+            }
+            assertEq(valid, Serializable::deserialize(original_data).acceptsValue(valid));
+        }
+    }
+    private declarations() {
+        foreach hash<string, string> row in ({"type": "anyURI", "bad": "http://[bad"},
+                {"type": "language", "bad": "bad_lang"}) {
+            foreach string constraint in ("default", "fixed") {
+                foreach string kind in ("element", "attribute") {
+                    string source = '<xs:schema xmlns:xs="' + XSD_NS + '"><xs:' + kind
+                        + ' name="value" type="xs:' + row.type + '" ' + constraint + '="' + row.bad + '"/></xs:schema>';
+                    assertThrows("XSD-SYNTAX-ERROR", \parse_xml_with_schema(), ("<value/>", source));
+                    assertThrows("WSDL-ERROR", \schema(), (source,));
+                }
+            }
+            string source = '<xs:schema xmlns:xs="' + XSD_NS + '"><xs:simpleType name="T">'
+                + '<xs:restriction base="xs:' + row.type + '"><xs:enumeration value="' + row.bad
+                + '"/></xs:restriction></xs:simpleType></xs:schema>';
+            assertThrows("XSD-SIMPLETYPE-ERROR", \schema(), (source,));
+            XsdSchema valid = schema('<xs:schema xmlns:xs="' + XSD_NS + '"><xs:element name="value" type="xs:string"/></xs:schema>');
+            assertThrows("XSD-SIMPLETYPE-ERROR", \valid.addSchemaString(), (source,));
+            assertEq("kept", valid.getElement("", "value").getDataProviderType().acceptsValue("kept"));
+        }
+    }
+    private constraints() {
+        foreach hash<string, string> row in ({"type": "anyURI", "value": "a%2Fb", "different": "a/b"},
+                {"type": "language", "value": "en-US", "different": "EN-US"}) {
+            foreach string constraint in ("default", "fixed") {
+                string source = '<xs:schema xmlns:xs="' + XSD_NS + '"><xs:element name="value" type="xs:'
+                    + row.type + '" ' + constraint + '=" ' + row.value + ' "/></xs:schema>';
+                XsdSchema original = schema(source);
+                foreach XsdSchema model in (original, saved(original)) {
+                    auto value = decode(model, "<value/>", True);
+                    assertEq(row.value, actual(value));
+                    assertTrue(actual(decode(model, "<value/>", False)).typeCode() == NT_STRING);
+                    XsdXmlValue output = model.serializeXmlValue("", "value", value);
+                    assertEq(parse_xml(output.getXml()), parse_xml_with_schema(output.getXml(), source));
+                    if (constraint == "fixed") {
+                        assertThrows("SOAP-SERIALIZATION-ERROR", \model.serializeXmlValue(), ("", "value", row.different));
+                        assertThrows("SOAP-DESERIALIZATION-ERROR", \decode(), (model, "<value>" + row.different + "</value>", True));
+                    }
+                }
+            }
+        }
+    }
+}
+%endif

@@ -1925,3 +1925,15 @@ retrieving references. Run `test/wsdl-annotations.qtest` and
 and [design/example](../../design/wsdl-schema-annotations.md).
 The [scalar URI/language gap](p5-wsdl-uri-language-finding.md) is next, followed by
 remaining P5 identity constraints and typed accounting. P6-P9 remain required.
+
+## URI and language values (P5-19g)
+
+The eight authored schemas and 73 documents in `fixtures/uri-language.json` are
+Copyright (C) 2026 Qore Technologies, s.r.o. Run `test/wsdl-uri-language.qtest`,
+`test/wsdl-uri-language-content.qtest`, `test/wsdl-uri-language-http.qtest` and
+`python3 test/wsdl-interop/test_uri_language.py -v`. Both conversion directions
+and saved providers validate lexical values while preserving URI spelling,
+language case and union primitive identity. Empty defaults follow the approved
+canonical-actual-type interpretation. See [design/example](../../design/wsdl-uri-language-values.md)
+[evidence](uri-language-evidence.md), [inventory](P5-19g-validation.json)
+and [full audit](audits/P5-19g-uri-language.md). Python CI wiring remains P9 work.

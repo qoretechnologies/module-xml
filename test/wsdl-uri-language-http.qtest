@@ -1,0 +1,119 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires xml
+%requires ../qlib/WSDL.qm
+%requires ../qlib/SoapClient.qm
+%requires ../qlib/SoapHandler.qm
+%requires HttpServer
+%exec-class UriLanguageHttpTest
+
+class UriLanguageHttpTest inherits QUnit::Test {
+    constructor() : Test("URI and language SOAP consumers", "1.0") {
+        addTestCase("Both SOAP HTTP bindings validate URI/language values and retain identity in both directions", \http());
+        set_return_value(main());
+    }
+
+    private auto saved(auto value) {
+        return Serializable::deserialize(Serializable::serialize(value));
+    }
+
+    private WebService service(string version) {
+        string soap = "http://schemas.xmlsoap.org/wsdl/soap" + (version == "12" ? "12" : "") + "/";
+        return new WebService('<w:definitions xmlns:w="http://schemas.xmlsoap.org/wsdl/" xmlns:s="' + soap
+            + '" xmlns:xs="' + XSD_NS + '" xmlns:t="urn:media" targetNamespace="urn:media">'
+            '<w:types><xs:schema targetNamespace="urn:media">'
+            '<xs:simpleType name="Uri"><xs:restriction base="xs:anyURI"><xs:enumeration value="a%2Fb"/>'
+            '<xs:enumeration value="a/b"/></xs:restriction></xs:simpleType>'
+            '<xs:simpleType name="Language"><xs:restriction base="xs:language"><xs:enumeration value="en-US"/>'
+            '<xs:enumeration value="EN-US"/></xs:restriction></xs:simpleType>'
+            '<xs:simpleType name="Uris"><xs:list itemType="t:Uri"/></xs:simpleType>'
+            '<xs:simpleType name="Either"><xs:union memberTypes="xs:language xs:boolean"/></xs:simpleType>'
+            '<xs:complexType name="Record"><xs:sequence><xs:element name="uri" type="t:Uri"/>'
+            '<xs:element name="language" type="t:Language"/><xs:element name="uris" type="t:Uris"/>'
+            '<xs:element name="either" type="t:Either"/><xs:element name="dynamic" type="xs:anyType"/>'
+            '</xs:sequence><xs:attribute name="uri" type="t:Uri" default="a%2Fb"/>'
+            '<xs:attribute name="language" type="t:Language" fixed="en-US"/>'
+            '</xs:complexType><xs:element name="value" type="t:Record"/></xs:schema></w:types>'
+            '<w:message name="Input"><w:part name="body" element="t:value"/></w:message>'
+            '<w:message name="Output"><w:part name="body" element="t:value"/></w:message>'
+            '<w:portType name="Port"><w:operation name="submit"><w:input message="t:Input"/>'
+            '<w:output message="t:Output"/></w:operation></w:portType>'
+            '<w:binding name="Soap" type="t:Port"><s:binding style="document" transport="http://schemas.xmlsoap.org/soap/http"/>'
+            '<w:operation name="submit"><s:operation soapAction="submit"/><w:input><s:body use="literal"/></w:input>'
+            '<w:output><s:body use="literal"/></w:output></w:operation></w:binding>'
+            '<w:service name="Service"><w:port name="Port" binding="t:Soap"><s:address location="http://example.invalid/"/>'
+            '</w:port></w:service></w:definitions>', {"async_only": True});
+    }
+
+    private hash<auto> record(bool response) {
+        return {"uri": response ? " a/b " : " a%2Fb ", "language": response ? " EN-US " : " en-US ",
+            "uris": ("a%2Fb", "a/b"), "either": response ? "0" : "1",
+            "dynamic": {"^type^": new XsdQNameValue(XSD_NS, "anyURI"), "^val^": response ? "a/b" : "a%2Fb"}};
+    }
+
+    private auto unwrap(auto value) {
+        return value.typeCode() == NT_HASH && value.hasKey("^val^") ? value."^val^" : value;
+    }
+
+    private check(auto value, bool response) {
+        value = unwrap(value);
+        assertEq(response ? "a/b" : "a%2Fb", unwrap(value.uri));
+        assertEq(response ? "EN-US" : "en-US", unwrap(value.language));
+        assertEq(("a%2Fb", "a/b"), unwrap(value.uris));
+        assertEq(response ? "0" : "1", unwrap(value.either));
+        assertEq(response ? "a/b" : "a%2Fb", unwrap(value.dynamic));
+        assertEq("a%2Fb", value."^attributes^".uri);
+        assertEq("en-US", value."^attributes^".language);
+    }
+
+    private http() {
+        foreach string version in ("11", "12") {
+            WebService original = service(version);
+            foreach WebService ws in (original, saved(original)) {
+                WSOperation op = ws.getBindingOperation("Soap", "submit");
+                AbstractDataProviderType input = saved(op.input.getDataProviderType(True));
+                AbstractDataProviderType output = saved(op.output.getDataProviderType(True));
+                HttpServer server();
+                on_exit server.stop();
+                SoapHandler handler(new PermissiveAuthenticator());
+                server.setDefaultHandler("soap", handler);
+                Queue observed();
+                Queue responses();
+                code<auto(hash<auto>, auto)> callback = auto sub(hash<auto> cx, auto value) {
+                    observed.push(input.acceptsValue({"body": value}).body);
+                    return output.acceptsValue({"body": responses.pop(30000)});
+                };
+                handler.addMethod(ws, op, callback, NOTHING, NOTHING, NOTHING, "Service", NOTHING,
+                    NOTHING, "Soap", NOTHING, False, True);
+                server.addListener(0);
+                string url = sprintf("http://127.0.0.1:%d/Service", server.getListenerInfo(0).port);
+                SoapClient client({"wsdl": saved(ws), "url": url, "timeout": 30000, "connect_timeout": 30000});
+                foreach bool preserve in (False, True) {
+                    responses.push(record(True));
+                    check(client.callOperation("submit", input.acceptsValue({"body": record(False)}),
+                        {"binding": "Soap", "preserve_types": preserve}), True);
+                    check(observed.pop(30000), False);
+                    foreach AbstractDataProviderType provider in (input, output) {
+                        foreach hash<auto> change in ({"uri": "http://[bad"}, {"language": "bad_lang"},
+                                {"uris": ("a%2Fb", "http://[bad")},
+                                {"^attributes^": {"uri": "http://[bad"}},
+                                {"^attributes^": {"language": "EN-US"}}) {
+                            hash<auto> invalid = record(False) + change;
+                            assertThrows("RUNTIME-TYPE-ERROR", \provider.acceptsValue(), ({"body": invalid},));
+                        }
+                    }
+                    hash<auto> invalid = record(False);
+                    invalid.uri = "http://[bad";
+                    assertThrows("SOAP-SERIALIZATION-ERROR", \client.callOperation(), ("submit", invalid));
+                    responses.push(record(True));
+                    check(client.callOperation("submit", input.acceptsValue({"body": saved(record(False))}),
+                        {"binding": "Soap", "preserve_types": preserve}), True);
+                    check(observed.pop(30000), False);
+                }
+            }
+        }
+    }
+}

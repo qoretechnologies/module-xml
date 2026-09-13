@@ -8112,3 +8112,27 @@ or push; unrelated `test/cmake/__pycache__/` is excluded. Next is the confirmed
 [scalar URI/language gap](p5-wsdl-uri-language-finding.md), then key/unique/keyref
 and complete typed accounting. P6-P9 remain required, including Python CI wiring.
 No question is pending. Artifacts: `/tmp/wsdl-p5-19f-wsdl-annotations/`.
+
+## P5-19g — URI/language scalar and provider values (2026-09-14)
+
+P5-19f committed as `0d3e378`. Builtin URI/language lexical validation now applies
+in both conversion directions and through provider base chains, lists/unions,
+constraints, simple content, saved graphs and actual SOAP consumers. URI spelling
+and language case retain identity; annotation language checks share the helper.
+
+All 174 broad Qore suites plus the additional content suite pass on frozen final
+inputs. The three new suites pass 1,241/160/312 assertions in all four execution
+modes; six Python checks also pass (18 supplemental executions). The eight-schema,
+73-document matrix agrees with native/Xerces validation. Documentation/metadata
+builds pass. No C++ changes require another Valgrind. Both-mode corpus outcomes
+are unchanged; NOTATION's 24 compatibility failures and 48 classified oracle
+disagreements remain visible. Full audit: 15 Pass, 47 N/A, zero Fail.
+See [evidence](uri-language-evidence.md), [inventory](P5-19g-validation.json) and
+[audit](audits/P5-19g-uri-language.md).
+
+Next is key/unique/keyref declaration retention and scoped instance enforcement,
+then complete P5 typed accounting. Baseline root-cause probes are under
+`/tmp/wsdl-p5-20-identities/`. P6-P9 and Python CI integration remain required.
+Main Qore stays clean/read-only; no installation or push; unrelated cache files
+are excluded. No pending question. Final artifacts:
+`/tmp/wsdl-p5-19g-uri-language/final/`.
