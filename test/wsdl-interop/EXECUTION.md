@@ -7754,3 +7754,30 @@ Next: WSDL binary canonical declarations. The prototype already passes its
 206-schema matrix and independently preserves 880 SOAP payloads. It remains
 outside this native commit. Other canonical families, instance-default PSVI,
 key/unique/keyref, complete typed preservation and P6–P9 remain required.
+
+## P5-18d — WSDL canonical binary declarations (2026-09-13)
+
+Native P5-18c committed as `2630052`; no push. WSDL now derives canonical hex
+and Base64 constraint spellings from the original selected octets, retaining
+binary identity and lexical carriers after the second validity assessment.
+Forced AST execution exposed an unnecessary binary-to-string conversion; the
+binary branch now runs before textual normalization. A large Base64 fixture was
+corrected to normalize its encoder's CRLF wrapping before forming an XSD pattern.
+
+The final unchanged-source acceptance run passes all 155 Qore suites and 16
+supplements, including both new suites in AST/IR/JIT/tiered/AOT modes. Unit tests
+pass 920 assertions; real HTTP tests pass 88. The source and AOT independent
+matrices each account for 1,498 records and preserve all 880 SOAP payload values.
+All 206 schemas agree with pinned Xerces. Both complete corpus modes match
+P5-18c at every case and stage. Affected WSDL AOT and API documentation build
+without warnings. Earlier interrupted runs are excluded from acceptance.
+
+See [evidence](wsdl-binary-constraints-evidence.md),
+[inventory](P5-18d-validation.json) and
+[full audit](audits/P5-18d-wsdl-binary-constraints.md): 15 Pass, 47 N/A, zero Fail.
+No native or main-Qore change, installation or push. Next: float/calendar
+canonical declarations, empty-element default PSVI, key/unique/keyref, remaining
+typed-preservation accounting and P6–P9. Float canonicalization investigation
+is under `/tmp/wsdl-p5-18e-ieee/`; pinned Xerces returns `0.0E1` for zero,
+contrary to XSD 1.0's required `0.0E0`, so oracle agreement will not replace the
+normative expectation.

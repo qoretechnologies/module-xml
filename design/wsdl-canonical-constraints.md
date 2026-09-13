@@ -2,7 +2,7 @@
 
 Copyright (C) 2026 Qore Technologies, s.r.o.
 
-WSDL schema construction checks integer, decimal and boolean default/fixed values
+WSDL schema construction checks integer, decimal, boolean and binary default/fixed values
 in both their source and canonical spellings. It follows the native compiler's
 [declaration rules](native-numeric-defaults.md). Element constraints use their
 simple content type; attribute declarations and constraints on attribute
@@ -15,6 +15,14 @@ fraction and decimal spellings require it. Boolean text is `true` or `false`.
 Other atomic members keep their lexical context. Lists assemble selected item
 spellings in order, including empty and singleton lists. A string-first union
 does not acquire numeric semantics merely because another member is numeric.
+
+Binary members use their already selected octets: hexadecimal text is uppercase,
+and Base64 has no whitespace or line wrapping. Canonicalization never treats a
+raw string as encoded input or changes a retained `XsdBinaryValue` carrier. A
+binary-pattern/string union can select a different member for its canonical
+trial, just as the boolean example below does; its stored fixed identity still
+comes from the original binary conversion. Empty and large binary values retain
+their complete octet sequence through saved providers and both SOAP bindings.
 
 The temporary `XsdUnionValueIdentity.constraint_lexical` field is populated only
 inside a declaration's `XsdConstraintLexicalScope`. The scope restores its
@@ -43,6 +51,11 @@ directions, omitted attributes and invalid fixed values. The Python matrix
 validates output payloads with pinned Xerces and compares numeric values and
 expanded QName identities independently.
 
+The corresponding `test/wsdl-binary-constraints.qtest` and HTTP suite exercise
+binary declarations, canonical member reselection, cancellation and large
+values. `test/wsdl-interop/test_wsdl_binary_constraints.py` compares decoded
+octets independently across original/saved services and both SOAP bindings.
+
 These declaration checks are separate from empty-element default projection.
-They do not resolve instance PSVI interpretation under E1-56, add float/calendar/
-binary canonicalization, or change the default `preserve_types=False` policy.
+They do not resolve instance PSVI interpretation under E1-56, add float/calendar
+canonicalization, or change the default `preserve_types=False` policy.

@@ -1637,6 +1637,25 @@ expanded QName identities independently. See [design](../../design/wsdl-canonica
 and [acceptance evidence](wsdl-canonical-constraints-evidence.md). Empty-element
 default projection and other canonical datatype families remain separate P5 work.
 
+## WSDL canonical binary declarations (P5-18d)
+
+Binary default/fixed declarations validate uppercase hexadecimal and unwrapped
+Base64 while retaining the original selected values. Tests cover elements,
+attributes and references, lists/unions, empty and large values, interrupted
+conversion, saved providers and actual SOAP 1.1/1.2 HTTP consumers.
+
+```sh
+QORE_MODULE_DIR=build-debug:qlib qore -b --enable-debug test/wsdl-binary-constraints.qtest
+QORE_MODULE_DIR=build-debug:qlib qore -b --enable-debug test/wsdl-binary-constraints-http.qtest
+QORE_MODULE_DIR=build-debug:qlib python3 -B test/wsdl-interop/test_wsdl_binary_constraints.py -v
+```
+
+The independent matrix accounts for 1,498 records and validates 880 SOAP
+payloads with pinned Xerces while separately comparing their decoded octets.
+See [design](../../design/wsdl-canonical-constraints.md),
+[evidence](wsdl-binary-constraints-evidence.md) and
+[inventory](P5-18d-validation.json). Remaining P5 criteria remain open.
+
 ## Native fixed values and scalar validation (P5-16d)
 
 `../xml-value-space.qtest` checks typed fixed-value equality, empty lists,

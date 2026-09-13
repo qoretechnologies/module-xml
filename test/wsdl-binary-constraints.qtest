@@ -1,0 +1,169 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires xml
+%requires ../qlib/WSDL.qm
+%try-module json
+%define NoJson
+%endtry
+%ifdef NoJson
+throw "MISSING-MODULE", "Binary constraint tests require the json module";
+%else
+%exec-class WsdlBinaryConstraintsTest
+
+class CanonicalFailureType inherits XsdBaseType {
+    public {
+        int calls = 0;
+    }
+    private {
+        string error;
+    }
+    constructor(string error) : XsdBaseType("hexBinary", new Namespaces({})) {
+        self.error = error;
+    }
+    auto deserializeValue(string name, hash<string, XsdAbstractType> types, *hash<auto> references, auto value) {
+        ++calls;
+        if (value == "AB") {
+            throw error, "canonical assessment interrupted";
+        }
+        return XsdBaseType::deserializeValue(name, types, references, value);
+    }
+}
+
+class WsdlBinaryConstraintsTest inherits QUnit::Test {
+    private {
+        list<hash<auto>> models;
+    }
+    constructor() : Test("WSDL canonical binary constraint declarations", "1.0") {
+        models = parse_json(ReadOnlyFile::readTextFile(get_script_dir()
+            + "/wsdl-interop/fixtures/binary-constraints.json"));
+        addTestCase("Binary declarations require both source and canonical validity", \declarations());
+        addTestCase("Saved schemas and providers retain valid constrained values", \savedValues());
+        addTestCase("Canonical member selection does not replace the original constraint", \selection());
+        addTestCase("Canonical conversion errors restore scope and preserve published values", \failure());
+        addTestCase("Large binary canonical values preserve every octet", \largeValues());
+        set_return_value(main());
+    }
+    private static XsdSchema schema(string source) {
+        return new XsdSchema(source, {"async_only":True});
+    }
+    private static auto saved(auto value) {
+        return Serializable::deserialize(Serializable::serialize(value));
+    }
+    private static auto decode(XsdSchema schema, string xml) {
+        auto wire = XsdBase::expandElementNamespaces(parse_xml(xml, XPF_PRESERVE_ORDER));
+        return schema.getElement("", "value").deserializeValue(schema.getTypeMap(), NOTHING,
+            wire."{}value", True, True);
+    }
+    private declarations() {
+        assertEq(206, models.size());
+        int accepted = 0;
+        foreach hash<auto> model in (models) {
+            if (model.valid) {
+                XsdSchema parsed = schema(model.schema);
+                assertEq("{}value", parsed.getElement("", "value").getExpandedName(), model.name);
+                ++accepted;
+            } else {
+                assertThrows("WSDL-ERROR", \schema(), (model.schema,));
+            }
+        }
+        assertEq(110, accepted);
+    }
+    private savedValues() {
+        int accepted = 0;
+        foreach hash<auto> model in (models) {
+            if (!model.valid) {
+                continue;
+            }
+            XsdSchema original = schema(model.schema);
+            foreach XsdSchema current in (original, saved(original)) {
+                auto value = decode(current, model.xml);
+                XsdXmlValue xml = current.serializeXmlValue("", "value", value);
+                assertEq(parse_xml(xml.getXml()), parse_xml_with_schema(xml.getXml(), model.schema), model.name);
+                AbstractDataProviderType provider = saved(current.getNativeDataProviderType("", "value"));
+                XsdXmlValue prepared = current.serializeXmlValue("", "value", provider.acceptsValue(value));
+                assertEq(parse_xml(xml.getXml()), parse_xml(prepared.getXml()), model.name);
+                XsdXmlValue retained = current.getXmlValue(model.xml);
+                assertEq(parse_xml(model.xml), parse_xml(retained.getXml()), model.name);
+            }
+            ++accepted;
+        }
+        assertEq(110, accepted);
+    }
+    private selection() {
+        string source = '<xs:schema xmlns:xs="' + XSD_NS + '">'
+            '<xs:simpleType name="One"><xs:restriction base="xs:hexBinary"><xs:pattern value="ab"/>'
+            '</xs:restriction></xs:simpleType>'
+            '<xs:simpleType name="Either"><xs:union memberTypes="One xs:string"/></xs:simpleType>'
+            '<xs:element name="value" type="Either" fixed="ab"/>'
+            '<xs:element name="record"><xs:complexType><xs:attribute name="item" type="Either" fixed="ab"/>'
+            '</xs:complexType></xs:element></xs:schema>';
+        XsdSchema original = schema(source);
+        foreach XsdSchema current in (original, saved(original)) {
+            XsdElement element = current.getElement("", "value");
+            assertEq("ab", element.getValueConstraint().lexical);
+            assertEq(parse_hex_string("AB"), cast<XsdBinaryValue>(element.getValueConstraint().value).getBinaryValue());
+            assertEq("ab", cast<XsdBinaryValue>(element.getValueConstraint().value).getLexicalValue());
+            element.validateValueConstraintType();
+            assertEq(parse_hex_string("AB"), cast<XsdBinaryValue>(element.getValueConstraint().value).getBinaryValue());
+            assertEq(parse_hex_string("AB"), cast<XsdBinaryValue>(decode(current, "<value>ab</value>")).getBinaryValue());
+            assertThrows("SOAP-DESERIALIZATION-ERROR", \decode(), (current, "<value>AB</value>"));
+            XsdComplexType record = cast<XsdComplexType>(current.getElement("", "record").type);
+            XsdAttribute attribute = record.attrs.item;
+            assertEq("ab", attribute.fixedLexical);
+            assertEq(parse_hex_string("AB"), cast<XsdBinaryValue>(attribute.getDefaultValue()).getBinaryValue());
+            assertEq(parse_hex_string("AB"), cast<XsdBinaryValue>(attribute.getValue("ab")).getBinaryValue());
+            assertThrows("SOAP-DESERIALIZATION-ERROR", \attribute.getValue(), ("AB",));
+        }
+    }
+    private failure() {
+        XsdSchema current = schema('<xs:schema xmlns:xs="' + XSD_NS + '">'
+            '<xs:element name="value" type="xs:hexBinary" default="ab"/></xs:schema>');
+        XsdElement target = current.getElement("", "value");
+        XsdAbstractType original = target.type;
+        hash<XsdElementValueConstraintInfo> before = target.getValueConstraint();
+        on_exit {
+            target.type = original;
+        }
+        foreach string error in ("PROGRAM-INTERRUPTED", "THREAD-CANCELLED", "CONTROLLED-CONVERSION-ERROR") {
+            CanonicalFailureType interrupted(error);
+            target.type = interrupted;
+            assertThrows(error == "CONTROLLED-CONVERSION-ERROR" ? "WSDL-ERROR" : error,
+                \target.validateValueConstraintType());
+            assertEq(2, interrupted.calls);
+            assertEq(before, target.getValueConstraint());
+            target.type = original;
+            target.validateValueConstraintType();
+            assertEq(before, target.getValueConstraint());
+            assertEq(parse_hex_string("AB"), decode(current, "<value>ab</value>"));
+        }
+    }
+    private largeValues() {
+        binary bytes = parse_hex_string(strmul("ab00ff", 128));
+        foreach string builtin in ("hexBinary", "base64Binary") {
+            string canonical = builtin == "hexBinary" ? toupper(make_hex_string(bytes)) : make_base64_string(bytes);
+            string lexical = builtin == "hexBinary" ? make_hex_string(bytes) : make_base64_string(bytes, 64);
+            lexical = trim(replace(lexical, "\r\n", " "));
+            assertFalse(lexical == canonical);
+            string prefix = '<xs:schema xmlns:xs="' + XSD_NS + '"><xs:simpleType name="Value">'
+                '<xs:restriction base="xs:' + builtin + '"><xs:pattern value="';
+            string suffix = '"/></xs:restriction></xs:simpleType><xs:element name="value" type="Value" fixed="'
+                + lexical + '"/></xs:schema>';
+            assertThrows("WSDL-ERROR", \schema(), (prefix + replace(lexical, "+", "\\+") + suffix,));
+            XsdSchema original = schema(prefix + replace(lexical, "+", "\\+") + "|"
+                + replace(canonical, "+", "\\+") + suffix);
+            foreach XsdSchema current in (original, saved(original)) {
+                XsdBinaryValue value = cast<XsdBinaryValue>(decode(current, "<value>" + lexical + "</value>"));
+                assertEq(bytes, value.getBinaryValue());
+                XsdXmlValue xml = current.serializeXmlValue("", "value", value);
+                assertEq(bytes, cast<XsdBinaryValue>(decode(current, xml.getXml())).getBinaryValue());
+                assertEq(parse_xml(xml.getXml()), parse_xml_with_schema(xml.getXml(), prefix
+                    + replace(lexical, "+", "\\+") + "|" + replace(canonical, "+", "\\+") + suffix));
+            }
+        }
+    }
+
+}
+%endif
