@@ -233,7 +233,10 @@ and instance-default PSVI remain open.
 P5-18e implements native IEEE conversion and canonical declarations, including
 locale/rounding-state independence, complete exponent syntax and explicit
 shortest-round-trip precision policy; see [evidence](native-ieee-constraints-evidence.md).
-The corresponding WSDL canonical capture and calendar/default PSVI work remain open.
+P5-18f implements the corresponding WSDL canonical capture, preserving original
+IEEE values through saved schemas/providers and both SOAP bindings; see
+[evidence](wsdl-ieee-constraints-evidence.md). Calendar canonical forms and
+instance-default PSVI, remaining identity constraints and typed accounting stay open.
 
 ## P6 — Complete WSDL component and binding interoperability
 

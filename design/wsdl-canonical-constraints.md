@@ -1,8 +1,8 @@
-# WSDL canonical numeric constraint declarations
+# WSDL canonical constraint declarations
 
 Copyright (C) 2026 Qore Technologies, s.r.o.
 
-WSDL schema construction checks integer, decimal, boolean and binary default/fixed values
+WSDL schema construction checks integer, decimal, boolean, binary and IEEE default/fixed values
 in both their source and canonical spellings. It follows the native compiler's
 [declaration rules](native-numeric-defaults.md). Element constraints use their
 simple content type; attribute declarations and constraints on attribute
@@ -23,6 +23,20 @@ binary-pattern/string union can select a different member for its canonical
 trial, just as the boolean example below does; its stored fixed identity still
 comes from the original binary conversion. Empty and large binary values retain
 their complete octet sequence through saved providers and both SOAP bindings.
+
+IEEE members pass their already selected round-trip identity text to
+`canonical_xsd_float(lexical, double_precision=False)`. That API validates a
+complete XML lexical string and reuses the native datatype/canonical APIs with
+RAII ownership. It rejects embedded NULs before calling the terminated-string
+API, converts encoding to UTF-8 and checks cooperative cancellation. Its native
+formatter preserves locale and the caller's floating-point environment.
+
+For example, `canonical_xsd_float("16777217")` returns `1.6777216E7`, the exact
+binary32 result, while passing `True` returns binary64 text `1.6777217E7`.
+Finite values use shortest round-trip scientific text; special values use
+`INF`, `-INF` and `NaN`. XSD 1.0's single zero is `0.0E0`. This policy never
+rounds a selected value for decimal appearance. See the
+[native IEEE contract](native-ieee-constraints.md) for the precision policy.
 
 The temporary `XsdUnionValueIdentity.constraint_lexical` field is populated only
 inside a declaration's `XsdConstraintLexicalScope`. The scope restores its
@@ -56,6 +70,16 @@ binary declarations, canonical member reselection, cancellation and large
 values. `test/wsdl-interop/test_wsdl_binary_constraints.py` compares decoded
 octets independently across original/saved services and both SOAP bindings.
 
+The IEEE unit/HTTP suites cover 300 declarations and preserved provider values.
+`test_wsdl_ieee_constraints.py` compares exact IEEE values, selected string
+values and expanded QName list members for 1,248 SOAP payloads. It retains all
+48 pinned Xerces schema differences and their unreachable document results.
+Separately identified derivatives remove only the default/fixed attribute to
+check explicit instance validity with the original type restrictions. These
+derivatives never replace the original declaration verdicts or fixture bytes.
+`test_ieee_canonical.py` checks the public API against 1,314 exact rational
+conversion/formatting expectations, including invalid and boundary inputs.
+
 These declaration checks are separate from empty-element default projection.
-They do not resolve instance PSVI interpretation under E1-56, add float/calendar
+They do not resolve instance PSVI interpretation under E1-56, add calendar
 canonicalization, or change the default `preserve_types=False` policy.

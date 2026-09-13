@@ -1757,3 +1757,23 @@ Typed preservation is still unassessed for 824 native directions. See
 [design](../../design/wsdl-id-bindings.md), [inventory](P5-17b-validation.json)
 and [full audit](audits/P5-17b-id-bindings.md). Empty-element defaults and
 key/unique/keyref constraints remain P5 work; P6–P9 are not complete.
+
+## WSDL IEEE constraints (P5-18f)
+
+`canonical_xsd_float()` supplies canonical scientific text at binary32/binary64
+precision. WSDL uses the selected value for declaration reassessment while
+retaining original defaults, fixed identities and lexical carriers. The tests
+cover 300 schemas, 1,248 SOAP payloads and 1,314 exact-rational API cases.
+
+```sh
+QORE_MODULE_DIR=build-debug:qlib qore -b --enable-debug test/xsd-float-canonical.qtest
+QORE_MODULE_DIR=build-debug:qlib qore -b --enable-debug test/wsdl-ieee-constraints.qtest
+QORE_MODULE_DIR=build-debug:qlib qore -b --enable-debug test/wsdl-ieee-constraints-http.qtest
+QORE_MODULE_DIR=build-debug:qlib python3 -B test/wsdl-interop/test_ieee_canonical.py -v
+QORE_MODULE_DIR=build-debug:qlib python3 -B test/wsdl-interop/test_wsdl_ieee_constraints.py -v
+```
+
+All 48 pinned Xerces differences remain explicit. Separately identified schema
+derivatives assess explicit instances without changing the original declaration
+results. See [evidence](wsdl-ieee-constraints-evidence.md),
+[design](../../design/wsdl-canonical-constraints.md) and [inventory](P5-18f-validation.json).

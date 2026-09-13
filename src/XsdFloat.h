@@ -10,4 +10,8 @@
 // The returned double contains the exact binary32 result when double_precision is false.
 DLLLOCAL double qore_xml_convert_xsd_float(QoreValue value, bool double_precision, ExceptionSink* xsink);
 
+// Canonical XSD 1.0 spelling of a validated lexical value at the selected precision.
+DLLLOCAL QoreStringNode* qore_xml_canonical_xsd_float(const QoreStringNode* lexical,
+    bool double_precision, ExceptionSink* xsink);
+
 #endif

@@ -1,0 +1,142 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires xml
+%requires ../qlib/WSDL.qm
+%try-module json
+%define NoJson
+%endtry
+%ifdef NoJson
+throw "MISSING-MODULE", "IEEE constraint tests require the json module";
+%else
+%exec-class WsdlIeeeConstraintsTest
+
+class CanonicalFailureType inherits XsdBaseType {
+    public {
+        int calls = 0;
+    }
+    private {
+        string error;
+    }
+    constructor(string error) : XsdBaseType("float", new Namespaces({})) {
+        self.error = error;
+    }
+    auto deserializeValue(string name, hash<string, XsdAbstractType> types, *hash<auto> references, auto value) {
+        ++calls;
+        if (value == "1.7E1") {
+            throw error, "canonical assessment interrupted";
+        }
+        return XsdBaseType::deserializeValue(name, types, references, value);
+    }
+}
+
+class WsdlIeeeConstraintsTest inherits QUnit::Test {
+    private {
+        list<hash<auto>> models;
+    }
+    constructor() : Test("WSDL canonical IEEE constraint declarations", "1.0") {
+        models = parse_json(ReadOnlyFile::readTextFile(get_script_dir()
+            + "/wsdl-interop/fixtures/ieee-constraints.json"));
+        addTestCase("IEEE declarations require both source and canonical validity", \declarations());
+        addTestCase("Saved schemas and providers retain valid constrained values", \savedValues());
+        addTestCase("Canonical member selection does not replace the original constraint", \selection());
+        addTestCase("Canonical conversion errors restore scope and preserve published values", \failure());
+        set_return_value(main());
+    }
+    private static XsdSchema schema(string source) {
+        return new XsdSchema(source, {"async_only":True});
+    }
+    private static auto saved(auto value) {
+        return Serializable::deserialize(Serializable::serialize(value));
+    }
+    private static auto decode(XsdSchema schema, string xml) {
+        auto wire = XsdBase::expandElementNamespaces(parse_xml(xml, XPF_PRESERVE_ORDER));
+        return schema.getElement("", "value").deserializeValue(schema.getTypeMap(), NOTHING,
+            wire."{}value", True, True);
+    }
+    private declarations() {
+        assertEq(300, models.size());
+        int accepted = 0;
+        foreach hash<auto> model in (models) {
+            if (model.valid) {
+                XsdSchema parsed = schema(model.schema);
+                assertEq("{}value", parsed.getElement("", "value").getExpandedName(), model.name);
+                ++accepted;
+            } else {
+                assertThrows("WSDL-ERROR", \schema(), (model.schema,));
+            }
+        }
+        assertEq(156, accepted);
+    }
+    private savedValues() {
+        int accepted = 0;
+        foreach hash<auto> model in (models) {
+            if (!model.valid) {
+                continue;
+            }
+            XsdSchema original = schema(model.schema);
+            foreach XsdSchema current in (original, saved(original)) {
+                auto value = decode(current, model.xml);
+                XsdXmlValue xml = current.serializeXmlValue("", "value", value);
+                assertEq(parse_xml(xml.getXml()), parse_xml_with_schema(xml.getXml(), model.schema), model.name);
+                AbstractDataProviderType provider = saved(current.getNativeDataProviderType("", "value"));
+                XsdXmlValue prepared = current.serializeXmlValue("", "value", provider.acceptsValue(value));
+                assertEq(parse_xml(xml.getXml()), parse_xml(prepared.getXml()), model.name);
+                XsdXmlValue retained = current.getXmlValue(model.xml);
+                assertEq(parse_xml(model.xml), parse_xml(retained.getXml()), model.name);
+            }
+            ++accepted;
+        }
+        assertEq(156, accepted);
+    }
+    private selection() {
+        string source = '<xs:schema xmlns:xs="' + XSD_NS + '">'
+            '<xs:simpleType name="One"><xs:restriction base="xs:float"><xs:pattern value="\\+017"/>'
+            '</xs:restriction></xs:simpleType>'
+            '<xs:simpleType name="Either"><xs:union memberTypes="One xs:string"/></xs:simpleType>'
+            '<xs:element name="value" type="Either" fixed="+017"/>'
+            '<xs:element name="record"><xs:complexType><xs:attribute name="item" type="Either" fixed="+017"/>'
+            '</xs:complexType></xs:element></xs:schema>';
+        XsdSchema original = schema(source);
+        foreach XsdSchema current in (original, saved(original)) {
+            XsdElement element = current.getElement("", "value");
+            assertEq("+017", element.getValueConstraint().lexical);
+            assertEq(17.0, convert_xsd_float(element.getValueConstraint().value));
+            element.validateValueConstraintType();
+            assertEq(17.0, convert_xsd_float(element.getValueConstraint().value));
+            assertEq(17.0, convert_xsd_float(decode(current, "<value>+017</value>")));
+            assertThrows("SOAP-DESERIALIZATION-ERROR", \decode(), (current, "<value>1.7E1</value>"));
+            XsdComplexType record = cast<XsdComplexType>(current.getElement("", "record").type);
+            XsdAttribute attribute = record.attrs.item;
+            assertEq("+017", attribute.fixedLexical);
+            assertEq(17.0, convert_xsd_float(attribute.getDefaultValue()));
+            assertEq(17.0, convert_xsd_float(attribute.getValue("+017")));
+            assertThrows("SOAP-DESERIALIZATION-ERROR", \attribute.getValue(), ("1.7E1",));
+        }
+    }
+    private failure() {
+        XsdSchema current = schema('<xs:schema xmlns:xs="' + XSD_NS + '">'
+            '<xs:element name="value" type="xs:float" default="+017"/></xs:schema>');
+        XsdElement target = current.getElement("", "value");
+        XsdAbstractType original = target.type;
+        hash<XsdElementValueConstraintInfo> before = target.getValueConstraint();
+        on_exit {
+            target.type = original;
+        }
+        foreach string error in ("PROGRAM-INTERRUPTED", "THREAD-CANCELLED", "CONTROLLED-CONVERSION-ERROR") {
+            CanonicalFailureType interrupted(error);
+            target.type = interrupted;
+            assertThrows(error == "CONTROLLED-CONVERSION-ERROR" ? "WSDL-ERROR" : error,
+                \target.validateValueConstraintType());
+            assertEq(2, interrupted.calls);
+            assertEq(before, target.getValueConstraint());
+            target.type = original;
+            target.validateValueConstraintType();
+            assertEq(before, target.getValueConstraint());
+            assertEq(17.0, decode(current, "<value>17</value>"));
+        }
+    }
+}
+%endif

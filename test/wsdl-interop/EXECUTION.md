@@ -7813,3 +7813,31 @@ supplements, source hashes and all 62 checklist results. No main-Qore change,
 installation or push. Next: WSDL IEEE canonical capture, calendar canonical forms,
 empty-element default PSVI, key/unique/keyref, complete typed-preservation
 accounting and P6–P9. Concrete notes are in `/tmp/wsdl-p5-18e-ieee/next-wsdl.md`.
+
+## P5-18f — WSDL canonical IEEE declarations (2026-09-13)
+
+P5-18e committed as `976fd28`; no push. Installed Qore matches the verified fixed
+`8c0c22c15` executable/library. The new canonical_xsd_float API validates complete
+lexicals and preserves selected precision with checked native ownership. WSDL
+uses it for canonical declaration capture without replacing the original value.
+The parent WSDL baseline accepted all 144 invalid schemas in the IEEE fixture.
+The old native float test's intended long inputs now use strmul correctly.
+
+All 159 Qore suites and 22 supplements pass on frozen source. The new API,
+WSDL unit and HTTP suites pass 602, 1,272 and 88 assertions respectively. Forced
+execution modes and compiled WSDL tests pass. The independent matrices verify
+1,314 rational API cases and 2,148 WSDL records, preserving 1,248 SOAP payloads.
+The 48 known Xerces disagreements remain explicit; 48 separately identified
+constraint-free derivatives validate 432 explicit instances. Four affected
+Valgrind runs report zero errors/lost memory. The WSDL memory checks use AST
+with a 1,200-second deadline after an initial default-mode run exceeded 600 seconds. Both corpus modes equal P5-18e
+at every case/stage, and affected documentation builds without warnings.
+
+See [evidence](wsdl-ieee-constraints-evidence.md),
+[inventory](P5-18f-validation.json) and
+[full audit](audits/P5-18f-wsdl-ieee-constraints.md): 22 Pass, 40 N/A, zero Fail.
+Remote fetch found no incoming XML commits. No main-Qore mutation, install or push.
+Next: calendar canonical declarations. Raw native formatting defects and exact
+fraction/offset requirements are recorded in `/tmp/wsdl-p5-18g-calendar-constraints/`.
+Empty-element default PSVI, key/unique/keyref, typed-preservation accounting and
+all P6–P9 requirements remain active; no outstanding user question.

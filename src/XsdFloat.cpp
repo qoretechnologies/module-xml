@@ -3,6 +3,8 @@
 
 #include "XsdFloat.h"
 
+#include <libxml/xmlschemastypes.h>
+
 #include <cassert>
 #include <cfenv>
 #include <cmath>
@@ -10,6 +12,7 @@
 #include <cstring>
 #include <limits>
 #include <locale>
+#include <memory>
 #include <sstream>
 #include <string>
 
@@ -271,4 +274,54 @@ double qore_xml_convert_xsd_float(QoreValue value, bool double_precision, Except
         return 0.0;
     }
     return double_precision ? parseFinite<double>(*text, start, end, xsink) : parseFinite<float>(*text, start, end, xsink);
+}
+
+QoreStringNode* qore_xml_canonical_xsd_float(const QoreStringNode* lexical,
+        bool double_precision, ExceptionSink* xsink) {
+    if (qore_check_cancel(xsink, "canonical XSD floating-point conversion")) {
+        return nullptr;
+    }
+    TempEncodingHelper text(lexical, QCS_UTF8, xsink);
+    if (!text) {
+        return nullptr;
+    }
+    // libxml2's datatype API takes a terminated string. Never let a Qore string
+    // containing an embedded NUL turn invalid input into a valid prefix.
+    for (size_t i = 0; i < text->size(); ++i) {
+        if (!(i % 100) && qore_check_cancel(xsink, "canonical XSD floating-point lexical validation")) {
+            return nullptr;
+        }
+        if (!text->c_str()[i]) {
+            xsink->raiseException("XSD-FLOAT-LEXICAL-ERROR", "an XSD floating-point lexical cannot contain NUL");
+            return nullptr;
+        }
+    }
+    xmlSchemaTypePtr type = xmlSchemaGetPredefinedType(
+        reinterpret_cast<const xmlChar*>(double_precision ? "double" : "float"),
+        reinterpret_cast<const xmlChar*>("http://www.w3.org/2001/XMLSchema"));
+    if (!type) {
+        xsink->raiseException("XSD-FLOAT-CONVERSION-ERROR", "cannot initialize the XML Schema IEEE datatype");
+        return nullptr;
+    }
+    xmlSchemaValPtr raw = nullptr;
+    int status = xmlSchemaValidatePredefinedType(type, reinterpret_cast<const xmlChar*>(text->c_str()), &raw);
+    std::unique_ptr<xmlSchemaVal, decltype(&xmlSchemaFreeValue)> value(raw, xmlSchemaFreeValue);
+    if (status || !value) {
+        xsink->raiseException(status > 0 ? "XSD-FLOAT-LEXICAL-ERROR" : "XSD-FLOAT-CONVERSION-ERROR",
+            "cannot convert the XML Schema %s lexical value", double_precision ? "double" : "float");
+        return nullptr;
+    }
+    const xmlChar* canonical = nullptr;
+    status = xmlSchemaGetCanonValue(value.get(), &canonical);
+    auto release = [](const xmlChar* p) { xmlFree(const_cast<xmlChar*>(p)); };
+    std::unique_ptr<const xmlChar, decltype(release)> result(canonical, release);
+    if (status || !result) {
+        xsink->raiseException("XSD-FLOAT-CONVERSION-ERROR", "cannot format the canonical XML Schema IEEE value");
+        return nullptr;
+    }
+    if (qore_check_cancel(xsink, "canonical XSD floating-point conversion")) {
+        return nullptr;
+    }
+    ReferenceHolder<QoreStringNode> rv(new QoreStringNode(reinterpret_cast<const char*>(result.get()), QCS_UTF8), xsink);
+    return rv.release();
 }
