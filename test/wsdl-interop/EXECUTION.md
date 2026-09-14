@@ -8136,3 +8136,27 @@ then complete P5 typed accounting. Baseline root-cause probes are under
 Main Qore stays clean/read-only; no installation or push; unrelated cache files
 are excluded. No pending question. Final artifacts:
 `/tmp/wsdl-p5-19g-uri-language/final/`.
+
+## P5-20a — Native identity XPath prerequisite (2026-09-14)
+
+P5-19g committed as `7a59f8f`. The native pattern compiler now rejects empty
+input and trailing union separators using its existing cleanup path. Configure
+checks selector and field grammar before accepting a system dependency. The
+54-schema matrix preserves legal token spacing and explicit axes; two pinned
+Xerces spacing disagreements are root-caused in its period-token scanner.
+
+Acceptance: 37 affected Qore suites, all 68 provider tests and three Python
+supplements pass. The native suite has 195 assertions. Its direct ELF Valgrind
+has zero errors/lost bytes; the direct 88-check C matrix frees all allocations.
+Debug build/docs are clean; all four corpus reports are byte-identical to
+P5-19g, including the classified failures. Full audit: 18 Pass, 44 N/A, zero Fail.
+See [evidence](identity-paths-evidence.md), [inventory](P5-20a-validation.json),
+[design](../../design/native-identity-paths.md) and
+[audit](audits/P5-20a-native-identity-paths.md).
+
+Main Qore is read-only, with the installed library matching the frozen verified
+runtime. No install or push; unrelated `test/cmake/__pycache__/` is excluded.
+Next: WSDL key/unique/keyref representation, namespace-bound paths, retained
+component metadata and instance tuple semantics, then P5 typed accounting and
+P6–P9. No question is pending. Artifacts: `/tmp/wsdl-p5-20-identities/final/`;
+provider artifacts: `/tmp/qore-xml-libxml2-test-mesac8m1/`.

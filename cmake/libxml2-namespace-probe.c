@@ -27,6 +27,7 @@
 #include "libxml2-element-defaults-probe.h"
 #include "libxml2-notation-probe.h"
 #include "libxml2-annotation-probe.h"
+#include "libxml2-identity-path-probe.h"
 
 static int check_namespace(const char* source, const char* expected) {
     xmlTextReaderPtr reader = xmlReaderForMemory(source, (int)strlen(source), NULL, "UTF-8", 0);
@@ -130,6 +131,11 @@ int main(void) {
         int annotations = check_annotations();
         result |= annotations;
         printf("annotations=%s\n", annotations ? "FAIL" : "PASS");
+    }
+    {
+        int identity_paths = check_identity_paths();
+        result |= identity_paths;
+        printf("identity_paths=%s\n", identity_paths ? "FAIL" : "PASS");
         int notations = check_notations();
         result |= notations;
         printf("notations=%s\n", notations ? "FAIL" : "PASS");

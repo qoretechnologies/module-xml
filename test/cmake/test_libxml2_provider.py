@@ -60,6 +60,8 @@ if(NOT BUILD_SHARED_LIBS)
 endif()
 add_executable(probe "{REPO}/cmake/libxml2-namespace-probe.c")
 target_link_libraries(probe PRIVATE ${{QORE_XML_LIBXML2_TARGET}} ${{QORE_XML_PROBE_LIBRARIES}})
+add_executable(identity-paths "{REPO}/test/cmake/libxml2_identity_paths.c")
+target_link_libraries(identity-paths PRIVATE ${{QORE_XML_LIBXML2_TARGET}})
 add_executable(calendar-values "{REPO}/test/cmake/libxml2_calendar_values.c")
 target_link_libraries(calendar-values PRIVATE ${{QORE_XML_LIBXML2_TARGET}})
 add_executable(calendar-allocation "{REPO}/test/cmake/libxml2_calendar_allocation.c")
@@ -196,6 +198,8 @@ include("{REPO}/cmake/QoreXmlLibXml2NotationFix.cmake")
 qore_xml_fix_libxml2_notations("{cls.source}" "${{CMAKE_CURRENT_BINARY_DIR}}/libxml")
 include("{REPO}/cmake/QoreXmlLibXml2AnnotationFix.cmake")
 qore_xml_fix_libxml2_annotations("{cls.source}" "${{CMAKE_CURRENT_BINARY_DIR}}/libxml")
+include("{REPO}/cmake/QoreXmlLibXml2IdentityPathFix.cmake")
+qore_xml_fix_libxml2_identity_paths("{cls.source}" "${{CMAKE_CURRENT_BINARY_DIR}}/libxml")
 ''')
         cls.fixed = cls.root / "fixed/build-debug"
         cls.run_command(["cmake", "-S", fixed_project, "-B", cls.fixed, "-DCMAKE_BUILD_TYPE=Debug",
@@ -812,6 +816,46 @@ set_property(TARGET LibXml2 PROPERTY SOURCES "${native_sources}")
         self.run_command(["cmake", "--build", self.root / "bundled", "--target", "calendar-allocation", "-j4"])
         self.assertIn("allocation failures propagated with intact ownership and successful recovery",
                       self.run_command([self.root / "bundled/calendar-allocation"]))
+
+    def test_identity_path_detection_and_idempotence(self):
+        project = self.root / "identity-path-broken/source"
+        project.mkdir(parents=True)
+        (project / "CMakeLists.txt").write_text(self.previous_identity_path_fixture())
+        build = self.root / "identity-path-broken/build-debug"
+        self.run_command(["cmake", "-S", project, "-B", build, "-DCMAKE_BUILD_TYPE=Debug",
+                          "-DBUILD_SHARED_LIBS=ON", "-DLIBXML2_WITH_PROGRAMS=OFF",
+                          "-DLIBXML2_WITH_TESTS=OFF", "-DLIBXML2_WITH_PYTHON=OFF"])
+        self.run_command(["cmake", "--build", build, "--target", "LibXml2", "-j4"])
+        libraries = list((build / "libxml").glob("libxml2.so")) + list((build / "libxml").glob("libxml2.dylib"))
+        self.assertEqual(1, len(libraries))
+        options = [f"-DLIBXML2_INCLUDE_DIR={self.fixed_include}", f"-DLIBXML2_LIBRARY={libraries[0]}",
+                   f"-DFETCHCONTENT_SOURCE_DIR_QORE_XML_LIBXML2={self.source}"]
+        output = self.configure("identity-path-broken-auto", "-DQORE_XML_LIBXML2_PROVIDER=AUTO", *options)
+        self.assertIn("using private static libxml2 2.15.4", output)
+        probe = (self.root / "identity-path-broken-auto/system-libxml2/namespace-probe.log").read_text()
+        self.assertIn("notations=PASS", probe)
+        self.assertIn("calendar_constraints=PASS", probe)
+        self.assertIn("qname_allocation=PASS", probe)
+        self.assertIn("identity_paths=FAIL", probe)
+        self.configure("identity-path-broken-system", "-DQORE_XML_LIBXML2_PROVIDER=SYSTEM", *options,
+                       success=False)
+        folder = self.root / "bundled/_deps/qore_xml_libxml2-build/qore-identity-path-fix"
+        before = {name: (folder / name).stat().st_mtime_ns for name in ("pattern.c",)}
+        self.configure("bundled", "-DQORE_XML_LIBXML2_PROVIDER=BUNDLED",
+                       f"-DFETCHCONTENT_SOURCE_DIR_QORE_XML_LIBXML2={self.source}")
+        self.assertEqual(before, {name: (folder / name).stat().st_mtime_ns for name in before})
+
+    def test_identity_path_syntax_and_recovery(self):
+        self.run_command(["cmake", "--build", self.root / "bundled", "--target", "identity-paths", "-j4"])
+        self.assertIn("identity path syntax and recovery: 88 checks passed",
+                      self.run_command([self.root / "bundled/identity-paths"]))
+
+    def previous_identity_path_fixture(self):
+        """All prior fixes with the original pattern compiler."""
+        fixed = (self.root / "fixed/source/CMakeLists.txt").read_text()
+        fixed = fixed.replace(f'include("{REPO}/cmake/QoreXmlLibXml2IdentityPathFix.cmake")\n', "")
+        return fixed.replace(f'qore_xml_fix_libxml2_identity_paths("{self.source}" '
+                             '"${CMAKE_CURRENT_BINARY_DIR}/libxml")\n', "")
 
     def test_annotation_detection_and_idempotence(self):
         project = self.root / "annotation-broken/source"

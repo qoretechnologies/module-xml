@@ -1937,3 +1937,14 @@ language case and union primitive identity. Empty defaults follow the approved
 canonical-actual-type interpretation. See [design/example](../../design/wsdl-uri-language-values.md)
 [evidence](uri-language-evidence.md), [inventory](P5-19g-validation.json)
 and [full audit](audits/P5-19g-uri-language.md). Python CI wiring remains P9 work.
+
+## Native identity XPath grammar (P5-20a)
+
+The 54 authored schemas in `fixtures/identity-paths.json` are Copyright (C) 2026
+Qore Technologies, s.r.o. Run `test/xml-identity-paths.qtest` and
+`python3 -B test/wsdl-interop/test_identity_paths.py -v`. Native APIs reject empty
+union arms while retaining legal whitespace, wildcard names and explicit axes.
+Two Xerces token-spacing defects remain explicitly classified against the valid
+original schemas; see [evidence](identity-paths-evidence.md) and
+[implemented design](../../design/native-identity-paths.md). WSDL identity
+declarations and instance semantics remain the next P5 increment.
