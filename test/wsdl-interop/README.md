@@ -1948,3 +1948,18 @@ Two Xerces token-spacing defects remain explicitly classified against the valid
 original schemas; see [evidence](identity-paths-evidence.md) and
 [implemented design](../../design/native-identity-paths.md). WSDL identity
 declarations and instance semantics remain the next P5 increment.
+
+## Identity declaration grammar and component QNames (P5-20b)
+
+The authored 86-schema `fixtures/identity-grammar.json` and 91-schema
+`fixtures/component-qnames.json` matrices are Copyright (C) 2026 Qore Technologies,
+s.r.o. Run `test/wsdl-identity-grammar.qtest`, `test/xml-component-qnames.qtest`,
+`test/wsdl-notation-http.qtest` and the independent Python checkers
+`test_identity_grammar.py` and `test_component_qnames.py`. WSDL validates ordered
+selector/field declarations and path syntax before grouping; native component
+references resolve normalized QNames with checked allocation diagnostics.
+See [design/example](../../design/wsdl-identity-grammar.md),
+[evidence](identity-grammar-evidence.md), [inventory](P5-20b-validation.json) and
+[full audit](audits/P5-20b-identity-grammar.md). Retained identity components,
+keyref component resolution and instance tuples remain next in P5; Python CI
+wiring and full supported-environment acceptance remain P9 work.

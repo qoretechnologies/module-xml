@@ -80,6 +80,8 @@ module WSDL {
     @section wsdlrelnotes WSDL Module Release Notes
 
     @subsection wsdl_0_5_8 WSDL v0.5.8
+    - Identity declarations validate names, attributes, ordered selector/field content and namespace-bound
+      XPath syntax before schema children are grouped; failed additions preserve existing schema state
     - anyURI and language values validate their complete XSD lexical forms in both conversion directions,
       including restrictions, lists/unions and saved providers; URI spelling and language case retain identity
     - Schema annotations validate ordered content, allowed attributes, URI sources, language tags and
@@ -19319,6 +19321,190 @@ class XsdAnnotationGrammarHelper {
     }
 }
 
+hashdecl XsdIdentityGrammarFrame {
+    string name = "";
+    bool ignored = False;
+    bool constraint = False;
+    bool selector = False;
+    int fields = 0;
+}
+
+#! Check identity declaration content while selector/field order is still available.
+class XsdIdentityGrammarHelper {
+    private {
+        hash<string, hash<XsdIdentityGrammarFrame>> frames;
+    }
+
+    private static bool identity(string local) {
+        return local == "key" || local == "unique" || local == "keyref";
+    }
+
+    private static finish(hash<XsdIdentityGrammarFrame> frame) {
+        if (identity(frame.name) && (!frame.selector || !frame.fields)) {
+            throw WSDL_ERROR, "an identity constraint requires one selector followed by one or more fields";
+        }
+    }
+
+    consume(XmlReader reader) {
+        int depth = reader.depth();
+        int kind = reader.nodeType();
+        string key = string(depth);
+        if (kind == XML_NODE_TYPE_END_ELEMENT) {
+            *hash<XsdIdentityGrammarFrame> frame = remove frames{key};
+            if (frame && !frame.ignored) {
+                finish(frame);
+            }
+            return;
+        }
+        *hash<XsdIdentityGrammarFrame> parent = frames{string(depth - 1)};
+        if (kind != XML_NODE_TYPE_ELEMENT) {
+            if (parent && !parent.ignored && (identity(parent.name)
+                    || parent.name == "selector" || parent.name == "field")
+                    && (kind == XML_NODE_TYPE_TEXT || kind == XML_NODE_TYPE_CDATA
+                        || kind == XML_NODE_TYPE_SIGNIFICANT_WHITESPACE)
+                    && XsdSimpleType::normalizeWhiteSpace(reader.value() ?? "", "collapse")) {
+                throw WSDL_ERROR, "identity declarations cannot contain character data";
+            }
+            return;
+        }
+        bool xsd = reader.namespaceUri() == XSD_NS;
+        string local = reader.localName();
+        hash<XsdIdentityGrammarFrame> current = <XsdIdentityGrammarFrame>{
+            "name": xsd ? local : "", "ignored": parent.ignored ?? False};
+        if (!current.ignored) {
+            if (parent && identity(parent.name)) {
+                if (xsd && local == "annotation" && !parent.selector && !parent.fields) {
+                    # Annotation cardinality and its own attributes are checked by the annotation helper.
+                } else if (xsd && local == "selector" && !parent.selector && !parent.fields) {
+                    parent.selector = True;
+                } else if (xsd && local == "field" && parent.selector) {
+                    ++parent.fields;
+                } else {
+                    throw WSDL_ERROR, "identity content requires an optional annotation, one selector, then fields";
+                }
+                frames{string(depth - 1)} = parent;
+            } else if (parent && (parent.name == "selector" || parent.name == "field")) {
+                if (!xsd || local != "annotation") {
+                    throw WSDL_ERROR, "a selector or field permits only an optional annotation";
+                }
+            } else if (xsd && (local == "selector" || local == "field")) {
+                throw WSDL_ERROR, "a selector or field must be a direct identity-constraint child";
+            }
+            if (xsd && identity(local)) {
+                if (!parent || parent.name != "element") {
+                    throw WSDL_ERROR, "an identity constraint must be a direct element-declaration child";
+                }
+                parent.constraint = True;
+                frames{string(depth - 1)} = parent;
+            } else if (parent && parent.name == "element" && parent.constraint) {
+                throw WSDL_ERROR, "identity constraints must follow the element's type declaration";
+            }
+            if (xsd && (identity(local) || local == "selector" || local == "field")) {
+                attributes(reader, local);
+            }
+            if (xsd && local == "annotation") {
+                current.ignored = True;
+            }
+        }
+        if (reader.isEmptyElement()) {
+            if (!current.ignored) {
+                finish(current);
+            }
+        } else {
+            frames{key} = current;
+        }
+    }
+
+    private static attributes(XmlReader reader, string element) {
+        hash<string, string> values();
+        if (reader.moveToFirstAttribute()) {
+            on_exit reader.moveToElement();
+            do {
+                string uri = reader.namespaceUri() ?? "";
+                string local = reader.localName();
+                if (uri && uri != XSD_NS) {
+                    continue;
+                }
+                if (uri || (local != "id" && !(identity(element) && local == "name")
+                        && !(element == "keyref" && local == "refer")
+                        && !((element == "selector" || element == "field") && local == "xpath"))) {
+                    throw WSDL_ERROR, sprintf("unexpected attribute {%s}%s on identity declaration %s",
+                        uri, local, element);
+                }
+                values{local} = reader.value() ?? "";
+            } while (reader.moveToNextAttribute());
+        }
+        if (identity(element)) {
+            string name = XsdNameLexicalHelper::lexical("NCName", values.name, WSDL_ERROR);
+            if (element == "keyref") {
+                string refer = XsdNameLexicalHelper::lexical("QName", values.refer, WSDL_ERROR);
+                list<string> parts = refer.split(":");
+                if (parts.size() == 2 && !reader.lookupNamespace(parts[0])) {
+                    throw WSDL_ERROR, sprintf("unbound keyref prefix %Y", parts[0]);
+                }
+            }
+        } else {
+            if (!values.hasKey("xpath")) {
+                throw WSDL_ERROR, sprintf("identity %s requires xpath", element);
+            }
+            xpath(values.xpath, element == "field", reader);
+        }
+    }
+
+    private static xpath(string text, bool field, XmlReader reader) {
+        text = XsdSimpleType::normalizeWhiteSpace(text, "collapse");
+        # split() omits the final empty item; reject missing final arms explicitly.
+        if (!text || text.endsWith("|")) {
+            throw WSDL_ERROR, "an identity XPath requires a nonempty path in every union arm";
+        }
+        foreach string path in (text.split("|")) {
+            path = XsdSimpleType::normalizeWhiteSpace(path, "collapse");
+            # Whitespace can separate '.' and the single longest '//' token.
+            path =~ s/\A\. *\/\/ *//;
+            if (!path || path.endsWith("/")) {
+                throw WSDL_ERROR, "an identity XPath requires a nonempty path in every union arm";
+            }
+            list<string> steps = path.split("/");
+            foreach string step in (steps) {
+                step = XsdSimpleType::normalizeWhiteSpace(step, "collapse");
+                if (step == ".") {
+                    continue;
+                }
+                bool attribute = step.startsWith("@");
+                if (attribute) {
+                    step = XsdSimpleType::normalizeWhiteSpace(step.substr(1), "collapse");
+                } else if (step =~ /\Aattribute *::/) {
+                    attribute = True;
+                    step =~ s/\Aattribute *:: *//;
+                } else {
+                    step =~ s/\Achild *:: *//;
+                }
+                if (attribute && (!field || $# != steps.size() - 1)) {
+                    throw WSDL_ERROR, "only an identity field's final step can select an attribute";
+                }
+                if (step == "*") {
+                    continue;
+                }
+                list<string> names = step.split(":");
+                if (names.size() == 2 && names[1] == "*") {
+                    string prefix = XsdNameLexicalHelper::lexical("NCName", names[0], WSDL_ERROR);
+                    if (prefix != names[0]) {
+                        throw WSDL_ERROR, "whitespace cannot split an identity XPath name test";
+                    }
+                } else {
+                    string name = XsdNameLexicalHelper::lexical("QName", step, WSDL_ERROR);
+                    if (name != step) {
+                        throw WSDL_ERROR, "whitespace cannot split an identity XPath name test";
+                    }
+                }
+                if (names.size() == 2 && !reader.lookupNamespace(names[0])) {
+                    throw WSDL_ERROR, sprintf("unbound identity XPath prefix %Y", names[0]);
+                }
+            }
+        }
+    }
+}
+
 #! Check the ordered XML representation before parseTypes merges namespace-qualified child names.
 class XsdFacetGrammarHelper {
     private {
@@ -31609,6 +31795,7 @@ public class XsdSchema inherits WSDL::XsdBase {
         XmlReader reader(xml);
         XsdFacetGrammarHelper facet_grammar();
         XsdAnnotationGrammarHelper annotations();
+        XsdIdentityGrammarHelper identities();
         int schema_depth = -1;
         int notation_depth = -1;
         bool notation_annotation = False;
@@ -31624,6 +31811,7 @@ public class XsdSchema inherits WSDL::XsdBase {
             if (schema_depth >= 0) {
                 facet_grammar.consume(reader);
                 annotations.consume(reader);
+                identities.consume(reader);
             }
             if (kind == XML_NODE_TYPE_END_ELEMENT) {
                 if (depth == notation_depth) {
@@ -31650,6 +31838,7 @@ public class XsdSchema inherits WSDL::XsdBase {
             }
             if (uri == XSD_NS && local == "schema" && (depth == 0 || (depth == 2 && types))) {
                 annotations.consume(reader);
+                identities.consume(reader);
                 schema_depth = reader.isEmptyElement() ? -1 : depth;
                 declared = False;
             } else if (schema_depth >= 0 && depth == schema_depth + 1) {

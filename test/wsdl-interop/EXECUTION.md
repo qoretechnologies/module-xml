@@ -8160,3 +8160,33 @@ Next: WSDL key/unique/keyref representation, namespace-bound paths, retained
 component metadata and instance tuple semantics, then P5 typed accounting and
 P6–P9. No question is pending. Artifacts: `/tmp/wsdl-p5-20-identities/final/`;
 provider artifacts: `/tmp/qore-xml-libxml2-test-mesac8m1/`.
+
+## P5-20b — Identity representation and component QNames (2026-09-14)
+
+P5-20a committed as `14cf23f`. WSDL now validates identity declaration structure
+and namespace-bound XPath grammar before child grouping. Native component QName
+references collapse surrounding XML whitespace before lookup; dictionary and
+implicit `xml` namespace allocation failures preserve the original error kind.
+The separate allocation writeup is
+`/tmp/wsdl-p5-20-identities/COMPONENT-QNAME-ALLOCATION.md`; this module-xml dependency
+issue is fixed here and does not require separate Qore work.
+
+The WSDL suite covers 140 schemas, four cases/1,568 assertions, saved graphs,
+both bindings/modes, rollback and cancellation. Native component validation
+covers 91 schemas/313 assertions; both new matrices agree with pinned Xerces.
+The real HTTP NOTATION suite with a unique declaration retains 440 assertions.
+Final acceptance: 178 broad Qore suites, 70 provider tests and 10 supplements pass;
+native/WSDL docs and metadata are clean. Both Valgrind runs report zero errors
+and lost bytes; the direct allocation harness frees all 30,648 allocations.
+All four corpus reports differ only in the WSDL hash; the separate NOTATION
+report retains 24 failed rows and 48 classified oracle differences.
+
+Full audit: 18 Pass, 44 N/A, zero Fail. See
+[evidence](identity-grammar-evidence.md), [inventory](P5-20b-validation.json),
+[design](../../design/wsdl-identity-grammar.md) and
+[audit](audits/P5-20b-identity-grammar.md). Main Qore remains read-only, with no
+installation or push. Unrelated `test/cmake/__pycache__/` is excluded.
+Next: retained constraint components/compiled paths, full schema name uniqueness,
+keyref component/category/field-count resolution, scoped instance tuples and P5
+typed accounting. P6–P9 remain required; no question is pending. Artifacts:
+`/tmp/wsdl-p5-20b-identity-grammar/final/`.

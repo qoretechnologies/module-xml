@@ -1,0 +1,131 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires ../qlib/WSDL.qm
+%requires xml
+%try-module json
+%define NoJson
+%endtry
+%ifdef NoJson
+throw "MISSING-MODULE", "Identity grammar tests require json";
+%else
+%exec-class WsdlIdentityGrammarTest
+
+class WsdlIdentityGrammarTest inherits QUnit::Test {
+    constructor() : Test("WSDL identity declaration grammar", "1.0") {
+        addTestCase("Schema and saved providers reject invalid declarations and preserve empty documents", \matrix());
+        addTestCase("Both WSDL bindings check identity declarations before grouping", \services());
+        addTestCase("Failed additions restore existing declarations and allow corrected retry", \rollback());
+        addTestCase("Interrupted grammar validation can be retried", \cancellation());
+        set_return_value(main());
+    }
+    private static list<hash<auto>> models() {
+        list<hash<auto>> result();
+        foreach string name in ("identity-paths", "identity-grammar") {
+            result += parse_json(ReadOnlyFile::readTextFile(get_script_dir() + "/wsdl-interop/fixtures/" + name + ".json"));
+        }
+        return result;
+    }
+    private static XsdSchema parse(string source) {
+        return new XsdSchema(source, {"async_only": True});
+    }
+    private matrix() {
+        list<hash<auto>> inputs = models();
+        assertEq(140, inputs.size());
+        foreach hash<auto> model in (inputs) {
+            if (!model.schema_valid) {
+                assertThrows("WSDL-ERROR", \parse(), (model.schema,));
+                assertThrows("XSD-SYNTAX-ERROR", \parse_xml_with_schema(), ("<value/>", model.schema));
+                continue;
+            }
+            XsdSchema original = parse(model.schema);
+            foreach XsdSchema current in (original, Serializable::deserialize(original.serialize())) {
+                XsdElement element = current.getElement("", "value");
+                AbstractDataProviderType provider = element.getDataProviderType();
+                foreach AbstractDataProviderType type in (provider, Serializable::deserialize(provider.serialize())) {
+                    assertEq(NOTHING, type.acceptsValue(NOTHING), model.name);
+                }
+                XsdXmlValue output = current.serializeXmlValue("", "value", {});
+                assertEq(parse_xml(output.getXml()), parse_xml_with_schema(output.getXml(), model.schema), model.name);
+                auto wire = XsdBase::expandElementNamespaces(parse_xml(output.getXml(), XPF_PRESERVE_ORDER));
+                foreach bool retain in (False, True) {
+                    assertEq(NOTHING, element.deserializeValue(current.getTypeMap(), NOTHING, wire."{}value", True, retain), model.name);
+                }
+            }
+        }
+    }
+    private static WebService service(string schema, string version) {
+        string binding = version == "1.1" ? "http://schemas.xmlsoap.org/wsdl/soap/"
+            : "http://schemas.xmlsoap.org/wsdl/soap12/";
+        return new WebService('<w:definitions xmlns:w="http://schemas.xmlsoap.org/wsdl/" xmlns:t="urn:service"'
+            + ' xmlns:s="' + binding + '" targetNamespace="urn:service"><w:types>' + schema
+            + '</w:types><w:message name="Value"><w:part name="body" element="value"/></w:message>'
+            + '<w:portType name="Port"><w:operation name="echo"><w:input message="t:Value"/>'
+            + '<w:output message="t:Value"/></w:operation></w:portType><w:binding name="Binding" type="t:Port">'
+            + '<s:binding style="document" transport="http://schemas.xmlsoap.org/soap/http"/>'
+            + '<w:operation name="echo"><s:operation soapAction="urn:echo"/><w:input><s:body use="literal"/>'
+            + '</w:input><w:output><s:body use="literal"/></w:output></w:operation></w:binding></w:definitions>',
+            {"async_only": True});
+    }
+
+    private services() {
+        foreach string version in ("1.1", "1.2") {
+            foreach hash<auto> model in (models()) {
+                if (!model.schema_valid) {
+                    assertThrows("WSDL-ERROR", \service(), (model.schema, version));
+                    continue;
+                }
+                WebService original = service(model.schema, version);
+                foreach WebService current in (original, Serializable::deserialize(original.serialize())) {
+                    assertEq("value", current.messages.Value.args.firstValue().element.name);
+                    assertEq("echo", current.listOperations()[0].operation.name);
+                }
+            }
+        }
+    }
+    private cancellation() {
+        XsdSchema original = parse('<xs:schema xmlns:xs="' + XSD_NS + '"><xs:element name="first" type="xs:string"/></xs:schema>');
+        string addition = '<xs:schema xmlns:xs="' + XSD_NS + '"><xs:element name="second">'
+            '<xs:complexType/><xs:unique name="U"><xs:selector xpath="never"/>'
+            '<xs:field xpath="@id"/></xs:unique></xs:element></xs:schema>';
+        SandboxManager manager();
+        on_exit manager.clearInterrupt();
+        Program program(PO_NEW_STYLE | PO_STRICT_ARGS | PO_REQUIRE_TYPES);
+        program.setSandboxManager(manager);
+        program.parse("%modern\n%requires ../qlib/WSDL.qm\n"
+            "sub add(XsdSchema schema, string source, SandboxManager manager, bool cancel) {\n"
+            "    if (cancel) { manager.requestInterrupt(); }\n"
+            "    schema.addSchemaString(source);\n}\n", get_script_dir() + "/identity-grammar-interrupt.qr");
+        *hash<ExceptionInfo> error;
+        try {
+            program.callFunction("add", original, addition, manager, True);
+        } catch (hash<ExceptionInfo> ex) {
+            error = ex;
+        }
+        manager.clearInterrupt();
+        assertEq("PROGRAM-INTERRUPTED", error.err);
+        assertEq("first", original.getElement("", "first").name);
+        program.callFunction("add", original, addition, manager, False);
+        assertEq("second", original.getElement("", "second").name);
+    }
+
+    private rollback() {
+        string first = '<xs:schema xmlns:xs="' + XSD_NS + '"><xs:element name="first" type="xs:string"/></xs:schema>';
+        XsdSchema original = parse(first);
+        foreach XsdSchema schema in (original, Serializable::deserialize(original.serialize())) {
+            foreach hash<auto> model in (models()) {
+                if (model.schema_valid) {
+                    continue;
+                }
+                assertThrows("WSDL-ERROR", \schema.addSchemaString(), (model.schema,));
+                assertEq("kept", schema.getElement("", "first").getDataProviderType().acceptsValue("kept"));
+            }
+            schema.addSchemaString(models()[0].schema);
+            assertEq("value", schema.getElement("", "value").name);
+            assertEq("kept", schema.getElement("", "first").getDataProviderType().acceptsValue("kept"));
+        }
+    }
+}
+%endif
