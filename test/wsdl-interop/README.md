@@ -1964,6 +1964,25 @@ See [design/example](../../design/wsdl-identity-grammar.md),
 keyref component resolution and instance tuples remain next in P5; Python CI
 wiring and full supported-environment acceptance remain P9 work.
 
+## Retained identity components (P5-20c)
+
+The authored 30-schema `fixtures/identity-components.json` is Copyright (C) 2026
+Qore Technologies, s.r.o. Run `test/wsdl-identity-components.qtest` and
+`python3 test/wsdl-interop/test_identity_components.py -v` with local modules.
+The matrix contains 14 valid and 16 invalid schemas; two explicitly recorded
+Xerces forward-keyref oracle defects remain invalid schemas. Reversed-order
+derivatives isolate that source-level defect.
+
+Element declarations now retain compiled selectors and ordered fields. The
+schema resolves expanded names, duplicate identities, keyref target categories
+and field counts before publishing additions. Saved graphs retain validated
+metadata. See [design/example](../../design/wsdl-identity-components.md),
+[evidence](identity-components-evidence.md), [inventory](P5-20c-validation.json)
+and [full audit](audits/P5-20c-identity-components.md). Scoped instance tuple
+assessment remains in P5; native key nillability and nil-as-missing are accepted
+in P5-20d/e below. Component acceptance passes with the separately fixed prebuilt
+Qore runtime; CI environment acceptance remains P9.
+
 ## P5-20d native key nillable declaration assessment
 
 Copyright (C) 2026 Qore Technologies, s.r.o. applies to the authored
@@ -1979,8 +1998,9 @@ See [evidence](native-key-nillable-evidence.md) and
 [implemented design](../../design/native-key-nillable.md).
 
 This independent native correction does not implement WSDL instance tuples or
-adopt a nil unique/keyref interpretation. The separate P5-20c component work
-remains blocked by the documented Qore serialization source-lifetime defect.
+adopt a nil unique/keyref interpretation. P5-20e below implements the approved
+interpretation. The separate Qore serialization prerequisite is verified in the
+P5-20c component evidence.
 
 ## P5-20e approved nil identity values
 
@@ -1997,6 +2017,6 @@ and `python3 test/wsdl-interop/test_nil_identities.py -v`. See
 [native evidence](native-nil-identities-evidence.md) and
 [implemented design](../../design/native-nil-identities.md).
 
-P5-20c WSDL component acceptance still requires the separate Qore serialization
-fix. Its previously reported lifetime failure is not resolved by this native
-change. Scoped WSDL tuples and complete typed accounting remain P5 work.
+The separate Qore serialization fix has now passed the P5-20c component gate
+using its prebuilt Debug runtime. Scoped WSDL tuples and complete typed
+accounting remain P5 work and use the approved nil-as-missing rule.

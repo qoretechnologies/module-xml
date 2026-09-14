@@ -8191,6 +8191,35 @@ keyref component/category/field-count resolution, scoped instance tuples and P5
 typed accounting. P6–P9 remain required; no question is pending. Artifacts:
 `/tmp/wsdl-p5-20b-identity-grammar/final/`.
 
+## P5-20c — Initial component gate and runtime blocker (2026-09-14)
+
+Historical result; superseded by the verified acceptance entry below. The nil
+question recorded here was resolved in P5-20e, including corrected W3C evidence.
+
+P5-20b committed as `0dd3110`. The uncommitted component layer retains compiled
+selector/field paths and resolves schema-wide names, target categories and field
+counts. New tests pass480 assertions; the30-schema native/Xerces matrix retains
+two root-caused forward-keyref oracle differences and reversed derivatives.
+All11 supplements pass, WSDL docs/metadata are clean, and all4 corpus reports
+differ only in the WSDL hash. The179-suite gate passed178 suites and failed
+`wsdl-particle-ambiguity` on corrupted saved registry metadata.
+
+The Qore source-identity index can reuse addresses of temporary containers
+returned by serialization hooks, causing an empty registry's metadata to point
+to an unrelated particle-flags hash. A bounded detached-particle reproduction
+fails consistently with the verified installed runtime. The separate Qore fix is
+needed now: `/tmp/wsdl-identity-serialization-lifetime/README.md`. Do not commit
+P5-20c or treat a passing rerun as resolution. The full audit retains2 Fail,
+13 Pass and47 N/A. Main Qore remains read-only; no installation or push.
+
+A separate native probe found missing enforcement of XSD1.0's ban on key fields
+assessed by nillable declarations. That unambiguous correction can proceed.
+Nil values for unique/keyref require an explicit interpretation: WG2219
+clarifies nil-as-missing for1.1, while the historical1.0 fixture expects repeated
+nil unique values to fail. An asynchronous approval question is pending; the
+concrete proposal is `/tmp/wsdl-p5-20d-identity-fields/NIL-DECISION.md`. No nil
+policy has changed. P5 scoped tuples/accounting and P6–P9 remain required.
+
 ## P5-20d — Native key nillable declaration assessment (2026-09-14)
 
 XSD 1.0 Structures 3.11.4 clause4.2.3 forbids key element fields assessed by
@@ -8236,3 +8265,36 @@ No Qore source was changed or installed. The installed runtime remains unchanged
 P5-20c is still blocked by `/tmp/wsdl-identity-serialization-lifetime/README.md`.
 This native increment is independently tested against committed WSDL sources.
 Scoped WSDL identity tuples, typed accounting and P6-P9 remain outstanding.
+
+## P5-20c — Component acceptance after the Qore serialization fix (2026-09-14)
+
+Verified the clean Qore source checkout at `e35e4d63c` and copied its existing
+Debug ELF/library into `/tmp/wsdl-p5-20c-serialization-fixed/runtime/`. The system
+installation was initially the prior runtime; the separate developer subsequently
+updated it. Its frozen Release copy also passes the reproducer, core transient
+suite and the enterprise whitespace test. The copied Debug library hash is
+`d47570eb52c4c16d0e317f73545d847f4e5aca10900cf35e4be557a5b2a90d92`;
+its embedded configure-time source hash predates the incremental build.
+The 1,000-iteration detached-graph reproducer and all five core Serializable
+suites pass. Main Qore was inspected read-only; no build, install or push.
+
+The accepted gate covers 181 Qore suites (90,936 assertions): 180 Debug
+passes and the enterprise whitespace suite passing on the verified installed
+Release runtime after a 600-second Debug timeout. This includes the formerly
+failing particle suite, all 13 supplements and clean WSDL docs/metadata.
+The component suite passes 480 assertions in each execution mode. The 30-schema
+matrix retains its two explained forward-keyref oracle defects. All four corpus
+reports differ only in runtime provenance and WSDL source hash. Existing P5
+NOTATION failures remain classified and visible.
+
+The component suite and two detached-particle cases pass Valgrind without
+memory errors or lost bytes. The additional full-particle memory attempt hit
+its 300-second deadline; the full suite passes outside Valgrind. The prebuilt
+library's DWARF inline-origin reader warning is recorded, not suppressed.
+The complete 62-check audit has 15 Pass, 47 N/A and zero Fail. See
+[component evidence](identity-components-evidence.md),
+[inventory](P5-20c-validation.json) and [audit](audits/P5-20c-identity-components.md).
+
+The serialization blocker is closed for this runtime. The approved nil-as-missing
+interpretation is settled. Next: scoped WSDL instance tuples, complete typed
+accounting, then P6-P9. Unrelated `test/cmake/__pycache__/` is preserved.

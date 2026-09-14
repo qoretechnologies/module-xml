@@ -80,6 +80,8 @@ module WSDL {
     @section wsdlrelnotes WSDL Module Release Notes
 
     @subsection wsdl_0_5_8 WSDL v0.5.8
+    - Element identity constraints retain compiled namespace-expanded paths and portable metadata; schema-wide
+      resolution checks duplicate names, keyref target categories and field counts before publishing additions
     - Identity declarations validate names, attributes, ordered selector/field content and namespace-bound
       XPath syntax before schema children are grouped; failed additions preserve existing schema state
     - anyURI and language values validate their complete XSD lexical forms in both conversion directions,
@@ -11973,6 +11975,7 @@ public class XsdElement inherits WSDL::XsdTypedData {
         *XsdElement substitution_head;
         *XsdElement declaration_ref;
         hash<string, XsdElement> substitution_members();
+        list<XsdIdentityConstraint> identity_constraints();
     }
 
     private:internal deserializeMembers(hash<auto> members) {
@@ -11980,6 +11983,7 @@ public class XsdElement inherits WSDL::XsdTypedData {
         # This hook restores only local state: referenced types may not yet have
         # their members restored. Legacy constraint identity is resolved on use.
         constraint_mutex = exists value_constraint ? new Mutex() : NOTHING;
+        identity_constraints = members.identity_constraints ?? ();
     }
 
     #! constructs an element declaration or a reference to a global element
@@ -12021,6 +12025,13 @@ public class XsdElement inherits WSDL::XsdTypedData {
             if (e.hasKey(kind) && ((exists e{kind} && e{kind}.typeCode() != NT_HASH)
                     || exists e{kind}."^attributes^".name)) {
                 throw WSDL_ERROR, sprintf("element %Y requires one anonymous %s declaration", name, kind);
+            }
+        }
+        foreach string category in ("key", "unique", "keyref") {
+            foreach hash<auto> node in (e{category}) {
+                XsdIdentityConstraint definition = XsdIdentityDeclarationHelper::parse(category, node, nsc);
+                identity_constraints += definition;
+                unresolved.addIdentityConstraint(definition);
             }
         }
         if (exists a.form) {
@@ -12146,6 +12157,15 @@ public class XsdElement inherits WSDL::XsdTypedData {
     */
     *hash<XsdElementValueConstraintInfo> getValueConstraint() {
         return declaration_ref ? declaration_ref.getValueConstraint() : value_constraint;
+    }
+
+    #! Returns identity constraints owned by this element declaration
+    /** @return immutable definitions with compiled selector and ordered field paths
+        @note Element references return the referenced declaration's constraints.
+        @since %WSDL 0.5.8
+    */
+    list<XsdIdentityConstraint> getIdentityConstraints() {
+        return declaration_ref ? declaration_ref.getIdentityConstraints() : identity_constraints;
     }
 
     private *hash<XsdUnionValueIdentity> getConstraintIdentity() {
@@ -19321,6 +19341,401 @@ class XsdAnnotationGrammarHelper {
     }
 }
 
+#! An XSD identity-constraint category
+/** @since %WSDL 0.5.8 */
+public enum XsdIdentityCategory : string {
+    #! Every selected row supplies a distinct complete key
+    Key = "key",
+    #! Complete selected rows have distinct values
+    Unique = "unique",
+    #! Complete selected rows reference a key or unique definition
+    KeyRef = "keyref",
+}
+
+#! An axis in the restricted XSD identity XPath language
+/** @since %WSDL 0.5.8 */
+public enum XsdIdentityAxis : string {
+    #! The context element itself
+    Self = "self",
+    #! Direct child elements
+    Child = "child",
+    #! Attributes of the context element
+    Attribute = "attribute",
+}
+
+#! One namespace-expanded identity XPath step
+/** @since %WSDL 0.5.8 */
+public hashdecl XsdIdentityStepInfo {
+    #! The selected axis
+    XsdIdentityAxis axis;
+    #! Namespace URI, empty for unqualified names, or NOTHING for any namespace
+    *string namespace_uri;
+    #! Local name, or NOTHING for a wildcard or self step
+    *string local_name;
+}
+
+#! One alternative of a restricted identity XPath
+/** @since %WSDL 0.5.8 */
+public hashdecl XsdIdentityPathInfo {
+    #! Whether the path begins with descendant-or-self selection
+    bool descendants = False;
+    #! Ordered steps, including explicit self steps
+    list<hash<XsdIdentityStepInfo>> steps;
+}
+
+#! Lexical identity XPath with declaration-owned prefix bindings
+/** Unqualified name tests always select no-namespace names. The XML default
+    namespace does not participate. Only referenced prefixes are retained.
+    @since %WSDL 0.5.8
+*/
+public hashdecl XsdIdentityPathSource {
+    #! Original selector or field attribute text
+    string expression;
+    #! Prefix-to-URI mappings used by qualified name tests
+    hash<string, string> namespaces;
+}
+
+#! Portable identity-constraint component metadata
+/** All fields contain values, without schema, element or registry backlinks.
+    @since %WSDL 0.5.8
+*/
+public hashdecl XsdIdentityConstraintInfo {
+    #! Schema target namespace, or an empty string
+    string namespace_uri;
+    #! Declared NCName
+    string local_name;
+    #! Key, unique, or keyref
+    XsdIdentityCategory category;
+    #! Selector expression and its own prefix context
+    hash<XsdIdentityPathSource> selector;
+    #! Ordered field expressions and their separate prefix contexts
+    list<hash<XsdIdentityPathSource>> fields;
+    #! Referenced component namespace for a keyref, including an empty no-namespace URI
+    *string refer_namespace_uri;
+    #! Referenced component local name for a keyref
+    *string refer_local_name;
+}
+
+class XsdIdentityPathHelper {
+    static list<hash<XsdIdentityPathInfo>> compile(string text, bool field,
+            code<*string(string)> lookup, reference<hash<string, string>> bindings, string error) {
+        list<hash<XsdIdentityPathInfo>> result();
+        text = XsdSimpleType::normalizeWhiteSpace(text, "collapse");
+        if (!text || text.endsWith("|")) {
+            throw error, "an identity XPath requires a nonempty path in every union arm";
+        }
+        foreach string path in (text.split("|")) {
+            path = XsdSimpleType::normalizeWhiteSpace(path, "collapse");
+            bool descendants = path =~ /\A\. *\/\//;
+            path =~ s/\A\. *\/\/ *//;
+            if (!path || path.endsWith("/")) {
+                throw error, "an identity XPath requires a nonempty path in every union arm";
+            }
+            list<hash<XsdIdentityStepInfo>> compiled();
+            list<string> steps = path.split("/");
+            foreach string step in (steps) {
+                step = XsdSimpleType::normalizeWhiteSpace(step, "collapse");
+                if (step == ".") {
+                    compiled += <XsdIdentityStepInfo>{"axis": XsdIdentityAxis::Self};
+                    continue;
+                }
+                bool attribute = step.startsWith("@");
+                if (attribute) {
+                    step = XsdSimpleType::normalizeWhiteSpace(step.substr(1), "collapse");
+                } else if (step =~ /\Aattribute *::/) {
+                    attribute = True;
+                    step =~ s/\Aattribute *:: *//;
+                } else {
+                    step =~ s/\Achild *:: *//;
+                }
+                if (attribute && (!field || $# != steps.size() - 1)) {
+                    throw error, "only an identity field's final step can select an attribute";
+                }
+                hash<XsdIdentityStepInfo> item = <XsdIdentityStepInfo>{
+                    "axis": attribute ? XsdIdentityAxis::Attribute : XsdIdentityAxis::Child};
+                if (step != "*") {
+                    list<string> names = step.split(":");
+                    if (names.size() == 2 && names[1] == "*") {
+                        string prefix = XsdNameLexicalHelper::lexical("NCName", names[0], error);
+                        if (prefix != names[0]) {
+                            throw error, "whitespace cannot split an identity XPath name test";
+                        }
+                    } else {
+                        string name = XsdNameLexicalHelper::lexical("QName", step, error);
+                        if (name != step) {
+                            throw error, "whitespace cannot split an identity XPath name test";
+                        }
+                        item.local_name = names[-1];
+                    }
+                    item.namespace_uri = "";
+                    if (names.size() == 2) {
+                        *string uri = lookup(names[0]);
+                        if (!uri) {
+                            throw error, sprintf("unbound identity XPath prefix %Y", names[0]);
+                        }
+                        bindings{names[0]} = uri;
+                        item.namespace_uri = uri;
+                    }
+                }
+                compiled += item;
+            }
+            result += <XsdIdentityPathInfo>{"descendants": descendants, "steps": compiled};
+        }
+        return result;
+    }
+
+    static hash<XsdIdentityPathSource> source(auto input, bool field,
+            reference<list<hash<XsdIdentityPathInfo>>> paths, string error) {
+        if (input.typeCode() != NT_HASH || input.size() != 2
+                || input.expression.typeCode() != NT_STRING || input.namespaces.typeCode() != NT_HASH) {
+            throw error, "an identity path requires expression text and a namespace map";
+        }
+        hash<string, string> retained();
+        code<*string(string)> lookup = *string sub (string prefix) {
+            auto uri = input.namespaces{prefix};
+            if (prefix == "xml" && !exists uri) {
+                return "http://www.w3.org/XML/1998/namespace";
+            }
+            if (exists uri && uri.typeCode() != NT_STRING) {
+                throw error, "identity XPath namespace URIs must be strings";
+            }
+            return uri;
+        };
+        paths = compile(input.expression, field, lookup, \retained, error);
+        # Validate reserved bindings and XML characters only for prefixes that are used.
+        hash<string, string> checked = XsdQNameValueHelper::bindings(retained, error);
+        return <XsdIdentityPathSource>{"expression": input.expression, "namespaces": retained};
+    }
+}
+
+#! An immutable compiled XSD identity-constraint declaration
+/** Retains declaration-owned paths and component names independently of a schema.
+    Compiles declaration metadata; this object does not assess instance values.
+    @par Example
+    Inspect a catalog element's \c productCode definition and its ordered field
+    paths before publishing an integration schema.
+    @since %WSDL 0.5.8
+*/
+public final class XsdIdentityConstraint inherits Serializable {
+    private {
+        hash<XsdIdentityConstraintInfo> info;
+        transient list<hash<XsdIdentityPathInfo>> selector_paths;
+        transient list<list<hash<XsdIdentityPathInfo>>> field_paths;
+    }
+    #! Validates and compiles portable declaration metadata
+    /** @param info expanded component names and declaration-scoped selector/fields
+        @throw XSD-IDENTITY-CONSTRAINT-ERROR invalid metadata, paths or name bindings
+    */
+    constructor(hash<XsdIdentityConstraintInfo> info) {
+        initialize(info, "XSD-IDENTITY-CONSTRAINT-ERROR");
+    }
+    private initialize(auto input, string error) {
+        if (input.typeCode() != NT_HASH || input.namespace_uri.typeCode() != NT_STRING
+                || input.local_name.typeCode() != NT_STRING || input.fields.typeCode() != NT_LIST
+                || !input.fields || (input.category != "key" && input.category != "unique" && input.category != "keyref")) {
+            throw error, "invalid identity-constraint metadata";
+        }
+        const hash<string, bool> members = {"namespace_uri": True, "local_name": True,
+            "category": True, "selector": True, "fields": True,
+            "refer_namespace_uri": True, "refer_local_name": True};
+        foreach string key in (keys input) {
+            if (!members{key}) {
+                throw error, sprintf("unexpected identity-constraint member %Y", key);
+            }
+        }
+        string name = XsdNameLexicalHelper::lexical("NCName", input.local_name, error);
+        if (name != input.local_name) {
+            throw error, "identity-constraint names must be normalized";
+        }
+        if (input.namespace_uri =~ /[^\x{9}\x{A}\x{D}\x{20}-\x{D7FF}\x{E000}-\x{FFFD}\x{10000}-\x{10FFFF}]/) {
+            throw error, "identity-constraint namespaces require XML character text";
+        }
+        bool keyref = input.category == "keyref";
+        if (keyref != exists input.refer_namespace_uri || keyref != exists input.refer_local_name) {
+            throw error, "only keyrefs require a referenced component name";
+        }
+        if (keyref) {
+            if (input.refer_namespace_uri.typeCode() != NT_STRING || input.refer_local_name.typeCode() != NT_STRING
+                    || input.refer_namespace_uri =~ /[^\x{9}\x{A}\x{D}\x{20}-\x{D7FF}\x{E000}-\x{FFFD}\x{10000}-\x{10FFFF}]/) {
+                throw error, "invalid referenced identity-constraint name";
+            }
+            string local = XsdNameLexicalHelper::lexical("NCName", input.refer_local_name, error);
+            if (local != input.refer_local_name) {
+                throw error, "referenced identity-constraint names must be normalized";
+            }
+        }
+        list<hash<XsdIdentityPathInfo>> selector();
+        hash<XsdIdentityPathSource> selector_source = XsdIdentityPathHelper::source(input.selector, False,
+            \selector, error);
+        list<hash<XsdIdentityPathSource>> fields();
+        list<list<hash<XsdIdentityPathInfo>>> compiled_fields();
+        foreach auto field in (input.fields) {
+            list<hash<XsdIdentityPathInfo>> compiled();
+            fields += XsdIdentityPathHelper::source(field, True, \compiled, error);
+            compiled_fields += (compiled,);
+        }
+        info = <XsdIdentityConstraintInfo>{"namespace_uri": input.namespace_uri, "local_name": name,
+            "category": input.category == "key" ? XsdIdentityCategory::Key
+                : input.category == "unique" ? XsdIdentityCategory::Unique : XsdIdentityCategory::KeyRef,
+            "selector": selector_source, "fields": fields,
+            "refer_namespace_uri": input.refer_namespace_uri, "refer_local_name": input.refer_local_name};
+        selector_paths = selector;
+        field_paths = compiled_fields;
+    }
+    private:internal deserializeMembers(hash<auto> members) {
+        if (members.size() != 1 || !members.hasKey("info")) {
+            throw "DESERIALIZATION-ERROR", "an identity constraint requires its portable metadata";
+        }
+        initialize(members.info, "DESERIALIZATION-ERROR");
+    }
+    #! Returns the complete portable declaration
+    /** @return value-semantic metadata without schema or registry backlinks */
+    hash<XsdIdentityConstraintInfo> getInfo() {
+        return info;
+    }
+    #! Returns the declaration's schema-wide expanded name
+    /** @return the component name in \c {namespace}local form */
+    string getExpandedName() {
+        return type_qname(info.namespace_uri, info.local_name);
+    }
+    #! Returns the declaration category
+    /** @return key, unique or keyref */
+    XsdIdentityCategory getCategory() {
+        return info.category;
+    }
+    #! Returns the referenced component name
+    /** @return an expanded name for keyref, or NOTHING for key/unique */
+    *string getReferencedName() {
+        return info.category == XsdIdentityCategory::KeyRef
+            ? type_qname(info.refer_namespace_uri, info.refer_local_name) : NOTHING;
+    }
+    #! Returns compiled selector alternatives
+    /** @return ordered, namespace-expanded paths with value semantics */
+    list<hash<XsdIdentityPathInfo>> getSelectorPaths() {
+        return selector_paths;
+    }
+    #! Returns compiled alternatives for each field
+    /** @return one ordered path list per field, in declaration order */
+    list<list<hash<XsdIdentityPathInfo>>> getFieldPaths() {
+        return field_paths;
+    }
+}
+
+#! Schema-wide identity-constraint definitions retained by detached graphs
+/** Publishes complete declaration sets before concurrent reads. Its serialized
+    representation contains flat metadata, so graph restoration does not depend
+    on the order in which referenced objects run their deserialize hooks.
+    @par Example
+    Resolve a saved order schema's line-item keyref to its declared unique key.
+    @since %WSDL 0.5.8
+*/
+public class XsdIdentityConstraintRegistry inherits Serializable {
+    private {
+        transient hash<string, XsdIdentityConstraint> definitions();
+    }
+    private:internal hash<auto> serializeMembers(*hash<auto> members) {
+        hash<string, hash<XsdIdentityConstraintInfo>> descriptions();
+        foreach string key in (keys definitions) {
+            descriptions{key} = definitions{key}.getInfo();
+        }
+        return {"definitions": descriptions};
+    }
+    private:internal deserializeMembers(hash<auto> members) {
+        if (members.size() != 1 || members.definitions.typeCode() != NT_HASH) {
+            throw "DESERIALIZATION-ERROR", "an identity registry requires its definition map";
+        }
+        hash<string, XsdIdentityConstraint> restored();
+        foreach string key in (keys members.definitions) {
+            try {
+                restored{key} = new XsdIdentityConstraint(members.definitions{key});
+            } catch (hash<ExceptionInfo> ex) {
+                if (ex.err != "XSD-IDENTITY-CONSTRAINT-ERROR" && ex.err != "RUNTIME-TYPE-ERROR"
+                        && ex.err != "RUNTIME-OVERLOAD-ERROR" && ex.err != "HASHDECL-KEY-ERROR") {
+                    rethrow;
+                }
+                throw "DESERIALIZATION-ERROR", ex.desc;
+            }
+        }
+        validate(restored, "DESERIALIZATION-ERROR");
+        definitions = restored;
+    }
+    private static validate(hash<string, XsdIdentityConstraint> candidates, string error) {
+        foreach string key in (keys candidates) {
+            XsdIdentityConstraint definition = candidates{key};
+            if (definition.getExpandedName() != key) {
+                throw error, "identity registry key does not match its component name";
+            }
+            *string ref = definition.getReferencedName();
+            if (exists ref) {
+                *XsdIdentityConstraint target = candidates{ref};
+                if (!target || target.getCategory() == XsdIdentityCategory::KeyRef) {
+                    throw error, sprintf("keyref %Y must reference a declared key or unique component %Y", key, ref);
+                }
+                if (definition.getFieldPaths().size() != target.getFieldPaths().size()) {
+                    throw error, sprintf("keyref %Y and target %Y must have the same field count", key, ref);
+                }
+            }
+        }
+    }
+    #! Validates and publishes a complete declaration map
+    /** @param candidates immutable definitions indexed by expanded name
+        @throw WSDL-ERROR inconsistent names, unresolved keyrefs or incompatible field counts
+        @note This construction operation must precede concurrent reads.
+    */
+    replace(hash<string, XsdIdentityConstraint> candidates) {
+        validate(candidates, WSDL_ERROR);
+        definitions = candidates;
+    }
+    #! Returns all resolved definitions
+    /** @return a value-semantic map of immutable declaration objects */
+    hash<string, XsdIdentityConstraint> getDefinitions() {
+        return definitions;
+    }
+    #! Looks up one definition
+    /** @param name component name in \c {namespace}local form
+        @return the definition, or NOTHING when absent
+    */
+    *XsdIdentityConstraint get(string name) {
+        return definitions{name};
+    }
+}
+
+class XsdIdentityDeclarationHelper {
+    static hash<XsdIdentityPathSource> path(hash<auto> node, Namespaces nsc) {
+        NamespacePrefixHelper scope(nsc, node."^attributes^");
+        return <XsdIdentityPathSource>{"expression": node."^attributes^".xpath,
+            "namespaces": nsc.getInputNamespaceState().input};
+    }
+    static XsdIdentityConstraint parse(string category, hash<auto> node, Namespaces nsc) {
+        XsdBase::removeNS(\node);
+        NamespacePrefixHelper scope(nsc, node."^attributes^");
+        hash<auto> attrs = node."^attributes^";
+        list<hash<XsdIdentityPathSource>> fields();
+        foreach hash<auto> field in (node.field) {
+            fields += path(field, nsc);
+        }
+        hash<XsdIdentityConstraintInfo> info = <XsdIdentityConstraintInfo>{
+            "namespace_uri": nsc.getTargetNamespaceUri() ?? "",
+            "local_name": XsdNameLexicalHelper::lexical("NCName", attrs.name, WSDL_ERROR),
+            "category": category == "key" ? XsdIdentityCategory::Key
+                : category == "unique" ? XsdIdentityCategory::Unique : XsdIdentityCategory::KeyRef,
+            "selector": path(node.selector, nsc), "fields": fields};
+        if (category == "keyref") {
+            hash<auto> ref = nsc.getTypeHash(attrs.refer);
+            info.refer_namespace_uri = ref.uri;
+            info.refer_local_name = ref.val;
+        }
+        try {
+            return new XsdIdentityConstraint(info);
+        } catch (hash<ExceptionInfo> ex) {
+            if (ex.err != "XSD-IDENTITY-CONSTRAINT-ERROR") {
+                rethrow;
+            }
+            throw WSDL_ERROR, ex.desc;
+        }
+    }
+}
+
 hashdecl XsdIdentityGrammarFrame {
     string name = "";
     bool ignored = False;
@@ -19452,57 +19867,14 @@ class XsdIdentityGrammarHelper {
     }
 
     private static xpath(string text, bool field, XmlReader reader) {
-        text = XsdSimpleType::normalizeWhiteSpace(text, "collapse");
-        # split() omits the final empty item; reject missing final arms explicitly.
-        if (!text || text.endsWith("|")) {
-            throw WSDL_ERROR, "an identity XPath requires a nonempty path in every union arm";
-        }
-        foreach string path in (text.split("|")) {
-            path = XsdSimpleType::normalizeWhiteSpace(path, "collapse");
-            # Whitespace can separate '.' and the single longest '//' token.
-            path =~ s/\A\. *\/\/ *//;
-            if (!path || path.endsWith("/")) {
-                throw WSDL_ERROR, "an identity XPath requires a nonempty path in every union arm";
-            }
-            list<string> steps = path.split("/");
-            foreach string step in (steps) {
-                step = XsdSimpleType::normalizeWhiteSpace(step, "collapse");
-                if (step == ".") {
-                    continue;
-                }
-                bool attribute = step.startsWith("@");
-                if (attribute) {
-                    step = XsdSimpleType::normalizeWhiteSpace(step.substr(1), "collapse");
-                } else if (step =~ /\Aattribute *::/) {
-                    attribute = True;
-                    step =~ s/\Aattribute *:: *//;
-                } else {
-                    step =~ s/\Achild *:: *//;
-                }
-                if (attribute && (!field || $# != steps.size() - 1)) {
-                    throw WSDL_ERROR, "only an identity field's final step can select an attribute";
-                }
-                if (step == "*") {
-                    continue;
-                }
-                list<string> names = step.split(":");
-                if (names.size() == 2 && names[1] == "*") {
-                    string prefix = XsdNameLexicalHelper::lexical("NCName", names[0], WSDL_ERROR);
-                    if (prefix != names[0]) {
-                        throw WSDL_ERROR, "whitespace cannot split an identity XPath name test";
-                    }
-                } else {
-                    string name = XsdNameLexicalHelper::lexical("QName", step, WSDL_ERROR);
-                    if (name != step) {
-                        throw WSDL_ERROR, "whitespace cannot split an identity XPath name test";
-                    }
-                }
-                if (names.size() == 2 && !reader.lookupNamespace(names[0])) {
-                    throw WSDL_ERROR, sprintf("unbound identity XPath prefix %Y", names[0]);
-                }
-            }
-        }
+        hash<string, string> bindings();
+        code<*string(string)> lookup = *string sub (string prefix) {
+            return reader.lookupNamespace(prefix);
+        };
+        list<hash<XsdIdentityPathInfo>> paths = XsdIdentityPathHelper::compile(text, field, lookup,
+            \bindings, WSDL_ERROR);
     }
+
 }
 
 #! Check the ordered XML representation before parseTypes merges namespace-qualified child names.
@@ -28457,6 +28829,7 @@ class XsdLateResolverHelper {
         list<XsdElement> notationElementUses();
         list<XsdAttribute> notationAttributeUses();
         list<XsdSimpleType> notationDefinitions();
+        list<XsdIdentityConstraint> identityConstraints();
         #! Group references: maps complexType -> list of group ref info
         hash<string, list<hash<GroupRefInfo>>> groupRefs();
         #! Attribute group references: maps complexType -> list of attribute group ref names
@@ -28472,6 +28845,22 @@ class XsdLateResolverHelper {
 
     list<auto> getList() {
         return l;
+    }
+
+    addIdentityConstraint(XsdIdentityConstraint definition) {
+        identityConstraints += definition;
+    }
+
+    publishIdentityConstraints(Namespaces nsc) {
+        hash<string, XsdIdentityConstraint> completed = nsc.getIdentityConstraintRegistry().getDefinitions();
+        foreach XsdIdentityConstraint definition in (identityConstraints) {
+            string name = definition.getExpandedName();
+            if (completed.hasKey(name)) {
+                throw WSDL_ERROR, sprintf("identity constraint %Y is declared more than once", name);
+            }
+            completed{name} = definition;
+        }
+        nsc.getIdentityConstraintRegistry().replace(completed);
     }
 
     addNotationUse(XsdElement element) {
@@ -30387,6 +30776,7 @@ public class Namespaces inherits Serializable {
         XsdGlobalAttributeRegistry global_attributes();
         XsdGlobalElementRegistry global_elements();
         XsdNotationRegistry notations();
+        XsdIdentityConstraintRegistry identity_constraints();
 
         #! maps output namespace prefixes to namespace URIs
         hash<string, string> ns = {
@@ -30461,6 +30851,7 @@ public class Namespaces inherits Serializable {
             global_attributes = nsc.global_attributes;
             global_elements = nsc.global_elements;
             notations = nsc.notations;
+            identity_constraints = nsc.identity_constraints;
         }
         if (!nsh.targetNamespace && targetNamespace) {
             chameleon_ns = targetNamespace;
@@ -30551,6 +30942,15 @@ public class Namespaces inherits Serializable {
     */
     XsdNotationRegistry getNotationRegistry() {
         return notations;
+    }
+
+    #! Returns the schema-wide identity-constraint registry
+    /** @return resolved definitions shared by declaration namespace contexts
+        @note Mutation must finish before concurrent reads.
+        @since %WSDL 0.5.8
+    */
+    XsdIdentityConstraintRegistry getIdentityConstraintRegistry() {
+        return identity_constraints;
     }
 
     #! Resolves a schema notation independently of prefix spelling
@@ -31517,6 +31917,7 @@ public class XsdSchema inherits WSDL::XsdBase {
         hash<string, XsdAttributeGroup> old_attribute_groups = attrGroupMap;
         hash<string, XsdAttribute> old_attributes = attributeMap;
         hash<string, hash<XsdNotationInfo>> old_notations = notationMap;
+        hash<string, XsdIdentityConstraint> old_identities = nsc.getIdentityConstraintRegistry().getDefinitions();
         hash<string, bool> old_imports = import_map;
         hash<string, string> old_dependencies = schema_dependencies;
         list<hash<XsdSourceInfo>> old_sources = schema_sources;
@@ -31533,6 +31934,7 @@ public class XsdSchema inherits WSDL::XsdBase {
             attributeMap = old_attributes;
             notationMap = old_notations;
             nsc.setNotations(old_notations);
+            nsc.getIdentityConstraintRegistry().replace(old_identities);
             nsc.setGlobalAttributes(old_attributes);
             nsc.setGlobalElements(old_elements, old_types);
             import_map = old_imports;
@@ -32508,6 +32910,7 @@ public class XsdSchema inherits WSDL::XsdBase {
         resolveElementSubstitutionGroups(global_declarations);
         # Membership can change existing content models during an incremental addition.
         validateSubstitutionParticles(global_declarations);
+        unresolved.publishIdentityConstraints(nsc);
         nsc.setGlobalAttributes(attributeMap);
         nsc.setGlobalElements(emap, tmap);
     }
