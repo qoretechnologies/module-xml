@@ -1981,3 +1981,22 @@ See [evidence](native-key-nillable-evidence.md) and
 This independent native correction does not implement WSDL instance tuples or
 adopt a nil unique/keyref interpretation. The separate P5-20c component work
 remains blocked by the documented Qore serialization source-lifetime defect.
+
+## P5-20e approved nil identity values
+
+The user approved nil-as-missing for unique/keyref on2026-09-14. That question
+is resolved. The native implementation retains selected-node cardinality,
+admissible field types, empty-string values and the key nillable restriction.
+The148-case matrix includes96 valid and52 invalid instances, with29 explicitly
+classified Xerces differences. Authored JSON fixture content is copyright2026
+Qore Technologies, s.r.o.; embedded W3C originals retain their provenance.
+
+Run `test/xml-nil-identities.qtest` with local Debug XML and `--enable-debug`,
+and `python3 test/wsdl-interop/test_nil_identities.py -v`. See
+[interpretation and corrected historical evidence](nil-identity-interpretation.md),
+[native evidence](native-nil-identities-evidence.md) and
+[implemented design](../../design/native-nil-identities.md).
+
+P5-20c WSDL component acceptance still requires the separate Qore serialization
+fix. Its previously reported lifetime failure is not resolved by this native
+change. Scoped WSDL tuples and complete typed accounting remain P5 work.

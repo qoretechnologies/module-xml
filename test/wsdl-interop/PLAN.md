@@ -441,3 +441,12 @@ Attribute fields on nillable owners remain valid. See
 [native key evidence](native-key-nillable-evidence.md). This independent native
 fix does not close the pending P5-20c Qore serialization prerequisite, the
 nil unique/keyref interpretation, WSDL scoped tuples or typed accounting.
+
+P5-20e implements the explicitly approved nil-as-missing identity value
+interpretation in native validation, retaining node cardinality, admissible
+field types and key declaration restrictions. The interpretation question is
+resolved; see [decision](nil-identity-interpretation.md) and
+[native evidence](native-nil-identities-evidence.md). WSDL instance tuples must
+use the same approved rule after the separately blocked P5-20c component
+acceptance. The original historical W3C fixture remains invalid because of
+its anyType field; its separately identified typed derivative is valid.

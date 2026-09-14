@@ -30,6 +30,7 @@
 #include "libxml2-identity-path-probe.h"
 #include "libxml2-component-qname-probe.h"
 #include "libxml2-key-nillable-probe.h"
+#include "libxml2-nil-identity-probe.h"
 
 static int check_namespace(const char* source, const char* expected) {
     xmlTextReaderPtr reader = xmlReaderForMemory(source, (int)strlen(source), NULL, "UTF-8", 0);
@@ -151,6 +152,11 @@ int main(void) {
         int key_nillable = check_key_nillable();
         result |= key_nillable;
         printf("key_nillable=%s\n", key_nillable ? "FAIL" : "PASS");
+    }
+    {
+        int nil_identities = check_nil_identities();
+        result |= nil_identities;
+        printf("nil_identities=%s\n", nil_identities ? "FAIL" : "PASS");
     }
     xmlCleanupParser();
     return result;

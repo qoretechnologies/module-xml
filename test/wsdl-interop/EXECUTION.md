@@ -8211,3 +8211,28 @@ changes. The source-lifetime prerequisite remains in
 `/tmp/wsdl-identity-serialization-lifetime/README.md`; installed libqore is
 unchanged. The nil unique/keyref interpretation remains pending and no nil
 policy was changed. P5 scoped instance validation and typed accounting remain.
+
+## P5-20e — Approved nil-as-missing identity values (2026-09-14)
+
+The user approved the recommendation and explicitly said “count it as missing”.
+The interpretation question is resolved. Native unique/keyref tuples now
+exclude nil values; selected nil nodes still enforce field cardinality.
+The existing simple-content requirement, empty-string value identity and
+key nillable-declaration restriction remain intact. Field capture allocation
+errors now use the actual validation context, preserving memory-error identity.
+
+The148-case matrix, independent validator classifications, all74 provider
+tests, affected committed-source suites and all four corpus modes are recorded
+in [evidence](native-nil-identities-evidence.md),
+[validation inventory](P5-20e-validation.json) and
+[full audit](audits/P5-20e-native-nil-identities.md). Both Valgrinds are clean;
+all four field allocation positions pass one-shot/persistent failure and recovery.
+The preliminary historical claim is corrected in the
+[interpretation record](nil-identity-interpretation.md): the original idF018
+fixture independently violates field typing; its explicit simple-type derivative
+is valid. Pinned Xerces differs on27 nil keyrefs and2 duplicate union branches.
+
+No Qore source was changed or installed. The installed runtime remains unchanged;
+P5-20c is still blocked by `/tmp/wsdl-identity-serialization-lifetime/README.md`.
+This native increment is independently tested against committed WSDL sources.
+Scoped WSDL identity tuples, typed accounting and P6-P9 remain outstanding.

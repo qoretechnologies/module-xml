@@ -23,7 +23,8 @@ A required product key should instead use a non-nillable declaration:
 An attribute key such as `@productCode` on a nillable product element remains
 valid. Likewise, a nillable declaration outside the selector's target nodes does
 not invalidate the key. Unique and keyref fields with non-nil values remain
-valid; their nil tuple qualification is a separate interpretation decision.
+valid; nil tuple qualification follows the approved
+[nil-as-missing interpretation](../test/wsdl-interop/nil-identity-interpretation.md).
 
 ## Assessment and ownership
 
