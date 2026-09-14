@@ -2020,3 +2020,12 @@ and `python3 test/wsdl-interop/test_nil_identities.py -v`. See
 The separate Qore serialization fix has now passed the P5-20c component gate
 using its prebuilt Debug runtime. Scoped WSDL tuples and complete typed
 accounting remain P5 work and use the approved nil-as-missing rule.
+
+Native identity-table inheritance uses `test/xml-identity-tables.qtest` and
+`test_identity_tables.py`. The 54 authored documents cover sibling conflicts,
+order changes, recursive local precedence, overlapping selectors and composite
+keys; their fixture JSON is Copyright (C) 2026 Qore Technologies, s.r.o.
+See [implemented behavior](../../design/native-identity-tables.md) and
+[validation evidence](native-identity-tables-evidence.md). WSDL instance tuple
+validation remains in the ongoing P5-20f increment. The
+[skipped-subtree interpretation](skipped-subtree-interpretation.md) is approved.

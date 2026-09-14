@@ -8298,3 +8298,46 @@ The complete 62-check audit has 15 Pass, 47 N/A and zero Fail. See
 The serialization blocker is closed for this runtime. The approved nil-as-missing
 interpretation is settled. Next: scoped WSDL instance tuples, complete typed
 accounting, then P6-P9. Unrelated `test/cmake/__pycache__/` is preserved.
+
+## P5-20f — Scoped tuple prototype and prerequisites (2026-09-14, ongoing)
+
+P5-20c is committed as `637b1e0`. The scoped tuple implementation remains under
+`/tmp/wsdl-p5-20f-identity-tuples/`; repository WSDL.qm has no tuple implementation
+yet. The user approved the [skipped-subtree interpretation](skipped-subtree-interpretation.md).
+No question is pending. Forty-two focused skip/control cases pass 618 assertions,
+including saved schemas/providers and both preservation modes. The broader
+165-case diagnostic run before the native table correction had 159 successes
+and six errors; those results are not P5 acceptance.
+
+The separate optional-softlist core finding in `/tmp/wsdl-softlist-optionality/`
+is fixed in the independently prebuilt Release runtime: all three standalone
+cases pass 28 assertions. This task froze that runtime, reflection and core qlib
+with exact hashes rather than modifying or rebuilding the concurrent Qore tree.
+The installed runtime still failed those optionality cases when checked; no
+installation or committed-core status is inferred from the prebuilt result.
+The earlier serialization prerequisite remains closed.
+
+The prototype now also fixes optional-provider metadata/missing-input validation
+and QName scalar inference; three focused provider tests pass 168 assertions.
+Unfinished work includes ordinary recursive provider construction, complete
+actual-type/xsi field capture, explicit legacy projection accounting, consumer
+integration, cancellation/concurrency and final P5 acceptance. Raw XML and
+inferred native scalar serialization have separate typed semantics, which must
+be tested explicitly rather than sharing a blanket validity expectation.
+
+## P5-20g — Native identity table inheritance (2026-09-14)
+
+The native prerequisite fixes loss of distinct keys after sibling conflicts,
+local-entry precedence and propagation of rejected child conflicts. All 54
+normative DOM/streaming cases pass; public XML tests pass 179 assertions.
+Fourteen allocation scenarios cover 14 single/persistent failure positions,
+cleanup/recovery and linear comparison bounds at 128/1,024 entries. Native and
+Qore Valgrind checks have zero errors or lost bytes. The 56-suite affected gate
+passes 24,871 assertions. Four corpus reports change only in runtime metadata;
+existing diagnostic failures remain visible. Provider, source-guard, survey and
+native documentation checks pass. See [evidence](native-identity-tables-evidence.md),
+[inventory](P5-20g-validation.json) and [audit](audits/P5-20g-native-identity-tables.md).
+
+Next: resume the P5-20f prototype with the corrected native dependency. P5 remains
+open, followed by P6-P9. No push, Qore build or installation was performed.
+Unrelated `test/cmake/__pycache__/` remains untouched.

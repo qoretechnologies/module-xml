@@ -450,3 +450,9 @@ resolved; see [decision](nil-identity-interpretation.md) and
 [native evidence](native-nil-identities-evidence.md). WSDL instance tuples must
 use the same approved rule after the accepted P5-20c component layer. The original historical W3C fixture remains invalid because of
 its anyType field; its separately identified typed derivative is valid.
+
+P5-20g repairs native identity-table inheritance and local precedence, with
+configure-time detection, allocation recovery and comparison-bound tests. See
+[native table evidence](native-identity-tables-evidence.md). P5-20f WSDL scoped
+tuples remain in progress; the [skipped-subtree rule](skipped-subtree-interpretation.md)
+is now explicitly approved.
