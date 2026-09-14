@@ -29,6 +29,7 @@
 #include "libxml2-annotation-probe.h"
 #include "libxml2-identity-path-probe.h"
 #include "libxml2-component-qname-probe.h"
+#include "libxml2-key-nillable-probe.h"
 
 static int check_namespace(const char* source, const char* expected) {
     xmlTextReaderPtr reader = xmlReaderForMemory(source, (int)strlen(source), NULL, "UTF-8", 0);
@@ -145,6 +146,11 @@ int main(void) {
         int notations = check_notations();
         result |= notations;
         printf("notations=%s\n", notations ? "FAIL" : "PASS");
+    }
+    {
+        int key_nillable = check_key_nillable();
+        result |= key_nillable;
+        printf("key_nillable=%s\n", key_nillable ? "FAIL" : "PASS");
     }
     xmlCleanupParser();
     return result;

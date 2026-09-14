@@ -99,12 +99,14 @@ if(TARGET LibXml2)
     target_compile_definitions(ieee-values PRIVATE QORE_XML_TYPES_SOURCE="${{types_source}}")
     target_include_directories(ieee-values PRIVATE ${{native_includes}})
     target_link_libraries(ieee-values PRIVATE ${{QORE_XML_LIBXML2_TARGET}})
-    foreach(part attribution-schema-allocation counter-schema-allocation counter-execution edc-schema-allocation wildcard-id-allocation wildcard-type-allocation character-content value-allocation id-binding-allocation numeric-defaults-allocation element-defaults-allocation notation-allocation component-qname-allocation)
+    foreach(part attribution-schema-allocation counter-schema-allocation counter-execution edc-schema-allocation wildcard-id-allocation wildcard-type-allocation character-content value-allocation id-binding-allocation numeric-defaults-allocation element-defaults-allocation notation-allocation component-qname-allocation key-nillable-allocation)
         string(REPLACE "-" "_" suffix "${{part}}")
         if(part STREQUAL "wildcard-id-allocation")
             add_executable(${{part}} "{REPO}/test/cmake/libxml2_wildcard_id_allocation.c")
         elseif(part STREQUAL "wildcard-type-allocation")
             add_executable(${{part}} "{REPO}/test/cmake/libxml2_wildcard_type_allocation.c")
+        elseif(part STREQUAL "key-nillable-allocation")
+            add_executable(${{part}} "{REPO}/test/cmake/libxml2_key_nillable_allocation.c")
         elseif(part STREQUAL "component-qname-allocation")
             add_executable(${{part}} "{REPO}/test/cmake/libxml2_component_qname_allocation.c")
         elseif(part STREQUAL "notation-allocation")
@@ -204,6 +206,8 @@ include("{REPO}/cmake/QoreXmlLibXml2IdentityPathFix.cmake")
 qore_xml_fix_libxml2_identity_paths("{cls.source}" "${{CMAKE_CURRENT_BINARY_DIR}}/libxml")
 include("{REPO}/cmake/QoreXmlLibXml2ComponentQNameFix.cmake")
 qore_xml_fix_libxml2_component_qnames("{cls.source}" "${{CMAKE_CURRENT_BINARY_DIR}}/libxml")
+include("{REPO}/cmake/QoreXmlLibXml2KeyNillableFix.cmake")
+qore_xml_fix_libxml2_key_nillable("{cls.source}" "${{CMAKE_CURRENT_BINARY_DIR}}/libxml")
 ''')
         cls.fixed = cls.root / "fixed/build-debug"
         cls.run_command(["cmake", "-S", fixed_project, "-B", cls.fixed, "-DCMAKE_BUILD_TYPE=Debug",
@@ -232,6 +236,7 @@ qore_xml_fix_libxml2_component_qnames("{cls.source}" "${{CMAKE_CURRENT_BINARY_DI
         self.assertIn("namespace_identity=PASS", output)
         self.assertIn("runtime=21504", output)
         self.assertIn("qname_unions=PASS", output)
+        self.assertIn("key_nillable=PASS", output)
         self.assertIn("uri_identity=PASS", output)
         self.assertIn("entity_values=PASS", output)
         self.assertIn("occurs_values=PASS", output)
@@ -821,6 +826,35 @@ set_property(TARGET LibXml2 PROPERTY SOURCES "${native_sources}")
         self.assertIn("allocation failures propagated with intact ownership and successful recovery",
                       self.run_command([self.root / "bundled/calendar-allocation"]))
 
+    def test_key_nillable_detection_and_idempotence(self):
+        project = self.root / "key-nillable-broken/source"
+        project.mkdir(parents=True)
+        (project / "CMakeLists.txt").write_text(self.previous_key_nillable_fixture())
+        build = self.root / "key-nillable-broken/build-debug"
+        self.run_command(["cmake", "-S", project, "-B", build, "-DCMAKE_BUILD_TYPE=Debug",
+                          "-DBUILD_SHARED_LIBS=ON", "-DLIBXML2_WITH_PROGRAMS=OFF",
+                          "-DLIBXML2_WITH_TESTS=OFF", "-DLIBXML2_WITH_PYTHON=OFF"])
+        self.run_command(["cmake", "--build", build, "--target", "LibXml2", "-j4"])
+        libraries = list((build / "libxml").glob("libxml2.so")) + list((build / "libxml").glob("libxml2.dylib"))
+        self.assertEqual(1, len(libraries))
+        options = [f"-DLIBXML2_INCLUDE_DIR={self.fixed_include}", f"-DLIBXML2_LIBRARY={libraries[0]}",
+                   f"-DFETCHCONTENT_SOURCE_DIR_QORE_XML_LIBXML2={self.source}"]
+        output = self.configure("key-nillable-broken-auto", "-DQORE_XML_LIBXML2_PROVIDER=AUTO", *options)
+        self.assertIn("using private static libxml2 2.15.4", output)
+        probe = (self.root / "key-nillable-broken-auto/system-libxml2/namespace-probe.log").read_text()
+        self.assertIn("component_qnames=PASS", probe)
+        self.assertIn("notations=PASS", probe)
+        self.assertIn("calendar_constraints=PASS", probe)
+        self.assertIn("qname_allocation=PASS", probe)
+        self.assertIn("key_nillable=FAIL", probe)
+        self.configure("key-nillable-broken-system", "-DQORE_XML_LIBXML2_PROVIDER=SYSTEM", *options,
+                       success=False)
+        folder = self.root / "bundled/_deps/qore_xml_libxml2-build/qore-key-nillable-fix"
+        before = {name: (folder / name).stat().st_mtime_ns for name in ("xmlschemas.c",)}
+        self.configure("bundled", "-DQORE_XML_LIBXML2_PROVIDER=BUNDLED",
+                       f"-DFETCHCONTENT_SOURCE_DIR_QORE_XML_LIBXML2={self.source}")
+        self.assertEqual(before, {name: (folder / name).stat().st_mtime_ns for name in before})
+
     def test_component_qname_detection_and_idempotence(self):
         project = self.root / "component-qname-broken/source"
         project.mkdir(parents=True)
@@ -854,9 +888,21 @@ set_property(TARGET LibXml2 PROPERTY SOURCES "${native_sources}")
         self.assertIn("Native component QName allocation: PASS",
                       self.run_command([self.root / "bundled/component-qname-allocation"]))
 
+    def test_key_nillable_allocation_cleanup(self):
+        self.run_command(["cmake", "--build", self.root / "bundled", "--target", "key-nillable-allocation", "-j4"])
+        self.assertIn("Native key nillable allocation: PASS",
+                      self.run_command([self.root / "bundled/key-nillable-allocation"]))
+
+    def previous_key_nillable_fixture(self):
+        """All prior fixes without declaration-based key field assessment."""
+        fixed = (self.root / "fixed/source/CMakeLists.txt").read_text()
+        fixed = fixed.replace(f'include("{REPO}/cmake/QoreXmlLibXml2KeyNillableFix.cmake")\n', "")
+        return fixed.replace(f'qore_xml_fix_libxml2_key_nillable("{self.source}" '
+                             '"${CMAKE_CURRENT_BINARY_DIR}/libxml")\n', "")
+
     def previous_component_qname_fixture(self):
         """All prior fixes with the original component QName resolver."""
-        fixed = (self.root / "fixed/source/CMakeLists.txt").read_text()
+        fixed = self.previous_key_nillable_fixture()
         fixed = fixed.replace(f'include("{REPO}/cmake/QoreXmlLibXml2ComponentQNameFix.cmake")\n', "")
         return fixed.replace(f'qore_xml_fix_libxml2_component_qnames("{self.source}" '
                              '"${CMAKE_CURRENT_BINARY_DIR}/libxml")\n', "")

@@ -434,3 +434,10 @@ not a claim that every listed fixture is a valid conformance test or an independ
 | P8 | `SOAPEncodedArray` |
 
 P6-P7 cover unmeasured WSDL/HTTP/SOAP requirements; P8 additionally covers attachments; P9 covers CI and completion. They have no artificial baseline counts assigned to them.
+
+P5-20d enforces native key fields against the assessed element declaration,
+including references, substitutions, wildcard assessment and dynamic types.
+Attribute fields on nillable owners remain valid. See
+[native key evidence](native-key-nillable-evidence.md). This independent native
+fix does not close the pending P5-20c Qore serialization prerequisite, the
+nil unique/keyref interpretation, WSDL scoped tuples or typed accounting.

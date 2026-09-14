@@ -1963,3 +1963,21 @@ See [design/example](../../design/wsdl-identity-grammar.md),
 [full audit](audits/P5-20b-identity-grammar.md). Retained identity components,
 keyref component resolution and instance tuples remain next in P5; Python CI
 wiring and full supported-environment acceptance remain P9 work.
+
+## P5-20d native key nillable declaration assessment
+
+Copyright (C) 2026 Qore Technologies, s.r.o. applies to the authored
+`fixtures/key-nillable.json` matrix and accompanying regression code.
+
+Native key fields reject nillable element declarations independently of the
+instance's `xsi:nil` value. The 63-case matrix covers simple/complex content,
+references, substitution members, strict wildcards, dynamic types, shared
+constraints, unselected nodes and attribute fields on nil owners.
+Run `test/xml-key-nillable.qtest` with local Debug XML and `--enable-debug`,
+and `python3 test/wsdl-interop/test_key_nillable.py -v` for pinned Xerces.
+See [evidence](native-key-nillable-evidence.md) and
+[implemented design](../../design/native-key-nillable.md).
+
+This independent native correction does not implement WSDL instance tuples or
+adopt a nil unique/keyref interpretation. The separate P5-20c component work
+remains blocked by the documented Qore serialization source-lifetime defect.

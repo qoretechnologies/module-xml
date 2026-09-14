@@ -8190,3 +8190,24 @@ Next: retained constraint components/compiled paths, full schema name uniqueness
 keyref component/category/field-count resolution, scoped instance tuples and P5
 typed accounting. P6–P9 remain required; no question is pending. Artifacts:
 `/tmp/wsdl-p5-20b-identity-grammar/final/`.
+
+## P5-20d — Native key nillable declaration assessment (2026-09-14)
+
+XSD 1.0 Structures 3.11.4 clause4.2.3 forbids key element fields assessed by
+nillable declarations, independently of instance nil state. The native field
+matcher omitted this check. A guarded build-tree correction checks the
+actual declaration, retains attribute fields and normal state cleanup, and
+adds configure-time detection with AUTO fallback and SYSTEM rejection.
+
+The authored63-schema/document matrix has33 valid and30 invalid instances.
+Pinned Xerces and all three native Qore APIs agree. Six diagnostic allocation
+positions pass one-shot/persistent failure and recovery, with clean native
+and Qore Valgrind runs. See [evidence](native-key-nillable-evidence.md),
+[validation inventory](P5-20d-validation.json) and
+[full audit](audits/P5-20d-native-key-nillable.md) for final checks.
+
+This native-only increment is independent of the uncommitted P5-20c component
+changes. The source-lifetime prerequisite remains in
+`/tmp/wsdl-identity-serialization-lifetime/README.md`; installed libqore is
+unchanged. The nil unique/keyref interpretation remains pending and no nil
+policy was changed. P5 scoped instance validation and typed accounting remain.
