@@ -8341,3 +8341,33 @@ native documentation checks pass. See [evidence](native-identity-tables-evidence
 Next: resume the P5-20f prototype with the corrected native dependency. P5 remains
 open, followed by P6-P9. No push, Qore build or installation was performed.
 Unrelated `test/cmake/__pycache__/` remains untouched.
+
+## P5-20h — Native instance attributes and selected identity varieties (2026-09-15)
+
+Builtin xsi attributes now participate in native identity assessment with their
+specified types. List/atomic union selection and empty lists retain their value
+identity; matched default attributes use declaration namespace scope. Formatting
+uses checked buffers, preserving QName/NOTATION expanded names and allocation
+errors. Invalid lexical attribute matches discard history before XPath cleanup.
+The expanded allocation and Valgrind tests found these formatter/cleanup defects;
+each was isolated and fixed in module-xml's private dependency. Their writeup is
+`/tmp/wsdl-p5-20h-xsi-identities/ALLOCATION-FORMAT.md`; no separate core fix is needed.
+
+The 121-document native matrix and 434 public API assertions pass. Pinned Xerces
+agrees on 118 documents; three multiple-attribute field differences remain
+explicitly adjudicated against the at-most-one-node requirement. Native document
+and allocation Valgrinds have zero errors and zero exit bytes. Qore Valgrind
+has zero errors/lost bytes using the frozen ELF, disabled signals and disabled
+PCRE2 JIT. The 65-suite affected gate passes 28,635 assertions, without warnings
+or errors. All four legacy/native survey/coverage reports are unchanged from
+P5-20g; later-phase failures remain visible. Exact final provider, documentation,
+survey and audit results are in [evidence](native-instance-identities-evidence.md),
+[inventory](P5-20h-validation.json) and [audit](audits/P5-20h-native-instance-identities.md).
+
+The [legacy anySimpleType projection policy](legacy-identity-projection.md) is
+approved. Its prototype explicitly tests one expected legacy rejection separately
+from lossless native/XML paths. No question is pending. Next is P5-20f WSDL tuple
+integration, provider graph/consumer/cancellation/performance coverage and complete
+typed accounting. P6–P9 remain required, including mandatory Python/reference
+coverage and supported CI environments. Main Qore remains read-only; no install,
+push or pipeline execution occurred. Artifacts: `/tmp/wsdl-p5-20h-xsi-identities/`.

@@ -32,6 +32,7 @@
 #include "libxml2-key-nillable-probe.h"
 #include "libxml2-nil-identity-probe.h"
 #include "libxml2-identity-table-probe.h"
+#include "libxml2-instance-identity-probe.h"
 
 static int check_namespace(const char* source, const char* expected) {
     xmlTextReaderPtr reader = xmlReaderForMemory(source, (int)strlen(source), NULL, "UTF-8", 0);
@@ -163,6 +164,11 @@ int main(void) {
         int identity_tables = check_identity_tables();
         result |= identity_tables;
         printf("identity_tables=%s\n", identity_tables ? "FAIL" : "PASS");
+    }
+    {
+        int instance_identities = check_instance_identities();
+        result |= instance_identities;
+        printf("instance_identities=%s\n", instance_identities ? "FAIL" : "PASS");
     }
     xmlCleanupParser();
     return result;

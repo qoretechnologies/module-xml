@@ -456,3 +456,11 @@ configure-time detection, allocation recovery and comparison-bound tests. See
 [native table evidence](native-identity-tables-evidence.md). P5-20f WSDL scoped
 tuples remain in progress; the [skipped-subtree rule](skipped-subtree-interpretation.md)
 is now explicitly approved.
+
+P5-20h implements native builtin-instance-attribute identity fields, selected
+list/atomic and empty-list values, default union variety, checked QName/NOTATION
+formatting and invalid-attribute XPath cleanup. See
+[native evidence](native-instance-identities-evidence.md). The
+[legacy anySimpleType projection policy](legacy-identity-projection.md) is
+approved; its expected rejection remains separate from lossless success.
+WSDL tuple integration and the remaining P5 acceptance criteria are still open.

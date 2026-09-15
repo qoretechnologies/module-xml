@@ -89,6 +89,8 @@ EXTRA_DIST = COPYING.LGPL COPYING.MIT AUTHORS README \
     cmake/QoreXmlLibXml2NilIdentityFix.cmake cmake/libxml2-nil-identity-probe.h \
     cmake/QoreXmlLibXml2IdentityTableFix.cmake cmake/libxml2-identity-table-probe.h \
     cmake/libxml2-identity-tables.inc \
+    cmake/QoreXmlLibXml2InstanceIdentityFix.cmake cmake/libxml2-instance-identities.inc \
+    cmake/libxml2-instance-identity-probe.h \
     cmake/QoreXmlLibXml2NotationFix.cmake cmake/libxml2-notation-parse.inc \
     cmake/libxml2-notation-use.inc cmake/libxml2-notation-probe.h \
     cmake/libxml2-calendar.inc cmake/libxml2-calendar-probe.h \

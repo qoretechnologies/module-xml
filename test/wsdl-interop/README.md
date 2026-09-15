@@ -2029,3 +2029,20 @@ See [implemented behavior](../../design/native-identity-tables.md) and
 [validation evidence](native-identity-tables-evidence.md). WSDL instance tuple
 validation remains in the ongoing P5-20f increment. The
 [skipped-subtree interpretation](skipped-subtree-interpretation.md) is approved.
+
+P5-20h adds native instance-attribute and list-variety assessment.
+`test/xml-instance-identities.qtest` exercises 121 documents across 41 schemas,
+including lexical rejection, wildcard assessment, attribute cardinality,
+empty lists, nil, union selection, defaults and keyrefs. The fixture JSON is
+Copyright (C) 2026 Qore Technologies, s.r.o. Run
+`python3 test/wsdl-interop/test_instance_identities.py -v` for the pinned Xerces
+check. Three multiple-attribute field cases retain an explicit Xerces matcher
+difference. See [design](../../design/native-instance-identities.md) and
+[evidence](native-instance-identities-evidence.md).
+
+The user approved the [legacy anySimpleType projection policy](legacy-identity-projection.md)
+on 2026-09-15. Serialization must reject a projected value if it violates identity
+constraints; native type retention and complete XML carriers remain the lossless
+paths. The prototype's expected legacy rejection is recorded separately from
+lossless success. WSDL instance tuples and the remaining P5 criteria are still
+in progress.
