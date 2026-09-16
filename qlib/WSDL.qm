@@ -80,13 +80,20 @@ module WSDL {
     @section wsdlrelnotes WSDL Module Release Notes
 
     @subsection wsdl_0_5_8 WSDL v0.5.8
+    - WSDL imports load transitive definitions and schemas with per-document namespaces and locations;
+      cycles and diamond dependencies share retrievals, and every import checks its required namespace
+    - Component references resolve across the complete import graph; qualified public lookups accept
+      \c "{namespace}local" names, while unambiguous local names remain compatible
+    - Saved services retain imported source bytes for offline reconstruction; WebService::getHash() includes
+      retained dependencies and added schemas, while getWSDLHash() remains the root-source digest
+    - SOAP RPC request and response wrapper namespaces follow each selected soap:body declaration
     - URL-backed WSDL and XSD sources retain full document URIs for query-only schema references;
       nested dependencies and saved sources retain their own bases and share fragment-free retrieval keys
     - URI resolution separates paths, queries and fragments; HTTP schema dependencies support root-relative
       and network-path references, and asynchronous WSDL retrieval retains the document's HTTP directory
     - WSDLLib::resolveDocumentLocation() resolves full-document URI references according to RFC 3986;
       HTTP document retrieval preserves queries and excludes fragments from request targets
-    - Document-local WSDL component references validate their expanded QNames and required targets before
+    - WSDL component references validate their expanded QNames and required targets before
       construction; scoped header prefixes and whitespace-normalized references survive saved services
     - WSDL documents require the WSDL 1.1 definitions root; declaration names use normalized XML NCNames,
       duplicate named components/parts/ports/faults reject before construction, and empty services/port types remain visible
@@ -23200,6 +23207,165 @@ hashdecl WsdlComponentReference {
     string origin;
 }
 
+hashdecl WsdlImportInfo {
+    string uri;
+    string location;
+}
+
+hashdecl WsdlDeclarationInfo {
+    string target_namespace;
+    hash<string, bool> components;
+    list<hash<WsdlComponentReference>> references;
+    list<hash<WsdlImportInfo>> imports;
+}
+
+hashdecl WsdlDocumentInfo {
+    string source;
+    *string resource_key;
+    *string location;
+    *string base;
+    hash<auto> data;
+    hash<WsdlDeclarationInfo> declarations;
+    bool schema;
+}
+
+# Construction-only metadata. Component objects do not retain this catalog.
+class WsdlComponentRegistry {
+    private {
+        hash<string, string> names();
+    }
+
+    constructor(list<hash<WsdlDocumentInfo>> documents) {
+        hash<string, bool> declarations();
+        hash<string, int> local_counts();
+        foreach hash<WsdlDocumentInfo> document in (documents) {
+            foreach string key in (keys document.declarations.components) {
+                if (declarations{key}) {
+                    throw WSDL_ERROR, sprintf("duplicate imported WSDL component %Y", key);
+                }
+                declarations{key} = True;
+                string kind = substr(key, 0, index(key, ":"));
+                string local = (key =~ x/}([^}]+)$/)[0];
+                ++local_counts{kind + ":" + local};
+            }
+        }
+        foreach string key in (keys declarations) {
+            int separator = index(key, ":");
+            string kind = substr(key, 0, separator);
+            string identity = substr(key, separator + 1);
+            string local = (identity =~ x/}([^}]+)$/)[0];
+            names{key} = local_counts{kind + ":" + local} == 1 ? local : identity;
+        }
+        foreach hash<WsdlDocumentInfo> document in (documents) {
+            foreach hash<WsdlComponentReference> ref in (document.declarations.references) {
+                if (!exists names{ref.kind + ":" + ref.identity}) {
+                    throw WSDL_ERROR, sprintf("%s references undefined WSDL %s %Y", ref.origin, ref.kind,
+                        ref.identity);
+                }
+            }
+        }
+    }
+
+    hash<string, string> getKeys() {
+        return names;
+    }
+
+    string key(string kind, *string uri, string local) {
+        string identity = kind + ":" + sprintf("{%s}%s", uri ?? "", local);
+        if (!exists names{identity}) {
+            throw WSDL_ERROR, sprintf("undefined WSDL component %Y", identity);
+        }
+        return names{identity};
+    }
+
+    string resolve(string kind, string value, Namespaces nsc) {
+        value = XsdNameLexicalHelper::lexical("QName", value, WSDL_ERROR);
+        list<string> parts = value.split(":");
+        *string uri = parts.size() == 2 ? nsc.getInputNamespaceUri(parts[0]) : nsc.getDefaultNs();
+        if (parts.size() == 2 && !uri) {
+            throw WSDL_ERROR, sprintf("unbound prefix in WSDL %s reference %Y", kind, value);
+        }
+        return key(kind, uri, parts[-1]);
+    }
+}
+
+class WsdlDocumentCatalog {
+    static list<hash<WsdlDocumentInfo>> load(string source, *string location, *string base,
+            code<string(string, string)> fetch) {
+        list<hash<WsdlDocumentInfo>> documents = (read(source, location, base, False),);
+        hash<string, int> known();
+        if (location) {
+            known{location} = 0;
+        }
+        int next = 0;
+        while (next < documents.size()) {
+            hash<WsdlDocumentInfo> document = documents[next++];
+            foreach hash<WsdlImportInfo> edge in (document.declarations.imports) {
+                string resolved = document.location
+                    ? WSDLLib::resolveDocumentLocation(edge.location, document.location)
+                    : WSDLLib::resolveLocation(edge.location, document.base);
+                *string child_location = WSDLLib::getUriDocumentLocation(resolved);
+                if (child_location) {
+                    resolved = child_location;
+                }
+                string identity = WSDLLib::normalizeLocation(resolved, "file", NOTHING);
+                int index;
+                if (exists known{identity}) {
+                    index = known{identity};
+                } else {
+                    string child_source = fetch(resolved, edge.location);
+                    *string child_base = WSDLLib::getLocationBase(resolved);
+                    if (!location && child_source == source
+                            && WSDLLib::resolveLocation(".", child_base ?? ".")
+                                == WSDLLib::resolveLocation(".", base ?? ".")) {
+                        index = 0;
+                    } else {
+                        hash<WsdlDocumentInfo> child = read(child_source, child_location, child_base, True, identity);
+                        index = documents.size();
+                        push documents, child;
+                    }
+                    known{identity} = index;
+                }
+                if (documents[index].declarations.target_namespace != edge.uri) {
+                    throw WSDL_ERROR, sprintf("WSDL import %Y requires namespace %Y, got %Y", resolved,
+                        edge.uri, documents[index].declarations.target_namespace);
+                }
+            }
+        }
+        return documents;
+    }
+
+    private static hash<WsdlDocumentInfo> read(string source, *string location, *string base,
+            bool allow_schema, *string resource_key) {
+        bool schema = False;
+        XmlReader reader(source);
+        while (reader.read()) {
+            if (reader.nodeType() != XML_NODE_TYPE_ELEMENT) {
+                continue;
+            }
+            schema = allow_schema && reader.localName() == "schema" && reader.namespaceUri() == XSD_NS;
+            break;
+        }
+        hash<WsdlDeclarationInfo> declarations;
+        if (schema) {
+            declarations = <WsdlDeclarationInfo>{
+                "target_namespace": XsdSimpleType::normalizeWhiteSpace(
+                    reader.getAttribute("targetNamespace") ?? "", "collapse"),
+                "components": {}, "references": (), "imports": (),
+            };
+        } else {
+            declarations = WsdlDeclarationGrammar::scan(source);
+        }
+        hash<auto> data = XsdSchemaSource::parse(source);
+        WSDL::XsdBase::removeNS(\data);
+        if (!schema) {
+            WSDL::XsdBase::removeNS(\data.definitions);
+        }
+        return <WsdlDocumentInfo>{"source": source, "resource_key": resource_key, "location": location, "base": base,
+            "data": data, "declarations": declarations, "schema": schema};
+    }
+}
+
 #! Validate document and declaration identity before namespace aliases are grouped.
 class WsdlDeclarationGrammar {
     private {
@@ -23208,10 +23374,20 @@ class WsdlDeclarationGrammar {
     }
 
     static validate(string xml) {
+        hash<WsdlDeclarationInfo> info = scan(xml);
+        foreach hash<WsdlComponentReference> ref in (info.references) {
+            if (!info.components{ref.kind + ":" + ref.identity}) {
+                throw WSDL_ERROR, sprintf("%s references undefined WSDL %s %Y", ref.origin, ref.kind, ref.identity);
+            }
+        }
+    }
+
+    static hash<WsdlDeclarationInfo> scan(string xml) {
         XmlReader reader(xml);
         hash<string, WsdlDeclarationFrame> frames();
         hash<string, bool> components();
         list<hash<WsdlComponentReference>> references();
+        list<hash<WsdlImportInfo>> imports();
         string target_namespace;
         bool root = False;
         while (reader.read()) {
@@ -23236,6 +23412,15 @@ class WsdlDeclarationGrammar {
                     "collapse");
             }
             *WsdlDeclarationFrame parent = frames{string(depth - 1)};
+            if (wsdl && parent.kind == "definitions" && local == "import") {
+                *string uri = reader.getAttribute("namespace");
+                *string location = reader.getAttribute("location");
+                if (!exists uri || !exists location) {
+                    throw WSDL_ERROR, "WSDL import requires namespace and location attributes";
+                }
+                push imports, <WsdlImportInfo>{"uri": XsdSimpleType::normalizeWhiteSpace(uri, "collapse"),
+                    "location": XsdSimpleType::normalizeWhiteSpace(location, "collapse")};
+            }
             bool named_global = parent.kind == "definitions" && Global{local};
             bool part = parent.kind == "message" && local == "part";
             bool port = parent.kind == "service" && local == "port";
@@ -23284,11 +23469,8 @@ class WsdlDeclarationGrammar {
         if (!root) {
             throw WSDL_ERROR, "missing WSDL 1.1 definitions root";
         }
-        foreach hash<WsdlComponentReference> ref in (references) {
-            if (!components{ref.kind + ":" + ref.identity}) {
-                throw WSDL_ERROR, sprintf("%s references undefined WSDL %s %Y", ref.origin, ref.kind, ref.identity);
-            }
-        }
+        return <WsdlDeclarationInfo>{"target_namespace": target_namespace, "components": components,
+            "references": references, "imports": imports};
     }
 
     private static hash<WsdlComponentReference> componentReference(XmlReader reader, string attribute,
@@ -28673,20 +28855,28 @@ public class WSOperation inherits WSDL::XsdNamedData {
     private {
         #! fault messages keyed by fault name
         hash<string, WSMessage> faults;
+
+        # Expanded binding identities map to the single public bindings entry.
+        hash<string, string> binding_keys();
     }
 
     #! creates the WSOperation object from the arguments supplied
     /** @param p the raw hash from deserialized XML data for the operation
         @param nsc the namespace container
-        @param messages a hash of messages defined in the WSDL; keys are message names; values are WSMessage objects
+        @param messages message component keys mapped to WSMessage objects
+        @param registry optional internal registry for resolving imported component identities
      */
-    constructor(hash<auto> p, Namespaces nsc, *hash<auto> messages) : XsdNamedData(\p) {
+    constructor(hash<auto> p, Namespaces nsc, *hash<auto> messages, *WsdlComponentRegistry registry)
+            : XsdNamedData(\p) {
         self.nsc = nsc;
+        NamespacePrefixHelper operation_scope(nsc, p."^attributes^");
 
         if (p.input) {
+            NamespacePrefixHelper message_scope(nsc, p.input."^attributes^");
             hash<auto> msghash = processNSValue(p.input."^attributes^");
-
-            *WSMessage msg = messages.(msghash.message.val);
+            string key = registry ? registry.resolve("message", p.input."^attributes^".message, nsc)
+                : msghash.message.val;
+            *WSMessage msg = messages{key};
             if (!msg)
                 throw WSDL_ERROR, sprintf("missing definition for input message %y required by operation %y", msghash.name.val ?? msghash.name ?? msghash.message.val, name);
             input = msg;
@@ -28697,9 +28887,11 @@ public class WSOperation inherits WSDL::XsdNamedData {
         }
 
         if (p.output) {
+            NamespacePrefixHelper message_scope(nsc, p.output."^attributes^");
             hash<auto> msghash = processNSValue(p.output."^attributes^");
-
-            *WSMessage msg = messages.(msghash.message.val);
+            string key = registry ? registry.resolve("message", p.output."^attributes^".message, nsc)
+                : msghash.message.val;
+            *WSMessage msg = messages{key};
             if (!msg)
                 throw WSDL_ERROR, sprintf("missing definition for output message %y required by operation %y", msghash.name.val ?? msghash.name ?? msghash.message.val, name);
 
@@ -28710,9 +28902,11 @@ public class WSOperation inherits WSDL::XsdNamedData {
 
         # issue #2804: process fault messages
         foreach hash<auto> fh in (p.fault) {
+            NamespacePrefixHelper fault_scope(nsc, fh."^attributes^");
             hash<auto> msghash = processNSValue(fh."^attributes^");
-
-            *WSMessage msg = messages{msghash.message.val};
+            string key = registry ? registry.resolve("message", fh."^attributes^".message, nsc)
+                : msghash.message.val;
+            *WSMessage msg = messages{key};
             if (!msg) {
                 throw WSDL_ERROR, sprintf("missing definition for fault message %y required by operation %y", msghash.name.val, name);
             }
@@ -28738,6 +28932,7 @@ public class WSOperation inherits WSDL::XsdNamedData {
         nsc = remove members.nsc;
         input = remove members.input;
         output = remove members.output;
+        binding_keys = remove members.binding_keys ?? {};
         self += members;
     }
 
@@ -28797,32 +28992,38 @@ public class WSOperation inherits WSDL::XsdNamedData {
     }
 
     #! returns a hash representing the given binding
-    /** @param bname the name of the binding, if not provided then uses the first assigned binding
+    /** @param bname a binding component key or expanded name; if omitted, uses the first assigned binding
 
-        @return a binding param hash describing the binding with the following keys:
-        - \c "httpMethod"
-        - \c "soapTransport"
+        @return the selected operational binding
 
         @throw WSDL-BINDING-ERROR unknown binding
      */
     OperationalBinding getBinding(*string bname) {
-        if (bindings && !exists bname)
+        if (bindings && !exists bname) {
             return bindings.firstValue();
-        if (!exists bindings{bname})
+        }
+        bname = binding_keys{bname} ?? bname;
+        if (!exists bindings{bname}) {
             throw "WSDL-BINDING-ERROR", sprintf("binding %y is not a known binding for operation %y; known bindings: %y", bname, name, bindings.keys());
+        }
         return bindings{bname};
     }
 
     #! adds the given binding
     /** @param b the binding to add; its name must be unique in this operation
+        @param expanded_name optional expanded binding name in \c "{namespace}local" form
 
         @throw WSDL-BINDING-ERROR when binding already registered
      */
-    addBinding(WSDL::OperationalBinding b) {
+    addBinding(WSDL::OperationalBinding b, *string expanded_name) {
         string bname = b.getName();
-        if (bindings.hasKey(bname))
+        if (bindings.hasKey(bname) || (exists expanded_name && exists binding_keys{expanded_name})) {
             throw "WSDL-BINDING-ERROR", sprintf("binding %y is already registered in operation %y", bname, name);
+        }
         bindings{bname} = b;
+        if (exists expanded_name) {
+            binding_keys{expanded_name} = bname;
+        }
     }
 
     #! serializes a fault response to an XML string or HTTP payload for the operation.
@@ -29239,7 +29440,10 @@ public class WSMessage inherits WSDL::XsdNamedData {
                 return rh;
             }
 
-            return {output_namespaces.getTargetNamespaceOutputPrefix() + ":" + n_name: rh};
+            *string wrapper_uri = msginfo.body.ns ?? output_namespaces.getTargetNamespaceUri();
+            string wrapper = wrapper_uri ? output_namespaces.getOutputNamespacePrefix(wrapper_uri) + ":" + n_name
+                : n_name;
+            return {wrapper: rh};
         }
     }
 
@@ -30467,7 +30671,8 @@ public class SoapBinding inherits WSDL::OperationalBinding {
 
         auto rv;
         if (exists body) {
-            hash<auto> msgh = docstyle ? XsdBase::expandElementNamespaces(body, envelope_namespaces) : body;
+            hash<auto> expanded_body = XsdBase::expandElementNamespaces(body, envelope_namespaces);
+            hash<auto> msgh = docstyle ? expanded_body : body;
             *hash<auto> mrh;
             # Literal parts use their concrete schema: id and href can be ordinary attributes.
             # Only an encoded body supplies a SOAP reference context to schema value conversion.
@@ -30526,6 +30731,11 @@ public class SoapBinding inherits WSDL::OperationalBinding {
                 rv = msg.deserializeDocument(mrh, msgh, bmd.getBodyPartNames(msg), False, True);
             } else {
                 string mname = (request ? op.output_name : op.input_name) ?? (op.name + (request ? "" : "Response"));
+                string wrapper_identity = type_qname(bmd.body.ns ?? op.nsc.getTargetNamespaceUri() ?? "", mname);
+                if (!exists expanded_body{wrapper_identity}) {
+                    throw SOAP_DESERIALIZATION_ERROR, sprintf("expected SOAP RPC wrapper %Y for %s operation %Y",
+                        wrapper_identity, io, op.name);
+                }
                 if (!msgh{mname})
                     throw SOAP_DESERIALIZATION_ERROR, sprintf("missing %s message name %y as top-level element; got elements: %y", io, mname, keys msgh);
                 XsdQNameNamespaceScope rpc_scope(msgh{mname}."^attributes^");
@@ -31214,7 +31424,28 @@ public class Binding inherits WSDL::XsdNamedData {
         *bool soap12_version;
     }
 
-    constructor(hash<auto> data, Namespaces nsc, reference portTypes, reference idocmap, *hash<auto> messages) : XsdNamedData(\data) {
+    private { *string component_key; }
+
+    #! returns this binding's unambiguous component selection key
+    /** @return the local name when unique, otherwise its expanded QName; old standalone bindings use their name
+        @since %WSDL 0.5.8
+    */
+    string getComponentKey() {
+        return component_key ?? name;
+    }
+
+    #! compiles a binding in its declaration's namespace context
+    /** @param data the binding XML data
+        @param nsc the containing document's namespace context
+        @param portTypes port type component keys mapped to their declarations
+        @param idocmap document body elements used for request dispatch
+        @param messages message component keys mapped to their declarations
+        @param registry optional internal registry for imported component identities
+        @throw WSDL-ERROR invalid binding declarations or unresolved references
+    */
+    constructor(hash<auto> data, Namespaces nsc, reference portTypes, reference idocmap, *hash<auto> messages,
+            *WsdlComponentRegistry registry) : XsdNamedData(\data) {
+        component_key = registry ? registry.key("binding", nsc.getTargetNamespaceUri(), name) : name;
         NamespacePrefixHelper binding_scope(nsc, data."^attributes^");
         # get binding attributes
         {
@@ -31223,7 +31454,7 @@ public class Binding inherits WSDL::XsdNamedData {
             (*string ns, *string prt) = ba.type =~ x/(?:([^:]+):)?([^:]+)/;
             if (!prt)
                 throw WSDL_ERROR, sprintf("missing port type for binding %y", name);
-            port = prt;
+            port = registry ? registry.resolve("portType", ba.type, nsc) : prt;
         }
 
         if (data.binding.typeCode() != NT_HASH) {
@@ -31410,7 +31641,8 @@ public class Binding inherits WSDL::XsdNamedData {
                             throw WSDL_ERROR, sprintf("%s binding %y for operation %y specifies a soap header element without a 'message' attribute (attr: %y)", io, name, opname, ma);
 
                         hash<auto> h = nsc.getTypeHash(ma.message);
-                        *WSMessage msg = messages.(h.val);
+                        string key = registry ? registry.resolve("message", ma.message, nsc) : h.val;
+                        *WSMessage msg = messages{key};
                         if (!msg)
                             throw WSDL_ERROR, sprintf("%s binding %y for operation %y references unknown message %y in the soap header element", io, name, opname, h.val);
 
@@ -31488,10 +31720,11 @@ public class Binding inherits WSDL::XsdNamedData {
             }
 
             OperationalBinding b = soapTransport
-                ? new SoapBinding(name, ophash.ns ?? "", b_docstyle, soapTransport, soapAction, ioh.input, ioh.output, soap12_version)
-                : new HttpBinding(name, ophash.ns ?? "", b_docstyle, httpMethod, location, soapAction, ioh.input, ioh.output);
+                ? new SoapBinding(getComponentKey(), ophash.ns ?? "", b_docstyle, soapTransport, soapAction, ioh.input, ioh.output, soap12_version)
+                : new HttpBinding(getComponentKey(), ophash.ns ?? "", b_docstyle, httpMethod, location, soapAction, ioh.input, ioh.output);
 
-            portTypes{port}.operations{opname}.addBinding(b);
+            portTypes{port}.operations{opname}.addBinding(b,
+                sprintf("{%s}%s", nsc.getTargetNamespaceUri() ?? "", name));
         }
 
         #binding = data;
@@ -34019,6 +34252,16 @@ public class XsdSchema inherits WSDL::XsdBase {
         if (resolver) {
             return;
         }
+        finalizeTypes(unresolved);
+    }
+
+    private finalizeTypes(XsdLateResolverHelper unresolved) {
+        on_exit {
+            resolving_simple = {};
+            resolved_simple = {};
+            valid_list_items = {};
+            union_definitions = {};
+        }
         # Resolve only after every document has contributed its declarations, allowing dependency cycles.
         nsc.setNotations(notationMap);
         list<XsdElement> global_declarations = resolveElementDeclarations();
@@ -34089,7 +34332,7 @@ public class WebService inherits WSDL::XsdSchema {
         */
         string name;
 
-        #! the digest of the WSDL source
+        #! cached digest of the retained WSDL and schema source graph
         /** @since %WSDL 0.5
         */
         string hash_str;
@@ -34108,6 +34351,9 @@ public class WebService inherits WSDL::XsdSchema {
     }
 
     private {
+        hash<string, string> wsdl_dependencies();
+        transient hash<string, string> component_keys();
+
         # service definitions; name -> service info hash
         hash<string, hash<WSDL::ServiceInfo>> services();
 
@@ -34122,10 +34368,12 @@ public class WebService inherits WSDL::XsdSchema {
         - \c "compat_empty_string_is_nothing": deserialize empty strings to \c NOTHING instead of an empty string
         - \c "document_location": full URI of the containing document; non-file URL loaders set this automatically
         - \c "def_path": the default path to use when retrieving referenced XSDs
-        - \c "try_import": a call reference or closure to be passed a string name for XSD imports without any scheme to retrieve the data, must take a string argument (the resource name) and return a string (the resource data)
+        - \c "try_import": a callback for WSDL and XSD references whose resolved locations have no scheme;
+          takes the original reference string from the importing document and returns its XML source
+          bytes. Saved dependencies and asynchronous cache entries take precedence over the callback
         - \c "http_client": a HTTPClient object for retrieving data from import commands
         - \c "http_headers": a hash of optional HTTP header info to use when retrieving data from import commands
-        - \c "xsd_cache": a hash mapping schema locations to cached schema data for async parsing
+        - \c "xsd_cache": resolved WSDL or schema locations mapped to cached XML source for async parsing
         - \c "async_only": if @ref True then external imports must be satisfied by \c "xsd_cache" and no blocking
           I/O is performed
 
@@ -34144,14 +34392,35 @@ public class WebService inherits WSDL::XsdSchema {
         return name;
     }
 
-    #! returns a unique hash for the WSDL that can be used to compare schemas for equality
-    /** @return a unique hash for the WSDL that can be used to compare schemas for equality
+    #! returns a fingerprint of the retained WSDL and schema sources
+    /** @return a SHA-256 fingerprint including imported source locations and bytes and added schemas
+        @note Root-only services retain their original SHA-256 source digest. This is a source fingerprint;
+        different compatibility options can interpret the same sources differently.
+        @par Example
+        @code{.py}
+        bool dependencies_changed = previous.getHash() != current.getHash();
+        @endcode
 
         @since %WSDL 0.5
     */
     synchronized string getHash() {
         if (!hash_str) {
-            hash_str = digest("sha256", wsdl).toHex();
+            string root_hash = digest("sha256", wsdl).toHex();
+            if (!wsdl_dependencies && !schema_dependencies && !schema_sources) {
+                hash_str = root_hash;
+            } else {
+                list<string> pieces = (root_hash,);
+                foreach string key in (sort(keys wsdl_dependencies)) {
+                    push pieces, sprintf("wsdl:%Y:%s", key, wsdl_dependencies{key}.toSHA512());
+                }
+                foreach string key in (sort(keys schema_dependencies)) {
+                    push pieces, sprintf("xsd:%Y:%s", key, schema_dependencies{key}.toSHA512());
+                }
+                foreach hash<XsdSourceInfo> source in (schema_sources) {
+                    push pieces, sprintf("added:%Y:%Y:%s", source.base, source.location, source.xml.toSHA512());
+                }
+                hash_str = digest("sha256", join("", pieces)).toHex();
+            }
         }
         return hash_str;
     }
@@ -34174,10 +34443,16 @@ public class WebService inherits WSDL::XsdSchema {
         return foldl $1 + $2, (map keys $1.operations, portType.iterator());
     }
 
-    #! returns the given operation for particular porttype or throws an exception if it cannot be found
+    #! returns the given operation for a particular port type
+    /** @param ptname a unique local name or expanded name in \c "{namespace}local" form
+        @param opname the operation name within the selected port type
+        @return the operation declaration
+        @throw WSDL-OPERATION-ERROR the port type or operation is unknown
+    */
     WSDL::WSOperation getPortTypeOperation(string ptname, string opname) {
         @assert(ptname, "port type name is required");
         @assert(opname, "operation name is required");
+        ptname = component_keys{"portType:" + ptname} ?? ptname;
         *WSOperation op = portType{ptname}.operations{opname};
         if (op)
             return op;
@@ -34217,14 +34492,14 @@ public class WebService inherits WSDL::XsdSchema {
     }
 
     #! return a @ref WSDL::Binding object describing the requested binding
-    /** @param name the name of the binding
+    /** @param name a unique local binding name or expanded name in \c "{namespace}local" form
 
         @return a @ref WSDL::Binding object
 
         @throw WSDL-BINDING-ERROR unknown binding
      */
     WSDL::Binding getBinding(string name) {
-        *Binding b = binding{name};
+        *Binding b = binding{component_keys{"binding:" + name} ?? name};
         if (!b)
             throw "WSDL-BINDING-ERROR", sprintf("binding %y is not a known binding; known bindings: %y", name, binding.keys());
         return b;
@@ -34243,7 +34518,7 @@ public class WebService inherits WSDL::XsdSchema {
     }
 
     #! returns a hash describing the requested service
-    /** @param name the name of the service
+    /** @param name a unique local service name or expanded name in \c "{namespace}local" form
         @return a hash describing the service with the following keys:
         - \c "name": the name of the service
         - \c "port": a hash of port information; where each hash<auto> is keyed by port name and the values have the following keys:
@@ -34253,13 +34528,32 @@ public class WebService inherits WSDL::XsdSchema {
         @throw WSDL-SERVICE-ERROR the service is not known
      */
     hash<WSDL::ServiceInfo> getService(string name) {
-        *hash<WSDL::ServiceInfo> h = services{name};
+        *hash<WSDL::ServiceInfo> h = services{component_keys{"service:" + name} ?? name};
         if (!h)
             throw "WSDL-SERVICE-ERROR", sprintf("service %y is not a known service; known services: %y", name, services.keys());
         return h;
     }
 
-    private parseMessages(*softlist<auto> message) {
+    #! returns a message by its component name
+    /** @param name a unique local name or expanded name in \c "{namespace}local" form
+        @return the corresponding message declaration
+        @throw WSDL-MESSAGE-ERROR the name is unknown or its local name is ambiguous
+        @par Example
+        @code{.py}
+        WSMessage request = service.getMessage("{urn:orders}OrderRequest");
+        @endcode
+        @since %WSDL 0.5.8
+    */
+    WSMessage getMessage(string name) {
+        *WSMessage message = messages{component_keys{"message:" + name} ?? name};
+        if (!message) {
+            throw "WSDL-MESSAGE-ERROR", sprintf("message %Y is not a known message; known messages: %Y",
+                name, keys messages);
+        }
+        return message;
+    }
+
+    private parseMessages(*softlist<auto> message, WsdlComponentRegistry registry) {
         # parse messages
         foreach hash<auto> m in (message) {
             WSMessage msg(m, emap, tmap, nsc);
@@ -34269,24 +34563,26 @@ public class WebService inherits WSDL::XsdSchema {
                 if (exists msg.args{arg}.type && !(msg.args{arg}.type instanceof XsdData))
                     msg.args{arg}.type = resolveType(msg.args{arg}.type);
             }
-            messages.(msg.name) = msg;
+            messages{registry.key("message", nsc.getTargetNamespaceUri(), msg.name)} = msg;
         }
     }
 
-    private parseService(*softlist<auto> svcs) {
+    private parseService(*softlist<auto> svcs, WsdlComponentRegistry registry) {
         foreach hash<auto> svc in (svcs) {
+            NamespacePrefixHelper service_scope(nsc, svc."^attributes^");
             WSDL::XsdBase::removeNS(\svc);
-            string svcname = svc."^attributes^".name;
+            string svcname = registry.key("service", nsc.getTargetNamespaceUri(), svc."^attributes^".name);
             # Empty services are valid named components too.
             services{svcname} = <ServiceInfo>{"name": svcname, "port": {}};
             foreach hash<auto> port in (svc.port) {
+                NamespacePrefixHelper port_scope(nsc, port."^attributes^");
                 WSDL::XsdBase::removeNS(\port);
                 hash<auto> pa = port."^attributes^";
                 string name = pa.name;
 
                 if (!pa.binding)
                     throw WSDL_ERROR, sprintf("service %y port %y has no binding", svcname, name);
-                (*string ns, *string bind) = pa.binding =~ x/(?:([^:]+):)?([^:]+)/;
+                string bind = registry.resolve("binding", pa.binding, nsc);
                 if (!bind)
                     throw WSDL_ERROR, sprintf("cannot parse service %y port %y binding: %y", svcname, name, pa.binding);
 
@@ -34302,25 +34598,26 @@ public class WebService inherits WSDL::XsdSchema {
         }
     }
 
-    private parsePortType(*softlist<auto> data) {
+    private parsePortType(*softlist<auto> data, WsdlComponentRegistry registry) {
         # setup list of services defined in this WSDL
         foreach hash<auto> port in (data) {
+            NamespacePrefixHelper port_scope(nsc, port."^attributes^");
             WSDL::XsdBase::removeNS(\port);
             #printf("DEBUG: portType: %y\n", port);
-            string name = port."^attributes^".name;
+            string name = registry.key("portType", nsc.getTargetNamespaceUri(), port."^attributes^".name);
             wsdl_services += name;
             portType{name} = <PortTypeInfo>{"operations": {}};
             foreach hash<auto> p in (port.operation) {
-                WSOperation op(p, nsc, messages);
+                WSOperation op(p, nsc, messages, registry);
                 portType{name}.operations.(op.name) = op;
             }
         }
     }
 
-    private parseBinding(*softlist<auto> bindings) {
+    private parseBinding(*softlist<auto> bindings, WsdlComponentRegistry registry) {
         foreach hash<auto> data in (bindings) {
-            WSDL::Binding b(data, nsc, \portType, \idocmap, messages);
-            binding.(b.getName()) = b;
+            WSDL::Binding b(data, nsc, \portType, \idocmap, messages, registry);
+            binding{b.getComponentKey()} = b;
         }
     }
 
@@ -34418,53 +34715,109 @@ public class WebService inherits WSDL::XsdSchema {
     #! supports the constructor and deserialization
     /** @since %WSDL 0.4
     */
+    private Namespaces documentNamespaces(hash<auto> attributes, Namespaces original) {
+        Namespaces document_nsc(attributes, original);
+        document_nsc.opt_empty_string_is_nothing = original.opt_empty_string_is_nothing;
+        document_nsc.opt_allow_any_header = original.opt_allow_any_header;
+        return document_nsc;
+    }
+
+    private string fetchWsdlDependency(string location, string reference) {
+        string key = WSDLLib::normalizeLocation(location, "file", NOTHING);
+        if (exists wsdl_dependencies{key}) {
+            return wsdl_dependencies{key};
+        }
+        string source;
+        if (opts.xsd_cache && exists opts.xsd_cache{key}) {
+            source = opts.xsd_cache{key};
+        } else if (opts.async_only) {
+            throw "WSDL-ASYNC-IMPORT", sprintf("missing async WSDL import %Y", key), key;
+        } else if (!WSDLLib::hasScheme(location) && try_import) {
+            source = call_function(try_import, reference);
+        } else {
+            source = WSDLLib::getFileFromURL(location, "file",
+                opts.http_client instanceof HTTPClient ? opts.http_client : NOTHING, opts.http_headers);
+        }
+        validateSchemaGrammar(source);
+        wsdl_dependencies{key} = source;
+        return source;
+    }
+
     private:internal doInit(string str, *hash<auto> opts) {
-        WsdlDeclarationGrammar::validate(str);
         validateSchemaGrammar(str);
-        hash<auto> h = XsdSchemaSource::parse(str);
-
-        # save WSDL text
-        wsdl = str;
-        wsdl_hash = str.toSHA512();
-
         initOptions(opts);
-
-        # remove namespace (normally "wsdl:") prefix from keys if present
-        WSDL::XsdBase::removeNS(\h);
-        WSDL::XsdBase::removeNS(\h.definitions);
-
-        # set name
-        name = h.definitions.service."^attributes^".name ?? "unnamed-soap-service";
-
-        nsc = new Namespaces(h.definitions."^attributes^");
-        if (opts.compat_empty_string_is_nothing || global_compat_empty_string_is_nothing) {
-            nsc.opt_empty_string_is_nothing = True;
+        list<hash<WsdlDocumentInfo>> documents = WsdlDocumentCatalog::load(str, document_location, def_path,
+            \fetchWsdlDependency());
+        WsdlComponentRegistry registry(documents);
+        component_keys = registry.getKeys();
+        foreach hash<WsdlDocumentInfo> document in (documents) {
+            validateSchemaGrammar(document.source);
+            if (document.schema) {
+                # WSDL and XSD imports share the same retained resource bytes.
+                @assert(document.resource_key, "an imported schema requires a resource key");
+                schema_dependencies{document.resource_key} = document.source;
+            }
         }
-        if (opts.compat_allow_any_header || global_compat_allow_any_header) {
-            nsc.opt_allow_any_header = True;
+        wsdl = str;
+        hash_str = "";
+        wsdl_hash = str.toSHA512();
+        hash<auto> root = documents[0].data.definitions;
+        name = root.service."^attributes^".name ?? "unnamed-soap-service";
+        nsc = new Namespaces(root."^attributes^");
+        nsc.opt_empty_string_is_nothing = opts.compat_empty_string_is_nothing
+            || global_compat_empty_string_is_nothing;
+        nsc.opt_allow_any_header = opts.compat_allow_any_header || global_compat_allow_any_header;
+        XsdLateResolverHelper resolver();
+        foreach hash<WsdlDocumentInfo> document in (documents) {
+            *hash<auto> types = document.schema ? document.data : document.data.definitions.types;
+            if (!exists types) {
+                continue;
+            }
+            if (document.schema) {
+                string identity = sprintf("%Y:%Y", document.resource_key, document.declarations.target_namespace);
+                if (import_map{identity}) {
+                    continue;
+                }
+                import_map{identity} = True;
+            }
+            Namespaces original = nsc;
+            if (document.schema || document.source != str) {
+                nsc = documentNamespaces(document.schema ? document.data.schema."^attributes^"
+                    : document.data.definitions."^attributes^", original);
+            }
+            *string original_base = def_path;
+            *string original_location = document_location;
+            def_path = document.base;
+            document_location = document.location;
+            on_exit {
+                nsc = original;
+                def_path = original_base;
+                document_location = original_location;
+            }
+            parseTypes(types, opts.http_client instanceof HTTPClient ? opts.http_client : NOTHING,
+                opts.http_headers, resolver);
+            if (nsc !== original) {
+                original.merge(nsc);
+            }
         }
-        #getNSPrefixes(h.definitions."^attributes^");
-        #printf("%y\n", h.definitions.types);
-
-        if (exists h.definitions.types) {
-            parseTypes(h.definitions.types, opts.http_client instanceof HTTPClient ? opts.http_client : NOTHING,
-                opts.http_headers);
-        }
-
-        if (exists h.definitions.message) {
-            parseMessages(h.definitions.message);
-        }
-
-        if (exists h.definitions.portType) {
-            parsePortType(h.definitions.portType);
-        }
-
-        if (exists h.definitions.binding) {
-            parseBinding(h.definitions.binding);
-        }
-
-        if (exists h.definitions.service) {
-            parseService(h.definitions.service);
+        finalizeTypes(resolver);
+        foreach string kind in ("message", "portType", "binding", "service") {
+            foreach hash<WsdlDocumentInfo> document in (documents) {
+                if (document.schema || !exists document.data.definitions{kind}) {
+                    continue;
+                }
+                Namespaces original = nsc;
+                if (document.source != str) {
+                    nsc = documentNamespaces(document.data.definitions."^attributes^", original);
+                }
+                on_exit nsc = original;
+                switch (kind) {
+                    case "message": parseMessages(document.data.definitions.message, registry); break;
+                    case "portType": parsePortType(document.data.definitions.portType, registry); break;
+                    case "binding": parseBinding(document.data.definitions.binding, registry); break;
+                    case "service": parseService(document.data.definitions.service, registry); break;
+                }
+            }
         }
     }
 
@@ -34477,6 +34830,7 @@ public class WebService inherits WSDL::XsdSchema {
     */
     addSchemaString(string xsd) {
         XsdSchema::addSchemaString(xsd);
+        hash_str = "";
         foreach WSMessage message in (messages.iterator()) {
             message.tmap = getTypeMap();
         }
@@ -34494,6 +34848,7 @@ public class WebService inherits WSDL::XsdSchema {
         tmap = {};
         portType = {};
 
+        wsdl_dependencies = members.wsdl_dependencies ?? {};
         # Options now belong to XsdSchema and have already been restored by its hook.
         # Accept locally stored options from older WebService serializations as well.
         doInit(members.wsdl, members.opts ?? opts);

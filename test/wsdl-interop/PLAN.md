@@ -548,3 +548,13 @@ loading, nested schemas and saved sources. Query-only references, fragment cache
 identity, cycles and restoration of active defaults are covered in
 [source-location evidence](document-locations-evidence.md). WSDL import catalog
 integration and canonical file-resource handling remain P6 work.
+
+
+P6-07 implements the transitive WSDL/XSD import catalog and expanded component
+registry, shared schema instantiation, qualified public lookups, saved dependency
+sources and selected RPC body namespaces. See [import evidence](imported-components-evidence.md).
+The 35-suite gate passes 457 cases / 7,256 reported assertions; the separate full
+enterprise fixture passes 5 cases / 85 assertions. All six corpus reports retain
+the prior results, with only version metadata changed. Canonical file URIs,
+redirect-effective bases, overloaded operation/input-output names, explicit
+operation selection and the rest of the P6 binding matrix remain required.

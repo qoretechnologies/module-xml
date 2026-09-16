@@ -2166,8 +2166,8 @@ and `python3 -B test/wsdl-interop/test_wsdl_component_references.py -v`.
 The shared matrix distinguishes schema lexical validity from correct expanded
 reference targets; saved graphs and actual SOAP 1.1/1.2 HTTP exchanges are covered.
 See [evidence](component-references-evidence.md) and
-[implemented behavior](../../design/wsdl-component-references.md). WSDL imports
-and the rest of the P6 binding matrix remain required.
+[implemented behavior](../../design/wsdl-component-references.md). The rest of the
+P6 binding matrix remains required.
 
 Resource URI resolution uses `test/wsdl-location-resolution.qtest`, including the
 RFC 3986 examples and real synchronous/asynchronous HTTP schema retrieval.
@@ -2178,3 +2178,21 @@ directory-base and full-document URI interfaces.
 `test/wsdl-document-locations.qtest` adds full containing-URI retention through all
 HTTP loaders, nested schema references, saved sources and failed additions.
 See [source-location evidence](document-locations-evidence.md).
+
+
+`test/wsdl-imported-components.qtest` checks transitive WSDL/XSD import graphs,
+namespace collisions, shared schema instantiation, scoped references, qualified
+lookups, saved dependencies and both SOAP versions over local HTTP. Independent
+component observations use:
+
+```bash
+python3 -B test/wsdl-interop/test_wsdl_imports.py -v
+```
+
+The test compiles `oracle/WsdlImportOracle.java` with a local JDK and the pinned
+WSDL4J 1.6.3 JAR. It verifies artifact hashes before use and needs no network.
+The accompanying upstream license and notice are retained unchanged; their
+checksums and provenance are in `oracle/wsdl4j-manifest.json`. WSDL4J supplies
+resolved component observations, not complete WSDL or SOAP validation. See
+[import evidence](imported-components-evidence.md) for the exact checked edges
+and remaining P6 work.

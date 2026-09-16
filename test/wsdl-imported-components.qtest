@@ -1,0 +1,445 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires ../qlib/WSDL.qm
+%requires ../qlib/SoapClient.qm
+%requires ../qlib/SoapHandler.qm
+%requires HttpServer
+%exec-class ImportedComponentsTest
+
+class ImportedComponentsTest inherits QUnit::Test {
+    constructor() : Test("Imported WSDL component identities", "1.0") {
+        addTestCase("Imported namespaces retain colliding component names and actual SOAP versions", \components());
+        addTestCase("Imported bindings exchange values on both SOAP versions after offline reconstruction", \http());
+        addTestCase("Import graphs validate every namespace edge and reject ambiguous declarations", \invalid());
+        addTestCase("Forward schema references resolve after all imported documents contribute types", \types());
+        addTestCase("Imported source changes alter graph identity while preserving root source hashes", \fingerprints());
+        addTestCase("Imported namespace contexts retain compatibility options", \options());
+        addTestCase("Cross-file references, diamond dependencies and root cycles load from files", \files());
+        addTestCase("RPC wrapper namespaces follow each selected body binding", \rpcNamespaces());
+        addTestCase("Shared independent collision fixtures retain component identities", \sharedFixtures());
+        addTestCase("HTTP query imports deduplicate fragments and root cycles through every loader", \httpImports());
+        addTestCase("WSDL 1.1 schema imports contribute typed declarations", \schemaImport());
+        addTestCase("Qualified lookup remains available for unique names and detached operations", \qualified());
+        addTestCase("Import callbacks receive original references and recover after failure", \callbacks());
+        addTestCase("Imported message providers and examples preserve each selected declaration", \providers());
+        addTestCase("WSDL and XSD imports share resource bytes and schema instantiation", \sharedSchema());
+        set_return_value(main());
+    }
+
+    private static string root(string content) {
+        return '<w:definitions xmlns:w="http://schemas.xmlsoap.org/wsdl/" targetNamespace="urn:root">'
+            + content + '</w:definitions>';
+    }
+
+    private static string imports() {
+        return root('<w:import namespace="urn:a" location="a.wsdl"/>'
+            + '<w:import namespace="urn:b" location="b.wsdl"/>');
+    }
+
+    private static string contract(string uri, bool soap12 = False, string type = "string") {
+        return '<w:definitions xmlns:w="http://schemas.xmlsoap.org/wsdl/" xmlns:t="' + uri + '"'
+            + ' xmlns:s="' + (soap12 ? SOAP_12_NS : SOAP_11_NS) + '"'
+            + ' xmlns:xs="http://www.w3.org/2001/XMLSchema" targetNamespace="' + uri + '">'
+            + '<w:message name="M"><w:part name="value" type="xs:' + type + '"/></w:message>'
+            + '<w:portType name="P"><w:operation name="send"><w:input message="t:M"/>'
+            + '<w:output message="t:M"/></w:operation></w:portType>'
+            + '<w:binding name="B" type="t:P"><s:binding style="rpc" transport="http://schemas.xmlsoap.org/soap/http"/>'
+            + '<w:operation name="send"><s:operation soapAction="send"/>'
+            + '<w:input><s:body use="literal" namespace="' + uri + '"/></w:input>'
+            + '<w:output><s:body use="literal" namespace="' + uri + '"/></w:output></w:operation></w:binding>'
+            + '<w:service name="S"><w:port name="Endpoint" binding="t:B">'
+            + '<s:address location="http://example.invalid/soap"/></w:port></w:service></w:definitions>';
+    }
+
+    private static WebService service() {
+        return new WebService(imports(), {"document_location": "https://host/root.wsdl", "async_only": True,
+            "xsd_cache": {"https://host/a.wsdl": contract("urn:a"),
+                "https://host/b.wsdl": contract("urn:b", True, "int")}});
+    }
+
+    private components() {
+        WebService ws = service();
+        assertEq(2, ws.messages.size());
+        assertEq(2, ws.portType.size());
+        assertEq(2, ws.listServices().size());
+        assertEq("M", ws.messages{"{urn:a}M"}.name);
+        assertEq("M", ws.messages{"{urn:b}M"}.name);
+        assertTrue(ws.getBindingOperation("{urn:a}B", "send").input === ws.messages{"{urn:a}M"});
+        assertTrue(ws.getBindingOperation("{urn:b}B", "send").input === ws.messages{"{urn:b}M"});
+        assertFalse(ws.getBinding("{urn:a}B").isSoap12());
+        assertTrue(ws.getBinding("{urn:b}B").isSoap12());
+        assertEq("B", ws.getBinding("{urn:a}B").name);
+        assertEq("{urn:a}B", ws.getBinding("{urn:a}B").getComponentKey());
+        assertTrue(ws.getService("{urn:a}S").port.Endpoint.binding === ws.getBinding("{urn:a}B"));
+        assertThrows("WSDL-BINDING-ERROR", \ws.getBinding(), ("B",));
+        assertThrows("WSDL-SERVICE-ERROR", \ws.getService(), ("S",));
+        ws.opts.xsd_cache = {};
+        WebService restored = Serializable::deserialize(ws.serialize());
+        assertEq(imports(), restored.getWSDL());
+        assertTrue(restored.getBindingOperation("{urn:b}B", "send").input === restored.messages{"{urn:b}M"});
+    }
+
+    private http() {
+        WebService ws = Serializable::deserialize(service().serialize());
+        foreach bool soap12 in (False, True) {
+            string uri = soap12 ? "urn:b" : "urn:a";
+            string binding = "{" + uri + "}B";
+            string service = "{" + uri + "}S";
+            HttpServer server();
+            on_exit server.stop();
+            SoapHandler handler(new PermissiveAuthenticator());
+            server.setDefaultHandler("soap", handler);
+            Queue observed();
+            code<auto(hash<auto>, auto)> callback = auto sub(hash<auto> cx, auto value) {
+                observed.push(cx.http_header."content-type");
+                return {"value": value};
+            };
+            handler.addMethod(ws, ws.getBindingOperation(binding, "send"), callback, NOTHING, NOTHING, NOTHING,
+                service, NOTHING, NOTHING, binding);
+            server.addListener(0);
+            SoapClient client({"wsdl": ws, "service": service, "port": "Endpoint",
+                "url": sprintf("http://127.0.0.1:%d/test", server.getListenerInfo(0).port),
+                "timeout": 30000, "connect_timeout": 30000});
+            auto value = soap12 ? 42 : "order-42";
+            hash<auto> info;
+            assertEq(value, client.callOperation("send", {"value": value}, NOTHING, \info));
+            string content_type = observed.get(30000);
+            assertTrue(content_type.startsWith(soap12 ? "application/soap+xml" : "text/xml"));
+            assertTrue(index(info."request-body", uri) >= 0);
+            assertTrue(index(info."response-body", uri) >= 0);
+        }
+    }
+
+    private static WebService parse(string source, hash<string, string> cache) {
+        return new WebService(source, {"document_location": "https://host/root.wsdl", "async_only": True,
+            "xsd_cache": cache});
+    }
+
+    private invalid() {
+        foreach string content in ('<w:import location="a.wsdl"/>', '<w:import namespace="urn:a"/>') {
+            assertThrows("WSDL-ERROR", \parse(), (root(content), {}));
+        }
+        assertThrows("WSDL-ASYNC-IMPORT", \parse(), (imports(), {}));
+        assertThrows("WSDL-ERROR", \parse(), (imports(), {"https://host/a.wsdl": contract("urn:wrong")}));
+        assertThrows("WSDL-ERROR", \parse(), (imports(), {"https://host/a.wsdl": '<bad/>'}));
+        string duplicate = root('<w:import namespace="urn:a" location="a.wsdl"/>'
+            + '<w:import namespace="urn:a" location="duplicate.wsdl"/>');
+        assertThrows("WSDL-ERROR", \parse(), (duplicate, {"https://host/a.wsdl": contract("urn:a"),
+            "https://host/duplicate.wsdl": contract("urn:a")}));
+        string conflicting = root('<w:import namespace="urn:a" location="a.wsdl#first"/>'
+            + '<w:import namespace="urn:b" location="a.wsdl#second"/>');
+        assertThrows("WSDL-ERROR", \parse(), (conflicting, {"https://host/a.wsdl": contract("urn:a")}));
+        assertEq(2, service().listServices().size());
+    }
+
+    private sharedFixtures() {
+        WebService ws = WSDLLib::getWebServiceFromUrl(get_script_dir()
+            + "/wsdl-interop/regressions/wsdl-imports/collisions/root.wsdl");
+        assertEq(("{urn:a}M", "{urn:b}M"), sort(keys ws.messages));
+        assertEq(("{urn:a}P", "{urn:b}P"), sort(keys ws.portType));
+        assertFalse(ws.getBinding("{urn:a}B").isSoap12());
+        assertTrue(ws.getBinding("{urn:b}B").isSoap12());
+        assertTrue(ws.getBindingOperation("{urn:a}B", "send").input === ws.messages{"{urn:a}M"});
+        assertTrue(ws.getBindingOperation("{urn:b}B", "send").input === ws.messages{"{urn:b}M"});
+    }
+
+    private static WebService poll(string url) {
+        WsdlPollOperation operation(url, {"timeout": 30000, "connect_timeout": 30000});
+        on_error operation.abort();
+        date deadline = now_us() + 30s;
+        while (!operation.goalReached()) {
+            *hash<SocketPollInfo> info = operation.continuePoll();
+            if (info) {
+                int remaining = (deadline - now_us()).durationMilliseconds();
+                if (remaining <= 0) {
+                    throw "TEST-ERROR", "asynchronous WSDL import deadline exceeded";
+                }
+                Socket::poll((info,), remaining);
+            }
+        }
+        return operation.getOutput();
+    }
+
+    private httpImports() {
+        string source = root('<w:import namespace="urn:a" location="?part=api#first"/>'
+            + '<w:import namespace="urn:a" location="?part=api#second"/>');
+        string api = replace(contract("urn:a"), '<w:message name="M">',
+            '<w:import namespace="urn:root" location="?part=root#root"/><w:message name="M">');
+        foreach string mode in ("sync", "async", "client") {
+            HttpServer server();
+            on_exit server.stop();
+            Queue observed();
+            server.setDefaultHandler("documents", new ImportedDocumentPeer(source, api, observed));
+            server.addListener(0);
+            string url = sprintf("http://127.0.0.1:%d/catalog?part=root", server.getListenerInfo(0).port);
+            WebService ws;
+            if (mode == "async") {
+                ws = poll(url);
+            } else if (mode == "client") {
+                SoapClient client({"wsdl": url, "url": url, "timeout": 30000, "connect_timeout": 30000});
+                ws = client.getWebService();
+            } else {
+                ws = WSDLLib::getWebServiceFromUrl(url, new HTTPClient({"timeout": 30000, "connect_timeout": 30000}));
+            }
+            assertEq("/catalog?part=root", observed.get(30000));
+            assertEq("/catalog?part=api", observed.get(30000));
+            assertEq(0, observed.size());
+            assertEq("urn:a", ws.getOperation("send").nsc.getTargetNamespaceUri());
+            assertEq(source, ws.getWSDL());
+            ws.opts.xsd_cache = {};
+            auto saved = ws.serialize();
+            server.stop();
+            WebService restored = Serializable::deserialize(saved);
+            assertTrue(restored.getOperation("send").input === restored.messages.M);
+            assertEq(ws.getHash(), restored.getHash());
+        }
+    }
+
+    private schemaImport() {
+        string source = '<w:definitions xmlns:w="http://schemas.xmlsoap.org/wsdl/" xmlns:t="urn:types">'
+            + '<w:import namespace="urn:types" location="types.xsd"/>'
+            + '<w:message name="M"><w:part name="value" type="t:Small"/></w:message></w:definitions>';
+        string schema = '<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" targetNamespace="urn:types">'
+            + '<xs:simpleType name="Small"><xs:restriction base="xs:int"><xs:maxInclusive value="20"/>'
+            + '</xs:restriction></xs:simpleType></xs:schema>';
+        WebService ws = parse(source, {"https://host/types.xsd": schema});
+        XsdAbstractType type = ws.findType("{urn:types}Small");
+        assertEq(15, type.deserializeValue("value", ws.getTypeMap(), NOTHING, "15"));
+        assertThrows("SOAP-DESERIALIZATION-ERROR", \type.deserializeValue(),
+            ("value", ws.getTypeMap(), NOTHING, "21"));
+        ws.opts.xsd_cache = {};
+        WebService restored = Serializable::deserialize(ws.serialize());
+        assertEq(15, restored.findType("{urn:types}Small").deserializeValue("value", restored.getTypeMap(), NOTHING, "15"));
+    }
+
+    private rpcNamespaces() {
+        foreach bool soap12 in (False, True) {
+            string xml = contract("urn:declaration", soap12);
+            xml = replace(xml, '<w:input><s:body use="literal" namespace="urn:declaration"',
+                '<w:input><s:body use="literal" namespace="urn:request"');
+            xml = replace(xml, '<w:output><s:body use="literal" namespace="urn:declaration"',
+                '<w:output><s:body use="literal" namespace="urn:response"');
+            WebService ws(xml);
+            WSOperation op = ws.getOperation("send");
+            hash<auto> request = op.serializeRequest({"value": "order"});
+            hash<auto> response = op.serializeResponse({"value": "confirmed"});
+            assertTrue(index(request.body, '"urn:request"') >= 0);
+            assertTrue(index(response.body, '"urn:response"') >= 0);
+            string envelope = soap12 ? SOAP_12_ENV : SOAP_11_ENV;
+            string input = '<s:Envelope xmlns:s="' + envelope + '"><s:Body>'
+                + '<q:send xmlns:q="urn:request"><value>order</value></q:send></s:Body></s:Envelope>';
+            string output = '<s:Envelope xmlns:s="' + envelope + '"><s:Body>'
+                + '<q:sendResponse xmlns:q="urn:response"><value>confirmed</value></q:sendResponse>'
+                + '</s:Body></s:Envelope>';
+            assertEq("order", op.deserializeRequest(parse_xml(input)));
+            assertEq("confirmed", op.deserializeResponse(parse_xml(output)));
+            assertThrows("SOAP-DESERIALIZATION-ERROR", \op.deserializeRequest(),
+                (parse_xml(replace(input, "urn:request", "urn:wrong")),));
+            assertThrows("SOAP-DESERIALIZATION-ERROR", \op.deserializeResponse(),
+                (parse_xml(replace(output, "urn:response", "urn:wrong")),));
+        }
+    }
+
+    private files() {
+        string file = get_script_dir() + "/wsdl-interop/regressions/wsdl-imports/root.wsdl";
+        foreach string location in (file, "file://" + file) {
+            WebService ws = WSDLLib::getWebServiceFromUrl(location);
+            assertEq(("send",), ws.getOperationNames());
+            assertEq("urn:ports", ws.getOperation("send").nsc.getTargetNamespaceUri());
+            assertTrue(ws.getOperation("send").input === ws.messages.M);
+            assertTrue(ws.getOperation("send").getFaultMessages().Failure === ws.messages.M);
+            assertTrue(ws.getService("S").port.Endpoint.binding === ws.getBinding("B"));
+            WebService restored = Serializable::deserialize(ws.serialize());
+            assertTrue(restored.getOperation("send").input === restored.messages.M);
+            hash<auto> request = restored.getOperation("send").serializeRequest({"value": "order-123"},
+                {"token": "partner-token"}, NOTHING, NOTHING, NOTHING, NOTHING, "B");
+            assertTrue(index(request.body, "partner-token") >= 0);
+            assertTrue(index(request.body, "urn:wire") >= 0);
+        }
+    }
+
+    private sharedSchema() {
+        string xsd = '<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" targetNamespace="urn:types">'
+            + '<xs:include schemaLocation="types.xsd"/><xs:simpleType name="Value">'
+            + '<xs:restriction base="xs:int"><xs:maxInclusive value="20"/></xs:restriction>'
+            + '</xs:simpleType></xs:schema>';
+        foreach bool inline_first in (False, True) {
+            string source = root('<w:import namespace="urn:types" location="types.xsd"/>'
+                + (inline_first ? '<w:types><xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"'
+                    + ' targetNamespace="urn:root"><xs:import namespace="urn:types" schemaLocation="types.xsd"/>'
+                    + '</xs:schema></w:types>' : ''));
+            WebService ws = parse(source, {"https://host/types.xsd": xsd});
+            ws.opts.xsd_cache = {};
+            foreach WebService candidate in (ws, Serializable::deserialize(ws.serialize())) {
+                XsdAbstractType type = candidate.findType("{urn:types}Value");
+                assertEq(15, type.deserializeValue("value", candidate.getTypeMap(), NOTHING, "15"));
+                assertThrows("SOAP-DESERIALIZATION-ERROR", \type.deserializeValue(),
+                    ("value", candidate.getTypeMap(), NOTHING, "21"));
+            }
+        }
+        Queue observed();
+        string source = root('<w:import namespace="urn:types" location="types.xsd"/>'
+            + '<w:types><xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" targetNamespace="urn:root">'
+            + '<xs:import namespace="urn:types" schemaLocation="types.xsd"/></xs:schema></w:types>');
+        code<string(string)> callback = string sub(string reference) {
+            observed.push(reference);
+            return xsd;
+        };
+        WebService ws(source, {"def_path": "/virtual/shared", "try_import": callback});
+        assertEq("types.xsd", observed.get(30000));
+        assertEq(0, observed.size());
+        assertTrue(exists ws.findType("{urn:types}Value"));
+    }
+
+    private qualified() {
+        WebService original(contract("urn:a"));
+        foreach WebService ws in (original, Serializable::deserialize(original.serialize())) {
+            assertTrue(ws.getBinding("B") === ws.getBinding("{urn:a}B"));
+            assertTrue(ws.getMessage("M") === ws.getMessage("{urn:a}M"));
+            assertEq(ws.getService("S"), ws.getService("{urn:a}S"));
+            assertTrue(ws.getPortTypeOperation("P", "send") === ws.getPortTypeOperation("{urn:a}P", "send"));
+            WSOperation op = ws.getBindingOperation("{urn:a}B", "send");
+            assertTrue(op.getBinding("B") === op.getBinding("{urn:a}B"));
+            assertEq(1, op.bindings.size());
+            assertThrows("WSDL-BINDING-ERROR", \ws.getBinding(), ("{urn:wrong}B",));
+            assertThrows("WSDL-MESSAGE-ERROR", \ws.getMessage(), ("{urn:wrong}M",));
+            assertThrows("WSDL-SERVICE-ERROR", \ws.getService(), ("{urn:wrong}S",));
+            assertThrows("WSDL-OPERATION-ERROR", \ws.getPortTypeOperation(), ("{urn:wrong}P", "send"));
+            WSOperation detached = Serializable::deserialize(op.serialize());
+            assertTrue(detached.getBinding("B") === detached.getBinding("{urn:a}B"));
+            hash<auto> wire = detached.serializeRequest({"value": "invoice"}, NOTHING, NOTHING, NOTHING,
+                NOTHING, NOTHING, "{urn:a}B");
+            assertTrue(index(wire.body, "invoice") >= 0);
+        }
+        WebService ambiguous = service();
+        assertThrows("WSDL-MESSAGE-ERROR", \ambiguous.getMessage(), ("M",));
+        assertThrows("WSDL-OPERATION-ERROR", \ambiguous.getPortTypeOperation(), ("P", "send"));
+        assertTrue(ambiguous.getMessage("{urn:a}M") === ambiguous.messages{"{urn:a}M"});
+    }
+
+    private callbacks() {
+        Queue observed();
+        string source = root('<w:import namespace="urn:a" location="sub/a.wsdl"/>'
+            + '<w:import namespace="urn:a" location="sub/a.wsdl"/>');
+        code<string(string)> callback = string sub(string reference) {
+            observed.push(reference);
+            return contract("urn:a");
+        };
+        WebService ws(source, {"def_path": "/virtual/contracts", "try_import": callback});
+        assertEq("sub/a.wsdl", observed.get(30000));
+        assertEq(1, ws.messages.size());
+        assertEq(0, observed.size());
+        WebService restored = Serializable::deserialize(ws.serialize());
+        assertEq("M", restored.getMessage("{urn:a}M").name);
+        assertEq(0, observed.size());
+        code<string(string)> failure = string sub(string reference) {
+            throw "TEST-IMPORT-ERROR", "callback interrupted: " + reference;
+        };
+        assertThrows("TEST-IMPORT-ERROR", sub() {
+            WebService rejected(source, {"def_path": "/virtual/contracts", "try_import": failure});
+        });
+        WebService retry(source, {"def_path": "/virtual/contracts", "try_import": callback});
+        assertEq("sub/a.wsdl", observed.get(30000));
+        assertEq("M", retry.getMessage("{urn:a}M").name);
+    }
+
+    private providers() {
+        WebService ws = Serializable::deserialize(service().serialize());
+        WSMessageHelper examples(ws);
+        foreach string uri in ("urn:a", "urn:b") {
+            WSMessage message = ws.getMessage("{" + uri + "}M");
+            HashDataType original = cast<HashDataType>(message.getDataProviderType());
+            foreach HashDataType type in (original, Serializable::deserialize(original.serialize())) {
+                auto value = uri == "urn:a" ? "invoice" : 42;
+                assertEq(value, type.acceptsValue({"value": value}).value);
+                auto sample = examples.getMessage(message);
+                assertTrue(exists type.acceptsValue({"value": sample}).value);
+                if (uri == "urn:b") {
+                    assertThrows("RUNTIME-TYPE-ERROR", \type.acceptsValue(), ({"value": "not-an-integer"},));
+                }
+            }
+        }
+    }
+
+    private fingerprints() {
+        WebService first = service();
+        WebService second = parse(imports(), {"https://host/a.wsdl": contract("urn:a", False, "int"),
+            "https://host/b.wsdl": contract("urn:b", True, "int")});
+        assertEq(first.getWSDLHash(), second.getWSDLHash());
+        assertTrue(first.getHash() != second.getHash());
+        assertEq(first.getHash(), Serializable::deserialize(first.serialize()).getHash());
+        string old = first.getHash();
+        first.addSchemaString('<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" targetNamespace="urn:extra">'
+            + '<xs:element name="Extra" type="xs:string"/></xs:schema>');
+        assertTrue(old != first.getHash());
+        assertEq(first.getHash(), Serializable::deserialize(first.serialize()).getHash());
+        WebService empty(root(""));
+        assertEq(digest("sha256", root("")).toHex(), empty.getHash());
+    }
+
+    private options() {
+        WebService ws(imports(), {"document_location": "https://host/root.wsdl", "async_only": True,
+            "compat_empty_string_is_nothing": True, "compat_allow_any_header": True,
+            "xsd_cache": {"https://host/a.wsdl": contract("urn:a"),
+                "https://host/b.wsdl": contract("urn:b", True, "int")}});
+        foreach string binding in ("{urn:a}B", "{urn:b}B") {
+            WSOperation op = ws.getBindingOperation(binding, "send");
+            assertTrue(op.nsc.opt_empty_string_is_nothing);
+            assertTrue(op.nsc.opt_allow_any_header);
+            assertTrue(op.input.nsc.opt_empty_string_is_nothing);
+            assertTrue(op.input.nsc.opt_allow_any_header);
+        }
+    }
+
+    private types() {
+        string source = '<w:definitions xmlns:w="http://schemas.xmlsoap.org/wsdl/" xmlns:a="urn:a">'
+            + '<w:import namespace="urn:a" location="a.wsdl"/><w:import namespace="urn:b" location="b.wsdl"/>'
+            + '<w:message name="M"><w:part name="value" type="a:Alias"/></w:message></w:definitions>';
+        string a = '<w:definitions xmlns:w="http://schemas.xmlsoap.org/wsdl/" targetNamespace="urn:a">'
+            + '<w:types><xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:b="urn:b" targetNamespace="urn:a">'
+            + '<xs:import namespace="urn:b"/><xs:simpleType name="Alias"><xs:restriction base="b:Small"/>'
+            + '</xs:simpleType></xs:schema></w:types></w:definitions>';
+        string b = '<w:definitions xmlns:w="http://schemas.xmlsoap.org/wsdl/" targetNamespace="urn:b">'
+            + '<w:types><xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" targetNamespace="urn:b">'
+            + '<xs:simpleType name="Small"><xs:restriction base="xs:int"><xs:minInclusive value="10"/>'
+            + '<xs:maxInclusive value="20"/></xs:restriction></xs:simpleType></xs:schema></w:types></w:definitions>';
+        WebService ws = parse(source, {"https://host/a.wsdl": a, "https://host/b.wsdl": b});
+        assertTrue(exists ws.findType("{urn:a}Alias"));
+        assertTrue(exists ws.findType("{urn:b}Small"));
+        assertEq("M", ws.messages.M.name);
+        ws.opts.xsd_cache = {};
+        WebService restored = Serializable::deserialize(ws.serialize());
+        assertTrue(exists restored.findType("{urn:a}Alias"));
+        XsdAbstractType type = restored.findType("{urn:a}Alias");
+        assertEq(15, type.deserializeValue("value", restored.getTypeMap(), NOTHING, "15"));
+        assertThrows("SOAP-DESERIALIZATION-ERROR", \type.deserializeValue(),
+            ("value", restored.getTypeMap(), NOTHING, "21"));
+    }
+}
+
+# Immutable document bytes; observations use a synchronized Queue.
+class ImportedDocumentPeer inherits AbstractHttpRequestHandler {
+    private {
+        string root_source;
+        string api_source;
+        Queue observed;
+    }
+    constructor(string root_source, string api_source, Queue observed) {
+        self.root_source = root_source;
+        self.api_source = api_source;
+        self.observed = observed;
+    }
+    hash<HttpResponseInfo> handleRequest(hash<auto> cx, hash<auto> hdr, *data body) {
+        observed.push(cx.raw_path);
+        if (cx.raw_path == "/catalog?part=root") {
+            return makeResponse({"Content-Type": "text/xml"}, 200, root_source);
+        }
+        if (cx.raw_path == "/catalog?part=api") {
+            return makeResponse({"Content-Type": "text/xml"}, 200, api_source);
+        }
+        return makeResponse({}, 404, "unknown import");
+    }
+}

@@ -8754,3 +8754,44 @@ No push, Qore change or image pipeline. WSDL import catalog/component integratio
 and canonical file-resource handling remain in P6. Construction-only registry
 classes and integration notes are drafted under
 `/tmp/wsdl-p6-05-import-catalog/`; they are not production import support.
+
+
+## P6-07 transitive imported components
+
+P6-06 is committed locally as `1bfc6b9`. This increment collects imported WSDL
+and XSD documents before compilation, validates expanded references across the
+graph, preserves per-document namespace/location state and exposes unambiguous
+component keys plus explicit qualified lookups. Saved services retain imported
+bytes; detached operations retain qualified binding aliases. SOAP RPC wrappers
+use the selected input/output body namespace, and service source fingerprints
+include retained dependencies and added schemas.
+
+An audit reproducer found duplicate schema instantiation when both WSDL and XSD
+imports reach one resource. The fix shares retained bytes and the existing
+resource/namespace instantiation registry. A pre-correction enterprise run was
+terminated; it is retained separately and is not passing evidence.
+
+Final verification: 35 affected suites / 457 cases / 7,256 reported assertions
+(the existing seven intentionally caught comparator assertions remain separate).
+The full enterprise/partner suite passes 5 cases / 85 assertions in 644.710 s.
+Five pinned WSDL4J tests, the 25-case declaration and 21-case reference matrices,
+seven contract tests and 33 coverage/survey tests pass. All six corpus reports
+differ from P6-06 only in version metadata: 2,096 native valid directions remain
+successful; legacy mode retains 2,084 successes and 12 explicit projection losses;
+176 invalid-source directions remain rejected. Both documentation targets build
+without warnings/errors. The full audit records 18 Pass / 44 N/A / zero Fail.
+See [evidence](imported-components-evidence.md), [validation](P6-07-validation.json)
+and [audit](audits/P6-07-imported-components.md).
+
+The next canonical-file-URI finding and isolated prototype are in
+`/tmp/wsdl-p6-08-file-uris/`; a redirected-root reproducer is in
+`/tmp/wsdl-p6-08-redirects/`. These are not integrated or accepted. The user also
+requested a solution for the qore-test-base macOS libxml2 VERSION/header clash;
+tested candidate module-xml/qore-test-base patches and rollout requirements are
+in `/tmp/module-xml-macos-header-solution/README.md`. That proposal was validated
+with a deterministic collision fixture and the real bundled dependency on Linux;
+actual macOS acceptance remains required. Neither candidate patch is applied.
+
+No main-Qore changes, installation, push or pipeline trigger. The unrelated
+`test/cmake/__pycache__/` is preserved. P6–P9 remain incomplete; no user question
+is pending.
