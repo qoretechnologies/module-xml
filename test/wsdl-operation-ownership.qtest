@@ -1,0 +1,375 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires xml
+%requires ../qlib/WSDL.qm
+%requires ../qlib/SoapClient.qm
+%requires ../qlib/SoapHandler.qm
+%requires HttpServer
+%exec-class OperationOwnershipTest
+
+class OwnedOperationNamespaces inherits Namespaces {
+    private { Counter released; }
+    constructor(Counter released) : Namespaces({"targetNamespace":"urn:tracked"}) {
+        self.released = released;
+    }
+    destructor() {
+        released.inc();
+    }
+}
+class OwnedOperationMessage inherits WSMessage {
+    private { Counter released; }
+    constructor(string name, Namespaces namespaces, Counter released)
+            : WSMessage({"^attributes^":{"name":name}}, {}, {}, namespaces) {
+        self.released = released;
+    }
+    destructor() {
+        released.inc();
+    }
+}
+class OwnedSampleService inherits WebService {
+    private { Counter released; }
+    constructor(string source, Counter released) : WebService(source, {"async_only":True}) {
+        self.released = released;
+    }
+    destructor() {
+        released.inc();
+    }
+}
+
+class OperationOwnershipTest inherits QUnit::Test {
+    constructor() : Test("Detached WSDL operation dependencies", "1.0") {
+        addTestCase("Detached operations retain messages namespaces and headers", \detached());
+        addTestCase("Zero-part messages own their namespace context", \emptyMessage());
+        addTestCase("Standalone header descriptions own their messages", \headers());
+        addTestCase("Detached and saved operations convert both versions with recursive values and headers", \roundtrips());
+        addTestCase("Old weak-reference graphs reconstruct owned dependencies", \legacy());
+        addTestCase("Malformed saved ownership rejects and a valid graph still restores", \invalid());
+        addTestCase("Owned dependency graphs release once after success and exceptions", \lifetime());
+        addTestCase("Cancellation releases operation dependency cycles", \cancellation());
+        addTestCase("Concurrent restored handles isolate values and namespaces", \concurrency());
+        addTestCase("Detached operations and saved providers serve both HTTP ports", \http());
+        addTestCase("Sample helpers retain their source service", \samples());
+        set_return_value(main());
+    }
+    private string source() {
+        return ReadOnlyFile::readTextFile(get_script_dir() + "/wsdl-interop/regressions/operation-ownership/service.wsdl");
+    }
+    private WebService service() {
+        return new WebService(source(), {"async_only":True});
+    }
+    private static auto saved(auto value) {
+        return Serializable::deserialize(Serializable::serialize(value));
+    }
+    private static WSMessage empty() {
+        return new WSMessage({"^attributes^":{"name":"Empty"}}, {}, {},
+            new Namespaces({"targetNamespace":"urn:empty"}));
+    }
+    private detached() {
+        WSOperation op = service().getOperation("echo");
+        assertTrue(exists op.nsc);
+        assertTrue(exists op.input);
+        assertTrue(exists op.output);
+        assertTrue(exists op.getBinding("B11").input.getHeaders()[0].msg);
+        assertEq("urn:operation-ownership", op.getTargetNS());
+    }
+    private emptyMessage() {
+        WSMessage msg = empty();
+        assertTrue(exists msg.nsc);
+        assertEq("urn:empty", msg.nsc.getTargetNamespaceUri());
+        assertEq({}, msg.getDataProviderType().acceptsValue({}));
+    }
+    private headers() {
+        BindingMessageHeaderDescription description("auth", False, empty());
+        assertTrue(exists description.msg);
+        assertEq("Empty", description.msg.name);
+        assertEq("urn:empty", description.msg.nsc.getTargetNamespaceUri());
+    }
+    private checkOperation(WSOperation op) {
+        foreach string binding in ("B11", "B12") {
+            OperationalBinding selected = op.getBinding(binding);
+            assertTrue(selected.input.getHeaders()[0].msg === selected.output.getHeaders()[0].msg);
+            hash<auto> value = {"body":{"count":7,"next":{"count":8},"{urn:extension}number":11}};
+            foreach bool request in (True, False) {
+                hash<auto> wire = request
+                    ? op.serializeRequest(value, {"auth":"secret"}, NOTHING, NOTHING, NOTHING, NOTHING, binding)
+                    : op.serializeResponse(value, {"auth":"secret"}, NOTHING, NOTHING, NOTHING, NOTHING, binding);
+                hash<auto> decoded = request
+                    ? op.deserializeRequest(parse_xml(wire.body, XPF_PRESERVE_ORDER), binding)
+                    : op.deserializeResponse(parse_xml(wire.body, XPF_PRESERVE_ORDER), binding);
+                assertEq(7, decoded.count);
+                assertEq(8, decoded.next.count);
+                assertEq("secret", decoded.Auth.auth);
+                assertEq("11", decoded."{urn:extension}number"."^value^");
+                string invalid = replace(wire.body, '>11<', '>not-an-int<');
+                assertFalse(invalid == wire.body);
+                if (request) {
+                    assertThrows("SOAP-DESERIALIZATION-ERROR", \op.deserializeRequest(),
+                        (parse_xml(invalid, XPF_PRESERVE_ORDER), binding));
+                } else {
+                    assertThrows("SOAP-DESERIALIZATION-ERROR", \op.deserializeResponse(),
+                        (parse_xml(invalid, XPF_PRESERVE_ORDER), binding));
+                }
+            }
+            hash<auto> bad = value;
+            bad.body.count = "invalid";
+            assertThrows("SOAP-SERIALIZATION-ERROR", \op.serializeRequest(),
+                (bad, {"auth":"secret"}, NOTHING, NOTHING, NOTHING, NOTHING, binding));
+            hash<auto> wire = op.serializeFault("Problem", "declared-fault", {"detail":"invalid order"},
+                {"auth":"secret"}, NOTHING, NOTHING, NOTHING, NOTHING, binding);
+            string uri = binding == "B12" ? SOAP_12_ENV : SOAP_11_ENV;
+            hash<auto> expanded = XsdBase::expandElementNamespaces(parse_xml(wire.body, XPF_PRESERVE_ORDER));
+            hash<auto> fault = expanded{"{" + uri + "}Envelope"}{"{" + uri + "}Body"}{"{" + uri + "}Fault"};
+            assertEq("invalid order", fault{binding == "B12" ? "{" + uri + "}Detail" : "{}detail"}
+                ."{urn:operation-ownership}problem");
+            assertThrows("SOAP-SERVER-FAULT-RESPONSE", \op.deserializeResponse(),
+                (parse_xml(wire.body, XPF_PRESERVE_ORDER), binding));
+            HashDataType provider = saved(op.input.getDataProviderType(True));
+            assertEq(7, provider.acceptsValue(value).body.count);
+        }
+    }
+    private roundtrips() {
+        WSOperation detached = service().getOperation("echo");
+        checkOperation(detached);
+        checkOperation(saved(detached));
+        checkOperation(Serializable::deserialize(detached.serializeToData()));
+        WSOperation notify = service().getOperation("notify");
+        foreach WSOperation op in (notify, saved(notify)) {
+            assertTrue(exists op.input);
+            assertFalse(exists op.output);
+            foreach string binding in ("B11", "B12") {
+                hash<auto> wire = op.serializeRequest({"auth":"notice"}, NOTHING, NOTHING, NOTHING,
+                    NOTHING, NOTHING, binding);
+                assertEq("notice", op.deserializeRequest(parse_xml(wire.body, XPF_PRESERVE_ORDER), binding));
+            }
+        }
+    }
+    private hash<SerializationInfo> oldGraph(Serializable object) {
+        hash<SerializationInfo> data = object.serializeToData();
+        hash<string, list<string>> fields = {"WSDL::WSOperation":("nsc", "input", "output"),
+            "WSDL::WSMessage":("nsc",), "WSDL::BindingMessageHeaderDescription":("msg",)};
+        foreach string index in (keys data._index) {
+            if (!data._index{index}.hasKey("_class_data")) {
+                continue;
+            }
+            foreach string cls in (keys fields) {
+                if (!data._index{index}._class_data.hasKey(cls)) {
+                    continue;
+                }
+                foreach string field in (fields{cls}) {
+                    auto value = data._index{index}._class_data{cls}{field};
+                    if (value.typeCode() == NT_HASH && value.hasKey("_index")) {
+                        data._index{index}._class_data{cls}{field} = {"_weak":value._index};
+                    }
+                }
+            }
+        }
+        return data;
+    }
+    private legacy() {
+        WSOperation op = service().getOperation("echo");
+        hash<SerializationInfo> data = oldGraph(op);
+        remove op;
+        WSOperation restored = Serializable::deserialize(data);
+        checkOperation(restored);
+        checkOperation(saved(restored));
+        WSMessage message = Serializable::deserialize(oldGraph(empty()));
+        assertEq("urn:empty", message.nsc.getTargetNamespaceUri());
+        BindingMessageHeaderDescription header = Serializable::deserialize(oldGraph(
+            new BindingMessageHeaderDescription("auth", False, empty())));
+        assertEq("urn:empty", header.msg.nsc.getTargetNamespaceUri());
+        data = oldGraph(empty());
+        foreach string index in (keys data._index) {
+            if (data._index{index}.hasKey("_class_data")
+                    && data._index{index}._class_data.hasKey("WSDL::WSMessage")) {
+                data._index{index}._class_data."WSDL::WSMessage".args = NOTHING;
+                data._index{index}._class_data."WSDL::WSMessage".pmap = NOTHING;
+            }
+        }
+        message = Serializable::deserialize(data);
+        assertEq({}, message.getDataProviderType().acceptsValue({}));
+    }
+    private invalid() {
+        WSOperation original = service().getOperation("echo");
+        foreach string cls in ("WSDL::WSOperation", "WSDL::WSMessage", "WSDL::BindingMessageHeaderDescription") {
+            hash<SerializationInfo> data = original.serializeToData();
+            int changed = 0;
+            foreach string index in (keys data._index) {
+                if (data._index{index}.hasKey("_class_data") && data._index{index}._class_data.hasKey(cls)) {
+                    remove data._index{index}._class_data{cls}{cls == "WSDL::BindingMessageHeaderDescription" ? "msg" : "nsc"};
+                    ++changed;
+                }
+            }
+            assertTrue(changed > 0);
+            assertThrows("DESERIALIZATION-ERROR", \Serializable::deserialize(), (data,));
+            checkOperation(saved(original));
+        }
+    }
+    private WSOperation tracked(Counter namespaces, Counter messages, bool fail = False) {
+        OwnedOperationNamespaces nsc(namespaces);
+        # A builtin cache creates the same namespace/type cycle as a real parsed schema.
+        nsc.getBaseType("int");
+        hash<string, WSMessage> values();
+        foreach string name in ("Input", "Output", "Auth", "Problem") {
+            values{name} = new OwnedOperationMessage(name, nsc, messages);
+        }
+        WSOperation op({"^attributes^":{"name":"echo"}, "input":{"^attributes^":{"message":"Input"}},
+            "output":{"^attributes^":{"message":"Output"}},
+            "fault":{"^attributes^":{"name":"Problem","message":"Problem"}}}, nsc, values);
+        BindingMessageDescription input();
+        input.addHeader(new BindingMessageHeaderDescription("auth", False, values.Auth));
+        op.addBinding(new SoapBinding("B", "", True, "http://schemas.xmlsoap.org/soap/http", "echo",
+            input, input, False));
+        if (fail) {
+            throw "OWNERSHIP-TEST-ERROR", "failure after the complete graph was constructed";
+        }
+        return op;
+    }
+    private lifetime() {
+        Counter namespaces();
+        Counter messages();
+        for (int i = 0; i < 4; ++i) {
+            {
+                WSOperation op = tracked(namespaces, messages);
+                assertEq(i, namespaces.getCount());
+                assertEq(i * 4, messages.getCount());
+                assertEq("Input", op.input.name);
+                assertEq("Output", op.output.name);
+                assertEq("Problem", op.getFaultMessages().Problem.name);
+                assertEq("Auth", op.getBinding("B").input.getHeaders()[0].msg.name);
+                # The test-only Counters deliberately cannot be serialized.
+                assertThrows("SERIALIZATION-ERROR", \op.serializeToData());
+                assertEq("urn:tracked", op.getTargetNS());
+            }
+            assertEq(i + 1, namespaces.getCount());
+            assertEq((i + 1) * 4, messages.getCount());
+        }
+        assertThrows("OWNERSHIP-TEST-ERROR", \tracked(), (namespaces, messages, True));
+        assertEq(5, namespaces.getCount());
+        assertEq(20, messages.getCount());
+        Counter services();
+        {
+            WSMessageHelper helper(new OwnedSampleService(source(), services));
+            assertEq(0, services.getCount());
+            assertEq({"token":"abc"}, helper.getMessage("token"));
+        }
+        assertEq(1, services.getCount());
+    }
+    private cancellation() {
+        Program program(PO_MODERN);
+        SandboxManager manager();
+        on_exit manager.clearInterrupt();
+        program.setSandboxManager(manager);
+        program.parse("%modern\nsub execute(code<nothing()> work) { work(); }\n",
+            get_script_dir() + "/operation-ownership-interrupt.qr");
+        Counter namespaces();
+        Counter messages();
+        code<nothing()> work = sub() {
+            WSOperation op = tracked(namespaces, messages);
+            manager.requestInterrupt();
+            foreach WSMessage message in (op.input, op.output) {
+                message.getDataProviderType();
+            }
+        };
+        *hash<ExceptionInfo> error;
+        try {
+            program.callFunction("execute", work);
+        } catch (hash<ExceptionInfo> ex) {
+            error = ex;
+        }
+        manager.clearInterrupt();
+        assertEq("PROGRAM-INTERRUPTED", error.err);
+        assertEq(1, namespaces.getCount());
+        assertEq(4, messages.getCount());
+        checkOperation(service().getOperation("echo"));
+    }
+    private concurrency() {
+        binary graph = service().getOperation("echo").serialize();
+        Queue ready();
+        Queue start();
+        Queue results();
+        Counter running();
+        on_exit {
+            for (int i = 0; i < 4; ++i) {
+                start.push(True);
+            }
+            assertEq(0, running.waitForZero(30s));
+        }
+        for (int i = 0; i < 4; ++i) {
+            running.inc();
+            background sub(int index) {
+                on_exit running.dec();
+                try {
+                    ready.push(True);
+                    start.pop(30000);
+                    WSOperation op = Serializable::deserialize(graph);
+                    string binding = index % 2 ? "B12" : "B11";
+                    op.nsc.addNamespaces({"xmlns:private":"urn:worker:" + index});
+                    hash<auto> wire = op.serializeRequest({"body":{"count":index}}, {"auth":string(index)},
+                        NOTHING, NOTHING, NOTHING, NOTHING, binding);
+                    hash<auto> value = op.deserializeRequest(parse_xml(wire.body, XPF_PRESERVE_ORDER), binding);
+                    results.push((index, value.count, value.Auth.auth, op.nsc.getInputNamespaceUri("private")));
+                } catch (hash<ExceptionInfo> ex) {
+                    results.push({"error":ex});
+                }
+            }(i);
+        }
+        for (int i = 0; i < 4; ++i) {
+            ready.pop(30000);
+        }
+        for (int i = 0; i < 4; ++i) {
+            start.push(True);
+        }
+        hash<string, bool> seen();
+        for (int i = 0; i < 4; ++i) {
+            auto result = results.pop(30000);
+            assertEq(NT_LIST, result.typeCode(), sprintf("%Y", result));
+            int index = result[0];
+            assertFalse(exists seen{string(index)});
+            seen{string(index)} = True;
+            assertEq((index, index, string(index), "urn:worker:" + index), result);
+        }
+    }
+    private http() {
+        foreach string binding in ("B11", "B12") {
+            # Each object comes from an independent service graph. The routing service cannot
+            # keep the detached operation's original messages alive accidentally.
+            WSOperation op = saved(service().getOperation("echo"));
+            HashDataType input = saved(op.input.getDataProviderType(True));
+            HashDataType output = saved(op.output.getDataProviderType(True));
+            WebService routing = service();
+            HttpServer server();
+            on_exit server.stop();
+            SoapHandler handler(new PermissiveAuthenticator());
+            server.setDefaultHandler("soap", handler);
+            Queue observed();
+            code<auto(hash<auto>, auto)> callback = auto sub(hash<auto> cx, auto value) {
+                string auth = (remove value.Auth).auth;
+                hash<auto> checked = input.acceptsValue({"body":value});
+                observed.push((checked.body.count, auth));
+                checked.body.count += 1;
+                return output.acceptsValue(checked) + {"^header^":{"auth":"reply-" + auth}};
+            };
+            handler.addMethod(routing, op, callback, NOTHING, NOTHING, NOTHING, "Service", NOTHING,
+                NOTHING, binding);
+            server.addListener(0);
+            SoapClient client({"wsdl":service(),"service":"Service", "port":binding == "B12" ? "Port12" : "Port11",
+                "url":sprintf("http://127.0.0.1:%d/Service", server.getListenerInfo(0).port),
+                "timeout":30000,"connect_timeout":30000});
+            hash<auto> value = client.callOperation("echo", {"body":{"count":41}},
+                {"soap_header":{"auth":"live"}});
+            assertEq(42, value.count);
+            assertEq("reply-live", value.Auth.auth);
+            assertEq((41, "live"), observed.pop(30000));
+        }
+    }
+    private samples() {
+        WSMessageHelper helper(service(), {"max_items":1});
+        assertEq({"token":"abc"}, helper.getMessage("token"));
+        # Recursive nonempty roots retain the existing precise bounded-generation diagnostic.
+        assertThrows("XSD-SAMPLE-ERROR", \helper.getMessage(), ("request",));
+        assertEq({"token":"abc"}, helper.getMessage("token"));
+    }
+}

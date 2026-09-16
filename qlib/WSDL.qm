@@ -80,6 +80,9 @@ module WSDL {
     @section wsdlrelnotes WSDL Module Release Notes
 
     @subsection wsdl_0_5_8 WSDL v0.5.8
+    - Detached operations, messages, header descriptions and sample helpers retain their dependencies;
+      saved graphs promote old weak member references, and zero-part messages expose initialized empty maps
+    - Typed attribute hashes passed to WSOperation construction are converted without changing their value types
     - SOAP request, fault and default response versions come from the selected binding extension,
       respecting declaration-local namespaces; unrelated SOAP namespace declarations do not select a version
     - WSOperation::isSoap12() accepts an optional binding name; WebService::isSoap12() checks actual bindings
@@ -28318,6 +28321,13 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
 }
 
 #! web service operation class
+/** Operations own their namespace context, input/output/fault messages and operational bindings.
+    A handle remains usable after its source WebService leaves scope; binding headers retain their own messages.
+    Serializable reconstruction establishes the same ownership, including older graphs with weak member references.
+    @par Example
+    Cache a partner operation directly with service.getOperation("submitOrder") for later serialization;
+    retaining a second reference to the service is unnecessary.
+*/
 public class WSOperation inherits WSDL::XsdNamedData {
     public {
         #! request message
@@ -28353,7 +28363,7 @@ public class WSOperation inherits WSDL::XsdNamedData {
         @param messages a hash of messages defined in the WSDL; keys are message names; values are WSMessage objects
      */
     constructor(hash<auto> p, Namespaces nsc, *hash<auto> messages) : XsdNamedData(\p) {
-        self.nsc := nsc;
+        self.nsc = nsc;
 
         if (p.input) {
             hash<auto> msghash = processNSValue(p.input."^attributes^");
@@ -28361,7 +28371,7 @@ public class WSOperation inherits WSDL::XsdNamedData {
             *WSMessage msg = messages.(msghash.message.val);
             if (!msg)
                 throw WSDL_ERROR, sprintf("missing definition for input message %y required by operation %y", msghash.name.val ?? msghash.name ?? msghash.message.val, name);
-            input := msg;
+            input = msg;
 
             #printf("DBG: WSOperation::constructor() name: %y msghash: %y\n", name, msghash);
             if (msghash.name)
@@ -28375,7 +28385,7 @@ public class WSOperation inherits WSDL::XsdNamedData {
             if (!msg)
                 throw WSDL_ERROR, sprintf("missing definition for output message %y required by operation %y", msghash.name.val ?? msghash.name ?? msghash.message.val, name);
 
-            output := msg;
+            output = msg;
             if (msghash.name)
                 output_name = msghash.name.val ?? msghash.name;
         }
@@ -28398,6 +28408,19 @@ public class WSOperation inherits WSDL::XsdNamedData {
         if (op_ns && op_ns !~ /\/$/)
             op_ns += "/";
         soapAction = op_ns ? op_ns + name : name;
+    }
+
+    private:internal deserializeMembers(hash<auto> members) {
+        if (!(members.nsc instanceof Namespaces)
+                || (exists members.input && !(members.input instanceof WSMessage))
+                || (exists members.output && !(members.output instanceof WSMessage))) {
+            throw "DESERIALIZATION-ERROR", "a WSDL operation requires its namespace context and valid messages";
+        }
+        # Explicit assignments promote references from older weak-member serializations.
+        nsc = remove members.nsc;
+        input = remove members.input;
+        output = remove members.output;
+        self += members;
     }
 
     #! returns a hash of fault messages keyed by fault name
@@ -28675,18 +28698,16 @@ public class WSOperation inherits WSDL::XsdNamedData {
         return getBinding(bname).deserializeRequestPath(self, path);
     }
 
-    #! processes a hash of raw deserialized XML data and removes any namespace prefix from keys (saved to a \c "ns" key in the hash vale assigned to the key) and returns the processed version of the hash
+    #! expands QName attribute values into local-name and prefix records
     static private hash<auto> processNSValue(hash<auto> h) {
+        hash<auto> result();
         foreach string k in (keys h) {
             (*string ns, *string name) = h{k} =~ x/([^:]+):([^:]+)/;
-            if (!name)
-                h{k}.val = h{k};
-            else {
-                h{k}.ns = ns;
-                h{k}.val = name;
-            }
+            # Parsed XML and typed public-constructor hashes must behave identically.
+            # Replacing scalar entries in the original typed hash cannot preserve its value type.
+            result{k} = name ? {"ns":ns, "val":name} : {"val":h{k}};
         }
-        return h;
+        return result;
     }
 
     #! returns True if the selected binding uses SOAP 1.2
@@ -28728,6 +28749,8 @@ public hashdecl ArgInfo {
 /** Message parts retain distinct part names for binding selection and provider fields. Element-based parts
     resolve their QNames in the enclosing XML scope. Unambiguous element arguments keep local aliases;
     collisions use expanded names. XML output always uses the element declaration's own name and namespace.
+    Messages own their namespace context and part definitions independently of the source service.
+    Zero-part messages expose empty argument/part maps and an empty provider record.
 */
 public class WSMessage inherits WSDL::XsdNamedData {
     public {
@@ -28735,21 +28758,21 @@ public class WSMessage inherits WSDL::XsdNamedData {
         /** Unambiguous element names keep their local aliases; names colliding with another element or
             type-part name use expanded names. Use pmap to look up an argument by its WSDL part name.
         */
-        hash<string, hash<WSDL::ArgInfo>> args;
+        hash<string, hash<WSDL::ArgInfo>> args();
 
         #! maps part names to args key, all parts are in hash
-        hash<string, string> pmap;
+        hash<string, string> pmap();
 
         #! type map
         hash<string, XsdAbstractType> tmap;
 
-        # keep a weak reference to the namespace map
+        # Owned namespace context, including empty messages without schema types.
         Namespaces nsc;
     }
 
     constructor(hash<auto> m, hash<string, hash<string, XsdElement>> emap, hash<string, XsdAbstractType> tmap, Namespaces nsc) : XsdNamedData(\m) {
         self.tmap = tmap;
-        self.nsc := nsc;
+        self.nsc = nsc;
 
         NamespacePrefixHelper message_scope(nsc, m."^attributes^");
         name = m."^attributes^".name;
@@ -28793,6 +28816,17 @@ public class WSMessage inherits WSDL::XsdNamedData {
             args{key} = arg;
             pmap{part} = key;
         }
+    }
+
+    private:internal deserializeMembers(hash<auto> members) {
+        if (!(members.nsc instanceof Namespaces)) {
+            throw "DESERIALIZATION-ERROR", "a WSDL message requires its namespace context";
+        }
+        nsc = remove members.nsc;
+        # Old zero-part messages saved NOTHING instead of initialized empty maps.
+        args = (remove members.args) ?? {};
+        pmap = (remove members.pmap) ?? {};
+        self += members;
     }
 
     #! returns native fields with schema instance checks for the message parts
@@ -30617,6 +30651,9 @@ public class BindingMessageBodyDescription inherits Serializable {
 }
 
 #! describes a SOAP message header for a SOAP operational binding message description
+/** The description owns its message; input/output descriptions can share a message without relying on
+    the lifetime of the source WebService. Saved legacy weak message references become owned on load.
+*/
 public class BindingMessageHeaderDescription inherits Serializable {
     public {
         #! message part name
@@ -30628,20 +30665,28 @@ public class BindingMessageHeaderDescription inherits Serializable {
             */
         bool encoded;
 
-        #! a weak reference to the actual message
+        #! owned actual message, independent of the source service lifetime
         WSMessage msg;
+    }
+
+    private:internal deserializeMembers(hash<auto> members) {
+        if (!(members.msg instanceof WSMessage)) {
+            throw "DESERIALIZATION-ERROR", "a SOAP header binding requires its message";
+        }
+        msg = remove members.msg;
+        self += members;
     }
 
     #! creates the object
     /*
         @param part message part name
         @param encoded if @ref Qore::True "True", then use = \c "encoded" (each message part references an abstract type using the \c type attribute), otherwise use = \c "literal" (each part references a concrete schema definition using either the \c element or \c type attribute)
-        @param msg actual message
+        @param msg the owned actual message, which remains valid after its source service leaves scope
     */
     constructor(string part, bool encoded = False, WSMessage msg) {
         self.part = part;
         self.encoded = encoded;
-        self.msg := msg;
+        self.msg = msg;
     }
 }
 
@@ -34204,7 +34249,8 @@ thread_local *XsdSampleCallContext SampleCallContext;
     printf("Catalog request: %Y\n", sample);
     @endcode
 
-    @note Generation checks the candidate with the existing schema instance conversion. If bounded generation
+    @note A helper constructed with a WebService retains it until the helper is released.
+    Generation checks the candidate with the existing schema instance conversion. If bounded generation
     cannot produce a valid candidate, provide a suitable example explicitly. The choices option produces
     explanatory alternatives; retained XML generation still performs its XML checks.
 */
@@ -34233,7 +34279,7 @@ public class WSMessageHelper {
         @note Instance examples check their converted output size, including values supplied by public overrides.
     **/
     constructor(WebService ws, *hash<auto> opts) {
-        self.ws := ws;
+        self.ws = ws;
         initOptions(opts);
     }
 

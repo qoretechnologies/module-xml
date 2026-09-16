@@ -2,7 +2,8 @@
 
 Copyright (C) 2026 Qore Technologies, s.r.o.
 
-Status: open independent P6 component/consumer lifetime defect, reproduced in
+Status: fixed by P6-02; see [ownership evidence](operation-ownership-evidence.md).
+The original independent P6 component/consumer lifetime defect was reproduced in
 the committed P5-03 source (`c0b4633`) before native type capture. It is not a
 passing native type retention check or an introduced P5-04 regression.
 
@@ -36,3 +37,16 @@ graph, including header messages, binding state, Serializable reconstruction,
 cycles and exception/cancellation cleanup. Merely keeping the operation's
 namespace registry would leave its other dependencies absent. Existing consumer
 code and the P5 tests retain their service owners throughout operation use.
+
+
+## Resolution
+
+Operations now own their namespace/input/output dependencies, messages own their
+namespace contexts, header descriptions own their messages, and sample helpers
+retain their source service. Legacy serialized weak members are promoted during
+reconstruction. Empty part maps and typed constructor QName records are also
+normalized at their source. Tests retain the historical reduction and cover the
+complete graph, shared headers, saved providers, HTTP, cancellation and exact
+release counts. See [implemented design](../../design/wsdl-operation-ownership.md)
+and [validation](P6-02-validation.json). Broader P6 component/binding acceptance
+remains open.

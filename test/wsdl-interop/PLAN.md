@@ -322,6 +322,8 @@ scoped instance validation, then complete typed accounting, remain before P6.
   must not be counted as SOAP 1.2 binding coverage.
 - Resolve the independently reproduced [operation handle ownership defect](p6-operation-lifetime-finding.md)
   as part of component/consumer lifecycle checks, including complete binding/header dependencies.
+  Implemented in P6-02 with saved graphs, exact cleanup counts and both HTTP ports;
+  see [ownership evidence](operation-ownership-evidence.md).
 
 **Acceptance:** every advertised binding has parse, serialize, deserialize and local HTTP integration
 coverage for both directions. Correct operation/part/QName selection is independently asserted. Invalid
@@ -511,3 +513,10 @@ See [binding-version evidence](binding-version-evidence.md). The explicit respon
 version override retains its historical compatibility behavior; strict incoming
 version enforcement remains P7. Detached operation ownership is the next bounded
 P6 increment; component, parts and HTTP/MIME acceptance remain open.
+
+P6-02 closes detached operation/message/header/helper ownership and old weak-graph
+reconstruction, with initialized zero-part maps and type-safe constructor QName
+records. Thirty affected suites, clean Valgrind and unchanged complete corpus
+results are recorded in [ownership evidence](operation-ownership-evidence.md).
+The next P6 work is WSDL grammar/component/reference validation and imports,
+followed by the remaining parts/header/HTTP-MIME acceptance matrix.

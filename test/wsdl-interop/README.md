@@ -9,7 +9,9 @@ The evidence documents below record their individual implementation increments.
 
 P6-01 implements [binding-specific SOAP versions](binding-version-evidence.md),
 including scoped declarations, saved services and actual HTTP exchanges on both
-ports. P6 component/ownership acceptance and P7 protocol enforcement remain open.
+ports. P6-02 fixes [detached operation ownership](operation-ownership-evidence.md),
+including legacy saved graphs, shared headers, zero-part messages and deterministic
+cleanup. P6 component/parts acceptance and P7 protocol enforcement remain open.
 
 Native empty defaults and declaration-scoped QName identity use
 `qore -b --enable-debug test/xml-element-defaults.qtest` and

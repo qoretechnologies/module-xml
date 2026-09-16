@@ -8597,3 +8597,34 @@ installation, push or new decision question. Artifacts: `/tmp/wsdl-p5-22b-covera
   Runtime and logs: `/tmp/wsdl-p6-01-binding-version/`. No native changes, install,
   push or main-Qore mutation. P6 ownership/components/parts/HTTP-MIME work remains;
   the detached operation ownership finding is next.
+
+
+## P6-02: detached operation dependency ownership
+
+- Confirmed the old weak edges with four failing baseline cases: temporary-service
+  operations, zero-part messages, standalone header descriptions and sample helpers.
+  Operations now own their nsc/input/output, messages own their nsc, header
+  descriptions own their message, and sample helpers retain their service.
+- Reconstruction hooks promote old weak members; malformed absent dependencies
+  reject explicitly. Existing global declaration/type registries retain the complete
+  schema graph, including wildcard and recursive definitions, without an operation
+  back reference to its source service.
+- Initialized empty message maps and normalized their old saved NOTHING shape.
+  Typed QName attribute hashes now produce new records instead of attempting to
+  change scalar entries into hashes. These directly related constructor/provider
+  failures were root-caused and fixed during ownership tests.
+- The sample generator's existing bounded recursive-candidate error is retained and
+  tested as such; the helper remains usable for an independent message afterward.
+- New suite: 11 cases / 405 assertions; final 30 affected suites: 411 cases / 6,670
+  reported assertions. Both HTTP ports, saved providers, shared header identity,
+  old weak graphs, invalid values, one-way input, exact destructor counts,
+  cancellation and queue-synchronized concurrent restoration are covered.
+- Full new suite under Valgrind: zero errors; zero definite/indirect/possible leaks;
+  no suppressions (313.5 seconds). Docs build cleanly. No C++ changes were required.
+- Complete native/legacy surveys and typed coverage retain parent outcomes;
+  native 2,096 valid directions pass and all 12 approved legacy losses remain visible.
+  Independent coverage has 16 passing tests; survey harness has 17.
+- Evidence: [ownership](operation-ownership-evidence.md), [validation](P6-02-validation.json),
+  [audit](audits/P6-02-operation-ownership.md). Raw logs: `/tmp/wsdl-p6-02-operation-ownership/`.
+  No install, push or main-Qore mutation. WSDL grammar/component/import/reference
+  validation is the next P6 increment; broader P6–P9 acceptance remains incomplete.
