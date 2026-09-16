@@ -28,8 +28,9 @@ The previous nil interpretation's statement that skipped-subtree semantics were
 not included describes the scope of that earlier approval, not a remaining
 restriction after this decision.
 
-Implementation is part of the ongoing P5-20f scoped-tuple work. Approval of the
-interpretation does not mark that implementation or its acceptance gates complete.
-The prototype and executable boundary evidence are retained under
-`/tmp/wsdl-p5-20f-identity-tuples/` until the implementation is ready for its full
-review and commit.
+The repository tuple matrix `test/wsdl-identity-tuples.qtest` checks this rule
+for keys, unique constraints and keyrefs, including matching declarations,
+unknown elements, nested skipped subtrees, outside declarations and path unions.
+Scoped tuples are integrated in WSDL and acceptance is tracked as P5-20j; this
+policy does not by itself close the remaining P5 acceptance criteria. Historical
+prototype evidence remains in `/tmp/wsdl-p5-20f-identity-tuples/`.

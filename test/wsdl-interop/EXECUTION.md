@@ -8450,3 +8450,24 @@ new real SOAP1.1/1.2 HTTP coverage passes 1/60, and converter/interruption/flat
 boundary/concurrent-document coverage passes 4/29. This tuple implementation
 remains outside the repository and needs its own final acceptance/audit.
 Main Qore remains read-only. No install or push. P5–P9 are not complete.
+
+
+## P5-20j accepted — scoped instance tuples (2026-09-16)
+
+P5-20f scoped tuples are integrated with selected value capture, recursive tables,
+local precedence, nil/skip policies, saved providers and real SOAP consumers.
+Native empty records and untyped anyType provenance remain present; allowed
+empty-list records retain compatibility. Final191suites/95,421assertions,
+201pinned reference schemas/documents, resource bounds, actual interruption,
+concurrency, clean lifecycle/instance Valgrinds, documentation and example pass.
+The initial three gate failures were corrected and the full gate rerun. Corpus
+verdicts are unchanged; four native GlobalElementAbstract bodies now retain
+original absent type and namespace bindings. No unassessed stage is counted as
+passing. The full62-check audit is22Pass/40N/A/zeroFail. See
+[evidence](identity-tuples-evidence.md), [inventory](P5-20j-validation.json) and
+[scoped accounting](identity-tuples-accounting.json).
+
+The separate qdx astparser select-call defect is fixed and tested in
+/tmp/wsdl-astparser-select-call, with a reviewable patch and reproducer for Qore.
+Main Qore remains read-only. No install or push. Complete P5 typed/infoset
+accounting is next, then P6–P9; no user decision is outstanding.

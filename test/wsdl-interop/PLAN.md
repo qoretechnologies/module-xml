@@ -471,3 +471,11 @@ validating-record optionality after verifying Qore `16ae86ca7`. Saved/soft graph
 metadata, nested rejection, interruption/retry and concurrent consumers pass;
 see [acceptance evidence](recursive-providers-evidence.md). Scoped tuple
 integration and complete typed accounting remain P5 requirements.
+
+
+P5-20j integrates scoped key/unique/keyref instance validation and its
+P5-20f prototype acceptance: selected typed capture, provider/SOAP consumers,
+owned table propagation, failure/interruption recovery and native provenance.
+See [acceptance evidence](identity-tuples-evidence.md). The independent qdx
+parser correction is prepared separately in /tmp; no main-Qore change was made.
+Complete P5 typed/infoset accounting remains required before P6.

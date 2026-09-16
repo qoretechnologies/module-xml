@@ -2053,3 +2053,39 @@ saved graphs and soft copies. Run `test/wsdl-recursive-providers.qtest`,
 with local XML/WSDL modules and a Qore runtime containing `16ae86ca7`. The last
 test checks the shared-graph conversion bound with a leaf-conversion counter.
 See the [implemented design and example](../../design/wsdl-recursive-providers.md).
+
+## Scoped WSDL instance tuples (P5-20j)
+
+`test/wsdl-identity-tuples.qtest` validates 165 authored schema/instance pairs
+through source/saved schemas, both preservation modes, serialization and ordinary
+providers. `test/wsdl-identity-instance-attributes.qtest` adds 36 builtin-instance-
+attribute pairs with separate native and WSDL tests. The fixture JSON files are
+Copyright (C) 2026 Qore Technologies, s.r.o. Expected WSDL, native and Xerces
+outcomes are separate fields; processor choices and reference defects are not
+silently treated as validator agreement.
+
+Run with the local XML binary and WSDL source paths:
+
+```sh
+qore -b --enable-debug test/wsdl-identity-tuples.qtest
+qore -b --enable-debug test/wsdl-identity-instance-attributes.qtest
+qore -b --enable-debug test/wsdl-identity-lossless-paths.qtest
+qore -b --enable-debug test/wsdl-identity-tuples-http.qtest
+qore -b --enable-debug test/wsdl-identity-tuple-lifecycle.qtest
+python3 test/wsdl-interop/test_identity_tuples.py -v
+python3 test/wsdl-interop/test_identity_tuple_resources.py -v
+```
+
+The HTTP test uses distinct SOAP 1.1/1.2 bindings with client, handler and
+SoapDataProvider request/response checks. Lifecycle coverage checks custom
+conversion counts, interruption/retry, flat table boundaries and concurrent
+saved-schema consumers. The structural probe checks retained entries and
+inherited-table traversal using a temporary instrumented module.
+
+See the [implemented design and catalog example](../../design/wsdl-identity-tuples.md).
+The [legacy projection policy](legacy-identity-projection.md) retains its explicit
+expected serialization rejection; that rejection is not counted as lossless
+forwarding. Complete P5 typed/infoset accounting and P6–P9 remain required.
+
+Final tuple validation and reference differences are recorded in
+[the acceptance evidence](identity-tuples-evidence.md).

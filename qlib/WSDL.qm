@@ -84,6 +84,11 @@ module WSDL {
       nested conversion, requiredness and metadata remain available at every recursive occurrence
     - Validating message, wildcard-content and wildcard-attribute record providers preserve explicit outer
       optionality, including containing fields and saved/soft copies; mandatory values reject omission
+    - Element key, unique and keyref constraints validate scoped tuples using selected simple values,
+      including defaults, nil, wildcard attributes and builtin xsi attributes, through saved providers and SOAP
+    - Completed child identity tables transfer to their parent without retaining a copy at each ancestor
+    - Native anyType text retains XML data without inventing xsi:type on forwarding; native empty records
+      remain present, and established empty-list record inputs still serialize as empty elements
     - Element identity constraints retain compiled namespace-expanded paths and portable metadata; schema-wide
       resolution checks duplicate names, keyref target categories and field counts before publishing additions
     - Identity declarations validate names, attributes, ordered selector/field content and namespace-bound
@@ -10361,6 +10366,11 @@ class XsdGenericValueHelper {
         if (exists value && !value.strp()) {
             throw SOAP_DESERIALIZATION_ERROR, "generic XML text requires a scalar value";
         }
+        # Preserve the absence of xsi:type for native forwarding. A scalar
+        # supplied for anyType is inferred on output; XML data keeps its type.
+        if (PreserveNativeTypes) {
+            return XsdWildcardElementHelper::retainNamespaces({"^value^":string(value)});
+        }
         return type.nsc.opt_empty_string_is_nothing ? value : string(value);
     }
 
@@ -10699,9 +10709,11 @@ public class XsdBaseType inherits WSDL::XsdAbstractType {
         if ((name == "anyType" || name == "anySimpleType") && val.typeCode() == NT_HASH) {
             return XsdGenericValueHelper::encode(self, nsc, val, omitType);
         }
-        if ((name == "anyType" || name == "anySimpleType") && val instanceof XsdNotationValue) {
-            XsdBaseType inferred("NOTATION", new Namespaces({}, self.nsc));
-            return inferred.serializeValue(nsc, val, False);
+        if ((name == "anyType" || name == "anySimpleType")
+                && (val instanceof XsdNotationValue || val instanceof XsdQNameValue)) {
+            XsdBaseType inferred(val instanceof XsdNotationValue ? "NOTATION" : "QName",
+                new Namespaces({}, self.nsc));
+            return XsdDocumentValueHelper::serializeValue(inferred, nsc, val, False, GenericDocumentValueResult);
         }
         if (name == "QName" || name == "NOTATION") {
             hash<string, string> bindings = XsdScopedLexicalContext::serializationBindings(nsc,
@@ -10877,6 +10889,12 @@ public class XsdBaseType inherits WSDL::XsdAbstractType {
         }
 
         #printf("DEBUG: FORCE: type: %y, nstype: %y, val: %y\n", type, nstype, val);
+        if (name == "anyType" && GenericDocumentValueResult) {
+            XsdBaseType actual(type, new Namespaces({}, self.nsc));
+            XsdDocumentValueCapture capture(actual);
+            GenericDocumentValueResult.actual_type = actual;
+            GenericDocumentValueResult.identity = capture.valueIdentity(val, val, SOAP_SERIALIZATION_ERROR, True);
+        }
         if (omitType) {
             if (comments) {
                 return comments + (
@@ -11563,7 +11581,11 @@ public class XsdAttribute inherits WSDL::XsdTypedData {
         if (hasValueConstraint()) {
             try {
                 Namespaces validation_namespaces({});
-                XsdDocumentValueHelper::serializeValue(type, validation_namespaces, constraintValue, True);
+                *XsdDocumentValueResult captured = IdentityTupleNode && !IdentityChecksSuspended
+                    ? new XsdDocumentValueResult() : NOTHING;
+                XsdDocumentValueHelper::serializeValue(type, validation_namespaces, constraintValue, True,
+                    captured, True);
+                XsdIdentityTupleScope::attribute(self, captured.identity);
             } catch (hash<ExceptionInfo> ex) {
                 if (ex.err == SOAP_SERIALIZATION_ERROR) {
                     rethrow SOAP_DESERIALIZATION_ERROR, ex.desc, ex.arg;
@@ -11626,8 +11648,11 @@ public class XsdAttribute inherits WSDL::XsdTypedData {
         @throw SOAP-DESERIALIZATION-ERROR an invalid value, fixed-value mismatch or unavailable ENTITY declaration
     */
     auto getValue(string val) {
+        *XsdDocumentValueResult captured = IdentityTupleNode && !IdentityChecksSuspended
+            ? new XsdDocumentValueResult() : NOTHING;
         auto result = XsdDocumentValueHelper::deserializeValue(type, name,
-            new hash<string, XsdAbstractType>(), NOTHING, val, False, NOTHING, True);
+            new hash<string, XsdAbstractType>(), NOTHING, val, False, captured, True);
+        XsdIdentityTupleScope::attribute(self, captured.identity);
         checkFixedValue(result, SOAP_DESERIALIZATION_ERROR);
         return result;
     }
@@ -11651,7 +11676,10 @@ public class XsdAttribute inherits WSDL::XsdTypedData {
         @since %WSDL 0.5.8
     */
     auto serializeAttributeValue(Namespaces nsc, auto val) {
-        auto serialized = XsdDocumentValueHelper::serializeValue(type, nsc, val, True, NOTHING, True);
+        *XsdDocumentValueResult captured = IdentityTupleNode && !IdentityChecksSuspended
+            ? new XsdDocumentValueResult() : NOTHING;
+        auto serialized = XsdDocumentValueHelper::serializeValue(type, nsc, val, True, captured, True);
+        XsdIdentityTupleScope::attribute(self, captured.identity);
         if (exists fixedLexical) {
             auto wire = serialized instanceof XsdQNameOutputText ? serialized.standalone() : serialized;
             auto typed = type.deserializeValue(name, new hash<string, XsdAbstractType>(), NOTHING, wire);
@@ -12205,7 +12233,8 @@ public class XsdElement inherits WSDL::XsdTypedData {
 
     AbstractDataProviderType getDataProviderType() {
         AbstractDataProviderType value_type = XsdElementFieldHelper::getOccurrenceType(self, !minOccurs, maxOccurs != 1);
-        return XsdIdentityBindings::contains(type) ? new XsdIdentityDataType(self, value_type) : value_type;
+        return getIdentityConstraints() || XsdIdentityBindings::contains(type)
+            ? new XsdIdentityDataType(self, value_type) : value_type;
     }
 
     *list<auto> getAllowedValues() {
@@ -12518,18 +12547,23 @@ public class XsdElement inherits WSDL::XsdTypedData {
                     throw SOAP_SERIALIZATION_ERROR, sprintf("one nilled occurrence supplied for element %Y "
                         "with minOccurs %d", name, minOccurs);
                 }
-                hash<auto> rh = serializeNil(type, nsc, new XsdNilValue());
+                *hash<auto> type_attributes;
                 if ((!omitType || type != self.type) && type.hasRealName()) {
-                    rh."^attributes^" += XsdDocumentValueHelper::typeAttributes(type, nsc);
+                    type_attributes = XsdDocumentValueHelper::typeAttributes(type, nsc);
                 }
-                return rh;
+                return serializeTypedValue(type, nsc, new XsdNilValue(), omitType, type_attributes);
             }
 
-            if (!type.isRequired())
-                return;
-
-            if (!type.requiresValue())
-                return ("^value^": NOTHING);
+            if (!type.isRequired() || !type.requiresValue()) {
+                # An empty occurrence list is also the established spelling of
+                # one empty element-only record; validate that record normally.
+                if (tc == NT_LIST && type instanceof XsdComplexType
+                        && !cast<XsdComplexType>(type).array && !cast<XsdComplexType>(type).simpleType
+                        && !cast<XsdComplexType>(type).hasMixedContent()) {
+                    h = {};
+                }
+                return serializeTypedValue(type, nsc, h, omitType, NOTHING);
+            }
 
             throw SOAP_SERIALIZATION_ERROR, sprintf("missing element %y value for %s::%s (minOccurs: %d, type %y)", name, typename, key, minOccurs, type.getName());
         }
@@ -12576,14 +12610,21 @@ public class XsdElement inherits WSDL::XsdTypedData {
             *softbool omitType, *hash<auto> type_attributes) {
         XsdIdentityElementScope identity_scope();
         on_success identity_scope.finish(SOAP_SERIALIZATION_ERROR);
+        XsdIdentityTupleScope tuples(self);
+        on_success tuples.finish(SOAP_SERIALIZATION_ERROR);
         if (value instanceof XsdDefaultValue) {
-            hash<auto> empty = serializeDefault(selected, namespaces, value);
+            XsdDocumentValueResult captured();
+            hash<auto> empty = serializeDefault(selected, namespaces, value, captured);
+            tuples.value(captured.actual_type ?? selected, captured.identity);
             empty."^attributes^" += type_attributes;
+            tuples.instanceAttributes(empty, SOAP_SERIALIZATION_ERROR, namespaces);
             return empty;
         }
         if (value instanceof XsdNilValue || (!exists value && nillable)) {
+            tuples.value(selected, NOTHING);
             hash<auto> nil = serializeNil(selected, namespaces, value ?? new XsdNilValue());
             nil."^attributes^" += type_attributes;
+            tuples.instanceAttributes(nil, SOAP_SERIALIZATION_ERROR, namespaces);
             return nil;
         }
         if (XsdTypeSubstitutionHelper::builtin(selected, "anyType") && value.typeCode() == NT_HASH) {
@@ -12596,6 +12637,8 @@ public class XsdElement inherits WSDL::XsdTypedData {
                 XsdAbstractType actual = XsdTypeSubstitutionHelper::select(\assessed, selected,
                     NativeTypeOutputTypes ?? selected.nsc.getInstanceTypes(), name, blocked_substitutions);
                 if (assessNil(actual, assessed)) {
+                    tuples.value(actual, NOTHING);
+                    tuples.instanceAttributes(wire, SOAP_SERIALIZATION_ERROR, namespaces);
                     return wire;
                 }
             } catch (hash<ExceptionInfo> error) {
@@ -12608,20 +12651,26 @@ public class XsdElement inherits WSDL::XsdTypedData {
         # An anonymous simple type cannot be named by xsi:type. Its restriction
         # base or union member must not be substituted for that anonymous component.
         bool omit_selected_type = omitType || (selected instanceof XsdSimpleType && !selected.hasRealName());
-        *XsdDocumentValueResult captured = getValueConstraint().fixed ? new XsdDocumentValueResult() : NOTHING;
+        *XsdDocumentValueResult captured = getValueConstraint().fixed || tuples.captures()
+            ? new XsdDocumentValueResult(!getValueConstraint().fixed) : NOTHING;
         auto converted = XsdDocumentValueHelper::serializeValue(selected, namespaces, value, omit_selected_type,
             captured);
+        tuples.value(captured.actual_type ?? selected, captured.identity);
         checkFixedValue(converted, captured.identity, SOAP_SERIALIZATION_ERROR);
         if (!type_attributes) {
+            tuples.instanceAttributes(converted, SOAP_SERIALIZATION_ERROR, namespaces);
             return converted;
         }
         if (converted.typeCode() != NT_HASH) {
-            return {"^value^": converted, "^attributes^": type_attributes};
+            hash<auto> wire = {"^value^": converted, "^attributes^": type_attributes};
+            tuples.instanceAttributes(wire, SOAP_SERIALIZATION_ERROR, namespaces);
+            return wire;
         }
         # Restriction/list/union converters may delegate to another type. The
         # element's selected component owns its annotation; retain all other
         # attributes, comments and child content without concatenating metadata.
         converted."^attributes^" += type_attributes;
+        tuples.instanceAttributes(converted, SOAP_SERIALIZATION_ERROR, namespaces);
         return converted;
     }
 
@@ -12693,12 +12742,16 @@ public class XsdElement inherits WSDL::XsdTypedData {
     private auto deserializeTypedValue(hash<string, XsdAbstractType> tmap, *hash<auto> references, auto value) {
         XsdIdentityElementScope identity_scope();
         on_success identity_scope.finish(SOAP_DESERIALIZATION_ERROR);
+        XsdIdentityTupleScope tuples(self);
+        on_success tuples.finish(SOAP_DESERIALIZATION_ERROR);
         if (abstract_element) {
             throw SOAP_DESERIALIZATION_ERROR, sprintf("abstract element %Y cannot occur directly", name);
         }
         XsdQNameNamespaceScope scope(value.typeCode() == NT_HASH ? value."^attributes^" : NOTHING);
+        tuples.instanceAttributes(value, SOAP_DESERIALIZATION_ERROR);
         XsdAbstractType selected = XsdTypeSubstitutionHelper::select(\value, type, tmap, name, blocked_substitutions);
         if (*XsdNilValue nil = assessNil(selected, value)) {
+            tuples.value(selected, NOTHING);
             # Keep the established bare and selected-type nil projections. Explicit
             # capture retains same-type presence, and attributes always need a carrier.
             auto retained = nil.getAttributes() || (PreserveNativeTypes
@@ -12712,15 +12765,23 @@ public class XsdElement inherits WSDL::XsdTypedData {
             string lexical = getConstraintIdentity().constraint_lexical ?? constraint.lexical;
             value = XsdEmptyElementDefaultHelper::apply(selected, value, lexical, constraint.namespaces);
         }
-        *XsdDocumentValueResult captured = constraint.fixed ? new XsdDocumentValueResult() : NOTHING;
+        *XsdDocumentValueResult captured = constraint.fixed || tuples.captures()
+            ? new XsdDocumentValueResult(!constraint.fixed) : NOTHING;
         auto converted = XsdDocumentValueHelper::deserializeValue(selected, name, tmap, references, value, False,
             captured);
+        tuples.value(captured.actual_type ?? selected, captured.identity);
         checkFixedValue(original, captured.identity, SOAP_DESERIALIZATION_ERROR);
+        if (PreserveNativeTypes && !exists converted && selected instanceof XsdComplexType
+                && !cast<XsdComplexType>(selected).simpleType && !cast<XsdComplexType>(selected).array
+                && !cast<XsdComplexType>(selected).hasMixedContent()) {
+            converted = {};
+        }
         return XsdNativeTypeValueHelper::retain(type, selected,
             defaulted && PreserveNativeTypes ? new XsdDefaultValue(converted) : converted);
     }
 
-    private hash<auto> serializeDefault(XsdAbstractType selected, Namespaces namespaces, XsdDefaultValue value) {
+    private hash<auto> serializeDefault(XsdAbstractType selected, Namespaces namespaces, XsdDefaultValue value,
+            XsdDocumentValueResult actual) {
         *hash<XsdElementValueConstraintInfo> constraint = getValueConstraint();
         if (!constraint) {
             throw SOAP_SERIALIZATION_ERROR, sprintf("element %Y has no default or fixed constraint", name);
@@ -12735,7 +12796,6 @@ public class XsdElement inherits WSDL::XsdTypedData {
         } else if (XsdGenericValueHelper::isGeneric(selected)) {
             content = new XsdBaseType("string", new Namespaces({}));
         }
-        XsdDocumentValueResult actual();
         auto encoded = XsdDocumentValueHelper::serializeValue(selected, namespaces, value.getValue(), True, actual);
         # This also rules out children hidden in a supplied native mixed value.
         XsdFixedValueHelper::text(encoded, SOAP_SERIALIZATION_ERROR);
@@ -15523,11 +15583,17 @@ class XsdIdentityBindings {
                     push pending, attribute.type;
                 }
                 foreach XsdElement element in (complex.elementmap.iterator()) {
+                    if (element.getIdentityConstraints()) {
+                        return True;
+                    }
                     push pending, element.type;
                 }
                 if (complex.getParticle()) {
                     foreach XsdElement element in (XsdElementFieldHelper::getParticleDeclarations(
                             complex.getParticle(), complex.getParticle().getElementOccurrenceRanges()).iterator()) {
+                        if (element.getIdentityConstraints()) {
+                            return True;
+                        }
                         push pending, element.type;
                     }
                 }
@@ -15638,8 +15704,11 @@ class XsdIdentityDocumentScope {
     private {
         *XsdIdentityFrame previous;
         bool suspended;
+        *XsdIdentityTupleNode previous_tuple;
     }
     constructor() {
+        previous_tuple = IdentityTupleNode;
+        IdentityTupleNode = NOTHING;
         previous = IdentityElement;
         suspended = IdentityChecksSuspended ?? False;
         IdentityElement = NOTHING;
@@ -15647,13 +15716,307 @@ class XsdIdentityDocumentScope {
     }
     destructor() {
         IdentityElement = previous;
+        IdentityTupleNode = previous_tuple;
         IdentityChecksSuspended = suspended;
+    }
+}
+
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+# Instance-local state, retained only while an owning constraint needs its subtree.
+class XsdIdentityTupleNode {
+    public {
+        string namespace_uri;
+        string local_name;
+        bool attribute = False;
+        bool nillable = False;
+        bool simple = False;
+        *hash<XsdUnionValueIdentity> value;
+        list<XsdIdentityTupleNode> children();
+        list<XsdIdentityTupleNode> attributes();
+        list<XsdIdentityConstraint> definitions();
+        hash<string, hash<string, string>> tables();
+    }
+    constructor(string namespace_uri, string local_name) {
+        self.namespace_uri = namespace_uri;
+        self.local_name = local_name;
+    }
+    static bool simpleType(XsdAbstractType type) {
+        return type instanceof XsdComplexType ? exists cast<XsdComplexType>(type).simpleType
+            : !XsdTypeSubstitutionHelper::builtin(type, "anyType");
+    }
+    static bool matches(XsdIdentityTupleNode node, hash<XsdIdentityStepInfo> step) {
+        return (!exists step.namespace_uri || step.namespace_uri == node.namespace_uri)
+            && (!exists step.local_name || step.local_name == node.local_name);
+    }
+    list<XsdIdentityTupleNode> select(list<hash<XsdIdentityPathInfo>> alternatives) {
+        hash<string, XsdIdentityTupleNode> result();
+        foreach hash<XsdIdentityPathInfo> path in (alternatives) {
+            hash<string, XsdIdentityTupleNode> current = {self.uniqueHash(): self};
+            if (path.descendants) {
+                list<XsdIdentityTupleNode> pending = children;
+                while (pending) {
+                    XsdIdentityTupleNode child = pop pending;
+                    current{child.uniqueHash()} = child;
+                    pending += child.children;
+                }
+            }
+            foreach hash<XsdIdentityStepInfo> step in (path.steps) {
+                if (step.axis == XsdIdentityAxis::Self) {
+                    continue;
+                }
+                hash<string, XsdIdentityTupleNode> following();
+                foreach XsdIdentityTupleNode cursor in (current.iterator()) {
+                    foreach XsdIdentityTupleNode child in (step.axis == XsdIdentityAxis::Attribute
+                            ? cursor.attributes : cursor.children) {
+                        if (matches(child, step)) {
+                            following{child.uniqueHash()} = child;
+                        }
+                    }
+                }
+                current = following;
+            }
+            result += current;
+        }
+        list<XsdIdentityTupleNode> selected();
+        foreach XsdIdentityTupleNode item in (result.iterator()) {
+            selected += item;
+        }
+        return selected;
+    }
+    private hash<string, string> tuples(XsdIdentityConstraint definition, string error) {
+        hash<string, string> result();
+        bool key = definition.getCategory() == XsdIdentityCategory::Key;
+        foreach XsdIdentityTupleNode row in (select(definition.getSelectorPaths())) {
+            list<string> parts();
+            bool complete = True;
+            foreach list<hash<XsdIdentityPathInfo>> paths in (definition.getFieldPaths()) {
+                list<XsdIdentityTupleNode> selected = row.select(paths);
+                if (selected.size() > 1) {
+                    throw error, sprintf("identity constraint %Y field %d selects multiple nodes",
+                        definition.getExpandedName(), $# + 1);
+                }
+                if (!selected) {
+                    complete = False;
+                    continue;
+                }
+                XsdIdentityTupleNode field = selected[0];
+                if (!field.simple) {
+                    throw error, sprintf("identity constraint %Y field %d requires a simple typed value",
+                        definition.getExpandedName(), $# + 1);
+                }
+                if (key && !field.attribute && field.nillable) {
+                    throw error, sprintf("key %Y selects a nillable element declaration",
+                        definition.getExpandedName());
+                }
+                if (!field.value) {
+                    complete = False;
+                    continue;
+                }
+                string value_key = XsdUnionValueHelper::key(field.value);
+                parts += sprintf("%d:%s", value_key.length(), value_key);
+            }
+            if (!complete) {
+                if (key) {
+                    throw error, sprintf("key %Y requires every field value", definition.getExpandedName());
+                }
+                continue;
+            }
+            string tuple = parts.join("");
+            if (result.hasKey(tuple) && definition.getCategory() != XsdIdentityCategory::KeyRef) {
+                throw error, sprintf("identity constraint %Y has duplicate field values",
+                    definition.getExpandedName());
+            }
+            result{tuple} = row.uniqueHash();
+        }
+        return result;
+    }
+    validate(string error) {
+        # An empty owner marks a conflict between distinct descendant nodes.
+        hash<string, hash<string, bool>> conflicts();
+        foreach XsdIdentityTupleNode child in (children) {
+            # A child has already checked its local keyrefs. Its tables belong
+            # to this scope now; retain its nodes and values for ancestor XPath
+            # selection without retaining a table copy at every tree level.
+            if (!tables) {
+                tables = remove child.tables;
+                continue;
+            }
+            foreach string name in (keys child.tables) {
+                foreach string tuple in (keys child.tables{name}) {
+                    string owner = child.tables{name}{tuple};
+                    if (!tables{name}.hasKey(tuple)) {
+                        tables{name}{tuple} = owner;
+                    } else if (tables{name}{tuple} != owner) {
+                        tables{name}{tuple} = "";
+                        conflicts{name}{tuple} = True;
+                    }
+                }
+            }
+            remove child.tables;
+        }
+        foreach XsdIdentityConstraint definition in (definitions) {
+            if (definition.getCategory() != XsdIdentityCategory::KeyRef) {
+                hash<string, string> local = tuples(definition, error);
+                # Local entries take precedence over conflicting inherited entries.
+                tables{definition.getExpandedName()} += local;
+            }
+        }
+        # Revisit only collisions: rescanning every inherited entry at every
+        # ancestor makes a deep tree quadratic even when no local keys exist.
+        foreach string name in (keys conflicts) {
+            foreach string tuple in (keys conflicts{name}) {
+                if (!tables{name}{tuple}) {
+                    remove tables{name}{tuple};
+                }
+            }
+        }
+        foreach XsdIdentityConstraint definition in (definitions) {
+            if (definition.getCategory() == XsdIdentityCategory::KeyRef) {
+                hash<string, string> references = tuples(definition, error);
+                foreach string tuple in (keys references) {
+                    if (!tables{definition.getReferencedName()}.hasKey(tuple)) {
+                        throw error, sprintf("keyref %Y has no matching %Y value in its element scope",
+                            definition.getExpandedName(), definition.getReferencedName());
+                    }
+                }
+            }
+        }
+    }
+}
+
+thread_local *XsdIdentityTupleNode IdentityTupleNode;
+
+class XsdIdentityTupleScope {
+    private {
+        *XsdIdentityTupleNode previous;
+        *XsdIdentityTupleNode node;
+    }
+    constructor(XsdElement declaration) {
+        if (IdentityChecksSuspended || (!IdentityTupleNode && !declaration.getIdentityConstraints())) {
+            return;
+        }
+        previous = IdentityTupleNode;
+        node = new XsdIdentityTupleNode(declaration.getNamespaceUri(), declaration.name);
+        node.nillable = declaration.isNillable();
+        node.definitions = declaration.getIdentityConstraints();
+        IdentityTupleNode = node;
+    }
+    constructor(string identity) {
+        if (IdentityChecksSuspended || !IdentityTupleNode) {
+            return;
+        }
+        previous = IdentityTupleNode;
+        XsdQNameValue name = XsdWildcardAttributeHelper::name(identity, SOAP_DESERIALIZATION_ERROR);
+        node = new XsdIdentityTupleNode(name.getNamespaceUri(), name.getLocalName());
+        IdentityTupleNode = node;
+    }
+    static unassessedAttribute(string identity, auto value) {
+        if (IdentityTupleNode && !IdentityChecksSuspended) {
+            XsdQNameValue name = XsdWildcardAttributeHelper::name(identity, SOAP_DESERIALIZATION_ERROR);
+            XsdIdentityTupleNode child(name.getNamespaceUri(), name.getLocalName());
+            child.attribute = True;
+            child.simple = True;
+            child.value = <XsdUnionValueIdentity>{"family":"string", "value":
+                value instanceof XsdScopedLexicalValue ? value.getLexicalValue() : string(value)};
+            IdentityTupleNode.attributes += child;
+        }
+    }
+    destructor() {
+        if (node) {
+            IdentityTupleNode = previous;
+        }
+    }
+    # Capture only actual XML attributes. The selected type or nil state does not
+    # imply that an xsi attribute was present on the element.
+    instanceAttributes(auto value, string error, *Namespaces output) {
+        if (!node || value.typeCode() != NT_HASH) {
+            return;
+        }
+        try {
+            *hash<auto> attributes = value."^attributes^";
+            if (output) {
+                attributes = XsdQNameContextHelper::attributes(output.getReferencedNamespaceMap() ?? {})
+                    + (attributes ?? {});
+            }
+            XsdQNameNamespaceScope scope(attributes, exists output);
+            hash<auto> expanded = XsdBase::getExpandedAttributes(attributes);
+            foreach string local in ("type", "nil", "schemaLocation", "noNamespaceSchemaLocation") {
+                string name = type_qname(XSI_NS, local);
+                if (!expanded.hasKey(name)) {
+                    continue;
+                }
+                auto lexical = expanded{name};
+                if (lexical instanceof XsdScopedLexicalValue) {
+                    lexical = lexical.getLexicalValue();
+                }
+                hash<XsdUnionValueIdentity> identity;
+                if (local == "type") {
+                    XsdQNameValue qname = XsdQNameValueHelper::resolve(lexical, error, QNameInputNamespaces);
+                    identity = <XsdUnionValueIdentity>{"family":"QName",
+                        "value":(qname.getNamespaceUri(), qname.getLocalName())};
+                } else if (local == "nil") {
+                    identity = <XsdUnionValueIdentity>{"family":"boolean",
+                        "value":XsdBooleanLexicalHelper::decode(lexical, error)};
+                } else if (local == "schemaLocation") {
+                    list<string> items();
+                    foreach string token in (XsdListValueHelper::tokens(lexical)) {
+                        items += XsdUnionValueHelper::key(<XsdUnionValueIdentity>{"family":"anyURI",
+                            "value":XsdTextLexicalHelper::lexical("anyURI", token, error)});
+                    }
+                    identity = <XsdUnionValueIdentity>{"family":"list", "value":items};
+                } else {
+                    identity = <XsdUnionValueIdentity>{"family":"anyURI",
+                        "value":XsdTextLexicalHelper::lexical("anyURI", lexical, error)};
+                }
+                XsdIdentityTupleNode attribute(XSI_NS, local);
+                attribute.attribute = True;
+                attribute.simple = True;
+                attribute.value = identity;
+                node.attributes += attribute;
+            }
+        } catch (hash<ExceptionInfo> ex) {
+            if (ex.err == SOAP_DESERIALIZATION_ERROR && error == SOAP_SERIALIZATION_ERROR) {
+                rethrow error, ex.desc, ex.arg;
+            }
+            rethrow;
+        }
+    }
+    bool captures() {
+        return exists node;
+    }
+    value(XsdAbstractType type, *hash<XsdUnionValueIdentity> identity) {
+        if (node) {
+            node.simple = XsdIdentityTupleNode::simpleType(type);
+            node.value = identity;
+        }
+    }
+    finish(string error) {
+        if (node) {
+            node.validate(error);
+            if (previous) {
+                previous.children += node;
+            }
+        }
+    }
+    static attribute(XsdAttribute declaration, *hash<XsdUnionValueIdentity> identity) {
+        if (IdentityTupleNode && !IdentityChecksSuspended) {
+            XsdIdentityTupleNode node(declaration.namespaceUri, declaration.name);
+            node.attribute = True;
+            node.simple = True;
+            node.value = identity;
+            IdentityTupleNode.attributes += node;
+        }
     }
 }
 
 class XsdDocumentValueResult {
     public {
         *hash<XsdUnionValueIdentity> identity;
+        *XsdAbstractType actual_type;
+        bool simple_only;
+    }
+    constructor(bool simple_only = False) {
+        self.simple_only = simple_only;
     }
 }
 
@@ -15678,8 +16041,14 @@ class XsdDocumentValueHelper {
         XsdDocumentValueCapture capture(type);
         auto converted = type.serializeValue(nsc, value, omitType);
         capture.validate(value, converted, SOAP_SERIALIZATION_ERROR, attribute, True);
-        if (captured && !captured.identity) {
-            captured.identity = capture.valueIdentity(value, converted, SOAP_SERIALIZATION_ERROR, True);
+        if (captured) {
+            if (!captured.actual_type) {
+                captured.actual_type = type;
+            }
+            if (!captured.identity && (!captured.simple_only
+                    || XsdIdentityTupleNode::simpleType(captured.actual_type))) {
+                captured.identity = capture.valueIdentity(value, converted, SOAP_SERIALIZATION_ERROR, True);
+            }
         }
         return converted;
     }
@@ -15739,7 +16108,10 @@ class XsdDocumentValueHelper {
         auto converted = type.deserializeValue(name, tmap, references, value);
         capture.validate(value, converted, SOAP_DESERIALIZATION_ERROR, attribute);
         if (captured) {
-            captured.identity = capture.valueIdentity(value, converted, SOAP_DESERIALIZATION_ERROR);
+            captured.actual_type = type;
+            if (!captured.simple_only || XsdIdentityTupleNode::simpleType(type)) {
+                captured.identity = capture.valueIdentity(value, converted, SOAP_DESERIALIZATION_ERROR);
+            }
         }
         # Generic XML decoding assesses the complete content. Re-encoding its
         # retained lexical tree would duplicate that assessment at every depth.
@@ -24691,6 +25063,9 @@ class XsdWildcardElementHelper {
         }
         XsdIdentityElementScope identity_scope();
         on_success identity_scope.finish(SOAP_DESERIALIZATION_ERROR);
+        XsdIdentityTupleScope tuples(identity);
+        on_success tuples.finish(SOAP_DESERIALIZATION_ERROR);
+        tuples.instanceAttributes(value, SOAP_DESERIALIZATION_ERROR);
         hash<auto> attributes = XsdBase::getExpandedAttributes(value.typeCode() == NT_HASH
             ? value."^attributes^" : NOTHING);
         if (exists attributes{type_qname(XSI_NS, "type")}) {
@@ -24700,7 +25075,11 @@ class XsdWildcardElementHelper {
             auto assessed = value;
             XsdAbstractType selected = XsdTypeSubstitutionHelper::select(\assessed, any_type, types, identity);
             if (!XsdTypeSubstitutionHelper::builtin(selected, "anyType")) {
-                XsdDocumentValueHelper::deserializeValue(selected, identity, types, references, assessed);
+                *XsdDocumentValueResult captured = tuples.captures()
+                    ? new XsdDocumentValueResult(True) : NOTHING;
+                XsdDocumentValueHelper::deserializeValue(selected, identity, types, references, assessed,
+                    False, captured);
+                tuples.value(captured.actual_type ?? selected, captured.identity);
                 return;
             }
         } else if (wildcard.processing == XsdWildcardProcessing::Strict) {
@@ -24816,7 +25195,11 @@ class XsdWildcardAttributeHelper {
             string identity, string value) {
         XsdQNameValue qname = name(identity, SOAP_DESERIALIZATION_ERROR);
         *XsdAttribute attribute = declaration(namespaces, wildcard, qname, SOAP_DESERIALIZATION_ERROR);
-        return attribute ? attribute.getValue(value) : new XsdScopedLexicalValue(value, {"":""} + (QNameInputNamespaces ?? {}));
+        if (attribute) {
+            return attribute.getValue(value);
+        }
+        XsdIdentityTupleScope::unassessedAttribute(identity, value);
+        return new XsdScopedLexicalValue(value, {"":""} + (QNameInputNamespaces ?? {}));
     }
     static auto encode(Namespaces declarations, Namespaces output, *hash<XsdAttributeWildcardInfo> wildcard,
             XsdQNameValue name, auto value) {
@@ -24824,6 +25207,7 @@ class XsdWildcardAttributeHelper {
         if (attribute) {
             return attribute.serializeAttributeValue(output, value);
         }
+        XsdIdentityTupleScope::unassessedAttribute(type_qname(name.getNamespaceUri(), name.getLocalName()), value);
         if (value instanceof XsdScopedLexicalValue) {
             return value;
         }

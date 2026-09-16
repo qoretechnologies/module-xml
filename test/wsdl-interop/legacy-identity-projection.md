@@ -14,13 +14,22 @@ are distinct. Legacy decoding yields `{a: 1, b: "1"}`, but its existing serializ
 emits both as untyped text. Instance validation must reject the duplicate string
 identities. Changing legacy scalar inference is a separate compatibility change.
 
-The P5-20f prototype explicitly asserts this one expected legacy rejection in
-its 165-case matrix (2,667 assertions), separately from native/XML lossless paths
-(191 assertions). Those paths exercise source/saved schemas and ordinary,
-saved and soft native providers. The rejection is not counted as a lossless
-round-trip. Original diagnostic failure logs remain unchanged.
+The repository matrix `test/wsdl-identity-tuples.qtest` explicitly asserts this
+one expected legacy rejection, separately from the 191 assertions in
+`test/wsdl-identity-lossless-paths.qtest`. Those lossless paths exercise source/
+saved schemas and ordinary, saved and soft native providers. The rejection is
+not counted as a lossless round-trip. Original diagnostic failure logs remain
+unchanged in `/tmp/wsdl-p5-20f-identity-tuples/`.
 
-The prototype and typed accounting are retained in
-`/tmp/wsdl-p5-20f-identity-tuples/`. This decision approves the policy; repository
-WSDL instance tuple implementation and its remaining consumer, cancellation,
-performance and final P5 acceptance checks are still in progress.
+Scoped tuples are now integrated in WSDL; their acceptance is tracked as P5-20j.
+Complete P5 typed/infoset accounting remains separate. See the
+[implemented design](../../design/wsdl-identity-tuples.md).
+
+
+The instance-attribute matrix additionally records two legacy `anyType` cases
+where empty untyped rows become strings and output inference adds duplicate
+`xsi:type` values. The previous committed WSDL emitted invalid XML for those
+rows. Tuple validation now rejects that projected document. Native preservation
+mode retains XML-data hashes and keeps the type attribute absent; XML carriers
+also forward the original valid document. This preserves the existing legacy
+inference contract and does not count those two rejections as lossless success.

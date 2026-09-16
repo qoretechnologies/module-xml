@@ -13,7 +13,10 @@ and [local type validity](https://www.w3.org/TR/2004/REC-xmlschema-1-20041028/#c
 
 ## Native and complete XML representations
 
-A plain anyType XML text value decodes as text. Structured anyType content retains
+A plain anyType XML text value decodes as text in legacy mode. With
+`preserve_types=True`, it retains an XML-data hash with `^value^` and namespace
+context, so forwarding does not invent an `xsi:type` attribute. This distinction
+matters when identity constraints select that attribute. Structured anyType content retains
 XML data, with expanded child keys, lexical attributes, text/CDATA fragments and
 ordered repeated-name suffixes. Namespace declarations are retained at the root
 of each detached generic value. The decoder does not replace a known child with

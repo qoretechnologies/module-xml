@@ -1,0 +1,178 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires xml
+%requires ../qlib/WSDL.qm
+%exec-class TupleLifecycleTest
+
+class TupleCountingType inherits XsdBaseType {
+    public {
+        int decoded = 0;
+        int encoded = 0;
+        *SandboxManager manager;
+        int interrupt_at = 0;
+    }
+    constructor(Namespaces ns) : XsdBaseType("string", ns) {
+    }
+    auto deserializeValue(string name, hash<string, XsdAbstractType> types, *hash<auto> references, auto value) {
+        ++decoded;
+        if (manager && decoded == interrupt_at) {
+            manager.requestInterrupt();
+        }
+        return XsdBaseType::deserializeValue(name, types, references, value);
+    }
+    auto serializeValue(Namespaces namespaces, auto value, *softbool omitType) {
+        ++encoded;
+        return XsdBaseType::serializeValue(namespaces, value, omitType);
+    }
+}
+
+class TupleLifecycleTest inherits QUnit::Test {
+    constructor() : Test("Identity tuple lifecycle and conversion work", "1.0") {
+        addTestCase("Capture uses each custom converter once and recovers after rejection", \conversions());
+        addTestCase("Program interruption clears partially captured identity state", \interruption());
+        addTestCase("Large flat key tables preserve every value and reject a late duplicate", \flat());
+        addTestCase("Concurrent documents never share tuple state", \concurrency());
+        set_return_value(main());
+    }
+    private static string source() {
+        return "<xs:schema xmlns:xs='http://www.w3.org/2001/XMLSchema'>"
+            "<xs:element name='root'><xs:complexType><xs:sequence>"
+            "<xs:element name='item' type='xs:string' maxOccurs='unbounded'/>"
+            "</xs:sequence></xs:complexType><xs:key name='K'><xs:selector xpath='item'/>"
+            "<xs:field xpath='.'/></xs:key></xs:element></xs:schema>";
+    }
+    private static auto decode(XsdSchema schema, string xml) {
+        return schema.getElement("", "root").deserializeValue(schema.getTypeMap(), NOTHING,
+            XsdBase::expandElementNamespaces(parse_xml(xml, XPF_PRESERVE_ORDER)){"{}root"}, True, False);
+    }
+    private conversions() {
+        XsdSchema schema(source(), {"async_only":True});
+        XsdComplexType root = cast<XsdComplexType>(schema.getElement("", "root").type);
+        TupleCountingType spy(root.nsc);
+        root.elementmap.item.type = spy;
+        hash<auto> good = {"item":("a", "b")};
+        assertEq(good, decode(schema, "<root><item>a</item><item>b</item></root>"));
+        assertEq(2, spy.decoded);
+        XsdXmlValue wire = schema.serializeXmlValue("", "root", good);
+        assertEq(2, spy.encoded);
+        assertEq(2, spy.decoded);
+        assertEq(parse_xml(wire.getXml()), parse_xml_with_schema(wire.getXml(), source()));
+        assertThrows("SOAP-DESERIALIZATION-ERROR", \decode(),
+            (schema, "<root><item>a</item><item>a</item></root>"));
+        assertEq(4, spy.decoded);
+        assertThrows("SOAP-SERIALIZATION-ERROR", \schema.serializeXmlValue(),
+            ("", "root", {"item":("a", "a")}));
+        assertEq(4, spy.encoded);
+        assertEq(good, decode(schema, "<root><item>a</item><item>b</item></root>"));
+        assertEq(6, spy.decoded);
+        foreach AbstractDataProviderType provider in (schema.getNativeDataProviderType("", "root"),
+                schema.getElement("", "root").getDataProviderType()) {
+            int encoded = spy.encoded;
+            int decoded = spy.decoded;
+            # Native field providers validate each leaf before the enclosing
+            # element serialization. Tuple capture adds no further conversion.
+            int conversions = $# == 0 ? 4 : 2;
+            assertEq(good, provider.acceptsValue(good));
+            assertEq(encoded + conversions, spy.encoded);
+            assertEq(decoded, spy.decoded);
+            assertThrows("RUNTIME-TYPE-ERROR", \provider.acceptsValue(), ({"item":("a", "a")},));
+            assertEq(encoded + 2 * conversions, spy.encoded);
+            assertEq(good, provider.acceptsValue(good));
+            assertEq(encoded + 3 * conversions, spy.encoded);
+            assertEq(decoded, spy.decoded);
+        }
+    }
+    private interruption() {
+        XsdSchema schema(source(), {"async_only":True});
+        XsdComplexType root = cast<XsdComplexType>(schema.getElement("", "root").type);
+        TupleCountingType spy(root.nsc);
+        root.elementmap.item.type = spy;
+        SandboxManager manager();
+        on_exit manager.clearInterrupt();
+        spy.manager = manager;
+        spy.interrupt_at = 2;
+        Program program(PO_NEW_STYLE | PO_STRICT_ARGS | PO_REQUIRE_TYPES);
+        program.setSandboxManager(manager);
+        program.parse("%modern\n%requires xml\n%requires ../qlib/WSDL.qm\n"
+            "auto sub decode(XsdSchema s, string xml) { return s.getElement(\"\", \"root\").deserializeValue("
+            "s.getTypeMap(), NOTHING, XsdBase::expandElementNamespaces(parse_xml(xml, XPF_PRESERVE_ORDER))"
+            "{\"{}root\"}, True, False); }\n", get_script_dir()+"/tuple-interrupt.qr");
+        *hash<ExceptionInfo> error;
+        try {
+            program.callFunction("decode", schema, "<root><item>a</item><item>b</item></root>");
+        } catch (hash<ExceptionInfo> ex) {
+            error = ex;
+        }
+        manager.clearInterrupt();
+        assertEq("PROGRAM-INTERRUPTED", error.err);
+        assertEq(2, spy.decoded);
+        spy.manager = NOTHING;
+        assertEq({"item":("a", "b")}, program.callFunction("decode", schema,
+            "<root><item>a</item><item>b</item></root>"));
+        assertEq(4, spy.decoded);
+    }
+    private flat() {
+        XsdSchema schema(source(), {"async_only":True});
+        foreach int size in (128, 1024) {
+            list<string> values();
+            for (int i = 0; i < size; ++i) {
+                values += sprintf("value-%d", i);
+            }
+            hash<auto> value = {"item":values};
+            XsdXmlValue wire = schema.serializeXmlValue("", "root", value);
+            assertEq(parse_xml(wire.getXml()), parse_xml_with_schema(wire.getXml(), source()));
+            assertEq(value, decode(schema, wire.getXml()));
+            values[-1] = values[0];
+            assertThrows("SOAP-SERIALIZATION-ERROR", \schema.serializeXmlValue(),
+                ("", "root", {"item":values}));
+            assertEq(value, decode(schema, wire.getXml()));
+        }
+    }
+    private concurrency() {
+        XsdSchema shared = Serializable::deserialize(new XsdSchema(source(), {"async_only":True}).serialize());
+        Queue ready();
+        Queue start();
+        Queue results();
+        Counter running();
+        on_exit {
+            for (int i = 0; i < 4; ++i) {
+                start.push(True);
+            }
+            assertEq(0, running.waitForZero(30s));
+        }
+        for (int i = 0; i < 4; ++i) {
+            running.inc();
+            background sub(int worker) {
+                on_exit running.dec();
+                ready.push(True);
+                try {
+                    start.get(30s);
+                    for (int iteration = 0; iteration < 8; ++iteration) {
+                        hash<auto> value = {"item":("same", sprintf("worker-%d-%d", worker, iteration))};
+                        XsdXmlValue wire = shared.serializeXmlValue("", "root", value);
+                        @assert(decode(shared, wire.getXml()) == value);
+                    }
+                    results.push(worker);
+                } catch (hash<ExceptionInfo> ex) {
+                    results.push(ex);
+                }
+            }(i);
+        }
+        for (int i = 0; i < 4; ++i) {
+            ready.get(30s);
+        }
+        for (int i = 0; i < 4; ++i) {
+            start.push(True);
+        }
+        hash<string, bool> seen();
+        for (int i = 0; i < 4; ++i) {
+            auto result = results.get(30s);
+            assertEq(NT_INT, result.typeCode(), sprintf("%Y", result));
+            seen{string(result)} = True;
+        }
+        assertEq(4, seen.size());
+    }
+}
