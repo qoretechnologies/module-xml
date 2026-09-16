@@ -5,6 +5,7 @@ Copyright (C) 2026 Qore Technologies, s.r.o.
 """
 
 from copy import deepcopy
+from collections import Counter
 import json
 from pathlib import Path
 import shutil
@@ -543,9 +544,16 @@ class CoverageTest(unittest.TestCase):
             self.assertEqual([], message["failures"])
         disagreements = [m["output_oracle_disagreement"] for c in report["cases"] for m in c["messages"]
                          if "output_oracle_disagreement" in m]
-        # Eight formerly rounded/exponential decimal outputs now preserve their exact values;
-        # Xerces accepts them while the retained libxml2 precision limitation remains visible.
-        self.assertEqual(72, len(disagreements))
+        # Exact numeric outputs retain the adjudicated libxml2 precision limitation.
+        # The former 16 IDREF disagreements disappeared when P5-17b began rejecting
+        # those invalid inputs; the rejection assertions above cover them explicitly.
+        families = Counter(c["case"] for c in report["cases"] for m in c["messages"]
+                           if "output_oracle_disagreement" in m)
+        self.assertEqual({"IntegerAttribute": 8, "IntegerElement": 8,
+                          **{base + position: 4 for base in ("Decimal", "NegativeInteger",
+                              "NonNegativeInteger", "NonPositiveInteger", "PositiveInteger")
+                             for position in ("Attribute", "Element")}}, families)
+        self.assertEqual(56, len(disagreements))
         self.assertTrue(all(d["adjudicated"] for d in disagreements))
 
 

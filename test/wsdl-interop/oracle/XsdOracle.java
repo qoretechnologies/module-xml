@@ -219,15 +219,17 @@ public final class XsdOracle {
     }
 
     static void run(String[] args, boolean entityDocuments) throws Exception {
-        if (args.length != 1) {
-            throw new IllegalArgumentException("XsdOracle MANIFEST.tsv");
+        boolean typed = !entityDocuments && args.length == 2 && args[0].equals("--typed");
+        if (args.length != 1 && !typed) {
+            throw new IllegalArgumentException("XsdOracle [--typed] MANIFEST.tsv");
         }
-        Path manifest = Path.of(args[0]);
+        Path manifest = Path.of(args[typed ? 1 : 0]);
         if (Files.size(manifest) > 128L * 1024 * 1024) {
             throw new IllegalArgumentException("oracle manifest exceeds 128 MiB");
         }
         Map<URI, byte[]> resources = new HashMap<>();
         Map<String, Schema> schemas = new HashMap<>();
+        Map<String, TypedXmlObserver> observers = new HashMap<>();
         Set<String> documents = new HashSet<>();
         LSResourceResolver resolver = (type, namespace, publicId, systemId, baseURI) -> {
             if (systemId == null) {
@@ -278,6 +280,7 @@ public final class XsdOracle {
                     try {
                         schemas.put(fields[1], factory.newSchema(source(data, resolve(fields[2], null).toASCIIString(),
                                                                         diagnostics)));
+                        if (typed) { observers.put(fields[1], new TypedXmlObserver(schemas.get(fields[1]))); }
                         result("S", fields[1], "valid", "", diagnostics);
                     } catch (SAXException | IllegalArgumentException error) {
                         result("S", fields[1], "invalid", error.toString(), diagnostics);
@@ -297,6 +300,10 @@ public final class XsdOracle {
                     try {
                         if (entityDocuments) {
                             validator.validate(entitySource(data, diagnostics));
+                        } else if (typed) {
+                            String observation = observers.get(fields[1]).observe(
+                                source(data, "urn:wsdl-interop:payload", diagnostics), diagnostics, resolver);
+                            System.out.println("T\t" + fields[2] + "\t" + encoded(observation));
                         } else {
                             validator.validate(source(data, "urn:wsdl-interop:payload", diagnostics));
                         }

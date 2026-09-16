@@ -488,3 +488,10 @@ character comparisons through both actual SOAP bindings; see
 [character evidence](character-whitespace-evidence.md). Complete typed-value and
 namespace-context accounting remains the next P5 acceptance criterion. P6–P9
 remain open; the exploratory PSVI comparison does not close these criteria.
+
+P5-22a qualifies the independent typed observer and comparison predicate, including
+exact scalar/list values, selected types, namespace dependencies, character order,
+strict result completeness and bounded resource handling. See
+[observer evidence](typed-observer-evidence.md). Mandatory corpus accounting is
+the next P5 task; existing unassessed stages remain visible until that integration
+and acceptance are complete.

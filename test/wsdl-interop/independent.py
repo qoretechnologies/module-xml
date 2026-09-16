@@ -5,6 +5,7 @@ Requires a JDK (java and javac); all dependencies are pinned offline.
 """
 
 import base64
+import json
 from dataclasses import dataclass, field
 import os
 from pathlib import Path
@@ -45,8 +46,23 @@ def _decode(value: str) -> str:
         raise RuntimeError("malformed oracle diagnostic encoding") from error
 
 
-def check_results(jobs: list[SchemaJob], output: str) -> dict:
+def _unique_keys(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate observation key")
+        result[key] = value
+    return result
+
+
+def _invalid_constant(value):
+    raise ValueError("non-JSON numeric observation: " + value)
+
+
+def check_results(jobs: list[SchemaJob], output: str, *, typed: bool = False) -> dict:
     """Reject lost, duplicate, reordered or malformed worker results, including skipped stages."""
+    if type(typed) is not bool:
+        raise ValueError("typed observation mode must be boolean")
     lines = iter(output.splitlines())
     version = next(lines, "").split("\t")
     if len(version) != 3 or version[0] != "version":
@@ -56,8 +72,23 @@ def check_results(jobs: list[SchemaJob], output: str) -> dict:
     if report["versions"]["xerces"] != "Xerces-J 2.12.2" or not report["versions"]["java"]:
         raise RuntimeError("unexpected oracle implementation version")
 
+    if typed:
+        report["observations"] = {}
+
     def take(stage: str, name: str, schema_ok: bool = True) -> dict:
         row = next(lines, "").split("\t")
+        observation = None
+        if typed and stage == "V" and row[:2] == ["T", name]:
+            if len(row) != 3:
+                raise RuntimeError(f"malformed typed oracle record: {name}")
+            from typed_reference import validate_observation
+            try:
+                observation = json.loads(_decode(row[2]), object_pairs_hook=_unique_keys,
+                                         parse_constant=_invalid_constant)
+                validate_observation(observation)
+            except (ValueError, RecursionError) as error:
+                raise RuntimeError(f"invalid typed oracle observation: {name}: {error}") from error
+            row = next(lines, "").split("\t")
         if (len(row) != 5 or row[:2] != [stage, name]
                 or row[2] not in ("valid", "invalid", "unreachable")
                 or (row[2] == "unreachable") != (not schema_ok)):
@@ -68,6 +99,10 @@ def check_results(jobs: list[SchemaJob], output: str) -> dict:
         warnings = [_decode(item) for item in row[4].split(",")] if row[4] else []
         if any(not warning for warning in warnings) or (row[2] == "unreachable" and warnings):
             raise RuntimeError(f"inconsistent oracle warnings: {stage}/{name}")
+        if typed and stage == "V":
+            if (row[2] == "valid") != (observation is not None):
+                raise RuntimeError(f"missing or unexpected typed oracle observation: {name}")
+            report["observations"][name] = observation
         return {"ok": True if row[2] == "valid" else False if row[2] == "invalid" else None,
                 "status": row[2], "desc": desc, "warnings": warnings}
 
@@ -90,6 +125,16 @@ def run(jobs: list[SchemaJob], resources: dict[str, bytes] | None = None) -> dic
     return _run(jobs, resources, "XsdOracle")
 
 
+def run_typed(jobs: list[SchemaJob], resources: dict[str, bytes] | None = None) -> dict:
+    """Validate and capture assessed types, exact values, characters and namespaces.
+
+    Valid documents require one complete observation; invalid/unreachable inputs
+    explicitly have none. The SOAP oracle's offline and DOCTYPE rules still apply.
+    Reference defects remain subject to the source-adjudication policy.
+    """
+    return _run(jobs, resources, "XsdOracle", typed=True)
+
+
 def run_entity_documents(jobs: list[SchemaJob]) -> dict:
     """Validate standalone ENTITY documents through the pinned DOM oracle.
 
@@ -100,7 +145,8 @@ def run_entity_documents(jobs: list[SchemaJob]) -> dict:
     return _run(jobs, None, "XsdEntityOracle")
 
 
-def _run(jobs: list[SchemaJob], resources: dict[str, bytes] | None, worker: str) -> dict:
+def _run(jobs: list[SchemaJob], resources: dict[str, bytes] | None, worker: str,
+         *, typed: bool = False) -> dict:
     if not jobs:
         raise ValueError("no independent oracle jobs")
     resources = resources or {}
@@ -137,7 +183,7 @@ def _run(jobs: list[SchemaJob], resources: dict[str, bytes] | None, worker: str)
         classpath = os.pathsep.join(artifacts + [temporary])
         compile_result = subprocess.run(["javac", "-Xlint:all", "-Werror", "-cp", classpath,
                                          "-d", temporary, str(ROOT / "XsdOracle.java"),
-                                         str(ROOT / "XsdEntityOracle.java")],
+                                         str(ROOT / "XsdEntityOracle.java"), str(ROOT / "TypedXmlObserver.java")],
                                         capture_output=True, text=True, check=True, timeout=30)
         if compile_result.stdout or compile_result.stderr:
             raise RuntimeError(f"oracle compilation diagnostics: {compile_result.stdout}{compile_result.stderr}")
@@ -145,8 +191,8 @@ def _run(jobs: list[SchemaJob], resources: dict[str, bytes] | None, worker: str)
         # Xerces exposes the conforming count as a JVM property read during type initialization.
         process = subprocess.run(["java", "-Xmx256m",
                                  "-Dorg.apache.xerces.impl.dv.xs.useCodePointCountForStringLength=true",
-                                 "-cp", classpath, worker, str(input_file)],
+                                 "-cp", classpath, worker, *(["--typed"] if typed else []), str(input_file)],
                                  capture_output=True, text=True, check=True, timeout=60)
         if process.stderr:
             raise RuntimeError(f"oracle worker diagnostics: {process.stderr}")
-    return check_results(jobs, process.stdout)
+    return check_results(jobs, process.stdout, typed=typed)

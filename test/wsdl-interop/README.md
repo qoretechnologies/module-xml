@@ -2117,3 +2117,13 @@ comparison demonstrates why schema validity alone cannot establish preservation.
 See [evidence](character-whitespace-evidence.md), [validation inventory](P5-21-validation.json)
 and [audit](audits/P5-21-character-whitespace.md). Complete P5 typed/namespace
 accounting and P6–P9 remain open.
+
+The independent typed observer is qualified by
+`python3 -B test/wsdl-interop/test_typed_reference.py -v`. Use
+`independent.run_typed([SchemaJob(...)], resources)` to obtain checked observations
+for documents validated against the same schema, then
+`typed_reference.compare(before, after, order="exact")` to compare them.
+The explicit `per-name` alternative permits only the established element-only
+flat-record ordering contract. See [observer evidence](typed-observer-evidence.md)
+for exact scalar/namespace semantics, examples, resource limits and the remaining
+coverage-integration boundary. Missing observations fail the harness.

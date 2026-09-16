@@ -8498,3 +8498,39 @@ namespace-context comparator testing and mandatory typed accounting remain next;
 this is not P5 completion. P6–P9 remain required. Artifacts:
 `/tmp/wsdl-p5-21-whitespace/` and `/tmp/wsdl-p5-typed-accounting/after-whitespace/`.
 Main Qore remains read-only; no install, push or new decision question.
+
+## P5-22a accepted — independent typed observations (2026-09-16)
+
+P5-21 is committed as `4ccbb88`. The pinned independent runner now emits checked
+post-validation types, exact values, selected list members, nil/default metadata,
+character order and local namespace declarations. Malformed/missing observations
+fail closed; depth and fragmented-text tests verify resource behavior. Exact
+calendar/duration reference predicates avoid fractional precision loss. Explicit
+ordering contracts retain mixed/generic order and equal-name occurrence order.
+
+Acceptance includes 57 comparison pairs, seven new observer tests, affected
+independent/reference tests and eight Qore suites (217 cases/1,613 reported
+assertions). The full calendar matrix passes nine tests in 584 seconds; its initial
+300-second aggregate deadline was insufficient. The complete coverage test's
+60-second subprocess deadline was exceeded in the concurrent run, then passed
+unchanged in 43 seconds when run separately. A stale 72-disagreement assertion is
+corrected to assert the exact 56 numeric disagreements: the earlier ID-binding
+fix removed the other 16. Its two existing P6 binding-version subtest failures
+remain explicit; no skip or expected-failure marker was added.
+
+Both survey modes and both coverage reports are exactly identical to P5-21.
+The checked observer validates 262 schemas and 4,192 documents: all 2,096 native
+pairs preserve their typed values under the established per-name element-only
+contract. Exact-order comparison retains 20 known flat-record/all differences.
+The 62-item audit records 11 Pass / 51 N/A / zero Fail. See
+[observer evidence](typed-observer-evidence.md), [validation](P5-22a-validation.json)
+and [audit](audits/P5-22a-typed-observer.md).
+
+The next coverage prototype is isolated under `/tmp/wsdl-p5-22b-coverage/`.
+Its native report assesses all 2,096 valid directions without differences; its
+legacy report exposes eight schema-valid projection losses plus the four known
+serialization failures. The generic inferred-type and optional-nil omission
+contracts are documented and native mode retains their information. These legacy
+losses must remain visible. Mandatory integration, strict P5 selection and phase
+acceptance remain open. Main Qore is read-only; no install or push. No new
+interpretation or permission question is pending.
