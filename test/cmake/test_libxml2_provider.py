@@ -20,6 +20,19 @@ REPO = Path(__file__).resolve().parents[2]
 
 
 class SourceDistributionTest(unittest.TestCase):
+    def test_private_decimal_parser_provenance_and_license(self):
+        import hashlib
+        root = REPO / "cmake/third-party/fast_float"
+        for name, digest in {
+            "fast_float.h": "f23d93a4d1adf052e7b50e2a55ac54feeef91e188b71d35ae3038597e2659b90",
+            "LICENSE-MIT": "e562f3f974ced7e69dd1db77b820b36bcf8f30377f1aa105723fba449c53c4e6",
+        }.items():
+            self.assertEqual(digest, hashlib.sha256((root / name).read_bytes()).hexdigest())
+            self.assertIn(digest, (root / "README.md").read_text())
+            self.assertIn(str((root / name).relative_to(REPO)), (REPO / "Makefile.am").read_text())
+        self.assertIn((root / "LICENSE-MIT").read_text(),
+                      (REPO / "cmake/libxml2-NOTICES.txt").read_text())
+
     def test_native_dependency_inputs_are_distributed(self):
         makefile = (REPO / "Makefile.am").read_text().replace("\\\n", " ")
         declarations = [line.partition("=")[2] for line in makefile.splitlines()
@@ -1434,6 +1447,45 @@ set_property(TARGET LibXml2 PROPERTY SOURCES "${native_sources}")
         self.configure("bundled", "-DQORE_XML_LIBXML2_PROVIDER=BUNDLED",
                        f"-DFETCHCONTENT_SOURCE_DIR_QORE_XML_LIBXML2={self.source}")
         self.assertEqual(before, (path.stat().st_mtime_ns, hashlib.sha256(path.read_bytes()).hexdigest()))
+
+    def test_ieee_without_standard_float_from_chars(self):
+        import ieee_reference_cases as reference
+        # Model Apple's integer-only from_chars API while retaining the host's
+        # real standard-library formatting. Include-next is supported by both
+        # Clang (macOS) and GCC (Linux), the provider suite's native compilers.
+        shim = self.root / "integer-only-charconv"
+        shim.mkdir()
+        (shim / "charconv").write_text('''#pragma once
+#define from_chars qore_test_original_from_chars
+#include_next <charconv>
+#undef from_chars
+#include <type_traits>
+namespace std {
+template<class Integer>
+enable_if_t<is_integral<Integer>::value, from_chars_result>
+from_chars(const char* first, const char* last, Integer& value, int base = 10) noexcept {
+    return qore_test_original_from_chars(first, last, value, base);
+}
+}
+''')
+        # Prove that the emulated API rejects the original float call.
+        negative = shim / "negative.cpp"
+        negative.write_text('#include <charconv>\nint main() { float value; '
+                            'std::from_chars("1", "1" + 1, value, std::chars_format::general); }\n')
+        compiler = next(line.split("=", 1)[1] for line in
+                        (self.root / "bundled/CMakeCache.txt").read_text().splitlines()
+                        if line.startswith("CMAKE_CXX_COMPILER:FILEPATH="))
+        self.run_command([compiler, "-std=c++17", "-I" + str(shim), "-c", negative,
+                          "-o", shim / "negative.o"], success=False)
+        self.configure("integer-only", "-DQORE_XML_LIBXML2_PROVIDER=BUNDLED",
+                       f"-DFETCHCONTENT_SOURCE_DIR_QORE_XML_LIBXML2={self.source}",
+                       f"-DCMAKE_CXX_FLAGS=-I{shim}")
+        self.run_command(["cmake", "--build", self.root / "integer-only",
+                          "--target", "ieee-values", "-j4"])
+        rows = reference.cases()
+        source = "".join(str(int(wide)) + "\t" + text + "\n" for wide, text, _, _ in rows)
+        output = self.run_command([self.root / "integer-only/ieee-values", "C"], input=source)
+        reference.check(self, rows, output)
 
     def test_ieee_values_against_integer_rational_reference(self):
         import ieee_reference_cases as reference

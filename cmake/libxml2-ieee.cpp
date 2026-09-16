@@ -3,6 +3,7 @@
  * Private libxml2 IEEE conversion: no allocation, locale or rounding-mode state.
  */
 #include <charconv>
+#include "third-party/fast_float/fast_float.h"
 #include <cfenv>
 #include <cmath>
 #include <cstring>
@@ -12,7 +13,7 @@ static_assert(std::numeric_limits<float>::is_iec559 && std::numeric_limits<float
     && std::numeric_limits<double>::is_iec559 && std::numeric_limits<double>::digits == 53,
     "XSD IEEE conversion requires binary32 and binary64");
 
-// charconv chooses nearest rounding, but its implementation can still raise
+// Decimal conversion chooses nearest rounding, but its implementation can still raise
 // floating-point status flags. Suppress traps and restore all caller state.
 template<class Function> static int guarded(Function function) noexcept {
     std::fenv_t environment;
@@ -72,7 +73,7 @@ template<class Float> static int canonical(Float value, char* output, size_t cap
 // Range errors are distinguished so the caller can map XSD overflow/underflow.
 template<class Float> static int parse(const char* first, const char* last, Float* output) noexcept {
     Float value = 0;
-    auto result = std::from_chars(first, last, value, std::chars_format::general);
+    auto result = fast_float::from_chars(first, last, value, fast_float::chars_format::general);
     if (result.ptr != last) {
         return -1;
     }
