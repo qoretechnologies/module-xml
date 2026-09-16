@@ -8534,3 +8534,40 @@ contracts are documented and native mode retains their information. These legacy
 losses must remain visible. Mandatory integration, strict P5 selection and phase
 acceptance remain open. Main Qore is read-only; no install or push. No new
 interpretation or permission question is pending.
+
+## P5-22b accepted — complete typed accounting and P5 closure (2026-09-16)
+
+Observer qualification is committed as `1f70115`. Coverage now assesses input
+and output under the same compiled schema and requires complete selected type,
+exact value, namespace and character observations for every serialized valid
+source. Existing normative scalar/particle assertions remain mandatory. Missing
+reference data fails coverage; malformed observation data fails the harness.
+Exact input/output observation and implementation hashes identify the evidence.
+
+The new strict P5 selection preserves all prior assertions and covers 172 WSDLs /
+1,564 directions, including 34 assigned/supporting requirement families. The
+complete native report has zero failures: 2,096 valid directions retain values,
+176 invalid-source directions reject correctly, and every typed stage is
+accounted for without unassessed/missing/skipped rows. P5 selected families use
+exact order. Legacy retains twelve failures: four selected-type serialization
+errors, four inferred anyType annotations and four optional nil omissions.
+Their documented projection policy is unchanged; the legacy strict gate exits
+one and is never presented as a conformance pass. Both diagnostic survey reports
+are exactly unchanged from P5-21.
+
+Seven new integration tests, observer/independent/survey tests and all 15 unaffected
+coverage methods pass; the existing coverage method still reports its two labelled
+P6 binding-version failures. Eight affected Qore suites pass 217 cases / 1,613
+reported assertions. All tested sources remain unchanged. P5-21's 193-suite /
+97,747-assertion runtime, independent binding checks and four clean Valgrinds
+cover the identical current WSDL/native/core hashes. This increment changes only
+Python reporting/tests, selection and documentation. All 62 audit checks are
+recorded: 11 Pass / 51 N/A / zero Fail. See [validation](P5-22b-validation.json),
+[typed coverage](typed-coverage-evidence.md) and [phase acceptance](P5-acceptance.md).
+
+P5 is complete under the approved explicit native-capture/retained-XML contracts;
+P6 is now the first incomplete phase. Begin with actual binding selection and the
+separately documented operation-handle ownership defect, then complete the P6
+component/parts/HTTP/MIME requirements. P7–P9, including the recorded QName AOT
+stack finding and mandatory platform CI, remain required. No main-Qore mutation,
+installation, push or new decision question. Artifacts: `/tmp/wsdl-p5-22b-coverage/`.

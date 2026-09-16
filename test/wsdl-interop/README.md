@@ -2,6 +2,11 @@
 
 Copyright (C) 2026 Qore Technologies, s.r.o. The W3C fixtures retain their original copyright notices.
 
+P1–P5 acceptance is complete for the approved explicit native/retained-XML
+contracts; [P5 acceptance](P5-acceptance.md) records the current complete typed
+coverage and the separately retained legacy projection losses. P6–P9 remain open.
+The evidence documents below record their individual implementation increments.
+
 Native empty defaults and declaration-scoped QName identity use
 `qore -b --enable-debug test/xml-element-defaults.qtest` and
 `python3 test/wsdl-interop/test_element_defaults.py -v`. The latter reproduces
@@ -2127,3 +2132,17 @@ The explicit `per-name` alternative permits only the established element-only
 flat-record ordering contract. See [observer evidence](typed-observer-evidence.md)
 for exact scalar/namespace semantics, examples, resource limits and the remaining
 coverage-integration boundary. Missing observations fail the harness.
+
+Complete typed corpus accounting uses the stricter P5 selection:
+
+```sh
+python3 -B test/wsdl-interop/test_typed_coverage.py -v
+python3 -B test/wsdl-interop/coverage.py /tmp/wsdl-corpus/databinding/examples/6/09 \
+  --preserve-types --selection test/wsdl-interop/p5-selection.json --strict \
+  --output /tmp/wsdl-p5-native-coverage.json
+```
+
+Existing normative assertions remain mandatory. Run and retain the legacy report
+separately; its type/nil projection losses must remain failures. See
+[typed accounting evidence](typed-coverage-evidence.md) for the selection, ordering
+contract, observation provenance and coverage boundaries.

@@ -24,7 +24,8 @@ import temporal_reference
 import duration_reference
 import binary_reference
 import particle_reference
-from independent import SchemaJob, run as run_independent
+from independent import SchemaJob, run_typed
+import typed_reference
 import normative
 import survey
 
@@ -165,6 +166,23 @@ def value_checks(expected: etree._Element, actual: etree._Element, assertions: l
     return {"ok": all(r["ok"] for r in results), "status": "assessed", "assertions": results}
 
 
+def typed_value_checks(oracle: dict, key: str, order: str) -> dict:
+    """Require both checked observations; retain a reproducible digest of each.
+
+    Missing reference assessment stays unassessed and causes a coverage failure.
+    Malformed observations raise outside payload-error handling, preserving the
+    distinction between a broken harness and an invalid production document.
+    """
+    before = oracle["observations"].get(key + "/input")
+    after = oracle["observations"].get(key)
+    if before is None or after is None:
+        return {"ok": None, "status": "unassessed", "reason": "reference assessment unavailable"}
+    same = typed_reference.compare(before, after, order=order)
+    return {"ok": same, "status": "assessed", "order": order, "format": 1,
+            "observation_sha256": {stage: hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
+                                   for stage, value in (("input", before), ("output", after))}}
+
+
 def validate_selection(selection: dict, records: dict) -> None:
     """Reject stale/empty/duplicate selections and undocumented expectations before testing."""
     if (not isinstance(selection, dict) or type(selection.get("format")) is not int or selection["format"] != 1
@@ -190,6 +208,12 @@ def validate_selection(selection: dict, records: dict) -> None:
             if decision["valid"] is False and assertions:
                 raise ValueError("invalid source message cannot expect successful serialization")
             for assertion in assertions:
+                if isinstance(assertion, dict) and assertion.get("datatype") == "typed":
+                    if set(assertion) != {"datatype", "order"} or assertion["order"] not in ("exact", "per-name"):
+                        raise ValueError("malformed typed observation assertion")
+                    if sum(a.get("datatype") == "typed" for a in assertions if isinstance(a, dict)) != 1:
+                        raise ValueError("duplicate typed observation assertion")
+                    continue
                 if isinstance(assertion, dict) and assertion.get("datatype") == "particle":
                     particle_reference.validate_assertion(assertion)
                     continue
@@ -234,6 +258,9 @@ def assess(root: Path, source: dict, selection: dict, catalog: corpus.Catalog, q
                 key = message["file"] + "/" + message["direction"]
                 try:
                     documents[key] = etree.tostring(survey.payload(row["body"].encode(), survey.parser(root, catalog)))
+                    if records[name]["messages"][message["file"]]["decision"]["valid"]:
+                        documents[key + "/input"] = etree.tostring(survey.payload(
+                            Path(message["path"]).read_bytes(), survey.parser(root, catalog)))
                 except (etree.LxmlError, ValueError, OSError) as error:
                     row["output_document_error"] = str(error)
         jobs.append(SchemaJob(name, uri, data, documents))
@@ -241,7 +268,7 @@ def assess(root: Path, source: dict, selection: dict, catalog: corpus.Catalog, q
             schemas[name] = etree.XMLSchema(etree.fromstring(data, survey.parser(root, catalog), base_url=uri))
         except (etree.LxmlError, OSError) as error:
             schemas[name] = str(error)
-    oracle = run_independent(jobs, resources)
+    oracle = run_typed(jobs, resources)
     outcomes, failures, selected_failures = [], [], []
     totals = Counter()
     for case in cases:
@@ -301,11 +328,24 @@ def assess(root: Path, source: dict, selection: dict, catalog: corpus.Catalog, q
                 assertions = selected.get("messages", {}).get(file)
                 if assertions is None:
                     assertions = [a for a in decision.get("assertions", []) if a["valid"] and a["datatype"] != "gMonth"]
+                typed_assertions = [a for a in assertions if a.get("datatype") == "typed"]
+                typed_order = typed_assertions[0]["order"] if typed_assertions else "per-name"
+                assertions = [a for a in assertions if a.get("datatype") != "typed"]
+                if decision["valid"]:
+                    result["input_xerces"] = oracle["documents"].get(key + "/input")
+                    result["typed_values"] = typed_value_checks(oracle, key, typed_order)
                 expected = actual = None
                 try:
                     expected = survey.payload(Path(message["path"]).read_bytes(), survey.parser(root, catalog))
                     actual = survey.payload(encode["body"].encode(), survey.parser(root, catalog))
                     result["values"] = value_checks(expected, actual, assertions)
+                    if decision["valid"]:
+                        if not assertions:
+                            result["values"] = result["typed_values"]
+                        elif result["typed_values"]["ok"] is not True:
+                            result["values"]["ok"] = False
+                        if result["typed_values"]["ok"] is None:
+                            result["failures"].append("typed_reference_unavailable")
                     envelope = etree.fromstring(encode["body"].encode(), survey.parser(root, catalog))
                     result["binding_version_passed"] = envelope.tag == "{" + survey.SOAP_NAMESPACES[
                         0 if case["identity"]["soap_version"] == "11" else 1] + "}Envelope"
@@ -341,7 +381,7 @@ def assess(root: Path, source: dict, selection: dict, catalog: corpus.Catalog, q
                 if file in selected.get("messages", {}):
                     selected_failures.append(failure)
             for stage, field in (("output_lxml", "output_lxml"), ("output_xerces", "output_xerces"),
-                                  ("values", "values")):
+                                  ("values", "values"), ("typed_values", "typed_values")):
                 counts = accounting["counts"].setdefault(stage, {state: 0 for state in
                     ("ok", "failed", "unreachable", "unassessed", "missing", "skipped")})
                 check = result.get(field)
@@ -357,11 +397,15 @@ def assess(root: Path, source: dict, selection: dict, catalog: corpus.Catalog, q
     return {"format": 1, "scope": {"wsdls": len(cases), "input_files": sum(len(c["messages"]) for c in cases) // 2,
                 "directions": list(DIRECTIONS), "input_soap_versions": ["11", "12"], "network": False,
                 "preserve_types": preserve_types,
-                "not_assessed": ["full typed/infoset preservation outside explicit assertions", "HTTP", "SOAP processing",
+                "typed_values": {"format": 1, "default_element_only_order": "per-name",
+                                 "selected_order": "explicit typed assertion overrides default"},
+                "not_assessed": ["complete XML carrier comments/PI/lexical boundaries", "HTTP", "SOAP processing",
                                  "actual SOAP 1.2 binding interoperability in the W3C echo set"]},
             "source_report_sha256": hashlib.sha256(json.dumps(source, sort_keys=True).encode()).hexdigest(),
             "selection_sha256": hashlib.sha256(json.dumps(selection, sort_keys=True).encode()).hexdigest(),
-            "versions": {**oracle["versions"], "qore": version.stdout, "lxml": list(etree.LXML_VERSION),
+            "versions": {**oracle["versions"], "qore": version.stdout,
+                         "typed_reference_sha256": hashlib.sha256((ROOT / "typed_reference.py").read_bytes()).hexdigest(),
+                         "typed_observer_sha256": hashlib.sha256((ROOT / "oracle/TypedXmlObserver.java").read_bytes()).hexdigest(), "lxml": list(etree.LXML_VERSION),
                          "libxml2": list(etree.LIBXML_VERSION), "wsdl_module_sha256": hashlib.sha256(
                              (ROOT.parents[1] / "qlib/WSDL.qm").read_bytes()).hexdigest()},
             "catalog_sha256": dict(catalog.sha256),
