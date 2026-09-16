@@ -107,15 +107,34 @@ public class InMemoryWebDavPropertyHandler inherits AbstractWebDavPropertyHandle
     }
 
     #! Copies all properties to another target URL
+    /** A source without stored properties clears the target's properties.
+        @param src_url the resource whose properties are copied
+        @param target_url the resource whose property set is replaced
+    */
     cp(string src_url, string target_url) {
         AutoWriteLock al(m_lock);
-        m_cache{target_url} = m_cache{src_url};
+        if (m_cache.hasKey(src_url)) {
+            m_cache{target_url} = m_cache{src_url};
+        } else {
+            remove m_cache{target_url};
+        }
     }
 
     #! Moves properties from one target URL to another
+    /** A source without stored properties clears the target's properties. Identical URLs leave properties intact.
+        @param src_url the resource whose properties are moved
+        @param target_url the resource whose property set is replaced
+    */
     move(string src_url, string target_url) {
+        if (src_url == target_url) {
+            return;
+        }
         AutoWriteLock al(m_lock);
-        m_cache{target_url} = m_cache{src_url};
+        if (m_cache.hasKey(src_url)) {
+            m_cache{target_url} = m_cache{src_url};
+        } else {
+            remove m_cache{target_url};
+        }
         delete m_cache{src_url};
     }
 } # class InMemoryWebDavPropertyHandler

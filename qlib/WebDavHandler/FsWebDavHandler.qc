@@ -1153,6 +1153,7 @@ public class FsWebDavHandler inherits AbstractWebDavHandler {
     #! Internal method for handling PROPPATCH requests
     /** Create, change and delete one or more properties on a resource in a single atomic action
 
+        @param href the resource URL, updated when path normalization is required
         @param cx the HTTP call context
         @param hdr as hash HTTP headers
         @param request_xml the parsed XML in the request

@@ -1,0 +1,163 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires FsUtil
+%requires ../qlib/WebDavHandler
+%exec-class WebDavPropertyHandlerTest
+
+class WebDavPropertyHandlerTest inherits QUnit::Test {
+    constructor() : Test("WebDAV property copy and move", "1.0") {
+        addTestCase("Absent properties copy and move without typed-map errors", \missing());
+        addTestCase("Absent source properties clear stale target properties", \replaceMissing());
+        addTestCase("Copies preserve all namespaces and remain independent", \copies());
+        addTestCase("Moves transfer properties and remove the source", \moves());
+        addTestCase("Same-resource operations preserve properties", \sameResource());
+        addTestCase("File-backed copy and move persist empty and populated state", \persistent());
+        addTestCase("Concurrent property operations and sync preserve completed updates", \concurrent());
+        set_return_value(main());
+    }
+    private list<AbstractWebDavPropertyHandler> handlers(TmpDir directory) {
+        return (new InMemoryWebDavPropertyHandler(), new FileWebDavPropertyHandler(directory.path));
+    }
+    private missing() {
+        TmpDir directory();
+        foreach AbstractWebDavPropertyHandler handler in (handlers(directory)) {
+            handler.cp("missing", "copied");
+            assertEq(NOTHING, handler.getAll("copied"));
+            handler.move("missing", "moved");
+            assertEq(NOTHING, handler.getAll("moved"));
+            assertEq(NOTHING, handler.getAll("missing"));
+            handler.set("valid", "urn:test", "title", "after missing");
+            handler.cp("valid", "copied");
+            assertEq("after missing", handler.get("copied", "urn:test", "title"));
+        }
+    }
+    private replaceMissing() {
+        TmpDir directory();
+        foreach AbstractWebDavPropertyHandler handler in (handlers(directory)) {
+            handler.set("destination", "urn:old", "stale", 1);
+            handler.cp("missing", "destination");
+            assertEq(NOTHING, handler.getAll("destination"));
+            handler.set("destination", "urn:old", "stale", 2);
+            handler.move("missing", "destination");
+            assertEq(NOTHING, handler.getAll("destination"));
+        }
+    }
+    private copies() {
+        TmpDir directory();
+        foreach AbstractWebDavPropertyHandler handler in (handlers(directory)) {
+            handler.set("source", "urn:a", "title", "original");
+            handler.set("source", "urn:b", "count", 7);
+            handler.set("target", "urn:stale", "old", True);
+            handler.cp("source", "target");
+            assertEq({"urn:a":{"title":"original"}, "urn:b":{"count":7}}, handler.getAll("target"));
+            handler.set("target", "urn:a", "title", "copy changed");
+            assertEq("original", handler.get("source", "urn:a", "title"));
+            handler.del("source", "urn:b", "count");
+            assertEq(7, handler.get("target", "urn:b", "count"));
+            handler.delAll("source");
+            assertEq("copy changed", handler.get("target", "urn:a", "title"));
+        }
+    }
+    private moves() {
+        TmpDir directory();
+        foreach AbstractWebDavPropertyHandler handler in (handlers(directory)) {
+            handler.set("source", "urn:a", "title", "moved");
+            handler.set("target", "urn:stale", "old", True);
+            handler.move("source", "target");
+            assertEq(NOTHING, handler.getAll("source"));
+            assertEq({"urn:a":{"title":"moved"}}, handler.getAll("target"));
+            handler.set("source", "urn:a", "title", "new source");
+            assertEq("moved", handler.get("target", "urn:a", "title"));
+        }
+    }
+    private sameResource() {
+        TmpDir directory();
+        foreach AbstractWebDavPropertyHandler handler in (handlers(directory)) {
+            handler.cp("missing", "missing");
+            handler.move("missing", "missing");
+            assertEq(NOTHING, handler.getAll("missing"));
+            handler.set("source", "urn:test", "title", "preserved");
+            handler.cp("source", "source");
+            assertEq("preserved", handler.get("source", "urn:test", "title"));
+            handler.move("source", "source");
+            assertEq("preserved", handler.get("source", "urn:test", "title"));
+        }
+    }
+    private concurrent() {
+        TmpDir directory();
+        FileWebDavPropertyHandler handler(directory.path);
+        Counter running();
+        Queue ready();
+        Queue start();
+        Queue results();
+        on_exit {
+            for (int i = 0; i < 4; ++i) {
+                start.push(True);
+            }
+            assertEq(0, running.waitForZero(30s));
+        }
+        for (int i = 0; i < 4; ++i) {
+            running.inc();
+            background sub(int index) {
+                on_exit running.dec();
+                try {
+                    ready.push(True);
+                    start.pop(30000);
+                    string source = "source-" + index;
+                    for (int value = 0; value < 12; ++value) {
+                        handler.set(source, "urn:test", "value", value);
+                        handler.cp(source, "copy-" + index);
+                        handler.move("copy-" + index, "target-" + index);
+                        handler.sync();
+                    }
+                    results.push(index);
+                } catch (hash<ExceptionInfo> ex) {
+                    results.push(ex);
+                }
+            }(i);
+        }
+        for (int i = 0; i < 4; ++i) {
+            ready.pop(30000);
+        }
+        for (int i = 0; i < 4; ++i) {
+            start.push(True);
+        }
+        hash<string, bool> seen();
+        for (int i = 0; i < 4; ++i) {
+            auto result = results.pop(30000);
+            assertEq(NT_INT, result.typeCode(), sprintf("%Y", result));
+            assertFalse(exists seen{string(result)});
+            seen{string(result)} = True;
+        }
+        assertEq(0, running.waitForZero(30s));
+        FileWebDavPropertyHandler restored(directory.path);
+        for (int i = 0; i < 4; ++i) {
+            assertEq(11, restored.get("source-" + i, "urn:test", "value"));
+            assertEq(11, restored.get("target-" + i, "urn:test", "value"));
+            assertEq(NOTHING, restored.getAll("copy-" + i));
+        }
+    }
+    private persistent() {
+        TmpDir directory();
+        {
+            FileWebDavPropertyHandler handler(directory.path);
+            handler.set("source", "urn:test", "title", "retained");
+            handler.cp("source", "copy");
+            handler.move("source", "moved");
+            handler.set("stale-copy", "urn:old", "gone", True);
+            handler.cp("missing", "stale-copy");
+            handler.set("stale-move", "urn:old", "gone", True);
+            handler.move("missing", "stale-move");
+            handler.sync();
+        }
+        FileWebDavPropertyHandler restored(directory.path);
+        assertEq({"urn:test":{"title":"retained"}}, restored.getAll("copy"));
+        assertEq(restored.getAll("copy"), restored.getAll("moved"));
+        foreach string resource in ("source", "missing", "stale-copy", "stale-move") {
+            assertEq(NOTHING, restored.getAll(resource));
+        }
+    }
+}

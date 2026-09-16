@@ -8628,3 +8628,24 @@ installation, push or new decision question. Artifacts: `/tmp/wsdl-p5-22b-covera
   [audit](audits/P6-02-operation-ownership.md). Raw logs: `/tmp/wsdl-p6-02-operation-ownership/`.
   No install, push or main-Qore mutation. WSDL grammar/component/import/reference
   validation is the next P6 increment; broader P6–P9 acceptance remains incomplete.
+
+## CI checkpoint and local WebDAV property repair
+
+The instruction to push and start an image pipeline was clarified as intended
+for another agent after module-xml through `fd9faa5` had already been pushed.
+Pipeline 56982 started; no Qore push or qore-test-base pipeline was initiated.
+All subsequent XML work must remain local until the development plan is complete.
+
+Both CI environments exposed an unchanged WebDAV property-store defect: copying
+a resource without stored properties assigned NOTHING into a nonoptional typed
+map and returned HTTP 500. It reproduces locally. Both property implementations
+now remove an absent source's target entry; self moves preserve the source.
+File saving uses an exclusive lock for its file/dirty-state mutation. Six suites
+pass 31 cases / 205 assertions, including real HTTP and concurrent persisted
+properties. Docs are clean and all 62 audit checks pass or are N/A. See
+[WebDAV evidence](ci-webdav-properties-evidence.md) and
+[validation](CI-webdav-properties-validation.json).
+
+The completed Alpine job's only failing cases are the three WebDAV cases; its
+WSDL/XML suites pass. The local repair has not been pushed. P6 declaration
+identity work is in progress separately; P6–P9 acceptance remains incomplete.

@@ -279,7 +279,7 @@ public class AbstractWebDavHandler inherits public HttpServer::AbstractHttpReque
     /** Implements the modern 3-arg handler signature; the framework handles all socket I/O
         asynchronously and dispatches handler invocation onto a thread pool worker. The handler
         receives the fully-buffered request body in @a body for non-streaming requests; the
-        response is returned by setting @ref HttpResponseInfo fields (use \c body /
+        response is returned by setting @ref HttpServer::HttpResponseInfo fields (use \c body /
         \c chunked_body / \c send_callback for streaming responses).
     */
     hash<HttpResponseInfo> handleRequest(hash<auto> cx, hash<auto> hdr, *data body) {
