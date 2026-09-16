@@ -4,7 +4,7 @@ Copyright (C) 2026 Qore Technologies, s.r.o.
 
 Execution started 2026-09-07 on `develop` at `c81b2db`, with a clean working tree.
 The authoritative scope and acceptance criteria remain in [PLAN.md](PLAN.md).
-P1 corpus/adjudication, P2 schema/representation, P3 scalar and P4 particle acceptance are complete; P5 content and substitution work is in progress. No scope reductions or workarounds are approved.
+P1–P5 acceptance is complete under the recorded explicit native/retained-XML contracts; P6 binding/component implementation is in progress. No scope reductions or workarounds are approved.
 
 ## P1: corpus provenance and adjudication (complete)
 
@@ -8571,3 +8571,29 @@ separately documented operation-handle ownership defect, then complete the P6
 component/parts/HTTP/MIME requirements. P7–P9, including the recorded QName AOT
 stack finding and mandatory platform CI, remain required. No main-Qore mutation,
 installation, push or new decision question. Artifacts: `/tmp/wsdl-p5-22b-coverage/`.
+
+
+## P6-01: selected binding protocol version
+
+- Root cause: WSOperation defaults and queries used document-wide SOAP namespace
+  presence. Binding extensions now retain their actual scoped protocol identity;
+  request, fault and implicit response serialization use the selected binding.
+- Received fault interpretation uses the envelope namespace. Ordinary decoding
+  and the established explicit response override retain compatibility; stricter
+  protocol enforcement remains P7. No conformance claim is made for that override.
+- New/saved services and bindings, both binding orders, local/default declarations,
+  unused declarations, invalid descriptions/retry, mixed HTTP/SOAP and both actual
+  HTTP service ports are covered. Old standalone metadata ambiguity is diagnosed
+  explicitly; explicit-version low-level serialization remains available.
+- Seven new Qore cases / 946 assertions and all eight existing suites pass. The
+  complex golden message test now explicitly exercises both named bindings.
+  All 16 independent coverage tests pass, including both formerly failing SOAP
+  1.1 measurement directions; all 17 survey tests pass. Docs build cleanly.
+- Complete legacy/native surveys and typed coverage retain parent results. Native
+  coverage has 2,096 successful valid directions; the 12 approved legacy projection
+  losses remain explicit, with legacy strict P5 exit 1 expected and verified.
+- Evidence: [binding versions](binding-version-evidence.md),
+  [validation](P6-01-validation.json), [all 62 audit checks](audits/P6-01-binding-version.md).
+  Runtime and logs: `/tmp/wsdl-p6-01-binding-version/`. No native changes, install,
+  push or main-Qore mutation. P6 ownership/components/parts/HTTP-MIME work remains;
+  the detached operation ownership finding is next.

@@ -7,6 +7,10 @@ contracts; [P5 acceptance](P5-acceptance.md) records the current complete typed
 coverage and the separately retained legacy projection losses. P6–P9 remain open.
 The evidence documents below record their individual implementation increments.
 
+P6-01 implements [binding-specific SOAP versions](binding-version-evidence.md),
+including scoped declarations, saved services and actual HTTP exchanges on both
+ports. P6 component/ownership acceptance and P7 protocol enforcement remain open.
+
 Native empty defaults and declaration-scoped QName identity use
 `qore -b --enable-debug test/xml-element-defaults.qtest` and
 `python3 test/wsdl-interop/test_element_defaults.py -v`. The latter reproduces

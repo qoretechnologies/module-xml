@@ -80,6 +80,11 @@ module WSDL {
     @section wsdlrelnotes WSDL Module Release Notes
 
     @subsection wsdl_0_5_8 WSDL v0.5.8
+    - SOAP request, fault and default response versions come from the selected binding extension,
+      respecting declaration-local namespaces; unrelated SOAP namespace declarations do not select a version
+    - WSOperation::isSoap12() accepts an optional binding name; WebService::isSoap12() checks actual bindings
+    - Saved services reconstruct binding versions from WSDL; old standalone bindings without version metadata
+      require an explicit version or reloading the WSDL for implicit serialization
     - WSDL message and XML-value parsing retain whitespace between children; schema conversion removes
       it only for element-only content, preserving generic and mixed values through SOAP and providers
     - Ordinary recursive XML provider fields retain completed definitions through saved graphs and soft copies;
@@ -28507,7 +28512,8 @@ public class WSOperation inherits WSDL::XsdNamedData {
             throw SOAP_SERIALIZATION_ERROR, sprintf("cannot serialize unknown fault %y for operation %y; known "
                 "faults: %y", fault, name, keys faults);
         }
-        return getBinding(bname).serializeMessage(self, faults{fault}, False, nsc.hasSoap12(), h, header, enc, nsh,
+        OperationalBinding binding = getBinding(bname);
+        return binding.serializeMessage(self, faults{fault}, False, binding.isSoap12(), h, header, enc, nsh,
             xml_opts, req_soapaction, faultmsg);
     }
 
@@ -28537,7 +28543,8 @@ public class WSOperation inherits WSDL::XsdNamedData {
     hash<auto> serializeRequest(auto h, *hash<auto> header, *string enc, *hash<auto> nsh, *int xml_opts, *string req_soapaction, *string bname, *hash<auto> http_headers) {
         XsdIdentityDocumentScope identity_document();
         @assert(nsc, "namespace container must be initialized");
-        return getBinding(bname).serializeMessage(self, input, True, nsc.hasSoap12(), h, header, enc, nsh, xml_opts,
+        OperationalBinding binding = getBinding(bname);
+        return binding.serializeMessage(self, input, True, binding.isSoap12(), h, header, enc, nsh, xml_opts,
             req_soapaction, NOTHING, http_headers);
     }
 
@@ -28548,7 +28555,9 @@ public class WSOperation inherits WSDL::XsdNamedData {
         @param enc the optional encoding to use; if this argument is not present, then the default encoding will be
         used
         @param nsh namespace hash
-        @param soap12 set to True if the response should use SOAP 1.2 encoding
+        @param soap12 explicit legacy response-version override; if omitted, use the selected binding's version
+        @note The explicit override retains its existing namespace-declaration availability check.
+        It does not establish that the selected WSDL binding supports the overridden protocol.
         @param xml_opts optional XML generation options
         @param bname SOAP binding name, leave empty to get the first assigned binding
         @param http_headers HTTP headers to serialize in the response
@@ -28565,20 +28574,18 @@ public class WSOperation inherits WSDL::XsdNamedData {
     hash<auto> serializeResponse(auto h, *hash<auto> header, *string enc, *hash<auto> nsh, *bool soap12, *int xml_opts, *string bname, *hash<auto> http_headers) {
         XsdIdentityDocumentScope identity_document();
         @assert(nsc, "namespace container must be initialized");
+        OperationalBinding binding = getBinding(bname);
         if (exists soap12) {
-            if (soap12) {
-                if (!nsc.hasSoap12())
-                    throw SOAP_SERIALIZATION_ERROR, sprintf("cannot serialize response for operation %y with SOAP "
-                        "1.2 encoding; this operation does not support SOAP 1.2", name);
-            } else {
-                if (!nsc.hasSoap11())
-                    throw SOAP_SERIALIZATION_ERROR, sprintf("cannot serialize response for operation %y with SOAP "
-                        "1.1 encoding; this operation does not support SOAP 1.1", name);
+            # Preserve the explicit response override used by legacy SoapHandler consumers.
+            if (!(soap12 ? nsc.hasSoap12() : nsc.hasSoap11())) {
+                throw SOAP_SERIALIZATION_ERROR, sprintf("cannot serialize response for operation %Y with SOAP %s; "
+                    "this WSDL does not declare that SOAP version", name, soap12 ? "1.2" : "1.1");
             }
-        } else
-            soap12 = nsc.hasSoap12();
-
-        return getBinding(bname).serializeMessage(self, output, False, soap12, h, header, enc, nsh, xml_opts, NOTHING, NOTHING, http_headers);
+        } else {
+            soap12 = binding.isSoap12();
+        }
+        return binding.serializeMessage(self, output, False, soap12, h, header, enc, nsh, xml_opts,
+            NOTHING, NOTHING, http_headers);
     }
 
     #! parses a hash representing a parsed XML request (parsed with @ref Qore::Xml::parse_xml "parse_xml(XPF_PRESERVE_ORDER | XPF_PRESERVE_WHITESPACE)") for the operation and returns the corresponding Qore data structure
@@ -28682,11 +28689,16 @@ public class WSOperation inherits WSDL::XsdNamedData {
         return h;
     }
 
-    #! returns True if the operation is a SOAP 1.2 operation
-    /** @return True if the operation is a SOAP 1.2 operation
+    #! returns True if the selected binding uses SOAP 1.2
+    /** @param bname binding name, or NOTHING for the first assigned binding
+        @return True for SOAP 1.2, False for SOAP 1.1 or HTTP
+        @throw WSDL-BINDING-ERROR unknown binding or a legacy binding without version metadata
+        @par Example
+        When a shipping service exposes ShippingSoap and ShippingSoap12, inspect the intended endpoint
+        with operation.isSoap12("ShippingSoap12") and pass that same binding name to serializeRequest().
     */
-    bool isSoap12() {
-        return nsc.hasSoap12();
+    bool isSoap12(*string bname) {
+        return getBinding(bname).isSoap12();
     }
 
     #! returns the target namespace for the operation
@@ -29634,6 +29646,13 @@ public class OperationalBinding inherits WSDL::XsdNamedData {
         self.output = output;
     }
 
+    #! returns True for a SOAP 1.2 binding, False for other protocols
+    /** @return False in the base implementation; SOAP bindings override this query
+    */
+    bool isSoap12() {
+        return False;
+    }
+
     hash<auto> serializeMessage(WSOperation op, *WSMessage msg, bool request, bool soap12, auto h, *hash<auto> header, string enc = "UTF-8", *hash<auto> nsh, *int xml_opts, *string req_soapaction, *string faultmsg, *hash<auto> http_headers) {
         return serializeMessageImpl(op, msg, request, soap12, h, header, enc, nsh, xml_opts, req_soapaction, faultmsg, http_headers);
     }
@@ -29658,8 +29677,41 @@ public class SoapBinding inherits WSDL::OperationalBinding {
         string soapTransport;
     }
 
-    constructor(string name, string ns, bool docstyle, string soapTransport, *string soapAction, *WSDL::BindingMessageDescription input, *WSDL::BindingMessageDescription output) : OperationalBinding(name, ns, docstyle, soapAction, input, output) {
+    private {
+        # Absent in old standalone serialized bindings; never infer it from unrelated xmlns declarations.
+        *bool soap12_version;
+    }
+
+    #! creates an operational SOAP binding
+    /** @param name binding name
+        @param ns binding namespace prefix
+        @param docstyle True for document style, False for RPC style
+        @param soapTransport SOAP transport URI
+        @param soapAction action URI
+        @param input request message description
+        @param output response message description
+        @param soap12 the binding's SOAP version; supply it for implicit WSOperation serialization
+        @note Older standalone bindings without version metadata can still be used with the explicit
+        version argument of serializeMessage(). Reload their WSDL to use implicit version selection.
+        WebService serialization retains and reparses the WSDL automatically.
+    */
+    constructor(string name, string ns, bool docstyle, string soapTransport, *string soapAction,
+            *WSDL::BindingMessageDescription input, *WSDL::BindingMessageDescription output, *bool soap12)
+            : OperationalBinding(name, ns, docstyle, soapAction, input, output) {
         self.soapTransport = soapTransport;
+        soap12_version = soap12;
+    }
+
+    #! returns the binding's declared SOAP version
+    /** @return True for SOAP 1.2, False for SOAP 1.1
+        @throw WSDL-BINDING-ERROR a legacy standalone binding has no version metadata; reload its WSDL
+    */
+    bool isSoap12() {
+        if (!exists soap12_version) {
+            throw "WSDL-BINDING-ERROR", sprintf("SOAP binding %Y has no saved protocol version; reload its WSDL "
+                "or construct it with an explicit SOAP version", name);
+        }
+        return soap12_version;
     }
 
     hash<auto> serializeMessageImpl(WSOperation op, *WSMessage msg, bool request, bool soap12, auto h, *hash<auto> header, string enc, *hash<auto> nsh, *int xml_opts, *string req_soapaction, *string faultmsg, *hash<auto> http_headers) {
@@ -30080,7 +30132,7 @@ public class SoapBinding inherits WSDL::OperationalBinding {
                 if (body.Fault) {
                     WSDL::XsdBase::removeNS(\body.Fault);
                     delete body.Fault.".ns";
-                    if (op.nsc.hasSoap12()) {
+                    if (envelope_namespaces{o.Envelope.".ns" ?? ""} == SOAP_12_ENV) {
                         WSDL::XsdBase::removeNS(\body.Fault.Code);
                         WSDL::XsdBase::removeNS(\body.Fault.Reason);
                         # remove extraneous "ns" keys
@@ -30796,9 +30848,11 @@ public class Binding inherits WSDL::XsdNamedData {
 
         *string httpMethod;
         *string soapTransport;
+        *bool soap12_version;
     }
 
     constructor(hash<auto> data, Namespaces nsc, reference portTypes, reference idocmap, *hash<auto> messages) : XsdNamedData(\data) {
+        NamespacePrefixHelper binding_scope(nsc, data."^attributes^");
         # get binding attributes
         {
             *hash<auto> ba = data."^attributes^";
@@ -30809,39 +30863,36 @@ public class Binding inherits WSDL::XsdNamedData {
             port = prt;
         }
 
-        if (data.binding) {
+        if (data.binding.typeCode() != NT_HASH) {
+            throw WSDL_ERROR, sprintf("binding %Y requires exactly one SOAP or HTTP binding extension", name);
+        }
+        {
             *hash<auto> bba = data.binding."^attributes^";
-            if (bba.verb) {
-                # HTTP binding
-                httpMethod = bba.verb;
-            }
-
-            if (bba.transport) {
-                # SOAP binding
-                if (!SOAP_TRANSPORT.(bba.transport))
-                    throw WSDL_ERROR, sprintf("unsupported transport %y in binding %y (known transports: %y)", bba.transport, name, SOAP_TRANSPORT.keys());
-                soapTransport = bba.transport;
-            }
-            if (!soapTransport && !httpMethod)
-                throw WSDL_ERROR, sprintf("missing SOAP verb or transport in binding %y (known SOAP transports: %y)", name, SOAP_TRANSPORT.keys());
-
-            if (exists bba.style) {
-                *bool ds = SoapStyleMap{bba.style};
-                if (!exists ds)
-                    throw WSDL_ERROR, sprintf("invalid '\"style\" attribute %y in binding %y; expected one of: %y", bba.style, name, SoapStyleMap.keys());
-                if (!ds)
-                    docstyle = False;
-            }
-
-            hash<string, string> nsh;
-            # issue #2858: add any XML namespaces to namespace object here
-            foreach hash<auto> h in (bba.pairIterator()) {
-                if (h.key =~ /^xmlns:/) {
-                    nsh{h.key} = h.value;
+            NamespacePrefixHelper extension_scope(nsc, bba);
+            string binding_uri = data.binding.ns ? nsc.getInputNamespaceUri(data.binding.ns)
+                : nsc.getDefaultNs() ?? "";
+            if (binding_uri == HTTP_NS) {
+                if (!bba.verb || exists bba.transport) {
+                    throw WSDL_ERROR, sprintf("HTTP binding %Y requires a verb and cannot declare a SOAP transport", name);
                 }
-            }
-            if (nsh) {
-                nsc.addNamespaces(nsh);
+                httpMethod = bba.verb;
+            } else if (binding_uri == SOAP_11_NS || binding_uri == SOAP_12_NS) {
+                if (exists bba.verb || !SOAP_TRANSPORT{bba.transport}) {
+                    throw WSDL_ERROR, sprintf("SOAP binding %Y requires a supported transport and cannot declare "
+                        "an HTTP verb (transport: %Y)", name, bba.transport);
+                }
+                soapTransport = bba.transport;
+                soap12_version = binding_uri == SOAP_12_NS;
+                if (exists bba.style) {
+                    *bool ds = SoapStyleMap{bba.style};
+                    if (!exists ds) {
+                        throw WSDL_ERROR, sprintf("invalid style %Y in binding %Y; expected one of: %Y",
+                            bba.style, name, keys SoapStyleMap);
+                    }
+                    docstyle = ds;
+                }
+            } else {
+                throw WSDL_ERROR, sprintf("unsupported binding extension namespace %Y in binding %Y", binding_uri, name);
             }
         }
 
@@ -31071,7 +31122,7 @@ public class Binding inherits WSDL::XsdNamedData {
             }
 
             OperationalBinding b = soapTransport
-                ? new SoapBinding(name, ophash.ns ?? "", b_docstyle, soapTransport, soapAction, ioh.input, ioh.output)
+                ? new SoapBinding(name, ophash.ns ?? "", b_docstyle, soapTransport, soapAction, ioh.input, ioh.output, soap12_version)
                 : new HttpBinding(name, ophash.ns ?? "", b_docstyle, httpMethod, location, soapAction, ioh.input, ioh.output);
 
             portTypes{port}.operations{opname}.addBinding(b);
@@ -31100,6 +31151,20 @@ public class Binding inherits WSDL::XsdNamedData {
 
     bool isSoapBinding() {
         return exists soapTransport;
+    }
+
+    #! returns True if this binding declares the SOAP 1.2 extension
+    /** @return True for SOAP 1.2, False for SOAP 1.1 or HTTP
+        @throw WSDL-BINDING-ERROR a legacy standalone SOAP binding has no version metadata; reload its WSDL
+    */
+    bool isSoap12() {
+        if (!isSoapBinding()) {
+            return False;
+        }
+        if (!exists soap12_version) {
+            throw "WSDL-BINDING-ERROR", sprintf("SOAP binding %Y has no saved protocol version; reload its WSDL", name);
+        }
+        return soap12_version;
     }
 
     bool isHttpBinding() {
@@ -33846,11 +33911,17 @@ public class WebService inherits WSDL::XsdSchema {
         }
     }
 
-    #! returns True if the WSDL describes a SOAP 1.2 service
-    /** @return True if the WSDL describes a SOAP 1.2 service
+    #! returns True if the WSDL declares at least one SOAP 1.2 binding
+    /** @return True when an actual binding uses the SOAP 1.2 WSDL extension
+        @note An unused SOAP 1.2 namespace declaration does not imply a SOAP 1.2 service.
     */
     bool isSoap12() {
-        return nsc.hasSoap12();
+        foreach Binding item in (binding.iterator()) {
+            if (item.isSoap12()) {
+                return True;
+            }
+        }
+        return False;
     }
 
     #! returns the XML string for the WSDL

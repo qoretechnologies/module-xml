@@ -2,7 +2,7 @@
 
 Copyright (C) 2026 Qore Technologies, s.r.o.
 
-Status: P1–P5 acceptance is complete under the approved explicit native-capture and retained-XML contracts. P5-22b adds complete typed corpus accounting and an exact-order P5 selection; see [P5 acceptance](P5-acceptance.md). The ordinary decoding default and its documented projection losses remain unchanged and separately reported. P6 binding/component implementation is next, followed by P7–P9; the recorded QName AOT stack issue remains assigned to P9 runtime acceptance.
+Status: P1–P5 acceptance is complete under the approved explicit native-capture and retained-XML contracts. P5-22b adds complete typed corpus accounting and an exact-order P5 selection; see [P5 acceptance](P5-acceptance.md). The ordinary decoding default and its documented projection losses remain unchanged and separately reported. P6 binding/component implementation is in progress, followed by P7–P9; the recorded QName AOT stack issue remains assigned to P9 runtime acceptance.
 See [EXECUTION.md](EXECUTION.md) for acceptance evidence and remaining implementation criteria.
 Prepared 2026-09-07 after `cc13171` on `develop`.
 Keep proposals here; put durable implementation details in `design/` only after implementation.
@@ -503,3 +503,11 @@ normative assertion and adds the 172-WSDL/1,564-direction strict P5 selection. A
 directions reject as required. Legacy projection losses remain twelve explicit
 failure records. See [P5 acceptance](P5-acceptance.md) and
 [typed coverage evidence](typed-coverage-evidence.md). P6 is the first incomplete phase.
+
+P6-01 implements binding-specific request/fault/default-response versions, scoped
+extension identity, saved metadata and real dual-port HTTP coverage. All existing
+coverage tests now pass, including the former independent SOAP 1.1 binding failures.
+See [binding-version evidence](binding-version-evidence.md). The explicit response
+version override retains its historical compatibility behavior; strict incoming
+version enforcement remains P7. Detached operation ownership is the next bounded
+P6 increment; component, parts and HTTP/MIME acceptance remain open.

@@ -1,0 +1,241 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires ../qlib/WSDL.qm
+%requires ../qlib/SoapClient.qm
+%requires ../qlib/SoapHandler.qm
+%requires HttpServer
+%exec-class BindingVersionTest
+
+class BindingVersionTest inherits QUnit::Test {
+    constructor() : Test("Binding-local SOAP protocol versions", "1.0") {
+        addTestCase("Selected binding controls requests responses faults and saved services", \versions());
+        addTestCase("Prefix declarations and default namespaces have lexical scope", \scopes());
+        addTestCase("Invalid protocol extensions reject and leave the next parse usable", \invalid());
+        addTestCase("Fault interpretation follows the received envelope", \faultEnvelopes());
+        addTestCase("Mixed HTTP and SOAP bindings retain protocol identity", \mixedHttp());
+        addTestCase("Standalone saved bindings retain explicit metadata or reject ambiguity", \savedBindings());
+        addTestCase("Both service ports exchange the declared version over HTTP", \http());
+        set_return_value(main());
+    }
+
+    private string binding(string name, string uri, string local = "", string extension = "") {
+        return '<w:binding name="' + name + '" type="t:Port" ' + local + '>'
+            + (extension ? extension : '<s:binding xmlns:s="' + uri
+                + '" transport="http://schemas.xmlsoap.org/soap/http"/>')
+            + '<w:operation name="echo"><s:operation xmlns:s="' + uri + '" soapAction="urn:echo"/>'
+            '<w:input><s:body xmlns:s="' + uri + '" use="literal"/></w:input>'
+            '<w:output><s:body xmlns:s="' + uri + '" use="literal"/></w:output>'
+            '</w:operation></w:binding>';
+    }
+    private string source(string bindings, bool ports = False) {
+        return '<w:definitions xmlns:w="http://schemas.xmlsoap.org/wsdl/" xmlns:xs="' + XSD_NS
+            + '" xmlns:t="urn:binding-version" xmlns:s="' + SOAP_11_NS + '" xmlns:unused="' + SOAP_12_NS
+            + '" targetNamespace="urn:binding-version"><w:types><xs:schema targetNamespace="urn:binding-version">'
+            '<xs:element name="value" type="xs:int"/></xs:schema></w:types>'
+            '<w:message name="Value"><w:part name="body" element="t:value"/></w:message>'
+            '<w:portType name="Port"><w:operation name="echo"><w:input message="t:Value"/>'
+            '<w:output message="t:Value"/></w:operation></w:portType>' + bindings
+            + (ports ? '<w:service name="Service"><w:port name="Port11" binding="t:B11">'
+                '<s:address location="http://example.invalid/Service"/></w:port>'
+                '<w:port name="Port12" binding="t:B12"><unused:address location="http://example.invalid/Service"/>'
+                '</w:port></w:service>' : "") + '</w:definitions>';
+    }
+    private static auto saved(auto value) {
+        return Serializable::deserialize(Serializable::serialize(value));
+    }
+    private wire(hash<auto> value, bool soap12, bool fault = False) {
+        string uri = soap12 ? SOAP_12_ENV : SOAP_11_ENV;
+        hash<auto> expanded = XsdBase::expandElementNamespaces(parse_xml(value.body, XPF_PRESERVE_ORDER));
+        assertTrue(expanded.hasKey("{" + uri + "}Envelope"));
+        assertEq(1, expanded.size());
+        assertTrue(value.hdr."Content-Type".startsWith(soap12 ? "application/soap+xml" : "text/xml"));
+        if (fault) {
+            assertTrue(expanded{"{" + uri + "}Envelope"}{"{" + uri + "}Body"}.hasKey("{" + uri + "}Fault"));
+        }
+    }
+    private check(WebService service, string name, bool soap12) {
+        WSOperation op = service.getOperation("echo");
+        assertEq(soap12, op.isSoap12(name));
+        hash<auto> request = op.serializeRequest({"body":17}, NOTHING, NOTHING, NOTHING, NOTHING, NOTHING, name);
+        wire(request, soap12);
+        assertEq(17, op.deserializeRequest(parse_xml(request.body, XPF_PRESERVE_ORDER), name));
+        hash<auto> response = op.serializeResponse({"body":29}, NOTHING, NOTHING, NOTHING, NOTHING, NOTHING, name);
+        wire(response, soap12);
+        assertEq(29, op.deserializeResponse(parse_xml(response.body, XPF_PRESERVE_ORDER), name));
+        wire(op.serializeResponse({"body":31}, NOTHING, NOTHING, NOTHING, soap12, NOTHING, name), soap12);
+        # This explicit legacy override is distinct from binding-derived defaults.
+        wire(op.serializeResponse({"body":31}, NOTHING, NOTHING, NOTHING, !soap12, NOTHING, name), !soap12);
+        hash<auto> fault = op.serializeFault(NOTHING, "version-check", NOTHING, NOTHING, NOTHING, NOTHING,
+            NOTHING, NOTHING, name);
+        wire(fault, soap12, True);
+        try {
+            op.deserializeResponse(parse_xml(fault.body, XPF_PRESERVE_ORDER), name);
+            fail("fault must raise");
+        } catch (hash<ExceptionInfo> ex) {
+            assertEq("SOAP-SERVER-FAULT-RESPONSE", ex.err);
+            assertTrue(ex.desc =~ /version-check/, ex.desc);
+        }
+        wire(op.serializeRequest({"body":41}, NOTHING, NOTHING, NOTHING, NOTHING, NOTHING, name), soap12);
+    }
+    private versions() {
+        foreach bool reverse in (False, True) {
+            string one = binding("B11", SOAP_11_NS);
+            string two = binding("B12", SOAP_12_NS);
+            WebService original(source(reverse ? two + one : one + two));
+            foreach WebService service in (original, saved(original)) {
+                assertTrue(service.isSoap12());
+                assertEq(reverse, service.getOperation("echo").isSoap12());
+                check(service, "B11", False);
+                check(service, "B12", True);
+            }
+        }
+        WebService only11(source(binding("B11", SOAP_11_NS)));
+        assertFalse(only11.isSoap12());
+        check(only11, "B11", False);
+    }
+    private scopes() {
+        foreach string ext in (
+                '<s:binding transport="http://schemas.xmlsoap.org/soap/http"/>',
+                '<s:binding xmlns:s="' + SOAP_12_NS + '" transport="http://schemas.xmlsoap.org/soap/http"/>',
+                '<binding xmlns="' + SOAP_12_NS + '" transport="http://schemas.xmlsoap.org/soap/http"/>') {
+            WebService service(source(binding("B12", SOAP_12_NS, 'xmlns:s="' + SOAP_12_NS + '"', ext)
+                + binding("B11", SOAP_11_NS, "", '<s:binding transport="http://schemas.xmlsoap.org/soap/http"/>')));
+            foreach WebService variant in (service, saved(service)) {
+                check(variant, "B12", True);
+                check(variant, "B11", False);
+            }
+        }
+        WebService default_ns(source(binding("B12", SOAP_12_NS, 'xmlns="' + SOAP_12_NS + '"',
+            '<binding transport="http://schemas.xmlsoap.org/soap/http"/>')));
+        check(default_ns, "B12", True);
+    }
+    private parse(string text) {
+        WebService service(text);
+    }
+    private invalid() {
+        foreach string ext in (
+                '<s:binding xmlns:s="urn:unknown" transport="http://schemas.xmlsoap.org/soap/http"/>',
+                '<binding xmlns="" transport="http://schemas.xmlsoap.org/soap/http"/>',
+                '<s:binding/>',
+                '<s:binding transport="http://schemas.xmlsoap.org/soap/http" verb="POST"/>',
+                '<h:binding xmlns:h="' + HTTP_NS + '" transport="http://schemas.xmlsoap.org/soap/http" verb="POST"/>',
+                '<h:binding xmlns:h="' + HTTP_NS + '"/>',
+                '<s:binding transport="urn:unknown"/>',
+                '<s:binding style="unknown" transport="http://schemas.xmlsoap.org/soap/http"/>',
+                '<s:binding transport="http://schemas.xmlsoap.org/soap/http"/>'
+                    '<unused:binding transport="http://schemas.xmlsoap.org/soap/http"/>',
+                '<w:documentation>missing extension</w:documentation>') {
+            assertThrows("WSDL-ERROR", \parse(), (source(binding("Bad", SOAP_11_NS, "", ext)),));
+            WebService retry(source(binding("B11", SOAP_11_NS)));
+            check(retry, "B11", False);
+        }
+    }
+    private faultEnvelopes() {
+        WebService service(source(binding("B11", SOAP_11_NS) + binding("B12", SOAP_12_NS)));
+        WSOperation op = service.getOperation("echo");
+        foreach string name in ("B11", "B12") {
+            foreach bool version in (False, True) {
+                foreach bool default_ns in (False, True) {
+                    string prefix = default_ns ? "" : "env:";
+                    string uri = version ? SOAP_12_ENV : SOAP_11_ENV;
+                    string declaration = default_ns ? "xmlns" : "xmlns:env";
+                    string content = version ? '<' + prefix + 'Code><' + prefix + 'Value>env:Receiver</'
+                        + prefix + 'Value></' + prefix + 'Code><' + prefix + 'Reason><' + prefix
+                        + 'Text xml:lang="en">wire-reason</' + prefix + 'Text></' + prefix + 'Reason>'
+                        : '<faultcode xmlns="">env:Server</faultcode><faultstring xmlns="">wire-reason</faultstring>';
+                    string xml = '<' + prefix + 'Envelope ' + declaration + '="' + uri
+                        + '" xmlns:unused="' + (version ? SOAP_11_ENV : SOAP_12_ENV) + '"'
+                        + (default_ns ? ' xmlns:env="' + uri + '"' : "") + '><' + prefix + 'Body><'
+                        + prefix + 'Fault>' + content + '</' + prefix + 'Fault></' + prefix + 'Body></'
+                        + prefix + 'Envelope>';
+                    try {
+                        op.deserializeResponse(parse_xml(xml, XPF_PRESERVE_ORDER), name);
+                        fail("fault must raise");
+                    } catch (hash<ExceptionInfo> ex) {
+                        assertEq("SOAP-SERVER-FAULT-RESPONSE", ex.err);
+                        assertTrue(ex.desc =~ /wire-reason/, ex.desc);
+                    }
+                }
+            }
+        }
+    }
+    private mixedHttp() {
+        string http = '<w:binding name="Http" type="t:Port"><h:binding xmlns:h="' + HTTP_NS + '" verb="GET"/>'
+            '<w:operation name="echo"><h:operation xmlns:h="' + HTTP_NS + '" location="/echo"/>'
+            '<w:input><h:urlEncoded xmlns:h="' + HTTP_NS + '"/></w:input>'
+            '<w:output><m:mimeXml xmlns:m="http://schemas.xmlsoap.org/wsdl/mime/" part="body"/>'
+            '</w:output></w:operation></w:binding>';
+        WebService service(source(http + binding("B11", SOAP_11_NS) + binding("B12", SOAP_12_NS)));
+        foreach WebService variant in (service, saved(service)) {
+            assertTrue(variant.getBinding("Http").isHttpBinding());
+            assertFalse(variant.getBinding("Http").isSoap12());
+            assertFalse(variant.getOperation("echo").isSoap12());
+            check(variant, "B11", False);
+            check(variant, "B12", True);
+        }
+        WebService only_http(source(http));
+        assertFalse(only_http.isSoap12());
+        string only11 = source(binding("B11", SOAP_11_NS));
+        only11 = replace(only11, 'xmlns:unused="' + SOAP_12_NS + '"', 'xmlns:unused="urn:unused"');
+        WebService limited(only11);
+        WSOperation op = limited.getOperation("echo");
+        assertThrows("SOAP-SERIALIZATION-ERROR", \op.serializeResponse(),
+            ({"body":31}, NOTHING, NOTHING, NOTHING, True, NOTHING, "B11"));
+        wire(op.serializeResponse({"body":31}), False);
+    }
+    private savedBindings() {
+        WebService service(source(binding("B11", SOAP_11_NS) + binding("B12", SOAP_12_NS)));
+        WSOperation op = service.getOperation("echo");
+        foreach string name in ("B11", "B12") {
+            SoapBinding restored = saved(op.getBinding(name));
+            bool version = name == "B12";
+            assertEq(version, saved(service.getBinding(name)).isSoap12());
+            assertEq(version, restored.isSoap12());
+            wire(restored.serializeMessage(op, op.input, True, version, {"body":17}), version);
+            hash<SerializationInfo> data = restored.serializeToData();
+            int changed = 0;
+            foreach string index in (keys data._index) {
+                if (data._index{index}.hasKey("_class_data")
+                        && data._index{index}._class_data.hasKey("WSDL::SoapBinding")) {
+                    remove data._index{index}._class_data."WSDL::SoapBinding".soap12_version;
+                    ++changed;
+                }
+            }
+            assertEq(1, changed);
+            SoapBinding legacy = Serializable::deserialize(data);
+            assertThrows("WSDL-BINDING-ERROR", \legacy.isSoap12());
+            wire(legacy.serializeMessage(op, op.input, True, version, {"body":17}), version);
+        }
+    }
+    private http() {
+        WebService service = saved(new WebService(source(binding("B11", SOAP_11_NS) + binding("B12", SOAP_12_NS), True),
+            {"async_only":True}));
+        foreach string name in ("B11", "B12") {
+            bool version = name == "B12";
+            HttpServer server();
+            on_exit server.stop();
+            SoapHandler handler(new PermissiveAuthenticator());
+            server.setDefaultHandler("soap", handler);
+            Queue observed();
+            code<auto(hash<auto>, auto)> callback = auto sub(hash<auto> cx, auto value) {
+                observed.push(cx.http_header."content-type");
+                return {"body":value + 1};
+            };
+            handler.addMethod(service, service.getOperation("echo"), callback, NOTHING, NOTHING, NOTHING,
+                "Service", NOTHING, NOTHING, name);
+            server.addListener(0);
+            SoapClient client({"wsdl":service, "service":"Service", "port":version ? "Port12" : "Port11",
+                "url":sprintf("http://127.0.0.1:%d/Service", server.getListenerInfo(0).port),
+                "timeout":30000,"connect_timeout":30000});
+            hash<auto> info;
+            assertEq(42, client.callOperation("echo", {"body":41}, NOTHING, \info));
+            wire({"body":info."response-body", "hdr":{"Content-Type":info."response-headers"."content-type"}}, version);
+            string content_type = observed.pop(30000);
+            wire({"body":info."request-body", "hdr":{"Content-Type":content_type}}, version);
+            assertTrue(content_type.startsWith(version ? "application/soap+xml" : "text/xml"), content_type);
+        }
+    }
+}
