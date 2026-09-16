@@ -535,3 +535,10 @@ increment must also repair the explicitly routed URI-resolution prerequisite in
 `/tmp/wsdl-p6-05-import-catalog/location-finding.md` before integrating the catalog.
 The WebDAV checkpoint pipeline 56986 is green on both supported CI distributions;
 subsequent P6 increments remain local and P9 acceptance is not complete.
+
+P6-05 repairs URI component resolution and HTTP root/nested schema retrieval,
+including asynchronous base propagation and fragment-free request targets. The
+new full-document URI interface passes the RFC examples. See
+[location evidence](location-resolution-evidence.md). WSDL import catalog
+integration, full-document bases for query-only schema references and the rest
+of the P6 component/binding matrix remain open; no phase boundary is claimed.

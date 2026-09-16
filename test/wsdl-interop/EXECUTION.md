@@ -8708,3 +8708,27 @@ The final P6-04 full enterprise/partner suite passed all 5 cases / 85 assertions
 without warnings/errors in 693.688 seconds. All final sources remained unchanged.
 The URI prerequisite prototype separately passes the 42 RFC examples plus seven
 additional cases; it remains isolated and is not counted as production behavior.
+
+## P6-05 resource URI resolution
+
+P6-04 is committed locally as `4bdb1d1`. P6-05 implements the RFC 3986 resolver,
+component-aware directory extraction, root/network HTTP references, fragment-free
+HTTP request targets and asynchronous WSDL root directory propagation. The new
+suite passes 5 cases / 131 assertions, including six real HTTP import/reconstruction
+scenarios. All 33 affected suites pass 433 cases / 6,993 reported assertions
+(including the seven intentionally caught comparator assertions in soap.qtest).
+
+All six native/legacy corpus reports differ from P6-04 only in version metadata;
+the 12 approved ordinary-projection losses remain visible, and strict legacy P5
+coverage still exits 1 as expected. The 33 survey/coverage Python unit tests pass.
+WSDL documentation builds without warnings/errors. The full audit records 18 Pass,
+44 N/A and zero Fail. No C++ changes or new Valgrind requirement. See
+[evidence](location-resolution-evidence.md), [validation](P6-05-validation.json)
+and [audit](audits/P6-05-location-resolution.md).
+
+No further push or image pipeline was started. P6–P9 remain incomplete. Next is
+full containing-document URI retention and WSDL import catalog integration;
+query-only schema references need a source URI rather than only a directory.
+The updated isolated catalog prototype passes query/fragment deduplication but
+is not production import support. Implementation notes and the prototype remain
+under `/tmp/wsdl-p6-05-import-catalog/`.

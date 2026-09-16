@@ -2168,3 +2168,9 @@ reference targets; saved graphs and actual SOAP 1.1/1.2 HTTP exchanges are cover
 See [evidence](component-references-evidence.md) and
 [implemented behavior](../../design/wsdl-component-references.md). WSDL imports
 and the rest of the P6 binding matrix remain required.
+
+Resource URI resolution uses `test/wsdl-location-resolution.qtest`, including the
+RFC 3986 examples and real synchronous/asynchronous HTTP schema retrieval.
+See [evidence](location-resolution-evidence.md) and
+[implemented behavior](../../design/wsdl-location-resolution.md) for the distinct
+directory-base and full-document URI interfaces.
