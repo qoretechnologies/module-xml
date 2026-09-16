@@ -1,0 +1,360 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires ../qlib/WSDL.qm
+%requires xml
+%exec-class RecursiveProvidersTest
+class RecursiveProvidersTest inherits QUnit::Test {
+    constructor() : Test("Ordinary recursive XML providers", "1.0") {
+        addTestCase("Self recursion retains fields, conversion and metadata", \selfRecursive());
+        addTestCase("Mutual recursion retains required scalar validation", \mutualRecursive());
+        addTestCase("Recursive metadata and soft conversion describe completed fields", \metadata());
+        addTestCase("Saved recursive graphs reject incomplete definitions and flags", \savedGuards());
+        addTestCase("Shared recursive types keep sibling values and flags independent", \siblings());
+        addTestCase("Optional recursive targets distinguish accepted and returned values", \optionalTargets());
+        addTestCase("Failed graph construction releases its thread context", \constructionRecovery());
+        addTestCase("Failed soft completion releases partial definitions before retry", \softCompletionRecovery());
+        addTestCase("Interrupting soft completion permits a fresh construction", \interruptedCompletion());
+        addTestCase("Completed saved graphs support concurrent consumers", \concurrency());
+        addTestCase("Recursive message providers validate complete nested parts", \message());
+        set_return_value(main());
+    }
+    private static string source(bool mutual) {
+        return "<xs:schema xmlns:xs='http://www.w3.org/2001/XMLSchema'>"
+            + "<xs:complexType name='A'><xs:sequence><xs:element name='label' type='xs:string'/>"
+            + "<xs:element name='child' type='" + (mutual ? "B" : "A")
+            + "' minOccurs='0' maxOccurs='unbounded'/></xs:sequence>"
+            + "<xs:attribute name='id' type='xs:integer' use='required'/></xs:complexType>"
+            + (mutual ? "<xs:complexType name='B'><xs:sequence><xs:element name='number' type='xs:int'/>"
+                + "<xs:element name='back' type='A' minOccurs='0'/></xs:sequence></xs:complexType>" : "")
+            + "<xs:element name='root' type='A'/></xs:schema>";
+    }
+    private selfRecursive() {
+        XsdSchema schema(source(False), {"async_only":True});
+        AbstractDataProviderType original = schema.getElement("", "root").getDataProviderType();
+        foreach AbstractDataProviderType provider in (original, Serializable::deserialize(original.serialize()),
+                original.getSoftType(), Serializable::deserialize(original.getSoftType().serialize())) {
+            hash<auto> child = {"label":"leaf", "^attributes^":{"id":2}};
+            hash<auto> value = {"label":"parent", "^attributes^":{"id":1}, "child":(child,)};
+            auto checked = provider.acceptsValue(value);
+            assertEq("leaf", checked.child[0].label);
+            assertEq(2, checked.child[0]."^attributes^".id);
+            assertTrue(provider.getInfo().fields.hasKey("label"));
+            hash<auto> invalid = value;
+            invalid.child[0]."^attributes^" = {"id":"invalid"};
+            assertThrows("RUNTIME-TYPE-ERROR", \provider.acceptsValue(), (invalid,));
+            hash<auto> omitted = value;
+            remove omitted.child[0].label;
+            assertThrows("RUNTIME-TYPE-ERROR", \provider.acceptsValue(), (omitted,));
+            assertTrue(provider.getFields().child.getType().isOrNothingType());
+        }
+    }
+    private mutualRecursive() {
+        XsdSchema schema(source(True), {"async_only":True});
+        AbstractDataProviderType original = schema.getElement("", "root").getDataProviderType();
+        foreach AbstractDataProviderType provider in (original, Serializable::deserialize(original.serialize()),
+                original.getSoftType(), Serializable::deserialize(original.getSoftType().serialize())) {
+            hash<auto> value = {"label":"a", "^attributes^":{"id":1}, "child":({"number":2,
+                "back":{"label":"a2", "^attributes^":{"id":3}}},)};
+            auto checked = provider.acceptsValue(value);
+            assertEq(3, checked.child[0].back."^attributes^".id);
+            assertEq("a2", checked.child[0].back.label);
+            hash<auto> invalid = value;
+            invalid.child[0].back."^attributes^" = {"id":"invalid"};
+            assertThrows("RUNTIME-TYPE-ERROR", \provider.acceptsValue(), (invalid,));
+            assertTrue(exists provider.getInfo());
+        }
+    }
+
+    private metadata() {
+        XsdSchema schema(source(False), {"async_only":True});
+        AbstractDataProviderType original = schema.getElement("", "root").getDataProviderType();
+        foreach AbstractDataProviderType provider in (original, Serializable::deserialize(original.serialize()),
+                original.getSoftType(), Serializable::deserialize(original.getSoftType().serialize())) {
+            AbstractDataProviderType recursive = provider.getFields().child.getType().getElementType();
+            assertTrue(recursive.getFields().hasKey("label"));
+            assertTrue(recursive.getFields().hasKey("^attributes^"));
+            assertTrue(recursive.getFields().child.getType().isOrNothingType());
+            assertTrue(recursive.getInputInfo().fields.hasKey("label"));
+            AbstractDataProviderType optional = recursive.getOrNothingType();
+            assertEq(NOTHING, optional.acceptsValue(NOTHING));
+            AbstractDataProviderType mandatory = optional.getMandatoryType();
+            assertThrows("MISSING-VALUE-ERROR", \mandatory.acceptsValue(), (NOTHING,));
+            assertTrue(optional.getAcceptTypeHash().nothing);
+            assertTrue(optional.getReturnTypeHash().nothing);
+            assertFalse(optional.getMandatoryType().getReturnTypeHash().hasKey("nothing"));
+            hash<auto> sample = provider.getMandatoryType().getExampleValue();
+            assertTrue(sample.hasKey("label"));
+            assertTrue(sample.hasKey("^attributes^"));
+        }
+        AbstractDataProviderType soft = original.getSoftType();
+        hash<auto> converted = soft.acceptsValue({"label":123, "^attributes^":{"id":"2"},
+            "child":({"label":456, "^attributes^":{"id":"3"}},)});
+        assertEq("123", converted.label);
+        assertEq("456", converted.child[0].label);
+        assertEq(3, converted.child[0]."^attributes^".id);
+    }
+    private savedGuards() {
+        XsdSchema schema(source(False), {"async_only":True});
+        AbstractDataProviderType provider = schema.getElement("", "root").getDataProviderType();
+        hash<SerializationInfo> original = provider.serializeToData();
+        int definitions = 0;
+        int references = 0;
+        foreach string node in (keys original._index) {
+            if (!original._index{node}.hasKey("_class_data")) {
+                continue;
+            }
+            if (*hash<auto> data = original._index{node}._class_data."WSDL::XsdOrdinaryProviderDefinition") {
+                ++definitions;
+                foreach string field in ("name", "referenced", "value_type", "soft_value_type") {
+                    hash<SerializationInfo> broken = original;
+                    remove broken._index{node}._class_data."WSDL::XsdOrdinaryProviderDefinition"{field};
+                    assertThrows("DESERIALIZATION-ERROR", \Serializable::deserialize(), (broken,));
+                }
+            }
+            if (original._index{node}._class_data."WSDL::XsdOrdinaryProviderReference") {
+                ++references;
+                foreach string field in ("definition", "softened") {
+                    hash<SerializationInfo> broken = original;
+                    remove broken._index{node}._class_data."WSDL::XsdOrdinaryProviderReference"{field};
+                    assertThrows("DESERIALIZATION-ERROR", \Serializable::deserialize(), (broken,));
+                }
+                hash<SerializationInfo> broken = original;
+                broken._index{node}._class_data."WSDL::XsdOrdinaryProviderReference".optional = "invalid";
+                assertThrows("DESERIALIZATION-ERROR", \Serializable::deserialize(), (broken,));
+            }
+        }
+        assertGt(0, definitions);
+        assertGt(0, references);
+        AbstractDataProviderType restored = Serializable::deserialize(original);
+        assertEq("kept", restored.acceptsValue({"label":"kept", "^attributes^":{"id":1}}).label);
+    }
+    private siblings() {
+        string xsd = source(False);
+        xsd = substr(xsd, 0, index(xsd, "<xs:element name='root' type='A'/>"))
+            + "<xs:element name='root'><xs:complexType><xs:sequence>"
+            "<xs:element name='left' type='A'/><xs:element name='right' type='A' minOccurs='0'/>"
+            "</xs:sequence></xs:complexType></xs:element></xs:schema>";
+        XsdSchema schema(xsd, {"async_only":True});
+        AbstractDataProviderType original = schema.getElement("", "root").getDataProviderType();
+        foreach AbstractDataProviderType provider in (original, Serializable::deserialize(original.serialize()),
+                original.getSoftType(), Serializable::deserialize(original.getSoftType().serialize())) {
+            hash<auto> value = {"left":{"label":"left", "^attributes^":{"id":1}},
+                "right":{"label":"right", "^attributes^":{"id":2},
+                    "child":({"label":"leaf", "^attributes^":{"id":3}},)}};
+            auto converted = provider.acceptsValue(value);
+            assertEq("left", converted.left.label);
+            assertEq("leaf", converted.right.child[0].label);
+            assertFalse(provider.getFields().left.getType().isOrNothingType());
+            assertTrue(provider.getFields().right.getType().isOrNothingType());
+            remove value.right;
+            assertEq("left", provider.acceptsValue(value).left.label);
+            assertThrows("MISSING-VALUE-ERROR", \provider.acceptsValue(), ({},));
+            hash<auto> invalid = {"left":{"label":"left", "^attributes^":{"id":1},
+                "child":({"^attributes^":{"id":4}},)}};
+            assertThrows("RUNTIME-TYPE-ERROR", \provider.acceptsValue(), (invalid,));
+            assertEq("left", provider.acceptsValue(value).left.label);
+        }
+    }
+
+    private optionalTargets() {
+        XsdSchema schema("<xs:schema xmlns:xs='http://www.w3.org/2001/XMLSchema'>"
+            "<xs:complexType name='A'><xs:sequence>"
+            "<xs:element name='child' type='A' minOccurs='0'/></xs:sequence></xs:complexType>"
+            "<xs:element name='root' type='A'/></xs:schema>", {"async_only":True});
+        AbstractDataProviderType original = schema.getElement("", "root").getDataProviderType();
+        foreach AbstractDataProviderType provider in (original, Serializable::deserialize(original.serialize()),
+                original.getSoftType(), Serializable::deserialize(original.getSoftType().serialize())) {
+            AbstractDataProviderType recursive = provider.getFields().child.getType();
+            assertTrue(recursive.getAcceptTypeHash().nothing);
+            assertTrue(recursive.getReturnTypeHash().nothing);
+            AbstractDataProviderType mandatory = recursive.getMandatoryType();
+            assertFalse(mandatory.getAcceptTypeHash().hasKey("nothing"));
+            assertFalse(mandatory.getAcceptTypeHash().hasKey("null"));
+            assertFalse(mandatory.getReturnTypeHash().hasKey("nothing"));
+            assertThrows("RUNTIME-TYPE-ERROR", \mandatory.acceptsValue(), (NULL,));
+            assertFalse(recursive.getReturnTypeHash().hasKey("null"));
+            assertEq({}, mandatory.acceptsValue({}));
+        }
+    }
+
+    private constructionRecovery() {
+        XsdSchema schema(source(False), {"async_only":True});
+        XsdComplexType root = cast<XsdComplexType>(schema.getElement("", "root").type);
+        FailingOrdinaryProviderType controlled(root.nsc);
+        root.elementmap.label.type = controlled;
+        assertThrows("TEST-PROVIDER-FAILURE", \root.getDataProviderType(), ());
+        controlled.fail = False;
+        AbstractDataProviderType provider = root.getDataProviderType().getMandatoryType();
+        hash<auto> value = {"label":"root", "^attributes^":{"id":1},
+            "child":({"label":"child", "^attributes^":{"id":2}},)};
+        assertEq("child", provider.acceptsValue(value).child[0].label);
+        assertTrue(provider.getInfo().fields.hasKey("label"));
+        AbstractDataProviderType restored = Serializable::deserialize(provider.serialize());
+        assertEq("child", restored.acceptsValue(value).child[0].label);
+    }
+    private softCompletionRecovery() {
+        foreach string category in ("TEST-SOFT-FAILURE", "THREAD-CANCELLED") {
+            XsdSchema schema(source(False), {"async_only":True});
+            XsdComplexType root = cast<XsdComplexType>(schema.getElement("", "root").type);
+            FailingSoftProviderType controlled(root.nsc);
+            controlled.provider.category = category;
+            root.elementmap.label.type = controlled;
+            assertThrows(category, \root.getDataProviderType(), ());
+            assertEq(1, controlled.provider.calls);
+            controlled.provider.category = NOTHING;
+            AbstractDataProviderType provider = root.getDataProviderType().getMandatoryType();
+            assertEq(2, controlled.provider.calls);
+            hash<auto> value = {"label":"root", "^attributes^":{"id":1},
+                "child":({"label":"child", "^attributes^":{"id":2}},)};
+            assertEq("child", provider.acceptsValue(value).child[0].label);
+            AbstractDataProviderType restored = Serializable::deserialize(provider.serialize());
+            assertEq("child", restored.acceptsValue(value).child[0].label);
+            hash<auto> invalid = value;
+            remove invalid.child[0].label;
+            assertThrows("RUNTIME-TYPE-ERROR", \restored.acceptsValue(), (invalid,));
+        }
+    }
+    private interruptedCompletion() {
+        XsdSchema schema(source(False), {"async_only":True});
+        XsdComplexType root = cast<XsdComplexType>(schema.getElement("", "root").type);
+        FailingSoftProviderType controlled(root.nsc);
+        root.elementmap.label.type = controlled;
+        SandboxManager manager();
+        on_exit manager.clearInterrupt();
+        controlled.provider.manager = manager;
+        Program program(PO_NEW_STYLE | PO_STRICT_ARGS | PO_REQUIRE_TYPES);
+        program.setSandboxManager(manager);
+        program.parse("%modern\n%requires ../qlib/WSDL.qm\n"
+            "AbstractDataProviderType sub build(XsdComplexType type) { return type.getDataProviderType(); }\n",
+            get_script_dir() + "/wsdl-recursive-interrupt.qr");
+        *hash<ExceptionInfo> error;
+        try {
+            program.callFunction("build", root);
+        } catch (hash<ExceptionInfo> ex) {
+            error = ex;
+        }
+        manager.clearInterrupt();
+        assertEq("PROGRAM-INTERRUPTED", error.err);
+        assertEq(1, controlled.provider.calls);
+        controlled.provider.manager = NOTHING;
+        AbstractDataProviderType provider = program.callFunction("build", root);
+        assertEq(2, controlled.provider.calls);
+        hash<auto> value = {"label":"root", "^attributes^":{"id":1},
+            "child":({"label":"child", "^attributes^":{"id":2}},)};
+        assertEq("child", provider.acceptsValue(value).child[0].label);
+        assertEq("child", Serializable::deserialize(provider.serialize()).acceptsValue(value).child[0].label);
+    }
+    private message() {
+        XsdSchema owner(source(False), {"async_only":True});
+        WSMessage message({"^attributes^":{"name":"TreeMessage"},
+            "part":({"^attributes^":{"name":"payload", "type":"A"}},)},
+            {}, owner.getTypeMap(), owner.nsc);
+        AbstractDataProviderType original = message.getDataProviderType();
+        foreach AbstractDataProviderType provider in (original, Serializable::deserialize(original.serialize()),
+                original.getSoftType(), Serializable::deserialize(original.getSoftType().serialize())) {
+            hash<auto> value = {"payload":{"label":"root", "^attributes^":{"id":1},
+                "child":({"label":"leaf", "^attributes^":{"id":2}},)}};
+            assertEq("leaf", provider.acceptsValue(value).payload.child[0].label);
+            assertTrue(provider.getInfo().fields.payload.type.fields.hasKey("label"));
+            remove value.payload.child[0].label;
+            assertThrows("RUNTIME-TYPE-ERROR", \provider.acceptsValue(), (value,));
+            assertThrows("MISSING-VALUE-ERROR", \provider.acceptsValue(), ({},));
+        }
+    }
+
+    private concurrency() {
+        XsdSchema schema(source(False), {"async_only":True});
+        AbstractDataProviderType shared = Serializable::deserialize(
+            schema.getElement("", "root").getDataProviderType().serialize());
+        Qore::Thread::Queue ready();
+        Qore::Thread::Queue start();
+        Qore::Thread::Queue results();
+        Qore::Thread::Counter running();
+        on_exit {
+            for (int i = 0; i < 4; ++i) {
+                start.push(True);
+            }
+            assertEq(0, running.waitForZero(30s));
+        }
+        for (int i = 0; i < 4; ++i) {
+            running.inc();
+            background sub(int worker) {
+                on_exit running.dec();
+                ready.push(True);
+                try {
+                    start.get(30s);
+                    for (int iteration = 0; iteration < 8; ++iteration) {
+                        hash<auto> value = {"label":"root", "^attributes^":{"id":worker},
+                            "child":({"label":"child", "^attributes^":{"id":iteration}},)};
+                        @assert(shared.acceptsValue(value).child[0]."^attributes^".id == iteration);
+                        @assert(shared.getInfo().fields.hasKey("label"));
+                    }
+                    results.push(worker);
+                } catch (hash<ExceptionInfo> ex) {
+                    results.push(ex);
+                }
+            }(i);
+        }
+        for (int i = 0; i < 4; ++i) {
+            ready.get(30s);
+        }
+        for (int i = 0; i < 4; ++i) {
+            start.push(True);
+        }
+        hash<string, bool> seen();
+        for (int i = 0; i < 4; ++i) {
+            auto value = results.get(30s);
+            assertEq(NT_INT, value.typeCode(), sprintf("%Y", value));
+            seen{value.toString()} = True;
+        }
+        assertEq(4, seen.size());
+    }
+}
+
+class FailingOrdinaryProviderType inherits XsdBaseType {
+    public {
+        bool fail = True;
+    }
+    constructor(Namespaces ns) : XsdBaseType("string", ns) {
+    }
+    AbstractDataProviderType getDataProviderType() {
+        if (fail) {
+            throw "TEST-PROVIDER-FAILURE", "controlled failure while constructing recursive fields";
+        }
+        return XsdBaseType::getDataProviderType();
+    }
+}
+
+class FailingSoftProvider inherits QoreDataType {
+    public {
+        *string category;
+        *SandboxManager manager;
+        int calls = 0;
+    }
+    constructor() : QoreDataType(StringType) {
+    }
+    AbstractDataProviderType getSoftType() {
+        ++calls;
+        if (manager) {
+            manager.requestInterrupt();
+        }
+        if (category) {
+            throw category, "controlled failure during recursive soft graph completion";
+        }
+        return QoreDataType::getSoftType();
+    }
+}
+
+class FailingSoftProviderType inherits XsdBaseType {
+    public {
+        FailingSoftProvider provider();
+    }
+    constructor(Namespaces ns) : XsdBaseType("string", ns) {
+    }
+    AbstractDataProviderType getDataProviderType() {
+        return provider;
+    }
+}

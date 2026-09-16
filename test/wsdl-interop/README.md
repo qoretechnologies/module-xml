@@ -2046,3 +2046,10 @@ constraints; native type retention and complete XML carriers remain the lossless
 paths. The prototype's expected legacy rejection is recorded separately from
 lossless success. WSDL instance tuples and the remaining P5 criteria are still
 in progress.
+
+Ordinary recursive providers retain complete nested field definitions through
+saved graphs and soft copies. Run `test/wsdl-recursive-providers.qtest`,
+`test/wsdl-provider-optionality.qtest` and `test/wsdl-provider-graph-size.qtest`
+with local XML/WSDL modules and a Qore runtime containing `16ae86ca7`. The last
+test checks the shared-graph conversion bound with a leaf-conversion counter.
+See the [implemented design and example](../../design/wsdl-recursive-providers.md).

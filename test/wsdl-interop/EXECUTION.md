@@ -8371,3 +8371,82 @@ integration, provider graph/consumer/cancellation/performance coverage and compl
 typed accounting. P6–P9 remain required, including mandatory Python/reference
 coverage and supported CI environments. Main Qore remains read-only; no install,
 push or pipeline execution occurred. Artifacts: `/tmp/wsdl-p5-20h-xsi-identities/`.
+
+## P5-20i — Ordinary recursive providers (2026-09-15, uncommitted)
+
+P5-20h is committed as `1760935`. The next isolated change adds completed
+definition references for ordinary recursive provider fields and explicit outer
+optionality for validating message/wildcard record providers. Saved, soft and
+mandatory copies retain their metadata and nested validation. Extended tests
+fixed separate prototype errors in returned-type metadata and mandatory NULL
+admission. Nine recursive-provider cases pass 187 assertions, and three
+optionality cases pass 168 assertions. Message containment, construction-error
+recovery, malformed saved graphs and concurrent consumers are covered. WSDL docs
+build cleanly. Current Qore Valgrind has zero errors/lost bytes. The four corpus
+reports differ from P5-20h only in the WSDL source hash.
+
+The commit gate is blocked by an independently reproduced Qore DataProvider
+performance defect: `HashDataType::getSoftType()` expands shared graph paths,
+performing 16/256/4096 leaf conversions for depths 4/8/12. Ordinary recursive
+provider construction invokes this path when completing soft definitions. The
+core-only reproducer, failing operation-count regression, current-source check
+and suggested acceptance criteria are in
+`/tmp/wsdl-recursive-provider-soft-growth/README.md`. This should be fixed in the
+separate Qore session before this provider increment is committed. No core
+mutation or workaround was made. Functional success does not waive this failed
+resource-bound check; the final full audit remains open. The uncommitted
+`test/wsdl-provider-graph-size.qtest` and the separate core-only regression
+both retain the failing complexity bound.
+
+The broader affected run passes 185 suites / 91,442 assertions without warnings
+or errors. Production inputs stayed unchanged. The recursive test was expanded
+before its suite executed; a final stable-hash rerun also passes all 187
+assertions. These functional results exclude the separately failing graph-size
+regression. Logs and final provenance are retained in
+`/tmp/wsdl-p5-20i-recursive-providers/`. The WSDL tuple implementation itself
+remains in `/tmp/wsdl-p5-20f-identity-tuples/`, outside the repository. Its five
+prototype suites pass against native commit1760935 (165 tuple cases/2667
+assertions; 72 xsi cases/324; lossless1/191; provider optionality3/168; recursive
+providers9/187). Tuple consumer/cancellation/performance coverage and P5–P9
+acceptance remain required. No decision question is pending.
+
+Recheck after the reported Qore fix: installed `/usr/bin/qore` identifies itself
+as `5f3d9b491`. With inherited Qorus module/library paths removed, both the
+core-only and local XML graph-size regressions still fail at depth 4 with 16
+leaf conversions. Main Qore's `HashDataType.qc` still contains the earlier
+non-memoized implementation. The fixed checkout/runtime location has been
+requested; no core changes were made here. Results and provenance are under
+`/tmp/wsdl-p5-20i-recursive-providers/core-recheck/`.
+
+An additional soft-completion recovery test now checks ordinary exceptions and
+a converter-raised `THREAD-CANCELLED` exception after recursive construction
+has begun, followed by retry, saved-graph validation and nested rejection.
+This is exception-propagation coverage, not an actual thread-cancellation test.
+The expanded recursive suite passes 10 cases / 199 assertions on the frozen
+runtime. Production WSDL is unchanged; the earlier broad gate and Valgrind
+results cover the preceding nine-case test file. Final fixed-runtime acceptance
+and the full commit audit remain open.
+
+
+## P5-20i accepted — verified Qore graph fix (2026-09-16)
+
+Qore `16ae86ca7` is installed and both blockers now pass. The core leaf counter
+is one at depths 4/8/12. No location or interpretation question remains.
+Final artifact coverage passes 186 suites / 91,480 assertions
+without warnings or errors. After docs triggered an XML relink, the 37 potentially
+affected suites and corpus/Valgrind were rerun against the frozen final binary.
+Recursive providers pass 11/207, optionality 3/168,
+and graph bounds 2/18; actual interruption/retry and concurrent consumers pass.
+Valgrind has zero errors/lost bytes. Docs, example and 17 survey tests pass;
+four corpus reports change only in runtime/WSDL source metadata. The full
+62-check audit has 22 Pass / 40 N/A / zero Fail. See
+[evidence](recursive-providers-evidence.md), [inventory](P5-20i-validation.json)
+and [audit](audits/P5-20i-recursive-providers.md).
+
+The next tuple prototype work is in `/tmp/wsdl-p5-20j-identity-memory/`.
+It transfers completed child key tables upward, reducing the 128-node retention
+probe from 8,256 to 128 entries. All six preceding prototype suites still pass;
+new real SOAP1.1/1.2 HTTP coverage passes 1/60, and converter/interruption/flat
+boundary/concurrent-document coverage passes 4/29. This tuple implementation
+remains outside the repository and needs its own final acceptance/audit.
+Main Qore remains read-only. No install or push. P5–P9 are not complete.

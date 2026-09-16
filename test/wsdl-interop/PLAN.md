@@ -464,3 +464,10 @@ formatting and invalid-attribute XPath cleanup. See
 [legacy anySimpleType projection policy](legacy-identity-projection.md) is
 approved; its expected rejection remains separate from lossless success.
 WSDL tuple integration and the remaining P5 acceptance criteria are still open.
+
+
+P5-20i completes ordinary recursive-provider graph construction and explicit
+validating-record optionality after verifying Qore `16ae86ca7`. Saved/soft graphs,
+metadata, nested rejection, interruption/retry and concurrent consumers pass;
+see [acceptance evidence](recursive-providers-evidence.md). Scoped tuple
+integration and complete typed accounting remain P5 requirements.
