@@ -7,6 +7,9 @@ may name an unpacked pinned archive for offline execution. Logs and build
 artifacts are retained in the printed temporary directory for diagnosis.
 """
 import os
+import json
+import shlex
+import shutil
 from pathlib import Path
 import subprocess
 import tempfile
@@ -141,6 +144,7 @@ class LibXml2ProviderTest(unittest.TestCase):
         cls.project.mkdir()
         (cls.project / "CMakeLists.txt").write_text(f'''cmake_minimum_required(VERSION 3.18...3.31)
 project(libxml2_provider_test C)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(BUILD_SHARED_LIBS ON CACHE BOOL "Parent option must survive")
 include("{REPO}/cmake/QoreXmlLibXml2.cmake")
 if(NOT BUILD_SHARED_LIBS)
@@ -182,6 +186,8 @@ if(TARGET LibXml2)
         endif()
     endforeach()
     get_target_property(native_includes LibXml2 INCLUDE_DIRECTORIES)
+    get_target_property(native_source_root LibXml2 SOURCE_DIR)
+    list(APPEND native_includes "${{native_source_root}}")
     get_target_property(native_options LibXml2 COMPILE_OPTIONS)
     # Instrument only the test translation unit, never the dependency target.
     file(READ "${{schema_source}}" fault_source)
@@ -256,6 +262,7 @@ install(TARGETS probe RUNTIME DESTINATION bin)
         (fixed_project / "CMakeLists.txt").write_text(f'''cmake_minimum_required(VERSION 3.18...3.31)
 project(libxml2_backport_fixture C CXX)
 add_subdirectory("{cls.source}" libxml)
+target_include_directories(LibXml2 PRIVATE "$<$<COMPILE_LANGUAGE:C>:{cls.source}>")
 include("{REPO}/cmake/QoreXmlLibXml2QNameFix.cmake")
 qore_xml_fix_libxml2_qnames("{cls.source}" "${{CMAKE_CURRENT_BINARY_DIR}}/libxml")
 include("{REPO}/cmake/QoreXmlLibXml2UriFix.cmake")
@@ -343,6 +350,50 @@ qore_xml_fix_libxml2_instance_identities("{cls.source}" "${{CMAKE_CURRENT_BINARY
         cls.fixed_options = [f"-DLIBXML2_LIBRARY={libraries[0]}",
                              f"-DLIBXML2_INCLUDE_DIR={cls.fixed_include}"]
 
+    def test_cpp_standard_headers_do_not_search_libxml2_source_root(self):
+        commands = json.loads((self.root / "bundled/compile_commands.json").read_text())
+        cpp = [entry for entry in commands if entry["file"].endswith("libxml2-ieee.cpp")]
+        relocated = [entry for entry in commands if entry["file"].endswith("xmlschemas.c")
+                     and "qore-" in entry["file"]]
+        self.assertEqual(1, len(cpp))
+        self.assertEqual(1, len(relocated))
+        source_flag = "-I" + str(self.source)
+        self.assertNotIn(source_flag, shlex.split(cpp[0]["command"]))
+        self.assertIn(source_flag, shlex.split(relocated[0]["command"]))
+
+        # A lowercase sentinel reproduces APFS VERSION/<version> aliasing on
+        # case-sensitive hosts too. Use a private source copy, never the input.
+        source = self.root / "header-collision-source"
+        shutil.copytree(self.source, source)
+        collision_marker = "libxml2_source_root_shadows_standard_header"
+        if (source / "version").exists():
+            collision_marker = (source / "VERSION").read_text().strip()
+        else:
+            (source / "version").write_text(f"#error {collision_marker}\n")
+        project = self.root / "header-collision-project"
+        project.mkdir()
+        (project / "standard.cpp").write_text('#include <version>\nint main() { return 0; }\n')
+        (project / "CMakeLists.txt").write_text(f'''cmake_minimum_required(VERSION 3.18...3.31)
+project(header_collision C CXX)
+include("{REPO}/cmake/QoreXmlLibXml2.cmake")
+add_executable(standard standard.cpp)
+target_sources(LibXml2 PRIVATE "${{CMAKE_CURRENT_SOURCE_DIR}}/standard.cpp")
+if(INJECT_SOURCE_ROOT)
+    target_include_directories(LibXml2 PRIVATE "{source}")
+endif()
+''')
+        build = project / "build-debug"
+        options = ["cmake", "-S", project, "-B", build, "-DCMAKE_BUILD_TYPE=Debug",
+                   "-DQORE_XML_LIBXML2_PROVIDER=BUNDLED",
+                   f"-DFETCHCONTENT_SOURCE_DIR_QORE_XML_LIBXML2={source}"]
+        self.run_command(options)
+        self.run_command(["cmake", "--build", build, "--target", "LibXml2", "standard", "-j4"])
+        self.run_command([build / "standard"])
+        # A negative control proves that the sentinel catches the original bug.
+        self.run_command([*options, "-DINJECT_SOURCE_ROOT=ON"])
+        output = self.run_command(["cmake", "--build", build, "--target", "LibXml2", "-j4"], success=False)
+        self.assertIn(collision_marker, output)
+
     def test_bundled_behavior_and_install(self):
         output = self.run_command([self.root / "bundled/probe"])
         self.assertIn("namespace_identity=PASS", output)
@@ -389,6 +440,7 @@ qore_xml_fix_libxml2_instance_identities("{cls.source}" "${{CMAKE_CURRENT_BINARY
         (project / "CMakeLists.txt").write_text(f'''cmake_minimum_required(VERSION 3.18...3.31)
 project(uri_broken_fixture C)
 add_subdirectory("{self.source}" libxml)
+target_include_directories(LibXml2 PRIVATE "$<$<COMPILE_LANGUAGE:C>:{self.source}>")
 include("{REPO}/cmake/QoreXmlLibXml2QNameFix.cmake")
 qore_xml_fix_libxml2_qnames("{self.source}" "${{CMAKE_CURRENT_BINARY_DIR}}/libxml")
 ''')
@@ -426,6 +478,7 @@ qore_xml_fix_libxml2_qnames("{self.source}" "${{CMAKE_CURRENT_BINARY_DIR}}/libxm
         (project / "CMakeLists.txt").write_text(f'''cmake_minimum_required(VERSION 3.18...3.31)
 project(entity_broken_fixture C)
 add_subdirectory("{self.source}" libxml)
+target_include_directories(LibXml2 PRIVATE "$<$<COMPILE_LANGUAGE:C>:{self.source}>")
 include("{REPO}/cmake/QoreXmlLibXml2QNameFix.cmake")
 qore_xml_fix_libxml2_qnames("{self.source}" "${{CMAKE_CURRENT_BINARY_DIR}}/libxml")
 include("{REPO}/cmake/QoreXmlLibXml2UriFix.cmake")

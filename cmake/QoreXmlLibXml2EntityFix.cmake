@@ -855,5 +855,4 @@ xmlSchemaNewStringValue(xmlSchemaValType type,
         message(STATUS "XML module: applied libxml2 ENTITY fix to ${_filename} in the build tree")
     endforeach()
     set_property(TARGET LibXml2 PROPERTY SOURCES "${_sources}")
-    target_include_directories(LibXml2 PRIVATE "${source_dir}")
 endfunction()
