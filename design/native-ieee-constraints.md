@@ -41,7 +41,15 @@ the pattern `\+017|1\.7E1` admits both required spellings.
 Configure-time behavior tests reject an installed library with these defects.
 The private correction adds a C++17 conversion unit with a private C interface;
 libxml2's public ABI stays unchanged. CMake carries the C++ runtime linkage to
-static consumers. Allocation failures preserve negative internal-error status,
+static consumers. After all build-tree C source replacements, the provider adds
+libxml2's source root only to the final C translation units. C++ include lookup
+excludes that root because upstream `VERSION` aliases the standard `<version>`
+header on case-insensitive filesystems. Instrumented C test drivers request the
+private include explicitly. The provider regression builds a copied source tree
+with a colliding header and checks both successful compilation and a negative
+control that restores the target-wide include.
+
+Allocation failures preserve negative internal-error status,
 null outputs and cleanup. Tests compare 1,314 inputs with an integer-rational
 oracle in all four rounding modes, exercise native conversion/DOM/reader APIs,
 and keep canonical precision disagreements visible.

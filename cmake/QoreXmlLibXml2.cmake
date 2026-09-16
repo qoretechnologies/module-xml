@@ -144,6 +144,18 @@ else()
         qore_xml_fix_libxml2_nil_identities("${qore_xml_libxml2_SOURCE_DIR}" "${qore_xml_libxml2_BINARY_DIR}")
         qore_xml_fix_libxml2_identity_tables("${qore_xml_libxml2_SOURCE_DIR}" "${qore_xml_libxml2_BINARY_DIR}")
         qore_xml_fix_libxml2_instance_identities("${qore_xml_libxml2_SOURCE_DIR}" "${qore_xml_libxml2_BINARY_DIR}")
+        # Relocated C sources need libxml2's private source-tree headers. Keep
+        # that directory out of C++ include lookup: VERSION shadows <version>
+        # on case-insensitive filesystems. Apply this after all replacements.
+        get_target_property(_libxml2_sources LibXml2 SOURCES)
+        foreach(_source IN LISTS _libxml2_sources)
+            if(_source MATCHES "\\.c$")
+                get_filename_component(_source_absolute "${_source}" ABSOLUTE
+                    BASE_DIR "${qore_xml_libxml2_SOURCE_DIR}")
+                set_property(SOURCE "${_source_absolute}" TARGET_DIRECTORY LibXml2
+                    APPEND PROPERTY INCLUDE_DIRECTORIES "${qore_xml_libxml2_SOURCE_DIR}")
+            endif()
+        endforeach()
         # Neither upstream tools nor headers/libraries belong in our install.
         set_property(DIRECTORY "${qore_xml_libxml2_SOURCE_DIR}" PROPERTY EXCLUDE_FROM_ALL TRUE)
         set_target_properties(LibXml2 PROPERTIES POSITION_INDEPENDENT_CODE ON C_VISIBILITY_PRESET hidden)

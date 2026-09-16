@@ -57,7 +57,6 @@ function(qore_xml_replace_libxml2_qname_source source_dir binary_dir filename or
     list(REMOVE_AT _sources ${_index})
     list(APPEND _sources "${_replacement}")
     set_property(TARGET LibXml2 PROPERTY SOURCES "${_sources}")
-    target_include_directories(LibXml2 PRIVATE "${source_dir}")
     message(STATUS "XML module: applied libxml2 QName identity fix to ${filename} in the build tree")
 endfunction()
 
