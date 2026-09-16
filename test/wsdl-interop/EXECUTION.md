@@ -8471,3 +8471,30 @@ The separate qdx astparser select-call defect is fixed and tested in
 /tmp/wsdl-astparser-select-call, with a reviewable patch and reproducer for Qore.
 Main Qore remains read-only. No install or push. Complete P5 typed/infoset
 accounting is next, then P6–P9; no user decision is outstanding.
+
+
+## P5-21 accepted — character whitespace (2026-09-16)
+
+P5-20j is committed as `9b8276d`. Independent typed-value exploration exposed
+whitespace loss in generic and inherited mixed content despite schema-valid
+output. An explicit native preservation flag now retains those characters;
+WSDL enables it at instance boundaries and schema-aware element-only conversion
+still removes allowed indentation. Ordered XML-value views retain the resulting
+separated child keys. The initial declaration-parser regression and stale view
+expectation were corrected before the final full run.
+
+Final acceptance: 193 suites / 97,747 assertions, 288 independent SOAP conversions,
+306 pinned-validator documents, 17 survey tests, both documentation targets,
+executable example and four clean Valgrinds. All 62 audit checks are recorded:
+27 Pass / 35 N/A / zero Fail. Both legacy/native corpus modes preserve the original
+characters in all 16 changed rows; verdicts and unresolved stage counts remain
+unchanged. The new matrix fails all 288 conversions on the parent WSDL snapshot,
+confirming that it detects the root defect independently of schema validity.
+See [evidence](character-whitespace-evidence.md) and [inventory](P5-21-validation.json).
+
+The exploratory PSVI comparison now finds no differences beyond the documented
+flat-record/all ordering contract in 2,096 native pairs. Complete datatype and
+namespace-context comparator testing and mandatory typed accounting remain next;
+this is not P5 completion. P6–P9 remain required. Artifacts:
+`/tmp/wsdl-p5-21-whitespace/` and `/tmp/wsdl-p5-typed-accounting/after-whitespace/`.
+Main Qore remains read-only; no install, push or new decision question.

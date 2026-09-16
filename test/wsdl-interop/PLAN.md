@@ -479,3 +479,12 @@ owned table propagation, failure/interruption recovery and native provenance.
 See [acceptance evidence](identity-tuples-evidence.md). The independent qdx
 parser correction is prepared separately in /tmp; no main-Qore change was made.
 Complete P5 typed/infoset accounting remains required before P6.
+
+
+P5-20j completes scoped WSDL key/unique/keyref instance tuples, and P5-21
+preserves character whitespace at WSDL instance boundaries with an explicit
+native parser flag. The latter passes 193 suites, four Valgrinds and independent
+character comparisons through both actual SOAP bindings; see
+[character evidence](character-whitespace-evidence.md). Complete typed-value and
+namespace-context accounting remains the next P5 acceptance criterion. P6–P9
+remain open; the exploratory PSVI comparison does not close these criteria.

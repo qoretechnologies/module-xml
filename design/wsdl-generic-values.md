@@ -18,7 +18,13 @@ A plain anyType XML text value decodes as text in legacy mode. With
 context, so forwarding does not invent an `xsi:type` attribute. This distinction
 matters when identity constraints select that attribute. Structured anyType content retains
 XML data, with expanded child keys, lexical attributes, text/CDATA fragments and
-ordered repeated-name suffixes. Namespace declarations are retained at the root
+ordered repeated-name suffixes. WSDL XML parsing uses `XPF_PRESERVE_WHITESPACE`
+with `XPF_PRESERVE_ORDER`, so whitespace-only fragments between children remain
+present even without `xml:space="preserve"`. Element-only schema conversion
+removes allowed indentation after parsing; generic and mixed content retain it.
+Direct callers of `deserializeValue()` or `deserializeRequest()` supplying parsed
+hashes must use both flags too, since conversion cannot recover discarded text.
+Namespace declarations are retained at the root
 of each detached generic value. The decoder does not replace a known child with
 its numeric or other native value: assessment checks it while retaining its XML
 lexical form. For example, a known integer child containing `017` keeps `017`.

@@ -2089,3 +2089,31 @@ forwarding. Complete P5 typed/infoset accounting and P6–P9 remain required.
 
 Final tuple validation and reference differences are recorded in
 [the acceptance evidence](identity-tuples-evidence.md).
+
+
+## Character whitespace at instance boundaries (P5-21)
+
+`XPF_PRESERVE_WHITESPACE | XPF_PRESERVE_ORDER` retains whitespace between
+children even if no other text is present. WSDL message parsing and `XsdXmlValue`
+views use both flags; schema-aware conversion removes indentation only for
+element-only content. Direct callers supplying parsed hashes should use both
+flags too. Whitespace now separates repeated names into ordered keys such as
+`entry^1` in XML-value views. The unflagged XML data parser keeps its existing
+grouping behavior.
+
+```sh
+qore -b --enable-debug test/xml-preserve-whitespace.qtest
+qore -b --enable-debug test/wsdl-character-whitespace.qtest
+qore -b --enable-debug test/wsdl-generic-http.qtest
+python3 test/wsdl-interop/test_character_whitespace.py -v
+```
+
+The independent test compares all characters, expanded names, attributes and
+ordered children across 288 conversions using both actual SOAP bindings,
+both directions, saved providers and both projection modes. It records the
+established legacy inferred scalar annotations explicitly; native mode retains
+their absence. Xerces validates all 18 sources and 288 outputs. A negative
+comparison demonstrates why schema validity alone cannot establish preservation.
+See [evidence](character-whitespace-evidence.md), [validation inventory](P5-21-validation.json)
+and [audit](audits/P5-21-character-whitespace.md). Complete P5 typed/namespace
+accounting and P6–P9 remain open.

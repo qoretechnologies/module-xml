@@ -51,6 +51,8 @@
 #define XPF_ADD_COMMENTS         (1 << 21)
 // strip namespace prefixes from element names
 #define XPF_STRIP_NS_PREFIXES    (1 << 22)
+// preserve whitespace between children even without other character content
+#define XPF_PRESERVE_WHITESPACE  (1 << 23)
 
 #define XPF_DECODE_MASK (XPF_DECODE_NUMERIC_REFS | XPF_DECODE_XHTML_REFS)
 

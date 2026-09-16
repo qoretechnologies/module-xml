@@ -79,6 +79,7 @@ namespace intern { // make classes local
         bool character_content = false;
         bool preserve_space = false;
         bool preserve_order = false;
+        bool preserve_whitespace = false;
         std::unordered_map<std::string, size_t> suffixes;
 
         DLLLOCAL xml_node(QoreValue& n, int d) : node(n), depth(d) {
@@ -99,6 +100,7 @@ namespace intern { // make classes local
         DLLLOCAL xml_stack(int pflags) {
             push(val, -1);
             tail->preserve_order = pflags & XPF_PRESERVE_ORDER;
+            tail->preserve_whitespace = pflags & XPF_PRESERVE_WHITESPACE;
         }
 
         DLLLOCAL ~xml_stack() {
@@ -134,6 +136,7 @@ namespace intern { // make classes local
             sn->next = tail;
             sn->preserve_space = tail && tail->preserve_space;
             sn->preserve_order = tail && tail->preserve_order;
+            sn->preserve_whitespace = tail && tail->preserve_whitespace;
             tail = sn;
         }
         DLLLOCAL QoreValue* getElementSlot(QoreHashNode* h, const char* name, ExceptionSink* xsink);

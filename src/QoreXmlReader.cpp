@@ -69,7 +69,7 @@ QoreValue* Qore::Xml::intern::xml_stack::getElementSlot(QoreHashNode* h, const c
 }
 
 int Qore::Xml::intern::xml_node::finish(ExceptionSink* xsink) {
-    if (!elements || character_content || preserve_space || !vcount) {
+    if (!elements || character_content || preserve_space || preserve_whitespace || !vcount) {
         return 0;
     }
     assert(node.getType() == NT_HASH);

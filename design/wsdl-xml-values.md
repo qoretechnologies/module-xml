@@ -24,10 +24,12 @@ implicit `xml` prefix. Descendant QName values use their reader's namespace scop
 
 `getExpandedName()` reports the root as `{namespace-uri}local-name`, including
 `{}local-name`. `getXmlDataView()` returns a copy-on-write hash produced with
-`XPF_PRESERVE_ORDER | XPF_ADD_COMMENTS`; `getElementData()` returns its root value.
+`XPF_PRESERVE_ORDER | XPF_ADD_COMMENTS | XPF_PRESERVE_WHITESPACE`; `getElementData()` returns its root value.
 These hash views retain lexical scalar strings, attributes and ordered mixed
-content keys, but omit processing instructions and whitespace-only text. They
-are convenience views, not a replacement for the authoritative XML string.
+content keys, including whitespace-only fragments between children. Whitespace
+separates repeated children into ordered suffixed keys (for example `entry^1`),
+while immediately adjacent equal names can share a list. Processing instructions
+remain available through the authoritative XML string and reader.
 
 The source XML and inherited XML attributes are serialized by `Serializable`.
 Reconstruction validates both and rebuilds all transient views and names; earlier
