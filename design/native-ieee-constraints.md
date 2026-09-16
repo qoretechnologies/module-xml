@@ -8,7 +8,7 @@ digits; XML whitespace is accepted only at the permitted normalization stage.
 Special values use exactly `INF`, `-INF` and `NaN`.
 
 Finite decimals convert directly to binary32 or binary64 with nearest,
-ties-to-even rounding. The C++17 `from_chars` helper uses no locale-dependent
+ties-to-even rounding. The C++17 `fast_float::from_chars` helper uses no locale-dependent
 conversion and preserves the caller's entire floating-point environment,
 including rounding direction, status flags and enabled traps. Overflow maps to
 signed infinity and underflow to signed zero. Classification uses the decimal
@@ -39,7 +39,15 @@ example, `default="+017"` on a float restriction with pattern `\+017` is invalid
 the pattern `\+017|1\.7E1` admits both required spellings.
 
 Configure-time behavior tests reject an installed library with these defects.
-The private correction adds a C++17 conversion unit with a private C interface;
+The private correction adds a C++17 conversion unit with a private C interface.
+Decimal parsing uses the unmodified fast_float 8.3.0 single header, pinned by
+SHA-256 in `cmake/third-party/fast_float/README.md` and shipped under its MIT
+license. This supplies binary32/binary64 parsing on standard libraries that
+lack floating-point `std::from_chars`, including Apple's libc++. Formatting
+continues to use floating-point `std::to_chars`. No extra runtime library or
+configure-time download is required for the parser; its license is included
+in the installed private dependency notices.
+
 libxml2's public ABI stays unchanged. CMake carries the C++ runtime linkage to
 static consumers. After all build-tree C source replacements, the provider adds
 libxml2's source root only to the final C translation units. C++ include lookup
