@@ -8649,3 +8649,30 @@ properties. Docs are clean and all 62 audit checks pass or are N/A. See
 The completed Alpine job's only failing cases are the three WebDAV cases; its
 WSDL/XML suites pass. The local repair has not been pushed. P6 declaration
 identity work is in progress separately; P6–P9 acceptance remains incomplete.
+
+## Authorized WebDAV push and P6-03 declaration identity
+
+The user subsequently authorized pushing the tested repair and watching CI.
+`47671ca` was pushed to develop; pipeline 56986 covers that exact commit. Pipeline
+56982 finished with only the three WebDAV failures on both Ubuntu and Alpine.
+The new WSDL declaration increment remains local while CI runs. No Qore push or
+image rebuild was requested for this workstream.
+
+P6-03 rejects wrong WSDL roots, missing/invalid normalized names and duplicate
+component/part/port/fault declarations before grouping. Empty services and port
+types survive lookup, reports and saved graph reconstruction. The focused suite
+passes 9 cases / 89 assertions; 31 affected suites pass, with unchanged native and
+legacy corpus outcomes and all 25 independent declaration cases agreeing.
+
+The earlier broad runner recorded 195 successes and one 600-second timeout.
+Both complete parent/current enterprise tests subsequently passed 5 cases / 85
+assertions in approximately 738/739 seconds. This collector-cost finding is
+explicitly routed to `/tmp/wsdl-dgc-namespace-owner-cost/README.md` for the separate
+Qore workstream and remains relevant to P9 runtime acceptance. No ownership
+weakening, timeout skip, or main-Qore change was introduced.
+
+See [evidence](declaration-identity-evidence.md), [validation](P6-03-validation.json)
+and [62-item audit](audits/P6-03-declaration-identity.md). Remaining P6 work begins
+with complete grammar and namespace-qualified/imported component references;
+operation signatures, parts/header/fault and HTTP/MIME requirements follow.
+P6–P9 acceptance remains incomplete.

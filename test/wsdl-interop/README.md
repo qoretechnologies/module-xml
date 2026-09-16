@@ -2152,3 +2152,11 @@ Existing normative assertions remain mandatory. Run and retain the legacy report
 separately; its type/nil projection losses must remain failures. See
 [typed accounting evidence](typed-coverage-evidence.md) for the selection, ordering
 contract, observation provenance and coverage boundaries.
+
+## WSDL declaration identity
+
+`test/wsdl-declaration-identity.qtest` checks WSDL root identity, normalized NCNames,
+duplicate owner scopes and empty components through source/saved graphs.
+`python3 -B test/wsdl-interop/test_wsdl_declarations.py -v` runs 25 pinned-schema
+reference cases. See [evidence](declaration-identity-evidence.md) and
+[implemented design](../../design/wsdl-declaration-identity.md).

@@ -80,6 +80,8 @@ module WSDL {
     @section wsdlrelnotes WSDL Module Release Notes
 
     @subsection wsdl_0_5_8 WSDL v0.5.8
+    - WSDL documents require the WSDL 1.1 definitions root; declaration names use normalized XML NCNames,
+      duplicate named components/parts/ports/faults reject before construction, and empty services/port types remain visible
     - Detached operations, messages, header descriptions and sample helpers retain their dependencies;
       saved graphs promote old weak member references, and zero-part messages expose initialized empty maps
     - Typed attribute hashes passed to WSOperation construction are converted without changing their value types
@@ -23018,6 +23020,81 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
     }
 }
 
+class WsdlDeclarationFrame {
+    public {
+        string kind;
+        hash<string, bool> names();
+    }
+    constructor(string kind) {
+        self.kind = kind;
+    }
+}
+
+#! Validate document and declaration identity before namespace aliases are grouped.
+class WsdlDeclarationGrammar {
+    private {
+        const Namespace = "http://schemas.xmlsoap.org/wsdl/";
+        const Global = {"message": True, "portType": True, "binding": True, "service": True};
+    }
+
+    static validate(string xml) {
+        XmlReader reader(xml);
+        hash<string, WsdlDeclarationFrame> frames();
+        bool root = False;
+        while (reader.read()) {
+            int depth = reader.depth();
+            string key = string(depth);
+            if (reader.nodeType() == XML_NODE_TYPE_END_ELEMENT) {
+                remove frames{key};
+                continue;
+            }
+            if (reader.nodeType() != XML_NODE_TYPE_ELEMENT) {
+                continue;
+            }
+            string local = reader.localName();
+            bool wsdl = reader.namespaceUri() == Namespace;
+            if (depth == 0) {
+                if (!wsdl || local != "definitions") {
+                    throw WSDL_ERROR, sprintf("expected WSDL 1.1 definitions root, got {%s}%s",
+                        reader.namespaceUri() ?? "", local);
+                }
+                root = True;
+            }
+            *WsdlDeclarationFrame parent = frames{string(depth - 1)};
+            bool named_global = parent.kind == "definitions" && Global{local};
+            bool part = parent.kind == "message" && local == "part";
+            bool port = parent.kind == "service" && local == "port";
+            bool operation = (parent.kind == "portType" || parent.kind == "binding") && local == "operation";
+            bool fault = parent.kind == "operation" && local == "fault";
+            bool active = wsdl && (depth == 0 || named_global || part || port || operation || fault);
+            if (!active) {
+                continue;
+            }
+            *string name = reader.getAttribute("name");
+            if (depth || exists name) {
+                if (!exists name) {
+                    throw WSDL_ERROR, sprintf("WSDL %s requires a name", local);
+                }
+                name = XsdNameLexicalHelper::lexical("NCName", name, WSDL_ERROR);
+            }
+            # Operations may be overloaded; their input/output signatures are a separate identity.
+            if (named_global || part || port || fault) {
+                string identity = local + ":" + name;
+                if (parent.names{identity}) {
+                    throw WSDL_ERROR, sprintf("duplicate WSDL %s declaration %Y", local, name);
+                }
+                parent.names{identity} = True;
+            }
+            if (!reader.isEmptyElement()) {
+                frames{key} = new WsdlDeclarationFrame(local);
+            }
+        }
+        if (!root) {
+            throw WSDL_ERROR, "missing WSDL 1.1 definitions root";
+        }
+    }
+}
+
 # The general XML data view groups equally named children. Keep the ordered view only
 # inside XSD compositors; other WSDL/schema consumers retain their grouped interfaces.
 class XsdSchemaSource {
@@ -23057,10 +23134,10 @@ class XsdSchemaSource {
     }
 
     private static convert(reference<auto> value, string name, hash<string, string> namespaces,
-            bool annotation_content = False, bool in_schema = False) {
+            bool annotation_content = False, bool in_schema = False, string wsdl_parent = "") {
         if (value.typeCode() == NT_LIST) {
             foreach auto child in (\value) {
-                convert(\child, name, namespaces, annotation_content, in_schema);
+                convert(\child, name, namespaces, annotation_content, in_schema, wsdl_parent);
             }
             return;
         }
@@ -23076,6 +23153,19 @@ class XsdSchemaSource {
         string uri = namespaces{colon < 0 ? "" : substr(name, 0, colon)} ?? "";
         annotation_content = annotation_content || (uri == XSD_NS && (local == "appinfo" || local == "documentation"))
             || (uri == "http://schemas.xmlsoap.org/wsdl/" && local == "documentation");
+        string wsdl_context = name == "" ? "root"
+            : (uri == "http://schemas.xmlsoap.org/wsdl/" && !annotation_content
+                && ((wsdl_parent == "root" && local == "definitions")
+                    || (wsdl_parent == "definitions" && (local == "message" || local == "portType"
+                        || local == "binding" || local == "service"))
+                    || (wsdl_parent == "message" && local == "part")
+                    || (wsdl_parent == "service" && local == "port")
+                    || ((wsdl_parent == "portType" || wsdl_parent == "binding") && local == "operation")
+                    || (wsdl_parent == "operation" && local == "fault")) ? local : "");
+        if (wsdl_context && exists value."^attributes^".name) {
+            value."^attributes^".name = XsdNameLexicalHelper::lexical("NCName",
+                value."^attributes^".name, WSDL_ERROR);
+        }
         in_schema = in_schema || (!annotation_content && uri == XSD_NS && local == "schema");
         bool element_content = in_schema && uri == XSD_NS && !annotation_content;
         if (value.typeCode() != NT_HASH) {
@@ -23098,7 +23188,7 @@ class XsdSchemaSource {
             }
             int suffix = key.rfind("^");
             string child_name = suffix < 0 ? key : substr(key, 0, suffix);
-            convert(\value{key}, child_name, namespaces, annotation_content, in_schema);
+            convert(\value{key}, child_name, namespaces, annotation_content, in_schema, wsdl_context);
             if (!ordered && suffix >= 0) {
                 rewrite = True;
             }
@@ -33692,6 +33782,10 @@ public class XsdSchema inherits WSDL::XsdBase {
 #! main class representing a parsed WSDL file
 /** This is the main class for handling SOAP communication and is based on a WSDL file
 
+The document root must be WSDL 1.1 definitions. Named declarations use XML NCNames; duplicate messages,
+port types, bindings and services reject instead of overwriting earlier components. Parts and ports have
+separate name scopes in each owner. Empty port types and services remain available through lookup and reports.
+
 @par Thread Safety
 This class is designed to be thread-safe for read operations once constructed. Multiple threads
 can safely use the same WebService object for SOAP serialization and deserialization operations.
@@ -33906,6 +34000,8 @@ public class WebService inherits WSDL::XsdSchema {
         foreach hash<auto> svc in (svcs) {
             WSDL::XsdBase::removeNS(\svc);
             string svcname = svc."^attributes^".name;
+            # Empty services are valid named components too.
+            services{svcname} = <ServiceInfo>{"name": svcname, "port": {}};
             foreach hash<auto> port in (svc.port) {
                 WSDL::XsdBase::removeNS(\port);
                 hash<auto> pa = port."^attributes^";
@@ -33919,10 +34015,6 @@ public class WebService inherits WSDL::XsdSchema {
 
                 if (!binding{bind})
                     throw WSDL_ERROR, sprintf("service %y port %y refers to non-existant binding %y; known bindings: %y", svcname, name, bind, binding.keys());
-
-                # create the ServiceInfo hash if necessary
-                if (!services{svcname})
-                    services{svcname} = new hash<WSDL::ServiceInfo>(("name": svcname));
 
                 # add the port to the service
                 services{svcname}.port{name} = pa + (
@@ -33940,10 +34032,9 @@ public class WebService inherits WSDL::XsdSchema {
             #printf("DEBUG: portType: %y\n", port);
             string name = port."^attributes^".name;
             wsdl_services += name;
+            portType{name} = <PortTypeInfo>{"operations": {}};
             foreach hash<auto> p in (port.operation) {
                 WSOperation op(p, nsc, messages);
-                if (!portType{name})
-                    portType{name} = new hash<PortTypeInfo>();
                 portType{name}.operations.(op.name) = op;
             }
         }
@@ -34051,6 +34142,7 @@ public class WebService inherits WSDL::XsdSchema {
     /** @since %WSDL 0.4
     */
     private:internal doInit(string str, *hash<auto> opts) {
+        WsdlDeclarationGrammar::validate(str);
         validateSchemaGrammar(str);
         hash<auto> h = XsdSchemaSource::parse(str);
 

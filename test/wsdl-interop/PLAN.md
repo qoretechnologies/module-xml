@@ -520,3 +520,10 @@ records. Thirty affected suites, clean Valgrind and unchanged complete corpus
 results are recorded in [ownership evidence](operation-ownership-evidence.md).
 The next P6 work is WSDL grammar/component/reference validation and imports,
 followed by the remaining parts/header/HTTP-MIME acceptance matrix.
+
+P6-03 validates document/declaration identity before grouping and preserves empty
+services and port types through saved graphs. See [declaration evidence](declaration-identity-evidence.md).
+The paired complete enterprise/partner tests pass; independently observed Qore
+collector cost is routed to the separate runtime investigation for P9 acceptance.
+Full grammar, imported QName component resolution and the remaining binding matrix
+are still P6 work. No phase boundary is claimed.
