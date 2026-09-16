@@ -1,0 +1,203 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires xml
+%requires ../qlib/WSDL.qm
+%requires ../qlib/SoapClient.qm
+%requires ../qlib/SoapHandler.qm
+%requires HttpServer
+%try-module json
+%define NoJson
+%endtry
+%ifdef NoJson
+throw "MISSING-MODULE", "Component reference fixtures require json";
+%else
+%exec-class WsdlComponentReferencesTest
+
+class WsdlComponentReferencesTest inherits QUnit::Test {
+    constructor() : Test("WSDL component references", "1.0") {
+        addTestCase("Reference namespaces cannot borrow a matching local name", \wrongNamespaces());
+        addTestCase("Unbound and malformed component QNames reject", \invalidQNames());
+        addTestCase("Forward references resolve in the correct component symbol space", \forward());
+        addTestCase("Declaration-local aliases and whitespace survive saved graphs", \scopes());
+        addTestCase("Absent references reject even without binding operations", \missing());
+        addTestCase("Bindings with scoped references exchange values over HTTP", \http());
+        addTestCase("Pinned independent component reference matrix", \matrix());
+        addTestCase("Headerfault references use their own namespace scope", \headerfaults());
+        set_return_value(main());
+    }
+
+    private static string source(string prefix = "t:") {
+        return '<w:definitions xmlns:w="http://schemas.xmlsoap.org/wsdl/"'
+            + ' xmlns:t="urn:component-references" xmlns:bad="urn:other"'
+            + ' xmlns:s="http://schemas.xmlsoap.org/wsdl/soap/"'
+            + ' xmlns:xs="http://www.w3.org/2001/XMLSchema" targetNamespace="urn:component-references">'
+            + '<w:service name="S"><w:port name="Endpoint" binding="' + prefix + 'B">'
+            + '<s:address location="http://example.invalid/"/></w:port></w:service>'
+            + '<w:binding name="B" type="' + prefix + 'P">'
+            + '<s:binding transport="http://schemas.xmlsoap.org/soap/http" style="rpc"/>'
+            + '<w:operation name="send"><s:operation soapAction="send"/>'
+            + '<w:input><s:body use="literal" namespace="urn:component-references"/>'
+            + '<s:header message="' + prefix + 'H" part="token" use="literal"/></w:input>'
+            + '<w:output><s:body use="literal" namespace="urn:component-references"/></w:output>'
+            + '</w:operation></w:binding>'
+            + '<w:portType name="P"><w:operation name="send">'
+            + '<w:input message="' + prefix + 'M"/><w:output message="' + prefix + 'M"/>'
+            + '<w:fault name="Failure" message="' + prefix + 'M"/>'
+            + '</w:operation></w:portType>'
+            + '<w:message name="M"><w:part name="value" type="xs:string"/></w:message>'
+            + '<w:message name="H"><w:part name="token" type="xs:string"/></w:message></w:definitions>';
+    }
+
+    private static WebService parse(string xml) {
+        return new WebService(xml, {"async_only": True});
+    }
+
+    private matrix() {
+        hash<auto> data = parse_json(ReadOnlyFile::readTextFile(get_script_dir()
+            + "/wsdl-interop/regressions/wsdl-declarations/reference-cases.json"));
+        assertEq(21, data.cases.size());
+        foreach string key in (keys data.cases) {
+            hash<auto> row = data.cases{key};
+            if (!row.qore_valid) {
+                assertThrows("WSDL-ERROR", \parse(), (row.xml,));
+                continue;
+            }
+            WebService ws = parse(row.xml);
+            foreach WebService value in (ws, Serializable::deserialize(ws.serialize())) {
+                assertTrue(value.getOperation("send").input === value.messages.M);
+                assertEq("urn:refs", value.getOperation("send").getTargetNS());
+                assertTrue(value.getService("S").port.Endpoint.binding === value.getBinding("B"));
+            }
+        }
+    }
+
+    private wrongNamespaces() {
+        foreach string attr in ('binding="t:B"', 'type="t:P"', 'message="t:M"', 'message="t:H"') {
+            string xml = replace(source(), attr, replace(attr, "t:", "bad:"));
+            assertThrows("WSDL-ERROR", \parse(), (xml,));
+        }
+        foreach string prefix_context in ('<w:input', '<w:output', '<w:fault name="Failure"') {
+            string start = prefix_context + ' message="t:M"';
+            assertThrows("WSDL-ERROR", \parse(),
+                (replace(source(), start, prefix_context + ' message="bad:M"'),));
+        }
+        # An unprefixed QName uses the default namespace, not targetNamespace.
+        assertThrows("WSDL-ERROR", \parse(), (source(""),));
+    }
+
+    private invalidQNames() {
+        foreach string qname in ("unknown:M", "t:M:extra", "t:", ":M", "", "t:two names") {
+            assertThrows("WSDL-ERROR", \parse(), (replace(source(), 'message="t:M"',
+                'message="' + qname + '"'),));
+        }
+        foreach string attr in ('binding="t:B"', 'type="t:P"', 'message="t:H"') {
+            assertThrows("WSDL-ERROR", \parse(), (replace(source(), attr,
+                replace(attr, "t:", "unknown:")),));
+        }
+    }
+
+    private forward() {
+        WebService ws = parse(source());
+        WSOperation op = ws.getBindingOperation("B", "send");
+        assertTrue(op.input === ws.messages.M);
+        assertTrue(op.output === ws.messages.M);
+        assertTrue(op.getFaultMessages().Failure === ws.messages.M);
+        assertTrue(ws.getService("S").port.Endpoint.binding === ws.getBinding("B"));
+        assertEq("P", ws.getBinding("B").getPort());
+        assertThrows("WSDL-ERROR", \parse(), (replace(source(), 'type="t:P"', 'type="t:M"'),));
+    }
+
+    private scopes() {
+        string xml = replace(source("a:"), 'xmlns:t="urn:component-references"',
+            'xmlns:a="urn:wrong-at-root"');
+        foreach string component in ('<w:service name="S"', '<w:binding name="B"', '<w:portType name="P"') {
+            xml = replace(xml, component, component + ' xmlns:a="urn:component-references"');
+        }
+        xml = replace(xml, 'message="a:H"', 'xmlns:h="urn:component-references" message=" h:H &#x9;"');
+        xml = replace(xml, 'type="a:P"', 'type=" a:P &#x9;"');
+        xml = replace(xml, 'binding="a:B"', 'binding=" a:B &#x9;"');
+        xml = replace(xml, 'message="a:M"', 'message=" a:M &#x9;"');
+        WebService original = parse(xml);
+        foreach WebService ws in (original, Serializable::deserialize(original.serialize()),
+                Serializable::deserialize(original.serializeToData())) {
+            WSOperation op = ws.getBindingOperation("B", "send");
+            assertTrue(op.input === ws.messages.M);
+            assertTrue(op.output === ws.messages.M);
+            assertEq("P", ws.getBinding("B").getPort());
+            hash<auto> request = op.serializeRequest({"value": "order-123"}, {"token": "partner-token"},
+                NOTHING, NOTHING, NOTHING, NOTHING, "B");
+            assertTrue(index(request.body, "partner-token") >= 0);
+            assertTrue(index(request.body, "order-123") >= 0);
+        }
+        WebService defaults = parse(replace(source(""), '<w:definitions ',
+            '<w:definitions xmlns="urn:component-references" '));
+        assertTrue(defaults.getOperation("send").input === defaults.messages.M);
+        WebService no_namespace = parse('<w:definitions xmlns:w="http://schemas.xmlsoap.org/wsdl/">'
+            + '<w:message name="M"/><w:portType name="P"><w:operation name="send">'
+            + '<w:input message="M"/></w:operation></w:portType></w:definitions>');
+        assertTrue(no_namespace.getOperation("send").input === no_namespace.messages.M);
+    }
+
+    private missing() {
+        string xml = '<w:definitions xmlns:w="http://schemas.xmlsoap.org/wsdl/"'
+            + ' xmlns:t="urn:component-references" xmlns:s="http://schemas.xmlsoap.org/wsdl/soap/"'
+            + ' targetNamespace="urn:component-references"><w:binding name="B" type="t:Absent">'
+            + '<s:binding transport="http://schemas.xmlsoap.org/soap/http"/></w:binding></w:definitions>';
+        assertThrows("WSDL-ERROR", \parse(), (xml,));
+        assertThrows("WSDL-ERROR", \parse(), (replace(source(), 'message="t:M"', ''),));
+        assertTrue(parse(source()).getOperation("send").input instanceof WSMessage);
+    }
+
+    private headerfaults() {
+        string original = '<s:header message="t:H" part="token" use="literal"/>';
+        string start = '<s:header message="t:H" part="token" use="literal">';
+        foreach string reference in ("bad:H", "unknown:H", "t:Absent", "t:H:extra") {
+            string replacement = start + '<s:headerfault message="' + reference
+                + '" part="token" use="literal"/></s:header>';
+            assertThrows("WSDL-ERROR", \parse(), (replace(source(), original, replacement),));
+        }
+        string replacement = start + '<s:headerfault xmlns:h="urn:component-references"'
+            + ' message="h:H" part="token" use="literal"/></s:header>';
+        WebService ws = parse(replace(source(), original, replacement));
+        assertTrue(ws.getOperation("send").input === ws.messages.M);
+    }
+
+    private http() {
+        foreach bool soap12 in (False, True) {
+            string xml = replace(source(), '<w:portType name="P">',
+                '<w:portType name="P" xmlns:a="urn:component-references">');
+            xml = replace(xml, 'message="t:M"', 'message=" a:M "');
+            xml = replace(xml, 'message="t:H"', 'xmlns:h="urn:component-references" message="h:H"');
+            if (soap12) {
+                xml = replace(xml, SOAP_11_NS, SOAP_12_NS);
+            }
+            WebService ws = Serializable::deserialize(parse(xml).serialize());
+            HttpServer server();
+            on_exit server.stop();
+            SoapHandler handler(new PermissiveAuthenticator());
+            server.setDefaultHandler("soap", handler);
+            Queue observed();
+            code<auto(hash<auto>, auto)> callback = auto sub(hash<auto> cx, auto value) {
+                observed.push(cx.http_header."content-type");
+                return {"value": value + "-confirmed"};
+            };
+            handler.addMethod(ws, ws.getOperation("send"), callback, NOTHING, NOTHING, NOTHING,
+                "S", NOTHING, NOTHING, "B");
+            server.addListener(0);
+            SoapClient client({"wsdl": ws, "service": "S", "port": "Endpoint",
+                "url": sprintf("http://127.0.0.1:%d/S", server.getListenerInfo(0).port),
+                "timeout": 30000, "connect_timeout": 30000});
+            hash<auto> info;
+            assertEq("order-123-confirmed", client.callOperation("send", {"value": "order-123"},
+                {"soap_header": {"token": "partner-token"}}, \info));
+            string content_type = observed.pop(30000);
+            assertTrue(content_type.startsWith(soap12 ? "application/soap+xml" : "text/xml"));
+            assertTrue(index(info."request-body", "partner-token") >= 0);
+            assertTrue(index(info."response-body", "order-123-confirmed") >= 0);
+        }
+    }
+}
+%endif

@@ -2160,3 +2160,11 @@ duplicate owner scopes and empty components through source/saved graphs.
 `python3 -B test/wsdl-interop/test_wsdl_declarations.py -v` runs 25 pinned-schema
 reference cases. See [evidence](declaration-identity-evidence.md) and
 [implemented design](../../design/wsdl-declaration-identity.md).
+
+Document-local component references use `test/wsdl-component-references.qtest`
+and `python3 -B test/wsdl-interop/test_wsdl_component_references.py -v`.
+The shared matrix distinguishes schema lexical validity from correct expanded
+reference targets; saved graphs and actual SOAP 1.1/1.2 HTTP exchanges are covered.
+See [evidence](component-references-evidence.md) and
+[implemented behavior](../../design/wsdl-component-references.md). WSDL imports
+and the rest of the P6 binding matrix remain required.

@@ -527,3 +527,11 @@ The paired complete enterprise/partner tests pass; independently observed Qore
 collector cost is routed to the separate runtime investigation for P9 acceptance.
 Full grammar, imported QName component resolution and the remaining binding matrix
 are still P6 work. No phase boundary is claimed.
+
+P6-04 validates document-local expanded component references, scoped header
+prefixes and namespace/reference whitespace; see [evidence](component-references-evidence.md).
+Imported component graphs and full grammar remain required. The next import
+increment must also repair the explicitly routed URI-resolution prerequisite in
+`/tmp/wsdl-p6-05-import-catalog/location-finding.md` before integrating the catalog.
+The WebDAV checkpoint pipeline 56986 is green on both supported CI distributions;
+subsequent P6 increments remain local and P9 acceptance is not complete.

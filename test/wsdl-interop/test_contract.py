@@ -23,7 +23,10 @@ class ContractTest(unittest.TestCase):
         self.assertEqual("{urn:second}value", contract.qname(doc[0], "p:value"))
         self.assertEqual("{urn:outer}value", contract.qname(doc, "value"))
         self.assertEqual("value", contract.qname(doc[0], "value"))
-        for name in (None, "", "missing:value", "a:b:c", ":value", "p:", "a b", "1name", "{urn:a}b"):
+        self.assertEqual("{urn:first}value", contract.qname(doc, " \t p:value\r\n"))
+        self.assertEqual("value", contract.qname(doc[0], "\tvalue "))
+        for name in (None, "", "missing:value", "a:b:c", ":value", "p:", "a b", "1name", "{urn:a}b",
+                     "p: value", "p :value", "\u00a0value", "value\u00a0", " \t\r\n"):
             with self.subTest(name=name), self.assertRaises(ValueError):
                 contract.qname(doc, name)
 
@@ -45,6 +48,34 @@ class ContractTest(unittest.TestCase):
             self.assertTrue(part["declared_inline"])
         self.assertEqual(ns + "SoapBinding", value["ports"][0]["binding"])
         self.assertEqual(ns + "BooleanElementService", value["ports"][0]["service"])
+
+    def test_scoped_forward_component_references(self):
+        wire = b'''<w:definitions xmlns:w="http://schemas.xmlsoap.org/wsdl/"
+             xmlns:a="urn:wrong" xmlns:t="urn:refs" targetNamespace="urn:refs">
+          <w:service name="S" xmlns:a="urn:refs"><w:port name="Endpoint" binding=" a:B "/></w:service>
+          <w:binding name="B" xmlns:a="urn:refs" type=" a:P "/>
+          <w:portType name="P" xmlns:a="urn:refs"><w:operation name="send">
+            <w:input message=" a:M "/><w:output message="a:M"/>
+          </w:operation></w:portType><w:message name="M"/>
+        </w:definitions>'''
+        doc = etree.fromstring(wire)
+        value = contract.describe(doc)
+        self.assertEqual([], value["errors"])
+        self.assertEqual("{urn:refs}B", value["ports"][0]["binding"])
+        self.assertEqual("{urn:refs}P", value["bindings"]["{urn:refs}B"]["port_type"])
+        for direction in ("input", "output"):
+            self.assertEqual("{urn:refs}M",
+                value["port_types"]["{urn:refs}P"]["operations"][0][direction]["message"])
+        for path, attr, name, error in (
+                ("w:service/w:port", "binding", "B", "WSDL-UNRESOLVED-BINDING"),
+                ("w:binding", "type", "P", "WSDL-UNRESOLVED-PORT-TYPE"),
+                ("w:portType/w:operation/w:input", "message", "M", "WSDL-UNRESOLVED-MESSAGE"),
+                ("w:portType/w:operation/w:output", "message", "M", "WSDL-UNRESOLVED-MESSAGE")):
+            for reference in (name, "w:" + name):
+                with self.subTest(path=path, reference=reference):
+                    bad = etree.fromstring(wire)
+                    bad.find(path, {"w": contract.WSDL}).set(attr, reference)
+                    self.assertEqual([error], [item["err"] for item in contract.describe(bad)["errors"]])
 
     def test_soap12_and_mime_binding_inventory(self):
         doc = etree.parse(str(ROOT / "cxf/hello_world_soap12.wsdl")).getroot()

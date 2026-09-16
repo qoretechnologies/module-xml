@@ -80,6 +80,8 @@ module WSDL {
     @section wsdlrelnotes WSDL Module Release Notes
 
     @subsection wsdl_0_5_8 WSDL v0.5.8
+    - Document-local WSDL component references validate their expanded QNames and required targets before
+      construction; scoped header prefixes and whitespace-normalized references survive saved services
     - WSDL documents require the WSDL 1.1 definitions root; declaration names use normalized XML NCNames,
       duplicate named components/parts/ports/faults reject before construction, and empty services/port types remain visible
     - Detached operations, messages, header descriptions and sample helpers retain their dependencies;
@@ -23024,10 +23026,17 @@ class WsdlDeclarationFrame {
     public {
         string kind;
         hash<string, bool> names();
+        bool binding_context = False;
     }
     constructor(string kind) {
         self.kind = kind;
     }
+}
+
+hashdecl WsdlComponentReference {
+    string kind;
+    string identity;
+    string origin;
 }
 
 #! Validate document and declaration identity before namespace aliases are grouped.
@@ -23040,6 +23049,9 @@ class WsdlDeclarationGrammar {
     static validate(string xml) {
         XmlReader reader(xml);
         hash<string, WsdlDeclarationFrame> frames();
+        hash<string, bool> components();
+        list<hash<WsdlComponentReference>> references();
+        string target_namespace;
         bool root = False;
         while (reader.read()) {
             int depth = reader.depth();
@@ -23059,6 +23071,8 @@ class WsdlDeclarationGrammar {
                         reader.namespaceUri() ?? "", local);
                 }
                 root = True;
+                target_namespace = XsdSimpleType::normalizeWhiteSpace(reader.getAttribute("targetNamespace") ?? "",
+                    "collapse");
             }
             *WsdlDeclarationFrame parent = frames{string(depth - 1)};
             bool named_global = parent.kind == "definitions" && Global{local};
@@ -23066,12 +23080,18 @@ class WsdlDeclarationGrammar {
             bool port = parent.kind == "service" && local == "port";
             bool operation = (parent.kind == "portType" || parent.kind == "binding") && local == "operation";
             bool fault = parent.kind == "operation" && local == "fault";
-            bool active = wsdl && (depth == 0 || named_global || part || port || operation || fault);
+            bool parameter = parent.kind == "operation" && (local == "input" || local == "output");
+            bool header = parent.binding_context && (reader.namespaceUri() == SOAP_11_NS
+                || reader.namespaceUri() == SOAP_12_NS)
+                && (((parent.kind == "input" || parent.kind == "output") && local == "header")
+                    || (parent.kind == "header" && local == "headerfault"));
+            bool active = (wsdl && (depth == 0 || named_global || part || port || operation || fault || parameter))
+                || header;
             if (!active) {
                 continue;
             }
             *string name = reader.getAttribute("name");
-            if (depth || exists name) {
+            if (!header && (named_global || part || port || operation || fault || exists name)) {
                 if (!exists name) {
                     throw WSDL_ERROR, sprintf("WSDL %s requires a name", local);
                 }
@@ -23085,13 +23105,45 @@ class WsdlDeclarationGrammar {
                 }
                 parent.names{identity} = True;
             }
+            if (named_global) {
+                components{local + ":" + sprintf("{%s}%s", target_namespace, name)} = True;
+            }
+            if (named_global && local == "binding") {
+                push references, componentReference(reader, "type", "portType");
+            } else if (port) {
+                push references, componentReference(reader, "binding", "binding");
+            } else if (header || ((parameter || fault) && !parent.binding_context)) {
+                push references, componentReference(reader, "message", "message");
+            }
             if (!reader.isEmptyElement()) {
                 frames{key} = new WsdlDeclarationFrame(local);
+                frames{key}.binding_context = parent.binding_context || (named_global && local == "binding");
             }
         }
         if (!root) {
             throw WSDL_ERROR, "missing WSDL 1.1 definitions root";
         }
+        foreach hash<WsdlComponentReference> ref in (references) {
+            if (!components{ref.kind + ":" + ref.identity}) {
+                throw WSDL_ERROR, sprintf("%s references undefined WSDL %s %Y", ref.origin, ref.kind, ref.identity);
+            }
+        }
+    }
+
+    private static hash<WsdlComponentReference> componentReference(XmlReader reader, string attribute,
+            string kind) {
+        *string value = reader.getAttribute(attribute);
+        if (!exists value) {
+            throw WSDL_ERROR, sprintf("WSDL %s requires %s", reader.localName(), attribute);
+        }
+        value = XsdNameLexicalHelper::lexical("QName", value, WSDL_ERROR);
+        list<string> parts = value.split(":");
+        *string uri = parts.size() == 2 ? reader.lookupNamespace(parts[0]) : reader.lookupNamespace();
+        if (parts.size() == 2 && !uri) {
+            throw WSDL_ERROR, sprintf("unbound prefix in WSDL %s reference %Y", kind, value);
+        }
+        return <WsdlComponentReference>{"kind": kind, "identity": sprintf("{%s}%s", uri ?? "", parts[-1]),
+            "origin": reader.localName() + "@" + attribute};
     }
 }
 
@@ -23161,10 +23213,25 @@ class XsdSchemaSource {
                     || (wsdl_parent == "message" && local == "part")
                     || (wsdl_parent == "service" && local == "port")
                     || ((wsdl_parent == "portType" || wsdl_parent == "binding") && local == "operation")
-                    || (wsdl_parent == "operation" && local == "fault")) ? local : "");
+                    || (wsdl_parent == "operation" && (local == "fault" || local == "input" || local == "output")))
+                ? local : "");
         if (wsdl_context && exists value."^attributes^".name) {
             value."^attributes^".name = XsdNameLexicalHelper::lexical("NCName",
                 value."^attributes^".name, WSDL_ERROR);
+        }
+        if (wsdl_context == "definitions" && exists value."^attributes^".targetNamespace) {
+            value."^attributes^".targetNamespace = XsdSimpleType::normalizeWhiteSpace(
+                value."^attributes^".targetNamespace, "collapse");
+        }
+        if (wsdl_context) {
+            string attribute = wsdl_context == "binding" ? "type" : wsdl_context == "port" ? "binding"
+                : (wsdl_context == "input" || wsdl_context == "output" || wsdl_context == "fault") ? "message" : "";
+            if (attribute) {
+                if (exists value."^attributes^"{attribute}) {
+                    value."^attributes^"{attribute} = XsdNameLexicalHelper::lexical("QName",
+                        value."^attributes^"{attribute}, WSDL_ERROR);
+                }
+            }
         }
         in_schema = in_schema || (!annotation_content && uri == XSD_NS && local == "schema");
         bool element_content = in_schema && uri == XSD_NS && !annotation_content;
@@ -31032,6 +31099,7 @@ public class Binding inherits WSDL::XsdNamedData {
         }
 
         foreach hash<auto> ophash in (data.operation) {
+            NamespacePrefixHelper operation_scope(nsc, ophash."^attributes^");
             string opname = ophash."^attributes^".name;
             if (!exists portTypes{port}.operations{opname})
                 throw WSDL_ERROR, sprintf("binding %y references unknown porttype %y operation %y", name, port, opname);
@@ -31078,6 +31146,7 @@ public class Binding inherits WSDL::XsdNamedData {
             hash<auto> op = remove ophash{"input", "output"};
 
             foreach string io in (keys op) {
+                NamespacePrefixHelper io_scope(nsc, op{io}."^attributes^");
                 WSDL::XsdBase::removeNS(\op{io});
                 if (!exists portTypes{port}.operations{opname}{io}) {
                     *hash<auto> hk = map {$1: True}, keys op{io};
@@ -31174,6 +31243,7 @@ public class Binding inherits WSDL::XsdNamedData {
                 if (exists op{io}.header) {
                     foreach hash<auto> hdr in (op{io}.header) {
                         *hash<auto> ma = hdr."^attributes^";
+                        NamespacePrefixHelper header_scope(nsc, ma);
 
                         if (!ma.message)
                             throw WSDL_ERROR, sprintf("%s binding %y for operation %y specifies a soap header element without a 'message' attribute (attr: %y)", io, name, opname, ma);
@@ -33785,6 +33855,8 @@ public class XsdSchema inherits WSDL::XsdBase {
 The document root must be WSDL 1.1 definitions. Named declarations use XML NCNames; duplicate messages,
 port types, bindings and services reject instead of overwriting earlier components. Parts and ports have
 separate name scopes in each owner. Empty port types and services remain available through lookup and reports.
+Component references use their declaration's namespace context and must identify the required component kind.
+An unprefixed reference uses the default namespace; targetNamespace is not an implicit default.
 
 @par Thread Safety
 This class is designed to be thread-safe for read operations once constructed. Multiple threads

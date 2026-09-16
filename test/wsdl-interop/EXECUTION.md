@@ -8676,3 +8676,35 @@ and [62-item audit](audits/P6-03-declaration-identity.md). Remaining P6 work beg
 with complete grammar and namespace-qualified/imported component references;
 operation signatures, parts/header/fault and HTTP/MIME requirements follow.
 P6–P9 acceptance remains incomplete.
+
+## Pushed repair CI and P6-04 component references
+
+The explicitly authorized WebDAV repair push, `47671ca`, passed pipeline
+[56986](https://git.qoretechnologies.com/mirror/module-xml/-/pipelines/56986):
+Alpine job 202065 and Ubuntu job 202064 both succeeded, with 206 successful suite
+summaries each. Full traces and exact-SHA verification are in
+`/tmp/wsdl-ci-webdav-properties/pipeline-56986-summary.json`. P6-03 is committed
+locally as `3d7e99e`; subsequent development has not been pushed. No Qore push or
+qore-test-base pipeline was started.
+
+P6-04 fixes document-local expanded QName references, required empty-binding
+targets, scoped header namespaces and normalized names/references/targetNamespace.
+Eight focused cases / 103 assertions, 32 affected suites, 21 independent shared
+fixtures and complete native/legacy corpus comparisons pass. The independent
+contract inventory now applies XML whitespace rules consistently. Docs are clean.
+See [evidence](component-references-evidence.md), [validation](P6-04-validation.json)
+and [audit](audits/P6-04-component-references.md).
+
+The remaining import work includes an existing URI-resolution defect found during
+preparation: query slashes corrupt a URL base and HTTP root/network-path references
+are mistaken for filesystem paths. It is explicitly assigned to the next P6
+increment before catalog integration; the root cause and RFC 3986 examples are in
+`/tmp/wsdl-p6-05-import-catalog/location-finding.md`. The isolated catalog prototype
+is in the same directory; it does not count as implemented WSDL import support.
+Full grammar, imported components, overload signatures and the remaining binding
+matrix are still open. No new user decision is needed.
+
+The final P6-04 full enterprise/partner suite passed all 5 cases / 85 assertions
+without warnings/errors in 693.688 seconds. All final sources remained unchanged.
+The URI prerequisite prototype separately passes the 42 RFC examples plus seven
+additional cases; it remains isolated and is not counted as production behavior.

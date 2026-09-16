@@ -4,6 +4,8 @@ Copyright (C) 2026 Qore Technologies, s.r.o.
 This records WSDL 1.1 references and binding metadata; it is not a complete WSDL validator.
 """
 
+import re
+
 from lxml import etree
 
 
@@ -14,7 +16,12 @@ SOAP = {"http://schemas.xmlsoap.org/wsdl/soap/": "11", "http://schemas.xmlsoap.o
 
 def qname(node: etree._Element, value: str) -> str:
     """Resolve a QName in the declaration's own namespace context, without local-name fallback."""
-    if not isinstance(value, str) or not value or value.strip() != value:
+    if not isinstance(value, str):
+        raise ValueError(f"invalid QName: {value!r}")
+    # XML Schema QName uses whitespace collapse. Internal whitespace remains
+    # invalid NCName content; non-XML whitespace must not be stripped.
+    value = value.strip(" \t\r\n")
+    if not value:
         raise ValueError(f"invalid QName: {value!r}")
     parts = value.split(":")
     if len(parts) > 2 or any(not part for part in parts):
@@ -42,7 +49,7 @@ def describe(document: etree._Element) -> dict:
     """
     if document.tag != f"{{{WSDL}}}definitions":
         raise ValueError("not a WSDL 1.1 definitions document")
-    namespace = document.get("targetNamespace", "")
+    namespace = re.sub(r"[ \t\r\n]+", " ", document.get("targetNamespace", "")).strip(" ")
     result = {"target_namespace": namespace, "messages": {}, "port_types": {}, "bindings": {},
               "ports": [], "errors": [], "imports": [], "inline_schemas": []}
 
