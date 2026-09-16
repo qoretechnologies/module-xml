@@ -8732,3 +8732,25 @@ query-only schema references need a source URI rather than only a directory.
 The updated isolated catalog prototype passes query/fragment deduplication but
 is not production import support. Implementation notes and the prototype remain
 under `/tmp/wsdl-p6-05-import-catalog/`.
+
+## P6-06 full containing-document URIs
+
+P6-05 is committed locally as `2216855`. P6-06 carries full non-file source URIs
+through WSDLLib, SoapClient, asynchronous loading, nested schemas and per-source
+serialization. URI resource identities omit fragments and preserve queries.
+Cycle detection no longer depends on an unused fallback directory when a full URI
+is known. Saved services restore their active defaults after rebuilding the root
+and added sources; failed nested additions restore the caller's context.
+
+The new suite passes 9 cases / 97 assertions. All 34 affected suites pass 442 cases /
+7,090 reported assertions (including seven intentionally caught comparator
+assertions). All six corpus reports differ from P6-05 only in version metadata;
+33 Python survey/coverage tests pass. WSDL and SoapClient documentation builds
+are clean. The full audit has 18 Pass / 44 N/A / zero Fail. See
+[evidence](document-locations-evidence.md), [validation](P6-06-validation.json)
+and [audit](audits/P6-06-document-locations.md).
+
+No push, Qore change or image pipeline. WSDL import catalog/component integration
+and canonical file-resource handling remain in P6. Construction-only registry
+classes and integration notes are drafted under
+`/tmp/wsdl-p6-05-import-catalog/`; they are not production import support.

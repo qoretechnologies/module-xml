@@ -1,0 +1,287 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires ../qlib/WSDL.qm
+%requires ../qlib/SoapClient.qm
+%requires HttpServer
+%exec-class DocumentLocationsTest
+
+const DocumentNs = "urn:document-locations";
+
+string sub documentSchema(string children) {
+    return '<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" targetNamespace="'
+        + DocumentNs + '">' + children + '</xs:schema>';
+}
+
+class DocumentLocationsTest inherits QUnit::Test {
+    constructor() : Test("WSDL containing document URIs", "1.0") {
+        addTestCase("All URL loaders retain query-bearing document origins", \http());
+        addTestCase("Each saved source retains its own complete URI", \savedSources());
+        addTestCase("Failed dependencies restore usable state and retry at the correct URI", \retry());
+        addTestCase("Missing and invalid source URI options are distinguished", \options());
+        addTestCase("Legacy fragment-bearing caches remain usable", \legacyCache());
+        addTestCase("Query cycles retain one definition and reconstruct offline", \cycle());
+        addTestCase("Local file additions restore the active HTTP document origin", \files());
+        addTestCase("Saved services restore the active context after rebuilding the root", \serviceContext());
+        addTestCase("Nested failures restore the containing document context", \nestedFailure());
+        set_return_value(main());
+    }
+
+    private static WebService poll(string url) {
+        WsdlPollOperation op(url, {"timeout": 30000, "connect_timeout": 30000});
+        on_error op.abort();
+        date deadline = now_us() + 30s;
+        while (!op.goalReached()) {
+            *hash<SocketPollInfo> info = op.continuePoll();
+            if (info) {
+                int remaining = (deadline - now_us()).durationMilliseconds();
+                if (remaining <= 0) {
+                    throw "TEST-ERROR", "asynchronous WSDL retrieval deadline exceeded";
+                }
+                Socket::poll((info,), remaining);
+            }
+        }
+        return op.getOutput();
+    }
+
+    private checkValue(XsdSchema schema, string name = "Value") {
+        XsdXmlValue value('<' + name + ' xmlns="' + DocumentNs + '">42</' + name + '>');
+        assertEq(value, schema.validateXmlValue(value));
+        assertThrows("SOAP-SERIALIZATION-ERROR", \schema.validateXmlValue(),
+            (new XsdXmlValue('<' + name + ' xmlns="' + DocumentNs + '">invalid</' + name + '>'),));
+    }
+
+    private http() {
+        foreach string mode in ("sync", "async", "client") {
+            HttpServer server();
+            on_exit server.stop();
+            Queue requests();
+            server.setDefaultHandler("documents", new DocumentLocationPeer(requests));
+            server.addListener(0);
+            string url = sprintf("http://127.0.0.1:%d/catalog/root.wsdl?version=1&path=x/y",
+                server.getListenerInfo(0).port);
+            WebService ws;
+            if (mode == "async") {
+                ws = poll(url + "#root");
+            } else if (mode == "client") {
+                SoapClient client({"wsdl": url + "#root", "timeout": 30000, "connect_timeout": 30000});
+                ws = client.getWebService();
+            } else {
+                ws = WSDLLib::getWebServiceFromUrl(url + "#root",
+                    new HTTPClient({"timeout": 30000, "connect_timeout": 30000}));
+            }
+            assertEq(url, ws.document_location);
+            assertEq("/catalog/root.wsdl?version=1&path=x/y", requests.get(30000));
+            assertEq("/catalog/root.wsdl?version=2", requests.get(30000));
+            assertEq("/catalog/root.wsdl?version=3", requests.get(30000));
+            assertEq(0, requests.size());
+            checkValue(ws);
+            auto saved = ws.serialize();
+            server.stop();
+            WebService restored = Serializable::deserialize(saved);
+            assertEq(url, restored.document_location);
+            checkValue(restored);
+        }
+    }
+
+    private savedSources() {
+        string source = documentSchema('<xs:include schemaLocation="?version=2"/>');
+        hash<string, string> cache = {
+            "https://host/a.xsd?version=2": documentSchema('<xs:element name="A" type="xs:int"/>'),
+            "https://host/b.xsd?version=2": documentSchema('<xs:element name="B" type="xs:int"/>'),
+        };
+        XsdSchema schema(source, {"document_location": "https://host/a.xsd?version=1",
+            "def_path": "/deliberately/unrelated", "async_only": True, "xsd_cache": cache});
+        schema.document_location = "https://host/b.xsd?version=1";
+        schema.addSchemaString(source);
+        checkValue(schema, "A");
+        checkValue(schema, "B");
+        schema.opts.xsd_cache = {};
+        XsdSchema restored = Serializable::deserialize(schema.serialize());
+        checkValue(restored, "A");
+        checkValue(restored, "B");
+        assertEq(schema.document_location, restored.document_location);
+        assertEq(schema.def_path, restored.def_path);
+    }
+
+    private serviceContext() {
+        string source = documentSchema('<xs:include schemaLocation="?version=2"/>');
+        string root = '<w:definitions xmlns:w="http://schemas.xmlsoap.org/wsdl/"><w:types>'
+            + source + '</w:types></w:definitions>';
+        WebService ws(root, {"document_location": "https://host/a.wsdl?version=1",
+            "def_path": "/original", "async_only": True, "xsd_cache": {
+                "https://host/a.wsdl?version=2": documentSchema('<xs:element name="A" type="xs:int"/>'),
+                "https://host/b.xsd?version=2": documentSchema('<xs:element name="B" type="xs:int"/>')}});
+        ws.document_location = "https://host/b.xsd?version=1";
+        ws.def_path = "/updated";
+        ws.addSchemaString(source);
+        ws.opts.xsd_cache = {};
+        WebService restored = Serializable::deserialize(ws.serialize());
+        checkValue(restored, "A");
+        checkValue(restored, "B");
+        assertEq(ws.document_location, restored.document_location);
+        assertEq(ws.def_path, restored.def_path);
+    }
+
+    private retry() {
+        XsdSchema schema(documentSchema('<xs:element name="Original" type="xs:int"/>'),
+            {"document_location": "https://host/root.xsd?v=1", "async_only": True});
+        string source = documentSchema('<xs:include schemaLocation="?v=2"/>');
+        try {
+            schema.addSchemaString(source);
+            fail("missing dependency accepted");
+        } catch (hash<ExceptionInfo> ex) {
+            assertEq("WSDL-ASYNC-IMPORT", ex.err);
+            assertEq("https://host/root.xsd?v=2", ex.arg);
+        }
+        assertEq("https://host/root.xsd?v=1", schema.document_location);
+        checkValue(schema, "Original");
+        schema.opts.xsd_cache = {"https://host/root.xsd?v=2":
+            documentSchema('<xs:element name="Added" type="xs:int"/>')};
+        schema.addSchemaString(source);
+        checkValue(schema, "Original");
+        checkValue(schema, "Added");
+        schema.opts.xsd_cache = {};
+        XsdSchema restored = Serializable::deserialize(schema.serialize());
+        checkValue(restored, "Added");
+    }
+
+    private nestedFailure() {
+        string child = documentSchema('<xs:include schemaLocation="?next=2"/>');
+        XsdSchema schema(documentSchema('<xs:element name="Original" type="xs:int"/>'),
+            {"document_location": "https://host/root.xsd", "async_only": True,
+                "xsd_cache": {"https://host/nested/child.xsd?next=1": child}});
+        string source = documentSchema('<xs:include schemaLocation="nested/child.xsd?next=1"/>');
+        try {
+            schema.addSchemaString(source);
+            fail("missing nested dependency accepted");
+        } catch (hash<ExceptionInfo> ex) {
+            assertEq("WSDL-ASYNC-IMPORT", ex.err);
+            assertEq("https://host/nested/child.xsd?next=2", ex.arg);
+        }
+        assertEq("https://host/root.xsd", schema.document_location);
+        checkValue(schema, "Original");
+        schema.opts.xsd_cache{"https://host/nested/child.xsd?next=2"} =
+            documentSchema('<xs:element name="Added" type="xs:int"/>');
+        schema.addSchemaString(source);
+        checkValue(schema, "Added");
+        assertEq("https://host/root.xsd", schema.document_location);
+    }
+
+    private static XsdSchema parseAt(string uri) {
+        return new XsdSchema(documentSchema('<xs:element name="Value" type="xs:int"/>'),
+            {"document_location": uri, "async_only": True});
+    }
+
+    private options() {
+        assertThrows("WSDL-LOCATION-ERROR", \parseAt(), ("relative/file.xsd",));
+        assertThrows("WSDL-LOCATION-ERROR", \parseAt(), ("",));
+        assertThrows("WSDL-LOCATION-ERROR", \parseAt(), ("https://bad host/file.xsd",));
+        XsdSchema empty();
+        assertEq(NOTHING, empty.document_location);
+        assertEq("https://host/file.xsd?v=1", parseAt("https://host/file.xsd?v=1#part").document_location);
+        assertEq(NOTHING, WSDLLib::getUriDocumentLocation("a local file.wsdl"));
+        assertEq(NOTHING, WSDLLib::getUriDocumentLocation("file:///local/file.wsdl"));
+        checkValue(parseAt("https://host/file.xsd"));
+    }
+
+    private cycle() {
+        string root = documentSchema('<xs:include schemaLocation="?version=2#other"/>'
+            + '<xs:element name="Root" type="xs:int"/>');
+        string child = documentSchema('<xs:include schemaLocation="?version=1#root"/>'
+            + '<xs:element name="Child" type="xs:int"/>');
+        XsdSchema schema(root, {"document_location": "https://host/cycle.xsd?version=1#root",
+            "async_only": True, "xsd_cache": {"https://host/cycle.xsd?version=1": root,
+                "https://host/cycle.xsd?version=2": child}});
+        checkValue(schema, "Root");
+        checkValue(schema, "Child");
+        schema.opts.xsd_cache = {};
+        XsdSchema restored = Serializable::deserialize(schema.serialize());
+        checkValue(restored, "Root");
+        checkValue(restored, "Child");
+    }
+
+    private files() {
+        XsdSchema schema(documentSchema('<xs:element name="Value" type="xs:int"/>'),
+            {"document_location": "https://host/root.xsd?v=1", "def_path": "https://host"});
+        string file = get_script_dir() + "/wsdl-include/schemas/include-test.xsd";
+        schema.addSchemaFile(file);
+        assertEq("https://host/root.xsd?v=1", schema.document_location);
+        assertEq("https://host", schema.def_path);
+        assertTrue(schema.getElementNamespaces().size() > 1);
+        assertThrows("FILE-OPEN2-ERROR", \schema.addSchemaFile(), (file + ".missing",));
+        assertEq("https://host/root.xsd?v=1", schema.document_location);
+        assertEq("https://host", schema.def_path);
+        checkValue(Serializable::deserialize(schema.serialize()));
+    }
+
+    private legacyCache() {
+        XsdSchema schema(documentSchema('<xs:include schemaLocation="child.xsd#fragment"/>'),
+            {"def_path": "https://host/schemas", "async_only": True,
+                "xsd_cache": {"https://host/schemas/child.xsd#fragment":
+                    documentSchema('<xs:element name="Value" type="xs:int"/>')}});
+        checkValue(schema);
+        schema.opts.xsd_cache = {};
+        checkValue(Serializable::deserialize(schema.serialize()));
+        # Reproduce the older saved shape: no per-source URI and fragment-bearing dependency keys.
+        hash<SerializationInfo> data = schema.serializeToData();
+        int changed = 0;
+        foreach string id in (keys data._index) {
+            hash<auto> node = data._index{id};
+            if (!node.hasKey("_hash")) {
+                continue;
+            }
+            if (node._hash == "WSDL::XsdSourceInfo") {
+                remove node._members.location;
+            }
+            if (node._hash == "^string" && exists node._members{"https://host/schemas/child.xsd"}) {
+                node._members{"https://host/schemas/child.xsd#fragment"} =
+                    remove node._members{"https://host/schemas/child.xsd"};
+                ++changed;
+            }
+            data._index{id} = node;
+        }
+        assertEq(1, changed);
+        checkValue(Serializable::deserialize(data));
+    }
+}
+
+# Immutable configuration; Queue synchronizes observations from HTTP worker threads.
+class DocumentLocationPeer inherits AbstractHttpRequestHandler {
+    private { Queue requests; }
+    constructor(Queue requests) { self.requests = requests; }
+
+    hash<HttpResponseInfo> handleRequest(hash<auto> cx, hash<auto> hdr, *data body) {
+        requests.push(cx.raw_path);
+        string source;
+        switch (cx.raw_path) {
+            case "/catalog/root.wsdl?version=1&path=x/y":
+                source = '<w:definitions xmlns:w="http://schemas.xmlsoap.org/wsdl/"'
+                    + ' xmlns:s="http://schemas.xmlsoap.org/wsdl/soap/" xmlns:t="urn:service"'
+                    + ' xmlns:xs="http://www.w3.org/2001/XMLSchema" targetNamespace="urn:service">'
+                    + '<w:types>' + documentSchema('<xs:include schemaLocation="?version=2#first"/>'
+                        + '<xs:include schemaLocation="?version=2#second"/>') + '</w:types>'
+                    + '<w:message name="M"><w:part name="value" type="xs:int"/></w:message>'
+                    + '<w:portType name="P"><w:operation name="Get"><w:input message="t:M"/>'
+                    + '<w:output message="t:M"/></w:operation></w:portType>'
+                    + '<w:binding name="B" type="t:P"><s:binding style="rpc"'
+                    + ' transport="http://schemas.xmlsoap.org/soap/http"/><w:operation name="Get">'
+                    + '<s:operation soapAction="Get"/><w:input><s:body use="literal" namespace="urn:service"/>'
+                    + '</w:input><w:output><s:body use="literal" namespace="urn:service"/></w:output>'
+                    + '</w:operation></w:binding><w:service name="S"><w:port name="Port" binding="t:B">'
+                    + '<s:address location="http://' + hdr.host + '/soap"/></w:port></w:service></w:definitions>';
+                break;
+            case "/catalog/root.wsdl?version=2":
+                source = documentSchema('<xs:include schemaLocation="?version=3#value"/>');
+                break;
+            case "/catalog/root.wsdl?version=3":
+                source = documentSchema('<xs:element name="Value" type="xs:int"/>');
+                break;
+            default:
+                return makeResponse({}, 404, "unknown document");
+        }
+        return makeResponse({"Content-Type": "text/xml"}, 200, source);
+    }
+}

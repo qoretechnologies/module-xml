@@ -80,6 +80,8 @@ module WSDL {
     @section wsdlrelnotes WSDL Module Release Notes
 
     @subsection wsdl_0_5_8 WSDL v0.5.8
+    - URL-backed WSDL and XSD sources retain full document URIs for query-only schema references;
+      nested dependencies and saved sources retain their own bases and share fragment-free retrieval keys
     - URI resolution separates paths, queries and fragments; HTTP schema dependencies support root-relative
       and network-path references, and asynchronous WSDL retrieval retains the document's HTTP directory
     - WSDLLib::resolveDocumentLocation() resolves full-document URI references according to RFC 3986;
@@ -1041,6 +1043,27 @@ public class WSDLLib {
         return WsdlUriResolver::resolve(location, document_location);
     }
 
+    #! returns a document URI for a URL source, or NOTHING for inline XML and local filesystem sources
+    /** @param location the source passed to a WSDL loader
+        @return a non-file URL without its fragment, or NOTHING when the source has no URI base
+        @throw WSDL-LOCATION-ERROR a URL contains an unescaped ASCII space or control character
+        @note Bare paths and legacy file locations retain the directory-base interface.
+        @par Example
+        @code{.py}
+        WSDLLib::getUriDocumentLocation("https://partner.example/orders.wsdl?version=2#service");
+        # returns https://partner.example/orders.wsdl?version=2
+        @endcode
+        @since %WSDL 0.5.8
+    */
+    static *string getUriDocumentLocation(string location) {
+        if (!hasScheme(location) || location =~ /^file:/i) {
+            return;
+        }
+        hash<WsdlUriParts> uri = WsdlUriResolver::parse(location);
+        uri.fragment = NOTHING;
+        return WsdlUriResolver::compose(uri);
+    }
+
     #! retrieves a file from a URL with HTTP and returns the file's contents as a string
     /** called by WSDLLib::getFileFromURL() in case the scheme is "http"
     */
@@ -1182,7 +1205,8 @@ public class WSDLLib {
     static WebService getWebServiceFromUrl(string url, *HTTPClient http_client, *hash<auto> http_headers) {
         string def_path;
         string wsdl = WSDLLib::getWSDL(url, http_client, http_headers, \def_path);
-        return new WebService(wsdl, {"def_path": def_path, "http_client": http_client, "http_headers": http_headers});
+        return new WebService(wsdl, {"def_path": def_path, "document_location": getUriDocumentLocation(url),
+            "http_client": http_client, "http_headers": http_headers});
     }
 
     #! takes a hash representation of a SOAP message and handles multipart messages, checks the content-type, and handles hrefs in the message
@@ -32639,6 +32663,7 @@ public class WsdlPollOperation inherits Qore::AbstractPollOperation {
                 try {
                     output = new WebService(wsdl_text, {
                         "def_path": def_path,
+                        "document_location": WSDLLib::getUriDocumentLocation(wsdl_url),
                         "http_headers": http_headers,
                         "xsd_cache": xsd_cache,
                         "async_only": True,
@@ -32784,6 +32809,8 @@ public hashdecl XsdSourceInfo {
     string xml;
     #! base used to resolve relative imports and includes
     *string base;
+    #! complete containing document URI, when available
+    *string location;
 }
 
 #! Encapsulates XSD schema parsing and the resulting type/element/group registry
@@ -32856,6 +32883,9 @@ public class XsdSchema inherits WSDL::XsdBase {
         /** Preserved separately from options because addSchemaFile() can set it after construction.
         */
         *string def_path;
+
+        #! complete containing document URI used for URI-relative schema references
+        *string document_location;
     }
 
     private {
@@ -32876,6 +32906,9 @@ public class XsdSchema inherits WSDL::XsdBase {
 
         # WebService must restore its inline declarations before schemas added later.
         transient list<hash<XsdSourceInfo>> pending_schema_sources();
+        # Root WSDL reconstruction temporarily uses its original options, then restores these defaults.
+        transient *string pending_default_base;
+        transient *string pending_document_location;
 
         # Successfully retrieved dependency bytes, indexed by normalized absolute location.
         hash<string, string> schema_dependencies();
@@ -32887,6 +32920,9 @@ public class XsdSchema inherits WSDL::XsdBase {
         }
         initOptions(members.opts);
         def_path = members.def_path ?? opts.def_path;
+        document_location = members.document_location ?? opts.document_location;
+        pending_default_base = def_path;
+        pending_document_location = document_location;
         has_try_import = members.has_try_import ?? False;
         nsc = new Namespaces({});
         nsc.opt_empty_string_is_nothing = opts.compat_empty_string_is_nothing
@@ -32907,10 +32943,14 @@ public class XsdSchema inherits WSDL::XsdBase {
     }
 
     private restoreSchemaSources() {
-        *string saved_base = def_path;
-        on_exit def_path = saved_base;
+        on_exit {
+            def_path = pending_default_base;
+            document_location = pending_document_location;
+            pending_default_base = pending_document_location = NOTHING;
+        }
         foreach hash<XsdSourceInfo> source in (pending_schema_sources) {
             def_path = source.base;
+            document_location = source.location;
             addSchemaString(source.xml);
         }
         pending_schema_sources = ();
@@ -32927,6 +32967,8 @@ public class XsdSchema inherits WSDL::XsdBase {
     #! creates an XsdSchema by parsing one or more XSD source documents
     /** @param xsd a single XSD document string, or a list of XSD document strings (parsed in order)
         @param opts an optional hash of options:
+        - \c "document_location": full URI of the containing document, used instead of the directory base
+          for URI references; saved with each source
         - \c "def_path": default path for retrieving referenced XSD imports
         - \c "try_import": call reference or closure to resolve XSD imports without a scheme; takes a
           string argument (the resource name) and returns a string (the resource data)
@@ -33019,11 +33061,11 @@ public class XsdSchema inherits WSDL::XsdBase {
         on_exit nsc = n_nsc;
         on_success n_nsc.merge(nsc);
 
-        string source_key = schemaSourceKey(xsd, nsc.getTargetNamespaceUri(), def_path);
+        string source_key = schemaSourceKey(xsd, nsc.getTargetNamespaceUri(), def_path, document_location);
         active_schemas{source_key} = True;
         on_exit remove active_schemas{source_key};
         parseTypes(h, opts.http_client instanceof HTTPClient ? opts.http_client : NOTHING, opts.http_headers);
-        hash<XsdSourceInfo> source = <XsdSourceInfo>{"xml": xsd, "base": def_path};
+        hash<XsdSourceInfo> source = <XsdSourceInfo>{"xml": xsd, "base": def_path, "location": document_location};
         schema_sources += source;
     }
 
@@ -33036,6 +33078,9 @@ public class XsdSchema inherits WSDL::XsdBase {
         Failed additions restore the original default base.
     */
     addSchemaFile(string path) {
+        *string previous_location = document_location;
+        document_location = NOTHING;
+        on_exit document_location = previous_location;
         *string previous_base = def_path;
         def_path = dirname(path);
         on_error def_path = previous_base;
@@ -33235,13 +33280,18 @@ public class XsdSchema inherits WSDL::XsdBase {
         return ("^type^": tmap_get(tmap, name), "^val^": v);
     }
 
-    private string schemaSourceKey(string xml, *string uri, *string base) {
-        # getLocationBase() returns directory URLs without the optional trailing separator.
+    private string schemaSourceKey(string xml, *string uri, *string base, *string location) {
+        if (exists location) {
+            # A full URI determines resolution independently of the fallback directory.
+            location = WSDLLib::resolveDocumentLocation("", location);
+            return sprintf("uri:%Y:%Y:%s", uri ?? "", location, xml.toSHA512());
+        }
+        # Legacy inline sources have only a directory base.
         if (base) {
             base = WSDLLib::resolveLocation(".", base);
             base =~ s{/+$}{};
         }
-        return sprintf("%Y:%Y:%s", uri ?? "", base ?? "", xml.toSHA512());
+        return sprintf("base:%Y:%Y:%s", uri ?? "", base ?? "", xml.toSHA512());
     }
 
     private validateSchemaRoot(string xml, string error) {
@@ -33345,6 +33395,10 @@ public class XsdSchema inherits WSDL::XsdBase {
             has_try_import = True;
         }
         def_path = opts.def_path;
+        document_location = opts.document_location;
+        if (exists document_location) {
+            document_location = WSDLLib::resolveDocumentLocation("", document_location);
+        }
     }
 
     private XsdBaseType getBaseType(string t) {
@@ -33643,7 +33697,14 @@ public class XsdSchema inherits WSDL::XsdBase {
             auto http_client, auto http_headers, bool include, XsdLateResolverHelper unresolved) {
         # relative locations must be resolved against the location of the referencing document and not
         # against the location of the top-level WSDL document
-        string loc = WSDLLib::resolveLocation(schema_location, def_path);
+        string loc = document_location
+            ? WSDLLib::resolveDocumentLocation(schema_location, document_location)
+            : WSDLLib::resolveLocation(schema_location, def_path);
+        string legacy_key = WSDLLib::normalizeLocation(loc, "file", NOTHING);
+        *string source_location = WSDLLib::getUriDocumentLocation(loc);
+        if (source_location) {
+            loc = source_location;
+        }
 
         bool async_only = opts.async_only ?? False;
         *hash<auto> xsd_cache = opts.xsd_cache;
@@ -33666,9 +33727,14 @@ public class XsdSchema inherits WSDL::XsdBase {
         if (exists schema_dependencies{dependency_key}) {
             xsd = schema_dependencies{dependency_key};
             new_def_path = WSDLLib::getLocationBase(loc);
+        } else if (exists schema_dependencies{legacy_key}) {
+            xsd = schema_dependencies{legacy_key};
+            new_def_path = WSDLLib::getLocationBase(loc);
         } else if (async_only) {
             if (xsd_cache && exists xsd_cache{cache_key}) {
                 xsd = xsd_cache{cache_key};
+            } else if (xsd_cache && exists xsd_cache{legacy_key}) {
+                xsd = xsd_cache{legacy_key};
             } else {
                 throw "WSDL-ASYNC-IMPORT", sprintf("missing async import %y", cache_key), cache_key;
             }
@@ -33711,8 +33777,9 @@ public class XsdSchema inherits WSDL::XsdBase {
         }
         import_map{identity} = True;
         schema_dependencies{dependency_key} = xsd;
-        string source_key = schemaSourceKey(xsd, expected_ns, new_def_path);
-        if (active_schemas{source_key}) {
+        string source_key = schemaSourceKey(xsd, expected_ns, new_def_path, source_location);
+        # A root supplied as raw XML with only a directory has no complete source URI.
+        if (active_schemas{source_key} || active_schemas{schemaSourceKey(xsd, expected_ns, new_def_path)}) {
             return;
         }
         active_schemas{source_key} = True;
@@ -33735,9 +33802,13 @@ public class XsdSchema inherits WSDL::XsdBase {
 
         # nested relative locations are resolved against the location of the external schema
         *string old_def_path = def_path;
+        *string old_document_location = document_location;
         def_path = new_def_path;
-        on_exit
+        document_location = source_location;
+        on_exit {
             def_path = old_def_path;
+            document_location = old_document_location;
+        }
 
         # HTTP info must be passed on when parsing nested schemas
         parseTypes(xh, http_client, http_headers, unresolved);
@@ -34049,6 +34120,7 @@ public class WebService inherits WSDL::XsdSchema {
         @param opts an optional hash of options with the following possible keys:
         - \c "compat_allow_any_header": allow any SOAP header to be sent without checking the WSDL
         - \c "compat_empty_string_is_nothing": deserialize empty strings to \c NOTHING instead of an empty string
+        - \c "document_location": full URI of the containing document; non-file URL loaders set this automatically
         - \c "def_path": the default path to use when retrieving referenced XSDs
         - \c "try_import": a call reference or closure to be passed a string name for XSD imports without any scheme to retrieve the data, must take a string argument (the resource name) and return a string (the resource data)
         - \c "http_client": a HTTPClient object for retrieving data from import commands
@@ -34355,16 +34427,7 @@ public class WebService inherits WSDL::XsdSchema {
         wsdl = str;
         wsdl_hash = str.toSHA512();
 
-        # save options
-        self.opts = opts;
-
-        try_import = opts.try_import;
-        if (try_import) {
-            remove self.opts.try_import;
-            has_try_import = True;
-        }
-
-        def_path = opts.def_path;
+        initOptions(opts);
 
         # remove namespace (normally "wsdl:") prefix from keys if present
         WSDL::XsdBase::removeNS(\h);

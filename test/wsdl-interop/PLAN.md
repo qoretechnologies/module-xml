@@ -542,3 +542,9 @@ new full-document URI interface passes the RFC examples. See
 [location evidence](location-resolution-evidence.md). WSDL import catalog
 integration, full-document bases for query-only schema references and the rest
 of the P6 component/binding matrix remain open; no phase boundary is claimed.
+
+P6-06 retains full non-file document URIs through WSDLLib, SoapClient, asynchronous
+loading, nested schemas and saved sources. Query-only references, fragment cache
+identity, cycles and restoration of active defaults are covered in
+[source-location evidence](document-locations-evidence.md). WSDL import catalog
+integration and canonical file-resource handling remain P6 work.

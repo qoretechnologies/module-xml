@@ -2174,3 +2174,7 @@ RFC 3986 examples and real synchronous/asynchronous HTTP schema retrieval.
 See [evidence](location-resolution-evidence.md) and
 [implemented behavior](../../design/wsdl-location-resolution.md) for the distinct
 directory-base and full-document URI interfaces.
+
+`test/wsdl-document-locations.qtest` adds full containing-URI retention through all
+HTTP loaders, nested schema references, saved sources and failed additions.
+See [source-location evidence](document-locations-evidence.md).

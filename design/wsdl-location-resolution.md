@@ -35,3 +35,28 @@ The asynchronous root WSDL fetch records its HTTP directory so nested schema
 references use the containing document's directory. Existing schema dependency
 storage retains retrieved bytes and directory bases for offline saved-service
 reconstruction.
+
+Non-file URL loaders (`WSDLLib`, `SoapClient` and `WsdlPollOperation`) retain the
+complete source URI in `XsdSchema::document_location`. Callers supplying XML
+strings can set the `document_location` construction option explicitly. It takes
+precedence over `def_path` for reference resolution. `getUriDocumentLocation()`
+extracts this URI from a loader source; bare paths and legacy file URLs continue
+to use the directory interface.
+
+Each external schema temporarily installs its own containing URI and restores
+the caller's context on every exit. Resource keys omit fragments and retain
+queries. Namespace checks still apply to every distinct reference, even when
+bytes are reused. Previously stored fragment-bearing dependency/cache keys are
+accepted when the canonical key is absent.
+
+`XsdSourceInfo::location` retains the URI for each explicitly added source. Saved
+schemas rebuild each source with its original URI and directory; saved services
+first rebuild their original WSDL, then added sources, then restore their saved
+active defaults. Local `addSchemaFile()` temporarily clears the URI context and
+uses that file's directory, restoring the caller's URI even on failure. Older
+saved source records without `location` use their retained directory.
+
+Active schema identity consists of namespace, source bytes and the full URI when
+available. A fallback directory does not affect that identity because it does
+not participate in resolution. Sources supplied without a URI use their directory
+instead; this also preserves cycle recognition for roots supplied as raw XML.
