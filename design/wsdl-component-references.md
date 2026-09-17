@@ -116,3 +116,67 @@ Construction and schema extension finish before a service is shared for concurre
 use. Temporary document and namespace state restores on every exit. Retained
 source bytes support offline reconstruction; callbacks are not serialized, and
 saved services rebuild their component keys from their source graph.
+
+## Abstract operation identities
+
+Operations retain their XML name and authored nullable `input_name` and
+`output_name` fields. `getMessageExchangePattern()` reports the ordered WSDL
+message exchange. `getInputName()` and `getOutputName()` apply effective defaults:
+
+| Pattern | Input default | Output default |
+| --- | --- | --- |
+| One-way | operation name | absent |
+| Notification | absent | operation name |
+| Request-response | name + `Request` | name + `Response` |
+| Solicit-response | name + `Solicit` | name + `Response` |
+
+Explicit labels override these defaults. The pinned WSDL schema's NCName rules
+normalize labels before identity comparison. Two declarations with the same
+operation name and effective input/output labels reject as duplicate signatures.
+An operation requires at least one abstract input or output message.
+
+Each port type keeps a map of selection keys and an index of XML names to
+candidate declarations. Unique XML names remain their existing lookup keys.
+Overloads use `name(input,output)`, with an empty slot for an absent message;
+NCName labels cannot contain the delimiters. `getOperationNames()` preserves
+source order and includes these keys. `WSOperation::getSelectionKey()` returns
+the assigned key; `getSignatureKey()` returns the full effective signature.
+`WSOperation::name` remains the XML name used for RPC wrappers and default actions.
+
+For example, `lookup(ById,ResultId)` and `lookup(ByName,ResultName)` can coexist
+in one port type. Binding input/output labels narrow their candidate set;
+omitted labels impose no constraint. A missing or ambiguous binding target
+rejects before the binding is assigned. Public binding lookup narrows candidates
+by actual binding membership before checking ambiguity. A bare `lookup` thus
+works for a binding containing only one of these operations and rejects for a
+binding containing both. Global lookup keeps the first matching port-type rule,
+while ambiguous bare names within that port type reject.
+
+Standalone serialization retains message order and the assigned selection key.
+Service reconstruction rebuilds the indexes from retained WSDL bytes. A legacy
+standalone operation with no order metadata can infer one-way/notification from
+message presence; with both messages it reports unknown order. Authored labels
+and the output `Response` default remain available. Deriving an omitted input
+label in that last case raises `WSDL-OPERATION-ERROR` and requires reloading the
+WSDL, because `Request` and `Solicit` cannot be distinguished. Wire serialization
+does not depend on that accessor. Invalid saved pattern values or pattern/message
+presence mismatches reject during reconstruction.
+
+These rules follow [WSDL 1.1 operation names and bindings](https://www.w3.org/TR/2001/NOTE-wsdl-20010315#_names).
+The independent WSDL4J oracle verifies defaults through `PortType.getOperation`
+and observes resolved binding targets, rejecting its undefined placeholders.
+
+## RPC calls with no parameters
+
+An RPC message emits the operation wrapper even when it has no parts. Its
+expanded wrapper key must be present on input, including when its native XML
+value is `NOTHING`. An empty or whitespace-only wrapper decodes to an empty
+hash. Missing/wrong wrappers, extra parameters and significant wrapper text
+reject. Fault detail keeps its separate unwrapped path. Both SOAP versions,
+request/response directions, literal/encoded bodies and saved operation handles
+use the same wrapper-presence rule.
+
+Document messages with no body parts emit an empty SOAP Body and decode to an
+empty native hash or retained body-part map. A missing Body still rejects.
+Header-only messages use an abstract zero-part message with separately bound
+headers; an operation with no abstract input/output declaration is invalid.

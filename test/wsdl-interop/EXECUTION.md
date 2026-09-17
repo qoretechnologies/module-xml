@@ -8973,3 +8973,50 @@ WSDL/SoapClient docs and WSDL astparser checks pass. The full 62-check audit has
 18 Pass / 44 N/A / zero Fail. No native code changed, so Valgrind is not required.
 See [evidence](header-merge-evidence.md) and [audit](audits/P6-13-header-merge.md).
 Operation overloads/default labels and the remaining P6–P9 criteria remain open.
+
+### P6-13 push and CI
+
+Commit `dbb7d2d8e371954a86b206cbefb330871436f227` and its preceding local
+increments were pushed to `develop`. Pipeline
+[57065](https://git.qoretechnologies.com/mirror/module-xml/-/pipelines/57065)
+is green. Its initial Ubuntu/Alpine builds used images lacking the new Qore
+RFC 3986 API declarations. The already-running qore-test-base image pipeline
+57058 published refreshed manifests, after which only the two failed XML jobs
+were retried. Ubuntu job 202499 and Alpine job 202500 both succeeded on the
+original pushed commit. No new image pipeline or source workaround was used.
+
+## P6-14: abstract operation identities and zero-part messages
+
+Port types retain every effective input/output signature instead of overwriting
+same-name operations. Concrete binding labels select the intended declaration;
+public binding lookup applies membership before reporting ambiguity. All four
+abstract message orders retain their default labels separately from RPC names.
+Saved services and standalone operations preserve selection identity, with an
+explicit limitation for missing order metadata in older standalone graphs.
+Zero-part RPC messages retain wrappers and zero-part document messages retain
+SOAP Bodies. Malformed/missing body structures reject. Header-only test fixtures
+now declare valid zero-part input messages.
+
+The initial four reduced overload cases fail on the old behavior. The final
+focused suite passes 12 cases / 481 assertions, including both SOAP versions,
+source/saved services and operations, invalid selections, empty bodies, retained
+XML and actual HTTP calls with independently inspected wire names. Seven oracle
+tests use pinned WSDL4J and the pinned WSDL schema. The 161-suite Qore gate passes
+1,624 cases / 81,872 reported assertions; soap.qtest intentionally catches seven
+negative comparator assertions. A test-only retained-XML method-name typo was
+corrected before resuming; the 98 completed suites retained identical production
+sources. Exact accounting is in [P6-14-validation.json](P6-14-validation.json).
+
+Thirteen corpus/oracle commands pass their expected outcomes. All six corpus
+reports semantically match P6-12: 2,096 native valid directions, 2,084 legacy
+valid directions, 12 approved legacy projection losses and 176 invalid-source
+directions rejected. WSDL documentation and astparser checks are clean. The
+62-check audit records 18 Pass / 44 N/A / zero Fail; no C++ changes require
+Valgrind. See [evidence](operation-identities-evidence.md) and
+[audit](audits/P6-14-operation-identities.md).
+
+The next P6 increment is explicit empty body-part selection and the remaining
+binding partition rules. A constructor probe confirms that omitted and empty
+parts attributes currently both become NOTHING; the relevant constructor and
+lookup truthiness checks are identified in `/tmp/xml-p6-body-selection/`.
+P6 is not complete, and P7–P9 remain open.

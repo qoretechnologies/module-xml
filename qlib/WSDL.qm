@@ -103,6 +103,12 @@ module WSDL {
     @section wsdlrelnotes WSDL Module Release Notes
 
     @subsection wsdl_0_5_8 WSDL v0.5.8
+    - overloaded operations retain every effective input/output signature; binding labels select the intended
+      declaration, and ambiguous or mismatched selections reject instead of overwriting or choosing another operation
+    - operation metadata retains abstract message order and exposes WSDL default labels independently of RPC names;
+      saved services and standalone operations retain their selection identities
+    - RPC calls with zero parameters still emit their operation wrapper and decode to an empty hash; missing,
+      incorrectly named or malformed wrappers reject; zero-part document messages retain an empty SOAP Body
     - fixed body/header message-name collisions and scalar body values losing data during SOAP deserialization;
       selected type and element wrappers retain their part keys inside shared message containers
       (<a href="https://github.com/qoretechnologies/qore/issues/5453">issue 5453</a>)
@@ -28911,6 +28917,19 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
     }
 }
 
+#! Abstract WSDL 1.1 message exchange order
+/** @since %WSDL 0.5.8 */
+public enum WsdlOperationPattern : string {
+    #! Receive one message
+    OneWay = "one-way",
+    #! Receive a message and send a correlated response
+    RequestResponse = "request-response",
+    #! Send a message and receive a correlated response
+    SolicitResponse = "solicit-response",
+    #! Send one message
+    Notification = "notification",
+}
+
 #! web service operation class
 /** Operations own their namespace context, input/output/fault messages and operational bindings.
     A handle remains usable after its source WebService leaves scope; binding headers retain their own messages.
@@ -28949,6 +28968,9 @@ public class WSOperation inherits WSDL::XsdNamedData {
 
         # Expanded binding identities map to the single public bindings entry.
         hash<string, string> binding_keys();
+        # Older standalone graphs did not retain the order of abstract messages.
+        *WsdlOperationPattern exchange_pattern;
+        *string selection_key;
     }
 
     #! creates the WSOperation object from the arguments supplied
@@ -28956,9 +28978,11 @@ public class WSOperation inherits WSDL::XsdNamedData {
         @param nsc the namespace container
         @param messages message component keys mapped to WSMessage objects
         @param registry optional internal registry for resolving imported component identities
+        @param overloaded True when the containing port type declares more than one operation with this XML name
+        @throw WSDL-ERROR the operation has no input/output message or references an unknown message
      */
-    constructor(hash<auto> p, Namespaces nsc, *hash<auto> messages, *WsdlComponentRegistry registry)
-            : XsdNamedData(\p) {
+    constructor(hash<auto> p, Namespaces nsc, *hash<auto> messages, *WsdlComponentRegistry registry,
+            bool overloaded = False) : XsdNamedData(\p) {
         self.nsc = nsc;
         NamespacePrefixHelper operation_scope(nsc, p."^attributes^");
 
@@ -28989,6 +29013,26 @@ public class WSOperation inherits WSDL::XsdNamedData {
             output = msg;
             if (msghash.name)
                 output_name = msghash.name.val ?? msghash.name;
+        }
+
+        if (input && output) {
+            foreach string key in (keys p) {
+                if (key == "input" || key == "output") {
+                    exchange_pattern = key == "input" ? WsdlOperationPattern::RequestResponse
+                        : WsdlOperationPattern::SolicitResponse;
+                    break;
+                }
+            }
+        } else if (input) {
+            exchange_pattern = WsdlOperationPattern::OneWay;
+        } else if (output) {
+            exchange_pattern = WsdlOperationPattern::Notification;
+        } else {
+            throw WSDL_ERROR, sprintf("operation %Y requires an input or output message", name);
+        }
+
+        if (overloaded) {
+            selection_key = getSignatureKey();
         }
 
         # issue #2804: process fault messages
@@ -29024,7 +29068,94 @@ public class WSOperation inherits WSDL::XsdNamedData {
         input = remove members.input;
         output = remove members.output;
         binding_keys = remove members.binding_keys ?? {};
+        auto pattern = remove members.exchange_pattern;
+        if (exists pattern) {
+            if (pattern != WsdlOperationPattern::OneWay && pattern != WsdlOperationPattern::RequestResponse
+                    && pattern != WsdlOperationPattern::SolicitResponse && pattern != WsdlOperationPattern::Notification) {
+                throw "DESERIALIZATION-ERROR", "invalid WSDL operation exchange pattern";
+            }
+            bool expects_input = pattern != WsdlOperationPattern::Notification;
+            bool expects_output = pattern != WsdlOperationPattern::OneWay;
+            if (expects_input != exists input || expects_output != exists output) {
+                throw "DESERIALIZATION-ERROR", "WSDL operation exchange pattern does not match its messages";
+            }
+        }
+        exchange_pattern = pattern;
         self += members;
+    }
+
+    #! returns the retained abstract message exchange order
+    /** @return the WSDL pattern, or NOTHING for an older standalone graph with both messages but no order metadata
+        @note WebService reconstruction recovers the order from its retained WSDL source.
+        @since %WSDL 0.5.8
+    */
+    *WsdlOperationPattern getMessageExchangePattern() {
+        return exchange_pattern ?? (input && !output ? WsdlOperationPattern::OneWay
+            : output && !input ? WsdlOperationPattern::Notification : NOTHING);
+    }
+
+    #! returns the effective abstract input label, including the WSDL default
+    /** @return the authored or default input name, or NOTHING if no input exists
+        @throw WSDL-OPERATION-ERROR a legacy standalone graph lacks the order needed to derive a default
+        @note This name identifies an abstract message and does not name a SOAP RPC wrapper.
+        @since %WSDL 0.5.8
+    */
+    *string getInputName() {
+        if (!input) {
+            return NOTHING;
+        }
+        if (exists input_name) {
+            return input_name;
+        }
+        *WsdlOperationPattern pattern = getMessageExchangePattern();
+        if (!exists pattern) {
+            throw "WSDL-OPERATION-ERROR", "legacy standalone operation lacks message order; reload the WSDL "
+                "to derive its default input name";
+        }
+        return name + (pattern == WsdlOperationPattern::OneWay ? ""
+            : pattern == WsdlOperationPattern::RequestResponse ? "Request" : "Solicit");
+    }
+
+    #! returns the effective abstract output label, including the WSDL default
+    /** @return the authored or default output name, or NOTHING if no output exists
+        @note Both two-message patterns use the Response suffix. This label is separate from SOAP RPC wrappers.
+        @since %WSDL 0.5.8
+    */
+    *string getOutputName() {
+        if (!output) {
+            return NOTHING;
+        }
+        return output_name ?? (name + (input ? "Response" : ""));
+    }
+
+    #! returns this operation's lookup key within its port type
+    /** @return the XML operation name when unique, or name(input,output) for an overloaded operation
+        @note The input/output slots contain effective labels; an absent message has an empty slot.
+        @par Example
+        Use service.getOperation("lookup(ById,ResultId)") to select one overloaded declaration.
+        @since %WSDL 0.5.8
+    */
+    string getSelectionKey() {
+        return selection_key ?? name;
+    }
+
+    #! returns the full abstract operation signature
+    /** @return name(input,output), using effective message labels and empty slots for absent directions
+        @throw WSDL-OPERATION-ERROR a legacy standalone graph lacks the order required for an input default
+        @note Overloaded operations use this signature as their port-type lookup key.
+        @since %WSDL 0.5.8
+    */
+    string getSignatureKey() {
+        return name + "(" + (getInputName() ?? "") + "," + (getOutputName() ?? "") + ")";
+    }
+
+    #! tests whether this operation belongs to a concrete binding
+    /** @param key a binding component key or expanded name
+        @return True if this operation has the selected binding, otherwise False
+        @since %WSDL 0.5.8
+    */
+    bool hasBinding(string key) {
+        return bindings.hasKey(binding_keys{key} ?? key);
     }
 
     #! returns a hash of fault messages keyed by fault name
@@ -29523,7 +29654,7 @@ public class WSMessage inherits WSDL::XsdNamedData {
             rh{args{k}.element ? args{k}.element.getXmlName(output_namespaces) : k} = hv;
         }
 
-        if (rh) {
+        if (rh || !fault) {
             if (encoded) {
                 rh."^attributes^" += {
                     "soapenv:encodingStyle": SOAP_ENCODING,
@@ -29538,7 +29669,7 @@ public class WSMessage inherits WSDL::XsdNamedData {
             *string wrapper_uri = msginfo.body.ns ?? output_namespaces.getTargetNamespaceUri();
             string wrapper = wrapper_uri ? output_namespaces.getOutputNamespacePrefix(wrapper_uri) + ":" + n_name
                 : n_name;
-            return {wrapper: rh};
+            return {wrapper: rh ?? {}};
         }
     }
 
@@ -29703,7 +29834,7 @@ public class WSMessage inherits WSDL::XsdNamedData {
     */
     *hash<auto> deserializeRpc(*hash<auto> mrh, hash<auto> val, *string part) {
         #printf("DBG WSMessage::deserializeRpc() pmap: %y part: %y val: %y\n", pmap, part, val);
-        hash<auto> ro;
+        hash<auto> ro();
 
         foreach string p in (part ?? keys pmap) {
             string k = getSerializedKey(p);
@@ -29745,7 +29876,7 @@ public class WSMessage inherits WSDL::XsdNamedData {
     */
     *hash<auto> deserializeDocument(*hash<auto> mrh, auto val, *softlist<string> parts, *bool ignore_unknown,
             bool expanded_names = False) {
-        hash<auto> rh;
+        hash<auto> rh();
 
         *hash<auto> attr = remove val."^attributes^";
 
@@ -30567,9 +30698,8 @@ public class SoapBinding inherits WSDL::OperationalBinding {
                 };
             }
         } else {
-            if (body) {
-                rh{soapenvEnvelope}."soapenv:Body" = body;
-            }
+            # Every SOAP envelope has a Body, including document messages with zero body parts.
+            rh{soapenvEnvelope}."soapenv:Body" = body ?? {};
         }
         # Body and header values can introduce namespaces absent from the schema. Publish the
         # complete per-message map only after every part has allocated its output names.
@@ -30759,8 +30889,14 @@ public class SoapBinding inherits WSDL::OperationalBinding {
             if (exists body) {
                 throw SOAP_DESERIALIZATION_ERROR, sprintf("%s value given for operation %y binding %y with no %s message: %y", request ? "request" : "response", op.name, name, io, body);
             }
-        } else if (!exists body)
-            throw SOAP_DESERIALIZATION_ERROR, sprintf("no %s body value given for operation %y binding %y", request ? "request" : "response", op.name, name);
+        } else if (!exists body) {
+            if (docstyle && o.Envelope.hasKey("Body")
+                    && !(bmd.getBodyPartNames(op{io}) ?? keys op{io}.pmap)) {
+                body = {};
+            } else {
+                throw SOAP_DESERIALIZATION_ERROR, sprintf("no %s body value given for operation %y binding %y", request ? "request" : "response", op.name, name);
+            }
+        }
 
         *WSMessage msg = op{io};
 
@@ -30827,14 +30963,15 @@ public class SoapBinding inherits WSDL::OperationalBinding {
             } else {
                 string mname = op.name + (request ? "" : "Response");
                 string wrapper_identity = type_qname(bmd.body.ns ?? op.nsc.getTargetNamespaceUri() ?? "", mname);
-                if (!exists expanded_body{wrapper_identity}) {
+                if (!expanded_body.hasKey(wrapper_identity)) {
                     throw SOAP_DESERIALIZATION_ERROR, sprintf("expected SOAP RPC wrapper %Y for %s operation %Y",
                         wrapper_identity, io, op.name);
                 }
-                if (!msgh{mname})
+                if (!msgh.hasKey(mname)) {
                     throw SOAP_DESERIALIZATION_ERROR, sprintf("missing %s message name %y as top-level element; got elements: %y", io, mname, keys msgh);
+                }
                 XsdQNameNamespaceScope rpc_scope(msgh{mname}."^attributes^");
-                msgh = XsdScalarTextHelper::elementContent(remove msgh{mname}, "SOAP RPC wrapper");
+                msgh = XsdScalarTextHelper::elementContent(remove msgh{mname}, "SOAP RPC wrapper") ?? {};
                 XsdBase::removeNS2(\msgh);
                 msgh -= (".ns", "ns");
 
@@ -31588,17 +31725,21 @@ public class Binding inherits WSDL::XsdNamedData {
         foreach hash<auto> ophash in (data.operation) {
             NamespacePrefixHelper operation_scope(nsc, ophash."^attributes^");
             string opname = ophash."^attributes^".name;
-            if (!exists portTypes{port}.operations{opname})
-                throw WSDL_ERROR, sprintf("binding %y references unknown porttype %y operation %y", name, port, opname);
-
             WSDL::XsdBase::removeNS(\ophash);
+            *WSOperation selected = WsdlOperationLookup::find(portTypes{port}, opname,
+                ophash.input."^attributes^".name, ophash.output."^attributes^".name, NOTHING, WSDL_ERROR);
+            if (!selected) {
+                throw WSDL_ERROR, sprintf("binding %Y references an unknown operation signature %Y(%Y,%Y) "
+                    "in port type %Y", name, opname, ophash.input."^attributes^".name,
+                    ophash.output."^attributes^".name, port);
+            }
 
             bool b_docstyle = docstyle;
 
             *hash<auto> opah = ophash.operation."^attributes^";
             *string soapAction = opah.soapAction;
             if (!exists soapAction) {
-                *string op_ns = portTypes{port}.operations{opname}.nsc.getTargetNamespaceUri();
+                *string op_ns = selected.nsc.getTargetNamespaceUri();
                 if (op_ns && op_ns !~ /\/$/)
                     op_ns += "/";
                 soapAction = op_ns ? op_ns + opname : opname;
@@ -31615,9 +31756,9 @@ public class Binding inherits WSDL::XsdNamedData {
             }
 
             if (b_docstyle)
-                portTypes{port}.operations{opname}.setDocStyleBinding(\idocmap);
+                selected.setDocStyleBinding(\idocmap);
             else
-                portTypes{port}.operations{opname}.markRpcStyleBinding();
+                selected.markRpcStyleBinding();
 
             *string location;
 
@@ -31635,7 +31776,7 @@ public class Binding inherits WSDL::XsdNamedData {
             foreach string io in (keys op) {
                 NamespacePrefixHelper io_scope(nsc, op{io}."^attributes^");
                 WSDL::XsdBase::removeNS(\op{io});
-                if (!exists portTypes{port}.operations{opname}{io}) {
+                if (!exists selected{io}) {
                     *hash<auto> hk = map {$1: True}, keys op{io};
                     remove hk.("header", "ns");
                     if (hk)
@@ -31703,7 +31844,7 @@ public class Binding inherits WSDL::XsdNamedData {
                                     }
                                 } else {
                                     pcname = partName;
-                                    partName = portTypes{port}.operations{opname}{io}.checkPart(partName);
+                                    partName = selected{io}.checkPart(partName);
                                 }
                                 auto contentType = contentAttrs.type;
                                 if (!exists contentType) {
@@ -31781,10 +31922,10 @@ public class Binding inherits WSDL::XsdNamedData {
                         if (bcd.formUrlEncoded)
                             continue;
 
-                        string part = checkMessagePart(portTypes{port}.operations{opname}{io}, cnt.part, sprintf("content %s operation %y", io, opname));
+                        string part = checkMessagePart(selected{io}, cnt.part, sprintf("content %s operation %y", io, opname));
                         if (exists bcd.part) {
                             if (bcd.part != part) {
-                                throw WSDL_ERROR, sprintf("ambiguous part %y in message %y in binding %y for %s operation %y", part, portTypes{port}.operations{opname}{io}.name, name, io, opname);
+                                throw WSDL_ERROR, sprintf("ambiguous part %y in message %y in binding %y for %s operation %y", part, selected{io}.name, name, io, opname);
                             }
                         } else {
                             bcd.part = part;
@@ -31796,7 +31937,7 @@ public class Binding inherits WSDL::XsdNamedData {
                 }
 
                 if (op{io}.hasKey("mimeXml")) {
-                    string part = checkMessagePart(portTypes{port}.operations{opname}{io}, ioh{io}.mimeXml."^attributes^".part, sprintf("%s operation %y", io, opname));
+                    string part = checkMessagePart(selected{io}, ioh{io}.mimeXml."^attributes^".part, sprintf("%s operation %y", io, opname));
                     bmd.mimeXml = new MimeXmlMessageDescription(part);
                     delete op{io}.mimeXml;
                 }
@@ -31818,7 +31959,7 @@ public class Binding inherits WSDL::XsdNamedData {
                 ? new SoapBinding(getComponentKey(), ophash.ns ?? "", b_docstyle, soapTransport, soapAction, ioh.input, ioh.output, soap12_version)
                 : new HttpBinding(getComponentKey(), ophash.ns ?? "", b_docstyle, httpMethod, location, soapAction, ioh.input, ioh.output);
 
-            portTypes{port}.operations{opname}.addBinding(b,
+            selected.addBinding(b,
                 sprintf("{%s}%s", nsc.getTargetNamespaceUri() ?? "", name));
         }
 
@@ -32891,7 +33032,33 @@ return rv;
 
 #! WSDL port type hash
 public hashdecl PortTypeInfo {
+    #! Operation lookup keys mapped to declarations
     hash<string, WSOperation> operations;
+    #! XML operation names mapped to their declarations in source order
+    hash<string, list<WSOperation>> operation_candidates = {};
+}
+
+# Port-type indexes are built once; binding lookups inspect only same-name candidates.
+class WsdlOperationLookup {
+    static *WSOperation find(hash<PortTypeInfo> port, string key, *string input_name = NOTHING,
+            *string output_name = NOTHING, *string binding = NOTHING, string error = "WSDL-OPERATION-ERROR") {
+        list<WSOperation> candidates = port.operations{key} ? (port.operations{key},)
+            : port.operation_candidates{key} ?? ();
+        *WSOperation result;
+        foreach WSOperation candidate in (candidates) {
+            if ((exists input_name && candidate.getInputName() != input_name)
+                    || (exists output_name && candidate.getOutputName() != output_name)
+                    || (exists binding && !candidate.hasBinding(binding))) {
+                continue;
+            }
+            if (result) {
+                throw error, sprintf("ambiguous operation %Y; select an input/output signature from %Y",
+                    key, map $1.getSelectionKey(), candidates);
+            }
+            result = candidate;
+        }
+        return result;
+    }
 }
 
 #! WSDL service info hash
@@ -34513,49 +34680,60 @@ public class WebService inherits WSDL::XsdSchema {
         return hash_str;
     }
 
-    #! returns the given operation or throws an exception if it cannot be found; operations are searched in portTypes in the order they are declared
-    /** @throw WSDL-OPERATION-ERROR if the operation is unknown
+    #! returns an operation, searching port types in declaration order
+    /** @param opname a unique XML operation name or an overloaded key from getOperationNames()
+        @return the matching operation from the first applicable port type
+        @throw WSDL-OPERATION-ERROR the operation is unknown or the bare name is ambiguous within that port type
+        @par Example
+        Select a partner lookup with getOperation("lookup(ById,ResultId)").
     */
     WSDL::WSOperation getOperation(string opname) {
         @assert(opname, "operation name is required");
-        foreach hash<auto> pt in (portType.iterator()) {
-            if (pt.operations{opname})
-                return pt.operations{opname};
+        foreach hash<PortTypeInfo> pt in (portType.iterator()) {
+            *WSOperation op = WsdlOperationLookup::find(pt, opname);
+            if (op) {
+                return op;
+            }
         }
         throw "WSDL-OPERATION-ERROR", sprintf("cannot retrieve operation %y; known operations: %y", opname,
             (foldl $1 + $2, (map $1.operations.keys(), portType.iterator())));
     }
 
-    #! returns a list of known operation names
+    #! returns operation lookup keys in declaration order
+    /** @return unique XML names and name(input,output) keys for overloaded declarations
+        @note Input/output slots use effective WSDL labels; an absent message has an empty slot.
+    */
     softlist<string> getOperationNames() {
         return foldl $1 + $2, (map keys $1.operations, portType.iterator());
     }
 
     #! returns the given operation for a particular port type
     /** @param ptname a unique local name or expanded name in \c "{namespace}local" form
-        @param opname the operation name within the selected port type
+        @param opname a unique operation name or an overloaded name(input,output) key within the port type
         @return the operation declaration
-        @throw WSDL-OPERATION-ERROR the port type or operation is unknown
+        @throw WSDL-OPERATION-ERROR the port type or operation is unknown, or the bare name is ambiguous
     */
     WSDL::WSOperation getPortTypeOperation(string ptname, string opname) {
         @assert(ptname, "port type name is required");
         @assert(opname, "operation name is required");
         ptname = component_keys{"portType:" + ptname} ?? ptname;
-        *WSOperation op = portType{ptname}.operations{opname};
-        if (op)
-            return op;
-        if (!portType{ptname})
+        if (!portType{ptname}) {
             throw "WSDL-OPERATION-ERROR", sprintf("port %y is not a defined port; known ports: %y", ptname, portType.keys());
+        }
+        *WSOperation op = WsdlOperationLookup::find(portType{ptname}, opname);
+        if (op) {
+            return op;
+        }
         throw "WSDL-OPERATION-ERROR", sprintf("operation %y is not known in port %y; known operations: %y", opname, ptname, portType{ptname}.operations.keys());
     }
 
     #! returns an operation declared by the selected binding
     /** @param bname a binding component key or expanded name; NOTHING retains global operation lookup
-        @param opname the operation name in the binding's port type
+        @param opname an operation name or an overloaded name(input,output) key in the binding's port type
         @return the operation after verifying its association with the selected binding
         @throw WSDL-BINDING-ERROR the binding is unknown or does not bind the operation
-        @throw WSDL-OPERATION-ERROR the operation is unknown in the selected port type
-        @note Abstract port-type membership alone does not imply membership in every binding.
+        @throw WSDL-OPERATION-ERROR the operation is unknown, or multiple bound overloads match the bare name
+        @note Binding membership is applied before deciding whether a bare overloaded name is ambiguous.
         @par Example
         @code{.py}
             WSOperation submit = service.getBindingOperation("OrdersSoap", "submit");
@@ -34568,8 +34746,14 @@ public class WebService inherits WSDL::XsdSchema {
         } else {
             WSDL::Binding b = getBinding(bname);
             @assert(b, "binding %y must exist", bname);
-            WSOperation op = getPortTypeOperation(b.getPort(), opname);
-            op.getBinding(b.getComponentKey());
+            hash<PortTypeInfo> pt = portType{b.getPort()};
+            if (!pt.operations.hasKey(opname) && !pt.operation_candidates.hasKey(opname)) {
+                throw "WSDL-OPERATION-ERROR", sprintf("operation %Y is unknown in port type %Y", opname, b.getPort());
+            }
+            *WSOperation op = WsdlOperationLookup::find(pt, opname, NOTHING, NOTHING, b.getComponentKey());
+            if (!op) {
+                throw "WSDL-BINDING-ERROR", sprintf("binding %Y does not bind operation %Y", bname, opname);
+            }
             return op;
         }
     }
@@ -34708,9 +34892,20 @@ public class WebService inherits WSDL::XsdSchema {
             string name = registry.key("portType", nsc.getTargetNamespaceUri(), port."^attributes^".name);
             wsdl_services += name;
             portType{name} = <PortTypeInfo>{"operations": {}};
+            hash<string, int> counts();
             foreach hash<auto> p in (port.operation) {
-                WSOperation op(p, nsc, messages, registry);
-                portType{name}.operations.(op.name) = op;
+                ++counts{p."^attributes^".name};
+            }
+            hash<string, bool> signatures();
+            foreach hash<auto> p in (port.operation) {
+                WSOperation op(p, nsc, messages, registry, counts{p."^attributes^".name} > 1);
+                string signature = op.getSignatureKey();
+                if (signatures{signature}) {
+                    throw WSDL_ERROR, sprintf("duplicate operation signature %Y in port type %Y", signature, name);
+                }
+                signatures{signature} = True;
+                push portType{name}.operation_candidates{op.name}, op;
+                portType{name}.operations{op.getSelectionKey()} = op;
             }
         }
     }

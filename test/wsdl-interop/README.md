@@ -2246,3 +2246,12 @@ shared message containers. The 2.x regression fixtures are also retained in
 `test/soap.qtest`. See [durable merge rules](../../design/wsdl-soap-header-values.md),
 [evidence](header-merge-evidence.md), [validation](P6-13-validation.json) and
 [audit](audits/P6-13-header-merge.md).
+
+## Operation identities and empty messages (P6-14)
+
+`test/wsdl-operation-identities.qtest` covers effective abstract labels, overload
+selection, imported and saved identities, empty RPC/document bodies and actual
+SOAP 1.1/1.2 calls. `test_wsdl_operations.py` independently checks WSDL4J selection
+and pinned schema grammar. See [evidence](operation-identities-evidence.md),
+[validation](P6-14-validation.json), [audit](audits/P6-14-operation-identities.md)
+and [durable operation design](../../design/wsdl-component-references.md).

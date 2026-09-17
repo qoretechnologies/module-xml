@@ -1,0 +1,351 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires ../qlib/WSDL.qm
+%requires ../qlib/SoapClient.qm
+%requires ../qlib/SoapHandler.qm
+%requires HttpServer
+%exec-class OperationOverloadsTest
+
+class OperationOverloadsTest inherits QUnit::Test {
+    constructor() : Test("WSDL overloaded identities", "1.0") {
+        addTestCase("All abstract overloads survive parsing and saved reconstruction", \retention());
+        addTestCase("Binding input and output labels select the intended overload", \selectors());
+        addTestCase("Mismatched and unknown binding signatures reject", \invalid());
+        addTestCase("A bare ambiguous operation name rejects", \ambiguous());
+        addTestCase("All four abstract patterns retain WSDL default labels", \defaults());
+        addTestCase("Explicit labels override defaults without changing selection keys", \explicitLabels());
+        addTestCase("Duplicate effective signatures and ambiguous bindings reject", \duplicates());
+        addTestCase("Legacy and malformed standalone operation metadata", \legacy());
+        addTestCase("Imported overloaded port types preserve namespace and binding identity", \imports());
+        addTestCase("Document and RPC overloads exchange distinct HTTP calls", \http());
+        addTestCase("Zero-parameter RPC calls retain wrappers and reject invalid bodies", \emptyRpc());
+        addTestCase("Zero-part document messages retain an empty SOAP Body", \emptyDocument());
+        set_return_value(main());
+    }
+
+    private static WebService service(string fixture) {
+        return new WebService(ReadOnlyFile::readTextFile(get_script_dir() + "/wsdl-interop/regressions/wsdl-operations/rr-" + fixture + ".wsdl"));
+    }
+
+    private retention() {
+        WebService original = service("input-only");
+        foreach WebService ws in (original, Serializable::deserialize(original.serialize())) {
+            assertEq(2, ws.listOperations().size());
+            assertEq(("lookup(ById,ResultId)", "lookup(ByName,ResultName)"), ws.getOperationNames());
+            assertEq("ById", ws.getPortTypeOperation("P", "lookup(ById,ResultId)").input_name);
+            assertEq("ByName", ws.getOperation("lookup(ByName,ResultName)").input_name);
+        }
+    }
+
+    private selectors() {
+        foreach hash<string, string> row in ({"fixture":"input-only", "input":"ById"},
+                {"fixture":"output-only", "input":"ByName"}, {"fixture":"both", "input":"ByName"}) {
+            WebService original = service(row.fixture);
+            foreach WebService ws in (original, Serializable::deserialize(original.serialize())) {
+                assertEq(row.input, ws.getBindingOperation("B", "lookup").input_name);
+            }
+        }
+    }
+
+    private invalid() {
+        foreach string fixture in ("mismatched", "unknown") {
+            assertThrows("WSDL-ERROR", sub() { service(fixture); });
+        }
+    }
+
+    private ambiguous() {
+        WebService ws = service("input-only");
+        assertThrows("WSDL-OPERATION-ERROR", \ws.getOperation(), ("lookup",));
+        assertThrows("WSDL-OPERATION-ERROR", \ws.getPortTypeOperation(), ("P", "lookup"));
+        assertThrows("WSDL-BINDING-ERROR", \ws.getBindingOperation(), ("B", "lookup(ByName,ResultName)"));
+        assertThrows("WSDL-OPERATION-ERROR", \ws.getBindingOperation(), ("B", "missing"));
+    }
+
+    private static string fixture(string name) {
+        return ReadOnlyFile::readTextFile(get_script_dir() + "/wsdl-interop/regressions/wsdl-operations/" + name);
+    }
+
+    private defaults() {
+        WebService original(fixture("defaults.wsdl"));
+        hash<string, list<auto>> expected = {
+            "oneway": (WsdlOperationPattern::OneWay, "oneway", NOTHING),
+            "notification": (WsdlOperationPattern::Notification, NOTHING, "notification"),
+            "request-response": (WsdlOperationPattern::RequestResponse, "request-responseRequest", "request-responseResponse"),
+            "solicit-response": (WsdlOperationPattern::SolicitResponse, "solicit-responseSolicit", "solicit-responseResponse"),
+        };
+        foreach WebService ws in (original, Serializable::deserialize(original.serialize()),
+                Serializable::deserialize(original.serializeToData())) {
+            assertEq(4, ws.listOperations().size());
+            foreach hash<OperationInfo> row in (ws.listOperations()) {
+                foreach WSOperation op in (row.operation, Serializable::deserialize(row.operation.serialize())) {
+                    list<auto> value = expected{op.name};
+                    assertEq(value[0], op.getMessageExchangePattern());
+                    assertEq(value[1], op.getInputName());
+                    assertEq(value[2], op.getOutputName());
+                    assertNothing(op.input_name);
+                    assertNothing(op.output_name);
+                    assertEq(op.name, op.getSelectionKey());
+                }
+            }
+        }
+    }
+
+    private explicitLabels() {
+        string source = fixture("rr-input-only.wsdl");
+        source = replace(source, 'name="ById"', 'name="  ById  "');
+        source = replace(source, 'name="ResultId"', 'name=" ResultId "');
+        WebService original(source);
+        foreach WebService ws in (original, Serializable::deserialize(original.serialize())) {
+            WSOperation op = ws.getBindingOperation("B", "lookup");
+            assertEq("ById", op.input_name);
+            assertEq("ResultId", op.output_name);
+            assertEq("ById", op.getInputName());
+            assertEq("ResultId", op.getOutputName());
+            assertEq("lookup(ById,ResultId)", op.getSelectionKey());
+            assertEq(op.getSignatureKey(), op.getSelectionKey());
+            assertTrue(op.hasBinding("B"));
+            assertTrue(op.hasBinding("{urn:ops}B"));
+            assertFalse(op.hasBinding("Missing"));
+        }
+    }
+
+    private duplicates() {
+        assertThrows("WSDL-ERROR", sub() { new WebService(fixture("overload-unnamed.wsdl")); });
+        string source = fixture("rr-input-only.wsdl");
+        source = replace(replace(source, "ByName", "ById"), "ResultName", "ResultId");
+        assertThrows("WSDL-ERROR", sub() { new WebService(source); });
+        source = '<w:definitions xmlns:w="http://schemas.xmlsoap.org/wsdl/" xmlns:t="urn:ops"'
+            + ' targetNamespace="urn:ops"><w:message name="M"/><w:portType name="P">'
+            + '<w:operation name="lookup"><w:input message="t:M"/><w:output message="t:M"/></w:operation>'
+            + '<w:operation name="lookup"><w:input name="lookupRequest" message="t:M"/>'
+            + '<w:output name="lookupResponse" message="t:M"/></w:operation></w:portType></w:definitions>';
+        assertThrows("WSDL-ERROR", sub() { new WebService(source); });
+        assertThrows("WSDL-ERROR", sub() {
+            new WebService('<w:definitions xmlns:w="http://schemas.xmlsoap.org/wsdl/">'
+                + '<w:portType name="P"><w:operation name="empty"/></w:portType></w:definitions>');
+        });
+    }
+
+    private hash<SerializationInfo> metadata(WSOperation op, *string pattern) {
+        hash<SerializationInfo> data = op.serializeToData();
+        int found = 0;
+        foreach string index in (keys data._index) {
+            if (data._index{index}.hasKey("_class_data")
+                    && data._index{index}._class_data.hasKey("WSDL::WSOperation")) {
+                if (exists pattern) {
+                    data._index{index}._class_data."WSDL::WSOperation".exchange_pattern = pattern;
+                } else {
+                    remove data._index{index}._class_data."WSDL::WSOperation".exchange_pattern;
+                    remove data._index{index}._class_data."WSDL::WSOperation".selection_key;
+                }
+                ++found;
+            }
+        }
+        assertEq(1, found);
+        return data;
+    }
+
+    private legacy() {
+        WebService ws(fixture("defaults.wsdl"));
+        foreach string name in ("request-response", "solicit-response") {
+            WSOperation op = Serializable::deserialize(metadata(ws.getOperation(name), NOTHING));
+            assertNothing(op.getMessageExchangePattern());
+            assertThrows("WSDL-OPERATION-ERROR", \op.getInputName());
+            assertEq(name + "Response", op.getOutputName());
+            assertEq(name, op.getSelectionKey());
+        }
+        foreach string name in ("oneway", "notification") {
+            WSOperation original = ws.getOperation(name);
+            WSOperation op = Serializable::deserialize(metadata(original, NOTHING));
+            assertEq(original.getMessageExchangePattern(), op.getMessageExchangePattern());
+            assertEq(original.getInputName(), op.getInputName());
+            assertEq(original.getOutputName(), op.getOutputName());
+        }
+        foreach string pattern in ("invalid", "one-way", "notification") {
+            hash<SerializationInfo> data = metadata(ws.getOperation("request-response"), pattern);
+            assertThrows("DESERIALIZATION-ERROR", \Serializable::deserialize(), (data,));
+        }
+        WSOperation named = Serializable::deserialize(metadata(service("input-only").getBindingOperation("B", "lookup"), NOTHING));
+        assertEq("ById", named.getInputName());
+        assertEq("ResultId", named.getOutputName());
+        assertEq({}, named.deserializeRequest(parse_xml(named.serializeRequest({}).body)));
+    }
+
+    private imports() {
+        WebService original = WSDLLib::getWebServiceFromUrl(get_script_dir()
+            + "/wsdl-interop/regressions/wsdl-operations/import.wsdl");
+        foreach WebService ws in (original, Serializable::deserialize(original.serialize())) {
+            assertEq(2, ws.listOperations().size());
+            assertEq("ById", ws.getBindingOperation("{urn:ops}B", "lookup").getInputName());
+            assertEq("ByName", ws.getBindingOperation("Imported", "lookup").getInputName());
+            assertEq("ByName", ws.getPortTypeOperation("{urn:ops}P", "lookup(ByName,ResultName)").getInputName());
+            assertThrows("WSDL-OPERATION-ERROR", \ws.getPortTypeOperation(), ("{urn:root}P", "lookup"));
+            assertThrows("WSDL-BINDING-ERROR", \ws.getBindingOperation(), ("Imported", "lookup(ById,ResultId)"));
+        }
+    }
+
+    private static string httpSource(bool soap12, bool rpc) {
+        string types;
+        string messages;
+        string operations;
+        string bindings;
+        foreach string suffix in ("Id", "Name") {
+            string type = suffix == "Id" ? "int" : "string";
+            types += '<xs:element name="' + suffix + 'Input" type="xs:' + type + '"/>'
+                + '<xs:element name="' + suffix + 'Output" type="xs:' + type + '"/>';
+            foreach string direction in ("Input", "Output") {
+                messages += '<w:message name="' + suffix + direction + '"><w:part name="value" '
+                    + (rpc ? 'type="xs:' + type : 'element="t:' + suffix + direction) + '"/></w:message>';
+            }
+            operations += '<w:operation name="lookup"><w:input name="By' + suffix + '" message="t:' + suffix
+                + 'Input"/><w:output name="Result' + suffix + '" message="t:' + suffix + 'Output"/></w:operation>';
+            bindings += '<w:operation name="lookup"><s:operation soapAction="urn:lookup:' + suffix + '"/>'
+                + '<w:input name="By' + suffix + '"><s:body use="literal" namespace="urn:wire"/></w:input>'
+                + '<w:output name="Result' + suffix + '"><s:body use="literal" namespace="urn:wire"/></w:output>'
+                + '</w:operation>';
+        }
+        return '<w:definitions xmlns:w="http://schemas.xmlsoap.org/wsdl/" xmlns:t="urn:overloads" xmlns:xs="'
+            + XSD_NS + '" xmlns:s="' + (soap12 ? SOAP_12_NS : SOAP_11_NS) + '" targetNamespace="urn:overloads">'
+            + '<w:types><xs:schema targetNamespace="urn:overloads">' + types + '</xs:schema></w:types>'
+            + messages + '<w:portType name="P">' + operations + '</w:portType><w:binding name="B" type="t:P">'
+            + '<s:binding style="' + (rpc ? "rpc" : "document") + '" transport="http://schemas.xmlsoap.org/soap/http"/>'
+            + bindings + '</w:binding><w:service name="S"><w:port name="Endpoint" binding="t:B">'
+            + '<s:address location="http://example.invalid/soap"/></w:port></w:service></w:definitions>';
+    }
+
+    private emptyRpc() {
+        foreach bool soap12 in (False, True) {
+            foreach bool encoded in (False, True) {
+                string source = fixture("rr-input-only.wsdl");
+                if (soap12) {
+                    source = replace(source, SOAP_11_NS, SOAP_12_NS);
+                }
+                if (encoded) {
+                    source = replace(source, 'use="literal"', 'use="encoded"');
+                }
+                WebService ws(source);
+                WSOperation original = ws.getBindingOperation("B", "lookup");
+                foreach WSOperation op in (original, Serializable::deserialize(original.serialize())) {
+                    string env = soap12 ? SOAP_12_ENV : SOAP_11_ENV;
+                    foreach bool request in (False, True) {
+                        string name = request ? "lookup" : "lookupResponse";
+                        hash<auto> wire = request ? op.serializeRequest({}) : op.serializeResponse({});
+                        hash<auto> expanded = XsdBase::expandElementNamespaces(parse_xml(wire.body));
+                        assertTrue(expanded{'{' + env + '}Envelope'}{'{' + env + '}Body'}.hasKey("{urn:ops}" + name));
+                        assertEq({}, request ? op.deserializeRequest(parse_xml(wire.body))
+                            : op.deserializeResponse(parse_xml(wire.body)));
+                        foreach string content in ("", " \n\t") {
+                            string xml = '<S:Envelope xmlns:S="' + env + '"><S:Body><' + name
+                                + ' xmlns="urn:ops">' + content + '</' + name + '></S:Body></S:Envelope>';
+                            hash<auto> parsed = WSDLLib::parseSOAPMessage({"body": xml, "content-type": "text/xml"});
+                            assertEq({}, request ? op.deserializeRequest(parsed) : op.deserializeResponse(parsed));
+                        }
+                        foreach string body in ("", '<wrong xmlns="urn:ops"/>', '<' + name
+                                + ' xmlns="urn:ops"><extra/></' + name + '>', '<' + name
+                                + ' xmlns="urn:ops">unexpected text</' + name + '>') {
+                            string xml = '<S:Envelope xmlns:S="' + env + '"><S:Body>' + body
+                                + '</S:Body></S:Envelope>';
+                            hash<auto> parsed = WSDLLib::parseSOAPMessage({"body": xml, "content-type": "text/xml"});
+                            assertThrows("SOAP-DESERIALIZATION-ERROR", sub() {
+                                if (request) {
+                                    op.deserializeRequest(parsed);
+                                } else {
+                                    op.deserializeResponse(parsed);
+                                }
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private emptyDocument() {
+        foreach bool soap12 in (False, True) {
+            string source = replace(fixture("rr-input-only.wsdl"), 'style="rpc"', 'style="document"');
+            if (soap12) {
+                source = replace(source, SOAP_11_NS, SOAP_12_NS);
+            }
+            WebService ws(source);
+            WSOperation original = ws.getBindingOperation("B", "lookup");
+            foreach WSOperation op in (original, Serializable::deserialize(original.serialize())) {
+                string env = soap12 ? SOAP_12_ENV : SOAP_11_ENV;
+                foreach bool request in (False, True) {
+                    hash<auto> wire = request ? op.serializeRequest({}) : op.serializeResponse({});
+                    hash<auto> expanded = XsdBase::expandElementNamespaces(parse_xml(wire.body));
+                    assertTrue(expanded{'{' + env + '}Envelope'}.hasKey('{' + env + '}Body'));
+                    assertEq({}, request ? op.deserializeRequest(parse_xml(wire.body))
+                        : op.deserializeResponse(parse_xml(wire.body)));
+                    hash<SoapXmlMessageInfo> retained = request ? op.deserializeXmlRequest(wire.body)
+                        : op.deserializeXmlResponse(wire.body);
+                    assertEq({}, retained.body);
+                    foreach string contents in ("", " \n\t") {
+                        string xml = '<S:Envelope xmlns:S="' + env + '"><S:Body>' + contents
+                            + '</S:Body></S:Envelope>';
+                        hash<auto> parsed = WSDLLib::parseSOAPMessage({"body": xml, "content-type": "text/xml"});
+                        assertEq({}, request ? op.deserializeRequest(parsed) : op.deserializeResponse(parsed));
+                    }
+                    foreach string contents in ("", "<S:Body>text</S:Body>", "<S:Body><extra/></S:Body>") {
+                        string xml = '<S:Envelope xmlns:S="' + env + '">' + contents + '</S:Envelope>';
+                        hash<auto> parsed = WSDLLib::parseSOAPMessage({"body": xml, "content-type": "text/xml"});
+                        assertThrows("SOAP-DESERIALIZATION-ERROR", sub() {
+                            if (request) {
+                                op.deserializeRequest(parsed);
+                            } else {
+                                op.deserializeResponse(parsed);
+                            }
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    private http() {
+        foreach bool soap12 in (False, True) {
+            foreach bool rpc in (False, True) {
+                WebService ws = Serializable::deserialize(new WebService(httpSource(soap12, rpc)).serialize());
+                assertThrows("WSDL-OPERATION-ERROR", \ws.getBindingOperation(), ("B", "lookup"));
+                HttpServer server();
+                on_exit server.stop();
+                SoapHandler handler(new PermissiveAuthenticator());
+                server.setDefaultHandler("soap", handler);
+                Queue received();
+                code<auto(hash<auto>, auto)> callback = auto sub(hash<auto> cx, auto value) {
+                    received.push(value);
+                    bool integer = value.typeCode() == NT_INT;
+                    return {rpc ? "value" : integer ? "IdOutput" : "NameOutput": integer ? value + 1 : value + "!"};
+                };
+                foreach string key in (ws.getOperationNames()) {
+                    WSOperation op = ws.getBindingOperation("B", key);
+                    assertEq(key, op.getSelectionKey());
+                    assertEq("lookup", op.name);
+                    handler.addMethod(ws, op, callback, NOTHING, NOTHING, NOTHING, "S", NOTHING, NOTHING, "B");
+                }
+                server.addListener(0);
+                SoapClient client({"wsdl": ws, "service": "S", "port": "Endpoint",
+                    "url": sprintf("http://127.0.0.1:%d/soap", server.getListenerInfo(0).port), "timeout": 30000});
+                foreach string suffix in ("Id", "Name") {
+                    auto value = suffix == "Id" ? 17 : "partner";
+                    string key = "lookup(By" + suffix + ",Result" + suffix + ")";
+                    hash<auto> info;
+                    assertEq(suffix == "Id" ? 18 : "partner!", client.callOperation(key,
+                        {rpc ? "value" : suffix + "Input": value}, NOTHING, \info));
+                    assertEq(value, received.get(30000));
+                    assertFalse(info."request-body".contains("By" + suffix));
+                    assertFalse(info."response-body".contains("Result" + suffix));
+                    if (rpc) {
+                        hash<auto> request = XsdBase::expandElementNamespaces(parse_xml(info."request-body"));
+                        hash<auto> response = XsdBase::expandElementNamespaces(parse_xml(info."response-body"));
+                        string env = soap12 ? SOAP_12_ENV : SOAP_11_ENV;
+                        assertTrue(request{'{' + env + '}Envelope'}{'{' + env + '}Body'}.hasKey("{urn:wire}lookup"));
+                        assertTrue(response{'{' + env + '}Envelope'}{'{' + env + '}Body'}.hasKey("{urn:wire}lookupResponse"));
+                    }
+                }
+            }
+        }
+    }
+}
