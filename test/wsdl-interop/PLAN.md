@@ -614,3 +614,9 @@ standard concrete interaction-pattern checks. See
 [standard binding evidence](standard-body-defaults-evidence.md). Concrete
 fault/headerfault rules, remaining HTTP/MIME binding behavior, pinned CXF replay
 and P7–P9 remain open.
+
+P6-17 compiles concrete SOAP fault descriptions, validates source/manual/saved
+associations and uses independent document-style detail serialization. See
+[fault binding evidence](fault-bindings-evidence.md). Headerfault handling, typed
+fault consumption, the remaining HTTP/MIME and pinned CXF matrix, and P7–P9
+remain open.

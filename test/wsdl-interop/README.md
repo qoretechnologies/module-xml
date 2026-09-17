@@ -2275,3 +2275,12 @@ manual/saved/imported bindings and live calls. See
 [evidence](standard-body-defaults-evidence.md), [validation](P6-16-validation.json)
 and [audit](audits/P6-16-standard-body-defaults.md). The empty HTTP request test
 requires Qore Mime fix `ac5cfb171` or its equivalent.
+
+## Concrete SOAP fault descriptions (P6-17)
+
+`wsdl-fault-bindings.qtest` covers concrete description validation, independent
+fault serialization, saved/imported/manual metadata and actual SOAP consumers.
+`test_wsdl_faults.py` observes metadata through pinned WSDL4J. See
+[evidence](fault-bindings-evidence.md), [validation](P6-17-validation.json),
+[audit](audits/P6-17-fault-bindings.md) and
+[durable design](../../design/wsdl-fault-bindings.md).

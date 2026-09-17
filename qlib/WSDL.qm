@@ -121,6 +121,10 @@ module WSDL {
     @section wsdlrelnotes WSDL Module Release Notes
 
     @subsection wsdl_0_5_8 WSDL v0.5.8
+    - concrete SOAP faults retain independent use, namespace and encoding metadata, validate names and single-part
+      messages, and serialize document-style detail independently of the normal response binding
+    - named faults must belong to the selected binding; old standalone bindings without fault metadata require
+      their source WSDL to be reloaded, while generic faults without detail remain available
     - omitted SOAP body part lists now select all message parts, including header-bound parts, as specified by
       WSDL 1.1; use explicit part lists for header/body partitioning
     - native values with a part in both Body and Header retain independent values in ^body^ and ^headers^ maps;
@@ -29062,6 +29066,12 @@ public class WSOperation inherits WSDL::XsdNamedData {
             selection_key = getSignatureKey();
         }
 
+        if (p.fault && (exchange_pattern == WsdlOperationPattern::OneWay
+                || exchange_pattern == WsdlOperationPattern::Notification)) {
+            throw WSDL_ERROR, sprintf("operation %Y with interaction pattern %Y cannot declare faults",
+                name, exchange_pattern);
+        }
+
         # issue #2804: process fault messages
         foreach hash<auto> fh in (p.fault) {
             NamespacePrefixHelper fault_scope(nsc, fh."^attributes^");
@@ -29109,8 +29119,12 @@ public class WSOperation inherits WSDL::XsdNamedData {
         }
         exchange_pattern = pattern;
         self += members;
+        pattern = getMessageExchangePattern();
+        if (faults && (pattern == WsdlOperationPattern::OneWay || pattern == WsdlOperationPattern::Notification)) {
+            throw "DESERIALIZATION-ERROR", "one-way and notification operations cannot declare faults";
+        }
         foreach OperationalBinding binding in (bindings.iterator()) {
-            validateBindingPattern(binding, "DESERIALIZATION-ERROR");
+            validateBinding(binding, "DESERIALIZATION-ERROR");
         }
     }
 
@@ -29268,7 +29282,7 @@ public class WSOperation inherits WSDL::XsdNamedData {
         @throw WSDL-BINDING-ERROR when binding is already registered or its interaction pattern is unsupported
      */
     addBinding(WSDL::OperationalBinding b, *string expanded_name) {
-        validateBindingPattern(b, "WSDL-BINDING-ERROR");
+        validateBinding(b, "WSDL-BINDING-ERROR");
         string bname = b.getName();
         if (bindings.hasKey(bname) || (exists expanded_name && exists binding_keys{expanded_name})) {
             throw "WSDL-BINDING-ERROR", sprintf("binding %y is already registered in operation %y", bname, name);
@@ -29279,12 +29293,21 @@ public class WSOperation inherits WSDL::XsdNamedData {
         }
     }
 
-    private validateBindingPattern(OperationalBinding binding, string error) {
+    private validateBinding(OperationalBinding binding, string error) {
         *WsdlOperationPattern pattern = getMessageExchangePattern();
         if ((binding instanceof SoapBinding || binding instanceof HttpBinding)
                 && (pattern == WsdlOperationPattern::Notification || pattern == WsdlOperationPattern::SolicitResponse)) {
             throw error, sprintf("standard binding %Y cannot bind operation %Y with interaction pattern %Y",
                 binding.getName(), name, pattern);
+        }
+        if (binding instanceof SoapBinding) {
+            foreach hash<auto> entry in (cast<SoapBinding>(binding).getFaultBindings().pairIterator()) {
+                *WSMessage message = faults{entry.key};
+                if (!message || message.pmap.size() != 1 || (entry.value.encoded && !message.args.firstValue().type)) {
+                    throw error, sprintf("SOAP binding %Y fault %Y has no compatible fault message in operation %Y",
+                        binding.getName(), entry.key, name);
+                }
+            }
         }
     }
 
@@ -29301,6 +29324,16 @@ public class WSOperation inherits WSDL::XsdNamedData {
         @param req_soapaction if present will override any SOAPAction value for the request, ignored for HTTP binding
         @param bname SOAP binding name or empty to get the first assigned binding
 
+        @throw SOAP-SERIALIZATION-ERROR an unknown or unbound fault, invalid detail, or generic fault with detail data
+        @throw WSDL-BINDING-ERROR legacy standalone binding metadata cannot identify the declared fault
+        @note Declared SOAP faults use their own concrete binding and document-style detail regardless of the
+        operation style. Generic faults (fault = NOTHING) have no declared detail and require h = NOTHING.
+        @par Example
+        @code{.qore}
+        hash<auto> response = operation.serializeFault("OrderRejected", "Order exceeds available stock",
+            {"orderId": "PO-724", "available": 12});
+        @endcode
+
         @return a hash with keys:
         - \c body: XML string in the SOAP response format or body part of HTTP message (string or binary). Target
           content type is evaluated from WSDL or in case of ambiguity using "^attributes^"."^content-type^". The
@@ -29312,11 +29345,16 @@ public class WSOperation inherits WSDL::XsdNamedData {
     */
     hash<auto> serializeFault(*string fault, string faultmsg, auto h, *hash<auto> header, *string enc,
             *hash<auto> nsh, *int xml_opts, *string req_soapaction, *string bname) {
+        XsdIdentityDocumentScope identity_document();
         if (exists fault && !faults{fault}) {
             throw SOAP_SERIALIZATION_ERROR, sprintf("cannot serialize unknown fault %y for operation %y; known "
                 "faults: %y", fault, name, keys faults);
         }
         OperationalBinding binding = getBinding(bname);
+        if (binding instanceof SoapBinding) {
+            return cast<SoapBinding>(binding).serializeFaultMessage(self, fault, faultmsg, h, header, enc,
+                nsh, xml_opts, req_soapaction);
+        }
         return binding.serializeMessage(self, faults{fault}, False, binding.isSoap12(), h, header, enc, nsh,
             xml_opts, req_soapaction, faultmsg);
     }
@@ -30516,6 +30554,8 @@ public class SoapBinding inherits WSDL::OperationalBinding {
     private {
         # Absent in old standalone serialized bindings; never infer it from unrelated xmlns declarations.
         *bool soap12_version;
+        # NOTHING denotes a legacy standalone binding with no concrete fault metadata.
+        *hash<string, BindingMessageBodyDescription> fault_bindings;
     }
 
     #! creates an operational SOAP binding
@@ -30527,15 +30567,106 @@ public class SoapBinding inherits WSDL::OperationalBinding {
         @param input request message description
         @param output response message description
         @param soap12 the binding's SOAP version; supply it for implicit WSOperation serialization
+        @param fault_bindings concrete fault descriptions keyed by abstract fault name; NOTHING marks legacy
+        metadata without concrete fault information, while an empty map declares no faults
+        @throw WSDL-ERROR invalid concrete fault descriptors or an unsupported encoding style
         @note Older standalone bindings without version metadata can still be used with the explicit
         version argument of serializeMessage(). Reload their WSDL to use implicit version selection.
         WebService serialization retains and reparses the WSDL automatically.
     */
     constructor(string name, string ns, bool docstyle, string soapTransport, *string soapAction,
-            *WSDL::BindingMessageDescription input, *WSDL::BindingMessageDescription output, *bool soap12)
+            *WSDL::BindingMessageDescription input, *WSDL::BindingMessageDescription output, *bool soap12,
+            *hash<string, BindingMessageBodyDescription> fault_bindings)
             : OperationalBinding(name, ns, docstyle, soapAction, input, output) {
         self.soapTransport = soapTransport;
         soap12_version = soap12;
+        validateFaultBindings(fault_bindings, WSDL_ERROR);
+        self.fault_bindings = fault_bindings;
+    }
+
+    private:internal deserializeMembers(hash<auto> members) {
+        auto descriptions = remove members.fault_bindings;
+        if (exists descriptions && descriptions.typeCode() != NT_HASH) {
+            throw "DESERIALIZATION-ERROR", "SOAP fault descriptions require a hash";
+        }
+        validateFaultBindings(descriptions, "DESERIALIZATION-ERROR");
+        fault_bindings = descriptions;
+        self += members;
+    }
+
+    private static validateFaultBindings(*hash<auto> descriptions, string error) {
+        foreach hash<auto> entry in (descriptions.pairIterator()) {
+            XsdNameLexicalHelper::lexical("NCName", entry.key, error);
+            if (!(entry.value instanceof BindingMessageBodyDescription) || exists entry.value.parts) {
+                throw error, "a concrete SOAP fault requires a body description without a part selection";
+            }
+            if (entry.value.encoded && exists entry.value.encodingStyle
+                    && XsdSimpleType::normalizeWhiteSpace(entry.value.encodingStyle, "collapse") != SOAP_ENCODING) {
+                throw error, sprintf("SOAP fault %Y selects an unsupported encoding style %Y",
+                    entry.key, entry.value.encodingStyle);
+            }
+        }
+    }
+
+    #! Returns concrete fault descriptions keyed by their abstract fault name
+    /** @return the descriptions, or NOTHING for a legacy binding without concrete fault metadata
+        @note Descriptions retain the fault's own use, namespace and encodingStyle. They are shared binding
+        metadata and must not be mutated while the binding is in use.
+        @since %WSDL 0.5.8
+    */
+    *hash<string, BindingMessageBodyDescription> getFaultBindings() {
+        return fault_bindings;
+    }
+
+    #! Serializes a selected declared fault or a generic protocol fault
+    /** @param op the operation owning the fault message
+        @param fault the declared fault name, or NOTHING for a generic fault without a detail message
+        @param reason the fault reason
+        @param value the fault message's native value
+        @param header optional SOAP headers for the response
+        @param enc output encoding
+        @param nsh optional output namespaces
+        @param xml_opts XML generation options
+        @param action optional SOAPAction override
+        @return the SOAP transport message with body and headers
+        @throw SOAP-SERIALIZATION-ERROR the fault is not bound or its detail is invalid
+        @throw WSDL-BINDING-ERROR the binding lacks protocol or concrete fault metadata
+        @par Example
+        Use WSOperation::serializeFault("Rejected", "Order rejected", detail) to select the operation's binding.
+        @since %WSDL 0.5.8
+    */
+    hash<auto> serializeFaultMessage(WSOperation op, *string fault, string reason, auto value,
+            *hash<auto> header, string enc = "UTF-8", *hash<auto> nsh, *int xml_opts, *string action) {
+        BindingMessageDescription description();
+        *WSMessage message;
+        if (exists fault) {
+            if (!exists fault_bindings) {
+                throw "WSDL-BINDING-ERROR", "legacy SOAP binding lacks concrete fault metadata; reload its WSDL";
+            }
+            if (!fault_bindings.hasKey(fault)) {
+                throw SOAP_SERIALIZATION_ERROR, sprintf("fault %Y is not declared in SOAP binding %Y", fault, name);
+            }
+            message = op.getFaultMessages(){fault};
+            if (!message || message.pmap.size() != 1) {
+                throw SOAP_SERIALIZATION_ERROR, sprintf("fault %Y requires a declared single-part message", fault);
+            }
+            description.body = fault_bindings{fault};
+            if (description.body.encoded && !message.args.firstValue().type) {
+                throw SOAP_SERIALIZATION_ERROR, "an encoded SOAP fault must reference a type-based message part";
+            }
+        } else {
+            if (exists value) {
+                throw SOAP_SERIALIZATION_ERROR, "a generic SOAP fault has no declared detail message";
+            }
+            description.body = new BindingMessageBodyDescription(False);
+        }
+        if (output) {
+            foreach BindingMessageHeaderDescription item in (output.getHeaders()) {
+                description.addHeader(item);
+            }
+        }
+        return serializeMessageWithDescription(op, message, False, isSoap12(), value, header, enc, nsh,
+            xml_opts, action, reason, NOTHING, description);
     }
 
     #! returns the binding's declared SOAP version
@@ -30551,6 +30682,13 @@ public class SoapBinding inherits WSDL::OperationalBinding {
     }
 
     hash<auto> serializeMessageImpl(WSOperation op, *WSMessage msg, bool request, bool soap12, auto h, *hash<auto> header, string enc, *hash<auto> nsh, *int xml_opts, *string req_soapaction, *string faultmsg, *hash<auto> http_headers) {
+        return serializeMessageWithDescription(op, msg, request, soap12, h, header, enc, nsh, xml_opts,
+            req_soapaction, faultmsg, http_headers, self{request ? "input" : "output"});
+    }
+
+    private hash<auto> serializeMessageWithDescription(WSOperation op, *WSMessage msg, bool request, bool soap12,
+            auto h, *hash<auto> header, string enc, *hash<auto> nsh, *int xml_opts, *string req_soapaction,
+            *string faultmsg, *hash<auto> http_headers, *BindingMessageDescription bmd) {
         hash<auto> rv;
 
         if (request) {
@@ -30562,7 +30700,6 @@ public class SoapBinding inherits WSDL::OperationalBinding {
 
         string io = request ? "input" : "output";
 
-        *BindingMessageDescription bmd = self{io};
         if (!bmd) {
             throw SOAP_SERIALIZATION_ERROR, sprintf("no %s message description for message %y", io, name);
         }
@@ -30575,13 +30712,12 @@ public class SoapBinding inherits WSDL::OperationalBinding {
         Namespaces output_namespaces = op.nsc.copy();
         XsdQNameOutputScope output_scope(output_namespaces);
         XsdQNameXmlOutputHelper output();
-        rv.body = make_xml(output.prepare(serializeSoapMessage(op, msg, h, header, nsh, request, soap12, \mpm, faultmsg)), xml_opts, enc);
+        rv.body = make_xml(output.prepare(serializeSoapMessage(op, msg, h, header, nsh, request, soap12, \mpm, faultmsg, bmd)), xml_opts, enc);
 
         string ct = WSDLLib::getSoapMimeType12(soap12);
 
         # Handle multipart message assembly - splice SOAP body as first part
         if (mpm && mpm.size() > 0) {
-            bmd = self{request ? "input" : "output"};
             string partId = sprintf("<%s>", (bmd.body.parts ?? (msg ? keys msg.args : ())).join(" "));
             mpm.splicePart(rv.body, partId, ct);
             hash<Mime::MessageInfo> mpmResult = mpm.getMsgAndHeaders();
@@ -30614,7 +30750,7 @@ public class SoapBinding inherits WSDL::OperationalBinding {
     }
 
     private:internal hash<auto> serializeSoapMessage(WSOperation op, *WSMessage msg, auto val, *hash<auto> header,
-            *hash<auto> nsh, bool request, bool soap12, reference mpm, *string faultmsg) {
+            *hash<auto> nsh, bool request, bool soap12, reference mpm, *string faultmsg, BindingMessageDescription bmd) {
         if (val.typeCode() == NT_HASH && (val.hasKey("^body^") || val.hasKey("^headers^"))) {
             if (val.size() != 2 || !val.hasKey("^body^") || !val.hasKey("^headers^")
                     || val."^body^".typeCode() != NT_HASH || val."^headers^".typeCode() != NT_HASH) {
@@ -30635,8 +30771,6 @@ public class SoapBinding inherits WSDL::OperationalBinding {
         string soapenvEnvelope = rh.firstKey();
         Namespaces output_namespaces = QNameOutputNamespaces ?? op.nsc;
 
-        BindingMessageDescription bmd = self{io};
-
         # Create multipart message container if multipartRelated binding is used
         if (exists bmd.multipart) {
             mpm = new MultiPartRelatedMessage();
@@ -30649,15 +30783,32 @@ public class SoapBinding inherits WSDL::OperationalBinding {
         *hash<auto> body;
         if (msg) {
             bool encoded = bmd.body.encoded;
+            if (fault && (msg.pmap.size() != 1 || (encoded && !msg.args.firstValue().type))) {
+                throw SOAP_SERIALIZATION_ERROR, "SOAP fault detail requires one part, referencing a type for encoded use";
+            }
             # Fault detail belongs to its own message, not the ordinary output body selection.
             *list<string> body_parts = fault ? NOTHING : bmd.body.parts;
-            if (docstyle) {
+            if (docstyle || fault) {
                 # bmd.body.encoded == False = literal encoding
                 #printf("parts: %y, args: %y\n", bmd.body.parts, msg.args.keys());
                 body = msg.serializeDocument(body_parts, bmd, mpm, encoded, \val, fault);
             } else {
                 string mname = op.name + (request ? "" : "Response");
                 body = msg.serializeRpc(body_parts, bmd, mpm, mname, encoded, \val, fault);
+            }
+            if (fault && encoded && body) {
+                string part = msg.pmap.firstKey();
+                string key = bmd.body.ns ? output_namespaces.getOutputNamespacePrefix(bmd.body.ns) + ":" + part
+                    : part;
+                auto value = remove body{part};
+                body{key} = value.typeCode() == NT_HASH ? value : {"^value^": value};
+                # encodingStyle belongs to application detail, not the SOAP-defined Detail element.
+                body{key}."^attributes^"."soapenv:encodingStyle" = bmd.body.encodingStyle
+                    ? XsdSimpleType::normalizeWhiteSpace(bmd.body.encodingStyle, "collapse") : SOAP_ENCODING;
+                remove body."^attributes^"."soapenv:encodingStyle";
+                if (!body."^attributes^") {
+                    remove body."^attributes^";
+                }
             }
             if (encoded) {
                 rh{soapenvEnvelope}."^attributes^"."xmlns:soapenc" = SOAP_ENCODING;
@@ -31739,7 +31890,10 @@ public class Binding inherits WSDL::XsdNamedData {
         *bool soap12_version;
     }
 
-    private { *string component_key; }
+    private {
+        *string component_key;
+        const FaultAttributes = {"name": True, "use": True, "namespace": True, "encodingStyle": True};
+    }
 
     #! returns this binding's unambiguous component selection key
     /** @return the local name when unique, otherwise its expanded QName; old standalone bindings use their name
@@ -32051,8 +32205,52 @@ public class Binding inherits WSDL::XsdNamedData {
                 throw WSDL_ERROR, sprintf("%y type is not supported as output type in binding %y for output operation %y", MimeTypeFormUrlEncoded, name, opname);
             }
 
+            hash<string, BindingMessageBodyDescription> fault_bindings();
+            foreach hash<auto> declaration in (ophash.fault) {
+                XsdBase::removeNS(\declaration);
+                string fault_name = declaration."^attributes^".name;
+                NamespacePrefixHelper fault_scope(nsc, declaration."^attributes^");
+                *WSMessage fault_message = selected.getFaultMessages(){fault_name};
+                if (!soapTransport || !fault_message) {
+                    throw WSDL_ERROR, sprintf("binding %Y references undefined or unsupported fault %Y", name, fault_name);
+                }
+                if (fault_message.pmap.size() != 1) {
+                    throw WSDL_ERROR, sprintf("SOAP fault %Y requires exactly one message part", fault_name);
+                }
+                if (declaration.fault.typeCode() != NT_HASH) {
+                    throw WSDL_ERROR, sprintf("SOAP fault %Y requires exactly one fault extension", fault_name);
+                }
+                hash<auto> attributes = declaration.fault."^attributes^";
+                NamespacePrefixHelper extension_scope(nsc, attributes);
+                foreach string attribute in (keys attributes) {
+                    if (attribute != "xmlns" && !attribute.contains(":")
+                            && !FaultAttributes.hasKey(attribute)) {
+                        throw WSDL_ERROR, sprintf("SOAP fault %Y has unsupported attribute %Y", fault_name, attribute);
+                    }
+                }
+                if (declaration.fault - ("^attributes^", "ns")) {
+                    throw WSDL_ERROR, sprintf("SOAP fault %Y cannot contain child content", fault_name);
+                }
+                string uri = declaration.fault.ns ? nsc.getInputNamespaceUri(declaration.fault.ns)
+                    : nsc.getDefaultNs() ?? "";
+                if (uri != (soap12_version ? SOAP_12_NS : SOAP_11_NS) || attributes.name != fault_name) {
+                    throw WSDL_ERROR, sprintf("SOAP fault %Y has mismatched name or extension namespace", fault_name);
+                }
+                *bool encoded = SoapUseMap{attributes.use};
+                if (!exists encoded) {
+                    throw WSDL_ERROR, sprintf("SOAP fault %Y has invalid use %Y", fault_name, attributes.use);
+                }
+                if (encoded && !fault_message.args.firstValue().type) {
+                    throw WSDL_ERROR, sprintf("encoded SOAP fault %Y must reference a type-based message part",
+                        fault_name);
+                }
+                fault_bindings{fault_name} = new BindingMessageBodyDescription(encoded,
+                    attributes.encodingStyle, attributes."namespace");
+            }
+
             OperationalBinding b = soapTransport
-                ? new SoapBinding(getComponentKey(), ophash.ns ?? "", b_docstyle, soapTransport, soapAction, ioh.input, ioh.output, soap12_version)
+                ? new SoapBinding(getComponentKey(), ophash.ns ?? "", b_docstyle, soapTransport, soapAction,
+                    ioh.input, ioh.output, soap12_version, fault_bindings)
                 : new HttpBinding(getComponentKey(), ophash.ns ?? "", b_docstyle, httpMethod, location, soapAction, ioh.input, ioh.output);
 
             selected.addBinding(b,

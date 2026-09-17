@@ -9075,3 +9075,23 @@ See [evidence](standard-body-defaults-evidence.md), [validation](P6-16-validatio
 and [audit](audits/P6-16-standard-body-defaults.md). P6 is not complete; concrete
 fault/headerfault behavior and the rest of its binding/peer matrix remain next,
 followed by P7–P9. No new DGC architecture was introduced.
+
+## P6-17: concrete SOAP fault descriptions
+
+Fault descriptions are retained and selected independently of ordinary output
+settings. Literal faults use document style even for RPC operations; encoded
+fault accessors use their own namespace and place encodingStyle on application
+detail. Source, manual and saved metadata validate compatible names, versions,
+use, part counts and operation patterns. Generic faults remain available without
+declared detail. Legacy named faults require the source WSDL when metadata is absent.
+
+The focused suite passes 9 cases / 272 assertions, and the final affected gate
+passes 22 suites / 473 cases / 8,872
+reported assertions. Two pinned WSDL4J tests independently observe eight metadata
+variants. All 15 corpus commands meet expected outcomes; six reports retain
+P6-16 semantic results. Doxygen and astparser pass. Audit: 18 Pass / 44 N/A /
+zero Fail; no C++ changes.
+
+See [evidence](fault-bindings-evidence.md), [validation](P6-17-validation.json)
+and [audit](audits/P6-17-fault-bindings.md). P6 remains open for headerfaults,
+typed fault consumption, HTTP/MIME and pinned CXF replay, followed by P7–P9.
