@@ -80,6 +80,12 @@ module WSDL {
     @section wsdlrelnotes WSDL Module Release Notes
 
     @subsection wsdl_0_5_8 WSDL v0.5.8
+    - Resource loading uses FileLocationHandler metadata for effective redirect URIs in synchronous and
+      asynchronous WSDL/XSD graphs; saved aliases and source bytes reconstruct the same graph offline
+    - XML resource decoding honors the BOM, then the transport charset, then the XML declaration/signature;
+      binary retrieval returns the original resource bytes
+    - Conflicting content retrieved through aliases of one resource rejects; failed schema additions roll
+      back aliases together with declarations and source bytes
     - Local file URIs support absolute and localhost forms, percent-encoded filenames and fragment-free
       resource identity; all WSDL loaders retain file document URIs for nested imports and saved graphs
     - Bare and legacy relative file paths retain literal filename characters and environment expansion;
@@ -913,6 +919,55 @@ class WsdlFileLocation {
     }
 }
 
+# Transport bytes are decoded once; graph state retains locations, not HTTP headers/cookies.
+class WsdlResourceHelper {
+    static string text(hash<FileResourceResult> resource) {
+        binary bytes = resource.data;
+        string prefix = bytes[0..3].toHex();
+        *string encoding;
+        int bom = 0;
+        if (prefix.startsWith("0000feff")) {
+            encoding = "UTF-32BE"; bom = 4;
+        } else if (prefix.startsWith("fffe0000")) {
+            encoding = "UTF-32LE"; bom = 4;
+        } else if (prefix.startsWith("feff")) {
+            encoding = "UTF-16BE"; bom = 2;
+        } else if (prefix.startsWith("fffe")) {
+            encoding = "UTF-16LE"; bom = 2;
+        } else if (prefix.startsWith("efbbbf")) {
+            encoding = "UTF-8"; bom = 3;
+        } else if (resource.info.charset) {
+            encoding = resource.info.charset;
+        } else {
+            # XML Appendix F signatures identify the encoding of the declaration.
+            hash<string, string> signatures = {"0000003c": "UTF-32BE", "3c000000": "UTF-32LE",
+                "003c003f": "UTF-16BE", "3c003f00": "UTF-16LE", "4c6fa794": "IBM037"};
+            *string signature = signatures{prefix};
+            string declaration = bytes.toString(signature ?? "ISO-8859-1");
+            encoding = (declaration =~ x/\A<\?xml[ \t\r\n]+[^?]*?encoding[ \t\r\n]*=[ \t\r\n]*['"]([^'"]+)['"]/)[0]
+                ?? signature ?? "UTF-8";
+        }
+        if (bom) {
+            bytes = bytes[bom..];
+        }
+        return bytes.toString(encoding).toString("UTF-8");
+    }
+
+    static hash<string, string> locations(hash<FileResourceInfo> info, string requested) {
+        hash<string, string> aliases();
+        if (info.effective_location) {
+            string effective = WSDLLib::getUriDocumentLocation(info.effective_location);
+            foreach string location in ((requested,) + (map $1.request_url, info.http.redirects ?? ())) {
+                string key = WSDLLib::getUriDocumentLocation(location);
+                if (key != effective) {
+                    aliases{key} = effective;
+                }
+            }
+        }
+        return aliases;
+    }
+}
+
 #! contains helper methods for retrieving WSDLs from a URL
 public class WSDLLib {
     #! Mime types recognized as SOAP messages
@@ -926,12 +981,13 @@ public class WSDLLib {
     /** called by WSDLLib::getFileFromURL() in case the scheme is "file"
     */
     static data getFile(string fn, bool as_string = True) {
-        *data rv = as_string ? ReadOnlyFile::readTextFile(fn) : ReadOnlyFile::readBinaryFile(fn);
+        *binary rv = ReadOnlyFile::readBinaryFile(fn);
         if (!exists rv) {
             throw "WSDL-LIB-ERROR", sprintf("file %y is empty or could not be read as a normal file", fn);
         }
 
-        return rv;
+        return as_string ? WsdlResourceHelper::text(<FileResourceResult>{"data": rv,
+            "info": <FileResourceInfo>{"requested_location": fn}}) : rv;
     }
 
     #! normalizes a location to a scheme-prefixed string
@@ -1070,22 +1126,39 @@ public class WSDLLib {
         return WsdlUriComponents::compose(uri);
     }
 
-    #! retrieves a file from a URL with HTTP and returns the file's contents as a string
-    /** called by WSDLLib::getFileFromURL() in case the scheme is "http"
+    #! retrieves XML resource contents using a configured HTTP client
+    /** @param url request URL; also installed on the supplied client
+        @param path request path and query, or NOTHING for "/"
+        @param hc configured client, or NOTHING to create one
+        @param headers optional request headers
+        @param as_string decode XML bytes to UTF-8 when True; return binary bytes otherwise
+        @param new_document_location optional output reference for the effective fragment-free URI
+        @param new_resource_locations optional output reference for requested/hop URI to final URI aliases
+        @return decoded XML text or unmodified resource bytes
+        @throw HTTP-CLIENT-RECEIVE-ERROR an HTTP request failed; other transport exceptions propagate
+        @throw ENCODING-CONVERSION-ERROR XML bytes cannot be decoded with their indicated encoding
+        @note Uses FileLocationHandler's bound-client resource API. Redirect metadata, not the configured
+          client URL, determines the retrieval base. Response headers and cookies are not retained in the graph.
     */
-    static string getHTTP(string url, *string path, *HTTPClient hc, *hash<auto> headers, bool as_string = True) {
+    static data getHTTP(string url, *string path, *HTTPClient hc, *hash<auto> headers, bool as_string = True,
+            *reference new_document_location, *reference<hash<string, string>> new_resource_locations) {
+        new_document_location = NOTHING;
+        new_resource_locations = {};
         if (hc) {
             hc.setURL(url);
         } else {
             hc = new HTTPClient(("url": url));
         }
-        string body;
+        hash<FileResourceResult> resource;
         try {
-            body = hc.get(path ? path : "/", headers);
+            AbstractFileLocationHandler handler = FileLocationHandler::getHttpHandlerForClient(hc);
+            resource = handler.getResource("http", path ? path : "/", {"headers": headers});
         } catch (hash<ExceptionInfo> ex) {
             throw ex.err, sprintf("error loading WSDL from %y: %s", url, ex.desc), ex.arg;
         }
-        return as_string ? body : binary(body);
+        new_document_location = WSDLLib::getUriDocumentLocation(resource.info.effective_location ?? url);
+        new_resource_locations = WsdlResourceHelper::locations(resource.info, url);
+        return as_string ? WsdlResourceHelper::text(resource) : resource.data;
     }
 
     #! retrieves a file from a URL with the FTP protocol and returns the file's contents as binary or string data
@@ -1112,46 +1185,73 @@ public class WSDLLib {
     /** in case the URL is actually a file path, environment variable substitution
         is performed on the path string
 
+        @param url resource URL or local path
+        @param def_protocol default scheme for locations without a scheme
+        @param http_client optional configured HTTP client
+        @param http_headers optional HTTP request headers
+        @param as_string decode XML bytes to UTF-8 when True; return binary bytes otherwise
+        @param def_path fallback directory for relative local paths
+        @param new_def_path optional output reference for the effective resource directory, when known
+        @param new_document_location optional output reference for the effective fragment-free URI, or NOTHING
+        @param new_resource_locations optional output reference for requested/hop URI to final URI aliases
+        @return decoded XML text or unmodified resource bytes
+        @throw WSDL-LOCATION-ERROR a file URI is invalid
+        @throw ENCODING-CONVERSION-ERROR XML bytes cannot be decoded; transport exceptions propagate
+
         @note uses the \c FileLocationHandler module to retrieve file data for all schemes except \c "file://" and
         \c "http(s)://", which uses @ref WSDL::WSDLLib::getFileFromURL() "WSDLLib::getFileFromURL()" and
         @ref WSDL::WSDLLib::getHTTP() "WSDLLib::getHTTP()" respectively for backwards compatibility
      */
     static data getFileFromURL(string url, string def_protocol = "file", *HTTPClient http_client,
-            *hash<auto> http_headers, bool as_string = True, *string def_path, *reference new_def_path) {
+            *hash<auto> http_headers, bool as_string = True, *string def_path, *reference new_def_path,
+            *reference new_document_location, *reference<hash<string, string>> new_resource_locations) {
+        new_document_location = NOTHING;
+        new_resource_locations = {};
         if (WsdlFileLocation::isFile(url, def_protocol)) {
             string path = WsdlFileLocation::path(url, def_path);
             new_def_path = dirname(path);
+            new_document_location = WsdlFileLocation::fromPath(path);
             return WSDLLib::getFile(path, as_string);
         }
-        try {
-            return WSDLLib::getFileFromURL(url, parse_url(url), def_protocol, http_client, http_headers, as_string,
-                def_path, \new_def_path);
-        } catch (hash<ExceptionInfo> ex) {
-            # re-throw HTTP errors - don't fall back to FileLocationHandler for these
-            if (ex.err =~ /^HTTP/) {
-                rethrow;
-            }
-            # see if a scheme is given in the location
-            if (url !~ /^\w+:\/\//) {
-                url = def_protocol + "://" + url;
-            }
-            return FileLocationHandler::getFileFromLocation(as_string, url);
-        }
+        # Custom handlers own their location syntax (for example data:// followed by literal XML).
+        # Do not parse that payload as an HTTP authority, or retry a failed transport operation.
+        *string scheme = (url =~ x/^([A-Za-z][A-Za-z0-9+.-]*):/)[0];
+        hash<auto> parsed = scheme && scheme !~ /^https?$/ ? {"protocol": scheme} : parse_url(url) ?? {};
+        return WSDLLib::getFileFromURL(url, parsed, def_protocol, http_client, http_headers,
+            as_string, def_path, \new_def_path, \new_document_location, \new_resource_locations);
     }
 
     #! retrieves a file from an already-parsed URL
     /** in case the URL is actually a file path, environment variable substitution
         is performed on the path string
 
+        @param url resource URL or local path
+        @param u parsed URL components
+        @param def_protocol default scheme for locations without a scheme
+        @param http_client optional configured HTTP client
+        @param http_headers optional HTTP request headers
+        @param as_string decode XML bytes to UTF-8 when True; return binary bytes otherwise
+        @param def_path fallback directory for relative local paths
+        @param new_def_path optional output reference for the effective resource directory, when known
+        @param new_document_location optional output reference for the effective fragment-free URI, or NOTHING
+        @param new_resource_locations optional output reference for requested/hop URI to final URI aliases
+        @return decoded XML text or unmodified resource bytes
+        @throw WSDL-LOCATION-ERROR a file URI is invalid
+        @throw ENCODING-CONVERSION-ERROR XML bytes cannot be decoded; transport exceptions propagate
+
         @note uses the \c FileLocationHandler module to retrieve file data for all schemes except \c "file://" and
         \c "http(s)://", which uses @ref WSDL::WSDLLib::getFileFromURL() "WSDLLib::getFileFromURL()" and
         @ref WSDL::WSDLLib::getHTTP() "WSDLLib::getHTTP()" respectively for backwards compatibility
      */
     static data getFileFromURL(string url, hash<auto> u, string def_protocol = "file", *HTTPClient http_client,
-            *hash<auto> http_headers, bool as_string = False, *string def_path, *reference new_def_path) {
+            *hash<auto> http_headers, bool as_string = False, *string def_path, *reference new_def_path,
+            *reference new_document_location, *reference<hash<string, string>> new_resource_locations) {
+        new_document_location = NOTHING;
+        new_resource_locations = {};
         if (WsdlFileLocation::isFile(url, def_protocol)) {
             string path = WsdlFileLocation::path(url, def_path);
             new_def_path = dirname(path);
+            new_document_location = WsdlFileLocation::fromPath(path);
             return WSDLLib::getFile(path, as_string);
         }
         bool used_def_protocol;
@@ -1181,19 +1281,29 @@ public class WSDLLib {
                 # the base location must always be updated, otherwise nested relative references in
                 # externally-referenced schemas are resolved against the wrong directory
                 new_def_path = dirname(path);
+                new_document_location = WsdlFileLocation::fromPath(path);
                 return WSDLLib::getFile(path, as_string);
             }
 
             case /^http(s)?$/:
                 # allow relative references in externally-referenced schemas to be resolved
-                new_def_path = WSDLLib::getLocationBase(url);
-                return WSDLLib::getHTTP(url, WsdlUriComponents::httpPath(url), http_client, http_headers, as_string);
+                data body = WSDLLib::getHTTP(url, WsdlUriComponents::httpPath(url), http_client, http_headers,
+                    as_string, \new_document_location, \new_resource_locations);
+                new_def_path = WSDLLib::getLocationBase(new_document_location);
+                return body;
 
             default:
                 if (used_def_protocol) {
                     url = def_protocol + "://" + url;
                 }
-                return FileLocationHandler::getFileFromLocation(as_string, url);
+                hash<FileResourceResult> resource = FileLocationHandler::getResourceFromLocation(url);
+                new_document_location = resource.info.effective_location;
+                if (new_document_location) {
+                    new_document_location = WSDLLib::getUriDocumentLocation(new_document_location);
+                    new_def_path = WSDLLib::getLocationBase(new_document_location);
+                }
+                new_resource_locations = WsdlResourceHelper::locations(resource.info, url);
+                return as_string ? WsdlResourceHelper::text(resource) : resource.data;
         }
     }
 
@@ -1205,12 +1315,36 @@ public class WSDLLib {
     #! returns a WSDL string from a file name, optional HTTPClient object and optional header hash
     /** in case the \a wsdl argument is actually a file path, environment variable substitution
         is performed on the path string
+
+        @param wsdl inline XML or the location of a WSDL document
+        @param http_client optional configured HTTP client
+        @param http_headers optional HTTP request headers
+        @param new_def_path optional output reference for the effective resource directory
+        @param new_document_location optional output reference for the effective URI; NOTHING for inline XML
+        @param new_resource_locations optional output reference for requested/hop URI to final URI aliases
+        @return inline XML unchanged, or retrieved XML decoded to UTF-8
+        @throw ENCODING-CONVERSION-ERROR resource bytes cannot be decoded; location/transport errors propagate
+
+        @par Example: retrieve a partner contract and preserve its redirect base
+        @code{.py}
+            *string directory;
+            *string location;
+            hash<string, string> aliases();
+            string source = WSDLLib::getWSDL("https://partner.example/current.wsdl", NOTHING, NOTHING,
+                \directory, \location, \aliases);
+            WebService service(source, {"def_path": directory, "document_location": location,
+                "resource_locations": aliases});
+        @endcode
      */
-    static string getWSDL(string wsdl, *HTTPClient http_client, *hash<auto> http_headers, *reference new_def_path) {
+    static string getWSDL(string wsdl, *HTTPClient http_client, *hash<auto> http_headers, *reference new_def_path,
+            *reference new_document_location, *reference<hash<string, string>> new_resource_locations) {
+        new_document_location = NOTHING;
+        new_resource_locations = {};
         if (wsdl =~ /^</) {
             return wsdl;
         }
-        return WSDLLib::getFileFromURL(wsdl, "file", http_client, http_headers, NOTHING, NOTHING, \new_def_path);
+        return WSDLLib::getFileFromURL(wsdl, "file", http_client, http_headers, True, NOTHING,
+            \new_def_path, \new_document_location, \new_resource_locations);
     }
 
     #! returns a WebService object from a URL and other optional arguments
@@ -1220,9 +1354,16 @@ public class WSDLLib {
     */
     static WebService getWebServiceFromUrl(string url, *HTTPClient http_client, *hash<auto> http_headers) {
         string def_path;
-        string wsdl = WSDLLib::getWSDL(url, http_client, http_headers, \def_path);
-        return new WebService(wsdl, {"def_path": def_path, "document_location": getUriDocumentLocation(url),
-            "http_client": http_client, "http_headers": http_headers});
+        *string location;
+        hash<string, string> aliases();
+        string wsdl = WSDLLib::getWSDL(url, http_client, http_headers, \def_path, \location, \aliases);
+        location = location ?? getUriDocumentLocation(url);
+        *string requested = getUriDocumentLocation(url);
+        if (requested && location && requested != location) {
+            aliases{requested} = location;
+        }
+        return new WebService(wsdl, {"def_path": def_path, "document_location": location,
+            "resource_locations": aliases, "http_client": http_client, "http_headers": http_headers});
     }
 
     #! takes a hash representation of a SOAP message and handles multipart messages, checks the content-type, and handles hrefs in the message
@@ -23194,13 +23335,23 @@ class WsdlComponentRegistry {
     }
 }
 
+hashdecl WsdlFetchedDocument {
+    string source;
+    string location;
+}
+
 class WsdlDocumentCatalog {
     static list<hash<WsdlDocumentInfo>> load(string source, *string location, *string base,
-            code<string(string, string)> fetch) {
+            code<hash<WsdlFetchedDocument>(string, string)> fetch, hash<string, string> aliases) {
         list<hash<WsdlDocumentInfo>> documents = (read(source, location, base, False),);
         hash<string, int> known();
         if (location) {
             known{location} = 0;
+            foreach string alias in (keys aliases) {
+                if (aliases{alias} == location) {
+                    known{alias} = 0;
+                }
+            }
         }
         int next = 0;
         while (next < documents.size()) {
@@ -23218,18 +23369,23 @@ class WsdlDocumentCatalog {
                 if (exists known{identity}) {
                     index = known{identity};
                 } else {
-                    string child_source = fetch(resolved, edge.location);
-                    *string child_base = WSDLLib::getLocationBase(resolved);
-                    if (!location && child_source == source
+                    hash<WsdlFetchedDocument> fetched = fetch(resolved, edge.location);
+                    string child_source = fetched.source;
+                    child_location = fetched.location;
+                    *string child_base = WSDLLib::getLocationBase(child_location);
+                    if (exists known{child_location}) {
+                        index = known{child_location};
+                    } else if (!location && child_source == source
                             && WSDLLib::normalizeLocation(WSDLLib::resolveLocation(".", child_base ?? "."))
                                 == WSDLLib::normalizeLocation(WSDLLib::resolveLocation(".", base ?? "."))) {
                         index = 0;
                     } else {
-                        hash<WsdlDocumentInfo> child = read(child_source, child_location, child_base, True, identity);
+                        hash<WsdlDocumentInfo> child = read(child_source, child_location, child_base, True, child_location);
                         index = documents.size();
                         push documents, child;
                     }
                     known{identity} = index;
+                    known{child_location} = index;
                 }
                 if (documents[index].declarations.target_namespace != edge.uri) {
                     throw WSDL_ERROR, sprintf("WSDL import %Y requires namespace %Y, got %Y", resolved,
@@ -32746,7 +32902,9 @@ public class WsdlPollOperation inherits Qore::AbstractPollOperation {
         *string def_path;
         *hash<auto> http_opts;
         *hash<auto> http_headers;
-        *AbstractPollOperation poller;
+        *AbstractPollOperation<hash<FileResourceResult>> poller;
+        *string document_location;
+        hash<string, string> resource_locations();
         string state;
         bool goal_reached = False;
         auto output;
@@ -32787,6 +32945,7 @@ public class WsdlPollOperation inherits Qore::AbstractPollOperation {
     }
 
     *hash<SocketPollInfo> continuePoll() {
+        on_error abort();
         while (True) {
             if (poller) {
                 *hash<SocketPollInfo> info = poller.continuePoll();
@@ -32801,7 +32960,8 @@ public class WsdlPollOperation inherits Qore::AbstractPollOperation {
                 try {
                     output = new WebService(wsdl_text, {
                         "def_path": def_path,
-                        "document_location": WSDLLib::getUriDocumentLocation(wsdl_url),
+                        "document_location": document_location,
+                        "resource_locations": resource_locations,
                         "http_headers": http_headers,
                         "xsd_cache": xsd_cache,
                         "async_only": True,
@@ -32841,35 +33001,39 @@ public class WsdlPollOperation inherits Qore::AbstractPollOperation {
     }
 
     private handlePollComplete() {
+        hash<FileResourceResult> resource = poller.getOutput();
+        string text = WsdlResourceHelper::text(resource);
+        string effective = resource.info.effective_location
+            ? WSDLLib::getUriDocumentLocation(resource.info.effective_location) : current_location;
+        resource_locations += WsdlResourceHelper::locations(resource.info, current_location);
+        if (exists xsd_cache{effective} && xsd_cache{effective} != text) {
+            throw WSDL_ERROR, sprintf("conflicting source bytes for resource %Y", effective);
+        }
+        # Retain the root too: an import can redirect back to it through a new alias.
+        xsd_cache{effective} = text;
         if (state == SPS_GET_WSDL) {
-            wsdl_text = parseResponseToString(poller.getOutput());
-            state = SPS_BUILD;
-            log("INFO", "WSDL async fetch complete");
-            poller = NOTHING;
-            return;
+            wsdl_text = text;
+            document_location = effective;
+            def_path = WSDLLib::getLocationBase(effective);
         }
-
-        if (state == SPS_GET_IMPORT) {
-            xsd_cache{current_location} = parseResponseToString(poller.getOutput());
-            state = SPS_BUILD;
-            log("INFO", "WSDL async import fetch complete: %y", current_location);
-            poller = NOTHING;
-            return;
-        }
-
+        state = SPS_BUILD;
         poller = NOTHING;
+        log("DEBUG", "WSDL async fetch complete: %y", effective);
     }
 
     private startFetch(string location) {
+        current_location = location;
         if (location =~ /^https?:/) {
             HTTPClient hc((http_opts ?? {}) + {"url": location});
             # HTTPClient does not support setLogger()
-            poller = hc.startPollSendRecv("GET", WsdlUriComponents::httpPath(location), NOTHING, http_headers);
+            AbstractFileLocationHandler handler = FileLocationHandler::getHttpHandlerForClient(hc);
+            poller = handler.getResourcePoller("http", WsdlUriComponents::httpPath(location),
+                {"headers": http_headers});
         } else {
             # The core file handler consumes a literal path, not a percent-encoded URI.
             string retrieval = WsdlFileLocation::isFile(location)
                 ? "file://" + WsdlFileLocation::path(location) : location;
-            poller = FileLocationHandler::getIoPollerForLocation(retrieval);
+            poller = FileLocationHandler::getResourcePollerForLocation(retrieval);
         }
         log("DEBUG", "WSDL async fetch queued: %y", location);
     }
@@ -32884,51 +33048,12 @@ public class WsdlPollOperation inherits Qore::AbstractPollOperation {
         return normalized;
     }
 
-    private string parseResponseToString(auto resp) {
-        if (resp.typeCode() == NT_HASH && exists resp.code) {
-            if ((resp.code / 100) != 2) {
-                log("ERROR", "WSDL async fetch failed: code=%d url=%y", resp.code, wsdl_url);
-                throw "WSDL-ASYNC-ERROR", sprintf("HTTP code %d returned for %y", resp.code, wsdl_url);
-            }
-            return resp."response-body" ? resp."response-body".toString(resp.info.charset ?? "ISO-8859-1") : "";
-        }
-        if (resp.typeCode() == NT_HASH && exists resp.data) {
-            auto data = resp.data;
-            if (data.typeCode() == NT_BINARY) {
-                return data.toString();
-            }
-            if (data.typeCode() == NT_STRING) {
-                return normalizeXmlString(data);
-            }
-            return data;
-        }
-        if (resp.typeCode() == NT_HASH && exists resp."response-body") {
-            return resp."response-body".toString(resp.info.charset ?? "ISO-8859-1");
-        }
-        if (resp.typeCode() == NT_STRING) {
-            return normalizeXmlString(resp);
-        }
-        if (resp.typeCode() == NT_BINARY) {
-            return resp.toString();
-        }
-        return resp;
-    }
-
     private log(string level, string msg, ...) {
         if (logger) {
             logger.logArgs(level, msg, argv);
         }
     }
 
-    private string normalizeXmlString(string xml) {
-        string enc = "UTF-8";
-        if (xml =~ x/<\?xml[^>]*encoding=['"]([^'"]+)['"]/i) {
-            if ($1) {
-                enc = $1;
-            }
-        }
-        return xml.toString(enc);
-    }
 }
 
 #! Original schema source and resolution base used for Serializable reconstruction
@@ -33042,12 +33167,16 @@ public class XsdSchema inherits WSDL::XsdBase {
 
         # Successfully retrieved dependency bytes, indexed by normalized absolute location.
         hash<string, string> schema_dependencies();
+
+        # Requested resource URI to final retrieval URI; retained for offline reconstruction.
+        hash<string, string> resource_locations();
     }
 
     private:internal deserializeMembers(hash<auto> members) {
         if (!exists members.schema_sources && !(self instanceof WebService)) {
             throw "DESERIALIZATION-ERROR", "serialized XsdSchema has no source documents; recreate it from the original XSD";
         }
+        resource_locations = members.resource_locations ?? {};
         initOptions(members.opts);
         def_path = members.def_path ?? opts.def_path;
         document_location = members.document_location ?? opts.document_location;
@@ -33104,6 +33233,8 @@ public class XsdSchema inherits WSDL::XsdBase {
           string argument (the resource name) and returns a string (the resource data)
         - \c "http_client": HTTPClient object for retrieving XSD imports
         - \c "http_headers": hash of HTTP headers for XSD imports
+        - \c "resource_locations": hash mapping requested resource URIs directly to final retrieval URIs;
+          returned by WSDLLib retrieval helpers and retained with saved graphs
         - \c "xsd_cache": hash mapping schema locations to cached schema data
         - \c "async_only": if @ref True then external imports must be satisfied by xsd_cache
         - \c "compat_empty_string_is_nothing": deserialize empty strings to NOTHING instead of ""
@@ -33158,6 +33289,7 @@ public class XsdSchema inherits WSDL::XsdBase {
         hash<string, XsdIdentityConstraint> old_identities = nsc.getIdentityConstraintRegistry().getDefinitions();
         hash<string, bool> old_imports = import_map;
         hash<string, string> old_dependencies = schema_dependencies;
+        hash<string, string> old_resource_locations = resource_locations;
         list<hash<XsdSourceInfo>> old_sources = schema_sources;
         on_error {
             emap = old_elements;
@@ -33177,6 +33309,7 @@ public class XsdSchema inherits WSDL::XsdBase {
             nsc.setGlobalElements(old_elements, old_types);
             import_map = old_imports;
             schema_dependencies = old_dependencies;
+            resource_locations = old_resource_locations;
             schema_sources = old_sources;
         }
 
@@ -33219,9 +33352,7 @@ public class XsdSchema inherits WSDL::XsdBase {
                 def_path = previous_base;
             }
         }
-        File f();
-        f.open2(path, O_RDONLY);
-        addSchemaString(f.read(-1));
+        addSchemaString(WSDLLib::getFile(path));
     }
 
     #! parses every matching XSD file in the given directory (non-recursive)
@@ -33519,6 +33650,7 @@ public class XsdSchema inherits WSDL::XsdBase {
     #! parse \a opts into XSD-specific state
     private initOptions(*hash<auto> opts) {
         self.opts = opts;
+        resource_locations = (opts.resource_locations ?? {}) + resource_locations;
         try_import = opts.try_import;
         if (try_import) {
             remove self.opts.try_import;
@@ -33845,6 +33977,11 @@ public class XsdSchema inherits WSDL::XsdBase {
         # the async cache key must be a location that the poller can fetch directly
         string cache_key = async_only ? WSDLLib::normalizeLocation(loc, "file", NOTHING) : loc;
         string dependency_key = WSDLLib::normalizeLocation(loc, "file", NOTHING);
+        string requested_key = dependency_key;
+        if (exists resource_locations{dependency_key}) {
+            source_location = loc = dependency_key = resource_locations{dependency_key};
+            cache_key = dependency_key;
+        }
         string expected_ns = namespace_uri ?? "";
         string identity = sprintf("%Y:%Y", dependency_key, expected_ns);
         string reference_key = sprintf("ref:%s:%y:%Y", identity, include, namespace_uri);
@@ -33876,12 +34013,24 @@ public class XsdSchema inherits WSDL::XsdBase {
             xsd = call_function(try_import, schema_location);
             new_def_path = WSDLLib::getLocationBase(loc);
         } else {
-            xsd = WSDLLib::getFileFromURL(loc, "file", http_client, http_headers, NOTHING, NOTHING, \new_def_path);
+            hash<string, string> aliases();
+            xsd = WSDLLib::getFileFromURL(loc, "file", http_client, http_headers, True, NOTHING, \new_def_path,
+                \source_location, \aliases);
+            source_location = source_location ?? WSDLLib::getUriDocumentLocation(loc);
+            resource_locations += aliases;
+            if (source_location && source_location != dependency_key) {
+                resource_locations{requested_key} = source_location;
+                dependency_key = loc = source_location;
+                identity = sprintf("%Y:%Y", dependency_key, expected_ns);
+            }
             if (!new_def_path) {
                 new_def_path = WSDLLib::getLocationBase(loc);
             }
         }
 
+        if (exists schema_dependencies{dependency_key} && schema_dependencies{dependency_key} != xsd) {
+            throw WSDL_ERROR, sprintf("conflicting source bytes for schema resource %Y", dependency_key);
+        }
         validateSchemaRoot(xsd, WSDL_ERROR);
         validateSchemaGrammar(xsd);
         hash<auto> xh = XsdSchemaSource::parse(xsd);
@@ -34266,7 +34415,9 @@ public class WebService inherits WSDL::XsdSchema {
         @param opts an optional hash of options with the following possible keys:
         - \c "compat_allow_any_header": allow any SOAP header to be sent without checking the WSDL
         - \c "compat_empty_string_is_nothing": deserialize empty strings to \c NOTHING instead of an empty string
-        - \c "document_location": full URI of the containing document; non-file URL loaders set this automatically
+        - \c "document_location": full URI of the containing document; file and URL loaders set this automatically
+        - \c "resource_locations": flat hash mapping requested and redirect-hop URIs to final retrieval URIs;
+          retained with source bytes for offline reconstruction
         - \c "def_path": the default path to use when retrieving referenced XSDs
         - \c "try_import": a callback for WSDL and XSD references whose resolved locations have no scheme;
           takes the original reference string from the importing document and returns its XML source
@@ -34293,8 +34444,8 @@ public class WebService inherits WSDL::XsdSchema {
     }
 
     #! returns a fingerprint of the retained WSDL and schema sources
-    /** @return a SHA-256 fingerprint including imported source locations and bytes and added schemas
-        @note Root-only services retain their original SHA-256 source digest. This is a source fingerprint;
+    /** @return a SHA-256 fingerprint including imported source locations and bytes, redirect aliases and added schemas
+        @note Root-only services without aliases retain their original SHA-256 source digest. This is a source fingerprint;
         different compatibility options can interpret the same sources differently.
         @par Example
         @code{.py}
@@ -34306,7 +34457,7 @@ public class WebService inherits WSDL::XsdSchema {
     synchronized string getHash() {
         if (!hash_str) {
             string root_hash = digest("sha256", wsdl).toHex();
-            if (!wsdl_dependencies && !schema_dependencies && !schema_sources) {
+            if (!wsdl_dependencies && !schema_dependencies && !schema_sources && !resource_locations) {
                 hash_str = root_hash;
             } else {
                 list<string> pieces = (root_hash,);
@@ -34315,6 +34466,9 @@ public class WebService inherits WSDL::XsdSchema {
                 }
                 foreach string key in (sort(keys schema_dependencies)) {
                     push pieces, sprintf("xsd:%Y:%s", key, schema_dependencies{key}.toSHA512());
+                }
+                foreach string key in (sort(keys resource_locations)) {
+                    push pieces, sprintf("alias:%Y:%Y", key, resource_locations{key});
                 }
                 foreach hash<XsdSourceInfo> source in (schema_sources) {
                     push pieces, sprintf("added:%Y:%Y:%s", source.base, source.location, source.xml.toSHA512());
@@ -34622,32 +34776,51 @@ public class WebService inherits WSDL::XsdSchema {
         return document_nsc;
     }
 
-    private string fetchWsdlDependency(string location, string reference) {
-        string key = WSDLLib::normalizeLocation(location, "file", NOTHING);
-        if (exists wsdl_dependencies{key}) {
-            return wsdl_dependencies{key};
-        }
+    private hash<WsdlFetchedDocument> fetchWsdlDependency(string location, string reference) {
+        string requested = WSDLLib::normalizeLocation(location, "file", NOTHING);
+        string key = resource_locations{requested} ?? requested;
         string source;
-        if (opts.xsd_cache && exists opts.xsd_cache{key}) {
+        if (key == document_location) {
+            source = wsdl;
+        } else if (exists wsdl_dependencies{key}) {
+            source = wsdl_dependencies{key};
+        } else if (opts.xsd_cache && exists opts.xsd_cache{key}) {
             source = opts.xsd_cache{key};
+        } else if (opts.xsd_cache && exists opts.xsd_cache{requested}) {
+            source = opts.xsd_cache{requested};
         } else if (opts.async_only) {
             throw "WSDL-ASYNC-IMPORT", sprintf("missing async WSDL import %Y", key), key;
         } else if (try_import && WsdlFileLocation::isFile(location) && !WSDLLib::hasScheme(reference)) {
             source = call_function(try_import, reference);
         } else {
+            *string effective;
+            hash<string, string> aliases();
             source = WSDLLib::getFileFromURL(location, "file",
-                opts.http_client instanceof HTTPClient ? opts.http_client : NOTHING, opts.http_headers);
+                opts.http_client instanceof HTTPClient ? opts.http_client : NOTHING, opts.http_headers,
+                True, NOTHING, NOTHING, \effective, \aliases);
+            resource_locations += aliases;
+            if (effective && effective != requested) {
+                resource_locations{requested} = effective;
+                key = effective;
+            }
         }
         validateSchemaGrammar(source);
-        wsdl_dependencies{key} = source;
-        return source;
+        if ((key == document_location && source != wsdl)
+                || (exists wsdl_dependencies{key} && wsdl_dependencies{key} != source)) {
+            throw WSDL_ERROR, sprintf("conflicting source bytes for WSDL resource %Y", key);
+        }
+        if (key != document_location) {
+            wsdl_dependencies{key} = source;
+        }
+        return <WsdlFetchedDocument>{"source": source, "location": key};
     }
 
     private:internal doInit(string str, *hash<auto> opts) {
         validateSchemaGrammar(str);
         initOptions(opts);
+        wsdl = str;
         list<hash<WsdlDocumentInfo>> documents = WsdlDocumentCatalog::load(str, document_location, def_path,
-            \fetchWsdlDependency());
+            \fetchWsdlDependency(), resource_locations);
         WsdlComponentRegistry registry(documents);
         component_keys = registry.getKeys();
         foreach hash<WsdlDocumentInfo> document in (documents) {
@@ -34658,7 +34831,6 @@ public class WebService inherits WSDL::XsdSchema {
                 schema_dependencies{document.resource_key} = document.source;
             }
         }
-        wsdl = str;
         hash_str = "";
         wsdl_hash = str.toSHA512();
         hash<auto> root = documents[0].data.definitions;

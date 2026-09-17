@@ -8852,3 +8852,35 @@ Transient corpus timeouts were investigated and the unchanged test rerun passed;
 no test deadline or assertion was relaxed. No push, installation or CI trigger.
 WSDL resource-result/redirect graph integration and the remaining P6–P9 work
 remain open.
+
+## P6-10: redirect resource metadata
+
+WSDLLib, SoapClient and WsdlPollOperation consume FileLocationHandler 3.0 resource
+results. Effective root/import locations and requested/hop aliases determine
+bases and component identity, survive saved graphs, and reconstruct offline.
+Namespace checks still run per import/include edge. Conflicting content at one
+effective URI rejects before cache replacement; failed additions roll back aliases.
+XML resource text uses BOM, transport charset, declaration/signature and UTF-8
+precedence. Binary retrieval preserves bytes. Custom schemes own their payload
+syntax, including literal data:// XML; no broad transport catch/retry remains.
+
+Focused redirect tests pass 10 cases / 284 assertions. The broad 37-suite gate
+passes 474 cases / 7,835 reported assertions (soap.qtest deliberately catches
+seven comparator assertions). The 12-command corpus gate passes with the
+expected p5-legacy projection-loss exit code; all six reports semantically match
+P6-09. After correcting custom dispatch, focused redirects plus five affected
+loader/integration suites were rerun. Exact pre/post fingerprints and logs are in
+[P6-10-validation.json](P6-10-validation.json). WSDL and SoapClient documentation
+and the WSDL astparser check pass cleanly. The audit has 18 Pass / 44 N/A / zero
+Fail across all 62 checks. No C++ changed; no Valgrind is required.
+
+See [evidence](redirect-resource-evidence.md) and
+[audit](audits/P6-10-redirect-resources.md). Durable resource design and release
+notes are updated. No Qore mutation, installation or push is made. The unrelated
+`test/cmake/__pycache__/` remains excluded.
+
+P6 remains open. `/tmp/xml-p6-operation-selection/probe.qr` and `baseline.log`
+reduce the next already-planned operation defects: same-name declarations
+replace one another, and getBindingOperation() returns operations absent from
+the selected binding. The README there records the corresponding source paths
+and WSDL 1.1 rules. P7–P9 remain open; no phase boundary is claimed.

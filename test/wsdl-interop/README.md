@@ -2213,3 +2213,12 @@ WSDL document references, retained XML Base, native HTTP schema locations and
 WebContentUtil use Qore 3.0 URI support. File URI conversion uses FileLocationHandler
 3.0. See [evidence](qore-uri-evidence.md), [validation](P6-09-validation.json) and
 [audit](audits/P6-09-qore-uri.md). WSDL redirect graph integration remains separate.
+
+## Redirect resource metadata (P6-10)
+
+WSDL/SoapClient synchronous and asynchronous loading use effective resource URIs
+for dependency bases and retain redirect aliases for offline reconstruction.
+Focused tests cover namespace checks, conflicting content, encoding, custom
+handlers and failed-addition rollback. See [evidence](redirect-resource-evidence.md),
+[validation](P6-10-validation.json) and [audit](audits/P6-10-redirect-resources.md).
+The remaining P6 binding/operation work and P7–P9 remain open.

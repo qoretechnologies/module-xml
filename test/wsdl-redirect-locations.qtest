@@ -1,0 +1,528 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires ../qlib/WSDL.qm
+%requires ../qlib/SoapClient.qm
+%requires HttpServer
+%requires FileLocationHandler
+%exec-class RedirectLocationsTest
+
+string sub redirectSchema(string content) {
+    return '<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" targetNamespace="urn:redirect">'
+        + content + '</xs:schema>';
+}
+
+string sub redirectWsdl(string content) {
+    return '<w:definitions xmlns:w="http://schemas.xmlsoap.org/wsdl/" xmlns:t="urn:redirect"'
+        + ' xmlns:s="http://schemas.xmlsoap.org/wsdl/soap/" targetNamespace="urn:redirect">'
+        + content + '</w:definitions>';
+}
+
+class RedirectLocationsTest inherits QUnit::Test {
+    constructor() : Test("WSDL effective retrieval URIs", "1.0") {
+        addTestCase("All loaders retain root and nested redirect bases and reconstruct offline", \graphs());
+        addTestCase("Retrieval APIs report the effective URI while preserving configured client URLs", \metadata());
+        addTestCase("Root hop aliases and duplicate dependency aliases preserve one declaration", \aliases());
+        addTestCase("Every redirected import still checks its namespace", \namespaceErrors());
+        addTestCase("Redirect errors release clients and allow later reads", \transportErrors());
+        addTestCase("Resource byte decoding uses BOM, transport charset and XML declaration", \encodings());
+        addTestCase("Added redirected schemas roll back aliases on failure and save offline", \addedSources());
+        addTestCase("Different bytes at an already retained effective URI reject", \conflictingSources());
+        addTestCase("Empty and invalid resource bytes fail without poisoning later reads", \invalidBytes());
+        addTestCase("Custom handlers support known and unknown effective document locations", \customHandlers());
+        set_return_value(main());
+    }
+
+    private WebService asyncLoad(string location, *hash<auto> http_opts, *hash<auto> headers) {
+        WsdlPollOperation op(location, {"timeout": 30000, "connect_timeout": 30000} + http_opts, headers);
+        on_error op.abort();
+        date deadline = now_us() + 30s;
+        while (!op.goalReached()) {
+            *hash<SocketPollInfo> info = op.continuePoll();
+            if (info) {
+                int remaining = (deadline - now_us()).durationMilliseconds();
+                if (remaining <= 0) {
+                    throw "TEST-ERROR", "asynchronous retrieval deadline exceeded";
+                }
+                Socket::poll((info,), remaining);
+            }
+        }
+        return op.getOutput();
+    }
+
+    private check(WebService ws) {
+        XsdXmlValue value('<Value xmlns="urn:redirect">42</Value>');
+        assertEq(value, ws.validateXmlValue(value));
+        assertThrows("SOAP-SERIALIZATION-ERROR", \ws.validateXmlValue(),
+            (new XsdXmlValue('<Value xmlns="urn:redirect">wrong</Value>'),));
+        assertEq("M", ws.getMessage("{urn:redirect}M").name);
+        assertEq(1, ws.listServices().size());
+    }
+
+    private graphs() {
+        foreach string mode in ("sync", "client", "async") {
+            HttpServer server();
+            on_exit server.stop();
+            Queue requests();
+            server.setDefaultHandler("redirects", new RedirectLocationPeer(requests));
+            server.addListener(0);
+            string origin = sprintf("http://127.0.0.1:%d", server.getListenerInfo(0).port);
+            WebService ws;
+            if (mode == "client") {
+                SoapClient client({"wsdl": origin + "/old/root.wsdl", "timeout": 30000});
+                ws = client.getWebService();
+            } else if (mode == "async") {
+                ws = asyncLoad(origin + "/old/root.wsdl");
+            } else {
+                ws = WSDLLib::getWebServiceFromUrl(origin + "/old/root.wsdl",
+                    new HTTPClient({"timeout": 30000}));
+            }
+            assertEq(origin + "/new/root.wsdl?rev=2", ws.document_location);
+            foreach string path in ("/old/root.wsdl", "/new/root.wsdl?rev=2", "/new/imports/child.wsdl",
+                    "/shared/child.wsdl", "/shared/types.xsd", "/types/first.xsd", "/types/second.xsd") {
+                assertEq(path, requests.get(30000));
+            }
+            assertEq(0, requests.size());
+            check(ws);
+            auto saved = ws.serialize();
+            server.stop();
+            WebService restored = Serializable::deserialize(saved);
+            assertEq(ws.document_location, restored.document_location);
+            assertEq(ws.getHash(), restored.getHash());
+            check(restored);
+        }
+    }
+
+    private WebService load(string url, bool async, *hash<auto> options, *hash<auto> headers) {
+        return async ? asyncLoad(url, options, headers)
+            : WSDLLib::getWebServiceFromUrl(url, new HTTPClient({"timeout": 30000} + options), headers);
+    }
+
+    private aliases() {
+        foreach bool async in (False, True) {
+            HttpServer server();
+            on_exit server.stop();
+            Queue requests();
+            string root = redirectWsdl('<w:import namespace="urn:redirect" location="/hop"/>'
+                + '<w:import namespace="urn:redirect" location="/child"/>'
+                + '<w:import namespace="urn:redirect" location="/alias"/>');
+            string child = redirectWsdl('<w:message name="OnlyOnce"/>');
+            server.setDefaultHandler("fixtures", new RedirectFixturePeer({
+                "/start": {"status": 302, "headers": {"Location": "/hop"}},
+                "/hop": {"status": 307, "headers": {"Location": "/final/root?"}},
+                "/final/root?": {"body": root, "headers": {"Set-Cookie": "response-secret=do-not-save"}},
+                "/child": {"body": child},
+                "/alias": {"status": 308, "headers": {"Location": "/child#message"}},
+            }, requests));
+            server.addListener(0);
+            string origin = sprintf("http://127.0.0.1:%d", server.getListenerInfo(0).port);
+            WebService ws = load(origin + "/start", async, NOTHING, {"X-Graph-Test": "configured-header"});
+            assertEq(origin + "/final/root?", ws.document_location);
+            assertEq("OnlyOnce", ws.getMessage("OnlyOnce").name);
+            foreach string path in ("/start", "/hop", "/final/root?", "/child", "/alias", "/child") {
+                hash<auto> req = requests.get(30000);
+                assertEq(path, req.path);
+                assertEq("configured-header", req.header);
+            }
+            assertEq(0, requests.size());
+            auto state = ws.serializeToData();
+            assertFalse(sprintf("%Y", state).contains("response-secret=do-not-save"));
+            server.stop();
+            WebService restored = Serializable::deserialize(state);
+            assertEq(ws.getHash(), restored.getHash());
+            assertEq("OnlyOnce", restored.getMessage("OnlyOnce").name);
+        }
+    }
+
+    private namespaceErrors() {
+        foreach bool async in (False, True) {
+            foreach bool schema in (False, True) {
+                HttpServer server();
+                on_exit server.stop();
+                Queue requests();
+                string source = schema
+                    ? redirectWsdl('<w:types>' + replace(redirectSchema('<xs:import namespace="urn:redirect" schemaLocation="/child"/>'
+                        + '<xs:import namespace="urn:wrong" schemaLocation="/alias"/>'),
+                        'targetNamespace="urn:redirect"', 'targetNamespace="urn:root"') + '</w:types>')
+                    : redirectWsdl('<w:import namespace="urn:redirect" location="/child"/>'
+                        + '<w:import namespace="urn:wrong" location="/alias"/>');
+                server.setDefaultHandler("fixtures", new RedirectFixturePeer({
+                    "/root": {"body": source},
+                    "/child": {"body": schema ? redirectSchema('<xs:element name="Value" type="xs:int"/>')
+                        : redirectWsdl('<w:message name="M"/>')},
+                    "/alias": {"status": 302, "headers": {"Location": "/child"}},
+                }, requests));
+                server.addListener(0);
+                string origin = sprintf("http://127.0.0.1:%d", server.getListenerInfo(0).port);
+                assertThrows("WSDL-ERROR", \load(), (origin + "/root", async));
+                foreach string path in ("/root", "/child", "/alias", "/child") {
+                    assertEq(path, requests.get(30000).path);
+                }
+                assertEq(0, requests.size());
+            }
+        }
+    }
+
+    private transportErrors() {
+        HttpServer server();
+        on_exit server.stop();
+        Queue requests();
+        server.setDefaultHandler("fixtures", new RedirectFixturePeer({
+            "/loop": {"status": 302, "headers": {"Location": "loop#same"}},
+            "/missing": {"status": 302, "headers": {"Location": "/absent"}},
+            "/ok": {"body": redirectWsdl('<w:message name="M"/>')},
+        }, requests));
+        server.addListener(0);
+        string origin = sprintf("http://127.0.0.1:%d", server.getListenerInfo(0).port);
+        foreach bool async in (False, True) {
+            assertThrows("HTTP-CLIENT-MAXIMUM-REDIRECTS-EXCEEDED", \load(),
+                (origin + "/loop", async, {"max_redirects": 1}));
+            assertThrows("HTTP-CLIENT-RECEIVE-ERROR", \load(), (origin + "/missing", async));
+            WebService ws = load(origin + "/ok", async);
+            assertEq("M", ws.getMessage("M").name);
+        }
+        HTTPClient hc({"timeout": 30000, "max_redirects": 1});
+        assertThrows("HTTP-CLIENT-MAXIMUM-REDIRECTS-EXCEEDED", \WSDLLib::getWSDL(),
+            (origin + "/loop", hc));
+        assertEq(redirectWsdl('<w:message name="M"/>'), WSDLLib::getWSDL(origin + "/ok", hc));
+    }
+
+    private encodings() {
+        foreach hash<auto> row in (
+                {"encoding": "UTF-8", "declaration": "UTF-8"},
+                {"encoding": "UTF-8", "declaration": NOTHING},
+                {"encoding": "UTF-16LE", "declaration": "UTF-16LE"},
+                {"encoding": "UTF-16BE", "declaration": "UTF-16BE"},
+                {"encoding": "UTF-32LE", "declaration": "UTF-32LE"},
+                {"encoding": "UTF-32BE", "declaration": "UTF-32BE"},
+                {"encoding": "ISO-8859-1", "declaration": "ISO-8859-1"},
+                {"encoding": "ISO-8859-1", "charset": "ISO-8859-1", "declaration": "UTF-8"},
+                {"encoding": "UTF-16LE", "bom": "fffe", "charset": "ISO-8859-1", "declaration": "UTF-16"},
+                {"encoding": "UTF-16BE", "bom": "feff", "declaration": "UTF-16"},
+                {"encoding": "UTF-32BE", "bom": "0000feff", "declaration": "UTF-32"},
+                {"encoding": "UTF-8", "bom": "efbbbf", "charset": "ISO-8859-1", "declaration": "UTF-8"}) {
+            string source = (row.declaration ? '<?xml version="1.0" encoding="' + row.declaration + '"?>' : "")
+                + redirectWsdl('<w:message name="Café"/>');
+            binary bytes = binary(source.toString(row.encoding));
+            if (row.bom) {
+                bytes = parse_hex_string(row.bom) + bytes;
+            }
+            HttpServer server();
+            on_exit server.stop();
+            Queue requests();
+            server.setDefaultHandler("fixtures", new RedirectFixturePeer({
+                "/start": {"status": 302, "headers": {"Location": "/encoded"}},
+                "/encoded": {"body": bytes, "headers": {"Content-Type": "application/xml"
+                    + (row.charset ? "; charset=" + row.charset : "")}},
+            }, requests));
+            server.addListener(0);
+            string origin = sprintf("http://127.0.0.1:%d", server.getListenerInfo(0).port);
+            foreach bool async in (False, True) {
+                WebService ws = load(origin + "/start", async);
+                assertEq("Café", ws.getMessage("Café").name);
+                assertEq(source, ws.getWSDL());
+                WebService restored = Serializable::deserialize(ws.serialize());
+                assertEq("Café", restored.getMessage("Café").name);
+            }
+            assertEq(bytes, WSDLLib::getFileFromURL(origin + "/start", "file", NOTHING, NOTHING, False));
+        }
+    }
+
+    private conflictingSources() {
+        foreach bool async in (False, True) {
+            foreach bool schema in (False, True) {
+                HttpServer server();
+                on_exit server.stop();
+                Queue requests();
+                server.setDefaultHandler("changing", new RedirectChangingPeer(schema, requests));
+                server.addListener(0);
+                string origin = sprintf("http://127.0.0.1:%d", server.getListenerInfo(0).port);
+                assertThrows("WSDL-ERROR", \load(), (origin + "/root", async));
+                foreach string path in ("/root", "/child", "/alias", "/child") {
+                    assertEq(path, requests.get(30000));
+                }
+                assertEq(0, requests.size());
+            }
+        }
+    }
+
+    private invalidBytes() {
+        HttpServer server();
+        on_exit server.stop();
+        Queue requests();
+        server.setDefaultHandler("fixtures", new RedirectFixturePeer({
+            "/empty": {"body": binary("")},
+            "/bom": {"body": <efbbbf>},
+            "/bad-encoding": {"body": binary('<?xml version="1.0" encoding="NO-SUCH-ENCODING"?>'
+                + redirectWsdl(""))},
+            "/ok": {"body": redirectWsdl('<w:message name="M"/>')},
+        }, requests));
+        server.addListener(0);
+        string origin = sprintf("http://127.0.0.1:%d", server.getListenerInfo(0).port);
+        foreach bool async in (False, True) {
+            foreach string path in ("/empty", "/bom", "/bad-encoding") {
+                assertThrows(path == "/bad-encoding" ? "ENCODING-CONVERSION-ERROR" : "PARSE-XML-EXCEPTION",
+                    \load(), (origin + path, async));
+            }
+            assertEq("M", load(origin + "/ok", async).getMessage("M").name);
+        }
+    }
+
+    private addedSources() {
+        HttpServer server();
+        on_exit server.stop();
+        Queue requests();
+        string include = redirectSchema('<xs:include schemaLocation="../alias"/>');
+        server.setDefaultHandler("fixtures", new RedirectFixturePeer({
+            "/alias": {"status": 302, "headers": {"Location": "/new/types.xsd"}},
+            "/new/types.xsd": {"body": redirectSchema('<xs:include schemaLocation="nested.xsd"/>')},
+            "/new/nested.xsd": {"body": redirectSchema('<xs:element name="Value" type="xs:int"/>')},
+        }, requests));
+        server.addListener(0);
+        string origin = sprintf("http://127.0.0.1:%d", server.getListenerInfo(0).port);
+        XsdSchema xs(redirectSchema(""), {"document_location": origin + "/old/source.xsd"});
+        string invalid = redirectSchema('<xs:include schemaLocation="../alias"/>'
+            + '<xs:element name="Invalid" type="xs:MissingType"/>');
+        assertThrows("WSDL-ERROR", \xs.addSchemaString(), (invalid,));
+        assertFalse(exists xs.getElement("urn:redirect", "Value"));
+        xs.addSchemaString(include);
+        foreach int attempt in (0..1) {
+            foreach string path in ("/alias", "/new/types.xsd", "/new/nested.xsd") {
+                assertEq(path, requests.get(30000).path, sprintf("attempt %d", attempt));
+            }
+        }
+        assertEq(0, requests.size());
+        assertEq(origin + "/old/source.xsd", xs.document_location);
+        auto state = xs.serialize();
+        server.stop();
+        XsdSchema restored = Serializable::deserialize(state);
+        XsdXmlValue value('<Value xmlns="urn:redirect">42</Value>');
+        assertEq(value, restored.validateXmlValue(value));
+    }
+
+    private customHandlers() {
+        string inline_source = redirectWsdl('<w:message name="Café"/>');
+        *string effective = "stale";
+        hash<string, string> aliases = {"stale": "stale"};
+        assertEq(inline_source, WSDLLib::getWSDL("data://" + inline_source, NOTHING, NOTHING,
+            NOTHING, \effective, \aliases));
+        assertNothing(effective);
+        assertEq({}, aliases);
+        assertEq(binary(inline_source), WSDLLib::getFileFromURL("data://" + inline_source,
+            "file", NOTHING, NOTHING, False));
+        foreach bool known in (False, True) {
+            string scheme = known ? "xmlredirectknown" : "xmlredirectunknown";
+            RedirectResourceHandler handler(known);
+            FileLocationHandler::registerHandler(scheme, handler);
+            foreach bool async in (False, True) {
+                handler.clear();
+                string root = scheme + "://contracts/old/root?revision=1";
+                WebService ws = load(root, async);
+                assertEq(scheme + "://contracts/" + (known ? "new" : "old") + "/root?revision=1",
+                    ws.document_location);
+                assertEq("M", ws.getMessage("M").name);
+                assertEq(known ? "contracts/new/types?revision=2" : "contracts/old/types?revision=2",
+                    handler.last_location);
+                assertEq(3, handler.requests);
+                auto saved = ws.serialize();
+                handler.enabled = False;
+                on_exit handler.enabled = True;
+                WebService restored = Serializable::deserialize(saved);
+                assertEq(ws.getHash(), restored.getHash());
+                XsdXmlValue value('<Value xmlns="urn:redirect">42</Value>');
+                assertEq(value, restored.validateXmlValue(value));
+            }
+        }
+    }
+
+    private metadata() {
+        HttpServer server();
+        on_exit server.stop();
+        Queue requests();
+        server.setDefaultHandler("redirects", new RedirectLocationPeer(requests));
+        server.addListener(0);
+        string origin = sprintf("http://127.0.0.1:%d", server.getListenerInfo(0).port);
+        HTTPClient hc({"url": origin + "/original", "timeout": 30000});
+        *string location;
+        *string base;
+        string body = WSDLLib::getFileFromURL(origin + "/old/root.wsdl", "file", hc, NOTHING, True,
+            NOTHING, \base, \location);
+        assertEq(origin + "/new/root.wsdl?rev=2", location);
+        assertEq(origin + "/new", base);
+        assertEq(origin + "/old/root.wsdl", hc.getURL());
+        assertTrue(body.startsWith("<w:definitions"));
+    }
+}
+
+class RedirectLocationPeer inherits AbstractHttpRequestHandler {
+    private { Queue requests; }
+    constructor(Queue requests) { self.requests = requests; }
+    hash<HttpResponseInfo> handleRequest(hash<auto> cx, hash<auto> hdr, *data body) {
+        requests.push(cx.raw_path);
+        string source;
+        switch (cx.raw_path) {
+            case "/old/root.wsdl":
+                return makeResponse({"Location": "../new/root.wsdl?rev=2#root"}, 302, "");
+            case "/new/root.wsdl?rev=2":
+                source = redirectWsdl('<w:import namespace="urn:redirect" location="imports/child.wsdl"/>'
+                    + '<w:portType name="P"/><w:binding name="B" type="t:P">'
+                    + '<s:binding transport="http://schemas.xmlsoap.org/soap/http"/></w:binding>'
+                    + '<w:service name="S"><w:port name="Endpoint" binding="t:B">'
+                    + '<s:address location="http://' + hdr.host + '/soap"/></w:port></w:service>');
+                break;
+            case "/new/imports/child.wsdl":
+                return makeResponse({"Location": "http://" + hdr.host + "/shared/child.wsdl"}, 307, "");
+            case "/shared/child.wsdl":
+                source = redirectWsdl('<w:import namespace="urn:redirect" location="/old/root.wsdl"/>'
+                    + '<w:types>' + redirectSchema('<xs:include schemaLocation="types.xsd"/>') + '</w:types>'
+                    + '<w:message name="M"><w:part name="value" element="t:Value"/></w:message>');
+                break;
+            case "/shared/types.xsd":
+                return makeResponse({"Location": "/types/first.xsd"}, 301, "");
+            case "/types/first.xsd":
+                source = redirectSchema('<xs:include schemaLocation="second.xsd"/>');
+                break;
+            case "/types/second.xsd":
+                source = redirectSchema('<xs:include schemaLocation="/shared/types.xsd#cycle"/>'
+                    + '<xs:element name="Value" type="xs:int"/>');
+                break;
+            default:
+                return makeResponse({}, 404, "unexpected target: " + cx.raw_path);
+        }
+        return makeResponse({"Content-Type": "text/xml"}, 200, source);
+    }
+}
+
+# Immutable routes; Queue owns synchronization for request observations.
+class RedirectFixturePeer inherits AbstractHttpRequestHandler {
+    private {
+        hash<string, hash<auto>> routes;
+        Queue requests;
+    }
+    constructor(hash<string, hash<auto>> routes, Queue requests) {
+        self.routes = routes;
+        self.requests = requests;
+    }
+    hash<HttpResponseInfo> handleRequest(hash<auto> cx, hash<auto> hdr, *data body) {
+        requests.push({"path": cx.raw_path, "header": hdr."x-graph-test"});
+        *hash<auto> route = routes{cx.raw_path};
+        if (!route) {
+            return makeResponse({}, 404, "unknown fixture");
+        }
+        return makeResponse({"Content-Type": "application/xml"} + route.headers,
+            route.status ?? 200, route.body ?? "");
+    }
+}
+
+# Request handling is serialized under the object lock for the changing-source fixture.
+class RedirectChangingPeer inherits AbstractHttpRequestHandler {
+    private {
+        bool schema;
+        int reads;
+        Queue requests;
+    }
+    constructor(bool schema, Queue requests) {
+        self.schema = schema;
+        self.requests = requests;
+    }
+    synchronized hash<HttpResponseInfo> handleRequest(hash<auto> cx, hash<auto> hdr, *data body) {
+        requests.push(cx.raw_path);
+        if (cx.raw_path == "/alias") {
+            return makeResponse({"Location": "/child"}, 302, "");
+        }
+        string source;
+        if (cx.raw_path == "/root") {
+            source = schema
+                ? redirectWsdl('<w:types>' + redirectSchema('<xs:include schemaLocation="/child"/>'
+                    + '<xs:include schemaLocation="/alias"/>') + '</w:types>')
+                : redirectWsdl('<w:import namespace="urn:redirect" location="/child"/>'
+                    + '<w:import namespace="urn:redirect" location="/alias"/>');
+        } else {
+            ++reads;
+            source = schema ? redirectSchema(sprintf('<xs:element name="Value%d" type="xs:int"/>', reads))
+                : redirectWsdl(sprintf('<w:message name="M%d"/>', reads));
+        }
+        return makeResponse({"Content-Type": "application/xml"}, 200, source);
+    }
+}
+
+# In-memory resource transport used only by its constructing test thread.
+class RedirectResourceHandler inherits AbstractFileLocationHandler {
+    public {
+        bool enabled = True;
+        int requests;
+        string last_location;
+    }
+    private { bool known; }
+    constructor(bool known) { self.known = known; }
+    clear() { requests = 0; last_location = ""; }
+    private hash<FileResourceResult> getResourceImpl(string scheme, string location, *hash<auto> opts) {
+        if (!enabled) {
+            throw "TEST-UNEXPECTED-IO", location;
+        }
+        ++requests;
+        last_location = location;
+        string source;
+        if (location.contains("/root?")) {
+            source = redirectWsdl('<w:types>' + redirectSchema('<xs:include schemaLocation="types?revision=1"/>')
+                + '</w:types><w:message name="M"/>');
+        } else if (location.endsWith("revision=1")) {
+            source = redirectSchema('<xs:include schemaLocation="?revision=2"/>');
+        } else {
+            source = redirectSchema('<xs:element name="Value" type="xs:int"/>');
+        }
+        hash<FileResourceInfo> info = <FileResourceInfo>{"requested_location": scheme + "://" + location};
+        if (known) {
+            info.effective_location = scheme + "://" + replace(location, "/old/", "/new/");
+        }
+        return <FileResourceResult>{"data": binary(source), "info": info};
+    }
+    private AbstractPollOperation<hash<FileResourceResult>> getResourcePollerImpl(string scheme,
+            string location, *hash<auto> opts) {
+        return new FileResourcePollOperation(new ImmediateDataPollOperation(getResourceImpl(scheme, location, opts)),
+            hash<FileResourceResult> sub (auto output) { return output; });
+    }
+    private string getTextFileImpl(string scheme, string location, *hash<auto> opts) {
+        return getBinaryFileImpl(scheme, location, opts).toString();
+    }
+
+    private binary getBinaryFileImpl(string scheme, string location, *hash<auto> opts) {
+        return getResourceImpl(scheme, location, opts).data;
+    }
+
+    private Qore::AbstractPollOperation getIoPollerForLocationImpl(string scheme, string location,
+            *hash<auto> opts) {
+        return new ImmediateDataPollOperation(getBinaryFileImpl(scheme, location, opts));
+    }
+
+    private Qore::StreamReader getStreamReaderImpl(string scheme, string location, *hash<auto> opts) {
+        throw "UNIMPLEMENTED", "not supported";
+    }
+
+    private Qore::InputStream getBinaryStreamImpl(string scheme, string location, *hash<auto> opts) {
+        throw "UNIMPLEMENTED", "not supported";
+    }
+
+    private writeFileImpl(string scheme, string location, data contents, *hash<auto> opts) {
+        throw "UNIMPLEMENTED", "not supported";
+    }
+
+    private OutputStreamWrapper getOutputStreamImpl(string scheme, string location, *hash<auto> opts) {
+        throw "UNIMPLEMENTED", "not supported";
+    }
+
+    private hash<string, hash<FileHandlerOptionInfo>> getReadOptionsImpl() {
+        return {
+            "flag": <FileHandlerOptionInfo>{
+                "type": "bool",
+                "desc": "a test option",
+            },
+        };
+    }
+
+    private hash<string, hash<FileHandlerOptionInfo>> getWriteOptionsImpl() {
+        return {};
+    }
+}

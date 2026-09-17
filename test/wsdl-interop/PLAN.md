@@ -570,3 +570,9 @@ file URI conversion with FileLocationHandler and uses native HTTP effective-URL
 metadata for schema bases. See [shared URI evidence](qore-uri-evidence.md).
 WSDL resource-result/redirect graph integration and the remaining P6 binding
 work remain open; this is not a phase-completion claim.
+
+P6-10 integrates FileLocationHandler resource results across root/dependency
+loading, redirect aliases and offline saved graphs. XML decoding uses BOM,
+transport charset and XML encoding detection consistently. See
+[redirect evidence](redirect-resource-evidence.md). Operation overloads,
+input/output names, binding selection and the remaining P6–P9 matrix remain open.

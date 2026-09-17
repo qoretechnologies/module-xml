@@ -31,12 +31,46 @@ location unchanged. A directory base does not retain a document filename; caller
 requiring query-only or fragment-only document references must use the complete
 URI interface.
 
-Synchronous and asynchronous HTTP document retrieval construct the request target
-from the URI path and query, excluding the fragment. An empty path becomes `/`.
-The asynchronous root WSDL fetch records its HTTP directory so nested schema
-references use the containing document's directory. Existing schema dependency
-storage retains retrieved bytes and directory bases for offline saved-service
-reconstruction.
+Synchronous and asynchronous HTTP retrieval use FileLocationHandler 3.0 resource
+results. The request target is the path and query without a fragment; an empty
+path becomes `/`. A bound HTTP handler preserves configured client transport
+options. `FileResourceInfo::effective_location` supplies the final document URI;
+the configured client URL does not supply the post-redirect base. Generic
+handlers can supply the same metadata. When the effective location is unknown,
+the graph keeps the requested URI, including its filename and query.
+
+`WSDLLib::getHTTP()`, both `getFileFromURL()` overloads and `getWSDL()` expose
+optional output references for the effective URI and a flat map of requested
+and redirect-hop URIs to the final URI. `getFileFromURL()` also returns the
+corresponding directory through its existing output reference. For example,
+`/current.wsdl` redirecting to `/v2/root.wsdl` causes a relative `types.xsd`
+import to resolve to `/v2/types.xsd`. Inline XML has no retrieval metadata.
+
+The loaders decode resource bytes using [RFC 7303 section 3.2](https://www.rfc-editor.org/rfc/rfc7303#section-3.2)
+and XML encoding detection: a BOM takes precedence, followed by an explicit
+transport charset, followed by the XML declaration/signature and UTF-8 default.
+The BOM is removed and text is converted to UTF-8 once before XML parsing.
+Local file text follows the same XML detection. Binary retrieval leaves bytes
+unchanged. Encoding and transport errors propagate without retrying a failed
+HTTP request through another handler. Custom schemes delegate their location
+syntax to the registered handler; literal `data://` XML is not parsed as an
+HTTP authority.
+
+WSDL catalogs and schema caches index content by the fragment-free effective
+URI. The alias map permits redirect cycles and alternate requested locations to
+reuse the same components. Every distinct import/include edge still validates
+its namespace and mode. Fetching different content for an already retained
+effective URI raises `WSDL-ERROR`; the asynchronous cache checks this before
+replacing content. Failed schema additions roll back aliases with their other
+source and declaration state. An asynchronous terminal error aborts its active
+transport operation.
+
+Saved graphs retain decoded XML sources and URI aliases, excluding response
+headers and cookies. Reconstruction installs aliases before replaying imports,
+so no redirect needs to be repeated. Older records without aliases use an empty
+map. `WebService::getHash()` includes sorted alias pairs with dependency content;
+`getWSDLHash()` remains the root source digest. State is per schema/construction,
+and callers complete additions before sharing an object between threads.
 
 File and URL loaders (`WSDLLib`, `SoapClient` and `WsdlPollOperation`) retain the
 complete source URI in `XsdSchema::document_location`. Callers supplying XML
