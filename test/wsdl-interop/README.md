@@ -2222,3 +2222,10 @@ Focused tests cover namespace checks, conflicting content, encoding, custom
 handlers and failed-addition rollback. See [evidence](redirect-resource-evidence.md),
 [validation](P6-10-validation.json) and [audit](audits/P6-10-redirect-resources.md).
 The remaining P6 binding/operation work and P7–P9 remain open.
+
+## Concrete binding operation selection (P6-11)
+
+Binding-specific lookup rejects operations that exist only in the abstract port
+type or another binding. Qualified imported names, saved services and SoapClient
+selection are covered by [evidence](binding-selection-evidence.md),
+[validation](P6-11-validation.json) and [audit](audits/P6-11-binding-selection.md).

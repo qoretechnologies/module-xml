@@ -79,6 +79,13 @@ key from the selected service port into request/response processing. Operations
 retain expanded binding aliases through standalone serialization. Global
 `getOperation(name)` retains its documented first-match search; callers selecting
 a particular component use `getBindingOperation()` or `getPortTypeOperation()`.
+The binding-specific lookup verifies that the selected operation has a concrete
+operational binding under `Binding::getComponentKey()`. An operation declared
+in the port type but omitted from that binding raises `WSDL-BINDING-ERROR`,
+including empty bindings. This uses the operation's existing association map;
+no second membership registry is maintained. A `NOTHING` binding argument keeps
+global lookup, and port-type lookup still exposes abstract unbound operations.
+SoapClient uses this check before serializing or sending a request.
 For example:
 
 ```qore
@@ -93,8 +100,8 @@ its values. The binding and port-type document namespaces may differ.
 
 `getWSDL()` and `getWSDLHash()` describe the original root bytes. `getHash()`
 fingerprints the retained source graph: root source, sorted WSDL and XSD
-resource keys and content digests, and ordered added-schema source records.
-Services without dependencies or added sources retain the root SHA-256 digest.
+resource keys and content digests, sorted redirect aliases, and ordered added-schema source records.
+Services without dependencies, aliases or added sources retain the root SHA-256 digest.
 Successful schema additions invalidate the cached fingerprint. This identifies
 sources, not option-dependent semantic equivalence.
 

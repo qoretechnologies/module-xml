@@ -8884,3 +8884,32 @@ reduce the next already-planned operation defects: same-name declarations
 replace one another, and getBindingOperation() returns operations absent from
 the selected binding. The README there records the corresponding source paths
 and WSDL 1.1 rules. P7–P9 remain open; no phase boundary is claimed.
+
+## P6-11: concrete binding membership
+
+getBindingOperation() now verifies the operation's existing association with
+the selected binding before returning it. The canonical binding component key
+handles both unique local and colliding imported names. Unknown concrete
+membership raises the existing WSDL-BINDING-ERROR. Abstract port-type and global
+lookup remain available for unbound declarations; no second registry is added.
+
+The focused regression fails before the change in direct and imported selection,
+then passes 3 cases / 134 assertions. It covers saved services, empty bindings,
+missing names, repeated valid use after errors, both SOAP versions and SoapClient
+request construction/rejection. The broad test exposed an older fixture typo:
+postForm belongs to POST binding b3, but soap.qtest requested GET binding b2.
+The test now selects b3 and explicitly rejects b2; existing POST body/method/value
+assertions are preserved. Passed suites were retained; soap and the remaining
+suites were rerun successfully after this test-only correction.
+
+The 38-suite gate passes 477 cases / 7,974 reported assertions, with seven
+intentional caught comparator assertions in soap.qtest. WSDL documentation and
+astparser pass cleanly. All 62 audit checks have 18 Pass / 44 N/A / zero Fail.
+See [evidence](binding-selection-evidence.md), [validation](P6-11-validation.json)
+and [audit](audits/P6-11-binding-selection.md). No C++ changed; Valgrind is not
+required. The guard does not change corpus parsing/conversion, so P6-10 remains
+the corpus baseline. No Qore mutation, installation or push is made.
+
+Next is overloaded operation identity and abstract input/output naming, followed
+by the rest of the P6 binding matrix and P7–P9. The independently reduced
+same-name overwrite remains recorded in `/tmp/xml-p6-operation-selection/`.

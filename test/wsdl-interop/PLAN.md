@@ -576,3 +576,9 @@ loading, redirect aliases and offline saved graphs. XML decoding uses BOM,
 transport charset and XML encoding detection consistently. See
 [redirect evidence](redirect-resource-evidence.md). Operation overloads,
 input/output names, binding selection and the remaining P6–P9 matrix remain open.
+
+P6-11 verifies concrete binding membership before returning an operation from
+getBindingOperation(), including imported and saved services. See
+[binding selection evidence](binding-selection-evidence.md). Overloaded operation
+identities, abstract input/output defaults and the rest of the binding matrix
+remain open, followed by P7–P9.
