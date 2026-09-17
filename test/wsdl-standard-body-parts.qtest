@@ -1,0 +1,238 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires ../qlib/WSDL.qm
+%requires ../qlib/SoapClient.qm
+%requires ../qlib/SoapHandler.qm
+%requires ../qlib/SoapDataProvider
+%requires HttpServer
+%requires xml
+%exec-class StandardBodyPartsTest
+
+class StandardBodyPartsTest inherits QUnit::Test {
+    constructor() : Test("WSDL standard body defaults", "1.0") {
+        addTestCase("Omitted parts includes parts also bound to headers", \defaults());
+        addTestCase("Explicit partitions keep header-only parts out of the body", \partition());
+        addTestCase("Selected body parts cannot be silently omitted during serialization", \missing());
+        addTestCase("Overlapping native containers preserve both independently supplied values", \overlap());
+        addTestCase("Single nil and empty parts preserve their header counterparts", \emptyOverlap());
+        addTestCase("Explicit body/header maps reject malformed or conflicting input", \invalidWrapper());
+        addTestCase("Overlapping maps survive client and handler exchanges", \http());
+        set_return_value(main());
+    }
+
+    private static string source(bool rpc, bool soap12, bool collision, *string parts) {
+        string text = ReadOnlyFile::readTextFile(get_script_dir()
+            + "/wsdl-interop/regressions/body-parts/document.wsdl");
+        text = replace(text, ' parts="left right"', exists parts ? ' parts="' + parts + '"' : "");
+        if (collision) {
+            text = replace(text, 'name="left"', 'name="M"');
+        }
+        if (rpc) {
+            text = replace(text, 'style="document"', 'style="rpc"');
+        }
+        foreach string direction in ("input", "output") {
+            text = replace(text, '</w:' + direction + '>', '<s:header message="t:M" part="right" use="literal"/>'
+                + '</w:' + direction + '>');
+        }
+        return soap12 ? replace(text, SOAP_11_NS, SOAP_12_NS) : text;
+    }
+
+    private static string envelope(bool rpc, bool soap12, bool request, bool include_right = True) {
+        string body = '<t:Left>17</t:Left>' + (include_right ? '<t:Right>29</t:Right>' : '');
+        if (rpc) {
+            string name = request ? "exchange" : "exchangeResponse";
+            body = '<r:' + name + ' xmlns:r="urn:wire">' + body + '</r:' + name + '>';
+        }
+        return '<e:Envelope xmlns:e="' + (soap12 ? SOAP_12_ENV : SOAP_11_ENV) + '" xmlns:t="urn:parts">'
+            + '<e:Header><t:Right>31</t:Right></e:Header><e:Body>' + body + '</e:Body></e:Envelope>';
+    }
+
+    private defaults() {
+        foreach bool rpc in (False, True) {
+            foreach bool soap12 in (False, True) {
+                WebService original(source(rpc, soap12, False, NOTHING));
+                foreach WebService ws in (original, Serializable::deserialize(original.serialize())) {
+                    WSOperation op = ws.getOperation("exchange");
+                    assertNothing(op.getBinding().input.getBodyPartNames(op.input));
+                    foreach bool request in (False, True) {
+                        string xml = envelope(rpc, soap12, request);
+                        auto value = request ? op.deserializeRequest(parse_xml(xml)) : op.deserializeResponse(parse_xml(xml));
+                        hash<auto> expected = {"^body^": {"left": 17, "right": 29}, "^headers^": {"M": {"right": 31}}};
+                        assertEq(expected, value);
+                        hash<auto> wire = request ? op.serializeRequest(value) : op.serializeResponse(value);
+                        assertEq(expected, request ? op.deserializeRequest(parse_xml(wire.body))
+                            : op.deserializeResponse(parse_xml(wire.body)));
+                        if (!rpc) {
+                            hash<SoapXmlMessageInfo> retained = request ? op.deserializeXmlRequest(xml)
+                                : op.deserializeXmlResponse(xml);
+                            assertEq(("left", "right"), keys retained.body);
+                            assertEq("29", retained.body.right.getElementData()."^value^");
+                            assertEq("31", retained.headers.M.right.getElementData()."^value^");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private partition() {
+        foreach bool rpc in (False, True) {
+            foreach bool soap12 in (False, True) {
+                WebService ws(source(rpc, soap12, False, "left"));
+                WSOperation op = ws.getOperation("exchange");
+                assertEq(("left",), op.getBinding().input.getBodyPartNames(op.input));
+                foreach bool request in (False, True) {
+                    hash<auto> wire = request ? op.serializeRequest({"left": 17}, {"right": 31})
+                        : op.serializeResponse({"left": 17}, {"right": 31});
+                    assertEq({"left": 17, "M": {"right": 31}}, request
+                        ? op.deserializeRequest(parse_xml(wire.body)) : op.deserializeResponse(parse_xml(wire.body)));
+                    assertThrows("SOAP-DESERIALIZATION-ERROR", sub() {
+                        if (request) {
+                            op.deserializeRequest(parse_xml(envelope(rpc, soap12, request)));
+                        } else {
+                            op.deserializeResponse(parse_xml(envelope(rpc, soap12, request)));
+                        }
+                    });
+                }
+            }
+        }
+    }
+
+    private missing() {
+        foreach bool rpc in (False, True) {
+            foreach *string parts in (NOTHING, "left right") {
+                WebService ws(source(rpc, False, False, parts));
+                WSOperation op = ws.getOperation("exchange");
+                foreach bool request in (False, True) {
+                    assertThrows("SOAP-SERIALIZATION-ERROR", sub() {
+                        if (request) {
+                            op.serializeRequest({"left": 17}, {"right": 31});
+                        } else {
+                            op.serializeResponse({"left": 17}, {"right": 31});
+                        }
+                    });
+                    assertThrows("SOAP-DESERIALIZATION-ERROR", sub() {
+                        if (request) {
+                            op.deserializeRequest(parse_xml(envelope(rpc, False, request, False)));
+                        } else {
+                            op.deserializeResponse(parse_xml(envelope(rpc, False, request, False)));
+                        }
+                    });
+                }
+            }
+        }
+    }
+
+    private overlap() {
+        foreach bool rpc in (False, True) {
+            foreach bool soap12 in (False, True) {
+                foreach *string parts in (NOTHING, "M right") {
+                    WebService ws(source(rpc, soap12, True, parts));
+                    foreach WSOperation op in (ws.getOperation("exchange"),
+                            Serializable::deserialize(ws.serialize()).getOperation("exchange"),
+                            Serializable::deserialize(ws.getOperation("exchange").serialize())) {
+                        foreach bool request in (False, True) {
+                            hash<auto> expected = {"^body^": {"M": 17, "right": 29}, "^headers^": {"M": {"right": 31}}};
+                            auto value = request ? op.deserializeRequest(parse_xml(envelope(rpc, soap12, request)))
+                                : op.deserializeResponse(parse_xml(envelope(rpc, soap12, request)));
+                            assertEq(expected, value);
+                            hash<auto> wire = request ? op.serializeRequest(value) : op.serializeResponse(value);
+                            assertEq(expected, request ? op.deserializeRequest(parse_xml(wire.body))
+                                : op.deserializeResponse(parse_xml(wire.body)));
+                            assertEq(expected, value);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private emptyOverlap() {
+        foreach bool rpc in (False, True) {
+            foreach bool soap12 in (False, True) {
+                foreach bool nil in (False, True) {
+                    string text = source(rpc, soap12, False, NOTHING);
+                    text = replace(text, '<w:part name="left" element="t:Left"/>', "");
+                    text = replace(text, '<xs:element name="Right" type="xs:int"/>', nil
+                        ? '<xs:element name="Right" type="xs:int" nillable="true"/>'
+                        : '<xs:element name="Right"><xs:complexType><xs:sequence/></xs:complexType></xs:element>');
+                    WebService ws(text);
+                    WSOperation op = ws.getOperation("exchange");
+                    hash<auto> value = {"^body^": {"right": nil ? NULL : {}},
+                        "^headers^": {"M": {"right": nil ? 31 : {}}}};
+                    foreach bool request in (False, True) {
+                        hash<auto> wire = request ? op.serializeRequest(value) : op.serializeResponse(value);
+                        auto decoded = request ? op.deserializeRequest(parse_xml(wire.body))
+                            : op.deserializeResponse(parse_xml(wire.body));
+                        assertTrue(decoded.hasKey("^body^"));
+                        assertTrue(decoded.hasKey("^headers^"));
+                        assertTrue(decoded."^body^".hasKey("right"));
+                        if (nil) {
+                            assertEq(31, decoded."^headers^".M.right);
+                        } else {
+                            assertNothing(decoded."^headers^".M.right);
+                        }
+                        hash<auto> second = request ? op.serializeRequest(decoded) : op.serializeResponse(decoded);
+                        assertEq(decoded, request ? op.deserializeRequest(parse_xml(second.body))
+                            : op.deserializeResponse(parse_xml(second.body)));
+                    }
+                }
+            }
+        }
+    }
+
+    private invalidWrapper() {
+        WebService ws(source(False, False, True, NOTHING));
+        WSOperation op = ws.getOperation("exchange");
+        foreach auto value in ({"^body^": {}}, {"^headers^": {}}, {"^body^": 1, "^headers^": {}},
+                {"^body^": {}, "^headers^": 1}, {"^body^": {}, "^headers^": {}, "extra": 1}) {
+            assertThrows("SOAP-SERIALIZATION-ERROR", \op.serializeRequest(), (value,));
+        }
+        assertThrows("SOAP-SERIALIZATION-ERROR", \op.serializeRequest(),
+            ({"^body^": {"M": 17, "right": 29}, "^headers^": {"M": {"right": 31}}}, {"right": 41}));
+    }
+
+    private http() {
+        foreach bool rpc in (False, True) {
+            foreach bool soap12 in (False, True) {
+                WebService ws = Serializable::deserialize(new WebService(source(rpc, soap12, True, NOTHING)).serialize());
+                HttpServer server();
+                on_exit server.stop();
+                SoapHandler handler(new PermissiveAuthenticator());
+                server.setDefaultHandler("standard", handler);
+                Queue received();
+                code<auto(hash<auto>, auto)> callback = auto sub(hash<auto> cx, auto value) {
+                    received.push(value);
+                    value."^body^".right += 1;
+                    value."^headers^".M.right += 2;
+                    return value;
+                };
+                handler.addMethod(ws, ws.getBindingOperation("B", "exchange"), callback, NOTHING,
+                    NOTHING, NOTHING, "S", NOTHING, NOTHING, "B");
+                server.addListener(0);
+                SoapClient client({"wsdl": ws, "service": "S", "port": "Endpoint",
+                    "url": sprintf("http://127.0.0.1:%d/standard", server.getListenerInfo(0).port), "timeout": 30000});
+                hash<auto> input = {"^body^": {"M": 17, "right": 29}, "^headers^": {"M": {"right": 31}}};
+                assertEq({"^body^": {"M": 17, "right": 30}, "^headers^": {"M": {"right": 33}}},
+                    client.callOperation("exchange", input));
+                assertEq(input, received.get(30000));
+                SoapRequestDataProvider provider(ws, client, ws.getOperation("exchange"));
+                assertEq({"^body^": {"M": 17, "right": 30}, "^headers^": {"M": {"right": 33}}},
+                    provider.doRequest(input));
+                assertEq(input, received.get(30000));
+                assertEq({"^body^": {"M": 17, "right": 30}, "^headers^": {"M": {"right": 33}}},
+                    provider.doRequest(input."^body^", {"soap_header": input."^headers^"}));
+                assertEq(input, received.get(30000));
+                auto invalid = input;
+                invalid."^body^" = {"M": 17, "right": "invalid integer"};
+                assertThrows("INVALID-REQUEST", \provider.doRequest(), (invalid,));
+                invalid = input;
+                invalid."^headers^" = {"M": {"right": "invalid integer"}};
+                assertThrows("SOAP-SERIALIZATION-ERROR", \provider.doRequest(), (invalid,));
+            }
+        }
+    }
+}

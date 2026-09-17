@@ -1,0 +1,172 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires ../qlib/WSDL.qm
+%requires ../qlib/SoapClient.qm
+%requires ../qlib/SoapHandler.qm
+%requires HttpServer
+%exec-class BindingPatternsTest
+
+class BindingPatternsTest inherits QUnit::Test {
+    constructor() : Test("WSDL concrete interaction patterns", "1.0") {
+        addTestCase("All abstract patterns remain discoverable and serializable", \abstractOnly());
+        addTestCase("Standard bindings preserve supported patterns", \supported());
+        addTestCase("Unsupported concrete SOAP and HTTP patterns reject early", \unsupported());
+        addTestCase("Imported unsupported patterns reject before transport", \imported());
+        addTestCase("Manual binding registration preserves unsupported abstract operations", \manual());
+        addTestCase("Saved standalone operations reject known unsupported standard bindings", \saved());
+        addTestCase("One-way and request-response SOAP consumers retain behavior", \http());
+        set_return_value(main());
+    }
+
+    private static string source(WsdlOperationPattern pattern, string protocol, bool abstract_only = False) {
+        string input = '<w:input message="t:M"/>';
+        string output = '<w:output message="t:M"/>';
+        bool oneway = pattern == WsdlOperationPattern::OneWay;
+        bool notification = pattern == WsdlOperationPattern::Notification;
+        bool rr = pattern == WsdlOperationPattern::RequestResponse;
+        string aio = oneway ? input : notification ? output : rr ? input + output : output + input;
+        bool soap = protocol == "soap11" || protocol == "soap12";
+        string ns = soap ? protocol == "soap12" ? SOAP_12_NS : SOAP_11_NS : HTTP_NS;
+        string body = soap ? '<s:body use="literal" namespace="urn:wire"/>' : '<s:urlEncoded/>';
+        input = '<w:input>' + body + '</w:input>';
+        output = '<w:output>' + (soap ? body : '<m:mimeXml part="value"/>') + '</w:output>';
+        string bio = oneway ? input : notification ? output : rr ? input + output : output + input;
+        return '<w:definitions xmlns:w="http://schemas.xmlsoap.org/wsdl/" xmlns:t="urn:patterns"'
+            + ' xmlns:s="' + ns + '" xmlns:m="http://schemas.xmlsoap.org/wsdl/mime/"'
+            + ' xmlns:xs="' + XSD_NS + '" targetNamespace="urn:patterns">'
+            + '<w:types><xs:schema targetNamespace="urn:patterns"><xs:element name="Value" type="xs:int"/>'
+            + '</xs:schema></w:types><w:message name="M"><w:part name="value" element="t:Value"/></w:message>'
+            + '<w:portType name="P"><w:operation name="submit">' + aio + '</w:operation></w:portType>'
+            + (abstract_only ? '' : '<w:binding name="B" type="t:P"><s:binding '
+                + (soap ? 'transport="http://schemas.xmlsoap.org/soap/http"' : 'verb="' + protocol + '"')
+                + '/><w:operation name="submit"><s:operation '
+                + (soap ? 'soapAction="urn:submit"' : 'location="/submit"') + '/>' + bio
+                + '</w:operation></w:binding><w:service name="S"><w:port name="Endpoint" binding="t:B">'
+                + '<s:address location="http://example.invalid/submit"/></w:port></w:service>') + '</w:definitions>';
+    }
+
+    private abstractOnly() {
+        foreach WsdlOperationPattern pattern in (WsdlOperationPattern::OneWay, WsdlOperationPattern::RequestResponse,
+                WsdlOperationPattern::Notification, WsdlOperationPattern::SolicitResponse) {
+            WebService original(source(pattern, "soap11", True));
+            foreach WebService ws in (original, Serializable::deserialize(original.serialize())) {
+                WSOperation op = ws.getPortTypeOperation("P", "submit");
+                assertEq(pattern, op.getMessageExchangePattern());
+                assertFalse(op.hasBinding("B"));
+                assertEq(pattern, Serializable::deserialize(op.serialize()).getMessageExchangePattern());
+            }
+        }
+    }
+
+    private supported() {
+        foreach WsdlOperationPattern pattern in (WsdlOperationPattern::OneWay, WsdlOperationPattern::RequestResponse) {
+            foreach string protocol in ("soap11", "soap12", "GET", "POST") {
+                WebService original(source(pattern, protocol));
+                foreach WebService ws in (original, Serializable::deserialize(original.serialize())) {
+                    WSOperation op = ws.getBindingOperation("B", "submit");
+                    assertEq(pattern, op.getMessageExchangePattern());
+                    assertTrue(op.hasBinding("B"));
+                    assertEq(pattern == WsdlOperationPattern::RequestResponse, exists op.output);
+                }
+            }
+        }
+    }
+
+    private unsupported() {
+        foreach WsdlOperationPattern pattern in (WsdlOperationPattern::Notification, WsdlOperationPattern::SolicitResponse) {
+            foreach string protocol in ("soap11", "soap12", "GET", "POST") {
+                assertThrows("WSDL-ERROR", sub() { new WebService(source(pattern, protocol)); });
+            }
+        }
+    }
+
+    private imported() {
+        string root = '<w:definitions xmlns:w="http://schemas.xmlsoap.org/wsdl/" targetNamespace="urn:root">'
+            + '<w:import namespace="urn:patterns" location="dependency.wsdl"/></w:definitions>';
+        foreach WsdlOperationPattern pattern in (WsdlOperationPattern::Notification, WsdlOperationPattern::SolicitResponse) {
+            assertThrows("WSDL-ERROR", sub() {
+                new WebService(root, {"document_location": "https://example.invalid/root.wsdl", "async_only": True,
+                    "xsd_cache": {"https://example.invalid/dependency.wsdl": source(pattern, "soap12")}});
+            });
+        }
+    }
+
+    private manual() {
+        foreach string protocol in ("soap11", "soap12", "GET", "POST") {
+            WebService bound(source(WsdlOperationPattern::RequestResponse, protocol));
+            OperationalBinding binding = bound.getBindingOperation("B", "submit").getBinding();
+            foreach WsdlOperationPattern pattern in (WsdlOperationPattern::Notification, WsdlOperationPattern::SolicitResponse) {
+                WebService ws(source(pattern, protocol, True));
+                WSOperation op = ws.getOperation("submit");
+                assertThrows("WSDL-BINDING-ERROR", \op.addBinding(), (binding,));
+                assertFalse(op.hasBinding("B"));
+                assertEq(pattern, op.getMessageExchangePattern());
+            }
+        }
+    }
+
+    private saved() {
+        foreach string protocol in ("soap11", "soap12", "GET", "POST") {
+            foreach bool legacy in (False, True) {
+                foreach WsdlOperationPattern pattern in (WsdlOperationPattern::Notification, WsdlOperationPattern::SolicitResponse) {
+                    if (legacy && pattern == WsdlOperationPattern::SolicitResponse) {
+                        # Old two-message graphs cannot recover message order; existing named legacy calls remain valid.
+                        continue;
+                    }
+                    WebService ws(source(WsdlOperationPattern::RequestResponse, protocol));
+                    hash<SerializationInfo> data = ws.getBindingOperation("B", "submit").serializeToData();
+                    int changed = 0;
+                    foreach string index in (keys data._index) {
+                        if (data._index{index}.hasKey("_class_data")
+                                && data._index{index}._class_data.hasKey("WSDL::WSOperation")) {
+                            if (legacy) {
+                                remove data._index{index}._class_data."WSDL::WSOperation".exchange_pattern;
+                            } else {
+                                data._index{index}._class_data."WSDL::WSOperation".exchange_pattern = pattern;
+                            }
+                            if (pattern == WsdlOperationPattern::Notification) {
+                                remove data._index{index}._class_data."WSDL::WSOperation".input;
+                            }
+                            ++changed;
+                        }
+                    }
+                    assertEq(1, changed);
+                    assertThrows("DESERIALIZATION-ERROR", \Serializable::deserialize(), (data,));
+                }
+            }
+        }
+    }
+
+    private http() {
+        foreach bool oneway in (False, True) {
+            foreach string protocol in ("soap11", "soap12") {
+                WebService ws = Serializable::deserialize(new WebService(source(oneway
+                    ? WsdlOperationPattern::OneWay : WsdlOperationPattern::RequestResponse, protocol)).serialize());
+                HttpServer server();
+                on_exit server.stop();
+                SoapHandler handler(new PermissiveAuthenticator());
+                server.setDefaultHandler("patterns", handler);
+                Queue received();
+                code<auto(hash<auto>, auto)> callback = auto sub(hash<auto> cx, auto value) {
+                    received.push(value);
+                    return {"value": value + 1};
+                };
+                handler.addMethod(ws, ws.getBindingOperation("B", "submit"), callback, NOTHING,
+                    NOTHING, NOTHING, "S", NOTHING, NOTHING, "B");
+                server.addListener(0);
+                SoapClient client({"wsdl": ws, "service": "S", "port": "Endpoint",
+                    "url": sprintf("http://127.0.0.1:%d/patterns", server.getListenerInfo(0).port), "timeout": 30000});
+                auto result = client.callOperation("submit", {"value": 41});
+                assertEq(41, received.get(30000));
+                if (oneway) {
+                    assertNothing(result);
+                } else {
+                    assertEq(42, result);
+                }
+            }
+        }
+    }
+}

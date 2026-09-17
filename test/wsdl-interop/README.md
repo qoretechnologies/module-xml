@@ -2265,3 +2265,13 @@ uses pinned WSDL4J and Xerces, retaining the WSDL4J tokenizer limitation as a
 separate observation. See [evidence](body-parts-evidence.md),
 [validation](P6-15-validation.json), [audit](audits/P6-15-body-parts.md) and
 [durable body-part design](../../design/wsdl-body-parts.md).
+
+## Standard SOAP body defaults and binding patterns (P6-16)
+
+`wsdl-standard-body-parts.qtest` tests all-part defaults, explicit partitioning,
+independent overlap values, invalid/missing parts and client/handler/provider
+round trips. `wsdl-binding-patterns.qtest` covers abstract and concrete patterns,
+manual/saved/imported bindings and live calls. See
+[evidence](standard-body-defaults-evidence.md), [validation](P6-16-validation.json)
+and [audit](audits/P6-16-standard-body-defaults.md). The empty HTTP request test
+requires Qore Mime fix `ac5cfb171` or its equivalent.

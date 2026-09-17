@@ -607,3 +607,10 @@ list whitespace, rejects invalid part references, applies selections to RPC
 decoding and keeps declared fault detail independent of ordinary output selection.
 See [body-part evidence](body-parts-evidence.md). The approved omitted-parts standard default, concrete header/fault and interaction-pattern binding rules, HTTP/MIME
 interoperability, pinned CXF replay and P7–P9 remain open.
+
+P6-16 implements the approved standard omitted-body default, separate native maps
+for overlapping Body/Header parts, missing literal body-part validation and
+standard concrete interaction-pattern checks. See
+[standard binding evidence](standard-body-defaults-evidence.md). Concrete
+fault/headerfault rules, remaining HTTP/MIME binding behavior, pinned CXF replay
+and P7–P9 remain open.

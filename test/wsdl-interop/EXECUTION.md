@@ -9052,3 +9052,26 @@ implementation and remaining concrete binding requirements stay open. A separate
 confirms unsupported notification/solicit-response patterns currently reach
 standard binding construction; this is the next P6 validation increment.
 P6 is not complete and P7–P9 remain open.
+
+## P6-16: standard body defaults and concrete interaction patterns
+
+Omitted SOAP body selections now include all message parts, as approved. Native
+Body/Header overlaps preserve independent values in explicit maps accepted by
+serializers, clients, handlers and the data provider. Literal bodies reject
+missing selected parts. Standard SOAP/HTTP bindings reject unsupported concrete
+interaction patterns during construction, manual registration and restoration.
+
+The final 164-suite gate passes 1,647 cases /
+82,855 reported assertions. All 14 corpus commands meet their
+expected outcomes; semantic results remain unchanged. Doxygen and astparser pass;
+the audit records 27 Pass / 35 N/A / zero Fail. No C++ changes were made.
+
+The valid empty HTTP request fixture exposed Qore Mime returning NOTHING instead
+of a string for empty form data. Qore/develop `ac5cfb171` fixes it with three added
+assertions; all 26 Mime cases / 231 assertions pass. The Qore commit was audited
+and not pushed. XML validation selects its rebuilt local qmod explicitly.
+
+See [evidence](standard-body-defaults-evidence.md), [validation](P6-16-validation.json)
+and [audit](audits/P6-16-standard-body-defaults.md). P6 is not complete; concrete
+fault/headerfault behavior and the rest of its binding/peer matrix remain next,
+followed by P7–P9. No new DGC architecture was introduced.

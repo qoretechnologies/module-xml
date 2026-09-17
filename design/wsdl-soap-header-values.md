@@ -7,7 +7,16 @@ their native results. Body values use WSDL part names. Header values use a
 message-name container with part names inside it. The merge applies to requests
 and responses, with document and RPC bindings.
 
-Without headers, a single body part returns its value directly. With headers:
+Without headers, a single body part returns its value directly. If the same
+message part is present in both locations, decoding returns exactly
+`{"^body^": <body part map>, "^headers^": <header message/part map>}`. This check
+precedes flattening and grouping. It keeps independently supplied values from
+overwriting each other or being exchanged by the legacy serializer's preference
+for message containers. Both request and response serialization accept these
+maps, including client/handler and data-provider calls. See
+[body selection](wsdl-body-parts.md) for input validation and examples.
+
+With headers and no overlapping parts:
 
 1. A single body part can return its value directly only if that value is
    `NOTHING` or a hash whose keys do not collide with header message names.
@@ -19,7 +28,7 @@ Without headers, a single body part returns its value directly. With headers:
    added alongside them. Scalar body values use this rule too.
 
 For example, a provisioning message `GetResponse` with body part `GetResponse`
-and header part `SessionId` returns `{MOAttributes: ..., GetResponse: {SessionId:
+and header part `SessionId`, explicitly excluded from the body parts list, returns `{MOAttributes: ..., GetResponse: {SessionId:
 ...}}` when the body fields have no conflicting name. If that root carries a
 selected type, explicit native capture instead returns `{GetResponse:
 {GetResponse: {"^type^": ..., "^val^": ...}, SessionId: ...}}`. The selected

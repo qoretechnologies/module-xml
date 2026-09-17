@@ -1,4 +1,4 @@
-# Explicit SOAP body-part selection
+# SOAP body-part selection
 
 Copyright (C) 2026 Qore Technologies, s.r.o.
 
@@ -11,7 +11,10 @@ raise `WSDL-ERROR`, and binding construction rejects names absent from the
 selected abstract input/output message. Names refer to message parts, not their
 referenced XML element names.
 
-An explicit list takes precedence over default body/header partitioning.
+The omitted attribute selects **all** message parts, including those also bound
+to a header, as required by WSDL 1.1 section 3.5. Only an explicit list partitions
+parts between the Body and Header. `getBodyPartNames()` returns `NOTHING` for
+this all-parts default.
 `getBodyPartNames()` returns an empty list for an empty explicit selection.
 Document and RPC serialization consume only selected parts. Document decoding,
 retained XML decoding and RPC decoding use that selection and reject unselected
@@ -48,3 +51,32 @@ uses XML Schema list whitespace semantics. The pinned WSDL4J oracle distinguishe
 omitted, empty and nonempty space-separated lists. Its SPACE-only tokenizer does
 not normalize character-reference TAB/CR/LF, so those cases are verified separately
 with the pinned XML Schema validator and normative list rules.
+
+Literal, non-multipart serialization checks that every selected body part was
+emitted. Missing required parts reject with `SOAP-SERIALIZATION-ERROR`; partial
+header conversion still uses its explicit part projection.
+
+When native decoding finds the same message part in both Body and Header, it
+returns exactly `{"^body^": <part map>, "^headers^": <message/part map>}`.
+This decision precedes flattening: even distinct flat keys can otherwise cause
+message-container lookup to substitute the header value when reserializing the
+body. Scalars, nil/empty records and selected wrappers retain their part keys.
+
+SOAP serialization accepts both maps together, validates their hash types and
+rejects extra top-level keys. Nonempty headers in both the map and the separate
+header argument reject instead of silently choosing one source. Both directions,
+SOAP versions, document/RPC styles and client/handler calls use the same path.
+Messages without overlapping parts retain the documented legacy merge shape.
+
+`SoapRequestDataProvider::getRequestTypeWithData()` describes explicit maps when
+present. Its body uses the existing schema-checked message type. The header map
+uses the same transport-level contract as the `soap_header` request option;
+selected header parts are schema-checked during SOAP serialization, before I/O.
+The static request/response types still describe the abstract message part map.
+For example, send `{"^body^": {"order": order, "token": "body-token"},
+"^headers^": {"OrderMessage": {"token": "header-token"}}}` or supply the body
+part map with the separate `soap_header` request option.
+
+Source and saved services apply the same standard default. WSDLs relying on
+implicit removal of header-bound parts must add explicit body `parts` lists.
+This follows [WSDL 1.1 section 3.5](https://www.w3.org/TR/2001/NOTE-wsdl-20010315#_soap:body).

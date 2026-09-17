@@ -72,6 +72,25 @@ public class SoapRequestDataProvider inherits SoapDataProviderBase {
         }
     }
 
+    #! Describes an explicit SOAP body/header value when supplied by the caller
+    /** The body retains the WSDL message's schema validation. Header values use the same
+        contract as the soap_header request option and are validated against the selected
+        binding during SOAP serialization.
+    */
+    private *AbstractDataProviderType getRequestTypeWithDataImpl(auto req) {
+        if (op.input && req.typeCode() == NT_HASH && (req.hasKey("^body^") || req.hasKey("^headers^"))) {
+            HashDataType envelope("SoapMessage");
+            envelope.addQoreFields({
+                "^body^": {"display_name": "SOAP Body", "type": op.input.getDataProviderType(),
+                    "desc": "Message parts to send in the SOAP Body."},
+                "^headers^": {"display_name": "SOAP Headers", "type": new HashDataType(),
+                    "desc": "SOAP header values keyed by message and part name; validated against the selected binding."},
+            });
+            return envelope;
+        }
+        return AbstractDataProvider::getRequestTypeWithDataImpl(req);
+    }
+
     #! Returns the description of a response message, if this object represents a response message
     /** If the object is a request message, then any successful response message should be returned here as well
 
