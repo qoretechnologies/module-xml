@@ -93,6 +93,13 @@ WSOperation submit = service.getBindingOperation("{urn:orders}OrdersSoap", "subm
 WSMessage request = service.getMessage("{urn:orders}SubmitRequest");
 ```
 
+SOAP RPC request wrappers use the operation's XML name. Response wrappers use
+that name with the `Response` suffix. Abstract WSDL input/output labels identify
+operation messages and do not override either wire name. Serialization and
+deserialization use the same rule for detached operations and reconstructed
+services. This keeps explicitly named abstract messages from changing dispatch
+or the RPC body shape.
+
 SOAP RPC wrapper namespaces come from the selected input or output `soap:body`
 `namespace` attribute, with the existing operation target namespace fallback when
 absent. Deserialization checks the expanded wrapper identity before converting

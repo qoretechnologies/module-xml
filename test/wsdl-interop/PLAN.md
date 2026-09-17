@@ -582,3 +582,9 @@ getBindingOperation(), including imported and saved services. See
 [binding selection evidence](binding-selection-evidence.md). Overloaded operation
 identities, abstract input/output defaults and the rest of the binding matrix
 remain open, followed by P7–P9.
+
+P6-12 separates SOAP RPC wrapper names from abstract input/output labels in both
+wire directions. See [RPC naming evidence](rpc-operation-names-evidence.md).
+This prerequisite preserves operation-based wire names before overload/default
+name work; overloaded identities, abstract defaults and the remaining P6–P9
+matrix remain open.

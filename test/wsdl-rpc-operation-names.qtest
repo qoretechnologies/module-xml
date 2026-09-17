@@ -1,0 +1,115 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires ../qlib/WSDL.qm
+%requires ../qlib/SoapClient.qm
+%requires ../qlib/SoapHandler.qm
+%requires HttpServer
+%exec-class RpcOperationNamesTest
+
+class RpcOperationNamesTest inherits QUnit::Test {
+    constructor() : Test("RPC operation wrapper names", "1.0") {
+        addTestCase("Abstract input and output labels do not name RPC wrappers", \labels());
+        addTestCase("One-way RPC requests use the operation name", \oneWay());
+        addTestCase("Named abstract messages exchange RPC calls through SoapClient and SoapHandler", \http());
+        set_return_value(main());
+    }
+
+    private static string source(bool soap12, bool one_way = False, bool named = True) {
+        return '<w:definitions xmlns:w="http://schemas.xmlsoap.org/wsdl/" xmlns:t="urn:rpc-names"'
+            + ' xmlns:s="' + (soap12 ? SOAP_12_NS : SOAP_11_NS) + '" xmlns:xs="' + XSD_NS
+            + '" targetNamespace="urn:rpc-names"><w:message name="RequestMessage">'
+            + '<w:part name="value" type="xs:int"/></w:message><w:message name="ResponseMessage">'
+            + '<w:part name="result" type="xs:int"/></w:message><w:portType name="P"><w:operation name="calculate">'
+            + '<w:input' + (named ? ' name="AbstractInput"' : '') + ' message="t:RequestMessage"/>'
+            + (one_way ? '' : '<w:output' + (named ? ' name="AbstractOutput"' : '') + ' message="t:ResponseMessage"/>')
+            + '</w:operation></w:portType><w:binding name="B" type="t:P">'
+            + '<s:binding style="rpc" transport="http://schemas.xmlsoap.org/soap/http"/>'
+            + '<w:operation name="calculate"><s:operation soapAction="urn:calculate"/>'
+            + '<w:input><s:body use="literal" namespace="urn:request"/></w:input>'
+            + (one_way ? '' : '<w:output><s:body use="literal" namespace="urn:response"/></w:output>')
+            + '</w:operation></w:binding><w:service name="S"><w:port name="Endpoint" binding="t:B">'
+            + '<s:address location="http://example.invalid/soap"/></w:port></w:service></w:definitions>';
+    }
+
+    private static string envelope(bool soap12, bool request, string local, int value) {
+        return '<s:Envelope xmlns:s="' + (soap12 ? SOAP_12_ENV : SOAP_11_ENV) + '"><s:Body>'
+            + '<q:' + local + ' xmlns:q="' + (request ? "urn:request" : "urn:response") + '">'
+            + (request ? '<value>' + value + '</value>' : '<result>' + value + '</result>')
+            + '</q:' + local + '></s:Body></s:Envelope>';
+    }
+
+    private checkWrapper(string xml, bool soap12, bool request) {
+        string uri = soap12 ? SOAP_12_ENV : SOAP_11_ENV;
+        hash<auto> expanded = XsdBase::expandElementNamespaces(parse_xml(xml, XPF_PRESERVE_ORDER));
+        hash<auto> body = expanded{'{' + uri + '}Envelope'}{'{' + uri + '}Body'};
+        assertTrue(body.hasKey(request ? "{urn:request}calculate" : "{urn:response}calculateResponse"));
+        assertFalse(xml.contains("AbstractInput"));
+        assertFalse(xml.contains("AbstractOutput"));
+    }
+
+    private labels() {
+        foreach bool soap12 in (False, True) {
+            foreach bool named in (False, True) {
+                WebService ws(source(soap12, False, named));
+                WSOperation original = ws.getBindingOperation("B", "calculate");
+                foreach WSOperation op in (original, Serializable::deserialize(original.serialize()),
+                        Serializable::deserialize(ws.serialize()).getBindingOperation("B", "calculate")) {
+                    assertEq(named ? "AbstractInput" : NOTHING, op.input_name);
+                    assertEq(named ? "AbstractOutput" : NOTHING, op.output_name);
+                    hash<auto> request = op.serializeRequest({"value": 17});
+                    hash<auto> response = op.serializeResponse({"result": 29});
+                    checkWrapper(request.body, soap12, True);
+                    checkWrapper(response.body, soap12, False);
+                    assertEq(17, op.deserializeRequest(parse_xml(envelope(soap12, True, "calculate", 17))));
+                    assertEq(29, op.deserializeResponse(parse_xml(envelope(soap12, False, "calculateResponse", 29))));
+                    foreach string wrong in ("AbstractInput", "AbstractOutput", "RequestMessage", "ResponseMessage") {
+                        assertThrows("SOAP-DESERIALIZATION-ERROR", \op.deserializeRequest(),
+                            (parse_xml(envelope(soap12, True, wrong, 17)),));
+                        assertThrows("SOAP-DESERIALIZATION-ERROR", \op.deserializeResponse(),
+                            (parse_xml(envelope(soap12, False, wrong, 29)),));
+                    }
+                }
+            }
+        }
+    }
+
+    private oneWay() {
+        foreach bool soap12 in (False, True) {
+            WebService ws(source(soap12, True));
+            foreach WSOperation op in (ws.getOperation("calculate"),
+                    Serializable::deserialize(ws.serialize()).getOperation("calculate")) {
+                assertNothing(op.output);
+                checkWrapper(op.serializeRequest({"value": 11}).body, soap12, True);
+                assertEq(11, op.deserializeRequest(parse_xml(envelope(soap12, True, "calculate", 11))));
+            }
+        }
+    }
+
+    private http() {
+        foreach bool soap12 in (False, True) {
+            WebService ws = Serializable::deserialize(new WebService(source(soap12)).serialize());
+            HttpServer server();
+            on_exit server.stop();
+            SoapHandler handler(new PermissiveAuthenticator());
+            server.setDefaultHandler("rpc", handler);
+            Queue received();
+            code<auto(hash<auto>, auto)> callback = auto sub(hash<auto> cx, auto value) {
+                received.push(value);
+                return {"result": value + 1};
+            };
+            handler.addMethod(ws, ws.getBindingOperation("B", "calculate"), callback, NOTHING,
+                NOTHING, NOTHING, "S", NOTHING, NOTHING, "B");
+            server.addListener(0);
+            SoapClient client({"wsdl": ws, "service": "S", "port": "Endpoint",
+                "url": sprintf("http://127.0.0.1:%d/rpc", server.getListenerInfo(0).port), "timeout": 30000});
+            hash<auto> info;
+            assertEq(42, client.callOperation("calculate", {"value": 41}, NOTHING, \info));
+            assertEq(41, received.get(30000));
+            checkWrapper(info."request-body", soap12, True);
+            checkWrapper(info."response-body", soap12, False);
+        }
+    }
+}

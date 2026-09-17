@@ -8913,3 +8913,36 @@ the corpus baseline. No Qore mutation, installation or push is made.
 Next is overloaded operation identity and abstract input/output naming, followed
 by the rest of the P6 binding matrix and P7–P9. The independently reduced
 same-name overwrite remains recorded in `/tmp/xml-p6-operation-selection/`.
+
+## P6-12: RPC wire names before abstract-name defaults
+
+RPC serialization and deserialization previously selected the opposite authored
+input/output label as the body wrapper, falling back to the operation name only
+when labels were absent. Both paths now use the operation name for requests and
+its Response suffix for responses. The abstract fields retain their authored
+values. This implements the WSDL/WS-I naming rule without coupling later abstract
+name defaults to the wire format.
+
+The new regression fails before the change for explicit labels and actual HTTP
+wrapper identity, then passes 3 cases / 252 assertions. It checks expanded names
+against independently authored envelopes, rejects label/message names as wrappers,
+and covers both SOAP versions, one-way requests, absent labels, saved/detached
+operations, rebuilt services and real SoapClient/SoapHandler calls. The 39-suite
+Qore gate passes 480 cases / 8,226 reported assertions (including seven
+intentional caught comparator assertions). All 12 corpus commands pass their
+expected exit status and all six reports retain P6-10 semantic results. The first
+legacy P5 worker timed out under concurrent Qore build/test load; its missing
+report prevented acceptance. The unchanged rerun completed in 53.875 seconds
+with the expected projection-loss report. No deadline or result was relaxed. Full regression,
+corpus, docs and astparser evidence is in [P6-12-validation.json](P6-12-validation.json).
+See [evidence](rpc-operation-names-evidence.md) and
+[audit](audits/P6-12-rpc-operation-names.md). All 62 audit items have 18 Pass /
+44 N/A / zero Fail. No native code changes require Valgrind.
+
+The next overload reductions in `/tmp/xml-p6-operation-selection/` now include an
+independent pinned WSDL4J 1.6.3 oracle, compiled with warnings treated as errors.
+It preserves both explicitly named overloads, selects ById through the binding's
+input name, rejects an unnamed ambiguous binding, and exposes an undefined
+placeholder for an unknown label (explicitly rejected by the probe). This is
+next-work evidence, not an implemented overload feature. P6–P9 remain incomplete.
+No Qore mutation, installation or push is made.

@@ -2229,3 +2229,10 @@ Binding-specific lookup rejects operations that exist only in the abstract port
 type or another binding. Qualified imported names, saved services and SoapClient
 selection are covered by [evidence](binding-selection-evidence.md),
 [validation](P6-11-validation.json) and [audit](audits/P6-11-binding-selection.md).
+
+## RPC operation wrapper names (P6-12)
+
+Explicit abstract input/output labels no longer replace the operation's RPC
+request name or its Response-suffixed response name. Saved/detached operations
+and actual SOAP 1.1/1.2 exchanges are covered by [evidence](rpc-operation-names-evidence.md),
+[validation](P6-12-validation.json) and [audit](audits/P6-12-rpc-operation-names.md).
