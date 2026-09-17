@@ -2206,3 +2206,10 @@ removed. Bare and legacy relative file paths retain literal filename semantics.
 The new suite passes 7 cases / 291 assertions; see [evidence](file-uri-evidence.md),
 [validation](P6-08-validation.json) and [audit](audits/P6-08-file-uris.md).
 Redirect-effective URI handling and the remaining P6–P9 requirements stay open.
+
+## Shared Qore URI resolution (P6-09)
+
+WSDL document references, retained XML Base, native HTTP schema locations and
+WebContentUtil use Qore 3.0 URI support. File URI conversion uses FileLocationHandler
+3.0. See [evidence](qore-uri-evidence.md), [validation](P6-09-validation.json) and
+[audit](audits/P6-09-qore-uri.md). WSDL redirect graph integration remains separate.

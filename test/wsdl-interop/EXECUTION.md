@@ -8827,3 +8827,28 @@ investigation is in `/tmp/xml-redirect-effective-base/`: synchronous get() expos
 redirect metadata but keeps the configured URL, while the current core poll API
 returns a raw 302. No redirect implementation or new core-defect claim is made
 by this increment; no user question is pending.
+
+## P6-09: shared Qore URI support
+
+Consumed installed Qore `ab4ff7b2737adb619bd19ac7775c98ea420c51b0`, including
+`53b8b3fff`. WSDL document and XML Base resolution, local file URI conversion,
+WebContentUtil links/dot removal and native schema effective URLs now use Qore's
+shared support. The remaining WSDL URI helper only accesses components.
+No shared Qore source is changed. See [evidence](qore-uri-evidence.md).
+
+The final 36-suite gate passes 464 cases / 7,555 reported assertions (seven
+existing intentionally caught SOAP comparator assertions). Additional XML context,
+WebContentUtil and native callback tests pass 99 cases / 550 assertions.
+Native resource and URI suites pass 14 Python tests. Two targeted native tests
+pass Valgrind with zero errors and zero definite, indirect or possible leaks.
+Full docs and final WSDL docs build without warnings; full WSDL astparser reports
+zero errors. All six corpus reports differ from P6-08 only in version metadata;
+33 coverage/survey tests, WSDL4J and the grammar/reference/contract checks pass.
+See [validation](P6-09-validation.json) and [audit](audits/P6-09-qore-uri.md).
+
+Root-caused ancillary fixes: the TLS fixture supplies its own OpenSSL config,
+and the full documentation build's broken symbol references are repaired.
+Transient corpus timeouts were investigated and the unchanged test rerun passed;
+no test deadline or assertion was relaxed. No push, installation or CI trigger.
+WSDL resource-result/redirect graph integration and the remaining P6–P9 work
+remain open.

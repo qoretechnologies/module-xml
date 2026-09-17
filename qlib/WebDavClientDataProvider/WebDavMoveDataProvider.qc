@@ -6,6 +6,7 @@
 
 public namespace WebDavClientDataProvider {
 
+#! Moves files and directories through a WebDAV connection
 public class WebDavMoveDataProvider inherits WebDavClientDataProviderBase {
     public {
         const ProviderInfo = <DataProviderInfo>{

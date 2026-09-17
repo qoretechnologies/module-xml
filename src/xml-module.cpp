@@ -35,6 +35,7 @@
 #include <libxml/parserInternals.h>
 #include <openssl/ssl.h>
 #include <qore/QoreHttpClientObject.h>
+#include <qore/QoreURL.h>
 #ifdef LIBXML_FTP_ENABLED
 #include <qore/QoreFtpClient.h>
 #endif
@@ -120,13 +121,14 @@ public:
             if (http) {
                 // Direct schema locations can be raw LEIRIs. Escape their UTF-8
                 // bytes once while retaining existing URI delimiters and percent escapes.
-                xmlChar* escaped = xmlURIEscapeStr(BAD_CAST location, BAD_CAST ":/?#[]@!$&()*+,;='%");
-                if (!escaped) {
-                    xsink->raiseException("XSD-SYNTAX-ERROR", "could not encode an HTTP schema URI");
+                QoreString base("", QCS_UTF8);
+                QoreString reference(location, QCS_UTF8);
+                ReferenceHolder<QoreStringNode> target(qore_resolve_url(base, reference,
+                    QRU_RELATIVE_BASE | QRU_ENCODE | QRU_NO_FRAGMENT, xsink), xsink);
+                if (*xsink) {
                     return true;
                 }
-                ON_BLOCK_EXIT(xmlFree, escaped);
-                resolved_location = reinterpret_cast<const char*>(escaped);
+                resolved_location = target->c_str();
                 QoreHttpClientObject client;
                 client.setSslVerifyMode(SSL_VERIFY_PEER);
                 // libxml2 supplies URI references with existing percent escapes.
@@ -140,23 +142,11 @@ public:
                 if (*xsink) {
                     return true;
                 }
-                // Redirects establish the document base URI used by relative imports.
-                for (int index = 1; ; ++index) {
-                    QoreString key;
-                    key.sprintf("redirect-%d", index);
-                    QoreValue value = info->getKeyValue(key.c_str());
-                    if (value.isNothing()) {
-                        break;
-                    }
-                    const QoreStringNode* redirect = value.get<const QoreStringNode>();
-                    xmlChar* resolved = xmlBuildURI(BAD_CAST redirect->c_str(), BAD_CAST resolved_location.c_str());
-                    if (!resolved) {
-                        xsink->raiseException("XSD-SYNTAX-ERROR", "could not resolve a schema redirect URI");
-                        return true;
-                    }
-                    ON_BLOCK_EXIT(xmlFree, resolved);
-                    resolved_location = reinterpret_cast<const char*>(resolved);
-                }
+                // The transport reports the URI that actually produced these bytes.
+                // Use it directly as the base for relative schema dependencies.
+                const QoreStringNode* effective = info->getKeyValue("effective-url").get<const QoreStringNode>();
+                assert(effective);
+                resolved_location = effective->c_str();
             }
 #ifdef LIBXML_FTP_ENABLED
             else {

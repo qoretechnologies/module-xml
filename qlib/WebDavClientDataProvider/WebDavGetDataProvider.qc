@@ -6,6 +6,7 @@
 
 public namespace WebDavClientDataProvider {
 
+#! Downloads file contents through a WebDAV connection
 public class WebDavGetDataProvider inherits WebDavClientDataProviderBase {
     public {
         const ProviderInfo = <DataProviderInfo>{

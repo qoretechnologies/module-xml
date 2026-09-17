@@ -425,23 +425,11 @@ public class HtmlExtractor {
     #! Resolve a possibly-relative URL against a base URL
     /** @param href the href value (may be absolute, root-relative, or relative)
         @param base_url the base URL of the page containing the link
-        @return absolute URL
+        @return absolute URL resolved by Qore::resolve_url()
+        @throw RESOLVE-URL-ERROR the base URL has no scheme
     */
     static string resolveUrl(string href, string base_url) {
-        if (href =~ /^https?:\/\//i) {
-            return href;
-        }
-        if (href =~ /^\//) {
-            # Root-relative — resolve against scheme + host
-            *string base = (base_url =~ x/^(https?:\/\/[^\/]+)/)[0];
-            if (base) {
-                return base + href;
-            }
-            return href;
-        }
-        # Relative — resolve against page base directory
-        string base_dir = base_url =~ /\/$/ ? base_url : dirname(base_url) + "/";
-        return base_dir + href;
+        return resolve_url(base_url, href);
     }
 }
 

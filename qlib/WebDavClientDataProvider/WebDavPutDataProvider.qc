@@ -6,6 +6,7 @@
 
 public namespace WebDavClientDataProvider {
 
+#! Uploads file contents through a WebDAV connection
 public class WebDavPutDataProvider inherits WebDavClientDataProviderBase {
     public {
         const ProviderInfo = <DataProviderInfo>{

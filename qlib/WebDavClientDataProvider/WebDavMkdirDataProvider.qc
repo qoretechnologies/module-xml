@@ -6,6 +6,7 @@
 
 public namespace WebDavClientDataProvider {
 
+#! Creates directories through a WebDAV connection
 public class WebDavMkdirDataProvider inherits WebDavClientDataProviderBase {
     public {
         const ProviderInfo = <DataProviderInfo>{

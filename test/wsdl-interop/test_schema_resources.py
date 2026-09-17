@@ -88,7 +88,10 @@ class SchemaResourceTest(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="xml-schema-tls-") as directory:
             key = Path(directory) / "key.pem"
             certificate = Path(directory) / "certificate.pem"
-            subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+            # The fixture owns its configuration; custom OpenSSL installs may have no default config.
+            config = Path(directory) / "openssl.cnf"
+            config.write_text("[req]\ndistinguished_name = dn\n[dn]\n")
+            subprocess.run(["openssl", "req", "-config", str(config), "-x509", "-newkey", "rsa:2048", "-nodes",
                             "-keyout", str(key), "-out", str(certificate), "-days", "1",
                             "-subj", "/CN=localhost", "-addext", "subjectAltName=IP:127.0.0.1,DNS:localhost"],
                            check=True, capture_output=True, timeout=30)
@@ -129,6 +132,34 @@ class SchemaResourceTest(unittest.TestCase):
                     self.assertEqual(([path] if path == "/redirect" else [])
                                      + ["/tree/main.xsd", "/tree/types.xsd"], requests[start:])
             self.assertEqual("PARSE-XML-EXCEPTION", load(base + "/redirect", xml="<value>wrong</value>")["error"])
+
+    def test_rfc_redirect_chains_use_effective_schema_uri(self):
+        # Every expected request target is literal; the server never resolves Location itself.
+        routes = {}
+        expected_requests = []
+        for status in (301, 302, 303, 307, 308):
+            prefix = f"/s{status}"
+            targets = [prefix + "/old/root.xsd", prefix + "/new/root.xsd?rev=2",
+                       prefix + "/new/root.xsd?", prefix + "/new/types.xsd"]
+            routes.update({
+                targets[0]: (status, {"Location": "../new/root.xsd?rev=2#part"}, b""),
+                targets[1]: (302, {"Location": "?"}, b""),
+                targets[2]: (200, {}, INCLUDE),
+                targets[3]: (200, {}, INTEGER),
+            })
+            expected_requests += targets * 2
+        with server(routes) as (base, requests):
+            fixtures = [{"schema": base + f"/s{status}/old/root.xsd", "xml": f"<value>{value}</value>"}
+                        for status in (301, 302, 303, 307, 308) for value in ("17", "wrong")]
+            results = run_fixture(fixtures)
+            self.assertEqual(10, len(results))
+            for i, result in enumerate(results):
+                with self.subTest(status=fixtures[i]["schema"], valid=i % 2 == 0):
+                    if i % 2:
+                        self.assertEqual("PARSE-XML-EXCEPTION", result["error"])
+                    else:
+                        self.assertEqual({"value": {"value": "17"}}, result)
+            self.assertEqual(expected_requests, requests)
 
     def test_text_includes_and_document_bytes(self):
         latin = ('<?xml version="1.0" encoding="ISO-8859-1"?>'

@@ -77,8 +77,8 @@ string n = UrlNormalizer::normalize("https://example.com/docs/../api/?b=2&a=1#to
     static string normalize(string url, *hash<auto> opts) {
         bool preserve_trailing_slash = opts.preserve_trailing_slash ?? False;
 
-        # Step 1: Strip fragment
-        url = regex_subst(url, "#.*$", "");
+        # Steps 1 and 2: Qore resolves dot segments and removes the fragment.
+        url = resolve_url("", url, RESOLVE_URL_RELATIVE_BASE | RESOLVE_URL_NO_FRAGMENT);
 
         # Parse components
         hash<auto> parts = parse_url(url);
@@ -103,34 +103,12 @@ string n = UrlNormalizer::normalize("https://example.com/docs/../api/?b=2&a=1#to
                 path_only = path_only.substr(0, qpos);
             }
 
-            # Detect trailing slash before resolution
-            bool had_trailing = path_only.size() > 1 && path_only.endsWith("/");
-
-            # Resolve segments
-            list<string> segments = path_only.split("/");
-            list<string> resolved = ();
-            foreach string seg in (segments) {
-                if (seg == "..") {
-                    if (resolved.size() > 1) {
-                        pop resolved;
-                    }
-                } else if (seg != ".") {
-                    resolved += seg;
-                }
-            }
-            path_only = resolved.join("/");
+            # The crawler owns the trailing-slash policy after Qore resolves the path.
             if (!path_only.val()) {
                 path_only = "/";
             }
-
-            # Step 5: trailing slash policy
             if (path_only != "/" && path_only.endsWith("/") && !preserve_trailing_slash) {
-                # Strip trailing slash on non-root paths (per design)
                 path_only = path_only.substr(0, path_only.size() - 1);
-            } else if (preserve_trailing_slash && had_trailing
-                    && path_only != "/" && !path_only.endsWith("/")) {
-                # Re-add the trailing slash if caller asked to preserve it
-                path_only += "/";
             }
 
             # Step 6: Decode unreserved percent-encodings in the path

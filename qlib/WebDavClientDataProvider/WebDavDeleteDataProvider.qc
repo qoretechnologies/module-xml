@@ -6,6 +6,7 @@
 
 public namespace WebDavClientDataProvider {
 
+#! Deletes files and directories through a WebDAV connection
 public class WebDavDeleteDataProvider inherits WebDavClientDataProviderBase {
     public {
         const ProviderInfo = <DataProviderInfo>{

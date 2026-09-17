@@ -176,7 +176,7 @@ public class CargoXmlDataProvider inherits AbstractDataProvider {
     #! returns reference data for the given kind
     /** @param type the kind of reference data to return
         @param action_opts options for the lookup (currently unused by this provider)
-        @return a list of @ref AllowedValueInfo entries, one per discovered message,
+        @return a list of @ref Util::AllowedValueInfo entries, one per discovered message,
             with the qualified name as the value and a human-readable
             \c "<local-name> @ <namespace>" label as the display name
     */

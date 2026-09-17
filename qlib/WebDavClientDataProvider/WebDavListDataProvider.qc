@@ -6,6 +6,7 @@
 
 public namespace WebDavClientDataProvider {
 
+#! Lists directory contents through a WebDAV connection
 public class WebDavListDataProvider inherits WebDavClientDataProviderBase {
     public {
         const ProviderInfo = <DataProviderInfo>{

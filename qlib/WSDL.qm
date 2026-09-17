@@ -32,7 +32,7 @@
 %requires Mime >= 1.4.2
 
 %requires(reexport) DataProvider
-%requires FileLocationHandler
+%requires FileLocationHandler >= 3.0
 
 %modern
 
@@ -95,6 +95,8 @@ module WSDL {
       nested dependencies and saved sources retain their own bases and share fragment-free retrieval keys
     - URI resolution separates paths, queries and fragments; HTTP schema dependencies support root-relative
       and network-path references, and asynchronous WSDL retrieval retains the document's HTTP directory
+    - Document URI and XML Base resolution use Qore 3.0 resolve_url(); malformed document URI percent escapes
+      raise WSDL-LOCATION-ERROR, while XML Base retains raw Unicode, spaces and relative parents
     - WSDLLib::resolveDocumentLocation() resolves full-document URI references according to RFC 3986;
       HTTP document retrieval preserves queries and excludes fragments from request targets
     - WSDL component references validate their expanded QNames and required targets before
@@ -835,40 +837,9 @@ hashdecl WsdlUriParts {
     *string fragment;
 }
 
-# RFC 3986 component resolution; no retrieval or scheme-specific interpretation.
-class WsdlUriResolver {
-    static string resolve(string reference, string base) {
-        hash<WsdlUriParts> r = parse(reference);
-        hash<WsdlUriParts> b = parse(base);
-        hash<WsdlUriParts> t = r;
-        if (!exists b.scheme) {
-            throw "WSDL-LOCATION-ERROR", "an absolute base URI is required";
-        }
-        if (exists r.scheme) {
-            t.path = dots(r.path);
-        } else {
-            t.scheme = b.scheme;
-            if (exists r.authority) {
-                t.path = dots(r.path);
-            } else {
-                t.authority = b.authority;
-                if (!r.path) {
-                    t.path = b.path;
-                    if (!exists r.query) {
-                        t.query = b.query;
-                    }
-                } else if (r.path.startsWith("/")) {
-                    t.path = dots(r.path);
-                } else {
-                    int end = b.path.rfind("/");
-                    string prefix = exists b.authority && !b.path ? "/" : substr(b.path, 0, end + 1);
-                    t.path = dots(prefix + r.path);
-                }
-            }
-        }
-        return compose(t);
-    }
-
+# Component access for file interpretation, directory adapters and HTTP request targets.
+# Reference resolution itself is provided by Qore::resolve_url().
+class WsdlUriComponents {
     static string httpPath(string location) {
         hash<WsdlUriParts> uri = parse(location);
         return (uri.path ? uri.path : "/") + (exists uri.query ? "?" + uri.query : "");
@@ -894,42 +865,6 @@ class WsdlUriResolver {
             "path": path ?? "", "query": exists qp ? query ?? "" : NOTHING,
             "fragment": exists fp ? fragment ?? "" : NOTHING};
     }
-    # Advance through the input once; avoid repeatedly copying the unconsumed suffix.
-    private static string dots(string path) {
-        list<string> output();
-        int offset = 0;
-        while (offset < path.size()) {
-            string head = substr(path, offset, 4);
-            int left = path.size() - offset;
-            if (head.startsWith("../")) {
-                offset += 3;
-            } else if (head.startsWith("./")) {
-                offset += 2;
-            } else if (head.startsWith("/./")) {
-                offset += 2;
-            } else if (left == 2 && head == "/.") {
-                push output, "/";
-                break;
-            } else if (head.startsWith("/../")) {
-                pop output;
-                offset += 3;
-            } else if (left == 3 && head == "/..") {
-                pop output;
-                push output, "/";
-                break;
-            } else if ((left == 1 && head == ".") || (left == 2 && head == "..")) {
-                break;
-            } else {
-                int end = index(path, "/", offset + 1);
-                if (end < 0) {
-                    end = path.size();
-                }
-                push output, substr(path, offset, end - offset);
-                offset = end;
-            }
-        }
-        return join("", output);
-    }
 }
 
 # Local file URI interpretation is separate from legacy literal file paths.  In the
@@ -944,18 +879,18 @@ class WsdlFileLocation {
         bool legacy = source =~ /^file:\/\/[^\/]/i
             && source !~ /^file:\/\/localhost(?:[\/?#:]|$)/i;
         if (source =~ /^file:/i && !legacy) {
-            hash<WsdlUriParts> uri = WsdlUriResolver::parse(source);
-            if (!uri.path.startsWith("/") || (uri.authority && tolower(uri.authority) != "localhost")) {
-                throw "WSDL-LOCATION-ERROR", "a local absolute file URI is required";
+            # Keep WSDL's strict document-location character policy before file interpretation.
+            if (source =~ /[\x00-\x20\x7f]/) {
+                throw "WSDL-LOCATION-ERROR", "URI references must not contain unescaped spaces or control characters";
             }
-            if (exists uri.query) {
-                throw "WSDL-LOCATION-ERROR", "file URIs cannot contain a query";
+            try {
+                path = AbstractFileLocationHandler::getPathFromFileUri(source);
+            } catch (hash<ExceptionInfo> ex) {
+                if (ex.err == "LOCATION-ERROR") {
+                    throw "WSDL-LOCATION-ERROR", ex.desc;
+                }
+                rethrow;
             }
-            if (uri.path =~ /%(?![0-9A-Fa-f]{2})/ || uri.path =~ /%00/i) {
-                throw "WSDL-LOCATION-ERROR", "invalid percent escape in file URI";
-            }
-            # Split URI components before decoding, and never decode the result again.
-            path = decode_url(uri.path);
         } else {
             path = source =~ /^file:\/\//i ? substr(source, 7) : source;
             map path = replace(path, "\$" + $1, ENV.$1), (path =~ x/\$(\w+)/g);
@@ -974,7 +909,7 @@ class WsdlFileLocation {
     }
 
     static string fromPath(string path) {
-        return "file://" + join("/", map encode_url($1, True), normalize_dir(path).split("/"));
+        return AbstractFileLocationHandler::getFileUri(path);
     }
 }
 
@@ -1038,14 +973,14 @@ public class WSDLLib {
     */
     static string getLocationBase(string location) {
         if (WSDLLib::hasScheme(location)) {
-            hash<WsdlUriParts> uri = WsdlUriResolver::parse(location);
+            hash<WsdlUriParts> uri = WsdlUriComponents::parse(location);
             uri.path = substr(uri.path, 0, uri.path.rfind("/") + 1);
             # Preserve the existing directory-base API (no added trailing separator).
             if (uri.path.endsWith("/") && !uri.path.endsWith("//")) {
                 uri.path = substr(uri.path, 0, uri.path.size() - 1);
             }
             uri.query = uri.fragment = NOTHING;
-            return WsdlUriResolver::compose(uri);
+            return WsdlUriComponents::compose(uri);
         }
         return dirname(location);
     }
@@ -1069,12 +1004,12 @@ public class WSDLLib {
             return location;
         }
         if (WSDLLib::hasScheme(base)) {
-            hash<WsdlUriParts> uri = WsdlUriResolver::parse(base);
+            hash<WsdlUriParts> uri = WsdlUriComponents::parse(base);
             if (!uri.path.endsWith("/")) {
                 uri.path += "/";
             }
             uri.query = uri.fragment = NOTHING;
-            return resolveDocumentLocation(location, WsdlUriResolver::compose(uri));
+            return resolveDocumentLocation(location, WsdlUriComponents::compose(uri));
         }
         if (WSDLLib::hasScheme(location) || absolute_path(location)) {
             return location;
@@ -1087,7 +1022,7 @@ public class WSDLLib {
         @param document_location the absolute URI of the containing document, including its filename and query
         @return the URI resolved using RFC 3986 section 5.2
         @throw WSDL-LOCATION-ERROR a base without a scheme, an unescaped space/control character, or a colon
-        in the first segment of a relative path
+        in the first segment of a relative path, or malformed percent escapes
         @note This method preserves escaped octets and empty query/fragment delimiters. It does not validate
         scheme-specific addresses or retrieve resources. Bare filesystem paths use resolveLocation() instead.
         @par Example
@@ -1098,7 +1033,14 @@ public class WSDLLib {
         @since %WSDL 0.5.8
     */
     static string resolveDocumentLocation(string location, string document_location) {
-        return WsdlUriResolver::resolve(location, document_location);
+        try {
+            return resolve_url(document_location, location, RESOLVE_URL_STRICT);
+        } catch (hash<ExceptionInfo> ex) {
+            if (ex.err == "RESOLVE-URL-ERROR") {
+                throw "WSDL-LOCATION-ERROR", ex.desc;
+            }
+            rethrow;
+        }
     }
 
     #! returns a document URI for a file or URL source, or NOTHING for inline XML
@@ -1123,9 +1065,9 @@ public class WSDLLib {
         if (WsdlFileLocation::isFile(location)) {
             return WsdlFileLocation::uri(location);
         }
-        hash<WsdlUriParts> uri = WsdlUriResolver::parse(location);
+        hash<WsdlUriParts> uri = WsdlUriComponents::parse(location);
         uri.fragment = NOTHING;
-        return WsdlUriResolver::compose(uri);
+        return WsdlUriComponents::compose(uri);
     }
 
     #! retrieves a file from a URL with HTTP and returns the file's contents as a string
@@ -1245,7 +1187,7 @@ public class WSDLLib {
             case /^http(s)?$/:
                 # allow relative references in externally-referenced schemas to be resolved
                 new_def_path = WSDLLib::getLocationBase(url);
-                return WSDLLib::getHTTP(url, WsdlUriResolver::httpPath(url), http_client, http_headers, as_string);
+                return WSDLLib::getHTTP(url, WsdlUriComponents::httpPath(url), http_client, http_headers, as_string);
 
             default:
                 if (used_def_protocol) {
@@ -2189,9 +2131,10 @@ public final class XsdXmlValue inherits Serializable {
                     }
                 }
                 if (attributes.hasKey("xml:base")) {
-                    if (inherited_xml_attributes.hasKey("xml:base")) {
-                        xml_context."xml:base" = XsdXmlBaseHelper::resolve(inherited_xml_attributes."xml:base",
-                            attributes."xml:base");
+                    if (inherited_xml_attributes."xml:base") {
+                        # Resolve raw LEIRIs without encoding; relative XML bases retain leading parents.
+                        xml_context."xml:base" = resolve_url(inherited_xml_attributes."xml:base",
+                            attributes."xml:base", RESOLVE_URL_RELATIVE_BASE);
                     } else {
                         xml_context."xml:base" = attributes."xml:base";
                     }
@@ -2365,111 +2308,6 @@ public final class XsdXmlValue inherits Serializable {
     */
     XmlReader getReader() {
         return new XmlReader(xml);
-    }
-}
-
-hashdecl XsdXmlBaseInfo {
-    *string scheme;
-    *string authority;
-    string path;
-    *string query;
-    *string fragment;
-}
-
-# XML Base accepts LEIRIs, whereas libxml2's URI resolver rejects non-ASCII characters.
-# Resolve components without early percent encoding or decoding (XML Base 3.1; RFC 3986 5.2).
-class XsdXmlBaseHelper {
-    private static hash<XsdXmlBaseInfo> parts(string value) {
-        hash<XsdXmlBaseInfo> result = <XsdXmlBaseInfo>{"path": ""};
-        int pos = index(value, "#");
-        if (pos >= 0) {
-            result.fragment = substr(value, pos + 1);
-            value = substr(value, 0, pos);
-        }
-        pos = index(value, "?");
-        if (pos >= 0) {
-            result.query = substr(value, pos + 1);
-            value = substr(value, 0, pos);
-        }
-        *string scheme = (value =~ x/^([a-zA-Z][a-zA-Z0-9+.-]*):/)[0];
-        if (exists scheme) {
-            result.scheme = scheme;
-            value = substr(value, scheme.length() + 1);
-        }
-        if (value.startsWith("//")) {
-            pos = index(value, "/", 2);
-            result.authority = pos < 0 ? substr(value, 2) : substr(value, 2, pos - 2);
-            value = pos < 0 ? "" : substr(value, pos);
-        }
-        result.path = value;
-        return result;
-    }
-
-    private static string normalizePath(string path, bool keep_relative_parents) {
-        bool absolute = path.startsWith("/");
-        list<string> result();
-        list<string> segments = split("/", path);
-        if (path.endsWith("/")) {
-            segments += "";
-        }
-        for (int i = 0; i < segments.size(); ++i) {
-            string segment = segments[i];
-            if (segment == "." || segment == "..") {
-                if (segment == "..") {
-                    if (result && result[-1] != ".." && !(absolute && result.size() == 1)) {
-                        pop result;
-                        if (!result && !keep_relative_parents) {
-                            # RFC dot removal retains the slash after the removed segment even
-                            # for a scheme-bearing rootless path, such as g:a/../b -> g:/b.
-                            absolute = True;
-                            result += "";
-                        }
-                    } else if (!absolute && keep_relative_parents) {
-                        result += "..";
-                    }
-                }
-                if (i == segments.size() - 1 && (absolute || result)) {
-                    result += "";
-                }
-            } else {
-                result += segment;
-            }
-        }
-        return result.join("/");
-    }
-
-    static string resolve(string base, string value) {
-        if (!base) {
-            return value;
-        }
-        hash<XsdXmlBaseInfo> parent = parts(base);
-        hash<XsdXmlBaseInfo> target = parts(value);
-        if (exists target.scheme) {
-            target.path = normalizePath(target.path, False);
-        } else {
-            target.scheme = parent.scheme;
-            if (exists target.authority) {
-                target.path = normalizePath(target.path, False);
-            } else {
-                target.authority = parent.authority;
-                if (!target.path) {
-                    target.path = parent.path;
-                    if (!exists target.query) {
-                        target.query = parent.query;
-                    }
-                } else if (target.path.startsWith("/")) {
-                    target.path = normalizePath(target.path, False);
-                } else {
-                    string prefix = exists parent.authority && !parent.path ? "/"
-                        : substr(parent.path, 0, rindex(parent.path, "/") + 1);
-                    target.path = normalizePath(prefix + target.path, !exists target.scheme && !exists target.authority);
-                }
-            }
-        }
-        return (exists target.scheme ? target.scheme + ":" : "")
-            + (exists target.authority ? "//" + target.authority : "") + target.path
-            + (exists target.query ? "?" + target.query : "")
-            + (exists target.fragment ? "#" + target.fragment : "");
     }
 }
 
@@ -33026,7 +32864,7 @@ public class WsdlPollOperation inherits Qore::AbstractPollOperation {
         if (location =~ /^https?:/) {
             HTTPClient hc((http_opts ?? {}) + {"url": location});
             # HTTPClient does not support setLogger()
-            poller = hc.startPollSendRecv("GET", WsdlUriResolver::httpPath(location), NOTHING, http_headers);
+            poller = hc.startPollSendRecv("GET", WsdlUriComponents::httpPath(location), NOTHING, http_headers);
         } else {
             # The core file handler consumes a literal path, not a percent-encoded URI.
             string retrieval = WsdlFileLocation::isFile(location)

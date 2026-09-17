@@ -47,9 +47,12 @@ The existing hidden-symbol, offline-source and notice-installation rules apply.
 
 ## Qore resource loading
 
-HTTP loading escapes a direct raw location once and uses HTTPClient's pre-encoded
-URL option. This preserves existing URI escapes and correctly transmits UTF-8
-paths as ASCII percent escapes. Redirects retain the final URI as the schema base.
+HTTP loading maps a direct raw location with Qore `qore_resolve_url()` using
+`QRU_RELATIVE_BASE | QRU_ENCODE | QRU_NO_FRAGMENT` and uses HTTPClient's
+pre-encoded URL option. This preserves existing URI escapes and correctly transmits UTF-8
+paths as ASCII percent escapes. The response's `effective-url` metadata provides
+the schema base, including after redirects; module-xml does not reconstruct
+redirect chains.
 The existing filesystem/network policies, TLS verification, cancellation and
 callback ownership described in [schema attachment](xml-reader-schemas.md) apply.
 Optional schema warnings use detailed debug logging; caught diagnostics do not

@@ -2,8 +2,8 @@
 
 Copyright (C) 2026 Qore Technologies, s.r.o.
 
-`WSDLLib::resolveDocumentLocation(reference, document_location)` implements the
-component transformation and dot-segment removal in
+`WSDLLib::resolveDocumentLocation(reference, document_location)` delegates to
+Qore 3.0 `resolve_url(document_location, reference, RESOLVE_URL_STRICT)` for
 [RFC 3986 section 5.2](https://www.rfc-editor.org/rfc/rfc3986#section-5.2).
 The base includes the containing document's filename and query. For example,
 resolving `?revision=2` against
@@ -13,11 +13,13 @@ replaces the query.
 The private typed URI record distinguishes an absent authority, query or fragment
 from an explicitly empty component. Resolution preserves escaped octets, repeated
 path separators and query/fragment text; only literal path dot segments are
-removed. The algorithm consumes the path using an advancing offset and a segment
-stack. It does not repeatedly copy the remaining input. All state is local to the
-call. An absent base scheme, unescaped ASCII spaces/control characters, or a
-colon in a relative first path segment raises `WSDL-LOCATION-ERROR`. This resolver
-splits URI components; scheme-specific address validation belongs to retrieval.
+removed. Qore owns component merging and dot-segment removal; module-xml retains only
+component access needed by file interpretation, directory adapters and request
+target construction. All state is local to the call. An absent base scheme,
+unescaped ASCII spaces/control characters, malformed percent escapes, or a colon
+in a relative first path segment raises `WSDL-LOCATION-ERROR`. Only Qore's
+`RESOLVE-URL-ERROR` is translated; cancellation and other exceptions propagate.
+Scheme-specific address validation belongs to retrieval.
 
 The existing `getLocationBase()` and `resolveLocation()` interface uses a directory
 base. URL directory extraction discards the query and fragment before removing
@@ -61,14 +63,17 @@ available. A fallback directory does not affect that identity because it does
 not participate in resolution. Sources supplied without a URI use their directory
 instead; this also preserves cycle recognition for roots supplied as raw XML.
 
-Local file retrieval implements the absolute and `localhost` forms of
+Local file retrieval uses FileLocationHandler 3.0
+`AbstractFileLocationHandler::getPathFromFileUri()` and `getFileUri()` for the
+absolute and `localhost` forms of
 [RFC 8089 sections 2–4](https://www.rfc-editor.org/rfc/rfc8089#section-2):
 `file:/srv/contracts/orders.wsdl`, `file:///srv/contracts/orders.wsdl` and
 `file://localhost/srv/contracts/orders.wsdl` identify the same file. Scheme and
 `localhost` matching are case insensitive; filename case is retained. The URI
 is split before path octets are decoded once. A fragment is excluded from
 retrieval and resource identity. Queries, malformed percent escapes, NUL octets
-and missing absolute paths raise `WSDL-LOCATION-ERROR` before I/O. Encoded spaces,
+and missing absolute paths raise `WSDL-LOCATION-ERROR` before I/O. The WSDL adapter preserves its error category, strict character
+policy and legacy literal path handling. Encoded spaces,
 UTF-8 bytes, percent signs, hashes, question marks and plus signs name literal
 filesystem characters; plus is not interpreted as a form-encoded space.
 

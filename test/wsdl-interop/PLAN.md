@@ -564,3 +564,9 @@ loading, added schema files and saved graphs. Literal bare/legacy paths, callbac
 references and older cache keys remain compatible. See [file URI evidence](file-uri-evidence.md).
 Redirect-effective bases, overloaded operation/input-output names, explicit
 operation selection and the remaining binding matrix are still required in P6.
+
+P6-09 replaces module-level URI resolution with Qore 3.0 resolve_url(), shares
+file URI conversion with FileLocationHandler and uses native HTTP effective-URL
+metadata for schema bases. See [shared URI evidence](qore-uri-evidence.md).
+WSDL resource-result/redirect graph integration and the remaining P6 binding
+work remain open; this is not a phase-completion claim.

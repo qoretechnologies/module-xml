@@ -44,8 +44,9 @@ root identity and views.
 when an element comes from another document. Unknown attributes, non-string
 serialized values, invalid XML characters and invalid `xml:space` values reject.
 `getXmlContext()` applies the root's overrides, including empty language resets,
-and resolves relative bases using RFC 3986 component merging and dot-segment
-removal. XML Base permits unescaped extended IRIs, so Unicode characters and
+and resolves relative bases with Qore `resolve_url()` and
+`RESOLVE_URL_RELATIVE_BASE`. Without a nonempty inherited base, the authored
+reference is retained until a base is available. XML Base permits unescaped extended IRIs, so Unicode characters and
 spaces remain intact; existing percent escapes are neither decoded nor encoded
 again. Unresolved leading parent segments are retained for relative bases whose
 document URI is unknown. The authored `xml:base` value
