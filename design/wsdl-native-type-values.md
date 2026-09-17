@@ -81,7 +81,10 @@ derivation uses the bounded resolved-graph algorithm described in
 
 A selected single root is a whole native argument, including for RPC type
 parts. When SOAP headers are present, its body part-name key remains around the
-wrapper so header message fields cannot be merged into it. Header values retain
+wrapper so header message fields cannot be merged into it. A collision between
+that part name and a header message name nests the body part inside its message
+container alongside the distinct header parts; see [SOAP merge rules](wsdl-soap-header-values.md).
+Header values retain
 their usual message/part keys, and their selected element types are captured too.
 Applications keep the `WebService` alive while using its operation handles.
 

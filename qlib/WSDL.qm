@@ -77,9 +77,35 @@ module WSDL {
     - <a href="../../SoapClient/html/index.html">SoapClient user module</a>
     - <a href="../../SoapHandler/html/index.html">SoapHandler user module</a>
 
+    @section wsdl_soap_header_deserialization SOAP Header and Body Deserialization
+
+    SOAP decoding combines body values keyed by WSDL part name with header hashes keyed by their message name:
+    - without header values, a single body part returns its value directly
+    - with header values, a single body value is flattened only when it is NOTHING or a hash whose keys do not
+      collide with header message names; selected type and element wrappers are never flattened in this case
+    - if body part names collide with header message names, body parts are grouped under the body message name;
+      when headers already use that message name, the distinct body and header parts share that message container
+    - otherwise body parts keep their part-name keys alongside the header message hashes; this includes scalars
+
+    These rules apply to both requests and responses, including RPC bodies. A selected root wrapper keeps its
+    part-name key, nested inside the message container when that part name collides with a header message name.
+
+    @par Example
+    A provisioning response whose body part and message are both named GetResponse, with SessionId bound as a
+    header part of that message, returns the body fields together with a separate header message hash:
+    @code{.py}
+    hash<auto> value = op.deserializeResponse(message);
+    # value.MOAttributes: provisioning response body fields
+    # value.GetResponse.SessionId: session header
+    @endcode
+    A scalar body part instead remains under its part-name key so adding the headers cannot discard either value.
+
     @section wsdlrelnotes WSDL Module Release Notes
 
     @subsection wsdl_0_5_8 WSDL v0.5.8
+    - fixed body/header message-name collisions and scalar body values losing data during SOAP deserialization;
+      selected type and element wrappers retain their part keys inside shared message containers
+      (<a href="https://github.com/qoretechnologies/qore/issues/5453">issue 5453</a>)
     - SOAP RPC wrapper names use the operation name and its Response suffix, independently of abstract
       WSDL input/output labels; saved and detached operations preserve the same wire contract
     - WebService::getBindingOperation() rejects abstract operations omitted from the selected binding,
@@ -29200,12 +29226,14 @@ public class WSOperation inherits WSDL::XsdNamedData {
         @param bname SOAP binding name, leave empty to use the first assigned binding
         @param preserve_types True to retain nonidentical selected types as portable native wrappers;
         False preserves the established return shapes
-        @return the Qore data structure corresponding to the request data. When SOAP header is deserialized according binding/input WSDL then all data are passed under subhash vales prefixed by message name
-        In case of HTTP binding the content type is matched against WSDL binding when wildcards are supported and current content type value is applied to "^attributes^"."^content-type^".
+        @return the Qore data structure corresponding to the request data; see @ref wsdl_soap_header_deserialization
+        for the body/header merge rules. HTTP bindings match the content type against the WSDL binding, including
+        wildcards, and apply the current value to \c "^attributes^"."^content-type^".
         @throw SOAP-DESERIALIZATION-ERROR invalid message, type selection or content
         @note A retained type uses XsdQNameValue in \c ^type^ and its native value in \c ^val^;
         output resolves that QName in its own schema and repeats all compatibility and content checks.
-        When headers accompany a selected root type, the body retains its part-name key to keep the wrapper intact.
+        When headers accompany a selected root type, the body retains its part-name key to keep the wrapper intact;
+        if that key collides with a header message name, it is nested inside the body message container.
         @par Example
         Retain a shipment part subtype before storing and later forwarding a decoded message.
     */
@@ -29220,12 +29248,14 @@ public class WSOperation inherits WSDL::XsdNamedData {
         @param bname SOAP binding name, leave empty to use the first assigned binding
         @param preserve_types True to retain nonidentical selected types as portable native wrappers;
         False preserves the established return shapes
-        @return the Qore data structure corresponding to the response data. When SOAP header is deserialized according binding/output WSDL then all data are passed under subhash vales prefixed by message name
-        In case of HTTP binding the content type is matched against WSDL binding when wildcards are supported and current content type value is applied to "^attributes^"."^content-type^".
+        @return the Qore data structure corresponding to the response data; see @ref wsdl_soap_header_deserialization
+        for the body/header merge rules. HTTP bindings match the content type against the WSDL binding, including
+        wildcards, and apply the current value to \c "^attributes^"."^content-type^".
         @throw SOAP-DESERIALIZATION-ERROR invalid message, type selection or content
         @note A retained type uses XsdQNameValue in \c ^type^ and its native value in \c ^val^;
         output resolves that QName in its own schema and repeats all compatibility and content checks.
-        When headers accompany a selected root type, the body retains its part-name key to keep the wrapper intact.
+        When headers accompany a selected root type, the body retains its part-name key to keep the wrapper intact;
+        if that key collides with a header message name, it is nested inside the body message container.
         @par Example
         Retain a shipment part subtype before storing and later forwarding a decoded message.
     */
@@ -30813,20 +30843,20 @@ public class SoapBinding inherits WSDL::OperationalBinding {
         }
 
         if (exists hrv) {
-            # for backwards compatibility with a flat hash when there was only argument
-            # but we must be care of when the argument is a type (not element)
-            # A selected root wrapper stays under its part key when header messages are also present.
-            if (rv.size() == 1 && rv.typeCode() == NT_HASH && !exists hrv{rv.firstKey()}
-                    && !XsdNativeTypeValueHelper::isWrapper(rv.firstValue())
-                    && !XsdElementValueHelper::isWrapper(rv.firstValue())) {
-                rv = rv.firstValue();
-            } else {
-                foreach string k in (keys hrv) {
-                    if (exists rv{k}) {
-                        # name conflict
-                        rv{msg.name} = rv;
-                        break;
-                    }
+            # Flatten only a non-wrapper body value whose keys cannot replace header messages.
+            auto fv = rv.firstValue();
+            if (rv.size() == 1 && rv.typeCode() == NT_HASH
+                    && (!exists fv || (fv.typeCode() == NT_HASH && !(select keys fv, hrv.hasKey($1))
+                        && !XsdNativeTypeValueHelper::isWrapper(fv) && !XsdElementValueHelper::isWrapper(fv)))) {
+                rv = fv;
+            } else if (rv.typeCode() == NT_HASH && (select keys rv, hrv.hasKey($1))) {
+                if (hrv.hasKey(msg.name)) {
+                    # Same-message body and header parts have distinct part names. Keep selected wrappers
+                    # under their part key inside the message, beside the header parts.
+                    hrv{msg.name} += rv;
+                    rv = NOTHING;
+                } else {
+                    rv = {msg.name: rv};
                 }
             }
             rv += hrv;

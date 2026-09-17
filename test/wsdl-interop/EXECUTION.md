@@ -8946,3 +8946,30 @@ input name, rejects an unnamed ambiguous binding, and exposes an undefined
 placeholder for an unknown label (explicitly rejected by the probe). This is
 next-work evidence, not an implemented overload feature. P6–P9 remain incomplete.
 No Qore mutation, installation or push is made.
+
+
+## P6-13: port SOAP header/body collision fixes from 2.x
+
+Ported issue 5453 at the native merge point, retaining develop's selected type
+and element wrappers. Body values flatten only when their keys cannot collide
+with header message names; scalar values keep part keys, and colliding body
+parts share or receive a message container. API docs, release notes and durable
+merge/native-wrapper design describe the result shapes. Earlier fixes for
+5405, 5410, 5411 and 5452 remain present; compiled XSD patterns are reused.
+
+The 2.x SOAP regression and seven focused cases reproduced the old failures.
+The final focused suite passes 9 cases / 480 assertions, including independently
+authored envelopes, both protocols/directions, saved services, nil/empty/scalar
+values, retained wrappers, malformed bodies and real HTTP client/handler calls.
+The full 160-suite WSDL/SOAP gate passes 1,612 cases / 81,391 reported assertions
+without warnings or unhandled errors. Seven comparator assertion failures are
+intentionally caught inside soap.qtest's negative comparator tests. One existing
+RPC callback test had relied on the header-loss bug; it now reads the body part
+and verifies that the header reaches the callback. Production source remained
+unchanged throughout the broad gate; test-only revisions and resumed suite
+accounting are recorded in [P6-13-validation.json](P6-13-validation.json).
+
+WSDL/SoapClient docs and WSDL astparser checks pass. The full 62-check audit has
+18 Pass / 44 N/A / zero Fail. No native code changed, so Valgrind is not required.
+See [evidence](header-merge-evidence.md) and [audit](audits/P6-13-header-merge.md).
+Operation overloads/default labels and the remaining P6–P9 criteria remain open.

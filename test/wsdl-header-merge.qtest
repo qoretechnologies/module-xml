@@ -1,0 +1,206 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires ../qlib/WSDL.qm
+%requires ../qlib/SoapClient.qm
+%requires ../qlib/SoapHandler.qm
+%requires HttpServer
+%exec-class HeaderMergeTest
+
+class HeaderMergeTest inherits QUnit::Test {
+    private {
+        const Ns = "urn:qore:test:header-parts";
+    }
+
+    constructor() : Test("SOAP header/body merge", "1.0") {
+        addTestCase("Body part named after its own header message", sub() {
+            check("OpSameName", "<Resp><r>value</r></Resp>",
+                {"r": "value", "SameNameM": {"SessionId": "session"}}, {"r": "value"});
+        });
+        addTestCase("Flattened body key collides with a header message", sub() {
+            check("OpHdrConflict", "<RespHdrConflict><HdrM>value</HdrM></RespHdrConflict>",
+                {"parameters": {"HdrM": "value"}, "HdrM": {"SessionId": "session"}}, {"HdrM": "value"});
+        });
+        addTestCase("Body part collides with a different header message", sub() {
+            check("OpPartConflict", "<Resp><r>value</r></Resp><Value>other</Value>",
+                {"PartConflictM": {"HdrM": {"r": "value"}, "other": "other"},
+                    "HdrM": {"SessionId": "session"}}, {"HdrM": {"r": "value"}, "other": "other"});
+        });
+        addTestCase("Body part and its value collide with their own header message", sub() {
+            check("OpMsgConflict", "<RespMsgConflict><CollM>value</CollM></RespMsgConflict>",
+                {"CollM": {"SessionId": "session", "CollM": {"CollM": "value"}}}, {"CollM": "value"});
+        });
+        addTestCase("Scalar and empty string bodies retain headers", sub() {
+            foreach string value in ("value", "") {
+                check("OpScalar", "<Value>" + value + "</Value>",
+                    {"parameters": value, "ScalarM": {"SessionId": "session"}}, value);
+            }
+        });
+        addTestCase("Nil body retains headers", \nilBody());
+        addTestCase("Selected type and element wrappers remain intact on collisions", \wrappers());
+        addTestCase("RPC scalar bodies retain headers", \rpc());
+        addTestCase("SoapClient and SoapHandler preserve colliding body/header messages", \http());
+        set_return_value(main());
+    }
+
+    private static string source(bool soap12, bool request) {
+        string text = ReadOnlyFile::readTextFile(get_script_dir() + "/header-parts.wsdl");
+        if (soap12) {
+            text =~ s/http:\/\/schemas.xmlsoap.org\/wsdl\/soap\//http:\/\/schemas.xmlsoap.org\/wsdl\/soap12\//g;
+        }
+        if (request) {
+            # Exchange message contents while retaining request-response element order.
+            hash<auto> document = parse_xml(text);
+            foreach string component in ("portType", "binding") {
+                for (int index = 0; index < document.definitions{component}.operation.size(); ++index) {
+                    hash<auto> operation = document.definitions{component}.operation[index];
+                    auto input = operation.input;
+                    operation.input = operation.output;
+                    operation.output = input;
+                    document.definitions{component}.operation[index] = operation;
+                }
+            }
+            text = make_xml(document);
+        }
+        return text;
+    }
+
+    private static string envelope(bool soap12, string body, bool header = True) {
+        return '<S:Envelope xmlns:S="' + (soap12 ? SOAP_12_ENV : SOAP_11_ENV) + '" xmlns="' + Ns
+            + '" xmlns:xs="' + XSD_NS + '" xmlns:i="' + XSI_NS + '">'
+            + (header ? '<S:Header><SessionId>session</SessionId></S:Header>' : '')
+            + '<S:Body>' + body + '</S:Body></S:Envelope>';
+    }
+
+    private static auto decode(WSOperation op, bool request, string xml, bool preserve = False) {
+        hash<auto> parsed = WSDLLib::parseSOAPMessage({"body": xml, "content-type": "text/xml"});
+        return request ? op.deserializeRequest(parsed, NOTHING, preserve)
+            : op.deserializeResponse(parsed, NOTHING, preserve);
+    }
+
+    private check(string operation, string body, auto expected, auto no_header) {
+        foreach bool soap12 in (False, True) {
+            foreach bool request in (False, True) {
+                WebService ws(source(soap12, request));
+                foreach WebService service in (ws, Serializable::deserialize(ws.serialize())) {
+                    WSOperation op = service.getOperation(operation);
+                    foreach bool preserve in (False, True) {
+                        assertEq(expected, decode(op, request, envelope(soap12, body), preserve));
+                        assertEq(no_header, decode(op, request, envelope(soap12, body, False), preserve));
+                        assertThrows("SOAP-DESERIALIZATION-ERROR", sub() {
+                            decode(op, request, envelope(soap12, body + "<Bogus/>"), preserve);
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    private nilBody() {
+        foreach bool soap12 in (False, True) {
+            foreach bool request in (False, True) {
+                string text = source(soap12, request);
+                text =~ s/name="Value" type="xs:string"/name="Value" type="xs:string" nillable="true"/;
+                WebService ws(text);
+                WSOperation op = ws.getOperation("OpScalar");
+                string body = '<Value i:nil="true"/>';
+                assertEq({"ScalarM": {"SessionId": "session"}}, decode(op, request, envelope(soap12, body)));
+                assertNothing(decode(op, request, envelope(soap12, body, False)));
+            }
+        }
+    }
+
+    private wrappers() {
+        foreach bool soap12 in (False, True) {
+            foreach bool request in (False, True) {
+                string text = source(soap12, request);
+                text =~ s/element="tns:Resp"/element="tns:Generic"/g;
+                text =~ s/<\/xs:schema>/<xs:element name="Generic" type="xs:anyType"\/><xs:element name="Member" type="xs:string" substitutionGroup="tns:Generic"\/><\/xs:schema>/;
+                WebService ws(text);
+                foreach WebService service in (ws, Serializable::deserialize(ws.serialize())) {
+                    WSOperation op = service.getOperation("OpSameName");
+                    foreach bool element in (False, True) {
+                        string body = element ? '<Member>value</Member>' : '<Generic i:type="xs:string">value</Generic>';
+                        auto value = decode(op, request, envelope(soap12, body), True);
+                        assertEq(1, value.size());
+                        assertEq("session", value.SameNameM.SessionId);
+                        assertEq(2, value.SameNameM.size());
+                        hash<auto> wrapper = value.SameNameM.SameNameM;
+                        string key = element ? "^element^" : "^type^";
+                        assertEq(2, wrapper.size());
+                        assertTrue(wrapper{key} instanceof XsdQNameValue);
+                        assertEq(element ? Ns : XSD_NS, wrapper{key}.getNamespaceUri());
+                        assertEq(element ? "Member" : "string", wrapper{key}.getLocalName());
+                        assertEq("value", wrapper."^val^");
+                        auto plain = decode(op, request, envelope(soap12, body, False), True);
+                        assertTrue(wrapper{key}.equals(plain{key}));
+                        assertEq(wrapper."^val^", plain."^val^");
+                    }
+                }
+            }
+        }
+    }
+
+    private rpc() {
+        foreach bool soap12 in (False, True) {
+            WebService ws('<w:definitions xmlns:w="http://schemas.xmlsoap.org/wsdl/" xmlns:t="' + Ns
+                + '" xmlns:xs="' + XSD_NS + '" xmlns:s="' + (soap12 ? SOAP_12_NS : SOAP_11_NS)
+                + '" targetNamespace="' + Ns + '"><w:types><xs:schema targetNamespace="' + Ns
+                + '"><xs:element name="SessionId" type="xs:string"/></xs:schema></w:types>'
+                + '<w:message name="M"><w:part name="value" type="xs:string"/></w:message>'
+                + '<w:message name="H"><w:part name="SessionId" element="t:SessionId"/></w:message>'
+                + '<w:portType name="P"><w:operation name="call"><w:input message="t:M"/>'
+                + '<w:output message="t:M"/></w:operation></w:portType><w:binding name="B" type="t:P">'
+                + '<s:binding style="rpc" transport="http://schemas.xmlsoap.org/soap/http"/>'
+                + '<w:operation name="call"><s:operation soapAction="call"/>'
+                + '<w:input><s:body use="literal" namespace="' + Ns
+                + '"/><s:header message="t:H" part="SessionId" use="literal"/></w:input>'
+                + '<w:output><s:body use="literal" namespace="' + Ns
+                + '"/><s:header message="t:H" part="SessionId" use="literal"/></w:output>'
+                + '</w:operation></w:binding></w:definitions>');
+            foreach WebService service in (ws, Serializable::deserialize(ws.serialize())) {
+                WSOperation op = service.getOperation("call");
+                foreach bool request in (False, True) {
+                    string name = request ? "call" : "callResponse";
+                    string body = '<' + name + '><value xmlns="">body</value></' + name + '>';
+                    assertEq({"value": "body", "H": {"SessionId": "session"}},
+                        decode(op, request, envelope(soap12, body)));
+                    assertEq("body", decode(op, request, envelope(soap12, body, False)));
+                }
+            }
+        }
+    }
+
+    private http() {
+        foreach bool soap12 in (False, True) {
+            foreach bool request in (False, True) {
+                WebService ws(source(soap12, request));
+                HttpServer server();
+                on_exit server.stop();
+                SoapHandler handler(new PermissiveAuthenticator());
+                server.setDefaultHandler("headers", handler);
+                Queue received();
+                code<auto(hash<auto>, auto)> callback = auto sub(hash<auto> cx, auto value) {
+                    received.push(value);
+                    hash<auto> result = request ? {"Req": {"a": "reply"}} : {"Resp": {"r": "reply"}};
+                    result."^header^" = {"SessionId": "response-session"};
+                    return result;
+                };
+                handler.addMethod(ws, ws.getOperation("OpSameName"), callback, NOTHING, NOTHING, NOTHING,
+                    "HeaderPartsService", NOTHING, NOTHING, "HeaderPartsBinding");
+                server.addListener(0);
+                SoapClient client({"wsdl": ws, "service": "HeaderPartsService", "port": "HeaderPartsPort",
+                    "url": sprintf("http://127.0.0.1:%d/headers", server.getListenerInfo(0).port), "timeout": 30000});
+                auto value = client.callOperation("OpSameName",
+                    request ? {"Resp": {"r": "request"}} : {"Req": {"a": "request"}},
+                    {"soap_header": {"SessionId": "request-session"}});
+                assertEq(request ? {"a": "reply", "ReqM": {"SessionId": "response-session"}}
+                    : {"r": "reply", "SameNameM": {"SessionId": "response-session"}}, value);
+                assertEq(request ? {"r": "request", "SameNameM": {"SessionId": "request-session"}}
+                    : {"a": "request", "ReqM": {"SessionId": "request-session"}}, received.get(30000));
+            }
+        }
+    }
+}

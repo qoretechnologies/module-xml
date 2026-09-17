@@ -2236,3 +2236,13 @@ Explicit abstract input/output labels no longer replace the operation's RPC
 request name or its Response-suffixed response name. Saved/detached operations
 and actual SOAP 1.1/1.2 exchanges are covered by [evidence](rpc-operation-names-evidence.md),
 [validation](P6-12-validation.json) and [audit](audits/P6-12-rpc-operation-names.md).
+
+## SOAP body/header merge (P6-13)
+
+`test/wsdl-header-merge.qtest` covers message/part collisions and scalar header
+preservation across SOAP versions, directions, saved services and real HTTP
+consumers. Selected type and element wrappers keep their part-name keys inside
+shared message containers. The 2.x regression fixtures are also retained in
+`test/soap.qtest`. See [durable merge rules](../../design/wsdl-soap-header-values.md),
+[evidence](header-merge-evidence.md), [validation](P6-13-validation.json) and
+[audit](audits/P6-13-header-merge.md).

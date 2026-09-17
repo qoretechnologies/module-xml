@@ -588,3 +588,9 @@ wire directions. See [RPC naming evidence](rpc-operation-names-evidence.md).
 This prerequisite preserves operation-based wire names before overload/default
 name work; overloaded identities, abstract defaults and the remaining P6–P9
 matrix remain open.
+
+P6-13 ports issue 5453 from 2.x: native SOAP body/header merging preserves
+colliding message/part names, scalar values and selected type/element wrappers.
+Earlier 2.x fixes remain present, including cached XSD pattern compilation.
+See [header merge evidence](header-merge-evidence.md). Operation overloads,
+abstract defaults and the remaining P6–P9 acceptance criteria remain open.
