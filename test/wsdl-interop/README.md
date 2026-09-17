@@ -2196,3 +2196,13 @@ checksums and provenance are in `oracle/wsdl4j-manifest.json`. WSDL4J supplies
 resolved component observations, not complete WSDL or SOAP validation. See
 [import evidence](imported-components-evidence.md) for the exact checked edges
 and remaining P6 work.
+
+## Local file URI resources (P6-08)
+
+Absolute and localhost file URIs now load escaped filenames consistently through
+WSDLLib, SoapClient and asynchronous loading. Nested WSDL/XSD imports retain
+canonical containing URIs; saved graphs rebuild after the original files are
+removed. Bare and legacy relative file paths retain literal filename semantics.
+The new suite passes 7 cases / 291 assertions; see [evidence](file-uri-evidence.md),
+[validation](P6-08-validation.json) and [audit](audits/P6-08-file-uris.md).
+Redirect-effective URI handling and the remaining P6–P9 requirements stay open.

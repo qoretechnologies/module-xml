@@ -80,6 +80,10 @@ module WSDL {
     @section wsdlrelnotes WSDL Module Release Notes
 
     @subsection wsdl_0_5_8 WSDL v0.5.8
+    - Local file URIs support absolute and localhost forms, percent-encoded filenames and fragment-free
+      resource identity; all WSDL loaders retain file document URIs for nested imports and saved graphs
+    - Bare and legacy relative file paths retain literal filename characters and environment expansion;
+      local import callbacks still receive the original relative reference
     - WSDL imports load transitive definitions and schemas with per-document namespaces and locations;
       cycles and diamond dependencies share retrievals, and every import checks its required namespace
     - Component references resolve across the complete import graph; qualified public lookups accept
@@ -928,6 +932,52 @@ class WsdlUriResolver {
     }
 }
 
+# Local file URI interpretation is separate from legacy literal file paths.  In the
+# legacy file://relative/path interface the authority is a relative directory.
+class WsdlFileLocation {
+    static bool isFile(string source, string def_protocol = "file") {
+        return source =~ /^file:/i || (def_protocol == "file" && !WSDLLib::hasScheme(source));
+    }
+
+    static string path(string source, *string def_path) {
+        string path;
+        bool legacy = source =~ /^file:\/\/[^\/]/i
+            && source !~ /^file:\/\/localhost(?:[\/?#:]|$)/i;
+        if (source =~ /^file:/i && !legacy) {
+            hash<WsdlUriParts> uri = WsdlUriResolver::parse(source);
+            if (!uri.path.startsWith("/") || (uri.authority && tolower(uri.authority) != "localhost")) {
+                throw "WSDL-LOCATION-ERROR", "a local absolute file URI is required";
+            }
+            if (exists uri.query) {
+                throw "WSDL-LOCATION-ERROR", "file URIs cannot contain a query";
+            }
+            if (uri.path =~ /%(?![0-9A-Fa-f]{2})/ || uri.path =~ /%00/i) {
+                throw "WSDL-LOCATION-ERROR", "invalid percent escape in file URI";
+            }
+            # Split URI components before decoding, and never decode the result again.
+            path = decode_url(uri.path);
+        } else {
+            path = source =~ /^file:\/\//i ? substr(source, 7) : source;
+            map path = replace(path, "\$" + $1, ENV.$1), (path =~ x/\$(\w+)/g);
+            if (def_path && !absolute_path(path)) {
+                path = def_path + DirSep + path;
+            }
+        }
+        if (path =~ /\x00/) {
+            throw "WSDL-LOCATION-ERROR", "file paths cannot contain NUL";
+        }
+        return path;
+    }
+
+    static string uri(string source, *string def_path) {
+        return fromPath(path(source, def_path));
+    }
+
+    static string fromPath(string path) {
+        return "file://" + join("/", map encode_url($1, True), normalize_dir(path).split("/"));
+    }
+}
+
 #! contains helper methods for retrieving WSDLs from a URL
 public class WSDLLib {
     #! Mime types recognized as SOAP messages
@@ -950,31 +1000,32 @@ public class WSDLLib {
     }
 
     #! normalizes a location to a scheme-prefixed string
-    /** @note Applies environment variable substitution and default path resolution for file locations
-
+    /** @param url a URL, bare filesystem path or legacy \c file://relative/path location
+        @param def_protocol protocol to assume when no scheme is present
+        @param def_path directory for relative filesystem paths
+        @return an absolute, escaped file URI for local files, or a scheme-prefixed non-file location
+        @throw WSDL-LOCATION-ERROR invalid local file URI
+        @note Environment variables are expanded only in bare/legacy paths. File URI fragments do not
+        identify separate resources; queries, invalid escapes and NUL octets reject.
+        @par Example
+        @code{.py}
+        WSDLLib::normalizeLocation("/srv/contracts/orders #1.wsdl");
+        # returns file:///srv/contracts/orders%20%231.wsdl
+        @endcode
         @since %WSDL 0.5.8
     */
     static string normalizeLocation(string url, string def_protocol = "file", *string def_path) {
-        if (url =~ /^\w+:\/\//) {
-            return url;
+        if (WsdlFileLocation::isFile(url, def_protocol)) {
+            return WsdlFileLocation::uri(url, def_path);
         }
-        if (def_protocol != "file") {
-            return def_protocol + "://" + url;
-        }
-        string path = url;
-        # do environment variable substitution
-        map path = replace(path, "\$" + $1, ENV.$1), (path =~ x/\$(\w+)/g);
-        if (def_path && !absolute_path(path)) {
-            path = def_path + DirSep + path;
-        }
-        return "file://" + path;
+        return hasScheme(url) ? url : def_protocol + "://" + url;
     }
 
     #! returns @ref True "True" if the given location has a URL scheme (ex: \c "http://...")
     /** @since %WSDL 0.5.8
     */
     static bool hasScheme(string location) {
-        return location =~ /^[a-zA-Z][-+.a-zA-Z0-9]*:\/\//;
+        return location =~ /^[a-zA-Z][-+.a-zA-Z0-9]*:\/\// || location =~ /^file:/i;
     }
 
     #! returns the base location to use when resolving locations relative to the given location
@@ -1050,11 +1101,14 @@ public class WSDLLib {
         return WsdlUriResolver::resolve(location, document_location);
     }
 
-    #! returns a document URI for a URL source, or NOTHING for inline XML and local filesystem sources
+    #! returns a document URI for a file or URL source, or NOTHING for inline XML
     /** @param location the source passed to a WSDL loader
-        @return a non-file URL without its fragment, or NOTHING when the source has no URI base
-        @throw WSDL-LOCATION-ERROR a URL contains an unescaped ASCII space or control character
-        @note Bare paths and legacy file locations retain the directory-base interface.
+        @return an absolute file URI or non-file URL without its fragment, or NOTHING for inline XML
+        @throw WSDL-LOCATION-ERROR invalid local file URI or an unescaped ASCII space/control in a URL
+        @note Bare paths and legacy \c file://relative/path locations name literal files; their characters
+        are escaped when constructing the URI. Standard \c file:/absolute, \c file:///absolute and
+        \c file://localhost/absolute URIs decode path octets once. Other file authorities retain the legacy
+        relative-directory meaning; they do not request access to a remote host.
         @par Example
         @code{.py}
         WSDLLib::getUriDocumentLocation("https://partner.example/orders.wsdl?version=2#service");
@@ -1063,8 +1117,11 @@ public class WSDLLib {
         @since %WSDL 0.5.8
     */
     static *string getUriDocumentLocation(string location) {
-        if (!hasScheme(location) || location =~ /^file:/i) {
+        if (location.startsWith("<")) {
             return;
+        }
+        if (WsdlFileLocation::isFile(location)) {
+            return WsdlFileLocation::uri(location);
         }
         hash<WsdlUriParts> uri = WsdlUriResolver::parse(location);
         uri.fragment = NOTHING;
@@ -1119,6 +1176,11 @@ public class WSDLLib {
      */
     static data getFileFromURL(string url, string def_protocol = "file", *HTTPClient http_client,
             *hash<auto> http_headers, bool as_string = True, *string def_path, *reference new_def_path) {
+        if (WsdlFileLocation::isFile(url, def_protocol)) {
+            string path = WsdlFileLocation::path(url, def_path);
+            new_def_path = dirname(path);
+            return WSDLLib::getFile(path, as_string);
+        }
         try {
             return WSDLLib::getFileFromURL(url, parse_url(url), def_protocol, http_client, http_headers, as_string,
                 def_path, \new_def_path);
@@ -1145,6 +1207,11 @@ public class WSDLLib {
      */
     static data getFileFromURL(string url, hash<auto> u, string def_protocol = "file", *HTTPClient http_client,
             *hash<auto> http_headers, bool as_string = False, *string def_path, *reference new_def_path) {
+        if (WsdlFileLocation::isFile(url, def_protocol)) {
+            string path = WsdlFileLocation::path(url, def_path);
+            new_def_path = dirname(path);
+            return WSDLLib::getFile(path, as_string);
+        }
         bool used_def_protocol;
         if (!exists u.protocol) {
             u.protocol = def_protocol;
@@ -23316,8 +23383,8 @@ class WsdlDocumentCatalog {
                     string child_source = fetch(resolved, edge.location);
                     *string child_base = WSDLLib::getLocationBase(resolved);
                     if (!location && child_source == source
-                            && WSDLLib::resolveLocation(".", child_base ?? ".")
-                                == WSDLLib::resolveLocation(".", base ?? ".")) {
+                            && WSDLLib::normalizeLocation(WSDLLib::resolveLocation(".", child_base ?? "."))
+                                == WSDLLib::normalizeLocation(WSDLLib::resolveLocation(".", base ?? "."))) {
                         index = 0;
                     } else {
                         hash<WsdlDocumentInfo> child = read(child_source, child_location, child_base, True, identity);
@@ -32961,26 +33028,18 @@ public class WsdlPollOperation inherits Qore::AbstractPollOperation {
             # HTTPClient does not support setLogger()
             poller = hc.startPollSendRecv("GET", WsdlUriResolver::httpPath(location), NOTHING, http_headers);
         } else {
-            poller = FileLocationHandler::getIoPollerForLocation(location);
+            # The core file handler consumes a literal path, not a percent-encoded URI.
+            string retrieval = WsdlFileLocation::isFile(location)
+                ? "file://" + WsdlFileLocation::path(location) : location;
+            poller = FileLocationHandler::getIoPollerForLocation(retrieval);
         }
         log("DEBUG", "WSDL async fetch queued: %y", location);
     }
 
     private string normalizeWsdlLocation(string location) {
         string normalized = WSDLLib::normalizeLocation(location, "file", NOTHING);
-        if (normalized =~ /^file:/) {
-            hash<UrlInfo> u = parse_url(normalized);
-            string path;
-            if (u.host) {
-                path = u.host;
-            }
-            if (u.path) {
-                if (path) {
-                    path += DirSep;
-                }
-                path += u.path;
-            }
-            def_path = dirname(path);
+        if (WsdlFileLocation::isFile(normalized)) {
+            def_path = dirname(WsdlFileLocation::path(normalized));
         } else {
             def_path = WSDLLib::getLocationBase(normalized);
         }
@@ -33312,7 +33371,7 @@ public class XsdSchema inherits WSDL::XsdBase {
     */
     addSchemaFile(string path) {
         *string previous_location = document_location;
-        document_location = NOTHING;
+        document_location = WsdlFileLocation::fromPath(path);
         on_exit document_location = previous_location;
         *string previous_base = def_path;
         def_path = dirname(path);
@@ -33631,6 +33690,9 @@ public class XsdSchema inherits WSDL::XsdBase {
         document_location = opts.document_location;
         if (exists document_location) {
             document_location = WSDLLib::resolveDocumentLocation("", document_location);
+            if (WsdlFileLocation::isFile(document_location)) {
+                document_location = WSDLLib::getUriDocumentLocation(document_location);
+            }
         }
     }
 
@@ -33933,7 +33995,8 @@ public class XsdSchema inherits WSDL::XsdBase {
         string loc = document_location
             ? WSDLLib::resolveDocumentLocation(schema_location, document_location)
             : WSDLLib::resolveLocation(schema_location, def_path);
-        string legacy_key = WSDLLib::normalizeLocation(loc, "file", NOTHING);
+        # Retain the pre-canonical key for older saved graphs and caller-supplied caches.
+        string legacy_key = WSDLLib::hasScheme(loc) ? loc : "file://" + WsdlFileLocation::path(loc);
         *string source_location = WSDLLib::getUriDocumentLocation(loc);
         if (source_location) {
             loc = source_location;
@@ -33956,7 +34019,6 @@ public class XsdSchema inherits WSDL::XsdBase {
         # the base location for locations relative to the external schema
         *string new_def_path;
         string xsd;
-        hash<auto> h = parse_url(loc);
         if (exists schema_dependencies{dependency_key}) {
             xsd = schema_dependencies{dependency_key};
             new_def_path = WSDLLib::getLocationBase(loc);
@@ -33972,7 +34034,7 @@ public class XsdSchema inherits WSDL::XsdBase {
                 throw "WSDL-ASYNC-IMPORT", sprintf("missing async import %y", cache_key), cache_key;
             }
             new_def_path = WSDLLib::getLocationBase(loc);
-        } else if (!h.protocol && try_import) {
+        } else if (try_import && WsdlFileLocation::isFile(loc) && !WSDLLib::hasScheme(schema_location)) {
             xsd = call_function(try_import, schema_location);
             new_def_path = WSDLLib::getLocationBase(loc);
         } else {
@@ -34732,7 +34794,7 @@ public class WebService inherits WSDL::XsdSchema {
             source = opts.xsd_cache{key};
         } else if (opts.async_only) {
             throw "WSDL-ASYNC-IMPORT", sprintf("missing async WSDL import %Y", key), key;
-        } else if (!WSDLLib::hasScheme(location) && try_import) {
+        } else if (try_import && WsdlFileLocation::isFile(location) && !WSDLLib::hasScheme(reference)) {
             source = call_function(try_import, reference);
         } else {
             source = WSDLLib::getFileFromURL(location, "file",

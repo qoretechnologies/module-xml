@@ -36,12 +36,12 @@ references use the containing document's directory. Existing schema dependency
 storage retains retrieved bytes and directory bases for offline saved-service
 reconstruction.
 
-Non-file URL loaders (`WSDLLib`, `SoapClient` and `WsdlPollOperation`) retain the
+File and URL loaders (`WSDLLib`, `SoapClient` and `WsdlPollOperation`) retain the
 complete source URI in `XsdSchema::document_location`. Callers supplying XML
 strings can set the `document_location` construction option explicitly. It takes
 precedence over `def_path` for reference resolution. `getUriDocumentLocation()`
-extracts this URI from a loader source; bare paths and legacy file URLs continue
-to use the directory interface.
+extracts this URI from a loader source, converting bare and legacy file paths to
+absolute escaped file URIs. Inline XML has no inferred document URI.
 
 Each external schema temporarily installs its own containing URI and restores
 the caller's context on every exit. Resource keys omit fragments and retain
@@ -52,11 +52,42 @@ accepted when the canonical key is absent.
 `XsdSourceInfo::location` retains the URI for each explicitly added source. Saved
 schemas rebuild each source with its original URI and directory; saved services
 first rebuild their original WSDL, then added sources, then restore their saved
-active defaults. Local `addSchemaFile()` temporarily clears the URI context and
-uses that file's directory, restoring the caller's URI even on failure. Older
+active defaults. Local `addSchemaFile()` temporarily installs the file's URI and directory,
+restoring the caller's URI even on failure. Older
 saved source records without `location` use their retained directory.
 
 Active schema identity consists of namespace, source bytes and the full URI when
 available. A fallback directory does not affect that identity because it does
 not participate in resolution. Sources supplied without a URI use their directory
 instead; this also preserves cycle recognition for roots supplied as raw XML.
+
+Local file retrieval implements the absolute and `localhost` forms of
+[RFC 8089 sections 2–4](https://www.rfc-editor.org/rfc/rfc8089#section-2):
+`file:/srv/contracts/orders.wsdl`, `file:///srv/contracts/orders.wsdl` and
+`file://localhost/srv/contracts/orders.wsdl` identify the same file. Scheme and
+`localhost` matching are case insensitive; filename case is retained. The URI
+is split before path octets are decoded once. A fragment is excluded from
+retrieval and resource identity. Queries, malformed percent escapes, NUL octets
+and missing absolute paths raise `WSDL-LOCATION-ERROR` before I/O. Encoded spaces,
+UTF-8 bytes, percent signs, hashes, question marks and plus signs name literal
+filesystem characters; plus is not interpreted as a form-encoded space.
+
+Bare paths and the existing `file://relative/path` interface use literal path
+semantics and environment expansion. Other nonempty file authorities retain
+that legacy relative-directory interpretation, rather than selecting a remote
+host. Absolute URI paths do not expand environment variables. Resource keys
+are absolute escaped file URIs without `localhost` or fragments; URI spelling
+aliases share dependency bytes and cycle detection. Bare filenames containing
+`#`, `?` or `%` are escaped when constructing the document URI, not parsed as
+URI delimiters or decoded. For example, `/srv/contracts/order #1.wsdl` becomes
+`file:///srv/contracts/order%20%231.wsdl`; an import of `types%20%231.xsd` then
+loads the sibling `types #1.xsd`.
+
+The synchronous loaders use the decoded local path directly. The asynchronous
+loader translates its canonical file URI to the literal path interface of
+`FileLocationHandler` only at the I/O boundary; its cache key remains a URI.
+Local `try_import` callbacks receive the original unschemed reference even when
+the resolved resource now has a canonical file URI. WSDL roots supplied inline
+compare normalized containing directories when recognizing a root cycle.
+All resource state is owned by the construction call; no process working-directory
+change or shared cache is introduced.

@@ -558,3 +558,9 @@ enterprise fixture passes 5 cases / 85 assertions. All six corpus reports retain
 the prior results, with only version metadata changed. Canonical file URIs,
 redirect-effective bases, overloaded operation/input-output names, explicit
 operation selection and the rest of the P6 binding matrix remain required.
+
+P6-08 implements canonical local file URIs across WSDLLib, SoapClient, async
+loading, added schema files and saved graphs. Literal bare/legacy paths, callback
+references and older cache keys remain compatible. See [file URI evidence](file-uri-evidence.md).
+Redirect-effective bases, overloaded operation/input-output names, explicit
+operation selection and the remaining binding matrix are still required in P6.

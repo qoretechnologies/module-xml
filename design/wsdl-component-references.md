@@ -42,7 +42,7 @@ component keys.
 
 The document catalog traverses `wsdl:import` edges before component construction.
 Each document retains its original XML bytes, parsed view, namespace declarations,
-full non-file URI when available, and fallback directory. Imports require both
+full URI when available, and fallback directory. Imports require both
 `namespace` and `location`; every edge checks the retrieved target namespace,
 including repeated references to an already loaded resource. WSDL 1.1 imports
 can contribute WSDL definitions or XSD schemas. Embedded and imported schemas
@@ -54,14 +54,14 @@ order, each under its own document namespace context. Compatibility options are
 copied into those contexts.
 
 The catalog uses a queue and a resource-key table, so cycles and diamond graphs
-reuse already loaded documents. Non-file resource keys omit fragments and retain
-queries. Roots supplied as XML without a source URI can be recognized by source
-bytes and normalized directory. The existing bare-file and legacy file-URL
-interfaces keep their directory-based resolution rules. Retrieval first uses
+reuse already loaded documents. Resource keys omit fragments; non-file URI keys
+retain queries. Local files use absolute escaped file URI keys, shared by the
+absolute and localhost URI spellings. Roots supplied as XML without a source
+URI can be recognized by source bytes and normalized containing directory. Retrieval first uses
 retained dependency bytes, then `xsd_cache`; `async_only` raises
 `WSDL-ASYNC-IMPORT` with the missing resolved key. Synchronous imports use the
 existing location handler or `try_import`. The callback receives the original
-reference when its resolved location has no scheme. The resolved location still
+unschemed reference when its resolved location names a local file. The resolved location still
 identifies its cache entry and determines the base of nested dependencies.
 
 Component identity is `(kind, namespace URI, local name)`. Duplicate expanded

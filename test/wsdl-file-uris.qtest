@@ -1,0 +1,245 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires ../qlib/WSDL.qm
+%requires ../qlib/SoapClient.qm
+%exec-class FileUrisTest
+
+class FileUrisTest inherits QUnit::Test {
+    constructor() : Test("WSDL file URI resources", "1.0") {
+        addTestCase("Standard file URI forms decode once and retain source identity", \forms());
+        addTestCase("Bare and legacy relative paths preserve literal filename characters", \literal());
+        addTestCase("All loaders resolve escaped WSDL and nested XSD imports and rebuild offline", \imports());
+        addTestCase("Added schema files retain escaped document origins and restore the caller context", \schemaFiles());
+        addTestCase("Inline WSDL root cycles compare canonical containing directories", \inlineCycle());
+        addTestCase("Explicit file origins and legacy relative cache keys share canonical schema resources", \cached());
+        addTestCase("Invalid local file URIs reject before I/O and permit a later valid read", \invalid());
+        set_return_value(main());
+    }
+
+    private static string directory() {
+        string dir = sprintf("%s/wsdl-file-uri-%d-%d", tmp_location(), getpid(), gettid());
+        mkdir(dir);
+        return dir;
+    }
+
+    private static write(string path, string text) {
+        File f();
+        f.open2(path, O_CREAT | O_EXCL | O_WRONLY, 0600);
+        f.write(text);
+    }
+
+    private static string schema(string body) {
+        return '<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" targetNamespace="urn:file-uri">'
+            + body + '</xs:schema>';
+    }
+
+    private static string root(string body) {
+        return '<w:definitions xmlns:w="http://schemas.xmlsoap.org/wsdl/" targetNamespace="urn:file-uri">'
+            + body + '</w:definitions>';
+    }
+
+    private static string endpoint() {
+        return '<w:portType name="P"/><w:binding name="B" type="t:P" xmlns:t="urn:file-uri">'
+            + '<s:binding xmlns:s="http://schemas.xmlsoap.org/wsdl/soap/"'
+            + ' transport="http://schemas.xmlsoap.org/soap/http"/></w:binding>'
+            + '<w:service name="S"><w:port name="Endpoint" binding="t:B" xmlns:t="urn:file-uri">'
+            + '<s:address xmlns:s="http://schemas.xmlsoap.org/wsdl/soap/"'
+            + ' location="http://example.invalid/soap"/></w:port></w:service>';
+    }
+
+    private forms() {
+        string dir = directory();
+        on_exit rmdir(dir);
+        string path = dir + "/café #?%+name.wsdl";
+        write(path, root(endpoint()));
+        on_exit unlink(path);
+        string escaped = dir + "/caf%C3%A9%20%23%3F%25+name.wsdl";
+        string canonical = "file://" + dir + "/caf%C3%A9%20%23%3F%25%2Bname.wsdl";
+        foreach string prefix in ("file:", "file://", "file://localhost", "FILE://LOCALHOST") {
+            foreach string fragment in ("", "#root") {
+                string source = prefix + escaped + fragment;
+                *string base;
+                assertEq(root(endpoint()), WSDLLib::getFileFromURL(source, "file", NOTHING, NOTHING, True,
+                    NOTHING, \base));
+                assertEq(dir, base);
+                assertEq(binary(root(endpoint())), WSDLLib::getFileFromURL(source, {"protocol": "file"}));
+                assertEq(canonical, WSDLLib::normalizeLocation(source));
+                assertEq(canonical, WSDLLib::getUriDocumentLocation(source));
+                foreach string mode in ("sync", "async", "client") {
+                    assertEq(canonical, load(source, mode).document_location);
+                }
+            }
+        }
+    }
+
+    private literal() {
+        string dir = directory();
+        on_exit rmdir(dir);
+        string name = "literal #%3F?+file.wsdl";
+        string path = dir + "/" + name;
+        write(path, root(endpoint()));
+        on_exit unlink(path);
+        string relative = get_relative_path(getcwd(), path);
+        foreach string source in (path, relative, "file://" + relative) {
+            assertEq(root(endpoint()), WSDLLib::getWSDL(source));
+            string uri = WSDLLib::getUriDocumentLocation(source);
+            assertEq("file://" + dir + "/literal%20%23%253F%3F%2Bfile.wsdl", uri);
+            assertEq(root(endpoint()), WSDLLib::getWSDL(uri));
+            foreach string mode in ("sync", "async", "client") {
+                assertEq(uri, load(source, mode).document_location);
+            }
+        }
+        assertEq(root(endpoint()), WSDLLib::getFileFromURL(name, "file", NOTHING, NOTHING, True, dir));
+        assertEq(NOTHING, WSDLLib::getUriDocumentLocation(root(endpoint())));
+    }
+
+    private static WebService load(string source, string mode) {
+        if (mode == "client") {
+            SoapClient client({"wsdl": source});
+            return client.getWebService();
+        }
+        if (mode == "sync") {
+            return WSDLLib::getWebServiceFromUrl(source);
+        }
+        WsdlPollOperation op(source);
+        on_error op.abort();
+        date deadline = now_us() + 30s;
+        while (!op.goalReached()) {
+            *hash<SocketPollInfo> info = op.continuePoll();
+            if (info) {
+                int remaining = (deadline - now_us()).durationMilliseconds();
+                if (remaining <= 0) {
+                    throw "TEST-ERROR", "file URI loading deadline exceeded";
+                }
+                Socket::poll((info,), remaining);
+            }
+        }
+        return op.getOutput();
+    }
+
+    private checkSchema(XsdSchema ws) {
+        XsdXmlValue value('<Value xmlns="urn:file-uri">42</Value>');
+        assertEq(value, ws.validateXmlValue(value));
+        assertThrows("SOAP-SERIALIZATION-ERROR", \ws.validateXmlValue(),
+            (new XsdXmlValue('<Value xmlns="urn:file-uri">bad</Value>'),));
+    }
+
+    private check(WebService ws) {
+        checkSchema(ws);
+        assertEq(1, ws.messages.size());
+        assertEq("M", ws.getMessage("{urn:file-uri}M").name);
+    }
+
+    private imports() {
+        foreach string mode in ("sync", "async", "client") {
+            foreach string prefix in ("", "file:", "file://", "file://localhost") {
+                string dir = directory();
+                on_exit rmdir(dir);
+                string path = dir + "/root.wsdl";
+                string child = dir + "/child #%.wsdl";
+                string first = dir + "/first #%.xsd";
+                string second = dir + "/second %23.xsd";
+                write(path, root('<w:import namespace="urn:file-uri" location="child%20%23%25.wsdl#child"/>'
+                    + endpoint()));
+                on_exit unlink(path);
+                write(child, root('<w:import namespace="urn:file-uri" location="file://localhost' + path + '#cycle"/>'
+                    + '<w:types>' + schema('<xs:include schemaLocation="first%20%23%25.xsd"/>') + '</w:types>'
+                    + '<w:message name="M"><w:part name="value" xmlns:t="urn:file-uri" element="t:Value"/></w:message>'));
+                on_exit unlink(child);
+                write(first, schema('<xs:include schemaLocation="second%20%2523.xsd"/>'));
+                on_exit unlink(first);
+                write(second, schema('<xs:include schemaLocation="first%20%23%25.xsd#cycle"/>'
+                    + '<xs:element name="Value" type="xs:int"/>'));
+                on_exit unlink(second);
+                WebService ws = load(prefix + path, mode);
+                assertEq("file://" + path, ws.document_location);
+                check(ws);
+                auto saved = ws.serialize();
+                # Remove the resources before rebuilding to prove retained bytes are sufficient.
+                unlink(path); unlink(child); unlink(first); unlink(second);
+                WebService restored = Serializable::deserialize(saved);
+                assertEq(ws.document_location, restored.document_location);
+                assertEq(ws.getHash(), restored.getHash());
+                check(restored);
+            }
+        }
+    }
+
+    private schemaFiles() {
+        string dir = directory();
+        on_exit rmdir(dir);
+        string parent = dir + "/root #%.xsd";
+        string child = dir + "/child #%.xsd";
+        write(parent, schema('<xs:include schemaLocation="child%20%23%25.xsd"/>'));
+        on_exit unlink(parent);
+        write(child, schema('<xs:include schemaLocation="root%20%23%25.xsd#cycle"/>'
+            + '<xs:element name="Value" type="xs:int"/>'));
+        on_exit unlink(child);
+        XsdSchema xs();
+        xs.document_location = "https://example.invalid/active.xsd";
+        xs.addSchemaFile(parent);
+        assertEq("https://example.invalid/active.xsd", xs.document_location);
+        checkSchema(xs);
+        auto saved = xs.serialize();
+        unlink(parent);
+        unlink(child);
+        XsdSchema restored = Serializable::deserialize(saved);
+        checkSchema(restored);
+        assertEq(xs.document_location, restored.document_location);
+    }
+
+    private inlineCycle() {
+        string dir = directory();
+        on_exit rmdir(dir);
+        string parent = dir + "/root.wsdl";
+        string child = dir + "/child.wsdl";
+        string text = root('<w:import namespace="urn:file-uri" location="child.wsdl"/>' + endpoint());
+        write(parent, text);
+        on_exit unlink(parent);
+        write(child, root('<w:import namespace="urn:file-uri" location="root.wsdl#cycle"/>'));
+        on_exit unlink(child);
+        WebService ws(text, {"def_path": dir});
+        assertEq(1, ws.listServices().size());
+        auto saved = ws.serialize();
+        unlink(parent);
+        unlink(child);
+        WebService restored = Serializable::deserialize(saved);
+        assertEq(1, restored.listServices().size());
+        assertEq(ws.getHash(), restored.getHash());
+    }
+
+    private cached() {
+        string child = schema('<xs:element name="Value" type="xs:int"/>');
+        string source = schema('<xs:include schemaLocation="child.xsd"/>');
+        XsdSchema old(schema('<xs:include schemaLocation="relative/child.xsd"/>'), {"async_only": True,
+            "xsd_cache": {"file://relative/child.xsd": child}});
+        checkSchema(old);
+        old.opts.xsd_cache = {};
+        checkSchema(Serializable::deserialize(old.serialize()));
+        foreach string prefix in ("file:", "file://", "FILE://LOCALHOST") {
+            XsdSchema xs(source, {"document_location": prefix + "/virtual/root.xsd#part", "async_only": True,
+                "xsd_cache": {"file:///virtual/child.xsd": child}});
+            assertEq("file:///virtual/root.xsd", xs.document_location);
+            checkSchema(xs);
+            xs.opts.xsd_cache = {};
+            checkSchema(Serializable::deserialize(xs.serialize()));
+        }
+    }
+
+    private invalid() {
+        foreach string source in ("file:", "file://", "file:relative.wsdl", "file://localhost", "file://localhost:80/a", "file:///a?query",
+                "file:///a?", "file:///bad%", "file:///bad%2G", "file:///bad%00", "file:///bad name") {
+            assertThrows("WSDL-LOCATION-ERROR", \WSDLLib::getWSDL(), (source,));
+            assertThrows("WSDL-LOCATION-ERROR", \WSDLLib::normalizeLocation(), (source,));
+            assertThrows("WSDL-LOCATION-ERROR", \WSDLLib::getUriDocumentLocation(), (source,));
+            assertThrows("WSDL-LOCATION-ERROR", \load(), (source, "async"));
+        }
+        assertThrows("WSDL-LOCATION-ERROR", \WSDLLib::getWSDL(), ("/bad\x00name",));
+        assertThrows("FILE-OPEN2-ERROR", \WSDLLib::getWSDL(),
+            ("file:///nonexistent-qore-file-uri-test-root/missing.wsdl",));
+        assertEq("file:///valid", WSDLLib::getUriDocumentLocation("file:/valid#part"));
+    }
+}

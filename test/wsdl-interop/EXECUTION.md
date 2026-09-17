@@ -8795,3 +8795,35 @@ actual macOS acceptance remains required. Neither candidate patch is applied.
 No main-Qore changes, installation, push or pipeline trigger. The unrelated
 `test/cmake/__pycache__/` is preserved. P6–P9 remain incomplete; no user question
 is pending.
+
+## P6-08: canonical local file resources
+
+The installed Qore 3.0.0 at `9d154799ab6ede823c5007029255ba72737157b9` parses the
+full WSDL module through astparser with zero errors. XML was rebuilt against
+that installed runtime, replacing expired `/tmp` paths in the local CMake cache;
+WSDL and SoapClient documentation targets build without warnings/errors.
+The two published macOS provider repairs are already merged into this local
+branch; fetching origin found no further module-xml changes.
+
+The file URI increment supports absolute/localhost URI forms, single decoding
+of filename octets, fragment-free canonical resource keys and containing URIs
+for nested references and added schema files. Legacy literal paths, local import
+callbacks and older relative cache keys remain usable. Inline-root cycle checks
+compare canonical containing directories. The seven-case test fails on the
+pre-change snapshot and passes 291 assertions after the fix.
+
+Final affected-suite verification passes 36 suites / 464 cases / 7,547 reported
+assertions, with seven existing intentionally caught comparator assertions.
+The full enterprise/partner suite passes 5 cases / 85 assertions. WSDL4J,
+declaration/reference matrices, contract tests and 33 survey/coverage tests pass.
+Six full corpus reports are compared against an isolated pre-change source
+snapshot using the same installed runtime and binary XML module; see
+[validation](P6-08-validation.json), [evidence](file-uri-evidence.md) and the
+[62-item audit](audits/P6-08-file-uris.md).
+
+No main-Qore mutation, installation, push or CI pipeline trigger. The unrelated
+`test/cmake/__pycache__/` is preserved. P6–P9 remain incomplete. The next redirect
+investigation is in `/tmp/xml-redirect-effective-base/`: synchronous get() exposes
+redirect metadata but keeps the configured URL, while the current core poll API
+returns a raw 302. No redirect implementation or new core-defect claim is made
+by this increment; no user question is pending.
