@@ -9020,3 +9020,35 @@ binding partition rules. A constructor probe confirms that omitted and empty
 parts attributes currently both become NOTHING; the relevant constructor and
 lookup truthiness checks are identified in `/tmp/xml-p6-body-selection/`.
 P6 is not complete, and P7–P9 remain open.
+
+## P6-15: explicit SOAP body-part selection
+
+Explicitly empty or whitespace-only part lists select no parts; omitted attributes
+remain distinct. XML whitespace is collapsed, order is retained and duplicate or
+unresolved names reject during construction. RPC binding decoding uses explicit
+selection with strict field validation. Fault detail uses its own message instead
+of the ordinary output selection. The audit also fixed unknown public RPC part
+names raising a Qore type error instead of WSDL-ERROR.
+
+The isolated preceding module reproduces eight failing cases out of nine. The
+final focused suite passes nine cases / 467 assertions. Seven independent tests
+cover WSDL4J observations and pinned Xerces XML list semantics. WSDL4J's SPACE-only
+tokenizer limitation is retained explicitly and independently adjudicated; no
+module assertions were relaxed. Both SOAP versions, styles and directions,
+source/saved graphs, retained XML and actual header-only HTTP calls are covered.
+
+The final-source 162-suite gate passes 1,633 cases /
+82,339 reported assertions. All 14 corpus/oracle commands
+have their expected outcomes, and the six corpus reports preserve P6-14 results:
+2,096 native valid directions, 2,084 legacy valid directions, 12 approved legacy
+projection losses and 176 invalid-source directions rejected. The earlier broad
+run was discarded after the RPC validation audit finding; every suite was rerun.
+Documentation and astparser checks pass. The 62-check audit records 18 Pass /
+44 N/A / zero Fail; no C++ changed.
+
+See [evidence](body-parts-evidence.md), [validation](P6-15-validation.json) and
+[audit](audits/P6-15-body-parts.md). The user approved the standard omitted-parts default (all message parts); its
+implementation and remaining concrete binding requirements stay open. A separate reduced probe
+confirms unsupported notification/solicit-response patterns currently reach
+standard binding construction; this is the next P6 validation increment.
+P6 is not complete and P7–P9 remain open.

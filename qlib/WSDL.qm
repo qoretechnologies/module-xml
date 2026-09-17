@@ -103,6 +103,8 @@ module WSDL {
     @section wsdlrelnotes WSDL Module Release Notes
 
     @subsection wsdl_0_5_8 WSDL v0.5.8
+    - explicit SOAP body part selections preserve empty lists and XML whitespace, validate part references,
+      and apply to RPC decoding; declared fault detail uses its own message parts
     - overloaded operations retain every effective input/output signature; binding labels select the intended
       declaration, and ambiguous or mismatched selections reject instead of overwriting or choosing another operation
     - operation metadata retains abstract message order and exposes WSDL default labels independently of RPC names;
@@ -29705,7 +29707,7 @@ public class WSMessage inherits WSDL::XsdNamedData {
 
         if (args.size() == 1) {
             string fk = args.firstKey();
-            if (!parts) {
+            if (!exists parts) {
                 /*
                 for backwards compatibility with a single argument, just when parts is NOTHING which is used for body
                 serialization when is no explicit part name.
@@ -29829,14 +29831,24 @@ public class WSMessage inherits WSDL::XsdNamedData {
     /**
     @param mrh optional SOAP multi-reference lookup hash
     @param val keys are element names or part names for simple types
-    @param part if exists then deserialize only particular part
-    @return serialized data, keys are wsdl element names (optionally part name is also possible) and part names for simple types
+    @param part selected part names; NOTHING selects every part, an empty list selects none
+    @param ignore_unknown True to ignore unselected fields; by default this is True only when part is supplied
+    @throw SOAP-DESERIALIZATION-ERROR invalid values or unexpected fields when strict selection is requested
+    @throw WSDL-ERROR a selected part is unknown or repeated
+    @return converted values keyed by WSDL part name
+    @note A string still selects one part. SOAP bindings explicitly request strict selection.
+    @par Example
+    Decode only a partner's acknowledged item count with
+    message.deserializeRpc(NOTHING, {"accepted": 17}, ("accepted",), False).
     */
-    *hash<auto> deserializeRpc(*hash<auto> mrh, hash<auto> val, *string part) {
+    *hash<auto> deserializeRpc(*hash<auto> mrh, hash<auto> val, *softlist<string> part, *bool ignore_unknown) {
         #printf("DBG WSMessage::deserializeRpc() pmap: %y part: %y val: %y\n", pmap, part, val);
         hash<auto> ro();
 
         foreach string p in (part ?? keys pmap) {
+            if (!pmap.hasKey(p) || ro.hasKey(p)) {
+                throw WSDL_ERROR, sprintf("unknown or repeated RPC part %Y in message %Y", p, name);
+            }
             string k = getSerializedKey(p);
             bool present = val.hasKey(k);
             auto v = remove val{k};
@@ -29854,8 +29866,9 @@ public class WSMessage inherits WSDL::XsdNamedData {
 
         # issue #2902: ignore XML attributes
         remove val."^attributes^";
-        if (val && !exists part)
+        if (val && !(ignore_unknown ?? exists part)) {
             throw SOAP_DESERIALIZATION_ERROR, sprintf("additional keys %y included in %y message hash", val.keys(), name);
+        }
 
         # if there is only one argument, return it directly
         return ro;
@@ -30584,13 +30597,15 @@ public class SoapBinding inherits WSDL::OperationalBinding {
         *hash<auto> body;
         if (msg) {
             bool encoded = bmd.body.encoded;
+            # Fault detail belongs to its own message, not the ordinary output body selection.
+            *list<string> body_parts = fault ? NOTHING : bmd.body.parts;
             if (docstyle) {
                 # bmd.body.encoded == False = literal encoding
                 #printf("parts: %y, args: %y\n", bmd.body.parts, msg.args.keys());
-                body = msg.serializeDocument(bmd.body.parts, bmd, mpm, encoded, \val, fault);
+                body = msg.serializeDocument(body_parts, bmd, mpm, encoded, \val, fault);
             } else {
                 string mname = op.name + (request ? "" : "Response");
-                body = msg.serializeRpc(bmd.body.parts, bmd, mpm, mname, encoded, \val, fault);
+                body = msg.serializeRpc(body_parts, bmd, mpm, mname, encoded, \val, fault);
             }
             if (encoded) {
                 rh{soapenvEnvelope}."^attributes^"."xmlns:soapenc" = SOAP_ENCODING;
@@ -30975,7 +30990,7 @@ public class SoapBinding inherits WSDL::OperationalBinding {
                 XsdBase::removeNS2(\msgh);
                 msgh -= (".ns", "ns");
 
-                rv = msg.deserializeRpc(mrh, msgh);
+                rv = msg.deserializeRpc(mrh, msgh, bmd.body.parts, False);
             }
         }
 
@@ -31392,17 +31407,33 @@ public class BindingMessageBodyDescription inherits Serializable {
         #! namespace; "only applies to content not explicitly defined by the abstract types"
         *string ns;
 
-        #! indicates which parts appear somewhere within the SOAP Body portion of the message
-        *list<auto> parts;
+        #! Selected SOAP body part names; NOTHING means omitted, an empty list selects no parts
+        *list<string> parts;
     }
 
+    #! creates the body description and preserves explicit part selection
+    /** @param encoded True for encoded use, False for literal use
+        @param encodingStyle optional encoding-style URI list
+        @param ns optional namespace for the RPC wrapper
+        @param parts optional XML-whitespace-separated part names; an empty string selects no parts
+        @throw WSDL-ERROR a part name is repeated
+        @note Part references are checked against the selected operation message during binding construction.
+    */
     constructor(bool encoded, *string encodingStyle, *string ns, *string parts) {
         self.encoded = encoded;
         self.encodingStyle = encodingStyle;
         self.ns = ns;
-        # get a list of strings ignoring whitespace
-        if (parts.val())
-            self.parts = select (map trim($1), parts.split(" ")), $1.val();
+        if (exists parts) {
+            string normalized = XsdSimpleType::normalizeWhiteSpace(parts, "collapse");
+            self.parts = normalized ? normalized.split(" ") : ();
+            hash<string, bool> seen();
+            foreach string part in (self.parts) {
+                if (seen{part}) {
+                    throw WSDL_ERROR, sprintf("duplicate SOAP body part %Y", part);
+                }
+                seen{part} = True;
+            }
+        }
     }
 
     bool isMultipart() {
@@ -31593,15 +31624,15 @@ public class BindingMessageDescription inherits Serializable {
         @param msg the message bound to this description
 
         @return the names of the parts appearing in the SOAP body, or \c NOTHING if all parts of the message
-        appear in the body
+        appear in the body; an explicit empty selection returns an empty list
 
         @see https://www.w3.org/TR/wsdl#_soap:body
 
         @since %WSDL 0.5.8
     */
     *list<string> getBodyPartNames(WSMessage msg) {
-        if (body.parts) {
-            return map $1, body.parts;
+        if (exists body.parts) {
+            return body.parts;
         }
         # parts bound to a header of the same message do not appear in the body
         hash<string, bool> hdr_parts;
@@ -31866,6 +31897,13 @@ public class Binding inherits WSDL::XsdNamedData {
                         }
                     }
                     delete op{io}.multipartRelated;
+                }
+
+                foreach string part in (bmd.body.parts) {
+                    if (!selected{io}.pmap.hasKey(part)) {
+                        throw WSDL_ERROR, sprintf("binding %Y for %s operation %Y selects unknown body part %Y",
+                            name, io, opname, part);
+                    }
                 }
 
                 if (exists op{io}.header) {

@@ -601,3 +601,9 @@ retain the required Body/wrapper structure. See
 [operation identity evidence](operation-identities-evidence.md). Explicit empty
 body-part selection, the remaining header/fault and interaction-pattern binding
 matrix, HTTP/MIME interoperability and P7–P9 remain open.
+
+P6-15 preserves explicit empty and ordered body-part selections, normalizes XML
+list whitespace, rejects invalid part references, applies selections to RPC
+decoding and keeps declared fault detail independent of ordinary output selection.
+See [body-part evidence](body-parts-evidence.md). The approved omitted-parts standard default, concrete header/fault and interaction-pattern binding rules, HTTP/MIME
+interoperability, pinned CXF replay and P7–P9 remain open.

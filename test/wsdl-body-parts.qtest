@@ -1,0 +1,264 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires ../qlib/WSDL.qm
+%requires ../qlib/SoapClient.qm
+%requires ../qlib/SoapHandler.qm
+%requires HttpServer
+%exec-class BodyPartsTest
+
+class BodyPartsTest inherits QUnit::Test {
+    constructor() : Test("Explicit SOAP body parts", "1.0") {
+        addTestCase("Omitted and explicitly empty selections stay distinct", \metadata());
+        addTestCase("Explicit empty bodies preserve native and retained values", \empty());
+        addTestCase("Empty selection does not infer a sole message argument", \singleEmpty());
+        addTestCase("One and multiple selected parts determine wire values", \subsets());
+        addTestCase("Unknown and duplicate selected parts reject during construction", \invalid());
+        addTestCase("Independent bodies reject missing and unselected parts", \negative());
+        addTestCase("Partial RPC conversion retains its public default and supports strict selection", \partialRpc());
+        addTestCase("Response body selection does not select declared fault parts", \faults());
+        addTestCase("Empty body with headers exchanges through the HTTP consumers", \http());
+        set_return_value(main());
+    }
+
+    private static string source(bool rpc, bool soap12, *string parts, bool headers = False) {
+        string xml = ReadOnlyFile::readTextFile(get_script_dir()
+            + "/wsdl-interop/regressions/body-parts/document.wsdl");
+        xml = replace(xml, ' parts="left right"', exists parts ? ' parts="' + parts + '"' : "");
+        if (rpc) {
+            xml = replace(xml, 'style="document"', 'style="rpc"');
+            xml = replace(replace(xml, 'element="t:Left"', 'type="xs:int"'),
+                'element="t:Right"', 'type="xs:int"');
+        }
+        if (headers) {
+            foreach string direction in ("input", "output") {
+                xml = replace(xml, '</w:' + direction + '>',
+                    '<s:header message="t:H" part="token" use="literal"/></w:' + direction + '>');
+            }
+        }
+        return soap12 ? replace(xml, SOAP_11_NS, SOAP_12_NS) : xml;
+    }
+
+    private metadata() {
+        foreach *string selection in (NOTHING, "", " \t\n\r ", " &#9;&#10;&#13; ", "right left", "right&#9;left") {
+            WebService ws(source(False, False, selection));
+            list<string> expected = selection && selection.startsWith("right") ? ("right", "left") : ();
+            foreach WSOperation op in (ws.getOperation("exchange"),
+                    Serializable::deserialize(ws.getOperation("exchange").serialize()),
+                    Serializable::deserialize(ws.serialize()).getOperation("exchange")) {
+                BindingMessageDescription description = op.getBinding().input;
+                if (!exists selection) {
+                    assertNothing(description.body.parts);
+                    assertNothing(description.getBodyPartNames(op.input));
+                } else {
+                    assertEq(expected, description.body.parts);
+                    assertEq(expected, description.getBodyPartNames(op.input));
+                }
+            }
+        }
+    }
+
+    private static string envelope(bool rpc, bool soap12, bool request, string contents) {
+        if (rpc) {
+            string name = request ? "exchange" : "exchangeResponse";
+            contents = '<r:' + name + ' xmlns:r="urn:wire">' + contents + '</r:' + name + '>';
+        }
+        return '<e:Envelope xmlns:e="' + (soap12 ? SOAP_12_ENV : SOAP_11_ENV)
+            + '"><e:Body>' + contents + '</e:Body></e:Envelope>';
+    }
+
+    private empty() {
+        foreach bool rpc in (False, True) {
+            foreach bool soap12 in (False, True) {
+                WebService ws(source(rpc, soap12, ""));
+                foreach WSOperation op in (ws.getOperation("exchange"),
+                        Serializable::deserialize(ws.serialize()).getOperation("exchange"),
+                        Serializable::deserialize(ws.getOperation("exchange").serialize())) {
+                    foreach bool request in (False, True) {
+                        hash<auto> wire = request ? op.serializeRequest({}) : op.serializeResponse({});
+                        hash<auto> parsed = parse_xml(envelope(rpc, soap12, request, ""));
+                        assertEq({}, request ? op.deserializeRequest(parsed) : op.deserializeResponse(parsed));
+                        assertEq({}, request ? op.deserializeRequest(parse_xml(wire.body))
+                            : op.deserializeResponse(parse_xml(wire.body)));
+                        assertFalse(wire.body.contains("Left"));
+                        assertFalse(wire.body.contains("left"));
+                        if (!rpc) {
+                            hash<SoapXmlMessageInfo> retained = request ? op.deserializeXmlRequest(wire.body)
+                                : op.deserializeXmlResponse(wire.body);
+                            assertEq({}, retained.body);
+                        }
+                        assertThrows("SOAP-SERIALIZATION-ERROR", sub() {
+                            if (request) {
+                                op.serializeRequest({"left": 1});
+                            } else {
+                                op.serializeResponse({"left": 1});
+                            }
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    private subsets() {
+        foreach bool rpc in (False, True) {
+            foreach bool soap12 in (False, True) {
+                foreach *string parts in (NOTHING, "left", "right left", "right&#9;left") {
+                    WebService ws(source(rpc, soap12, parts));
+                    foreach WSOperation op in (ws.getOperation("exchange"),
+                            Serializable::deserialize(ws.serialize()).getOperation("exchange")) {
+                        hash<auto> input = parts == "left" ? {"left": 17} : {"left": 17, "right": 29};
+                        auto expected = parts == "left" ? 17 : input;
+                        foreach bool request in (False, True) {
+                            hash<auto> wire = request ? op.serializeRequest(input) : op.serializeResponse(input);
+                            assertEq(expected, request ? op.deserializeRequest(parse_xml(wire.body))
+                                : op.deserializeResponse(parse_xml(wire.body)));
+                            string left = rpc ? "left" : "Left";
+                            string right = rpc ? "right" : "Right";
+                            if (parts == "left") {
+                                assertFalse(wire.body.contains(right));
+                            } else if (exists parts) {
+                                assertTrue(index(wire.body, right) < index(wire.body, left));
+                            } else {
+                                assertTrue(index(wire.body, left) < index(wire.body, right));
+                            }
+                            if (!rpc) {
+                                hash<SoapXmlMessageInfo> retained = request ? op.deserializeXmlRequest(wire.body)
+                                    : op.deserializeXmlResponse(wire.body);
+                                assertEq(parts == "left" ? ("left",) : exists parts ? ("right", "left")
+                                    : ("left", "right"), keys retained.body);
+                                assertEq("17", retained.body.left.getElementData()."^value^");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private singleEmpty() {
+        foreach bool rpc in (False, True) {
+            foreach bool soap12 in (False, True) {
+                string xml = source(rpc, soap12, "");
+                xml = replace(xml, rpc ? '<w:part name="right" type="xs:int"/>'
+                    : '<w:part name="right" element="t:Right"/>', "");
+                WebService ws(xml);
+                WSOperation op = ws.getOperation("exchange");
+                assertEq(1, op.input.pmap.size());
+                foreach auto value in (NOTHING, {}) {
+                    assertEq({}, op.deserializeRequest(parse_xml(op.serializeRequest(value).body)));
+                    assertEq({}, op.deserializeResponse(parse_xml(op.serializeResponse(value).body)));
+                }
+            }
+        }
+    }
+
+    private invalid() {
+        foreach bool rpc in (False, True) {
+            foreach string parts in ("missing", "left missing", "left left", "left :bad", "Left") {
+                assertThrows("WSDL-ERROR", sub() { new WebService(source(rpc, False, parts)); });
+            }
+        }
+    }
+
+    private negative() {
+        foreach bool rpc in (False, True) {
+            foreach bool soap12 in (False, True) {
+                foreach string parts in ("", "left") {
+                    WebService ws(source(rpc, soap12, parts));
+                    WSOperation op = ws.getOperation("exchange");
+                    foreach bool request in (False, True) {
+                        string value = rpc ? '<left>17</left><right>29</right>'
+                            : '<Left xmlns="urn:parts">17</Left><Right xmlns="urn:parts">29</Right>';
+                        hash<auto> parsed = parse_xml(envelope(rpc, soap12, request, value));
+                        assertThrows("SOAP-DESERIALIZATION-ERROR", sub() {
+                            if (request) {
+                                op.deserializeRequest(parsed);
+                            } else {
+                                op.deserializeResponse(parsed);
+                            }
+                        });
+                        if (parts == "left") {
+                            hash<auto> missing = parse_xml(envelope(rpc, soap12, request, ""));
+                            assertThrows("SOAP-DESERIALIZATION-ERROR", sub() {
+                                if (request) {
+                                    op.deserializeRequest(missing);
+                                } else {
+                                    op.deserializeResponse(missing);
+                                }
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private partialRpc() {
+        WebService ws(source(True, False, "left"));
+        WSMessage msg = ws.getMessage("M");
+        assertEq({"left": 17}, msg.deserializeRpc(NOTHING, {"left": 17, "right": 29}, "left"));
+        assertEq({"left": 17}, msg.deserializeRpc(NOTHING, {"left": 17}, ("left",), False));
+        assertThrows("SOAP-DESERIALIZATION-ERROR", \msg.deserializeRpc(),
+            (NOTHING, {"left": 17, "right": 29}, ("left",), False));
+        assertThrows("WSDL-ERROR", \msg.deserializeRpc(), (NOTHING, {"missing": 17}, ("missing",), False));
+        assertThrows("WSDL-ERROR", \msg.deserializeRpc(), (NOTHING, {"left": 17}, ("left", "left"), False));
+    }
+
+    private http() {
+        foreach bool rpc in (False, True) {
+            foreach bool soap12 in (False, True) {
+                WebService ws = Serializable::deserialize(new WebService(source(rpc, soap12, "", True)).serialize());
+                HttpServer server();
+                on_exit server.stop();
+                SoapHandler handler(new PermissiveAuthenticator());
+                server.setDefaultHandler("parts", handler);
+                Queue received();
+                code<auto(hash<auto>, auto)> callback = auto sub(hash<auto> cx, auto value) {
+                    received.push(value);
+                    return {"H": {"token": value.H.token + 1}};
+                };
+                handler.addMethod(ws, ws.getBindingOperation("B", "exchange"), callback, NOTHING,
+                    NOTHING, NOTHING, "S", NOTHING, NOTHING, "B");
+                server.addListener(0);
+                SoapClient client({"wsdl": ws, "service": "S", "port": "Endpoint",
+                    "url": sprintf("http://127.0.0.1:%d/parts", server.getListenerInfo(0).port), "timeout": 30000});
+                hash<auto> info;
+                assertEq({"H": {"token": 42}}, client.callOperation("exchange", {"H": {"token": 41}}, NOTHING, \info));
+                assertEq({"H": {"token": 41}}, received.get(30000));
+                assertFalse(info."request-body".contains("Left"));
+                assertFalse(info."response-body".contains("Right"));
+            }
+        }
+    }
+
+    private faults() {
+        foreach bool rpc in (False, True) {
+            foreach bool soap12 in (False, True) {
+                foreach string parts in ("", "left") {
+                    string xml = source(rpc, soap12, parts);
+                    xml = replace(xml, '</xs:schema>', '<xs:element name="Error" type="xs:int"/></xs:schema>');
+                    xml = replace(xml, '<w:portType', '<w:message name="F"><w:part name="error"'
+                        + ' element="t:Error"/></w:message><w:portType');
+                    xml = replace(xml, '<w:output message="t:M"/>', '<w:output message="t:M"/>'
+                        + '<w:fault name="Rejected" message="t:F"/>');
+                    xml = replace(xml, '</w:output>', '</w:output><w:fault name="Rejected">'
+                        + '<s:fault name="Rejected" use="literal"/></w:fault>');
+                    WebService ws(xml);
+                    foreach WSOperation op in (ws.getOperation("exchange"),
+                            Serializable::deserialize(ws.serialize()).getOperation("exchange")) {
+                        hash<auto> wire = op.serializeFault("Rejected", "invalid request", {"Error": 71});
+                        string env = soap12 ? SOAP_12_ENV : SOAP_11_ENV;
+                        hash<auto> expanded = XsdBase::expandElementNamespaces(parse_xml(wire.body));
+                        hash<auto> fault = expanded{'{' + env + '}Envelope'}{'{' + env + '}Body'}{'{' + env + '}Fault'};
+                        hash<auto> detail = fault{soap12 ? '{' + env + '}Detail' : '{}detail'};
+                        assertEq("71", detail{'{urn:parts}Error'});
+                        assertThrows("SOAP-SERVER-FAULT-RESPONSE", \op.deserializeResponse(), (parse_xml(wire.body),));
+                    }
+                }
+            }
+        }
+    }
+}

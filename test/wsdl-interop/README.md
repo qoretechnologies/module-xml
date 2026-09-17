@@ -2255,3 +2255,13 @@ SOAP 1.1/1.2 calls. `test_wsdl_operations.py` independently checks WSDL4J select
 and pinned schema grammar. See [evidence](operation-identities-evidence.md),
 [validation](P6-14-validation.json), [audit](audits/P6-14-operation-identities.md)
 and [durable operation design](../../design/wsdl-component-references.md).
+
+## Explicit SOAP body-part selections (P6-15)
+
+`test/wsdl-body-parts.qtest` covers omitted/empty selections, XML whitespace,
+subsets/order, invalid names and values, strict RPC decoding, saved graphs,
+independent fault detail and header-only HTTP calls. `test_wsdl_body_parts.py`
+uses pinned WSDL4J and Xerces, retaining the WSDL4J tokenizer limitation as a
+separate observation. See [evidence](body-parts-evidence.md),
+[validation](P6-15-validation.json), [audit](audits/P6-15-body-parts.md) and
+[durable body-part design](../../design/wsdl-body-parts.md).
