@@ -64,3 +64,26 @@ retain the same mapping. Retained XML fragment markers also include that identit
 to prevent distinct header fragments from replacing each other during assembly.
 `test/wsdl-header-identities.qtest` covers namespace collisions in both directions,
 SOAP versions, document/RPC bindings, native/retained values and local consumers.
+
+Concrete header descriptions retain their own `ns` and `encodingStyle` alongside
+message, part and use. Encoded parts must reference types. The supported explicit
+encoding style is `SOAP_ENCODING`; absent encoding style uses the same codec.
+Unsupported explicit encodings reject at construction and saved-graph loading.
+The encoded accessor uses the supplied binding namespace and part name,
+independently of the body and operation style. Each encoded header block carries
+its encodingStyle. Decoding matches its expanded accessor name and validates and
+consumes that block's SOAP encodingStyle before applying the schema type; ordinary
+attributes still undergo schema validation. Literal element headers keep their
+schema-defined names and treat namespace/encoding metadata as format hints.
+
+Old standalone header descriptors without optional namespace or encoding fields
+retain absent values when restored. A descriptor without an encoded namespace
+retains the existing unqualified accessor convention. Applications should supply
+an explicit namespace for type-based encoded header blocks.
+
+Source headers require message, part and valid use, a matching SOAP extension
+namespace and recognized unqualified attributes. Manual and saved descriptors
+validate part membership and encoded type/codec compatibility. These metadata
+checks do not make shared descriptors mutable during operation execution.
+`test/wsdl-header-metadata.qtest` covers independent metadata, schema conversion,
+manual/saved graphs, local namespace declarations and real HTTP consumers.

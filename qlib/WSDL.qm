@@ -121,6 +121,9 @@ module WSDL {
     @section wsdlrelnotes WSDL Module Release Notes
 
     @subsection wsdl_0_5_8 WSDL v0.5.8
+    - concrete SOAP headers retain namespace/encoding metadata independently of the body; encoded accessors
+      use their declared namespace and carry validated encodingStyle metadata on the header block
+    - malformed source/manual/saved header descriptions reject before use; unknown message parts raise WSDL-ERROR
     - imported SOAP header messages with colliding local names use expanded-name containers and independent
       native body/header maps; retained XML headers and saved operations preserve both values
     - concrete SOAP faults retain independent use, namespace and encoding metadata, validate names and single-part
@@ -30301,11 +30304,15 @@ public class WSMessage inherits WSDL::XsdNamedData {
     }
 
     #! check if pname is defined as message part
-    /** @return translated part name to element/type name
+    /** @param pname the WSDL part name to resolve
+        @return translated part name to element/type name
+        @throw WSDL-ERROR the message has no part with this name
+        @par Example
+        Resolve an imported session message's token argument with message.checkPart("token").
      */
     string checkPart(string pname) {
         if (!pmap{pname}) {
-            throw sprintf("%y is an unknown part in message %y, defined parts: %y", pname, name, keys pmap);
+            throw WSDL_ERROR, sprintf("%y is an unknown part in message %y, defined parts: %y", pname, name, keys pmap);
         }
         return pmap{pname};
     }
@@ -30849,6 +30856,14 @@ public class SoapBinding inherits WSDL::OperationalBinding {
                     h = serializeHeaderPart(hdr, field, \val);
                 }
                 if (h) {
+                    if (hdr.encoded) {
+                        string key = hdr.ns ? output_namespaces.getOutputNamespacePrefix(hdr.ns) + ":" + hdr.part
+                            : hdr.part;
+                        auto value = remove h{hdr.part};
+                        h{key} = value.typeCode() == NT_HASH ? value : {"^value^": value};
+                        h{key}."^attributes^"."soapenv:encodingStyle" = hdr.encodingStyle
+                            ? XsdSimpleType::normalizeWhiteSpace(hdr.encodingStyle, "collapse") : SOAP_ENCODING;
+                    }
                     foreach string key in (keys h) {
                         if (key.startsWith("^xml^")) {
                             auto fragment = h{key};
@@ -31054,6 +31069,30 @@ public class SoapBinding inherits WSDL::OperationalBinding {
         return result;
     }
 
+    private static auto prepareEncodedHeaderValue(auto value, string envelope_uri) {
+        if (value.typeCode() != NT_HASH) {
+            return value;
+        }
+        *hash<auto> attributes = value."^attributes^";
+        hash<auto> expanded = XsdBase::getExpandedAttributes(attributes);
+        string identity = type_qname(envelope_uri, "encodingStyle");
+        if (expanded.hasKey(identity)) {
+            if (expanded{identity}.typeCode() != NT_STRING
+                    || XsdSimpleType::normalizeWhiteSpace(expanded{identity}, "collapse") != SOAP_ENCODING) {
+                throw SOAP_DESERIALIZATION_ERROR, sprintf("unsupported SOAP header encoding style %Y", expanded{identity});
+            }
+            hash<string, string> namespaces = XsdBase::getAttributeNamespaces(attributes);
+            foreach string key in (keys attributes) {
+                list<string> name = key.split(":");
+                if (key == identity || (name.size() == 2 && name[1] == "encodingStyle"
+                        && namespaces{name[0]} == envelope_uri)) {
+                    remove value."^attributes^"{key};
+                }
+            }
+        }
+        return value;
+    }
+
     private static hash<string, BindingMessageHeaderDescription> matchHeaders(BindingMessageDescription description,
             list<string> names) {
         hash<string, list<int>> candidates();
@@ -31065,7 +31104,7 @@ public class SoapBinding inherits WSDL::OperationalBinding {
         int id = 0;
         foreach BindingMessageHeaderDescription header in (description.getHeaders()) {
             string key = string(id++);
-            foreach string identity in (header.msg.getDocumentPartNames(header.part)) {
+            foreach string identity in (header.getDocumentPartNames()) {
                 if (occurrences{identity}) {
                     candidates{key} += occurrences{identity};
                     declarations{key} = header;
@@ -31135,8 +31174,10 @@ public class SoapBinding inherits WSDL::OperationalBinding {
             foreach hash<string, auto> entry in (matchHeaders(bmd, header_names).pairIterator()) {
                 int index = int(entry.key);
                 BindingMessageHeaderDescription hdr = entry.value;
+                auto value = hdr.encoded ? prepareEncodedHeaderValue(header_values[index],
+                    isSoap12() ? SOAP_12_ENV : SOAP_11_ENV) : header_values[index];
                 hrv{header_keys{hdr.msg.getExpandedName()}} += hdr.msg.deserializeDocument(NOTHING,
-                    {header_names[index]: header_values[index]}, hdr.part, NOTHING, True);
+                    {hdr.encoded ? type_qname("", hdr.part) : header_names[index]: value}, hdr.part, NOTHING, True);
             }
             #printf("DEBUG: Deserialized SOAP headers: %N\n", hrv);
         }
@@ -31708,34 +31749,73 @@ public class BindingMessageHeaderDescription inherits Serializable {
         #! message part name
         string part;
 
-        #! required attribute
-        /** if @ref Qore::True "True", then use = \c "encoded" (each message part references an abstract type using the \c type attribute),
-            otherwise use = \c "literal" (each part references a concrete schema definition using either the \c element or \c type attribute)
-            */
+        #! True for SOAP-encoded values; False for literal schema values
         bool encoded;
 
         #! owned actual message, independent of the source service lifetime
         WSMessage msg;
+
+        #! concrete namespace of an encoded accessor, when supplied by the binding
+        *string ns;
+
+        #! selected encoding URI list, or a literal-format hint for literal use
+        *string encodingStyle;
     }
 
     private:internal deserializeMembers(hash<auto> members) {
-        if (!(members.msg instanceof WSMessage)) {
-            throw "DESERIALIZATION-ERROR", "a SOAP header binding requires its message";
+        if (!(members.msg instanceof WSMessage) || members.part.typeCode() != NT_STRING
+                || members.encoded.typeCode() != NT_BOOLEAN
+                || (exists members.ns && members.ns.typeCode() != NT_STRING)
+                || (exists members.encodingStyle && members.encodingStyle.typeCode() != NT_STRING)) {
+            throw "DESERIALIZATION-ERROR", "invalid SOAP header binding members";
         }
+        validate(members.msg, members.part, members.encoded, members.encodingStyle, "DESERIALIZATION-ERROR");
         msg = remove members.msg;
         self += members;
     }
 
-    #! creates the object
-    /*
-        @param part message part name
-        @param encoded if @ref Qore::True "True", then use = \c "encoded" (each message part references an abstract type using the \c type attribute), otherwise use = \c "literal" (each part references a concrete schema definition using either the \c element or \c type attribute)
-        @param msg the owned actual message, which remains valid after its source service leaves scope
+    #! creates an owned concrete header description
+    /** @param part message part name
+        @param encoded True for encoded use, False for literal use
+        @param msg the owned message, which remains valid after its source service leaves scope
+        @param namespace_uri the optional binding namespace of the encoded accessor
+        @param encoding_style optional encoding URI list; literal use retains this as a format hint
+        @throw WSDL-ERROR unknown part, element-based encoded part or unsupported encoded format
+        @note Descriptions are shared by operation handles; do not mutate them while bindings are in use.
+        @par Example
+        A type-based authentication token can use namespace_uri = "urn:session" and
+        encoding_style = SOAP_ENCODING independently of the operation's literal body.
     */
-    constructor(string part, bool encoded = False, WSMessage msg) {
+    constructor(string part, bool encoded = False, WSMessage msg, *string namespace_uri, *string encoding_style) {
+        validate(msg, part, encoded, encoding_style, WSDL_ERROR);
         self.part = part;
         self.encoded = encoded;
         self.msg = msg;
+        ns = namespace_uri;
+        encodingStyle = encoding_style;
+    }
+
+    private static validate(WSMessage message, string part, bool encoded, *string encoding_style, string error) {
+        if (!message.pmap.hasKey(part)) {
+            throw error, sprintf("SOAP header references unknown part %Y in message %Y", part, message.name);
+        }
+        if (encoded && !message.args{message.pmap{part}}.type) {
+            throw error, sprintf("encoded SOAP header part %Y must reference a type", part);
+        }
+        if (encoded && exists encoding_style
+                && XsdSimpleType::normalizeWhiteSpace(encoding_style, "collapse") != SOAP_ENCODING) {
+            throw error, sprintf("SOAP header part %Y selects unsupported encoding style %Y", part, encoding_style);
+        }
+    }
+
+    #! returns the possible wire element identities for this header
+    /** @return expanded accessor name for encoded use, or the literal part's declared element names
+        @note Literal namespace/encoding hints do not override element declarations.
+        @par Example
+        A type-based token with namespace "urn:session" returns ("{urn:session}token",).
+    */
+    list<string> getDocumentPartNames() {
+        return encoded ? (type_qname(ns ?? "", part),) : msg.getDocumentPartNames(part);
     }
 }
 
@@ -31963,6 +32043,8 @@ public class Binding inherits WSDL::XsdNamedData {
     private {
         *string component_key;
         const FaultAttributes = {"name": True, "use": True, "namespace": True, "encodingStyle": True};
+        const HeaderAttributes = {"message": True, "part": True, "use": True, "namespace": True,
+            "encodingStyle": True};
     }
 
     #! returns this binding's unambiguous component selection key
@@ -32192,6 +32274,18 @@ public class Binding inherits WSDL::XsdNamedData {
                     foreach hash<auto> hdr in (op{io}.header) {
                         *hash<auto> ma = hdr."^attributes^";
                         NamespacePrefixHelper header_scope(nsc, ma);
+                        string uri = hdr.ns ? nsc.getInputNamespaceUri(hdr.ns) : nsc.getDefaultNs() ?? "";
+                        if (!soapTransport || uri != (soap12_version ? SOAP_12_NS : SOAP_11_NS)) {
+                            throw WSDL_ERROR, sprintf("header in binding %Y has a mismatched extension namespace", name);
+                        }
+                        foreach string attribute in (keys ma) {
+                            if (attribute != "xmlns" && !attribute.contains(":") && !HeaderAttributes.hasKey(attribute)) {
+                                throw WSDL_ERROR, sprintf("header in binding %Y has unsupported attribute %Y", name, attribute);
+                            }
+                        }
+                        if (!ma.part) {
+                            throw WSDL_ERROR, sprintf("header in binding %Y requires a part attribute", name);
+                        }
 
                         if (!ma.message)
                             throw WSDL_ERROR, sprintf("%s binding %y for operation %y specifies a soap header element without a 'message' attribute (attr: %y)", io, name, opname, ma);
@@ -32209,7 +32303,7 @@ public class Binding inherits WSDL::XsdNamedData {
                             throw WSDL_ERROR, sprintf("binding %y for operation %y for the %y header of the %s message has an invalid 'use' attribute: %y", name, opname, ma.part, io, ma.use);
 
                         #printf("DEBUG: match part to message: %y, part: %y\n", msg.name, part);
-                        bmd.addHeader(new BindingMessageHeaderDescription(part, encoded, msg));
+                        bmd.addHeader(new BindingMessageHeaderDescription(part, encoded, msg, ma."namespace", ma.encodingStyle));
                     }
                     delete op{io}.header;
                 }

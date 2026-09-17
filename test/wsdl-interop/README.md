@@ -2294,3 +2294,13 @@ SOAP consumers. `test_wsdl_headers.py` resolves the same header declarations wit
 pinned WSDL4J. See [evidence](header-identities-evidence.md),
 [validation](P6-18-validation.json), [audit](audits/P6-18-header-identities.md) and
 [durable design](../../design/wsdl-soap-header-values.md).
+
+
+## Concrete SOAP header metadata (P6-19)
+
+`wsdl-header-metadata.qtest` covers independent namespace/encoding selection,
+literal hints, invalid declarations, saved/imported descriptors, complex values
+and real consumers. `test_wsdl_headers.py` independently observes the metadata
+with pinned WSDL4J. See [evidence](header-metadata-evidence.md),
+[validation](P6-19-validation.json), [audit](audits/P6-19-header-metadata.md) and
+[durable design](../../design/wsdl-soap-header-values.md).

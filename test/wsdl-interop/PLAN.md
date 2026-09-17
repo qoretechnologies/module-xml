@@ -626,3 +626,9 @@ P6-18 preserves colliding imported header message names through native and retai
 XML projections, saved graphs and consumers. See [header identity evidence](header-identities-evidence.md).
 Concrete header metadata/headerfault handling, typed fault consumption, remaining
 binding grammar, HTTP/MIME, pinned CXF replay and P7–P9 remain open.
+
+
+P6-19 retains concrete header namespace/encoding metadata and validates source,
+manual and saved descriptions. See [header metadata evidence](header-metadata-evidence.md).
+Headerfaults, typed fault consumption, full grammar, HTTP/MIME and CXF remain P6;
+P7 includes header qualification and inherited protocol metadata, followed by P8–P9.

@@ -57,6 +57,29 @@ class HeaderIdentitiesTests(unittest.TestCase):
                                   for direction in ("input", "output") for namespace in ("a", "b")],
                                  result.stdout.splitlines())
 
+    def test_independent_header_namespace_and_encoding_metadata(self):
+        for soap12 in (False, True):
+            with self.subTest(soap12=soap12):
+                raw = (ROOT / "regressions/fault-bindings/literal.wsdl").read_text()
+                raw = raw.replace('<w:part name="token" element="t:Token"/>',
+                                  '<w:part name="token" type="xs:int"/>')
+                encoding = "http://schemas.xmlsoap.org/soap/encoding/"
+                header = ('<s:header message="t:H" part="token" use="encoded" '
+                          'namespace="urn:header-wire" encodingStyle="' + encoding + '"/>')
+                for direction in ("input", "output"):
+                    raw = raw.replace('<w:' + direction + '><s:body', '<w:' + direction + '>' + header + '<s:body')
+                if soap12:
+                    raw = raw.replace(SOAP11, SOAP12)
+                path = Path(self.directory.name) / "metadata.wsdl"
+                path.write_text(raw)
+                result = subprocess.run(["java", "-cp", str(self.classes) + os.pathsep + str(self.jar),
+                                         "WsdlHeadersOracle", str(path), "--metadata"], capture_output=True,
+                                        text=True, timeout=30)
+                self.assertEqual(0, result.returncode, result.stderr)
+                self.assertEqual("", result.stderr)
+                self.assertEqual([direction + "\t{urn:parts}H\ttoken\tencoded\turn:header-wire\t[" + encoding + "]"
+                                  for direction in ("input", "output")], result.stdout.splitlines())
+
 
 if __name__ == "__main__":
     unittest.main()

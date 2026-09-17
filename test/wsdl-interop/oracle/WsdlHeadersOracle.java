@@ -12,21 +12,25 @@ import javax.wsdl.xml.WSDLReader;
 public final class WsdlHeadersOracle {
     private WsdlHeadersOracle() { }
 
-    private static void headers(String direction, List<?> extensions) {
+    private static void headers(String direction, List<?> extensions, boolean metadata) {
         for (Object extension : extensions) {
             if (extension instanceof SOAPHeader) {
                 SOAPHeader header = (SOAPHeader) extension;
-                System.out.println(direction + "\t" + header.getMessage() + "\t" + header.getPart());
+                System.out.println(direction + "\t" + header.getMessage() + "\t" + header.getPart()
+                    + (metadata ? "\t" + header.getUse() + "\t" + header.getNamespaceURI()
+                        + "\t" + header.getEncodingStyles() : ""));
             } else if (extension instanceof SOAP12Header) {
                 SOAP12Header header = (SOAP12Header) extension;
-                System.out.println(direction + "\t" + header.getMessage() + "\t" + header.getPart());
+                System.out.println(direction + "\t" + header.getMessage() + "\t" + header.getPart()
+                    + (metadata ? "\t" + header.getUse() + "\t" + header.getNamespaceURI()
+                        + "\t[" + header.getEncodingStyle() + "]" : ""));
             }
         }
     }
 
     public static void main(String[] args) throws Exception {
-        if (args.length != 1) {
-            throw new IllegalArgumentException("one local WSDL path is required");
+        if (args.length < 1 || args.length > 2 || (args.length == 2 && !"--metadata".equals(args[1]))) {
+            throw new IllegalArgumentException("one local WSDL path and optional --metadata are required");
         }
         System.setProperty("javax.xml.accessExternalDTD", "");
         System.setProperty("javax.xml.accessExternalSchema", "");
@@ -37,8 +41,8 @@ public final class WsdlHeadersOracle {
             Binding binding = (Binding) value;
             for (Object entry : binding.getBindingOperations()) {
                 BindingOperation operation = (BindingOperation) entry;
-                headers("input", operation.getBindingInput().getExtensibilityElements());
-                headers("output", operation.getBindingOutput().getExtensibilityElements());
+                headers("input", operation.getBindingInput().getExtensibilityElements(), args.length == 2);
+                headers("output", operation.getBindingOutput().getExtensibilityElements(), args.length == 2);
             }
         }
     }

@@ -9110,3 +9110,19 @@ reports are unchanged. Doxygen and astparser pass; audit: 18 Pass / 44 N/A / zer
 Fail. No C++ changes. See [evidence](header-identities-evidence.md),
 [validation](P6-18-validation.json) and [audit](audits/P6-18-header-identities.md).
 P6–P9 remain open, with concrete header metadata next.
+
+
+## P6-19: concrete SOAP header namespace and encoding metadata
+
+Header metadata now determines encoded accessor names and block-local
+encodingStyle independently of the body. Literal schema names remain authoritative.
+Malformed source/manual/saved metadata rejects; unknown parts raise WSDL-ERROR.
+
+The focused suite passes 8 cases / 352 assertions; the affected gate passes
+24 suites / 489 cases / 9,405 reported assertions. Existing SOAP goldens include
+block encoding metadata, and ownership fixtures now declare their auth parts
+without changing lifecycle assertions. All 16 corpus commands meet expected
+outcomes and six reports retain semantic results. Docs/parser checks pass;
+audit: 18 Pass / 44 N/A / zero Fail. See [evidence](header-metadata-evidence.md),
+[validation](P6-19-validation.json) and [audit](audits/P6-19-header-metadata.md).
+P6–P9 remain open; headerfault handling is next.
