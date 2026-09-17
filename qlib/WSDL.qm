@@ -78,6 +78,39 @@ module WSDL {
     - <a href="../../SoapClient/html/index.html">SoapClient user module</a>
     - <a href="../../SoapHandler/html/index.html">SoapHandler user module</a>
 
+    @section wsdl_soap_header_deserialization SOAP Header and Body Deserialization
+
+    When a document-style SOAP message is deserialized with @ref WSDL::WSOperation::deserializeRequest() or
+    @ref WSDL::WSOperation::deserializeResponse(), values from the SOAP body are keyed by part name, and values from
+    the SOAP header are returned in a hash keyed by the name of the message the header part is bound to.  The two are
+    combined as follows:
+    - if the message has no SOAP header values, and the body has a single part, then the value of that part is
+      returned directly
+    - if the body has a single part whose value is a hash, and none of the keys of that hash are the names of a
+      header message, then the body value is returned with the header value hashes added to it
+    - if a body part name is the name of a header message, then the body parts are returned under the name of the
+      message; if the header parts belong to the same message, then all parts of the message are returned together
+      under the name of the message
+    - otherwise the body parts are returned keyed by part name with the header value hashes added to them
+
+    Body values are never overwritten by header values.
+
+    @par Example
+    Given the following message from an Ericsson CAI3G WSDL where the header parts are bound to the same message as
+    the body part:
+    @code{.xml}
+<message name="GetResponse">
+    <part name="GetResponse" element="cai3g:GetResponse"/>
+    <part name="SessionId" element="cai3g:SessionId"/>
+</message>
+    @endcode
+    A response message with a \c SessionId header and a \c GetResponse body element is deserialized as follows:
+    @code{.py}
+hash<auto> rv = op.deserializeResponse(msg);
+# rv.MOAttributes: the values of the GetResponse body element
+# rv.GetResponse.SessionId: the SessionId header value
+    @endcode
+
     @section wsdlrelnotes WSDL Module Release Notes
 
     @subsection wsdl_0_5_7 WSDL v0.5.7
@@ -129,6 +162,11 @@ module WSDL {
       \c xs:normalizedString replaces every tab, newline, and carriage return with a space, and \c xs:token and
       every other built-in type additionally collapse runs of spaces and trim the value
       (<a href="https://github.com/qoretechnologies/qore/issues/5411">issue 5411</a>)
+    - fixed deserializing SOAP responses and requests where a SOAP header part is bound to the same message as the
+      body part and the body part has the same name as the message; the body value was silently replaced by the
+      header values; body values are also no longer overwritten by header values or discarded when they cannot be
+      merged with the header values
+      (<a href="https://github.com/qoretechnologies/qore/issues/5453">issue 5453</a>)
 
     @subsection wsdl_0_5_6 WSDL v0.5.6
     - fixed handling nested XSD model groups; elements declared in an \c xs:sequence, \c xs:choice, or \c xs:all
@@ -4919,8 +4957,10 @@ public class WSDL::WSOperation inherits WSDL::XsdNamedData {
     #! parses a hash representing a parsed XML request (parsed with @ref parse_xml() "parse_xml(XPF_PRESERVE_ORDER)") for the operation and returns the corresponding Qore data structure
     /** @param o the parsed SOAP or HTTP request with @ref WSDLLib::parseSOAPMessage() for the operation
         @param bname SOAP binding name, leave empty to use the first assigned binding
-        @return the Qore data structure corresponding to the request data. When SOAP header is deserialized according binding/input WSDL then all data are passed under subhash vales prefixed by message name
-        In case of HTTP binding the content type is matched against WSDL binding when wildcards are supported and current content type value is applied to "^attributes^"."^content-type^".
+        @return the Qore data structure corresponding to the request data; see @ref wsdl_soap_header_deserialization
+        for information on how SOAP header and body values are returned.  In case of HTTP binding the content type is
+        matched against WSDL binding when wildcards are supported and current content type value is applied to
+        \c "^attributes^"."^content-type^".
     */
     auto deserializeRequest(hash<auto> o, *string bname) {
         return getBinding(bname).deserializeMessage(self, o, True);
@@ -4929,8 +4969,10 @@ public class WSDL::WSOperation inherits WSDL::XsdNamedData {
     #! parses a hash representing a parsed XML response (parsed with @ref parse_xml() "parse_xml(XPF_PRESERVE_ORDER)") for the operation and returns the corresponding Qore data structure
     /** @param o the parsed SOAP or HTTP request with @ref WSDLLib::parseSOAPMessage() for the operation
         @param bname SOAP binding name, leave empty to use the first assigned binding
-        @return the Qore data structure corresponding to the response data. When SOAP header is deserialized according binding/output WSDL then all data are passed under subhash vales prefixed by message name
-        In case of HTTP binding the content type is matched against WSDL binding when wildcards are supported and current content type value is applied to "^attributes^"."^content-type^".
+        @return the Qore data structure corresponding to the response data; see @ref wsdl_soap_header_deserialization
+        for information on how SOAP header and body values are returned.  In case of HTTP binding the content type is
+        matched against WSDL binding when wildcards are supported and current content type value is applied to
+        \c "^attributes^"."^content-type^".
     */
     auto deserializeResponse(hash<auto> o, *string bname) {
         return getBinding(bname).deserializeMessage(self, o, False);
@@ -5790,15 +5832,21 @@ public class WSDL::SoapBinding inherits WSDL::OperationalBinding {
         if (exists hrv) {
             # for backwards compatibility with a flat hash when there was only argument
             # but we must be care of when the argument is a type (not element)
-            if (rv.size() == 1 && rv.typeCode() == NT_HASH && !exists hrv{rv.firstKey()} ) {
-                rv = rv.firstValue();
-            } else {
-                foreach string k in (keys hrv) {
-                    if (exists rv{k}) {
-                        # name conflict
-                        rv{msg.name} = rv;
-                        break;
-                    }
+            # issue #5453: the body value can only be flattened if its keys do not conflict with the keys of the
+            # header values, which are keyed by header message name
+            auto fv = rv.firstValue();
+            if (rv.size() == 1 && rv.typeCode() == NT_HASH
+                && (!exists fv || (fv.typeCode() == NT_HASH && !(select keys fv, hrv.hasKey($1))))) {
+                rv = fv;
+            } else if (rv.typeCode() == NT_HASH && (select keys rv, hrv.hasKey($1))) {
+                # name conflict: the body parts are returned under the message name
+                if (hrv.hasKey(msg.name)) {
+                    # issue #5453: the header parts are parts of the same message, and part names are unique in a
+                    # message, so all parts are returned together under the message name
+                    hrv{msg.name} += rv;
+                    rv = NOTHING;
+                } else {
+                    rv = {msg.name: rv};
                 }
             }
             rv += hrv;
