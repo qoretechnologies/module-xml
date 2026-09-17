@@ -620,3 +620,9 @@ associations and uses independent document-style detail serialization. See
 [fault binding evidence](fault-bindings-evidence.md). Headerfault handling, typed
 fault consumption, the remaining HTTP/MIME and pinned CXF matrix, and P7–P9
 remain open.
+
+
+P6-18 preserves colliding imported header message names through native and retained
+XML projections, saved graphs and consumers. See [header identity evidence](header-identities-evidence.md).
+Concrete header metadata/headerfault handling, typed fault consumption, remaining
+binding grammar, HTTP/MIME, pinned CXF replay and P7–P9 remain open.

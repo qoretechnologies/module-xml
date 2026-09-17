@@ -1,0 +1,186 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires xml
+%requires ../qlib/WSDL.qm
+%requires ../qlib/SoapClient.qm
+%requires ../qlib/SoapHandler.qm
+%requires ../qlib/SoapDataProvider
+%requires HttpServer
+%exec-class HeaderIdentityTest
+
+class HeaderIdentityTest inherits QUnit::Test {
+    constructor() : Test("Imported SOAP header value identities", "1.0") {
+        addTestCase("Both imported headers survive native and retained XML projections", \values());
+        addTestCase("RPC and saved operation graphs preserve header identities", \rpc());
+        addTestCase("Missing and malformed header values preserve stable binding keys", \boundaries());
+        addTestCase("Body messages participate in local-name disambiguation", \bodyCollision());
+        addTestCase("Unique and repeated header messages retain short names", \unique());
+        addTestCase("Multiple parts in one qualified header container survive incremental consumption", \multiple());
+        addTestCase("Zero-part bodies and renamed XML prefixes preserve header identities", \empty());
+        addTestCase("SOAP client handler and provider exchange colliding header names", \http());
+        set_return_value(main());
+    }
+    private static string fixture(string name) {
+        return ReadOnlyFile::readTextFile(get_script_dir() + "/wsdl-interop/regressions/header-identities/" + name + ".wsdl");
+    }
+    private static WebService service(bool soap12 = False, bool rpc = False, *string root, *string imported_a) {
+        string source = root ?? fixture("root");
+        if (soap12) {
+            source = replace(source, SOAP_11_NS, SOAP_12_NS);
+        }
+        if (rpc) {
+            source = replace(source, 'style="document"', 'style="rpc"');
+        }
+        return new WebService(source, {"document_location": "https://example.invalid/root.wsdl", "async_only": True,
+            "xsd_cache": {"https://example.invalid/a.wsdl": imported_a ?? fixture("a"), "https://example.invalid/b.wsdl": fixture("b")}});
+    }
+    private static string envelope(bool soap12, bool second = True, bool first = True) {
+        return "<s:Envelope xmlns:s='" + (soap12 ? SOAP_12_ENV : SOAP_11_ENV)
+            + "' xmlns:a='urn:header:a' xmlns:b='urn:header:b' xmlns:t='urn:header:root'><s:Header>"
+            + (first ? "<a:Token>11</a:Token>" : "") + (second ? "<b:Token>22</b:Token>" : "")
+            + "</s:Header><s:Body><t:Body>33</t:Body></s:Body></s:Envelope>";
+    }
+    private static hash<auto> expected() {
+        return {"^body^": {"body": 33}, "^headers^": {"{urn:header:a}H": {"token": 11}, "{urn:header:b}H": {"token": 22}}};
+    }
+    private assertWire(string wire, bool soap12) {
+        string env = soap12 ? SOAP_12_ENV : SOAP_11_ENV;
+        hash<auto> data = XsdBase::expandElementNamespaces(parse_xml(wire)){'{' + env + '}Envelope'}{'{' + env + '}Header'};
+        assertEq("11", data{'{urn:header:a}Token'}."^value^" ?? data{'{urn:header:a}Token'});
+        assertEq("22", data{'{urn:header:b}Token'}."^value^" ?? data{'{urn:header:b}Token'});
+    }
+    private values() {
+        foreach bool soap12 in (False, True) {
+            WebService ws = service(soap12);
+            foreach WSOperation op in (ws.getOperation("exchange"), Serializable::deserialize(ws.serialize()).getOperation("exchange"),
+                    Serializable::deserialize(ws.getOperation("exchange").serialize())) {
+                assertEq("{urn:header:root}M", op.input.getExpandedName());
+                foreach bool request in (False, True) {
+                    string wire = envelope(soap12);
+                    hash<auto> decoded = request ? op.deserializeRequest(parse_xml(wire)) : op.deserializeResponse(parse_xml(wire));
+                    assertEq(expected(), decoded);
+                    hash<auto> serialized = request ? op.serializeRequest(decoded) : op.serializeResponse(decoded);
+                    assertWire(serialized.body, soap12);
+                    assertEq(decoded, request ? op.deserializeRequest(parse_xml(serialized.body)) : op.deserializeResponse(parse_xml(serialized.body)));
+                    hash<SoapXmlMessageInfo> retained = request ? op.deserializeXmlRequest(wire) : op.deserializeXmlResponse(wire);
+                    assertEq(("{urn:header:a}H", "{urn:header:b}H"), sort(keys retained.headers));
+                    assertEq("{urn:header:a}Token", retained.headers{"{urn:header:a}H"}.token.getExpandedName());
+                    assertEq("{urn:header:b}Token", retained.headers{"{urn:header:b}H"}.token.getExpandedName());
+                    hash<auto> value = {"^body^": retained.body, "^headers^": retained.headers};
+                    serialized = request ? op.serializeRequest(value) : op.serializeResponse(value);
+                    assertWire(serialized.body, soap12);
+                    assertEq(expected(), request ? op.deserializeRequest(parse_xml(serialized.body)) : op.deserializeResponse(parse_xml(serialized.body)));
+                }
+            }
+        }
+    }
+    private rpc() {
+        foreach bool soap12 in (False, True) {
+            WSOperation op = Serializable::deserialize(service(soap12, True).getOperation("exchange").serialize());
+            foreach bool request in (False, True) {
+                hash<auto> wire = request ? op.serializeRequest(expected()) : op.serializeResponse(expected());
+                assertWire(wire.body, soap12);
+                assertEq(expected(), request ? op.deserializeRequest(parse_xml(wire.body)) : op.deserializeResponse(parse_xml(wire.body)));
+            }
+        }
+    }
+    private boundaries() {
+        WSOperation op = service().getOperation("exchange");
+        assertEq({"^body^": {"body": 33}, "^headers^": {"{urn:header:a}H": {"token": 11}}},
+            op.deserializeRequest(parse_xml(envelope(False, False))));
+        assertEq({"^body^": {"body": 33}, "^headers^": {"{urn:header:b}H": {"token": 22}}},
+            op.deserializeRequest(parse_xml(envelope(False, True, False))));
+        assertEq(33, op.deserializeRequest(parse_xml(envelope(False, False, False))));
+        foreach hash<auto> headers in ({"H": {"token": 11}}, {"token": 11}, {"{urn:header:a}H": 11},
+                {"{urn:header:a}H": {"token": "invalid"}}, {"{urn:header:a}H": {"unknown": 11}}) {
+            assertThrows("SOAP-SERIALIZATION-ERROR", \op.serializeRequest(), ({"body": 33}, headers));
+        }
+        assertThrows("SOAP-DESERIALIZATION-ERROR", \op.deserializeRequest(),
+            (parse_xml(replace(envelope(False), "<a:Token>11</a:Token>", "<a:Token>11</a:Token><a:Token>12</a:Token>")),));
+        assertThrows("SOAP-DESERIALIZATION-ERROR", \op.deserializeRequest(),
+            (parse_xml(replace(envelope(False), ">22<", ">invalid<")),));
+        assertWire(op.serializeRequest(expected()).body, False);
+    }
+    private bodyCollision() {
+        string root = replace(fixture("root"), 'name="M"', 'name="H"');
+        root = replace(root, 'message="t:M"', 'message="t:H"');
+        root = replace(root, '<s:header message="b:H" part="token" use="literal"/>', "");
+        WSOperation op = service(False, False, root).getOperation("exchange");
+        hash<auto> value = {"^body^": {"body": 33}, "^headers^": {"{urn:header:a}H": {"token": 11}}};
+        assertEq(value, op.deserializeRequest(parse_xml(envelope(False, False))));
+        assertEq(value, op.deserializeRequest(parse_xml(op.serializeRequest(value).body)));
+    }
+    private unique() {
+        string root = replace(fixture("root"), '<s:header message="b:H" part="token" use="literal"/>', "");
+        WSOperation op = service(False, False, root).getOperation("exchange");
+        hash<auto> value = {"body": 33, "H": {"token": 11}};
+        assertEq(value, op.deserializeRequest(parse_xml(envelope(False, False))));
+        assertEq(value, op.deserializeRequest(parse_xml(op.serializeRequest(value).body)));
+        BindingMessageDescription description();
+        BindingMessageHeaderDescription header("token", False, service().messages{"{urn:header:a}H"});
+        description.addHeader(header);
+        description.addHeader(header);
+        assertEq({"{urn:header:a}H": "H"}, description.getHeaderMessageKeys());
+    }
+    private multiple() {
+        string root = replace(fixture("root"), '<s:header message="a:H" part="token" use="literal"/>',
+            '<s:header message="a:H" part="token" use="literal"/><s:header message="a:H" part="other" use="literal"/>');
+        string imported = replace(fixture("a"), '<x:element name="Token" type="x:int"/>',
+            '<x:element name="Token" type="x:int"/><x:element name="Other" type="x:int"/>');
+        imported = replace(imported, '<w:part name="token" element="t:Token"/>',
+            '<w:part name="token" element="t:Token"/><w:part name="other" element="t:Other"/>');
+        foreach bool soap12 in (False, True) {
+            WSOperation op = service(soap12, False, root, imported).getOperation("exchange");
+            hash<auto> value = expected();
+            value."^headers^"{"{urn:header:a}H"}.other = 44;
+            string wire = replace(envelope(soap12), '</a:Token>', '</a:Token><a:Other>44</a:Other>');
+            assertEq(value, op.deserializeRequest(parse_xml(wire)));
+            assertEq(value, op.deserializeRequest(parse_xml(op.serializeRequest(value).body)));
+            assertEq(value, op.deserializeResponse(parse_xml(op.serializeResponse(value).body)));
+            hash<SoapXmlMessageInfo> retained = op.deserializeXmlRequest(wire);
+            assertEq(("other", "token"), sort(keys retained.headers{"{urn:header:a}H"}));
+            assertEq(value, op.deserializeRequest(parse_xml(op.serializeRequest(
+                {"^body^": retained.body, "^headers^": retained.headers}).body)));
+        }
+    }
+    private empty() {
+        string root = replace(fixture("root"), '<w:part name="body" element="t:Body"/>', "");
+        foreach bool soap12 in (False, True) {
+            WSOperation op = service(soap12, False, root).getOperation("exchange");
+            hash<auto> value = expected();
+            value."^body^" = {};
+            string wire = replace(envelope(soap12), '<t:Body>33</t:Body>', "");
+            wire = replace(replace(wire, "xmlns:a=", "xmlns:c="), "a:Token", "c:Token");
+            assertEq(value, op.deserializeRequest(parse_xml(wire)));
+            assertEq(value, op.deserializeResponse(parse_xml(op.serializeResponse(value).body)));
+            assertEq(value, op.deserializeRequest(parse_xml(op.serializeRequest(value).body)));
+            assertEq({}, op.deserializeXmlRequest(wire).body);
+        }
+    }
+    private http() {
+        foreach bool soap12 in (False, True) {
+            WebService ws = Serializable::deserialize(service(soap12).serialize());
+            HttpServer server();
+            on_exit server.stop();
+            SoapHandler handler(new PermissiveAuthenticator());
+            server.setDefaultHandler("identities", handler);
+            Queue received();
+            code<auto(hash<auto>, auto)> callback = auto sub(hash<auto> cx, auto value) {
+                received.push(value);
+                return value;
+            };
+            handler.addMethod(ws, ws.getOperation("exchange"), callback, NOTHING, NOTHING, NOTHING, "S", NOTHING, NOTHING, "B");
+            server.addListener(0);
+            SoapClient client({"wsdl": ws, "service": "S", "port": "Endpoint",
+                "url": sprintf("http://127.0.0.1:%d/identities", server.getListenerInfo(0).port), "timeout": 30000});
+            assertEq(expected(), client.callOperation("exchange", expected()));
+            assertEq(expected(), received.get(30000));
+            SoapRequestDataProvider provider(ws, client, ws.getOperation("exchange"));
+            assertEq(expected(), provider.doRequest(expected()));
+            assertEq(expected(), received.get(30000));
+        }
+    }
+}

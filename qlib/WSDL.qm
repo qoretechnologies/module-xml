@@ -121,6 +121,8 @@ module WSDL {
     @section wsdlrelnotes WSDL Module Release Notes
 
     @subsection wsdl_0_5_8 WSDL v0.5.8
+    - imported SOAP header messages with colliding local names use expanded-name containers and independent
+      native body/header maps; retained XML headers and saved operations preserve both values
     - concrete SOAP faults retain independent use, namespace and encoding metadata, validate names and single-part
       messages, and serialize document-style detail independently of the normal response binding
     - named faults must belong to the selected binding; old standalone bindings without fault metadata require
@@ -29652,6 +29654,15 @@ public class WSMessage inherits WSDL::XsdNamedData {
         self += members;
     }
 
+    #! returns the namespace-expanded identity of this WSDL message
+    /** @return the message identity in `{namespace-uri}local-name` form
+        @par Example
+        Imported messages named Session are distinguished by identities such as `{urn:billing}Session`.
+    */
+    string getExpandedName() {
+        return type_qname(nsc.getTargetNamespaceUri() ?? "", name);
+    }
+
     #! returns native fields with schema instance checks for the message parts
     /** @param preserve_types True to accept native selected-type wrappers, with declared and wrapper metadata;
         False retains the ordinary native field types
@@ -29815,6 +29826,9 @@ public class WSMessage inherits WSDL::XsdNamedData {
                         foreach BindingMessageHeaderDescription hdr in (msginfo.getHeaders()) {
                             reserved{hdr.msg.name} = reserved{hdr.part} = reserved{hdr.msg.pmap{hdr.part}} = True;
                         }
+                        foreach string field in (msginfo.getHeaderMessageKeys(self).iterator()) {
+                            reserved{field} = True;
+                        }
                     }
                     if (h.typeCode() == NT_HASH && h.hasKey(name)) {
                         val = getValueFromHash(args{k}.element, \h{name}, True, reserved);
@@ -29844,7 +29858,7 @@ public class WSMessage inherits WSDL::XsdNamedData {
                 XsdSoapXmlHelper::mergeContext(\xml_attributes, cast<XsdXmlValue>(val).getInheritedXmlAttributes());
                 # Headers are serialized in separate calls and merged, so the marker must include
                 # both message and part identity rather than a per-call numeric index.
-                rh{sprintf("^xml^%d:%s:%s", name.length(), name, p)} = XsdQNameOutputScope::retains(output_namespaces)
+                rh{sprintf("^xml^%d:%s:%s", getExpandedName().length(), getExpandedName(), p)} = XsdQNameOutputScope::retains(output_namespaces)
                     ? new XsdQNameXmlFragment(cast<XsdXmlValue>(val), native) : cast<XsdXmlValue>(val).getXml();
                 push emitted_parts, p;
                 push emitted_names, cast<XsdXmlValue>(val).getExpandedName();
@@ -30817,6 +30831,7 @@ public class SoapBinding inherits WSDL::OperationalBinding {
         }
 
         *hash<string, string> header_xml_attributes;
+        hash<string, string> header_keys = bmd.getHeaderMessageKeys(msg);
         if (bmd.hasHeaders()) {
             #printf("DEBUG: %s header: %y\n", io, header);
             #printf("DEBUG: doc: %y bhdr: %N\n", docstyle, (map $1.("message", "part"), bmd.getHeaders()));
@@ -30826,11 +30841,12 @@ public class SoapBinding inherits WSDL::OperationalBinding {
                 #printf("DEBUG: hdr: %y (%y)\n", hdr.("encoded", "part"), hdr.msg.args.keys());
                 # only style="document" is assumed since headers do not contain parameters.
                 *hash<auto> h;
-                if (header)
-                    h = hdr.msg.serializeDocument(hdr.part, NOTHING, NOTHING, hdr.encoded, \header, False);
+                string field = header_keys{hdr.msg.getExpandedName()};
+                if (header) {
+                    h = serializeHeaderPart(hdr, field, \header);
+                }
                 if (!h && val) {
-                    # header data provided in val ?
-                    h = hdr.msg.serializeDocument(hdr.part, NOTHING, NOTHING, hdr.encoded, \val, False);
+                    h = serializeHeaderPart(hdr, field, \val);
                 }
                 if (h) {
                     foreach string key in (keys h) {
@@ -30996,6 +31012,7 @@ public class SoapBinding inherits WSDL::OperationalBinding {
                 throw "WSDL-BINDING-ERROR", "retained XML headers must be literal";
             }
         }
+        hash<string, string> header_keys = description.getHeaderMessageKeys(message);
         hash<string, BindingMessageHeaderDescription> selected_headers = matchHeaders(description,
             map $1.getExpandedName(), header_values);
         for (int index = 0; index < header_values.size(); ++index) {
@@ -31009,7 +31026,30 @@ public class SoapBinding inherits WSDL::OperationalBinding {
                 continue;
             }
             validateXmlPart(op, header.msg, header.part, value);
-            result.headers{header.msg.name}{header.part} = value;
+            result.headers{header_keys{header.msg.getExpandedName()}}{header.part} = value;
+        }
+        return result;
+    }
+
+    private static *hash<auto> serializeHeaderPart(BindingMessageHeaderDescription header, string field,
+            reference<auto> values) {
+        if (field == header.msg.name) {
+            return header.msg.serializeDocument(header.part, NOTHING, NOTHING, header.encoded, \values, False);
+        }
+        if (values.typeCode() != NT_HASH || !values.hasKey(field)) {
+            return;
+        }
+        if (values{field}.typeCode() != NT_HASH) {
+            throw SOAP_SERIALIZATION_ERROR, sprintf("header message %Y requires a part-value hash", field);
+        }
+        # Isolate the qualified container without mutating the shared WSMessage or consuming another message.
+        hash<auto> selected = {header.msg.name: values{field}};
+        *hash<auto> result = header.msg.serializeDocument(header.part, NOTHING, NOTHING, header.encoded,
+            \selected, False);
+        if (selected.hasKey(header.msg.name)) {
+            values{field} = selected{header.msg.name};
+        } else {
+            remove values{field};
         }
         return result;
     }
@@ -31068,6 +31108,7 @@ public class SoapBinding inherits WSDL::OperationalBinding {
         hash<auto> hrv;
 
         *BindingMessageDescription bmd = self{io};
+        hash<string, string> header_keys = bmd ? bmd.getHeaderMessageKeys(op{io}) : {};
 
         if (bmd && bmd.hasHeaders()) {
             XsdQNameNamespaceScope header_scope(o.Envelope.Header."^attributes^");
@@ -31094,7 +31135,7 @@ public class SoapBinding inherits WSDL::OperationalBinding {
             foreach hash<string, auto> entry in (matchHeaders(bmd, header_names).pairIterator()) {
                 int index = int(entry.key);
                 BindingMessageHeaderDescription hdr = entry.value;
-                hrv{hdr.msg.name} += hdr.msg.deserializeDocument(NOTHING,
+                hrv{header_keys{hdr.msg.getExpandedName()}} += hdr.msg.deserializeDocument(NOTHING,
                     {header_names[index]: header_values[index]}, hdr.part, NOTHING, True);
             }
             #printf("DEBUG: Deserialized SOAP headers: %N\n", hrv);
@@ -31198,6 +31239,11 @@ public class SoapBinding inherits WSDL::OperationalBinding {
         }
 
         if (exists hrv) {
+            foreach BindingMessageHeaderDescription header in (bmd.getHeaders()) {
+                if (header_keys{header.msg.getExpandedName()} != header.msg.name) {
+                    return {"^body^": rv ?? {}, "^headers^": hrv};
+                }
+            }
             if (rv.typeCode() == NT_HASH && hrv.hasKey(msg.name)
                     && (select keys rv, hrv{msg.name}.hasKey($1))) {
                 # Repeated part names in the two locations cannot use the legacy message-container
@@ -31827,6 +31873,30 @@ public class BindingMessageDescription inherits Serializable {
     #! returns a list of WSDL::BindingMessageHeaderDescription objects
     list<BindingMessageHeaderDescription> getHeaders() {
         return headers;
+    }
+
+    #! returns stable header container names for this message direction
+    /** @param message the body message, or NOTHING when no body message is selected
+        @return a map from expanded header message identities to value-container keys; local names are
+        retained only when unambiguous among the body and header messages
+        @note Names depend on the binding declarations, not on which optional headers appear in a payload.
+        @par Example
+        Two imported Session messages use `{urn:billing}Session` and `{urn:shipping}Session` containers.
+    */
+    hash<string, string> getHeaderMessageKeys(*WSMessage message) {
+        hash<string, hash<string, bool>> identities();
+        if (message) {
+            identities{message.name}{message.getExpandedName()} = True;
+        }
+        foreach BindingMessageHeaderDescription header in (headers) {
+            identities{header.msg.name}{header.msg.getExpandedName()} = True;
+        }
+        hash<string, string> fields();
+        foreach BindingMessageHeaderDescription header in (headers) {
+            string identity = header.msg.getExpandedName();
+            fields{identity} = identities{header.msg.name}.size() > 1 ? identity : header.msg.name;
+        }
+        return fields;
     }
 
     #! returns the names of the message parts that appear in the SOAP body

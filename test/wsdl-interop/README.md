@@ -2284,3 +2284,13 @@ fault serialization, saved/imported/manual metadata and actual SOAP consumers.
 [evidence](fault-bindings-evidence.md), [validation](P6-17-validation.json),
 [audit](audits/P6-17-fault-bindings.md) and
 [durable design](../../design/wsdl-fault-bindings.md).
+
+
+## Imported SOAP header value identities (P6-18)
+
+`wsdl-header-identities.qtest` covers colliding imported message/part names in both
+wire directions, native/retained XML, saved graphs, RPC, boundary cases and real
+SOAP consumers. `test_wsdl_headers.py` resolves the same header declarations with
+pinned WSDL4J. See [evidence](header-identities-evidence.md),
+[validation](P6-18-validation.json), [audit](audits/P6-18-header-identities.md) and
+[durable design](../../design/wsdl-soap-header-values.md).

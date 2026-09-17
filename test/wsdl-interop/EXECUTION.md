@@ -9095,3 +9095,18 @@ zero Fail; no C++ changes.
 See [evidence](fault-bindings-evidence.md), [validation](P6-17-validation.json)
 and [audit](audits/P6-17-fault-bindings.md). P6 remains open for headerfaults,
 typed fault consumption, HTTP/MIME and pinned CXF replay, followed by P7–P9.
+
+
+## P6-18: imported SOAP header value identities
+
+Distinct imported messages sharing local message/part names now retain separate
+namespace-qualified containers. Native maps, retained XML and output fragments
+keep both values; serialization does not mutate shared message descriptors.
+
+The new suite passes 8 cases / 181 assertions; the affected gate passes 23 suites /
+481 cases / 9,053 reported assertions. WSDL4J independently confirms imported
+header identities. All 16 corpus commands meet expected outcomes; six semantic
+reports are unchanged. Doxygen and astparser pass; audit: 18 Pass / 44 N/A / zero
+Fail. No C++ changes. See [evidence](header-identities-evidence.md),
+[validation](P6-18-validation.json) and [audit](audits/P6-18-header-identities.md).
+P6–P9 remain open, with concrete header metadata next.

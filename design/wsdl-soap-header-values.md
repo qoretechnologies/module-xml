@@ -4,8 +4,21 @@ Copyright (C) 2026 Qore Technologies, s.r.o.
 
 `SoapBinding` decodes body parts and bound headers independently before combining
 their native results. Body values use WSDL part names. Header values use a
-message-name container with part names inside it. The merge applies to requests
+message-name container with part names inside it. Container names are local names
+when unambiguous among the selected direction's body and header messages. When
+distinct message namespaces share a local name, affected headers use expanded
+`{namespace-uri}local-name` containers. The choice depends on the binding
+declarations, so omitting an optional header does not change the remaining keys. The merge applies to requests
 and responses, with document and RPC bindings.
+
+For example, imported `{urn:billing}Session` and `{urn:shipping}Session` messages
+with a `token` part retain separate containers even when only one header arrives.
+When any bound header needs an expanded container and at least one bound header
+is present, native decoding returns `{"^body^": <body part map>, "^headers^":
+<header message/part map>}`. Serialization requires expanded containers for these
+ambiguous header messages; it never guesses from a shared local name or flat part
+name. Body/header maps also pass through SoapClient, SoapHandler and the request
+DataProvider. Shared message descriptors remain unchanged during conversion.
 
 Without headers, a single body part returns its value directly. If the same
 message part is present in both locations, decoding returns exactly
@@ -43,3 +56,11 @@ their schema validation is changed by the native result shape.
 services, absent headers, empty/nil/scalar bodies, colliding names and selected
 wrappers across SOAP versions and directions. Client/server integration verifies
 the same result through `SoapClient` and `SoapHandler`.
+
+`BindingMessageDescription::getHeaderMessageKeys()` exposes the expanded-message
+to container-key mapping. `WSMessage::getExpandedName()` derives the declaration
+identity from the owned message namespace context, so detached and saved graphs
+retain the same mapping. Retained XML fragment markers also include that identity
+to prevent distinct header fragments from replacing each other during assembly.
+`test/wsdl-header-identities.qtest` covers namespace collisions in both directions,
+SOAP versions, document/RPC bindings, native/retained values and local consumers.
