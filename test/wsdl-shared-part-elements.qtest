@@ -1,0 +1,108 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires xml
+%requires ../qlib/WSDL.qm
+%requires ../qlib/SoapClient.qm
+%requires ../qlib/SoapHandler.qm
+%requires HttpServer
+%exec-class SharedPartElementsTest
+
+class SharedPartElementsTest inherits QUnit::Test {
+    constructor() : Test("WSDL parts sharing an element", "1.0") {
+        addTestCase("Body and header retain independent parts with the same element", \separate());
+        addTestCase("Ambiguous wire parts reject and provider fields stay distinct", \negative());
+        addTestCase("Shared element parts reach HTTP clients and callbacks", \http());
+        addTestCase("Pinned SwA message declarations retain their distinct parts", \pinned());
+        set_return_value(main());
+    }
+    private static string source(bool soap12) {
+        string soap = soap12 ? "http://schemas.xmlsoap.org/wsdl/soap12/" : "http://schemas.xmlsoap.org/wsdl/soap/";
+        return '<w:definitions xmlns:w="http://schemas.xmlsoap.org/wsdl/" xmlns:s="' + soap + '" xmlns:t="urn:shared" xmlns:x="http://www.w3.org/2001/XMLSchema" targetNamespace="urn:shared">'
+            + '<w:types><x:schema targetNamespace="urn:shared"><x:element name="Token" type="x:string"/></x:schema></w:types>'
+            + '<w:message name="M"><w:part name="body" element="t:Token"/><w:part name="header" element="t:Token"/></w:message>'
+            + '<w:portType name="P"><w:operation name="send"><w:input message="t:M"/><w:output message="t:M"/></w:operation></w:portType>'
+            + '<w:binding name="B" type="t:P"><s:binding transport="http://schemas.xmlsoap.org/soap/http" style="document"/>'
+            + '<w:operation name="send"><s:operation soapAction="send"/>'
+            + '<w:input><s:body use="literal" parts="body"/><s:header use="literal" message="t:M" part="header"/></w:input>'
+            + '<w:output><s:body use="literal" parts="body"/><s:header use="literal" message="t:M" part="header"/></w:output>'
+            + '</w:operation></w:binding><w:service name="S"><w:port name="Port" binding="t:B"><s:address location="http://example.invalid/"/></w:port></w:service></w:definitions>';
+    }
+    private separate() {
+        foreach bool soap12 in (False, True) {
+            WebService ws(source(soap12));
+            string env = soap12 ? SOAP_12_ENV : SOAP_11_ENV;
+            string golden = '<e:Envelope xmlns:e="' + env + '" xmlns:t="urn:shared"><e:Header><t:Token>header value</t:Token></e:Header><e:Body><t:Token>body value</t:Token></e:Body></e:Envelope>';
+            hash<auto> expected = {"body":"body value", "M":{"header":"header value"}};
+            foreach WSOperation op in (ws.getOperation("send"), Serializable::deserialize(ws.serialize()).getOperation("send"), Serializable::deserialize(ws.getOperation("send").serialize())) {
+                assertFalse(op.input.pmap.body == op.input.pmap.header);
+                foreach bool request in (True, False) {
+                    assertEq(expected, request ? op.deserializeRequest(parse_xml(golden)) : op.deserializeResponse(parse_xml(golden)));
+                    hash<auto> msg = request ? op.serializeRequest(expected) : op.serializeResponse(expected);
+                    hash<auto> xml = XsdBase::expandElementNamespaces(parse_xml(msg.body)){'{' + env + '}Envelope'};
+                    auto body = xml{'{' + env + '}Body'}{'{urn:shared}Token'};
+                    auto header = xml{'{' + env + '}Header'}{'{urn:shared}Token'};
+                    assertEq("body value", body."^value^" ?? body);
+                    assertEq("header value", header."^value^" ?? header);
+                    hash<SoapXmlMessageInfo> retained = request ? op.deserializeXmlRequest(golden) : op.deserializeXmlResponse(golden);
+                    assertEq("{urn:shared}Token", retained.body.body.getExpandedName());
+                    assertEq("{urn:shared}Token", retained.headers.M.header.getExpandedName());
+                    hash<auto> value = {"^body^":retained.body, "^headers^":retained.headers};
+                    msg = request ? op.serializeRequest(value) : op.serializeResponse(value);
+                    assertEq(expected, request ? op.deserializeRequest(parse_xml(msg.body)) : op.deserializeResponse(parse_xml(msg.body)));
+                }
+            }
+        }
+    }
+    private negative() {
+        string raw = source(False);
+        assertThrows("WSDL-ERROR", sub() { new WebService(replace(raw, 'name="header" element', 'name="body" element')); });
+        WebService ws(raw);
+        WSMessage message = ws.getOperation("send").input;
+        hash<auto> values = {"body":"B", "header":"H"};
+        assertEq(values, message.getDataProviderType().acceptsValue(values));
+        assertEq("Token", message.getSerializedKey("body"));
+        assertEq("Token", message.getSerializedKey("header"));
+        assertEq({"body":"B"}, message.deserializeData("body", {"Token":"B"}));
+        assertEq({"header":"H"}, message.deserializeData("header", {"Token":"H"}));
+        WSOperation ambiguous = new WebService(replace(raw, 'parts="body"', 'parts="body header"')).getOperation("send");
+        assertThrows("SOAP-SERIALIZATION-ERROR", \ambiguous.serializeRequest(), (values,));
+        assertThrows("SOAP-DESERIALIZATION-ERROR", \message.matchDocumentParts(),
+            (("body", "header"), ("{urn:shared}Token", "{urn:shared}Token")));
+        string with_type = replace(raw, '<w:part name="header" element="t:Token"/>',
+            '<w:part name="header" element="t:Token"/><w:part name="Token" type="x:int"/>');
+        message = new WebService(with_type).getOperation("send").input;
+        assertEq("Token", message.pmap.Token);
+        assertEq(3, message.args.size());
+        assertEq(values + {"Token":7}, message.getDataProviderType().acceptsValue(values + {"Token":7}));
+    }
+    private http() {
+        foreach bool soap12 in (False, True) {
+            WebService ws = Serializable::deserialize(new WebService(source(soap12)).serialize());
+            HttpServer server();
+            on_exit server.stop();
+            SoapHandler handler(new PermissiveAuthenticator());
+            server.setDefaultHandler("shared", handler);
+            Queue received();
+            code<auto(hash<auto>, auto)> callback = auto sub(hash<auto> cx, auto value) {
+                received.push(value);
+                return {"body":"response body", "M":{"header":"response header"}};
+            };
+            handler.addMethod(ws, ws.getOperation("send"), callback);
+            server.addListener(0);
+            SoapClient client({"wsdl":ws, "url":sprintf("http://127.0.0.1:%d/", server.getListenerInfo(0).port), "timeout":30000});
+            hash<auto> request = {"body":"request body", "M":{"header":"request header"}};
+            assertEq({"body":"response body", "M":{"header":"response header"}}, client.callOperation("send", request));
+            assertEq(request, received.get(30000));
+        }
+    }
+    private pinned() {
+        WebService ws = WSDLLib::getWebServiceFromUrl(get_script_dir() + "/wsdl-interop/cxf/swa-mime.wsdl");
+        WSMessage message = ws.getOperation("echoDataWithHeader").input;
+        assertEq(("data", "headerText", "text"), sort(keys message.pmap));
+        assertEq(message.getExpandedSerializedKey("text"), message.getExpandedSerializedKey("headerText"));
+        assertFalse(message.pmap.text == message.pmap.headerText);
+    }
+}

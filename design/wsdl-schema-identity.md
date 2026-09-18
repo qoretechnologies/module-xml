@@ -387,11 +387,17 @@ for provider values and binding selection.
 Argument aliases are selected after every part has been resolved. A unique
 element local name keeps its existing alias. When names collide with another
 element or a type-part name, element aliases use expanded names; type parts
-keep their part names. `pmap` maps each part name to its argument key, so
+keep their part names. Distinct parts referencing the same expanded element name
+receive separate internal keys formed from that expanded name and the part name.
+These keys do not appear on the wire or replace the public part-name fields.
+`pmap` maps each part name to its argument key, so
 bindings select parts independently of XML prefix spelling. Output obtains
 the actual XML name from the element declaration; no-namespace roots are
 unqualified. Body/header parts can therefore share an element local name
-while retaining different namespace identities and values.
+while retaining different namespace identities and values. They may also reference
+the same expanded element name when the binding separates their wire locations.
+Selecting multiple indistinguishable element parts in one document body still
+raises an ambiguity error; construction does not reject independent locations.
 
 For example, two parts named `approved` and `quantity` may both reference
 an element named `value`, one in `urn:approval` and one in `urn:stock`.

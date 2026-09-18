@@ -686,3 +686,21 @@ negative assertions remain intentional. Docs/astparser pass; audit: 18 Pass /
 44 N/A / zero Fail. See [validation](P6-24-validation.json) and
 [audit](audits/P6-24-http-replacement.md). Remaining P6 binding grammar and the
 HTTP/MIME/CXF matrix still precede P7–P9; no phase boundary is claimed.
+
+
+## P6-25: distinct message parts sharing an element QName
+
+Message parts retain separate internal argument identities even when they refer
+to the same element. The selected binding can place their independent values in
+Body and Header; wire QNames and public part-name/provider fields remain stable.
+Duplicate part names and ambiguous same-body selections still reject. Both SOAP
+versions, both directions, saved graphs, native/retained forms and HTTP consumers
+pass. The unmodified pinned SwA contract now loads, and WSDL4J independently
+confirms its request/response part declarations; this is not an attachment gate.
+The affected gate passes 30 suites / 519 cases / 10,639 reported assertions; the
+final focused test adds two raw decoder checks and passes 4 cases / 96 assertions.
+Docs/astparser pass; audit: 18 Pass / 44 N/A / zero Fail. See
+[validation](P6-25-validation.json) and [audit](audits/P6-25-shared-part-elements.md).
+The pinned document-header contract has undefined inoutHeader body-part names;
+the RPC-header contract includes a CXF-specific XML binding. Their source and
+capability adjudication and remaining P6 work still precede P7–P9.
