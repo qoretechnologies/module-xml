@@ -7,6 +7,12 @@ contracts; [P5 acceptance](P5-acceptance.md) records the current complete typed
 coverage and the separately retained legacy projection losses. P6–P9 remain open.
 The evidence documents below record their individual implementation increments.
 
+Core WSDL grammar and extension isolation use `test/wsdl-grammar.qtest` and
+`python3 -B test/wsdl-interop/test_wsdl_grammar.py -v`. The 312-document matrix is
+checked against the pinned corrected WSDL schema; required-extension capability
+failures are separate from schema validity. See [evidence](wsdl-grammar-evidence.md)
+and [the implemented design](../../design/wsdl-core-grammar.md).
+
 P6-01 implements [binding-specific SOAP versions](binding-version-evidence.md),
 including scoped declarations, saved services and actual HTTP exchanges on both
 ports. P6-02 fixes [detached operation ownership](operation-ownership-evidence.md),

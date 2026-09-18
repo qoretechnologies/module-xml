@@ -9280,3 +9280,26 @@ See [validation](P6-28-validation.json), [audit](audits/P6-28-cxf-peer.md),
 and [empty-record design](../../design/wsdl-native-empty-records.md).
 Remaining full P6 grammar/binding acceptance and the attachment-specific CXF gates
 still require completion; P7–P9 are not complete.
+
+
+## P6-29: core grammar and optional extension isolation
+
+Core WSDL declarations validate ordered children, attributes, documentation,
+character data, operation shape, parameter tokens and schema-instance metadata
+before grouping. Unknown required extensions fail; optional foreign payloads
+cannot shadow component or binding names. Schema normalization starts only at
+actual document/inline schema roots, preserving XSD-looking vendor metadata.
+The pinned corrected 2004-08-24 WSDL schema independently assesses all 312 authored
+documents, including 22 schema-valid required-capability rejections. The focused
+suite passes 314 cases / 3,580 assertions across original, serialized and data-saved
+services, request/response values, providers/samples, retained unsupported metadata
+and recovery. The full gate passes 180 Qore suites / 2073 cases /
+91,003 reported assertions. All 16 corpus commands meet expected outcomes;
+all six semantic reports are unchanged. Six CXF peer tests, docs and astparser
+pass without diagnostics. Audit: 18 Pass / 44 N/A / zero Fail; no C++ changes.
+See [evidence](wsdl-grammar-evidence.md), [validation](P6-29-validation.json),
+[audit](audits/P6-29-core-grammar.md) and
+[implemented design](../../design/wsdl-core-grammar.md).
+Remaining top-level WSDL constraints, binding extension grammar and HTTP/MIME/CXF
+acceptance stay in P6;
+P7–P9 are not complete. No push until development completion.

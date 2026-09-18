@@ -23384,6 +23384,340 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
     }
 }
 
+#! Keep foreign extension payloads out of the core component name space.
+class WsdlSourceProjection {
+    private {
+        const Namespace = "http://schemas.xmlsoap.org/wsdl/";
+    }
+
+    static bool recognized(string parent, string uri, string local) {
+        if (parent == "types") {
+            return uri == XSD_NS && local == "schema";
+        }
+        if (parent == "binding") {
+            return local == "binding" && (uri == SOAP_11_NS || uri == SOAP_12_NS
+                || uri == HTTP_NS || uri == CXF_XML_NS);
+        }
+        if (parent == "bindingOperation") {
+            return local == "operation" && (uri == SOAP_11_NS || uri == SOAP_12_NS
+                || uri == HTTP_NS || uri == CXF_XML_NS);
+        }
+        if (parent == "bindingInput" || parent == "bindingOutput") {
+            if (uri == SOAP_11_NS || uri == SOAP_12_NS) {
+                return local == "body" || local == "header";
+            }
+            if (uri == HTTP_NS) {
+                return local == "urlEncoded" || local == "urlReplacement";
+            }
+            if (uri == MIME_NS) {
+                return local == "content" || local == "mimeXml" || local == "multipartRelated";
+            }
+            return uri == CXF_XML_NS && local == "body";
+        }
+        if (parent == "bindingFault") {
+            return local == "fault" && (uri == SOAP_11_NS || uri == SOAP_12_NS);
+        }
+        return parent == "port" && local == "address" && (uri == SOAP_11_NS || uri == SOAP_12_NS
+            || uri == HTTP_NS || uri == CXF_XML_NS || uri == CXF_JMS_NS);
+    }
+
+    static project(reference<hash<auto>> document) {
+        foreach string name in (keys document) {
+            if (!name.startsWith("^")) {
+                bool ignored = element(\document{name}, name, {}, "");
+                @assert(!ignored, "the validated document root is a core WSDL element");
+            }
+        }
+    }
+
+    private static bool element(reference<auto> value, string name, hash<string, string> namespaces,
+            string parent) {
+        foreach string key in (keys value."^attributes^") {
+            if (key == "xmlns") {
+                namespaces{""} = value."^attributes^"{key};
+            } else if (key.startsWith("xmlns:")) {
+                namespaces{substr(key, 6)} = value."^attributes^"{key};
+            }
+        }
+        list<string> parts = name.split(":");
+        string local = parts[-1];
+        string uri = namespaces{parts.size() == 2 ? parts[0] : ""} ?? "";
+        if (uri != Namespace) {
+            return !recognized(parent, uri, local);
+        }
+        if (local == "documentation") {
+            return False;
+        }
+        string kind = parent == "binding" ? "bindingOperation" : parent == "bindingOperation"
+            ? (local == "input" ? "bindingInput" : local == "output" ? "bindingOutput" : "bindingFault") : local;
+        if (value.typeCode() != NT_HASH) {
+            return False;
+        }
+        list<hash<auto>> extensions();
+        foreach string key in (keys value) {
+            if (key.startsWith("^") || key.startsWith(".")) {
+                continue;
+            }
+            bool multiple = value{key}.typeCode() == NT_LIST;
+            list<auto> children = multiple ? value{key} : (value{key},);
+            list<auto> retained();
+            foreach auto child in (\children) {
+                if (element(\child, key, namespaces, kind)) {
+                    push extensions, {"name":key, "value":child};
+                } else {
+                    push retained, child;
+                }
+            }
+            if (!retained) {
+                remove value{key};
+            } else {
+                value{key} = multiple ? retained : retained[0];
+            }
+        }
+        if (extensions) {
+            value.".wsdlExtensions" = extensions;
+        }
+        return False;
+    }
+}
+
+hashdecl WsdlStructureFrame {
+    string kind;
+    bool documentation = False;
+    bool content = False;
+    bool core_children = False;
+    hash<string, int> counts;
+    list<string> parameters;
+}
+
+#! Validate core WSDL grammar while child order and expanded names remain available.
+class WsdlStructureGrammar {
+    private {
+        const Namespace = "http://schemas.xmlsoap.org/wsdl/";
+        const Children = {
+            "definitions": {"import":True, "types":True, "message":True, "portType":True, "binding":True, "service":True},
+            "types": {},
+            "import": {},
+            "message": {"part":True},
+            "part": {},
+            "portType": {"operation":True},
+            "operation": {"input":True, "output":True, "fault":True},
+            "input": {},
+            "output": {},
+            "fault": {},
+            "binding": {"operation":True},
+            "bindingOperation": {"input":True, "output":True, "fault":True},
+            "bindingInput": {},
+            "bindingOutput": {},
+            "bindingFault": {},
+            "service": {"port":True},
+            "port": {},
+        };
+        const Attributes = {
+            "definitions": {"name":True, "targetNamespace":True},
+            "types": {},
+            "documentation": {},
+            "import": {"namespace":True, "location":True},
+            "message": {"name":True},
+            "part": {"name":True, "element":True, "type":True},
+            "portType": {"name":True},
+            "operation": {"name":True, "parameterOrder":True},
+            "input": {"name":True, "message":True},
+            "output": {"name":True, "message":True},
+            "fault": {"name":True, "message":True},
+            "binding": {"name":True, "type":True},
+            "bindingOperation": {"name":True},
+            "bindingInput": {"name":True},
+            "bindingOutput": {"name":True},
+            "bindingFault": {"name":True},
+            "service": {"name":True},
+            "port": {"name":True, "binding":True},
+        };
+        const SchemaTypes = {
+            "definitions":"tDefinitions", "types":"tTypes", "documentation":"tDocumentation",
+            "import":"tImport", "message":"tMessage", "part":"tPart", "portType":"tPortType",
+            "operation":"tOperation", "input":"tParam", "output":"tParam", "fault":"tFault",
+            "binding":"tBinding", "bindingOperation":"tBindingOperation",
+            "bindingInput":"tBindingOperationMessage", "bindingOutput":"tBindingOperationMessage",
+            "bindingFault":"tBindingOperationFault", "service":"tService", "port":"tPort",
+        };
+        hash<string, hash<WsdlStructureFrame>> frames();
+        int payload_depth = -1;
+    }
+
+    consume(XmlReader reader) {
+        int depth = reader.depth();
+        int node_type = reader.nodeType();
+        if (payload_depth >= 0) {
+            if (node_type == XML_NODE_TYPE_END_ELEMENT && depth == payload_depth) {
+                payload_depth = -1;
+            }
+            return;
+        }
+        string key = string(depth);
+        if (node_type == XML_NODE_TYPE_END_ELEMENT) {
+            *hash<WsdlStructureFrame> completed = remove frames{key};
+            if (completed) {
+                finish(completed);
+            }
+            return;
+        }
+        *hash<WsdlStructureFrame> parent = frames{string(depth - 1)};
+        if (node_type != XML_NODE_TYPE_ELEMENT) {
+            if (parent && (node_type == XML_NODE_TYPE_TEXT || node_type == XML_NODE_TYPE_CDATA
+                    || node_type == XML_NODE_TYPE_SIGNIFICANT_WHITESPACE)
+                    && XsdSimpleType::normalizeWhiteSpace(reader.value() ?? "", "collapse")) {
+                throw WSDL_ERROR, sprintf("WSDL %s cannot contain character data", parent.kind);
+            }
+            return;
+        }
+        string local = reader.localName();
+        string uri = reader.namespaceUri() ?? "";
+        string kind = local;
+        if (!depth) {
+            if (uri != Namespace || local != "definitions") {
+                throw WSDL_ERROR, sprintf("expected WSDL 1.1 definitions root, got {%s}%s", uri, local);
+            }
+        } else {
+            @assert(parent, "all non-payload WSDL children have a checked parent");
+            if (uri != Namespace) {
+                if (!uri || (parent.core_children && parent.kind != "definitions")) {
+                    throw WSDL_ERROR, sprintf("unexpected extension {%s}%s in WSDL %s", uri, local, parent.kind);
+                }
+                *string required = reader.getAttributeNs("required", Namespace);
+                if (exists required) {
+                    required = XsdSimpleType::normalizeWhiteSpace(required, "collapse");
+                    if (required != "true" && required != "false" && required != "0" && required != "1") {
+                        throw WSDL_ERROR, "wsdl:required must be an XML boolean";
+                    }
+                    if ((required == "true" || required == "1")
+                            && !WsdlSourceProjection::recognized(parent.kind, uri, local)) {
+                        throw WSDL_ERROR, sprintf("unsupported required WSDL extension {%s}%s", uri, local);
+                    }
+                }
+                parent.content = True;
+                frames{string(depth - 1)} = parent;
+                payload_depth = reader.isEmptyElement() ? -1 : depth;
+                return;
+            }
+            if (local == "documentation") {
+                if (parent.documentation || parent.content) {
+                    throw WSDL_ERROR, "WSDL documentation must occur once before other content";
+                }
+                parent.documentation = True;
+                frames{string(depth - 1)} = parent;
+                attributes(reader, local);
+                payload_depth = reader.isEmptyElement() ? -1 : depth;
+                return;
+            }
+            if (!Children{parent.kind}{local}) {
+                throw WSDL_ERROR, sprintf("unexpected WSDL %s child %s", parent.kind, local);
+            }
+            parent.content = parent.core_children = True;
+            ++parent.counts{local};
+            if (parent.kind == "operation" || parent.kind == "bindingOperation") {
+                if (local != "fault" && parent.counts{local} > 1) {
+                    throw WSDL_ERROR, sprintf("WSDL operation has multiple %s declarations", local);
+                }
+                if (local != "fault" && parent.counts.fault) {
+                    throw WSDL_ERROR, "WSDL operation faults must follow its input and output";
+                }
+                if (local != "fault") {
+                    push parent.parameters, local;
+                }
+            }
+            frames{string(depth - 1)} = parent;
+            if (parent.kind == "binding") {
+                kind = "bindingOperation";
+            } else if (parent.kind == "bindingOperation") {
+                kind = local == "input" ? "bindingInput" : local == "output" ? "bindingOutput" : "bindingFault";
+            }
+        }
+        attributes(reader, kind);
+        hash<WsdlStructureFrame> frame = <WsdlStructureFrame>{"kind":kind};
+        if (reader.isEmptyElement()) {
+            finish(frame);
+        } else {
+            frames{key} = frame;
+        }
+    }
+
+    private static finish(hash<WsdlStructureFrame> frame) {
+        if (frame.kind == "operation" && (!frame.parameters
+                || (frame.counts.fault && frame.parameters.size() != 2))) {
+            throw WSDL_ERROR, "an abstract WSDL operation requires an input or output, and faults require both";
+        }
+        if (frame.kind == "bindingOperation" && frame.parameters.size() == 2
+                && frame.parameters[0] != "input") {
+            throw WSDL_ERROR, "a concrete WSDL operation's input must precede its output";
+        }
+    }
+
+    private static instanceAttribute(XmlReader reader, string name, string kind) {
+        string value = XsdSimpleType::normalizeWhiteSpace(reader.value() ?? "", "collapse");
+        if (name == "nil") {
+            throw WSDL_ERROR, "core WSDL declarations are not nillable";
+        } else if (name == "type") {
+            value = XsdNameLexicalHelper::lexical("QName", value, WSDL_ERROR);
+            list<string> parts = value.split(":");
+            *string uri = parts.size() == 2 ? reader.lookupNamespace(parts[0]) : reader.lookupNamespace();
+            if (uri != Namespace || parts[-1] != SchemaTypes{kind}) {
+                throw WSDL_ERROR, sprintf("unsupported xsi:type %Y on WSDL %s", value, kind);
+            }
+        } else if (name == "schemaLocation" || name == "noNamespaceSchemaLocation") {
+            list<string> locations = name == "schemaLocation" ? (value ? value.split(" ") : ()) : (value,);
+            if (name == "schemaLocation" && locations.size() % 2) {
+                throw WSDL_ERROR, "xsi:schemaLocation requires namespace/location pairs";
+            }
+            foreach string location in (locations) {
+                try {
+                    string checked = normalize_xsd_uri(location);
+                } catch (hash<ExceptionInfo> error) {
+                    if (error.err != "XSD-URI-LEXICAL-ERROR") {
+                        rethrow;
+                    }
+                    throw WSDL_ERROR, error.desc;
+                }
+            }
+        }
+    }
+
+    private static attributes(XmlReader reader, string kind) {
+        if (!reader.moveToFirstAttribute()) {
+            return;
+        }
+        on_exit reader.moveToElement();
+        do {
+            string uri = reader.namespaceUri() ?? "";
+            string local = reader.localName();
+            if (uri == XSI_NS && (local == "type" || local == "nil"
+                    || local == "schemaLocation" || local == "noNamespaceSchemaLocation")) {
+                instanceAttribute(reader, local, kind);
+                continue;
+            }
+            if (uri == "http://www.w3.org/2000/xmlns/"
+                    || (uri && uri != Namespace && kind != "documentation")) {
+                continue;
+            }
+            if (uri || !Attributes{kind}{local}) {
+                throw WSDL_ERROR, sprintf("unexpected attribute {%s}%s on WSDL %s", uri, local, kind);
+            }
+            if (local == "parameterOrder") {
+                string value = XsdBuiltinListHelper::lexical("NMTOKENS", reader.value(), WSDL_ERROR);
+            } else if (local == "targetNamespace" || local == "namespace" || local == "location") {
+                try {
+                    string value = normalize_xsd_uri(reader.value() ?? "");
+                } catch (hash<ExceptionInfo> error) {
+                    if (error.err != "XSD-URI-LEXICAL-ERROR") {
+                        rethrow;
+                    }
+                    throw WSDL_ERROR, error.desc;
+                }
+            }
+        } while (reader.moveToNextAttribute());
+    }
+}
+
 class WsdlDeclarationFrame {
     public {
         string kind;
@@ -23566,6 +23900,9 @@ class WsdlDocumentCatalog {
             declarations = WsdlDeclarationGrammar::scan(source);
         }
         hash<auto> data = XsdSchemaSource::parse(source);
+        if (!schema) {
+            WsdlSourceProjection::project(\data);
+        }
         WSDL::XsdBase::removeNS(\data);
         if (!schema) {
             WSDL::XsdBase::removeNS(\data.definitions);
@@ -23593,6 +23930,7 @@ class WsdlDeclarationGrammar {
 
     static hash<WsdlDeclarationInfo> scan(string xml) {
         XmlReader reader(xml);
+        WsdlStructureGrammar grammar();
         hash<string, WsdlDeclarationFrame> frames();
         hash<string, bool> components();
         list<hash<WsdlComponentReference>> references();
@@ -23600,6 +23938,7 @@ class WsdlDeclarationGrammar {
         string target_namespace;
         bool root = False;
         while (reader.read()) {
+            grammar.consume(reader);
             int depth = reader.depth();
             string key = string(depth);
             if (reader.nodeType() == XML_NODE_TYPE_END_ELEMENT) {
@@ -23760,7 +24099,7 @@ class XsdSchemaSource {
         string wsdl_context = name == "" ? "root"
             : (uri == "http://schemas.xmlsoap.org/wsdl/" && !annotation_content
                 && ((wsdl_parent == "root" && local == "definitions")
-                    || (wsdl_parent == "definitions" && (local == "message" || local == "portType"
+                    || (wsdl_parent == "definitions" && (local == "types" || local == "message" || local == "portType"
                         || local == "binding" || local == "service"))
                     || (wsdl_parent == "message" && local == "part")
                     || (wsdl_parent == "service" && local == "port")
@@ -23785,7 +24124,10 @@ class XsdSchemaSource {
                 }
             }
         }
-        in_schema = in_schema || (!annotation_content && uri == XSD_NS && local == "schema");
+        # Only actual schema roots enter schema normalization. An XSD-looking element inside an
+        # opaque WSDL extension is metadata, even if its name is "schema".
+        in_schema = in_schema || (!annotation_content && uri == XSD_NS && local == "schema"
+            && (wsdl_parent == "root" || wsdl_parent == "types"));
         bool element_content = in_schema && uri == XSD_NS && !annotation_content;
         if (wsdl_parent == "binding" && local == "binding" && uri == CXF_XML_NS
                 && !exists value) {
@@ -32812,7 +33154,7 @@ public class Binding inherits WSDL::XsdNamedData {
                     delete op{io}.mimeXml;
                 }
 
-                delete op{io}.("^attributes^", "ns");
+                delete op{io}.("^attributes^", "ns", "documentation", ".wsdlExtensions");
 
                 if (op{io}) {
                     throw WSDL_ERROR, sprintf("unknown element(s) in binding %y for %s operation %y: %y", name, io, opname, keys op{io});
