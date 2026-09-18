@@ -167,6 +167,12 @@ suffixes do not identify operations.
 
 ## Operation URI boundaries
 
+HTTP operation locations must be relative references under WSDL 1.1 section 4.5.
+Construction rejects scheme-bearing values such as `http://example.invalid/send`
+or `urn:send`. Paths, query-only references and network-path references have no
+scheme and remain relative. Qore's URI mapping classifies the XSD anyURI spelling;
+it does not change the stored location or percent-decode it.
+
 An explicitly empty `http:operation/@location` is a valid relative URI. It is
 separate from an absent required attribute and targets the selected port's base
 URI. An empty URL-replacement map likewise represents an active zero-part binding;

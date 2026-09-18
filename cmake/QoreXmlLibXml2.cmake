@@ -82,6 +82,8 @@ else()
     include("${_qore_xml_libxml2_cmake_dir}/QoreXmlLibXml2IdentityTableFix.cmake")
     include("${_qore_xml_libxml2_cmake_dir}/QoreXmlLibXml2InstanceIdentityFix.cmake")
 
+    include("${_qore_xml_libxml2_cmake_dir}/QoreXmlLibXml2AnyUriFix.cmake")
+
     function(qore_xml_fetch_libxml2)
         # Normal variables are scoped to this function; do not overwrite the
         # caller's BUILD_SHARED_LIBS or any other project's cache options.
@@ -144,6 +146,7 @@ else()
         qore_xml_fix_libxml2_nil_identities("${qore_xml_libxml2_SOURCE_DIR}" "${qore_xml_libxml2_BINARY_DIR}")
         qore_xml_fix_libxml2_identity_tables("${qore_xml_libxml2_SOURCE_DIR}" "${qore_xml_libxml2_BINARY_DIR}")
         qore_xml_fix_libxml2_instance_identities("${qore_xml_libxml2_SOURCE_DIR}" "${qore_xml_libxml2_BINARY_DIR}")
+        qore_xml_fix_libxml2_anyuri("${qore_xml_libxml2_SOURCE_DIR}" "${qore_xml_libxml2_BINARY_DIR}")
         # Relocated C sources need libxml2's private source-tree headers. Keep
         # that directory out of C++ include lookup: VERSION shadows <version>
         # on case-insensitive filesystems. Apply this after all replacements.

@@ -16,7 +16,7 @@ class UriLanguageTest(unittest.TestCase):
         models = json.loads((ROOT / 'fixtures/uri-language.json').read_text())
         self.assertEqual(8, len(models))
         names = [row['name'] for model in models for row in model['documents']]
-        self.assertEqual(73, len(names))
+        self.assertEqual(89, len(names))
         self.assertEqual(len(names), len(set(names)))
         report = run([SchemaJob(m['name'], f'http://example.invalid/uri-language/{i}.xsd',
             m['schema'].encode(), {r['name']: r['xml'].encode() for r in m['documents']})

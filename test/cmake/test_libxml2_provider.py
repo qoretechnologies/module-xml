@@ -132,6 +132,35 @@ qore_xml_fix_libxml2_instance_identity_values("{project}" "{project}/build-debug
                     self.assertIn(diagnostic, result.stderr)
                     self.assertFalse((project / "build-debug/qore-instance-identity-fix").exists())
 
+    def test_anyuri_patch_rejects_unexpected_inputs(self):
+        with tempfile.TemporaryDirectory(prefix="qore-xml-identity-input-") as directory:
+            root = Path(directory)
+            for name, sources, diagnostic in [
+                    ("missing", [], "Cannot locate libxml2 xmlschemastypes.c"),
+                    ("unknown", ["one/xmlschemastypes.c"], "Unexpected libxml2 xmlschemastypes.c"),
+                    ("duplicate", ["one/xmlschemastypes.c", "two/xmlschemastypes.c"],
+                     "Duplicate libxml2 xmlschemastypes.c target source")]:
+                with self.subTest(name=name):
+                    project = root / name
+                    project.mkdir()
+                    for source in sources:
+                        path = project / source
+                        path.parent.mkdir(exist_ok=True)
+                        path.write_text("/* Deliberately unrelated source. */\n")
+                    quoted = " ".join(f'"{project / source}"' for source in sources)
+                    (project / "CMakeLists.txt").write_text(f'''cmake_minimum_required(VERSION 3.18...3.31)
+project(anyuri_input NONE)
+add_library(LibXml2 INTERFACE)
+set_property(TARGET LibXml2 PROPERTY SOURCES {quoted})
+include("{REPO}/cmake/QoreXmlLibXml2AnyUriFix.cmake")
+qore_xml_fix_libxml2_anyuri("{project}" "{project}/build-debug")
+''')
+                    result = subprocess.run(["cmake", "-S", str(project), "-B", str(project / "build-debug")],
+                                            text=True, capture_output=True, timeout=30)
+                    self.assertNotEqual(0, result.returncode)
+                    self.assertIn(diagnostic, result.stderr)
+                    self.assertFalse((project / "build-debug/qore-anyuri-fix").exists())
+
 
 class LibXml2ProviderTest(unittest.TestCase):
     @classmethod
@@ -340,6 +369,9 @@ include("{REPO}/cmake/QoreXmlLibXml2IdentityTableFix.cmake")
 qore_xml_fix_libxml2_identity_tables("{cls.source}" "${{CMAKE_CURRENT_BINARY_DIR}}/libxml")
 include("{REPO}/cmake/QoreXmlLibXml2InstanceIdentityFix.cmake")
 qore_xml_fix_libxml2_instance_identities("{cls.source}" "${{CMAKE_CURRENT_BINARY_DIR}}/libxml")
+include("{REPO}/cmake/QoreXmlLibXml2AnyUriFix.cmake")
+qore_xml_fix_libxml2_anyuri("{cls.source}" "${{CMAKE_CURRENT_BINARY_DIR}}/libxml")
+qore_xml_fix_libxml2_anyuri("{cls.source}" "${{CMAKE_CURRENT_BINARY_DIR}}/libxml")
 ''')
         cls.fixed = cls.root / "fixed/build-debug"
         cls.run_command(["cmake", "-S", fixed_project, "-B", cls.fixed, "-DCMAKE_BUILD_TYPE=Debug",
@@ -417,6 +449,7 @@ endif()
         self.assertIn("identity_tables=PASS", output)
         self.assertIn("instance_identities=PASS", output)
         self.assertIn("uri_identity=PASS", output)
+        self.assertIn("anyuri_values=PASS", output)
         self.assertIn("entity_values=PASS", output)
         self.assertIn("occurs_values=PASS", output)
         self.assertIn("particle_identity=PASS", output)
@@ -1007,6 +1040,39 @@ set_property(TARGET LibXml2 PROPERTY SOURCES "${native_sources}")
         self.assertIn("allocation failures propagated with intact ownership and successful recovery",
                       self.run_command([self.root / "bundled/calendar-allocation"]))
 
+    def test_anyuri_detection_and_idempotence(self):
+        project = self.root / "anyuri-broken/source"
+        project.mkdir(parents=True)
+        (project / "CMakeLists.txt").write_text(self.previous_anyuri_fixture())
+        build = self.root / "anyuri-broken/build-debug"
+        self.run_command(["cmake", "-S", project, "-B", build, "-DCMAKE_BUILD_TYPE=Debug",
+                          "-DBUILD_SHARED_LIBS=ON", "-DLIBXML2_WITH_PROGRAMS=OFF",
+                          "-DLIBXML2_WITH_TESTS=OFF", "-DLIBXML2_WITH_PYTHON=OFF"])
+        self.run_command(["cmake", "--build", build, "--target", "LibXml2", "-j4"])
+        libraries = list((build / "libxml").glob("libxml2.so")) + list((build / "libxml").glob("libxml2.dylib"))
+        self.assertEqual(1, len(libraries))
+        options = [f"-DLIBXML2_INCLUDE_DIR={self.fixed_include}", f"-DLIBXML2_LIBRARY={libraries[0]}",
+                   f"-DFETCHCONTENT_SOURCE_DIR_QORE_XML_LIBXML2={self.source}"]
+        output = self.configure("anyuri-broken-auto", "-DQORE_XML_LIBXML2_PROVIDER=AUTO", *options)
+        self.assertIn("using private static libxml2 2.15.4", output)
+        probe = (self.root / "anyuri-broken-auto/system-libxml2/namespace-probe.log").read_text()
+        self.assertIn("instance_identities=PASS", probe)
+        self.assertIn("identity_tables=PASS", probe)
+        self.assertIn("nil_identities=PASS", probe)
+        self.assertIn("key_nillable=PASS", probe)
+        self.assertIn("component_qnames=PASS", probe)
+        self.assertIn("notations=PASS", probe)
+        self.assertIn("calendar_constraints=PASS", probe)
+        self.assertIn("qname_allocation=PASS", probe)
+        self.assertIn("anyuri_values=FAIL", probe)
+        self.configure("anyuri-broken-system", "-DQORE_XML_LIBXML2_PROVIDER=SYSTEM", *options,
+                       success=False)
+        folder = self.root / "bundled/_deps/qore_xml_libxml2-build/qore-anyuri-fix"
+        before = {name: (folder / name).stat().st_mtime_ns for name in ("xmlschemastypes.c",)}
+        self.configure("bundled", "-DQORE_XML_LIBXML2_PROVIDER=BUNDLED",
+                       f"-DFETCHCONTENT_SOURCE_DIR_QORE_XML_LIBXML2={self.source}")
+        self.assertEqual(before, {name: (folder / name).stat().st_mtime_ns for name in before})
+
     def test_instance_identity_detection_and_idempotence(self):
         project = self.root / "instance-identity-broken/source"
         project.mkdir(parents=True)
@@ -1210,9 +1276,16 @@ set_property(TARGET LibXml2 PROPERTY SOURCES "${native_sources}")
         self.assertIn("Native identity table allocation: PASS",
                       self.run_command([self.root / "bundled/identity-table-allocation"]))
 
+    def previous_anyuri_fixture(self):
+        """All prior fixes before XSD anyURI content assessment."""
+        fixed = (self.root / "fixed/source/CMakeLists.txt").read_text()
+        fixed = fixed.replace(f'include("{REPO}/cmake/QoreXmlLibXml2AnyUriFix.cmake")\n', "")
+        return fixed.replace(f'qore_xml_fix_libxml2_anyuri("{self.source}" '
+                             '"${CMAKE_CURRENT_BINARY_DIR}/libxml")\n', "")
+
     def previous_instance_identity_fixture(self):
         """All prior fixes without builtin attribute and list identity assessment."""
-        fixed = (self.root / "fixed/source/CMakeLists.txt").read_text()
+        fixed = self.previous_anyuri_fixture()
         fixed = fixed.replace(f'include("{REPO}/cmake/QoreXmlLibXml2InstanceIdentityFix.cmake")\n', "")
         return fixed.replace(f'qore_xml_fix_libxml2_instance_identities("{self.source}" '
                              '"${CMAKE_CURRENT_BINARY_DIR}/libxml")\n', "")
@@ -1617,7 +1690,7 @@ set_property(TARGET LibXml2 PROPERTY SOURCES "${native_sources}")
         fixture = (self.root / "fixed/source/CMakeLists.txt").read_text()
         fixture += '''
 get_target_property(native_sources LibXml2 SOURCES)
-set(original "${CMAKE_CURRENT_BINARY_DIR}/libxml/qore-instance-identity-fix/xmlschemastypes.c")
+set(original "${CMAKE_CURRENT_BINARY_DIR}/libxml/qore-anyuri-fix/xmlschemastypes.c")
 file(READ "${original}" source)
 string(REPLACE [=[            if (ret < 0) {
                 goto error;

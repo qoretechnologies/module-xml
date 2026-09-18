@@ -922,3 +922,29 @@ See [evidence](http-uri-boundaries-evidence.md), [validation](P6-34-validation.j
 [audit](audits/P6-34-http-uri-boundaries.md) and [implemented design](../../design/wsdl-http-mime.md).
 Remaining top-level/component constraints, binding combinations, MIME multipart
 and attachment replay stay in P6 before P7–P9. This is not phase completion.
+
+
+## P6-35: WSDL URI constraints and native anyURI content
+
+Supplied target namespaces now require absolute URIs; HTTP operation locations
+require relative references. Imports use the same rules, and Qore URI mapping
+classifies values without changing stored namespace/location spelling. Independent
+validation also exposed native acceptance of bare schemes. The shared XSD 1.0
+anyURI validator now enforces RFC 2396 absolute-URI content while general RFC 3986
+resolution remains unchanged. CMake detects affected libraries and applies the
+checksum-verified private correction with allocation-error cleanup intact.
+The 33-document WSDL matrix passes 35 cases / 754 assertions and 21 actual HTTP
+calls through source/saved consumers. Pinned Xerces agrees on grammar assessment;
+13 schema-valid semantic negatives and two lexical negatives are explicit.
+The URI/language matrix now has 89 documents. All 30 affected Qore suites pass
+(1,254 cases / 25,660 reported assertions), plus independent matrices,
+six CXF peer tests, 12 CMake tests, docs and astparser. Native and configured-Qore
+Valgrinds have zero errors/lost bytes; initial PCRE2-JIT diagnostics are separately
+recorded. All 16 corpus gates meet expected outcomes; six semantic reports are
+unchanged. Audit: 22 Pass / 40 N/A / zero Fail. No push.
+See [evidence](uri-constraints-evidence.md), [validation](P6-35-validation.json),
+[audit](audits/P6-35-uri-constraints.md) and [datatype design](../../design/wsdl-uri-language-values.md).
+Remaining P6 work includes concrete binding combinations, complete HTTP part/URI
+behavior, MIME multipart grammar/alternatives and attachment contract replay;
+P7–P9 remain incomplete. The empty-query part-validation bypass is reproduced in
+`/tmp/xml-http-part-values/` for the next binding increment.

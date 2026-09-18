@@ -36,6 +36,9 @@ CMake's behavior probe covers namespace/QName identity and 142 URI checks:
 hint cases. Hint tests include DOM and streaming validation, absolute/relative
 locations, whitespace normalization, combined attributes and invalid typed values.
 All probe resource callbacks are offline and reject unknown locations.
+The separate anyURI datatype probe checks 16 lexical values through direct,
+DOM and streaming assessment, including XSD 1.0's nonempty absolute-URI content
+requirement. Datatype validation and general RFC 3986 resolution remain separate.
 
 `AUTO` uses an installed library only when this complete probe passes; otherwise
 it builds the checksum-pinned private libxml2. `SYSTEM` fails if the probe fails.

@@ -38,6 +38,13 @@ Schema location hints are checked lexically and never fetched. Other foreign
 attributes, including unknown names in the schema-instance namespace, follow the
 component's attribute wildcard.
 
+A supplied `definitions/@targetNamespace` must be absolute, as required by WSDL
+1.1 section 2.1.1. An absent attribute declares components without a namespace;
+an explicit empty value or another relative reference rejects. Qore's URI mapping
+classifies the normalized anyURI value without rewriting its stored spelling or
+namespace identity. Imported WSDL documents pass through the same checks. URI
+schemes are not restricted to HTTP: `urn:inventory` is a valid target namespace.
+
 ## Optional and required extensions
 
 An extension's `wsdl:required` value has XML boolean syntax. An unknown extension

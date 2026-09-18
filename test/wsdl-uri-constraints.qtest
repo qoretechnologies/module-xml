@@ -1,0 +1,120 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires ../qlib/WSDL.qm
+%requires ../qlib/SoapClient.qm
+%requires ../qlib/SoapHandler.qm
+%requires HttpServer
+%try-module json
+%define NoJson
+%endtry
+%ifdef NoJson
+throw "MISSING-MODULE", "WSDL URI fixtures require json";
+%else
+%exec-class UriConstraintsTest
+class UriConstraintsTest inherits QUnit::Test {
+    constructor() : Test("WSDL URI constraints", "1.0") {
+        hash<auto> data = parse_json(ReadOnlyFile::readTextFile(get_script_dir()
+            + "/wsdl-interop/regressions/wsdl-uri-constraints/cases.json"));
+        foreach hash<auto> row in (data.cases) {
+            addTestCase(row.name, \check(), (row,));
+        }
+        list<hash<auto>> rows = data.cases;
+        addTestCase("Imported URI declarations retain their semantic checks", \imports(), (rows,));
+        addTestCase("Absolute namespace identities survive actual HTTP consumers", \http(), (rows,));
+        set_return_value(main());
+    }
+    private check(hash<auto> row) {
+        if (!row.valid) {
+            code<nothing()> parse = sub() { WebService ws(row.xml, {"async_only":True}); };
+            assertThrows("WSDL-ERROR", parse);
+            return;
+        }
+        WebService original(row.xml, {"async_only":True});
+        foreach WebService ws in (original, Serializable::deserialize(original.serialize()),
+                Serializable::deserialize(original.serializeToData())) {
+            assertEq(row.xml, ws.getWSDL());
+            string uri = row.kind == "namespace" ? trim(row.value ?? "") : "urn:uri-boundary";
+            assertEq("{" + uri + "}In", ws.getMessage("In").getExpandedName());
+            AbstractDataProviderType provider = ws.getMessage("In").getDataProviderType(True);
+            hash<auto> value = {"id":"A/B č"};
+            assertEq(value, provider.acceptsValue(value));
+            foreach WSOperation op in (ws.getOperation("send"), Serializable::deserialize(ws.getOperation("send").serialize())) {
+                hash<auto> request = op.serializeRequest(value);
+                assertEq(row.location + (row.location.contains("?") ? "&" : "?") + "id=A%2FB%20%C4%8D", request.path);
+                assertEq(value, op.deserializeRequestPath(request.path));
+                hash<auto> sample = provider.getExampleValue();
+                assertEq(sample, op.deserializeRequestPath(op.serializeRequest(sample).path));
+                hash<auto> response = op.serializeResponse({"result":"reply"});
+                assertEq({"result":"reply"}, op.deserializeResponse(WSDLLib::parseSOAPMessage(
+                    {"body":response.body,"content-type":response.hdr."Content-Type"})));
+            }
+        }
+    }
+
+    private imports(list<hash<auto>> rows) {
+        foreach hash<auto> row in (rows) {
+            string uri = row.kind == "namespace" ? trim(row.value ?? "") : "urn:uri-boundary";
+            string escaped = replace(replace(uri, "&", "&amp;"), "\"", "&quot;");
+            string source = '<w:definitions xmlns:w="http://schemas.xmlsoap.org/wsdl/" targetNamespace="urn:root">'
+                + '<w:import namespace="' + escaped + '" location="child.wsdl"/></w:definitions>';
+            hash<auto> options = {"document_location":"http://example.invalid/root.wsdl", "async_only":True,
+                "xsd_cache":{"http://example.invalid/child.wsdl":row.xml}};
+            if (!row.valid) {
+                try {
+                    WebService ws(source, options);
+                    fail("accepted an invalid imported URI declaration");
+                } catch (hash<ExceptionInfo> ex) {
+                    assertEq("WSDL-ERROR", ex.err);
+                    if (row.schema_valid) {
+                        assertTrue(ex.desc.contains(row.kind == "namespace" ? "absolute URI" : "relative URI"));
+                    } else {
+                        assertTrue(ex.desc.contains("URI"));
+                    }
+                }
+                continue;
+            }
+            WebService original(source, options);
+            foreach WebService ws in (original, Serializable::deserialize(original.serialize())) {
+                WSOperation op = ws.getOperation("send");
+                assertEq("{" + uri + "}In", op.input.getExpandedName());
+                hash<auto> value = {"id":"imported"};
+                assertEq(value, op.deserializeRequestPath(op.serializeRequest(value).path));
+            }
+        }
+    }
+
+    private http(list<hash<auto>> rows) {
+        int calls = 0;
+        foreach hash<auto> row in (rows) {
+            if (!row.valid || row.kind != "namespace") {
+                continue;
+            }
+            WebService original(row.xml);
+            foreach WebService ws in (original, Serializable::deserialize(original.serialize()),
+                    Serializable::deserialize(original.serializeToData())) {
+                HttpServer server();
+                on_exit server.stop();
+                SoapHandler handler(new PermissiveAuthenticator());
+                server.setDefaultHandler("uri", handler);
+                Queue received();
+                code<auto(hash<auto>, auto)> callback = auto sub(hash<auto> cx, auto value) {
+                    received.push(value);
+                    return {"result":value.id};
+                };
+                handler.addMethod(ws, ws.getOperation("send"), callback, NOTHING, NOTHING, NOTHING,
+                    NOTHING, NOTHING, NOTHING, "B");
+                server.addListener(0);
+                SoapClient client({"wsdl":ws, "service":"S", "port":"Endpoint", "timeout":30000,
+                    "url":sprintf("http://127.0.0.1:%d/", server.getListenerInfo(0).port)});
+                assertEq({"result":"A/B č"}, client.callOperation("send", {"id":"A/B č"}));
+                assertEq({"id":"A/B č"}, received.get(30000));
+                ++calls;
+            }
+        }
+        assertEq(21, calls);
+    }
+}
+%endif

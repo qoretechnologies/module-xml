@@ -17,6 +17,15 @@ language values are invalid. The legacy empty-element compatibility option still
 controls omitted XML character data without turning explicit empty strings into
 omitted values.
 
+XSD 1.0 anyURI retains RFC 2396's requirement for a hierarchical or opaque part
+after an absolute URI's scheme. `a:` and `a:#fragment` reject; `a:/`, `a:?` and
+`a: #fragment` are valid. This datatype check is separate from general RFC 3986
+URI resolution. The private libxml2 datatype validator applies it after URI
+parsing and before publishing a value, preserving allocation-error propagation
+and cleanup. The system-library behavior probe checks direct conversion, DOM and
+streaming schema validation, with recovery after invalid values. An affected
+system library triggers the existing pinned-build selection policy.
+
 `XsdSizedFacetInfo.text_type` carries builtin URI/language validation in generated
 providers. It requires string values, collapsed whitespace and no conflicting
 name-type metadata. Derived providers validate through their base chain before

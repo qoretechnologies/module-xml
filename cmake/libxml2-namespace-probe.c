@@ -33,6 +33,7 @@
 #include "libxml2-nil-identity-probe.h"
 #include "libxml2-identity-table-probe.h"
 #include "libxml2-instance-identity-probe.h"
+#include "libxml2-anyuri-probe.h"
 
 static int check_namespace(const char* source, const char* expected) {
     xmlTextReaderPtr reader = xmlReaderForMemory(source, (int)strlen(source), NULL, "UTF-8", 0);
@@ -62,6 +63,11 @@ int main(void) {
     int result = 0;
     if (prepare_value_allocation()) {
         return 1;
+    }
+    {
+        int anyuri = check_anyuri_values();
+        result |= anyuri;
+        printf("anyuri_values=%s\n", anyuri ? "FAIL" : "PASS");
     }
     result |= check_namespace("<r xmlns:p='urn:a&amp;b'><p:x/></r>", "urn:a&b");
     result |= check_namespace("<r xmlns:p='urn:a&#38;b'><p:x/></r>", "urn:a&b");
