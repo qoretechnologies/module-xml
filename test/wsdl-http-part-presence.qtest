@@ -1,0 +1,135 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires ../qlib/WSDL.qm
+%requires ../qlib/SoapClient.qm
+%requires ../qlib/SoapHandler.qm
+%requires HttpServer
+%try-module json
+%define NoJson
+%endtry
+%ifdef NoJson
+throw "MISSING-MODULE", "HTTP part fixtures require json";
+%else
+%exec-class HttpPartPresenceTest
+
+class HttpPartPresenceTest inherits QUnit::Test {
+    constructor() : Test("HTTP message part presence", "1.0") {
+        hash<auto> data = parse_json(ReadOnlyFile::readTextFile(get_script_dir()
+            + "/wsdl-interop/regressions/wsdl-http-part-presence/cases.json"));
+        foreach hash<auto> model in (data.models) {
+            foreach string verb in ("GET", "POST") {
+                foreach string location in ("/send", "/send?revision=1") {
+                    addTestCase(sprintf("%s %s %s", model.name, verb, location), \check(),
+                        (model, verb, location));
+                }
+            }
+            foreach string location in ("/send", "/send?revision=1") {
+                addTestCase(sprintf("%s MIME form %s", model.name, location), \check(),
+                    (model, "POST", location, True));
+            }
+        }
+        set_return_value(main());
+    }
+    private static string source(hash<auto> model, string verb, string location, bool mime_form) {
+        string parts;
+        foreach string name in (keys model.parts) {
+            parts += sprintf('<w:part name="%s" type="xs:%s"/>', name, model.parts{name});
+        }
+        return '<w:definitions xmlns:w="http://schemas.xmlsoap.org/wsdl/" xmlns:h="http://schemas.xmlsoap.org/wsdl/http/"'
+            + ' xmlns:m="http://schemas.xmlsoap.org/wsdl/mime/" xmlns:t="urn:presence" xmlns:xs="http://www.w3.org/2001/XMLSchema" targetNamespace="urn:presence">'
+            + '<w:message name="In">' + parts + '</w:message>'
+            + '<w:message name="Out"><w:part name="result" type="xs:string"/></w:message>'
+            + '<w:portType name="P"><w:operation name="send"><w:input message="t:In"/><w:output message="t:Out"/></w:operation></w:portType>'
+            + '<w:binding name="B" type="t:P"><h:binding verb="' + verb + '"/><w:operation name="send"><h:operation location="' + location + '"/>'
+            + '<w:input>' + (mime_form ? '<m:content type="application/x-www-form-urlencoded"/>' : '<h:urlEncoded/>')
+            + '</w:input><w:output><m:mimeXml part="result"/></w:output>'
+            + '</w:operation></w:binding><w:service name="S"><w:port name="Endpoint" binding="t:B">'
+            + '<h:address location="http://example.invalid/"/></w:port></w:service></w:definitions>';
+    }
+    private static string path(string location, string form, bool explicit_empty = False) {
+        return location + (form || explicit_empty ? (location.contains("?") ? "&" : "?") + form : "");
+    }
+    private static hash<auto> decode(WSOperation op, string verb, string location, string form,
+            bool explicit_empty = False) {
+        return verb == "GET" ? op.deserializeRequestPath(path(location, form, explicit_empty))
+            : op.deserializeRequest({"body":form,"content-type":"application/x-www-form-urlencoded"});
+    }
+    private check(hash<auto> model, string verb, string location, bool mime_form = False) {
+        WebService original(source(model, verb, location, mime_form));
+        foreach WebService ws in (original, Serializable::deserialize(original.serialize()),
+                Serializable::deserialize(original.serializeToData())) {
+            AbstractDataProviderType provider = ws.getMessage("In").getDataProviderType(True);
+            assertEq(model.value, provider.acceptsValue(model.value));
+            foreach WSOperation op in (ws.getOperation("send"), Serializable::deserialize(ws.getOperation("send").serialize())) {
+                foreach hash<auto> row in (model.rows) {
+                    if (row.valid) {
+                        assertEq(row.value, decode(op, verb, location, row.form));
+                    } else {
+                        try {
+                            decode(op, verb, location, row.form);
+                            fail("accepted an absent or invalid part");
+                        } catch (hash<ExceptionInfo> ex) {
+                            assertEq("SOAP-DESERIALIZATION-ERROR", ex.err);
+                            if (exists row.missing) {
+                                assertEq(sprintf("missing part %Y in message \"In\"", row.missing), ex.desc);
+                            }
+                        }
+                    }
+                    if (row.form == "" && verb == "GET") {
+                        if (row.valid) {
+                            assertEq(row.value, decode(op, verb, location, "", True));
+                        } else {
+                            assertThrows("SOAP-DESERIALIZATION-ERROR", \decode(), (op, verb, location, "", True));
+                        }
+                    }
+                }
+                hash<auto> sample = provider.getExampleValue();
+                if (verb == "POST") {
+                    hash<auto> empty = {"content-type":"application/x-www-form-urlencoded"};
+                    if (model.parts) {
+                        assertThrows("SOAP-DESERIALIZATION-ERROR", \op.deserializeRequest(), (empty,));
+                    } else {
+                        assertEq({}, op.deserializeRequest(empty));
+                    }
+                }
+                hash<auto> wire = op.serializeRequest(sample);
+                assertEq(sample, verb == "GET" ? op.deserializeRequestPath(wire.path)
+                    : op.deserializeRequest({"body":wire.body,"content-type":wire.hdr."Content-Type"}));
+                hash<auto> response = op.serializeResponse({"result":"accepted"});
+                assertEq({"result":"accepted"}, op.deserializeResponse(WSDLLib::parseSOAPMessage(
+                    {"body":response.body,"content-type":response.hdr."Content-Type"})));
+            }
+            HttpServer server();
+            on_exit server.stop();
+            SoapHandler handler(new PermissiveAuthenticator());
+            server.setDefaultHandler("presence", handler);
+            Queue received();
+            code<auto(hash<auto>, auto)> callback = auto sub(hash<auto> cx, auto data) {
+                received.push(data);
+                return {"result":"accepted"};
+            };
+            handler.addMethod(ws, ws.getOperation("send"), callback, NOTHING, NOTHING, NOTHING,
+                NOTHING, NOTHING, NOTHING, "B");
+            server.addListener(0);
+            string url = sprintf("http://127.0.0.1:%d/", server.getListenerInfo(0).port);
+            HTTPClient peer({"url":url,"timeout":30000});
+            foreach hash<auto> row in (model.rows) {
+                if (!exists row.missing) {
+                    continue;
+                }
+                assertThrows("HTTP-CLIENT-RECEIVE-ERROR", \peer.send(),
+                    (verb == "POST" ? row.form : NOTHING, verb,
+                    verb == "GET" ? path(location, row.form) : location,
+                    {"Content-Type":"application/x-www-form-urlencoded"}));
+                assertEq(0, received.size());
+            }
+            SoapClient client({"wsdl":ws,"service":"S","port":"Endpoint","url":url,"timeout":30000});
+            assertEq({"result":"accepted"}, client.callOperation("send", model.value));
+            assertEq(model.value, received.get(30000));
+        }
+    }
+}
+%endif

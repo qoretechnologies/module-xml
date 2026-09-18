@@ -9449,3 +9449,25 @@ Remaining P6 work includes concrete binding combinations, complete HTTP part/URI
 behavior, MIME multipart grammar/alternatives and attachment contract replay;
 P7–P9 remain incomplete. The empty-query part-validation bypass is reproduced in
 `/tmp/xml-http-part-values/` for the next binding increment.
+
+
+## P6-36: HTTP query and form part presence
+
+HTTP GET queries and POST/MIME forms enforce the presence of every declared part,
+including absent queries and normalized zero-byte bodies. Explicit empty strings
+remain valid; empty integer/boolean values fail their type checks. Zero-part
+messages work, and extra unbound keys retain their existing ignored behavior.
+The shared part converter checks key presence before conversion; all GET queries
+reach it. Thirty cases / 2,646 assertions cover 31 forms, source and both saved
+services, detached operations, providers/examples, 90 successful HTTP calls and
+180 missing-part rejections before callbacks. Independent Python parsing and
+pinned Xerces agree on values and invalid forms.
+All 20 affected Qore suites pass (605 cases / 15,199 assertions),
+plus seven independent gates (including six CXF peer tests), docs and astparser.
+All 16 corpus gates meet expected outcomes; six semantic reports match P6-35.
+Validation uses current Qore's already-fixed Mime binary for empty form output.
+Audit: 18 Pass / 44 N/A / zero Fail. No C++ changes or push.
+See [evidence](http-part-presence-evidence.md), [validation](P6-36-validation.json),
+[audit](audits/P6-36-http-part-presence.md) and [design](../../design/wsdl-http-mime.md).
+P6 still requires concrete binding combinations, remaining URI behavior,
+MIME multipart grammar/alternatives and attachment replay before P7–P9.

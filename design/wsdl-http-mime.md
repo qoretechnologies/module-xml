@@ -195,3 +195,22 @@ Routing compares the actual URI rather than treating TreeMap's component-relativ
 unmatched suffix as raw URI text. Static routes retain precedence over template
 routes; multiple matching templates fail explicitly. Removal by service identifier
 also removes fixed-query routes, and re-registration restores them.
+
+## HTTP form part presence
+
+Every declared part must have a wire key when decoding all message parts.
+`WSMessage::deserializeAllPartData()` checks key presence before type conversion;
+it does not infer presence from a scalar converter's empty-value behavior. An
+explicit `label=` pair retains its key even when the MIME parser represents its
+empty value as `NOTHING`, so a string part decodes to `""`. Omitting that pair
+raises `SOAP-DESERIALIZATION-ERROR`. Numeric and boolean empty values still fail
+their datatype rules. Extra unbound form/query keys retain their existing ignored
+behavior.
+
+GET requests with no query, an empty query, or only the fixed operation query
+pass through the same message checks as nonempty queries. POST and MIME form
+decoding treat a normalized absent body as zero octets, then apply those checks.
+A zero-part operation accepts the resulting empty map; other operations reject
+before a handler callback runs. Invalid requests do not change subsequent valid
+request handling. The source, saved-service and detached-operation paths share
+these rules.
