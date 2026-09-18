@@ -1,0 +1,130 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires ../qlib/WSDL.qm
+%requires ../qlib/SoapClient.qm
+%requires ../qlib/SoapHandler.qm
+%requires HttpServer
+%try-module json
+%define NoJson
+%endtry
+%ifdef NoJson
+throw "MISSING-MODULE", "Binding ownership fixtures require json";
+%else
+%exec-class BindingOwnershipTest
+class BindingOwnershipTest inherits QUnit::Test {
+    constructor() : Test("WSDL binding extension ownership", "1.0") {
+        hash<auto> manifest = parse_json(ReadOnlyFile::readTextFile(get_script_dir() + "/wsdl-interop/regressions/wsdl-binding-extension-ownership/cases.json"));
+        foreach hash<auto> row in (manifest.cases) {
+            addTestCase(row.name, \check(), (row,));
+            if (row.name == "soap11/absent-operation" || row.name == "soap12/absent-operation") {
+                addTestCase(row.kind + " selected type-part routes", \selectedTypeRoute(), (row,));
+            }
+        }
+        set_return_value(main());
+    }
+    private static WebService parse(string source) {
+        return new WebService(source, {"async_only":True});
+    }
+    private static WebService imported(string source) {
+        return new WebService('<w:definitions xmlns:w="http://schemas.xmlsoap.org/wsdl/" targetNamespace="urn:root">'
+            + '<w:import namespace="urn:owner" location="owner.wsdl"/></w:definitions>',
+            {"async_only":True,"document_location":"https://example.invalid/root.wsdl",
+                "xsd_cache":{"https://example.invalid/owner.wsdl":source}});
+    }
+    private check(hash<auto> row) {
+        if (!row.valid) {
+            assertThrows("WSDL-ERROR", \parse(), (row.xml,));
+            assertThrows("WSDL-ERROR", \imported(), (row.xml,));
+            return;
+        }
+        foreach WebService original in (parse(row.xml), imported(row.xml)) {
+            foreach WebService ws in (original, Serializable::deserialize(original.serialize()),
+                    Serializable::deserialize(original.serializeToData())) {
+                assertEq(row.kind == "soap12", ws.getBinding("B").isSoap12());
+                AbstractDataProviderType provider = ws.getMessage("In").getDataProviderType(True);
+                hash<auto> value = {"id":"input value"};
+                assertEq(value, provider.acceptsValue(value));
+                WSOperation current = ws.getBindingOperation("B", "send");
+                foreach WSOperation op in (current, Serializable::deserialize(current.serialize())) {
+                    hash<auto> request = op.serializeRequest(value);
+                    if (row.kind == "http") {
+                        assertEq("POST", request.method);
+                        assertEq("/send", request.path);
+                        assertEq(value, op.deserializeRequest({"body":request.body,
+                            "content-type":request.hdr."Content-Type"}));
+                    } else {
+                        assertTrue(request.body.contains(row.kind == "soap12" ? SOAP_12_ENV : SOAP_11_ENV));
+                        assertEq(value.id, op.deserializeRequest(parse_xml(request.body), "B", True));
+                    }
+                    hash<auto> reply = op.serializeResponse({"result":"response value"});
+                    auto response = op.deserializeResponse(parse_xml(reply.body), "B", True);
+                    assertEq(row.kind == "http" ? {"result":"response value"} : "response value", response);
+                    hash<auto> sample = provider.getExampleValue();
+                    hash<auto> wire = op.serializeRequest(sample);
+                    assertEq(row.kind == "http" ? sample : sample.id, row.kind == "http"
+                        ? op.deserializeRequest({"body":wire.body,"content-type":wire.hdr."Content-Type"})
+                        : op.deserializeRequest(parse_xml(wire.body), "B", True));
+                }
+                HttpServer server();
+                on_exit server.stop();
+                SoapHandler handler(new PermissiveAuthenticator());
+                server.setDefaultHandler("ownership", handler);
+                Queue received();
+                code<auto(hash<auto>, auto)> callback = auto sub(hash<auto> cx, auto data) {
+                    received.push(data);
+                    return {"result":"accepted"};
+                };
+                handler.addMethod(ws, current, callback, NOTHING, NOTHING, NOTHING, NOTHING, NOTHING, NOTHING, "B");
+                server.addListener(0);
+                SoapClient client({"wsdl":ws,"service":"S","port":"Endpoint","timeout":30000,
+                    "url":sprintf("http://127.0.0.1:%d/",server.getListenerInfo(0).port)});
+                assertEq(row.kind == "http" ? {"result":"accepted"} : "accepted",client.callOperation("send",value));
+                assertEq(row.kind == "http" ? value : value.id,received.get(30000));
+            }
+        }
+    }
+
+    private selectedTypeRoute(hash<auto> row) {
+        string source = replace(row.xml, '<w:part name="id" type="x:string"/>',
+            '<w:part name="id" type="x:string"/><w:part name="ignored" type="x:string"/>');
+        source = replace(source, '<w:input><b:body use="literal"/>',
+            '<w:input><b:body use="literal" parts="id"/>');
+        WebService original(source);
+        foreach WebService ws in (original, Serializable::deserialize(original.serialize()),
+                Serializable::deserialize(original.serializeToData())) {
+            WSOperation current = ws.getBindingOperation("B", "send");
+            foreach WSOperation op in (current, Serializable::deserialize(current.serialize())) {
+                assertEq(("id",), op.getTopLevelRequestNames());
+                assertEq("selected", op.deserializeRequest(parse_xml(op.serializeRequest({"id":"selected"}).body),
+                    "B", True));
+            }
+            HttpServer server();
+            on_exit server.stop();
+            SoapHandler handler(new PermissiveAuthenticator());
+            server.setDefaultHandler("selected", handler);
+            Queue received();
+            code<auto(hash<auto>, auto)> callback = auto sub(hash<auto> cx, auto data) {
+                received.push(data);
+                return {"result":"accepted"};
+            };
+            handler.addMethod(ws, current, callback, NOTHING, NOTHING, NOTHING, NOTHING, NOTHING, NOTHING, "B");
+            server.addListener(0);
+            string url = sprintf("http://127.0.0.1:%d/", server.getListenerInfo(0).port);
+            SoapClient client({"wsdl":ws,"service":"S","port":"Endpoint","timeout":30000,"url":url});
+            assertEq("accepted", client.callOperation("send", {"id":"first"}));
+            assertEq("first", received.get(30000));
+            hash<auto> valid = current.serializeRequest({"id":"selected"});
+            string invalid = replace(replace(valid.body, "<id>", "<ignored>"), "</id>", "</ignored>");
+            assertNeq(valid.body, invalid);
+            HTTPClient peer({"url":url,"timeout":30000});
+            assertThrows("HTTP-CLIENT-RECEIVE-ERROR", \peer.send(), (invalid,"POST","/",valid.hdr));
+            assertEq(0, received.size());
+            assertEq("accepted", client.callOperation("send", {"id":"recovered"}));
+            assertEq("recovered", received.get(30000));
+        }
+    }
+}
+%endif

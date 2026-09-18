@@ -9471,3 +9471,26 @@ See [evidence](http-part-presence-evidence.md), [validation](P6-36-validation.js
 [audit](audits/P6-36-http-part-presence.md) and [design](../../design/wsdl-http-mime.md).
 P6 still requires concrete binding combinations, remaining URI behavior,
 MIME multipart grammar/alternatives and attachment replay before P7–P9.
+
+
+## P6-37: Concrete extension ownership and type-part routing
+
+The structure scanner retains the enclosing binding namespace and validates
+SOAP/HTTP operation/message extensions before namespace stripping. Protocol/version
+mismatches, duplicate declarations, conflicting URL mappings and output URL mappings
+reject with WSDL-ERROR. Prefix aliases, default namespace scopes, opaque optional
+extensions and absent SOAP operations work through local/imported and saved services.
+Actionless document type-parts now register their selected wire names for dispatch.
+The 65-document independent Python/Xerces matrix separates 24 supported cases
+from 41 schema-valid semantic negatives. The Qore suite passes 67 cases / 1,924
+assertions, including detached handles, providers, 156 successful HTTP calls,
+six unselected-route rejections and recovery.
+All 29 affected Qore suites pass (1,337 cases / 30,613 assertions),
+plus nine independent gates (including six CXF peer tests), docs and astparser.
+All 16 corpus gates meet expected outcomes and six semantic reports match P6-36.
+Audit: 18 Pass / 44 N/A / zero Fail; no C++ changes or push.
+See [evidence](binding-extension-ownership-evidence.md), [validation](P6-37-validation.json),
+[audit](audits/P6-37-binding-extension-ownership.md) and [design](../../design/wsdl-core-grammar.md).
+MIME multipart grammar, nested header retention and alternative compilation remain
+required P6 work; the next root-cause probes are in `/tmp/xml-mime-part-grammar/`.
+P7–P9 remain incomplete.

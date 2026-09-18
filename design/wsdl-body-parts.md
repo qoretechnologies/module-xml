@@ -56,6 +56,13 @@ Literal, non-multipart serialization checks that every selected body part was
 emitted. Missing required parts reject with `SOAP-SERIALIZATION-ERROR`; partial
 header conversion still uses its explicit part projection.
 
+Document request routing includes the wire names of selected type-based parts as
+well as admitted element declarations. For example, an `orderId` part declared
+with `type="xs:string"` can dispatch from its `orderId` body element when the SOAP
+action is omitted. Explicit body selection excludes unselected type-part names
+from registration. Source/saved services and detached operations derive these
+names from their binding descriptions; normal body validation still applies.
+
 When native decoding finds the same message part in both Body and Header, it
 returns exactly `{"^body^": <part map>, "^headers^": <message/part map>}`.
 This decision precedes flattening: even distinct flat keys can otherwise cause

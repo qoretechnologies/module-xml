@@ -73,6 +73,27 @@ binding capabilities and schema/message validation have separate owners. Classic
 WSDL imports of XSD and import-resource deduplication remain available; profile
 restrictions on those features are not imposed by the core structure pass.
 
+## Concrete protocol ownership
+
+The streaming structure frames retain the enclosing binding's extension namespace.
+SOAP 1.1, SOAP 1.2 and HTTP operation/message extensions must belong to that
+protocol. Prefix aliases and local/default namespace declarations are resolved by
+the XML reader before this comparison. Grouped local names cannot make a SOAP 1.2
+body belong to a SOAP 1.1 binding or make an HTTP operation supply SOAP metadata.
+
+A binding has one recognized protocol declaration. Operation extensions and SOAP
+bodies occur at most once in their respective owner. HTTP URL mappings apply only
+to inputs and select one of `urlEncoded` or `urlReplacement`; duplicate or combined
+mappings reject. SOAP operation extensions remain optional. Unknown optional
+extension payloads are opaque and do not contribute declarations or counts. These
+rules apply to imported descriptions before any callable operation is published.
+The separately retained CXF binding metadata keeps its existing selection rules.
+
+These are component constraints beyond the individual extension schemas, whose
+WSDL extension slots permit otherwise valid elements from different protocols.
+`test/wsdl-binding-extension-ownership.qtest` checks the constraints, namespace
+rebinding, source/saved/imported consumers, provider examples and HTTP execution.
+
 ## Example and verification
 
 An inventory binding can include an optional foreign annotation before its WSDL
