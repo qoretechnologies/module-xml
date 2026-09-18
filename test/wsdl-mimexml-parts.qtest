@@ -1,0 +1,84 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires xml
+%requires ../qlib/WSDL.qm
+%requires ../qlib/SoapClient.qm
+%requires ../qlib/SoapHandler.qm
+%requires HttpServer
+%exec-class MimeXmlPartsTest
+
+class MimeXmlPartsTest inherits QUnit::Test {
+    constructor() : Test("Explicit MIME XML part selection", "1.0") {
+        addTestCase("Multiple-part messages honor independent input and output selections", \selected());
+        addTestCase("Unknown parts reject while omitted single-part selection remains compatible", \invalid());
+        addTestCase("Selected parts reach real HTTP consumers", \http());
+        set_return_value(main());
+    }
+    private static string source(string input_part = "right", string output_part = "left", bool single = False) {
+        return '<w:definitions xmlns:w="http://schemas.xmlsoap.org/wsdl/" xmlns:h="http://schemas.xmlsoap.org/wsdl/http/"'
+            + ' xmlns:m="http://schemas.xmlsoap.org/wsdl/mime/" xmlns:t="urn:mime" xmlns:xs="http://www.w3.org/2001/XMLSchema" targetNamespace="urn:mime">'
+            + '<w:message name="M"><w:part name="right" type="xs:int"/>'
+            + (single ? '' : '<w:part name="left" type="xs:string"/>') + '</w:message>'
+            + '<w:portType name="P"><w:operation name="send"><w:input message="t:M"/><w:output message="t:M"/></w:operation></w:portType>'
+            + '<w:binding name="B" type="t:P"><h:binding verb="POST"/><w:operation name="send"><h:operation location="/send"/>'
+            + '<w:input><m:mimeXml' + (input_part ? ' part="' + input_part + '"' : '') + '/></w:input>'
+            + '<w:output><m:mimeXml' + (output_part ? ' part="' + output_part + '"' : '') + '/></w:output>'
+            + '</w:operation></w:binding><w:service name="S"><w:port name="Endpoint" binding="t:B">'
+            + '<h:address location="http://example.invalid/mime"/></w:port></w:service></w:definitions>';
+    }
+    private selected() {
+        WebService original(source());
+        foreach WSOperation op in (original.getOperation("send"), Serializable::deserialize(original.serialize()).getOperation("send"),
+                Serializable::deserialize(original.getOperation("send").serialize())) {
+            assertEq("right", op.getBinding().input.mimeXml.part);
+            assertEq("left", op.getBinding().output.mimeXml.part);
+            hash<auto> request = op.serializeRequest({"right":71});
+            hash<auto> response = op.serializeResponse({"left":"accepted"});
+            assertEq({"right":"71"}, parse_xml(request.body));
+            assertEq({"left":"accepted"}, parse_xml(response.body));
+            assertEq({"right":71}, op.deserializeRequest(parse_xml(request.body)));
+            assertEq({"left":"accepted"}, op.deserializeResponse(parse_xml(response.body)));
+        }
+    }
+    private invalid() {
+        foreach list<string> parts in (("absent", "left"), ("right", "absent"), ("", "left"), ("right", "")) {
+            assertThrows("WSDL-ERROR", sub() { new WebService(source(parts[0], parts[1])); });
+        }
+        assertThrows("WSDL-ERROR", sub() { new WebService(source("absent", "right", True)); });
+        foreach string part in ("", "right") {
+            WSOperation op = new WebService(source(part, part, True)).getOperation("send");
+            assertEq("right", op.getBinding().input.mimeXml.part);
+            assertEq("right", op.getBinding().output.mimeXml.part);
+        }
+    }
+    private http() {
+        WebService ws = Serializable::deserialize(new WebService(source()).serialize());
+        HttpServer server();
+        on_exit server.stop();
+        SoapHandler handler(new PermissiveAuthenticator());
+        server.setDefaultHandler("mime", handler);
+        Queue received();
+        code<auto(hash<auto>, auto)> callback = auto sub(hash<auto> cx, auto value) {
+            if (value.right == 72) {
+                throw "TEST-REJECTION", "request rejected";
+            }
+            received.push(value);
+            return {"left": "accepted"};
+        };
+        handler.addMethod(ws, ws.getOperation("send"), callback, NOTHING, NOTHING, NOTHING, NOTHING, NOTHING, NOTHING, "B");
+        server.addListener(0);
+        SoapClient client({"wsdl":ws, "service":"S", "port":"Endpoint",
+            "url":sprintf("http://127.0.0.1:%d/", server.getListenerInfo(0).port), "timeout":30000});
+        hash<auto> info;
+        auto result = client.callOperation("send", {"right":71}, NOTHING, \info);
+        assertEq({"left":"accepted"}, result);
+        assertEq({"right":71}, received.get(30000));
+        assertEq({"right":"71"}, parse_xml(info."request-body"));
+        assertEq({"left":"accepted"}, parse_xml(info."response-body"));
+        assertThrows("HTTP-CLIENT-RECEIVE-ERROR", \client.callOperation(), ("send", {"right":72}));
+    }
+
+}

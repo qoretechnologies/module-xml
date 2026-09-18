@@ -642,3 +642,17 @@ all six semantic reports are unchanged. The approved configurable worker deadlin
 preserves the 60-second default; this full run used 180 seconds. See
 [fault evidence](headerfaults-evidence.md). Remaining binding grammar, HTTP/MIME,
 pinned CXF replay and P7–P9 remain open.
+
+
+## P6-22: HTTP MIME XML part selection and transport
+
+Explicit MIME XML input/output part selections now resolve against the selected
+abstract messages. HTTP-only services serialize successful responses without a
+SOAP version override; HTTP errors remain errors even with SOAP-shaped bodies.
+Source, saved and detached metadata and a real local client/server exchange pass.
+The affected gate passes 9 suites / 86 cases / 2,765 reported assertions; the
+SOAP comparator suite intentionally catches its negative assertions. Docs and
+astparser pass; audit: 18 Pass / 44 N/A / zero Fail. No C++ changes.
+See [validation](P6-22-validation.json), [audit](audits/P6-22-http-mime.md) and
+[implemented design](../../design/wsdl-http-mime.md). Full binding grammar,
+the remaining HTTP/MIME matrix and pinned CXF replay remain in P6, followed by P7–P9.
