@@ -1,0 +1,107 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires ../qlib/WSDL.qm
+%requires ../qlib/SoapClient.qm
+%requires ../qlib/SoapHandler.qm
+%requires HttpServer
+%try-module json
+%define NoJson
+%endtry
+%ifdef NoJson
+throw "MISSING-MODULE", "MIME content fixtures require json";
+%else
+%exec-class MimeContentDefaultsTest
+class MimeContentDefaultsTest inherits QUnit::Test {
+    constructor() : Test("MIME content defaults and declaration constraints", "1.0") {
+        hash<auto> manifest = parse_json(ReadOnlyFile::readTextFile(get_script_dir()
+            + "/wsdl-interop/regressions/wsdl-mime-content-defaults/cases.json"));
+        foreach hash<auto> row in (manifest.cases) {
+            addTestCase(row.name, \check(), (row,));
+        }
+        set_return_value(main());
+    }
+    private static WebService parse(string source) {
+        return new WebService(source, {"async_only":True});
+    }
+    private static WebService imported(string source) {
+        return new WebService('<w:definitions xmlns:w="http://schemas.xmlsoap.org/wsdl/" targetNamespace="urn:root">'
+            + '<w:import namespace="urn:mime-defaults" location="mime.wsdl"/></w:definitions>',
+            {"async_only":True,"document_location":"https://example.invalid/root.wsdl",
+                "xsd_cache":{"https://example.invalid/mime.wsdl":source}});
+    }
+    private directContent(WebService ws) {
+        WSOperation current = ws.getBindingOperation("B", "call");
+        hash<auto> value = {"payload":{"^value^":"A < & č", "^attributes^":{"^content-type^":"text/plain;charset=UTF-8"}}};
+        foreach WSOperation op in (current, Serializable::deserialize(current.serialize())) {
+            foreach string direction in ("input", "output") {
+                BindingContentDescription content = op.getBinding("B"){direction}.content;
+                assertEq("payload", content.part);
+                assertTrue(content.acceptAllContentTypes);
+            }
+            hash<auto> request = op.serializeRequest(value);
+            assertEq("A < & č", request.body);
+            assertEq("text/plain;charset=UTF-8", request.hdr."Content-Type");
+            hash<auto> wire = {"body":request.body,"content-type":request.hdr."Content-Type"};
+            assertEq(value, op.deserializeRequest(wire));
+            assertEq(value, op.deserializeResponse(wire));
+            assertThrows("SOAP-SERIALIZATION-ERROR", \op.serializeRequest(), ({"payload":"no concrete media type"},));
+        }
+        HttpServer server();
+        on_exit server.stop();
+        SoapHandler handler(new PermissiveAuthenticator());
+        server.setDefaultHandler("mime", handler);
+        Queue received();
+        code<auto(hash<auto>, auto)> callback = auto sub(hash<auto> cx, auto data) {
+            received.push(data);
+            return data;
+        };
+        handler.addMethod(ws,current,callback,NOTHING,NOTHING,NOTHING,NOTHING,NOTHING,NOTHING,"B");
+        server.addListener(0);
+        SoapClient client({"wsdl":ws,"service":"S","port":"Endpoint","timeout":30000,
+            "url":sprintf("http://127.0.0.1:%d/",server.getListenerInfo(0).port)});
+        assertEq(value,client.callOperation("call",value));
+        assertEq(value,received.get(30000));
+    }
+    private check(hash<auto> row) {
+        if (!row.valid) {
+            assertThrows("WSDL-ERROR", \parse(), (row.xml,));
+            assertThrows("WSDL-ERROR", \imported(), (row.xml,));
+            return;
+        }
+        foreach WebService original in (parse(row.xml), imported(row.xml)) {
+            foreach WebService ws in (original, Serializable::deserialize(original.serialize()),
+                    Serializable::deserialize(original.serializeToData())) {
+                assertEq(original.getWSDL(), ws.getWSDL());
+                if (row.http) {
+                    directContent(ws);
+                    continue;
+                }
+                WSMessage message = ws.getMessage("M");
+                AbstractDataProviderType provider = message.getDataProviderType(True);
+                hash<auto> value();
+                value.payload = <00ff1234>;
+                if (!row.single) {
+                    value.body = "main body";
+                }
+                assertEq(value, provider.acceptsValue(value));
+                hash<auto> sample = provider.getExampleValue();
+                assertTrue(sample.hasKey("payload"));
+                assertEq(sample, provider.acceptsValue(sample));
+                WSOperation current = ws.getBindingOperation("B", "call");
+                foreach WSOperation op in (current, Serializable::deserialize(current.serialize())) {
+                    foreach string direction in ("input", "output") {
+                        BindingMessageDescription description = op.getBinding("B"){direction};
+                        assertEq("related", description.multipart);
+                        assertEq(row.single ? () : ("body",), description.body.parts);
+                        assertEq(1, description.parts.size());
+                        assertEq(row.expected, description.parts{message.pmap.payload});
+                    }
+                }
+            }
+        }
+    }
+}
+%endif

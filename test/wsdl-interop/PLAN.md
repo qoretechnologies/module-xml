@@ -1016,3 +1016,25 @@ See [evidence](mime-part-grammar-evidence.md), [validation](P6-38-validation.jso
 Complete MIME representation alternatives and remaining HTTP URI behavior stay in
 P6. A concrete SoapClient base-URI concatenation failure is reduced in
 `/tmp/xml-http-base-resolution/` for the next increment. P7–P9 remain incomplete.
+
+
+## P6-39: MIME content defaults and complete media declaration checks
+
+Direct and multipart content bindings share WSDL single-part/unrestricted-type
+defaults and media validation. Empty content elements are present declarations.
+Every multipart alternative validates syntax and parameter constraints before
+publication; ambiguous/unknown parts and explicitly empty media types reject.
+The 70-document matrix has 38 supported and 32 invalid descriptions; its Qore
+suite passes 70 cases / 4,636 assertions and 12 HTTP exchanges. Python, Xerces and
+WSDL4J independently distinguish general WSDL defaults from the published WS-I
+schema's stricter required-part rule. Saved services, detached handles and providers
+retain the metadata. All 31 affected Qore suites pass (1,527 cases /
+44,997 assertions), plus 14 supplemental gates. All 16 corpus commands meet
+expected outcomes and six semantic reports match P6-38. Audit: 18 Pass / 44 N/A /
+zero Fail. No C++ changes or push.
+See [evidence](mime-content-defaults-evidence.md), [validation](P6-39-validation.json),
+[audit](audits/P6-39-mime-content-defaults.md) and [design](../../design/wsdl-mime-part-grammar.md).
+P6 still requires MIME representation alternatives, attachment replay and complete
+HTTP URI behavior. The latter requires Qore's request-local absolute URL API;
+write-up and two-server reproducer: `/tmp/xml-http-base-resolution/QORE-REQUEST-URL.md`.
+P7–P9 remain incomplete.

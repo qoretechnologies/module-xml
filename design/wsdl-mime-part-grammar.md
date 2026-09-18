@@ -53,3 +53,20 @@ The header uses the same native message/part map as a directly bound header.
 With no attachment values, the existing transport can send an ordinary SOAP
 message; WS-I Attachments Profile R2917 permits this for SOAP 1.1. Declaring MIME
 metadata does not itself create an attachment value or replace wire validation.
+
+MIME content uses the same declaration media parser in direct and multipart
+bindings. Omitting `part` selects the sole abstract message part; omission with
+multiple parts and references to unknown parts fail. Omitting `type` accepts every
+MIME type and is represented by `*/*` in the multipart map. An explicitly empty
+`type` fails. All alternatives undergo parameter and wildcard validation before
+publication; original supplied media strings remain in multipart metadata.
+
+An empty `<mime:content/>` is a present declaration. A single-part HTTP upload
+can use it to accept arbitrary content; callers supply a concrete media type in
+the existing `^attributes^.^content-type^` value metadata. For example,
+`{"payload":{"^value^":"invoice text", "^attributes^":{"^content-type^":"text/plain;charset=UTF-8"}}}`
+selects UTF-8 text without relaxing the payload's declared schema type.
+
+These defaults follow general WSDL 1.1 section 5.3. The published 2004 MIME schema
+requires an explicit content part for WS-I; the general single-part default is
+checked separately and does not imply WS-I Attachments Profile conformance.
