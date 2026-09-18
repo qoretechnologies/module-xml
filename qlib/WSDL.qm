@@ -124,6 +124,8 @@ module WSDL {
     - distinct message parts can share an element QName in different body/header locations without losing part identity
     - URL-replacement decoding validates complete templates and repeated values, with linear token traversal
     - http:urlEncoded uses a form body for POST and a query for GET, with typed decoding in both directions
+    - HTTP MIME XML uses schema-aware document values, preserving qualified roots, QName context, nil and retained XML
+      with strict part matching, per-call namespaces, and requested output encoding/formatting
     - HTTP MIME XML bindings honor explicit input/output part selections and reject unknown part names
     - declared SOAP body fault details support explicit native decoding and literal XML retention, independently
       of normal output bodies and without changing the existing client exception contract
@@ -29914,11 +29916,14 @@ public class WSMessage inherits WSDL::XsdNamedData {
         @param encoded if the encoded use module should be used (or the literal use model)
         @param h data to be serialized, keys are wsdl element names (optionally part name is also possible) and part names for simple types
         @param fault @ref True if serializing a fault response
+        @param soap True applies SOAP's restrictions on retained XML; False permits standalone MIME XML
+        @return serialized XML data for the selected document parts
+        @throw SOAP-SERIALIZATION-ERROR invalid part values or XML content forbidden by the selected protocol
         @note A single selected part accepts unwrapped record fields, including nested choices and
         explicit element wildcards. Explicit values for other parts and declared headers remain available.
         Multiple selected parts require part or element wrappers to identify ownership.
      */
-    *hash<auto> serializeDocument(*softlist<auto> parts, *WSDL::BindingMessageDescription msginfo, *MultiPartRelatedMessage mpm, bool encoded, reference<auto> h, bool fault) {
+    *hash<auto> serializeDocument(*softlist<auto> parts, *WSDL::BindingMessageDescription msginfo, *MultiPartRelatedMessage mpm, bool encoded, reference<auto> h, bool fault, bool soap = True) {
         Namespaces output_namespaces = QNameOutputNamespaces ?? nsc;
         XsdNativeTypeOutputScope type_scope(tmap);
         hash<auto> rh;
@@ -29992,9 +29997,11 @@ public class WSMessage inherits WSDL::XsdNamedData {
             if (val instanceof XsdXmlValue) {
                 if (!arg.element || encoded || (mpm && msginfo.parts{k})) {
                     throw SOAP_SERIALIZATION_ERROR,
-                        "retained XML values require an element-based literal SOAP part";
+                        "retained XML values require an element-based literal message part";
                 }
-                XsdSoapXmlHelper::validate(val, SOAP_SERIALIZATION_ERROR);
+                if (soap) {
+                    XsdSoapXmlHelper::validate(val, SOAP_SERIALIZATION_ERROR);
+                }
                 auto native = arg.element.validateXmlValue(val, output_namespaces, tmap);
                 XsdSoapXmlHelper::mergeContext(\xml_attributes, cast<XsdXmlValue>(val).getInheritedXmlAttributes());
                 # Headers are serialized in separate calls and merged, so the marker must include
@@ -31814,11 +31821,33 @@ public class HttpBinding inherits WSDL::OperationalBinding {
             }
         } else if (bmd.mimeXml) {
             ct = MimeTypeXml;
-            # in case of mimeXml is body content, i.e. XML tag based on element/type name, not part
-            string ons;
-            hash<auto> hh;
-            hh{msg.getSerializedKey(bmd.mimeXml.part)} = msg.serializeRpcValue(bmd.mimeXml.part, False, \h, \ons);
-            rv.body = make_xml(hh);
+            Namespaces namespaces = op.nsc.copy();
+            XsdQNameOutputScope output_scope(namespaces);
+            hash<auto> document = msg.serializeDocument((bmd.mimeXml.part,), bmd, NOTHING, False, \h, False, False);
+            *hash<auto> attributes = remove document."^attributes^";
+            if (attributes) {
+                throw SOAP_SERIALIZATION_ERROR,
+                    "standalone MIME XML cannot retain inherited XML attributes without a containing element";
+            }
+            foreach string root in (keys document) {
+                # Retained XML fragments already carry their own namespace context.
+                if (root.startsWith("^xml^")) {
+                    continue;
+                }
+                hash<auto> content();
+                if (document{root}.typeCode() == NT_HASH) {
+                    content += document{root};
+                } else {
+                    content."^value^" = document{root};
+                }
+                content."^attributes^" += namespaces.getOutputNamespaceHash(NOTHING);
+                if (root.find(":") < 0) {
+                    content."^attributes^".xmlns = "";
+                }
+                document{root} = content;
+            }
+            XsdQNameXmlOutputHelper output();
+            rv.body = make_xml(output.prepare(document), xml_opts, enc);
         }
 
         # add request headers if necessary
@@ -31935,8 +31964,8 @@ public class HttpBinding inherits WSDL::OperationalBinding {
         }
 
         if (bmd.mimeXml) {
-            *hash<auto> h = msg.deserializeData(bmd.mimeXml.part, v);
-            return h;
+            return msg.deserializeDocument(NOTHING, XsdBase::expandElementNamespaces(v),
+                (bmd.mimeXml.part,), False, True);
         }
     }
 

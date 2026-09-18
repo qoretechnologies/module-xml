@@ -9205,3 +9205,29 @@ Docs/astparser pass; audit: 18 Pass / 44 N/A / zero Fail. See
 The pinned document-header contract has undefined inoutHeader body-part names;
 the RPC-header contract includes a CXF-specific XML binding. Their source and
 capability adjudication and remaining P6 work still precede P7–P9.
+
+
+## Optional CXF transport scope decision
+
+The user approved retaining CXF XML/JMS metadata while rejecting unsupported port
+selection and allowing supported SOAP ports in the same contract. Full transport
+support is deferred to [Qore #5454](https://github.com/qoretechnologies/qore/issues/5454),
+opened with pinned fixture references and client/server interoperability criteria.
+Metadata preservation and explicit rejection are still pending P6 implementation.
+
+
+## P6-26: schema-aware HTTP MIME XML values
+
+MIME XML now serializes the selected document part with per-call namespace
+bindings and decodes by expanded root identity. Qualified children, QName values,
+nil, saved graphs and retained lexical XML work in both directions and through
+real HTTP consumers. Encoding and formatting options reach the XML generator.
+SOAP-only processing-instruction restrictions remain specific to SOAP. Wrong,
+missing, repeated and extra roots reject; the legacy unqualified-global-element
+expectation now asserts rejection and supplies valid qualified XML for success.
+The gate passes 14 suites / 169 cases / 3,989 reported assertions;
+all 16 corpus commands meet expected outcomes. Docs/parser pass; audit: 18 Pass /
+44 N/A / zero Fail. See [validation](P6-26-validation.json),
+[audit](audits/P6-26-http-xml-values.md), and the
+[implemented design](../../design/wsdl-http-mime.md).
+Remaining P6 binding/CXF work and P7–P9 are still open.

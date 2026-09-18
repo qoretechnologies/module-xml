@@ -20,6 +20,15 @@ payloads. Of independently valid inputs, 52 fail decoding, one fails serializati
 invalid XML. The input oracle also rejects 52 messages and cannot assess six. These sets overlap;
 they are stage counts, not independent bug counts or a compliance percentage.
 
+## Approved optional transport scope
+
+CXF's XML binding and JMS transports are outside this plan's transport implementation
+scope by explicit user approval. Retain their binding/port metadata, keep supported
+SOAP ports usable in mixed contracts, and reject selection of unsupported ports.
+Implementing those transports is tracked separately in
+[Qore #5454](https://github.com/qoretechnologies/qore/issues/5454). The metadata and
+selection behavior remains required P6 work; approval does not count it as implemented.
+
 ## Execution rules and phase boundaries
 
 Implement phases P1 through P9 in order. Split a phase into small commits where necessary, keeping
@@ -704,3 +713,20 @@ Docs/astparser pass; audit: 18 Pass / 44 N/A / zero Fail. See
 The pinned document-header contract has undefined inoutHeader body-part names;
 the RPC-header contract includes a CXF-specific XML binding. Their source and
 capability adjudication and remaining P6 work still precede P7–P9.
+
+
+## P6-26: schema-aware HTTP MIME XML values
+
+MIME XML now serializes the selected document part with per-call namespace
+bindings and decodes by expanded root identity. Qualified children, QName values,
+nil, saved graphs and retained lexical XML work in both directions and through
+real HTTP consumers. Encoding and formatting options reach the XML generator.
+SOAP-only processing-instruction restrictions remain specific to SOAP. Wrong,
+missing, repeated and extra roots reject; the legacy unqualified-global-element
+expectation now asserts rejection and supplies valid qualified XML for success.
+The gate passes 14 suites / 169 cases / 3,989 reported assertions;
+all 16 corpus commands meet expected outcomes. Docs/parser pass; audit: 18 Pass /
+44 N/A / zero Fail. See [validation](P6-26-validation.json),
+[audit](audits/P6-26-http-xml-values.md), and the
+[implemented design](../../design/wsdl-http-mime.md).
+Remaining P6 binding/CXF work and P7–P9 are still open.

@@ -15,6 +15,32 @@ the request with `<mime:mimeXml part="quantity"/>` and the response with
 receive a part map such as `{"confirmation": "accepted"}`. Wire names and typed
 conversion come from the selected message part through the existing XML codec.
 
+MIME XML uses the selected part's document codec, following the schema-root mapping
+in [WSDL 1.1 section 5.6](https://www.w3.org/TR/2001/NOTE-wsdl-20010315#_mime:mimeXml). Element-based parts emit the
+actual global element QName and schema-qualified children; type-based parts use
+an unqualified WSDL part name. The complete document carries namespace bindings
+for its content and QName values. Serialization uses a per-call namespace copy,
+so one request cannot change the shared service namespace registry. XML encoding
+and generator flags apply to the final document.
+
+Decoding resolves element names to expanded identities before matching the one
+selected part, rejecting missing, extra, repeated and wrongly qualified roots.
+The selected declaration then validates content, nil and native type wrappers.
+An `XsdXmlValue` supplied as an element part is validated and emitted with its
+retained lexical content and namespace context, including processing instructions
+inside the element. The element-fragment generator rejects DOCTYPEs. Standalone
+MIME output also rejects a retained value with inherited XML attributes: there is
+no enclosing element on which to preserve that context, and adding the attributes
+to the root could change its schema validity. Explicit `deserializeXmlRequest`
+and `deserializeXmlResponse` remain SOAP-only APIs.
+
+For example, `{"order": {"count": 71, "category": new XsdQNameValue("urn:catalog",
+"p:Product")}}` produces a complete qualified order document when the `order`
+part references a global element. A peer may use a different prefix for that
+element and the category value; decoding compares their namespace identities.
+`test/wsdl-http-xml-values.qtest` covers this behavior in source, saved-service,
+detached-operation and real HTTP paths, including negative inputs and nil values.
+
 `SoapHandler` applies a response SOAP-version override only when the selected
 operational binding is a `SoapBinding`. HTTP binding responses do not require
 the service to declare a SOAP version. `SoapClient` likewise restricts SOAP fault
