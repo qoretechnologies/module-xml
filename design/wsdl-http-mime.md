@@ -41,3 +41,26 @@ This preserves reserved delimiters and Unicode without a second encoding pass.
 A GET argument `{"label": "A & č+"}` therefore contains
 `label=A%20%26%20%C4%8D%2B` in the request target; the corresponding POST sends it
 in the body. The same behavior applies after saved-service reconstruction.
+
+## URL-replacement routing
+
+`HttpBinding::matchesRequestPath()` checks the complete operation-relative
+replacement template without applying schema types. Prefix literals, internal
+separators and suffixes must match; repeated references to a part must decode to
+the same value. A trailing unmatched resource path fails. Token traversal is
+linear; each parameter uses the immediately following literal as its delimiter.
+Message type conversion follows successful matching.
+
+SoapHandler stores replacement routes separately from static HTTP paths, under
+the HTTP verb and template. It tries exact static routes first, then complete
+replacement templates. Duplicate template registration fails; a request matching
+multiple replacement routes fails instead of selecting an arbitrary callback.
+Template matching and decoding use HttpServer's raw request path, with the handler
+mount prefix removed, so encoded slashes and percent signs are decoded once.
+For example, `/items/A%2FB%252F/view` supplies `A/B%2F` to the callback.
+
+HTTP route registration holds the write lock. `removeService(unique_id)` removes
+static and replacement routes belonging to that identifier. In-flight requests
+retain their selected method, while subsequent lookups observe the removal.
+The replacement regression covers default and mounted handlers, source and saved
+services, repeated values, suffix validation, overlapping templates and removal.

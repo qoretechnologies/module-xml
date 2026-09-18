@@ -1,0 +1,140 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires xml
+%requires ../qlib/WSDL.qm
+%requires ../qlib/SoapClient.qm
+%requires ../qlib/SoapHandler.qm
+%requires HttpServer
+%exec-class HttpReplacementTest
+
+class HttpReplacementTest inherits QUnit::Test {
+    constructor() : Test("HTTP replacement routing", "1.0") {
+        addTestCase("Complete templates match and repeated values agree", \templates());
+        addTestCase("Real HTTP routing preserves raw replacement values", \http());
+        addTestCase("Service removal drops static and replacement routes", \removal());
+        addTestCase("Duplicate and ambiguous templates reject", \ambiguous());
+        set_return_value(main());
+    }
+    private static string source(string location = "/items/(id)/view", bool query = False) {
+        return '<w:definitions xmlns:w="http://schemas.xmlsoap.org/wsdl/" xmlns:h="http://schemas.xmlsoap.org/wsdl/http/"'
+            + ' xmlns:m="http://schemas.xmlsoap.org/wsdl/mime/" xmlns:t="urn:replacement" xmlns:xs="http://www.w3.org/2001/XMLSchema" targetNamespace="urn:replacement">'
+            + '<w:message name="In"><w:part name="id" type="xs:string"/></w:message>'
+            + '<w:message name="Out"><w:part name="result" type="xs:string"/></w:message>'
+            + '<w:portType name="P"><w:operation name="send"><w:input message="t:In"/><w:output message="t:Out"/></w:operation></w:portType>'
+            + '<w:binding name="B" type="t:P"><h:binding verb="GET"/><w:operation name="send"><h:operation location="' + location + '"/>'
+            + '<w:input><h:' + (query ? 'urlEncoded' : 'urlReplacement') + '/></w:input><w:output><m:mimeXml part="result"/></w:output>'
+            + '</w:operation></w:binding><w:service name="S"><w:port name="Endpoint" binding="t:B">'
+            + '<h:address location="http://example.invalid/"/></w:port></w:service></w:definitions>';
+    }
+    private templates() {
+        foreach string location in ("/items/(id)/view", "items/(id)/view", "/items/(id)/again/(id)") {
+            WebService ws(source(location));
+            foreach WSOperation op in (ws.getOperation("send"), Serializable::deserialize(ws.getOperation("send").serialize())) {
+                HttpBinding binding = op.getBinding();
+                foreach string id in ("abc", "A/B & č+%2F", "", "(id)") {
+                    hash<auto> value = {"id":id};
+                    hash<auto> msg = op.serializeRequest(value);
+                    assertTrue(binding.matchesRequestPath(msg.path));
+                    assertEq(value, op.deserializeRequestPath(msg.path));
+                    if (location !~ /again/) {
+                        assertFalse(binding.matchesRequestPath(msg.path + "/extra"));
+                        assertThrows("SOAP-DESERIALIZATION-ERROR", \op.deserializeRequestPath(), (msg.path + "/extra",));
+                    }
+                }
+                assertFalse(binding.matchesRequestPath("/wrong/a/view"));
+            }
+        }
+        WSOperation repeated = new WebService(source("/items/(id)/again/(id)")).getOperation("send");
+        assertFalse(cast<HttpBinding>(repeated.getBinding()).matchesRequestPath("/items/a/again/b"));
+        assertThrows("SOAP-DESERIALIZATION-ERROR", \repeated.deserializeRequestPath(), ("/items/a/again/b",));
+    }
+    private http() {
+        foreach bool saved in (False, True) {
+            foreach string mount in ("", "api", "api č") {
+                WebService first(source());
+                WebService second(source("/items/(id)/edit"));
+                WebService query(source("/items", True));
+                if (saved) {
+                    first = Serializable::deserialize(first.serialize());
+                    second = Serializable::deserialize(second.serialize());
+                    query = Serializable::deserialize(query.serialize());
+                }
+                HttpServer server();
+                on_exit server.stop();
+                SoapHandler handler(new PermissiveAuthenticator());
+                if (mount) {
+                    server.setHandler("replacement", mount, NOTHING, handler, NOTHING, False);
+                } else {
+                    server.setDefaultHandler("replacement", handler);
+                }
+                Queue received();
+                code<auto(hash<auto>, auto)> callback = auto sub(hash<auto> cx, auto value) {
+                    received.push({"value":value, "raw":cx.raw_path});
+                    return {"result":value.id};
+                };
+                handler.addMethod(first, first.getOperation("send"), callback, NOTHING, NOTHING, NOTHING, NOTHING, NOTHING, NOTHING, "B");
+                handler.addMethod(second, second.getOperation("send"), callback, NOTHING, NOTHING, NOTHING, NOTHING, NOTHING, NOTHING, "B");
+                handler.addMethod(query, query.getOperation("send"), callback, NOTHING, NOTHING, NOTHING, NOTHING, NOTHING, NOTHING, "B");
+                server.addListener(0);
+                foreach WebService ws in (first, second, query) {
+                    SoapClient client({"wsdl":ws, "service":"S", "port":"Endpoint",
+                        "url":sprintf("http://127.0.0.1:%d/%s", server.getListenerInfo(0).port, mount ? encode_url(mount) + "/" : ""), "timeout":30000});
+                    foreach string id in ("A/B & č+%2F", "") {
+                        assertEq({"result":id}, client.callOperation("send", {"id":id}));
+                        hash<auto> actual = received.get(30000);
+                        assertEq({"id":id}, actual.value);
+                        if (id) {
+                            assertTrue(actual.raw.contains("A%2FB%20%26%20%C4%8D%2B%252F"));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    private ambiguous() {
+        WebService first(source("/items/(id)/view"));
+        WebService second(source("/items/(id)"));
+        HttpServer server();
+        on_exit server.stop();
+        SoapHandler handler(new PermissiveAuthenticator());
+        server.setDefaultHandler("replacement", handler);
+        Queue received();
+        code<auto(hash<auto>, auto)> callback = auto sub(hash<auto> cx, auto value) {
+            received.push(value);
+            return {"result":value.id};
+        };
+        code<nothing()> add_first = sub() {
+            handler.addMethod(first, first.getOperation("send"), callback, NOTHING, NOTHING, NOTHING, NOTHING, NOTHING, NOTHING, "B");
+        };
+        add_first();
+        assertThrows("SOAP-PATH-ERROR", add_first);
+        handler.addMethod(second, second.getOperation("send"), callback, NOTHING, NOTHING, NOTHING, NOTHING, NOTHING, NOTHING, "B");
+        server.addListener(0);
+        SoapClient client({"wsdl":first, "url":sprintf("http://127.0.0.1:%d/", server.getListenerInfo(0).port), "timeout":30000});
+        assertThrows("HTTP-CLIENT-RECEIVE-ERROR", \client.callOperation(), ("send", {"id":"x"}));
+        assertEq(0, received.size());
+    }
+    private removal() {
+        foreach bool query in (False, True) {
+            WebService ws(source(query ? "/items" : "/items/(id)/view", query));
+            HttpServer server();
+            on_exit server.stop();
+            SoapHandler handler(new PermissiveAuthenticator());
+            server.setDefaultHandler("replacement", handler);
+            code<auto(hash<auto>, auto)> callback = auto sub(hash<auto> cx, auto value) {
+                return {"result":value.id};
+            };
+            handler.addMethod(ws, ws.getOperation("send"), callback, NOTHING, NOTHING, NOTHING, NOTHING, NOTHING, NOTHING, "B", "owner");
+            server.addListener(0);
+            SoapClient client({"wsdl":ws, "url":sprintf("http://127.0.0.1:%d/", server.getListenerInfo(0).port), "timeout":30000});
+            assertEq({"result":"ok"}, client.callOperation("send", {"id":"ok"}));
+            handler.removeService("owner");
+            assertThrows("HTTP-CLIENT-RECEIVE-ERROR", \client.callOperation(), ("send", {"id":"ok"}));
+            handler.addMethod(ws, ws.getOperation("send"), callback, NOTHING, NOTHING, NOTHING, NOTHING, NOTHING, NOTHING, "B", "owner");
+            assertEq({"result":"again"}, client.callOperation("send", {"id":"again"}));
+        }
+    }
+}

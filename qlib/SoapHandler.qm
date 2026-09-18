@@ -76,6 +76,8 @@ module SoapHandler {
     @section soaphandler_relnotes SoapHandler Release History
 
     @subsection soaphandler_0_3_4 SoapHandler 0.3.4
+    - HTTP URL-replacement routes match complete templates and decode raw paths once, including mounted handlers
+    - HTTP route registration uses the write lock, and removeService() removes both static and replacement routes
     - http:urlEncoded POST operations decode typed form bodies instead of reading query parameters
     - HTTP-only WSDL bindings serialize successful responses without requiring a SOAP version
     - callbacks can throw WSDL::SOAP_HEADER_FAULT with WSDL::SoapHeaderFaultInfo to return a declared
@@ -223,6 +225,9 @@ public namespace SoapHandler {
 
             # path TreeMap for each HTTP method
             hash<string, TreeMap> mapMethodPathToOperation;
+
+            # HTTP verb -> replacement template -> method
+            hash<string, hash<string, hash<auto>>> httpReplacementMethods;
 
             # soapaction -> method -> binding
         }
@@ -372,6 +377,21 @@ public namespace SoapHandler {
             # remove SOAPAction mappings for service
             map remove sam{$1}, keys rsam{unique_id};
             remove rsam{unique_id};
+
+            foreach TreeMap paths in (mapMethodPathToOperation.iterator()) {
+                foreach hash<auto> entry in (paths.getAll().pairIterator()) {
+                    if (entry.value.unique_id == unique_id) {
+                        paths.take(entry.key);
+                    }
+                }
+            }
+            foreach string verb in (keys httpReplacementMethods) {
+                foreach string path in (keys httpReplacementMethods{verb}) {
+                    if (httpReplacementMethods{verb}{path}.unique_id == unique_id) {
+                        remove httpReplacementMethods{verb}{path};
+                    }
+                }
+            }
         }
 
         #! @cond nodoc
@@ -536,19 +556,28 @@ public namespace SoapHandler {
             } else if (binding instanceof HttpBinding) {
                 HttpBinding hb = binding;
                 # http binding
-                rwl.readLock();
-                on_exit rwl.readUnlock();
+                rwl.writeLock();
+                on_exit rwl.writeUnlock();
                 if (!mapMethodPathToOperation{hb.httpMethod}) {
                     mapMethodPathToOperation{hb.httpMethod} = new TreeMap();
                 }
                 method.parseUrlOnly = (hb.input.urlEncoded && hb.httpMethod != "POST") || hb.input.urlReplacement;
                 method.exactMatch = !hb.input.urlReplacement;
                 method.path = ltrim(method.path ?? hb.location, "/");
-                if (index(method.path, "?") >= 0) {
+                if (!hb.input.urlReplacement && index(method.path, "?") >= 0) {
                     throw "SOAPACTION-ERROR", sprintf("cannot register path %y for operation %y because it contains "
                         "parameters", method.path, method.operation.name);
                 }
-                mapMethodPathToOperation{hb.httpMethod}.put(method.path, method);
+                if (hb.input.urlReplacement) {
+                    if (httpReplacementMethods{hb.httpMethod}.hasKey(method.path)) {
+                        throw "SOAP-PATH-ERROR", sprintf("HTTP replacement template %Y is already registered",
+                            method.path);
+                    }
+                    method.http_binding = hb;
+                    httpReplacementMethods{hb.httpMethod}{method.path} = method;
+                } else {
+                    mapMethodPathToOperation{hb.httpMethod}.put(method.path, method);
+                }
             } else if (!exists binding) {
                 throw "SOAPACTION-ERROR", sprintf("cannot register operation %y because it has no binding",
                     method.operation.name);
@@ -712,7 +741,8 @@ private nothing msglog(hash<auto> cx, hash<auto> msg) {
 
             try {
                 if (method.parseUrlOnly) {
-                    args = method.operation.deserializeRequestPath(cx.url.path, method.binding);
+                    args = method.operation.deserializeRequestPath(method.http_binding
+                        ? getHttpReplacementPath(cx) : cx.url.path, method.binding);
                 } else if (method.xml_values) {
                     if (!exists xml_body) {
                         throw "SOAP-DESERIALIZATION-ERROR", "retained XML decoding requires a SOAP XML message";
@@ -843,6 +873,15 @@ private nothing msglog(hash<auto> cx, hash<auto> msg) {
             return method;
         }
 
+        private string getHttpReplacementPath(hash<auto> cx) {
+            string path = ltrim(cx.raw_path ?? cx.url.path, "/");
+            string root = encode_url(ltrim(cx.root_path ?? "", "/"));
+            if (root && path.equalPartialPath(root)) {
+                path = ltrim(path.substr(root.size()), "/");
+            }
+            return path;
+        }
+
         # method called by HttpServer
         # don't reimplement this method; fix/enhance it in the module
         final hash<auto> handleRequest(hash<auto> cx, hash<auto> hdr, *data body) {
@@ -917,7 +956,18 @@ private nothing msglog(hash<auto> cx, hash<auto> msg) {
                         TreeMap tm = mapMethodPathToOperation{hdr.method};
                         method = matchMethod(tm, path, \args);
                         if (!method && alt_path) {
-                            method = tm.get(alt_path, \args);
+                            method = matchMethod(tm, alt_path, \args);
+                        }
+                    }
+                    if (!method) {
+                        string raw_path = getHttpReplacementPath(cx);
+                        foreach hash<auto> candidate in (httpReplacementMethods{hdr.method}.iterator()) {
+                            if (candidate.http_binding.matchesRequestPath(raw_path)) {
+                                if (method) {
+                                    throw "SOAP-PATH-ERROR", sprintf("ambiguous HTTP replacement path %Y", raw_path);
+                                }
+                                method = candidate;
+                            }
                         }
                     }
                 }

@@ -9172,3 +9172,18 @@ astparser pass; audit: 18 Pass / 44 N/A / zero Fail. See
 [validation](P6-23-validation.json) and [audit](audits/P6-23-http-form.md).
 The remaining binding grammar/HTTP/MIME and pinned CXF matrix remain P6 work,
 followed by P7–P9; this increment is not a phase-completion claim.
+
+
+## P6-24: HTTP URL-replacement routing and lifecycle
+
+The handler matches complete replacement templates separately from static paths,
+using raw request paths and removing handler mount prefixes before decoding.
+Static mounted lookups retain exact-match checks. Duplicate/ambiguous templates
+reject, registration holds the write lock, and removeService drops both HTTP
+route kinds. The old SoapClient expected-failure case now asserts success and
+callback values. The focused suite passes 4 cases / 187 assertions; the affected
+gate passes 12 suites / 148 cases / 3,270 reported assertions. SOAP comparator
+negative assertions remain intentional. Docs/astparser pass; audit: 18 Pass /
+44 N/A / zero Fail. See [validation](P6-24-validation.json) and
+[audit](audits/P6-24-http-replacement.md). Remaining P6 binding grammar and the
+HTTP/MIME/CXF matrix still precede P7–P9; no phase boundary is claimed.

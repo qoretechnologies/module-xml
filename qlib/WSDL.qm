@@ -121,6 +121,7 @@ module WSDL {
     @section wsdlrelnotes WSDL Module Release Notes
 
     @subsection wsdl_0_5_8 WSDL v0.5.8
+    - URL-replacement decoding validates complete templates and repeated values, with linear token traversal
     - http:urlEncoded uses a form body for POST and a query for GET, with typed decoding in both directions
     - HTTP MIME XML bindings honor explicit input/output part selections and reject unknown part names
     - declared SOAP body fault details support explicit native decoding and literal XML retention, independently
@@ -31919,61 +31920,71 @@ public class HttpBinding inherits WSDL::OperationalBinding {
         }
     }
 
+    #! checks whether a raw URI path matches this binding's URL-replacement template
+    /** @param path the percent-encoded request path, without a handler mount prefix
+        @return True when the complete template matches, otherwise False
+        @throw URL-ENCODING-ERROR invalid percent encoding in a replacement value
+        @note Matching checks path structure and repeated values; message types are checked during decoding.
+        @par Example
+        A template `/items/(id)/view` matches `/items/A%2FB/view` and supplies the id `A/B` during decoding.
+        @since %WSDL 0.5.8
+    */
+    bool matchesRequestPath(string path) {
+        return exists getRequestPathValues(path);
+    }
+
+    private *hash<auto> getRequestPathValues(string path) {
+        if (!input.urlReplacement) {
+            return NOTHING;
+        }
+        hash<auto> values = {};
+        int pos = 0;
+        list<string> tokens = keys input.urlReplacement;
+        # Leading slashes do not change the operation-relative template.
+        path = ltrim(path, "/");
+        for (int i = 0; i < tokens.size(); ++i) {
+            string key = tokens[i];
+            if (key =~ /^string/) {
+                string expected = input.urlReplacement{key};
+                if (!i) {
+                    expected = ltrim(expected, "/");
+                }
+                if (substr(path, pos, expected.size()) != expected) {
+                    return NOTHING;
+                }
+                pos += expected.size();
+            } else if (key =~ /^part/) {
+                *string next_literal = i + 1 < tokens.size() && tokens[i + 1] =~ /^string/
+                    ? input.urlReplacement{tokens[i + 1]} : NOTHING;
+                int end = next_literal ? index(path, next_literal, pos) : index(path, "?", pos);
+                if (end < 0) {
+                    if (next_literal) {
+                        return NOTHING;
+                    }
+                    end = path.size();
+                }
+                string name = input.urlReplacement{key};
+                string value = decode_url(substr(path, pos, end - pos));
+                if (values.hasKey(name) && values{name} != value) {
+                    return NOTHING;
+                }
+                values{name} = value;
+                pos = end;
+            }
+        }
+        if (pos < path.size() && path[pos] != "?") {
+            return NOTHING;
+        }
+        return values;
+    }
+
     hash<auto> deserializeRequestPathImpl(WSOperation op, string path) {
         if (input.urlReplacement) {
-            # Parse URL replacement parameters from path
-            # urlReplacement hash contains alternating string literals and part names:
-            # {"string^1": "/api/users/", "part^2": "userId", "string^3": "/profile/", ...}
-            hash<auto> values;
-            int pos = 0;
-
-            foreach string k in (keys input.urlReplacement) {
-                if (k =~ /^string/) {
-                    # String literal - must match exactly at current position
-                    string expected = input.urlReplacement{k};
-                    if (substr(path, pos, expected.size()) != expected) {
-                        throw SOAP_DESERIALIZATION_ERROR, sprintf("URL replacement mismatch at position %d: "
-                            "expected %y, path: %y", pos, expected, path);
-                    }
-                    pos += expected.size();
-                } else if (k =~ /^part/) {
-                    # Part value - extract until next string literal or end of path
-                    string partName = input.urlReplacement{k};
-
-                    # Find the next string literal to know where this part value ends
-                    *string nextLiteral;
-                    bool foundNext = False;
-                    foreach string k2 in (keys input.urlReplacement) {
-                        if (foundNext && k2 =~ /^string/) {
-                            nextLiteral = input.urlReplacement{k2};
-                            break;
-                        }
-                        if (k2 == k) {
-                            foundNext = True;
-                        }
-                    }
-
-                    int endPos;
-                    if (nextLiteral) {
-                        endPos = index(path, nextLiteral, pos);
-                        if (endPos < 0) {
-                            throw SOAP_DESERIALIZATION_ERROR, sprintf("URL replacement: cannot find delimiter %y "
-                                "after position %d in path: %y", nextLiteral, pos, path);
-                        }
-                    } else {
-                        # No next literal - value goes to end of path (excluding query string)
-                        endPos = index(path, "?", pos);
-                        if (endPos < 0) {
-                            endPos = path.size();
-                        }
-                    }
-
-                    string partValue = decode_url(substr(path, pos, endPos - pos));
-                    values{partName} = partValue;
-                    pos = endPos;
-                }
+            *hash<auto> values = getRequestPathValues(path);
+            if (!exists values) {
+                throw SOAP_DESERIALIZATION_ERROR, sprintf("request path %Y does not match URL replacement template %Y",
+                    path, location);
             }
-
             return op.input.deserializeAllPartData(values);
         }
         if (input.urlEncoded) {
