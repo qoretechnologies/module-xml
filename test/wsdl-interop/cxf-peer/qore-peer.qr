@@ -1,0 +1,85 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../../../qlib"
+%requires xml
+%requires ../../../qlib/WSDL.qm
+%requires ../../../qlib/SoapClient.qm
+%requires ../../../qlib/SoapHandler.qm
+%requires HttpServer
+%try-module json
+%define NoJson
+%endtry
+%ifdef NoJson
+throw "MISSING-MODULE", "CXF interoperability tests require json";
+%else
+
+code<auto(hash<auto>, auto)> sub callback(list<auto> cases, Queue received) {
+    return auto sub(hash<auto> cx, auto input) {
+        foreach hash<auto> row in (cases) {
+            if (input == row.decoded_input) {
+                received.push(row.id);
+                return row.output;
+            }
+        }
+        throw "CXF-INPUT-ERROR", sprintf("unexpected typed input: %y", input);
+    };
+}
+
+@assert(ARGV.size() >= 3);
+string mode = ARGV[0];
+string fixture = ARGV[1];
+bool saved = ARGV[2] == "saved";
+@assert(saved || ARGV[2] == "source");
+hash<auto> golden = parse_json(ReadOnlyFile::readTextFile(get_script_dir() + "/golden.json"));
+list<auto> cases = map $1, golden.cases, $1.fixture == fixture;
+@assert(cases);
+hash<auto> config = cases[0];
+WebService ws = WSDLLib::getWebServiceFromUrl(get_script_dir() + "/../" + config.wsdl);
+if (saved) {
+    ws = Serializable::deserialize(ws.serialize());
+}
+if (mode == "encode") {
+    list<auto> results();
+    foreach hash<auto> row in (cases) {
+        WSOperation op = ws.getBindingOperation(row.binding, row.operation);
+        push results, {"id":row.id,
+            "request":op.serializeRequest(row.input, NOTHING, NOTHING, NOTHING, NOTHING, NOTHING, row.binding),
+            "response":op.serializeResponse(row.output, NOTHING, NOTHING, NOTHING, NOTHING, NOTHING, row.binding)};
+    }
+    printf("%s\n", make_json(results));
+} else if (mode == "client") {
+    @assert(ARGV.size() == 4);
+    SoapClient client({"wsdl":ws, "service":config.service, "port":config.port,
+        "url":ARGV[3], "timeout":30000, "connect_timeout":10000});
+    foreach hash<auto> row in (cases) {
+        auto value = client.callOperation(row.operation, row.input);
+        @assert(value == row.decoded_output, sprintf("%s response: %y", row.id, value));
+    }
+    printf("PASS\t%s\n", fixture);
+} else if (mode == "server") {
+    HttpServer server();
+    on_exit server.stop();
+    SoapHandler handler(new PermissiveAuthenticator());
+    server.setDefaultHandler("cxf-peer", handler);
+    Queue received();
+    hash<string, list<auto>> operations();
+    foreach hash<auto> row in (cases) {
+        push operations{row.operation}, row;
+    }
+    foreach string operation in (keys operations) {
+        handler.addMethod(ws, ws.getBindingOperation(config.binding, operation),
+            callback(operations{operation}, received), NOTHING, NOTHING, NOTHING,
+            NOTHING, NOTHING, NOTHING, config.binding);
+    }
+    server.addListener(0);
+    printf("READY\t%d\n", server.getListenerInfo(0).port);
+    @assert(trim(stdin.readLine()) == "STOP");
+    # Each successful callback must occur exactly once, including both nil/non-nil decimal cases.
+    foreach hash<auto> row in (cases) {
+        @assert(received.get(1000) == row.id);
+    }
+} else {
+    throw "CXF-PEER-ERROR", sprintf("unknown mode %Y", mode);
+}
+%endif

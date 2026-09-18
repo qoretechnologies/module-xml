@@ -121,6 +121,9 @@ module WSDL {
     @section wsdlrelnotes WSDL Module Release Notes
 
     @subsection wsdl_0_5_8 WSDL v0.5.8
+    - native capture preserves empty complex records for both element and type parts, independent of namespace
+      declaration placement; native providers accept and generate empty records with occurrence-based optionality
+    - absent WSDL SOAP actions no longer invent operation URIs; SOAP 1.1 defaults emit a quoted empty SOAPAction
     - CXF XML and JMS bindings/ports retain declaration metadata without disabling supported SOAP endpoints;
       selecting an unsupported binding fails explicitly, and saved graphs retain capability information
     - mounted WSDL rewrites only supported address elements, preserving unrelated URLs and XML node content
@@ -13119,11 +13122,6 @@ public class XsdElement inherits WSDL::XsdTypedData {
             captured);
         tuples.value(captured.actual_type ?? selected, captured.identity);
         checkFixedValue(original, captured.identity, SOAP_DESERIALIZATION_ERROR);
-        if (PreserveNativeTypes && !exists converted && selected instanceof XsdComplexType
-                && !cast<XsdComplexType>(selected).simpleType && !cast<XsdComplexType>(selected).array
-                && !cast<XsdComplexType>(selected).hasMixedContent()) {
-            converted = {};
-        }
         return XsdNativeTypeValueHelper::retain(type, selected,
             defaulted && PreserveNativeTypes ? new XsdDefaultValue(converted) : converted);
     }
@@ -14503,6 +14501,12 @@ public class XsdNativeTypeDataType inherits AbstractDataProviderType {
             if (element && element.getValueConstraint().fixed) {
                 return new XsdFixedElementDataType(element, nativeType()).getMandatoryType().getExampleValue(emap, fname);
             }
+            if (definition.declared instanceof XsdComplexType && nativeType().getBaseTypeCode() == NT_HASH
+                    && !nativeType().getFields()) {
+                # Generic hash examples invent keys; schema records with no fields cannot use them.
+                auto sample = WSMessageHelper::getTypeExample(definition.declared);
+                return exists sample ? sample : {};
+            }
             return nativeType().getMandatoryType().getExampleValue(emap, fname);
         }
         foreach XsdAbstractType candidate in (definition.owner.types.iterator()) {
@@ -14914,6 +14918,24 @@ public class XsdMessageDataType inherits HashDataType {
     /** @return an empty map */
     *hash<string, bool> getDirectTypeHash() {
         return {};
+    }
+
+    #! generates a complete example checked against the message's part definitions
+    /** @param emap declarations visited on the enclosing example path
+        @param fname optional field context
+        @return a normalized part-value map, including an empty map for a zero-part message;
+        NOTHING for an optional message
+        @throw RUNTIME-TYPE-ERROR a generated value does not satisfy its schema
+        @throw XSD-SAMPLE-ERROR no valid bounded example can be generated
+        @par Example
+        Use message.getDataProviderType(True).getExampleValue() to prepare a typed SOAP request template.
+        @since %WSDL 0.5.8
+    */
+    auto getExampleValue(*hash<string, bool> emap, *string fname) {
+        if (or_nothing_type) {
+            return;
+        }
+        return acceptsValue(getFields() ? HashDataType::getExampleValue(emap, fname) : {});
     }
 
     #! converts fields and validates the resulting XML part values
@@ -16455,6 +16477,13 @@ class XsdDocumentValueHelper {
         XsdDocumentValueCapture capture(type);
         auto converted = type.deserializeValue(name, tmap, references, value);
         capture.validate(value, converted, SOAP_DESERIALIZATION_ERROR, attribute);
+        # Element and type-based message parts share the same native record contract.
+        # Namespace declarations on an otherwise empty element must not change its value shape.
+        if (PreserveNativeTypes && !exists converted && type instanceof XsdComplexType
+                && !cast<XsdComplexType>(type).simpleType && !cast<XsdComplexType>(type).array
+                && !cast<XsdComplexType>(type).hasMixedContent()) {
+            converted = {};
+        }
         if (captured) {
             captured.actual_type = type;
             if (!captured.simple_only || XsdIdentityTupleNode::simpleType(type)) {
@@ -27887,6 +27916,11 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
     }
     private AbstractDataProviderType buildOrdinaryProvider() {
         AbstractDataProviderType rv = getDataProviderTypeIntern();
+        if (NativeTypeProviderContext) {
+            # Empty content is a present record. Occurrence/nil optionality belongs to
+            # XsdElementFieldHelper, not to whether the complex type has required children.
+            return rv.getMandatoryType();
+        }
         return nillable || ((!required || isEmpty()) && !hasRequiredAttributes())
             ? rv.getOrNothingType()
             : rv;
@@ -28031,7 +28065,7 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
             }
 
             case XET_NONE:
-                if (attrs || exists attribute_wildcard) {
+                if (attrs || exists attribute_wildcard || NativeTypeProviderContext) {
                     return addAttributeFields(new HashDataType(name));
                 }
                 return AbstractDataProviderType::get(AbstractDataProviderType::nothingType);
@@ -29295,7 +29329,7 @@ public class WSOperation inherits WSDL::XsdNamedData {
         @since %WSDL 0.5.8
     */
     list<auto> getTopLevelRequestNames() {
-        hash<string, bool> names = reqh;
+        hash<string, bool> names = reqh ?? {};
         if (input) {
             foreach OperationalBinding binding in (bindings.iterator()) {
                 if (!(binding instanceof SoapBinding) || !binding.docstyle || !binding.input) {
@@ -31085,8 +31119,10 @@ public class SoapBinding inherits WSDL::OperationalBinding {
             throw SOAP_SERIALIZATION_ERROR, sprintf("no %s message description for message %y", io, name);
         }
 
-        if (!exists req_soapaction)
+        bool default_action = !exists req_soapaction;
+        if (default_action) {
             req_soapaction = soapAction;
+        }
 
         MultiPartRelatedMessage mpm;
 
@@ -31113,6 +31149,8 @@ public class SoapBinding inherits WSDL::OperationalBinding {
             if (soap12) {
                 ct += sprintf(";action=%s", req_soapaction);
             }
+        } else if (request && !soap12 && default_action) {
+            rv.hdr.SOAPAction = "\"\"";
         }
 
         if (rv.body) {
@@ -32586,13 +32624,8 @@ public class Binding inherits WSDL::XsdNamedData {
             bool b_docstyle = docstyle;
 
             *hash<auto> opah = ophash.operation."^attributes^";
-            *string soapAction = opah.soapAction;
-            if (!exists soapAction) {
-                *string op_ns = selected.nsc.getTargetNamespaceUri();
-                if (op_ns && op_ns !~ /\/$/)
-                    op_ns += "/";
-                soapAction = op_ns ? op_ns + opname : opname;
-            }
+            # WS-I R2745: an absent SOAP action does not invent a namespace/operation URI.
+            *string soapAction = opah.soapAction ?? "";
 
             {
                 *string style = opah.style;

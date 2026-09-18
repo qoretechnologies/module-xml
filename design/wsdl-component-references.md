@@ -180,3 +180,18 @@ Document messages with no body parts emit an empty SOAP Body and decode to an
 empty native hash or retained body-part map. A missing Body still rejects.
 Header-only messages use an abstract zero-part message with separately bound
 headers; an operation with no abstract input/output declaration is invalid.
+
+An absent concrete SOAP action stays empty rather than being synthesized from
+the namespace and operation name. Default SOAP 1.1 requests carry `SOAPAction:
+""`, following WS-I Basic Profile R2745; an explicit per-call empty override keeps
+the documented header-suppression option. Authored actions retain their declared
+value. SOAP 1.2 does not receive a SOAP 1.1 empty-action header by default.
+
+SoapHandler can dispatch bare scalar roots as well as complex roots. A document
+request with zero body parts can dispatch without an action when exactly one
+registered operation in the selected route scope accepts an empty body. Multiple
+candidates reject explicitly; an authored action or distinct route identifies the
+operation instead. Candidate lookup holds the handler read lock and uses the
+normal registration maps, so service removal immediately updates the candidates.
+Zero-part operations expose an empty top-level request-name list without a type
+assignment failure.

@@ -751,3 +751,31 @@ and [implemented design](../../design/wsdl-optional-transports.md).
 Full XML/JMS transport execution remains outside scope as approved and is tracked
 in [Qore #5454](https://github.com/qoretechnologies/qore/issues/5454).
 Remaining P6 grammar/CXF replay and P7–P9 are still open.
+
+
+## P6-28: independent CXF binding replay and live peers
+
+The pinned bare, RPC/literal, SOAP 1.2 and RPC-header contracts, plus the explicitly
+corrected document-header derivative, pass 19 reference message pairs. Original
+CXF sources and their hashes remain unchanged. An offline CXF 4.1.3/JAXB/Jetty peer
+performs 76 live calls across both Qore/CXF directions and source/saved services,
+and replays all 19 captured reference requests against CXF. Qore tests additionally
+exercise detached operations, native/retained values, providers and samples.
+Root-cause fixes retain empty complex records at type-part boundaries, give native
+providers occurrence-based optionality and valid empty examples, normalize complete
+message examples, avoid invented SOAP actions and dispatch bare scalar/empty bodies.
+Ambiguous empty dispatch rejects and service removal restores a unique candidate.
+Four identity fixture inputs use explicit empty objects for present empty records;
+the independent identity gate passes all 340 stages and 278 validation documents.
+Substitution-root and wildcard-attribute regressions now test native capture
+separately from the unchanged ordinary empty projection, including saved/soft
+providers and missing-versus-present values.
+All 179 Qore suites pass: 1758 cases / 87,379 reported assertions.
+The six-test peer gate, docs and astparser pass without diagnostics. All 16 corpus
+commands meet expected outcomes and all six semantic reports are unchanged.
+Audit: 19 Pass / 43 N/A / zero Fail; no C++ changes or push.
+See [validation](P6-28-validation.json), [audit](audits/P6-28-cxf-peer.md),
+[peer instructions](cxf-peer/README.md), [derivative provenance](cxf-derived/README.md),
+and [empty-record design](../../design/wsdl-native-empty-records.md).
+Remaining full P6 grammar/binding acceptance and the attachment-specific CXF gates
+still require completion; P7–P9 are not complete.

@@ -1,0 +1,106 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires xml
+%requires ../qlib/WSDL.qm
+%requires ../qlib/SoapClient.qm
+%requires ../qlib/SoapHandler.qm
+%requires HttpServer
+%exec-class EmptyBodyRoutingTest
+
+class EmptyBodyRoutingTest inherits QUnit::Test {
+    constructor() : Test("Actionless bare SOAP dispatch", "1.0") {
+        addTestCase("Absent and empty WSDL actions use the empty SOAPAction default", \actions());
+        addTestCase("Empty and scalar bare bodies dispatch across source and saved services", \http());
+        addTestCase("Ambiguous empty bodies reject and service removal restores unique routing", \ambiguity());
+        set_return_value(main());
+    }
+    private static WebService service(string action = "") {
+        string source = '<w:definitions xmlns:w="http://schemas.xmlsoap.org/wsdl/" xmlns:s="http://schemas.xmlsoap.org/wsdl/soap/"'
+            + ' xmlns:xs="' + XSD_NS + '" xmlns:t="urn:empty-route" targetNamespace="urn:empty-route">'
+            + '<w:types><xs:schema targetNamespace="urn:empty-route"><xs:element name="value" type="xs:string"/>'
+            + '</xs:schema></w:types><w:message name="Empty"/><w:message name="Value"><w:part name="body" element="t:value"/>'
+            + '</w:message><w:portType name="P">';
+        foreach string name in ("first", "second", "scalar") {
+            source += '<w:operation name="' + name + '"><w:input message="t:' + (name == "scalar" ? "Value" : "Empty")
+                + '"/><w:output message="t:Value"/></w:operation>';
+        }
+        source += '</w:portType><w:binding name="B" type="t:P"><s:binding style="document" transport="http://schemas.xmlsoap.org/soap/http"/>';
+        foreach string name in ("first", "second", "scalar") {
+            source += '<w:operation name="' + name + '">' + action + '<w:input><s:body use="literal"/></w:input>'
+                + '<w:output><s:body use="literal"/></w:output></w:operation>';
+        }
+        return new WebService(source + '</w:binding><w:service name="S"><w:port name="P" binding="t:B">'
+            + '<s:address location="http://example.invalid/"/></w:port></w:service></w:definitions>');
+    }
+    private actions() {
+        foreach string extension in ("", '<s:operation/>', '<s:operation soapAction=""/>') {
+            WebService original = service(extension);
+            foreach WebService ws in (original, Serializable::deserialize(original.serialize())) {
+                WSOperation op = ws.getBindingOperation("B", "first");
+                assertEq((), op.getTopLevelRequestNames());
+                assertEq("", op.getBinding("B").soapAction);
+                assertEq('""', op.serializeRequest({}).hdr.SOAPAction);
+                assertFalse(exists op.serializeResponse({"body":"response"}).hdr.SOAPAction);
+                # The explicit per-call suppression option retains its documented behavior.
+                assertFalse(exists op.serializeRequest({}, NOTHING, NOTHING, NOTHING, NOTHING, "").hdr.SOAPAction);
+                assertEq("urn:override", op.serializeRequest({}, NOTHING, NOTHING, NOTHING, NOTHING,
+                    "urn:override").hdr.SOAPAction);
+            }
+        }
+        WebService authored = service('<s:operation soapAction="relative/action"/>');
+        assertEq("relative/action", authored.getBindingOperation("B", "first").serializeRequest({}).hdr.SOAPAction);
+    }
+    private http() {
+        WebService original = service();
+        foreach WebService ws in (original, Serializable::deserialize(original.serialize())) {
+            HttpServer server();
+            on_exit server.stop();
+            SoapHandler handler(new PermissiveAuthenticator());
+            server.setDefaultHandler("empty-route", handler);
+            Queue received();
+            handler.addMethod(ws, ws.getBindingOperation("B", "first"), auto sub(hash<auto> cx, auto input) {
+                received.push(input);
+                return {"body":"empty accepted"};
+            });
+            handler.addMethod(ws, ws.getBindingOperation("B", "scalar"), auto sub(hash<auto> cx, auto input) {
+                received.push(input);
+                return {"body":input};
+            });
+            server.addListener(0);
+            SoapClient client({"wsdl":ws, "timeout":30000,
+                "url":sprintf("http://127.0.0.1:%d/", server.getListenerInfo(0).port)});
+            assertEq("empty accepted", client.callOperation("first", {}));
+            assertEq({}, received.get(1000));
+            assertEq("bare text", client.callOperation("scalar", {"body":"bare text"}));
+            assertEq("bare text", received.get(1000));
+        }
+    }
+    private ambiguity() {
+        WebService ws = service();
+        HttpServer server();
+        on_exit server.stop();
+        SoapHandler handler(new PermissiveAuthenticator());
+        server.setDefaultHandler("empty-route", handler);
+        foreach string name in ("first", "second") {
+            handler.addMethod(ws, ws.getBindingOperation("B", name), auto sub(hash<auto> cx, auto input) {
+                return {"body":"accepted"};
+            }, NOTHING, NOTHING, NOTHING, NOTHING, NOTHING, NOTHING, "B", name);
+        }
+        server.addListener(0);
+        SoapClient client({"wsdl":ws, "timeout":30000,
+            "url":sprintf("http://127.0.0.1:%d/", server.getListenerInfo(0).port)});
+        *hash<ExceptionInfo> failure;
+        try {
+            client.callOperation("first", {});
+        } catch (hash<ExceptionInfo> error) {
+            failure = error;
+        }
+        assertEq("SOAP-SERVER-FAULT-RESPONSE", failure.err);
+        assertTrue(failure.desc.find("ambiguous empty SOAP body") >= 0);
+        handler.removeService("second");
+        assertEq("accepted", client.callOperation("first", {}));
+    }
+}

@@ -1,0 +1,111 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires xml
+%requires ../qlib/WSDL.qm
+%try-module json
+%define NoJson
+%endtry
+%ifdef NoJson
+throw "MISSING-MODULE", "CXF replay tests require json";
+%else
+%exec-class CxfReplayTest
+
+class CxfReplayTest inherits QUnit::Test {
+    constructor() : Test("Pinned Apache CXF message replay", "1.0") {
+        foreach string fixture in ("bare", "rpc", "soap12", "header-rpc", "header-doc") {
+            addTestCase(fixture, testFixture(fixture));
+        }
+        set_return_value(main());
+    }
+
+    private code<nothing()> testFixture(string fixture) {
+        return nothing sub() { replay(fixture); };
+    }
+
+    private replay(string fixture) {
+        string base = get_script_dir() + "/wsdl-interop/";
+        hash<auto> golden = parse_json(ReadOnlyFile::readTextFile(base + "cxf-peer/golden.json"));
+        list<auto> rows = map $1, golden.cases, $1.fixture == fixture;
+        assertEq(fixture == "bare" ? 5 : fixture == "soap12" ? 2 : 4, rows.size());
+        WebService original = WSDLLib::getWebServiceFromUrl(base + rows[0].wsdl);
+        foreach WebService ws in (original, Serializable::deserialize(original.serialize())) {
+            foreach hash<auto> row in (rows) {
+                WSOperation operation = ws.getBindingOperation(row.binding, row.operation);
+                foreach WSOperation op in (operation, Serializable::deserialize(operation.serialize())) {
+                    assertEq(fixture == "soap12", op.getBinding(row.binding).isSoap12());
+                    foreach bool request in (True, False) {
+                        string reference_xml = row{request ? "request" : "response"};
+                        hash<auto> parsed = parse_xml(reference_xml, XPF_PRESERVE_ORDER);
+                        auto expected = row{request ? "decoded_input" : "decoded_output"};
+                        auto native_expected = request && row.id == "bare-5" ? new XsdNilValue({}) : fixture == "soap12" && (request || row.operation == "pingMe") ? {} : expected;
+                        foreach bool preserve in (False, True) {
+                            auto decoded = request ? op.deserializeRequest(parsed, row.binding, preserve)
+                                : op.deserializeResponse(parsed, row.binding, preserve);
+                            if (preserve && request && row.id == "bare-5") {
+                                assertTrue(decoded instanceof XsdNilValue);
+                                assertEq({}, cast<XsdNilValue>(decoded).getAttributes());
+                            } else {
+                                assertEq(preserve ? native_expected : expected, decoded, row.id);
+                            }
+                        }
+                        auto value = row{request ? "input" : "output"};
+                        hash<auto> encoded = request ? op.serializeRequest(value, NOTHING, NOTHING, NOTHING,
+                            NOTHING, NOTHING, row.binding) : op.serializeResponse(value, NOTHING, NOTHING,
+                            NOTHING, NOTHING, NOTHING, row.binding);
+                        auto round_trip = request ? op.deserializeRequest(parse_xml(encoded.body), row.binding, True)
+                            : op.deserializeResponse(parse_xml(encoded.body), row.binding, True);
+                        if (native_expected instanceof XsdNilValue) {
+                            assertTrue(round_trip instanceof XsdNilValue);
+                        } else {
+                            assertEq(native_expected, round_trip);
+                        }
+                        # Providers validate each WSDL part, including header parts stored in message containers.
+                        WSMessage message = request ? op.input : op.output;
+                        hash<auto> parts = {} + value;
+                        *hash<auto> headers = remove parts{message.name};
+                        parts += headers;
+                        HashDataType provider = message.getDataProviderType(True);
+                        assertEq(parts, provider.acceptsValue(parts));
+                        assertEq(parts, cast<HashDataType>(Serializable::deserialize(provider.serialize())).acceptsValue(parts));
+                        auto sample = provider.getExampleValue();
+                        assertEq(sample, provider.acceptsValue(sample));
+                        hash<auto> sample_wire = request ? op.serializeRequest(sample, NOTHING, NOTHING, NOTHING,
+                            NOTHING, NOTHING, row.binding) : op.serializeResponse(sample, NOTHING, NOTHING, NOTHING,
+                            NOTHING, NOTHING, row.binding);
+                        assertTrue(exists sample_wire.body);
+                        # A generated schema message must also be serializable in the selected binding.
+                        WSMessageHelper helper(ws);
+                        auto example = helper.getMessage(message);
+                        if (message.pmap.size() == 1 && message.args.firstValue().type) {
+                            # The helper's documented single type-part API returns its value directly.
+                            example = {message.pmap.firstKey():example};
+                        }
+                        hash<auto> example_wire = request ? op.serializeRequest(example, NOTHING, NOTHING, NOTHING,
+                            NOTHING, NOTHING, row.binding) : op.serializeResponse(example, NOTHING, NOTHING, NOTHING,
+                            NOTHING, NOTHING, row.binding);
+                        assertTrue(exists example_wire.body);
+                        if (fixture == "bare" || fixture == "soap12" || fixture == "header-doc") {
+                            hash<SoapXmlMessageInfo> retained = request ? op.deserializeXmlRequest(reference_xml, row.binding)
+                                : op.deserializeXmlResponse(reference_xml, row.binding);
+                            hash<auto> xml_value = {"^body^":retained.body, "^headers^":retained.headers};
+                            hash<auto> reproduced = request ? op.serializeRequest(xml_value, NOTHING, NOTHING,
+                                NOTHING, NOTHING, NOTHING, row.binding) : op.serializeResponse(xml_value, NOTHING,
+                                NOTHING, NOTHING, NOTHING, NOTHING, row.binding);
+                            auto retained_result = request ? op.deserializeRequest(parse_xml(reproduced.body), row.binding, True)
+                                : op.deserializeResponse(parse_xml(reproduced.body), row.binding, True);
+                            if (native_expected instanceof XsdNilValue) {
+                                assertTrue(retained_result instanceof XsdNilValue);
+                            } else {
+                                assertEq(native_expected, retained_result);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+%endif

@@ -425,6 +425,15 @@ for P6–P8; pinning and metadata inspection do not claim runtime interoperabili
 omits the body `parts` attribute inside MIME multipart; an explicit empty `parts=""` is a distinct case
 covered separately by the component-inventory tests and required by P6.
 
+The [offline CXF peer](cxf-peer/README.md) now exercises the bare document,
+RPC/literal, SOAP 1.2, RPC-header and corrected document-header contracts. Its 19
+captured message pairs drive replay, native/retained/provider/sample checks, and
+real CXF/Qore exchanges in both directions with source and saved Qore services.
+The [document-header derivative](cxf-derived/README.md) records its two corrected
+body-part references; the original stays unchanged and remains an expected
+rejection. Attachment contracts and the complete SOAP protocol matrix retain
+their separate acceptance gates.
+
 ## Strict Qore selection and complete diagnostic coverage
 
 ```sh
