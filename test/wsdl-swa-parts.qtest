@@ -1,0 +1,390 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires ../qlib/WSDL.qm
+%requires ../qlib/SoapClient.qm
+%requires ../qlib/SoapHandler.qm
+%requires ../qlib/SoapDataProvider
+%requires HttpServer
+%exec-class AttachmentPartTest
+
+class AttachmentPartTest inherits QUnit::Test {
+    constructor() : Test("WSDL SOAP attachment part values", "1.0") {
+        foreach bool soap12 in (False, True) {
+            foreach string encoding in ("UTF-8", "ISO-8859-1", "UTF-16") {
+                addTestCase(sprintf("SOAP %s, %s, source/saved/detached parts", soap12 ? "1.2" : "1.1", encoding),
+                    \values(), (soap12, encoding));
+            }
+        }
+        addTestCase("Body and attachment overlap keeps distinct values", \overlap());
+        addTestCase("MIME type parts override their abstract XSD type", \rawTypes());
+        addTestCase("Attachment identifiers select parts independent of wire order", \identifiers());
+        addTestCase("Missing, duplicate and malformed attachment values reject", \invalid());
+        addTestCase("Single attachment identity survives scalar and record values", \singlePart());
+        addTestCase("Empty bodies, generic faults and shared element parts", \placement());
+        addTestCase("MIME alternatives require concrete selection", \alternatives());
+        addTestCase("Unicode WSDL part identifiers use UTF-8 percent escapes", \unicode());
+        addTestCase("Qualified header identities retain separate attachment maps", \headerIdentities());
+        addTestCase("Provider selection follows the client port", \providerSelection());
+        addTestCase("Binding-aware provider validation and saved types", \providers());
+        addTestCase("Concurrent attachment encodings remain call-local", \concurrent());
+        addTestCase("Live native and retained XML consumers", \http());
+        set_return_value(main());
+    }
+    private static string source(bool soap12 = False) {
+        string text = ReadOnlyFile::readTextFile(get_script_dir() + "/wsdl-interop/regressions/wsdl-swa-parts/literal.wsdl");
+        return soap12 ? replace(text, "http://schemas.xmlsoap.org/wsdl/soap/", "http://schemas.xmlsoap.org/wsdl/soap12/") : text;
+    }
+    private static hash<auto> value() {
+        return {"text":"Order é", "data":<00ff410d0a>, "invoice":{"id":7,"label":"Invoice é"}};
+    }
+    private static hash<auto> normalize(hash<auto> wire) {
+        return WSDLLib::parseMultiPartSOAPMessage({"body":wire.body,"_qore_orig_content_type":wire.hdr."Content-Type"});
+    }
+    private static auto decode(WSOperation op, hash<auto> normalized, bool request = True) {
+        hash<auto> parsed = WSDLLib::parseSOAPMessage(normalized);
+        return request ? op.deserializeRequest(parsed) : op.deserializeResponse(parsed);
+    }
+    private static hash<auto> byPart(hash<auto> normalized) {
+        return map {decode_url($1.substr(0, $1.find("="))):normalized.parts{$1}}, keys normalized.parts;
+    }
+    private values(bool soap12, string encoding) {
+        WebService ws(source(soap12));
+        foreach WSOperation op in (ws.getOperation("exchange"),
+                Serializable::deserialize(ws.serialize()).getOperation("exchange"),
+                Serializable::deserialize(ws.getOperation("exchange").serialize())) {
+            foreach bool request in (True, False) {
+                hash<auto> input = value();
+                hash<auto> wire = request ? op.serializeRequest(input, NOTHING, encoding)
+                    : op.serializeResponse(input, NOTHING, encoding);
+                assertEq(value(), input);
+                assertEq(NOTHING, WSDLLib::getContentTypeParameter(wire.hdr."Content-Type", "charset"));
+                assertEq(soap12 ? "application/soap+xml" : "text/xml",
+                    WSDLLib::getContentTypeParameter(wire.hdr."Content-Type", "type"));
+                hash<auto> normalized = normalize(wire);
+                assertEq(encoding, WSDLLib::getContentTypeParameter(normalized."content-type", "charset"));
+                assertEq(soap12 ? "urn:exchange" : NOTHING,
+                    WSDLLib::getContentTypeParameter(normalized."content-type", "action"));
+                assertEq(value(), decode(op, normalized, request));
+                hash<auto> parts = byPart(normalized);
+                assertEq(<00ff410d0a>, parts.data.body);
+                assertEq("application/octet-stream", parts.data.hdr."content-type");
+                XsdXmlValue invoice(WSDLLib::getXmlMessageText({"body":parts.invoice.body,
+                    "content-type":parts.invoice.hdr."content-type"}));
+                assertEq("{urn:attachments}Invoice", invoice.getExpandedName());
+                assertEq("7", invoice.getChildValues()[0].getElementData()."^value^");
+                hash<SoapXmlMessageInfo> retained = request
+                    ? op.deserializeXmlRequest(WSDLLib::getXmlMessageText(normalized), NOTHING, normalized.parts)
+                    : op.deserializeXmlResponse(WSDLLib::getXmlMessageText(normalized), NOTHING, normalized.parts);
+                assertEq("Order é", retained.body.text.getElementData()."^value^");
+                assertEq(<00ff410d0a>, retained.attachments.data);
+                assertEq("{urn:attachments}Invoice", retained.attachments.invoice.getExpandedName());
+                hash<auto> retained_input = {"^body^":retained.body, "^headers^":retained.headers,
+                    "^attachments^":retained.attachments};
+                assertEq(value(), decode(op, normalize(op.serializeRequest(retained_input))));
+                if (encoding == "UTF-16") {
+                    assertEq("feff", binary(normalized.body)[0..1].toHex());
+                    assertEq("feff", parts.invoice.body[0..1].toHex());
+                }
+            }
+            WSMessageHelper examples(ws);
+            auto sample = examples.getMessage(op.input);
+            assertTrue(exists decode(op, normalize(op.serializeRequest(sample))));
+            # This API describes the abstract message schema; MIME wire conversion is binding-owned.
+            auto provider = op.input.getDataProviderType();
+            assertEq(value(), provider.acceptsValue(value()));
+        }
+    }
+    private overlap() {
+        WSOperation op = new WebService(replace(source(), ' parts="text"', '')).getOperation("exchange");
+        hash<auto> attachments = {"data":<0102>, "invoice":{"id":8,"label":"copy"}};
+        hash<auto> explicit = {"^body^":value(), "^headers^":{}, "^attachments^":attachments};
+        assertEq(explicit, decode(op, normalize(op.serializeRequest(explicit))));
+        hash<auto> shared = {"^body^":value(), "^headers^":{},
+            "^attachments^":{"data":value().data, "invoice":value().invoice}};
+        assertEq(shared, decode(op, normalize(op.serializeRequest(value()))));
+    }
+    private rawTypes() {
+        WSOperation op = new WebService(replace(source(), 'type="xs:base64Binary"', 'type="xs:int"')).getOperation("exchange");
+        assertEq(value(), decode(op, normalize(op.serializeRequest(value()))));
+        foreach auto empty in (binary(""), "") {
+            hash<auto> input = value(); input.data = empty;
+            assertEq(binary(""), decode(op, normalize(op.serializeRequest(input))).data);
+        }
+    }
+    private identifiers() {
+        WSOperation op = new WebService(source()).getOperation("exchange");
+        hash<auto> normalized = normalize(op.serializeRequest(value()));
+        hash<auto> parts = byPart(normalized);
+        string boundary = "independent-boundary";
+        binary wire = binary("--" + boundary + "\r\nContent-ID: <data=one@example.test>\r\n"
+            + "Content-Type: application/octet-stream\r\n\r\n") + parts.data.body
+            + binary("\r\n--" + boundary + "\r\nContent-ID: <invoice=two@example.test>\r\n"
+            + "Content-Type: text/xml;charset=UTF-8\r\n\r\n") + parts.invoice.body
+            + binary("\r\n--" + boundary + "\r\nContent-ID: <root@example.test>\r\n"
+            + "Content-Type: text/xml;charset=UTF-8\r\n\r\n") + binary(normalized.body)
+            + binary("\r\n--" + boundary + "--\r\n");
+        hash<auto> selected = normalize({"body":wire,"hdr":{"Content-Type":
+            'multipart/related;boundary=independent-boundary;type="text/xml";start="<root@example.test>"'}});
+        assertEq(value(), decode(op, selected));
+        selected.parts."unbound@example.test" = <Mime::MessageInfo>{"body":<00>,"hdr":{"content-type":"application/octet-stream"}};
+        assertEq(value(), decode(op, selected));
+    }
+    private invalid() {
+        WSOperation op = new WebService(source()).getOperation("exchange");
+        foreach auto bad in (NOTHING, NULL, 42, {"extra":"value"}, {"^value^":<00>,"^attributes^":{"^content-type^":17}}) {
+            hash<auto> input = value(); input.data = bad;
+            assertThrows("SOAP-SERIALIZATION-ERROR", \op.serializeRequest(), (input,));
+        }
+        hash<auto> input = value(); remove input.data;
+        assertThrows("SOAP-SERIALIZATION-ERROR", \op.serializeRequest(), (input,));
+        assertThrows("SOAP-SERIALIZATION-ERROR", \op.serializeRequest(),
+            ({"^body^":value(),"^headers^":{},"^attachments^":{"unbound":<00>}},));
+        hash<auto> normalized = normalize(op.serializeRequest(value()));
+        string id = (select keys normalized.parts, $1.startsWith("data="))[0];
+        foreach string replacement in ("data", "data=no-domain", "data=@example.test", "data=one@", "data%XX=one@example.test") {
+            hash<auto> changed = normalized;
+            changed.parts{replacement} = remove changed.parts{id};
+            assertThrows("SOAP-DESERIALIZATION-ERROR", \decode(), (op,changed));
+        }
+        hash<auto> changed = normalized; remove changed.parts{id};
+        assertThrows("SOAP-DESERIALIZATION-ERROR", \decode(), (op,changed));
+        changed = normalized; changed.parts."data=duplicate@example.test" = changed.parts{id};
+        assertThrows("SOAP-DESERIALIZATION-ERROR", \decode(), (op,changed));
+        string invoice_id = (select keys normalized.parts, $1.startsWith("invoice="))[0];
+        changed = normalized; changed.parts{invoice_id}.body = binary('<Invoice xmlns="urn:wrong"/>');
+        assertThrows("SOAP-DESERIALIZATION-ERROR", \decode(), (op,changed));
+        changed = normalized; changed.parts{id}.hdr."content-type" = "image/png";
+        assertThrows("SOAP-MESSAGE-ERROR", \decode(), (op,changed));
+        assertEq(value(), decode(op, normalize(op.serializeRequest(value()))));
+    }
+    private singlePart() {
+        foreach string part in ("data", "invoice") {
+            string absent = part == "data" ? "invoice" : "data";
+            string declaration = absent == "data"
+                ? '<m:part><m:content part="data" type="application/octet-stream"/></m:part>'
+                : '<m:part><m:content part="invoice" type="text/xml"/></m:part>';
+            foreach bool header in (False, True) {
+                string text = replace(replace(source(), 'parts="text"', 'parts=""'), declaration, "");
+                if (header) {
+                    text = replace(text, '<s:body use="literal" parts=""/>',
+                        '<s:body use="literal" parts=""/><s:header use="literal" message="t:Message" part="text"/>');
+                }
+                WSOperation op = new WebService(text).getOperation("exchange");
+                hash<auto> input(); input{part} = value(){part};
+                if (header) { input.Message = {"text":"header"}; }
+                auto decoded = decode(op, normalize(op.serializeRequest(input)));
+                assertEq(input, decoded);
+                assertEq(input, decode(op, normalize(op.serializeRequest(decoded))));
+            }
+        }
+    }
+    private placement() {
+        WSOperation empty = new WebService(replace(source(), 'parts="text"', 'parts=""')).getOperation("exchange");
+        hash<auto> attachments = value(); remove attachments.text;
+        assertEq(attachments, decode(empty, normalize(empty.serializeRequest(attachments))));
+        hash<auto> wire = empty.serializeFault(NOTHING, "Invalid order");
+        assertFalse(wire.hdr."Content-Type".startsWith("multipart/"));
+        assertThrows("SOAP-SERVER-FAULT-RESPONSE", \empty.deserializeResponse(), (parse_xml(wire.body),));
+        string text = replace(source(), '<w:part name="data" type="xs:base64Binary"/>',
+            '<w:part name="data" element="t:Invoice"/>');
+        text = replace(text, 'type="application/octet-stream"', 'type="text/xml"');
+        WSOperation aliases = new WebService(text).getOperation("exchange");
+        hash<auto> input = value(); input.data = {"id":99,"label":"copy"};
+        assertEq(input, decode(aliases, normalize(aliases.serializeRequest(input))));
+        # Per-part values remain separate even when both MIME entities have the same XML root QName.
+        hash<auto> parts = byPart(normalize(aliases.serializeRequest(input)));
+        assertTrue(parts.data.body != parts.invoice.body);
+    }
+    private alternatives() {
+        foreach string alternatives in ('<m:content part="data" type="image/png"/>',
+                '<m:content part="data" type="application/octet-stream"/>') {
+            string text = replace(source(), '<m:content part="data" type="application/octet-stream"/>',
+                '<m:content part="data" type="application/octet-stream"/>' + alternatives);
+            WSOperation op = new WebService(text).getOperation("exchange");
+            bool ambiguous = alternatives.contains("image/png");
+            hash<auto> input = value();
+            if (ambiguous) {
+                assertThrows("SOAP-SERIALIZATION-ERROR", \op.serializeRequest(), (input,));
+                input.data = {"^value^":value().data,"^attributes^":{"^content-type^":"image/png"}};
+            }
+            assertEq(input, decode(op, normalize(op.serializeRequest(input))));
+            WsdlSoapMimeDataType provider(op, True);
+            assertEq(input, provider.acceptsValue(input));
+            assertTrue(exists decode(op, normalize(op.serializeRequest(provider.getExampleValue()))));
+        }
+        WSOperation wildcard = new WebService(replace(source(), 'type="application/octet-stream"', 'type="*/*"')).getOperation("exchange");
+        hash<auto> input = value();
+        assertThrows("SOAP-SERIALIZATION-ERROR", \wildcard.serializeRequest(), (input,));
+        input.data = {"^value^":"é","^attributes^":{"^content-type^":"text/plain;charset=ISO-8859-1"}};
+        assertEq(input, decode(wildcard, normalize(wildcard.serializeRequest(input))));
+        WsdlSoapMimeDataType provider(wildcard, True);
+        assertEq(input, provider.acceptsValue(input));
+        assertThrows("XSD-SAMPLE-ERROR", \provider.getExampleValue());
+    }
+    private unicode() {
+        WSOperation op = new WebService(replace(replace(source(), 'name="data"', 'name="dátá"'),
+            'part="data"', 'part="dátá"')).getOperation("exchange");
+        hash<auto> input = value(); input."dátá" = remove input.data;
+        hash<auto> normalized = normalize(op.serializeRequest(input));
+        assertEq(1, (select keys normalized.parts, $1.startsWith("d%C3%A1t%C3%A1=")).size());
+        assertEq(input, decode(op, normalized));
+    }
+    private providers() {
+        foreach bool overlap in (False, True) {
+            string text = overlap ? replace(source(), ' parts="text"', '')
+                : replace(source(), 'type="xs:base64Binary"', 'type="xs:int"');
+            WebService ws(text);
+            WSOperation op = ws.getOperation("exchange");
+            SoapRequestDataProvider request(ws, NOTHING, op);
+            if (!overlap) {
+                AbstractDataProviderType abstract_type = op.input.getDataProviderType();
+                assertThrows("RUNTIME-TYPE-ERROR", \abstract_type.acceptsValue(), (value(),));
+            }
+            AbstractDataProviderType initial = request.getRequestType();
+            assertTrue(initial instanceof WsdlSoapMimeDataType);
+            foreach AbstractDataProviderType provider in (initial, Serializable::deserialize(initial.serialize()),
+                    initial.getSoftType()) {
+                assertTrue(provider instanceof WsdlSoapMimeDataType);
+                auto input = overlap ? {"^body^":value(),"^headers^":{},
+                    "^attachments^":{"data":<0102>,"invoice":{"id":8,"label":"copy"}}} : value();
+                assertEq(input, provider.acceptsValue(input));
+                assertEq(NOTHING, provider.getOrNothingType().acceptsValue(NOTHING));
+                assertThrows("MISSING-VALUE-ERROR", \provider.acceptsValue(), (NOTHING,));
+                auto bad = input;
+                if (overlap) { bad."^attachments^".data = 17; } else { bad.data = 17; }
+                assertThrows("RUNTIME-TYPE-ERROR", \provider.acceptsValue(), (bad,));
+                bad = input;
+                if (overlap) { bad."^body^".invoice.id = "not an integer"; } else { bad.invoice.id = "not an integer"; }
+                assertThrows("RUNTIME-TYPE-ERROR", \provider.acceptsValue(), (bad,));
+                auto example = provider.getExampleValue();
+                assertTrue(exists decode(op, normalize(op.serializeRequest(example))));
+            }
+            assertTrue(request.getResponseType() instanceof WsdlSoapMimeDataType);
+        }
+    }
+    private headerIdentities() {
+        string imported = replace(ReadOnlyFile::readTextFile(get_script_dir()
+            + "/wsdl-interop/regressions/header-identities/a.wsdl"), 'name="H"', 'name="Message"');
+        foreach bool soap12 in (False, True) {
+            foreach bool overlap in (False, True) {
+                string text = replace(source(soap12), 'xmlns:t="urn:attachments"',
+                    'xmlns:a="urn:header:a" xmlns:t="urn:attachments"');
+                text = replace(text, '<w:types>', '<w:import namespace="urn:header:a" location="a.wsdl"/><w:types>');
+                text = replace(text, '<s:body use="literal" parts="text"/>',
+                    '<s:body use="literal" parts="text"/><s:header use="literal" message="a:Message" part="token"/>'
+                    + (overlap ? '<s:header use="literal" message="t:Message" part="invoice"/>' : ""));
+                WebService ws(text, {"document_location":"https://example.invalid/root.wsdl", "async_only":True,
+                    "xsd_cache":{"https://example.invalid/a.wsdl":imported}});
+                foreach WSOperation op in (ws.getOperation("exchange"),
+                        Serializable::deserialize(ws.serialize()).getOperation("exchange"),
+                        Serializable::deserialize(ws.getOperation("exchange").serialize())) {
+                    hash<auto> input = {"^body^":{"text":value().text},
+                        "^headers^":{},
+                        "^attachments^":{"data":value().data,"invoice":value().invoice}};
+                    input."^headers^"."{urn:header:a}Message" = {"token":11};
+                    if (overlap) {
+                        input."^headers^"."{urn:attachments}Message" = {"invoice":{"id":88,"label":"header"}};
+                    }
+                    foreach bool request in (False, True) {
+                        hash<auto> wire = request ? op.serializeRequest(input) : op.serializeResponse(input);
+                        hash<auto> normalized = normalize(wire);
+                        assertEq(input, decode(op, normalized, request));
+                        assertEq(input, decode(op, normalize(op.serializeRequest(decode(op, normalized, request)))));
+                        hash<SoapXmlMessageInfo> retained = request
+                            ? op.deserializeXmlRequest(WSDLLib::getXmlMessageText(normalized), NOTHING, normalized.parts)
+                            : op.deserializeXmlResponse(WSDLLib::getXmlMessageText(normalized), NOTHING, normalized.parts);
+                        assertEq(input, decode(op, normalize(op.serializeRequest({"^body^":retained.body,
+                            "^headers^":retained.headers,"^attachments^":retained.attachments}))));
+                        WsdlSoapMimeDataType provider(op, request);
+                        assertTrue(exists provider.getField("^attachments^"));
+                        assertEq(input, provider.acceptsValue(input));
+                        auto example = provider.getExampleValue();
+                        assertTrue(exists decode(op, normalize(op.serializeRequest(example))));
+                        hash<auto> invalid = input;
+                        invalid."^headers^"."{urn:header:a}Message" = {"token":"invalid"};
+                        assertThrows("RUNTIME-TYPE-ERROR", \provider.acceptsValue(), (invalid,));
+                    }
+                }
+            }
+        }
+    }
+    private providerSelection() {
+        string text = source();
+        int start = text.find('<w:binding name="Binding"');
+        int end = text.find('</w:binding>', start) + '</w:binding>'.size();
+        string alternate = replace(replace(text.substr(start, end - start), 'name="Binding"', 'name="Alternate"'),
+            'type="application/octet-stream"', 'type="image/png"');
+        text = replace(text, '<w:service name="Service">', alternate + '<w:service name="Service">');
+        text = replace(text, 'binding="t:Binding"', 'binding="t:Alternate"');
+        WebService ws(text);
+        SoapRequestDataProvider provider(ws, NOTHING, ws.getOperation("exchange"));
+        auto type = provider.getRequestType();
+        hash<auto> input = value();
+        input.data = {"^value^":value().data,"^attributes^":{"^content-type^":"application/octet-stream"}};
+        assertThrows("RUNTIME-TYPE-ERROR", \type.acceptsValue(), (input,));
+        input.data."^attributes^"."^content-type^" = "image/png";
+        assertEq(input, type.acceptsValue(input));
+    }
+    private concurrent() {
+        WSOperation op = new WebService(source()).getOperation("exchange");
+        Queue ready(); Queue start(); Queue done();
+        foreach string encoding in ("UTF-8", "UTF-16", "ISO-8859-1") {
+            background sub(string selected) {
+                ready.push(selected);
+                auto event = start.get(10000);
+                try {
+                    for (int i = 0; i < 12; ++i) {
+                        hash<auto> input = value(); input.invoice.id = i;
+                        hash<auto> wire = op.serializeRequest(input, NOTHING, selected);
+                        @assert(input == decode(op, normalize(wire)));
+                    }
+                    done.push(selected);
+                } catch (hash<ExceptionInfo> error) { done.push(error); }
+            }(encoding);
+        }
+        for (int i = 0; i < 3; ++i) { auto event = ready.get(10000); }
+        for (int i = 0; i < 3; ++i) { start.push(True); }
+        list<string> completed();
+        for (int i = 0; i < 3; ++i) { push completed, done.get(10000); }
+        assertEq(("ISO-8859-1", "UTF-16", "UTF-8"), sort(completed));
+    }
+    private http() {
+        foreach bool soap12 in (False, True) {
+            foreach bool retained in (False, True) {
+                foreach bool saved in (False, True) {
+                    WebService ws(source(soap12));
+                    if (saved) { ws = Serializable::deserialize(ws.serialize()); }
+                    HttpServer server(); on_exit server.stop();
+                    SoapHandler handler(new PermissiveAuthenticator());
+                    server.setDefaultHandler("attachments", handler);
+                    Queue received();
+                    handler.addMethod(ws, ws.getOperation("exchange"),
+                        auto sub(hash<auto> cx, auto request) {
+                            received.push(request);
+                            return retained ? {"^body^":request.body,"^headers^":request.headers,
+                                "^attachments^":request.attachments} : request;
+                        }, NOTHING, NOTHING, NOTHING, NOTHING, NOTHING, NOTHING, "Binding", NOTHING, retained);
+                    server.addListener(0);
+                    SoapClient client({"wsdl":ws,"url":sprintf("http://127.0.0.1:%d/service", server.getListenerInfo(0).port),
+                        "timeout":10000});
+                    auto response = client.callOperation("exchange", value(), {"xml_values":retained});
+                    auto request = received.get(1000);
+                    SoapRequestDataProvider provider(ws, client, ws.getOperation("exchange"));
+                    assertEq("Binding", client.getBindingName());
+                    hash<auto> invalid = value(); invalid.data = 42;
+                    assertThrows("INVALID-REQUEST", \provider.doRequest(), (invalid,));
+                    assertEq(value(), provider.doRequest(value()));
+                    auto provider_request = received.get(1000);
+                    if (retained) {
+                        assertEq(value().data, response.attachments.data);
+                        assertEq("Order é", response.body.text.getElementData()."^value^");
+                        assertEq("{urn:attachments}Invoice", request.attachments.invoice.getExpandedName());
+                    } else { assertEq(value(), request); assertEq(value(), response); }
+                }
+            }
+        }
+    }
+}

@@ -9587,3 +9587,29 @@ See [evidence](multipart-input-evidence.md), [validation](P6-41-validation.json)
 [audit](audits/P6-41-multipart-input.md), and [design](../../design/wsdl-multipart-input.md).
 P6 still requires multipart layout compilation, attachment binding replay and the
 request-local URI API integration; P7–P9 remain incomplete.
+
+
+## P6-42: SOAP MIME attachment parts and concrete provider types
+
+Attachment parts now serialize independently of SOAP body/header selection.
+Type-based parts carry raw media; global-element parts use schema XML. Native
+and retained XML consumers preserve media alternatives, public part identities,
+qualified headers and separate values for overlapping locations. SoapDataProvider
+uses the concrete selected binding, preserves raw bytes and supplies validated
+examples through saved, soft and optional types.
+
+The focused suite passes 19 cases / 876 assertions. Independent pinned CXF golden
+messages and 24 live calls cover three operations in both directions, plus 60
+negative/recovery exchanges. The original CXF fixture remains unchanged; a named
+and exactly checked derivative removes one invalid media annotation. All 58 gates
+pass: 41 Qore suites / 1,669 cases / 54,721 assertions, 15 independent gates,
+docs and astparser. All 16 corpus commands meet expected outcomes and six semantic
+reports match P6-41. All four changed modules compile to QMOD and the focused suite
+also passes with the compiled modules. Audit: 27 Pass / 35 N/A / zero Fail.
+No C++ changes or push.
+
+See [evidence](swa-parts-evidence.md), [validation](P6-42-validation.json),
+[audit](audits/P6-42-swa-parts.md), and [design](../../design/wsdl-swa-parts.md).
+General multipart layout compilation/execution and request-local HTTP URI
+integration remain required P6 work. Full attachment reference semantics remain
+P8 work; P7–P9 are incomplete.

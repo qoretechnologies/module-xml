@@ -1,0 +1,105 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../../../qlib"
+%requires ../../../qlib/WSDL.qm
+%requires ../../../qlib/SoapClient.qm
+%requires ../../../qlib/SoapHandler.qm
+%requires HttpServer
+%try-module json
+%define NoJson
+%endtry
+%ifdef NoJson
+throw "MISSING-MODULE", "attachment interoperability requires json";
+%else
+hash<auto> sub native(hash<auto> encoded) {
+    foreach string key in (keys encoded) {
+        if (encoded{key}.typeCode() == NT_HASH && encoded{key}.hasKey("binary")) {
+            encoded{key} = parse_base64_string(encoded{key}.binary);
+        }
+    }
+    return encoded;
+}
+hash<auto> sub normalized(hash<auto> wire) {
+    return WSDLLib::parseMultiPartSOAPMessage({"body":wire.body,"_qore_orig_content_type":wire.hdr."Content-Type"});
+}
+auto sub nativeXml(WSOperation operation, hash<SoapXmlMessageInfo> value, bool request) {
+    hash<auto> input = {"^body^":value.body,"^headers^":value.headers,"^attachments^":value.attachments};
+    hash<auto> wire = request ? operation.serializeRequest(input) : operation.serializeResponse(input);
+    hash<auto> parsed = WSDLLib::parseSOAPMessage(normalized(wire));
+    return request ? operation.deserializeRequest(parsed) : operation.deserializeResponse(parsed);
+}
+code<auto(hash<auto>, auto)> sub callback(WSOperation op, hash<auto> row, Queue received, bool retained) {
+    return auto sub(hash<auto> cx, auto input) {
+            if (retained) { input = nativeXml(op, input, True); }
+            @assert(input == native(row.request_value), sprintf("%s input: %Y", row.operation, input));
+            received.push(row.operation);
+            return native(row.response_value);
+
+    };
+}
+@assert(ARGV.size() >= 2);
+string mode = ARGV[0];
+bool saved = ARGV[1] == "saved";
+@assert(saved || ARGV[1] == "source");
+bool retained = ARGV[2] == "xml";
+hash<auto> golden = parse_json(ReadOnlyFile::readTextFile(get_script_dir() + "/golden.json"));
+WebService ws = WSDLLib::getWebServiceFromUrl(get_script_dir() + "/../" + golden.wsdl);
+if (saved) { ws = Serializable::deserialize(ws.serialize()); }
+if (mode == "encode") {
+    list<auto> output();
+    foreach hash<auto> row in (golden.cases) {
+        WSOperation op = ws.getOperation(row.operation);
+        hash<auto> result();
+        result.operation = row.operation;
+        foreach string direction in ("request", "response") {
+            auto value = native(row{direction + "_value"});
+            hash<auto> wire = direction == "request" ? op.serializeRequest(value) : op.serializeResponse(value);
+            result{direction} = {"headers":wire.hdr,"body":make_base64_string(binary(wire.body))};
+            hash<auto> captured = row{direction};
+            hash<auto> parsed = WSDLLib::parseSOAPMessage(normalized({"body":parse_base64_string(captured.body),
+                "hdr":captured.headers}));
+            foreach WSOperation selected in (op, Serializable::deserialize(op.serialize())) {
+                auto decoded = direction == "request" ? selected.deserializeRequest(parsed) : selected.deserializeResponse(parsed);
+                @assert(decoded == value, sprintf("%s %s: %Y", row.operation, direction, decoded));
+            }
+        }
+        push output, result;
+    }
+    printf("%s\n", make_json(output));
+} else if (mode == "client" || mode == "client-invalid") {
+    @assert(ARGV.size() == 4);
+    SoapClient client({"wsdl":ws,"service":"SwAService","port":"SwAServiceHttpPort","url":ARGV[3],
+        "timeout":30000,"connect_timeout":10000});
+    foreach hash<auto> row in (golden.cases) {
+        if (mode == "client-invalid") {
+            foreach string problem in ("missing", "duplicate", "media") {
+                *string error;
+                try { auto invalid = client.callOperation(row.operation, native(row.request_value)); }
+                catch (hash<ExceptionInfo> ex) { error = ex.err; }
+                @assert(error == (problem == "media" ? "SOAP-MESSAGE-ERROR" : "SOAP-DESERIALIZATION-ERROR"), error);
+                @assert(client.callOperation(row.operation, native(row.request_value)) == native(row.response_value));
+            }
+            continue;
+        }
+        auto result = client.callOperation(row.operation, native(row.request_value), {"xml_values":retained});
+        if (retained) { result = nativeXml(ws.getOperation(row.operation), result, False); }
+        @assert(result == native(row.response_value), sprintf("%s response: %Y", row.operation, result));
+    }
+    printf("PASS\n");
+} else if (mode == "server") {
+    HttpServer server(); on_exit server.stop();
+    SoapHandler handler(new PermissiveAuthenticator());
+    server.setDefaultHandler("swa-peer", handler);
+    Queue received();
+    foreach hash<auto> row in (golden.cases) {
+        WSOperation op = ws.getOperation(row.operation);
+        handler.addMethod(ws, op, callback(op, row, received, retained),
+            NOTHING, NOTHING, NOTHING, NOTHING, NOTHING, NOTHING, "SwAServiceBinding", NOTHING, retained);
+    }
+    server.addListener(0);
+    printf("READY\t%d\n", server.getListenerInfo(0).port);
+    @assert(trim(stdin.readLine()) == "STOP");
+    foreach hash<auto> row in (golden.cases) { @assert(received.get(1000) == row.operation); }
+} else { throw "SWA-PEER-ERROR", sprintf("unknown mode %Y", mode); }
+%endif

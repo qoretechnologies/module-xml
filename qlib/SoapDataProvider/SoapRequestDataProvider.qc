@@ -65,10 +65,26 @@ public class SoapRequestDataProvider inherits SoapDataProviderBase {
         return record_type;
     }
 
+    private *WsdlSoapMimeDataType getMimeType(bool request, bool explicit_values = False) {
+        *string selected = soapclient ? soapclient.getBindingName() : NOTHING;
+        if (!exists selected) {
+            # Match the default port used by the lazily constructed client without creating a transport.
+            list<auto> services = webservice.listServices();
+            if (services.size() == 1) {
+                hash<ServiceInfo> service = webservice.getService(services[0].name);
+                if (service.port) { selected = service.port.firstValue().binding.getComponentKey(); }
+            }
+        }
+        OperationalBinding binding = op.getBinding(selected);
+        *BindingMessageDescription description = request ? binding.input : binding.output;
+        return binding instanceof SoapBinding && description.parts
+            ? new WsdlSoapMimeDataType(op, request, binding.name, explicit_values) : NOTHING;
+    }
+
     #! Returns the description of a successful request message, if any
     private *AbstractDataProviderType getRequestTypeImpl() {
         if (op.input) {
-            return op.input.getDataProviderType();
+            return getMimeType(True) ?? op.input.getDataProviderType();
         }
     }
 
@@ -78,6 +94,8 @@ public class SoapRequestDataProvider inherits SoapDataProviderBase {
         binding during SOAP serialization.
     */
     private *AbstractDataProviderType getRequestTypeWithDataImpl(auto req) {
+        *WsdlSoapMimeDataType mime = getMimeType(True, req.typeCode() == NT_HASH && req.hasKey("^attachments^"));
+        if (mime) { return mime; }
         if (op.input && req.typeCode() == NT_HASH && (req.hasKey("^body^") || req.hasKey("^headers^"))) {
             HashDataType envelope("SoapMessage");
             envelope.addQoreFields({
@@ -100,7 +118,7 @@ public class SoapRequestDataProvider inherits SoapDataProviderBase {
     */
     private *AbstractDataProviderType getResponseTypeImpl() {
         if (op.output) {
-            return op.output.getDataProviderType();
+            return getMimeType(False) ?? op.output.getDataProviderType();
         }
     }
 
