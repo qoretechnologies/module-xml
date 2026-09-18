@@ -164,3 +164,28 @@ serialization quotes and escapes its action parameter. SoapHandler obtains the
 decoded parameter using `WSDLLib::getContentTypeParameter()`, checks the declared
 action exactly, and uses the actual body element for body-based dispatch. URI
 suffixes do not identify operations.
+
+## Operation URI boundaries
+
+An explicitly empty `http:operation/@location` is a valid relative URI. It is
+separate from an absent required attribute and targets the selected port's base
+URI. An empty URL-replacement map likewise represents an active zero-part binding;
+serialization, path decoding and handler dispatch check its presence. Required
+message parts still need declared replacement patterns.
+
+Replacement matching converts a caller path to UTF-8 once and uses byte offsets
+for searching and slicing, consistent with the compiled literal tokens. Unicode
+literal prefixes and separators remain distinct from percent-encoded part values.
+URL-encoded requests strip an operation-location prefix using the same byte
+units before parsing the query. For example, `/č/(id)/é` with `id=ž` emits
+`/č/%C5%BE/é` and decodes to the original value, including when a direct caller
+supplies the request path in a different string encoding.
+
+SoapHandler stores locations containing a fixed query alongside replacement
+routes under their verb and complete template. `/reports?revision=1` accepts an
+appended `&id=71`, but does not match `revision=10` or `/reportsExtra`. Ordinary
+static routes require their exact path, optionally followed by `?` parameters.
+Routing compares the actual URI rather than treating TreeMap's component-relative
+unmatched suffix as raw URI text. Static routes retain precedence over template
+routes; multiple matching templates fail explicitly. Removal by service identifier
+also removes fixed-query routes, and re-registration restores them.

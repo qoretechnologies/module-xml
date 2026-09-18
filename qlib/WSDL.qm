@@ -121,6 +121,8 @@ module WSDL {
     @section wsdlrelnotes WSDL Module Release Notes
 
     @subsection wsdl_0_5_8 WSDL v0.5.8
+    - HTTP operation locations preserve empty relative URIs and Unicode path boundaries;
+      handlers route fixed query strings with exact component boundaries
     - MIME content types use complete, case-insensitive type/subtype matching with explicit wildcard and
       parameter constraints; HTTP MIME content retains its parameters and bypasses SOAP/XML body parsing
     - explicit MIME charset parameters control text encoding without duplicate charset headers
@@ -32874,12 +32876,12 @@ public class HttpBinding inherits WSDL::OperationalBinding {
 
     #! serializes path part of URL when urlEncoded WSDL is defined
     private:internal string serializeRequestPath(WSOperation op, auto h) {
-        if ((input.urlReplacement || input.urlEncoded) && exists h && h.typeCode() != NT_HASH) {
+        if ((exists input.urlReplacement || input.urlEncoded) && exists h && h.typeCode() != NT_HASH) {
             throw SOAP_SERIALIZATION_ERROR, sprintf("HTTP URL arguments for operation %Y require a hash, got %y",
                 op.name, h.type());
         }
         string path = location;
-        if (input.urlReplacement) {
+        if (exists input.urlReplacement) {
             path = "";
             foreach string k in (keys input.urlReplacement) {
                 if (k =~ /^string/) {
@@ -32919,7 +32921,7 @@ public class HttpBinding inherits WSDL::OperationalBinding {
             throw SOAP_DESERIALIZATION_ERROR, sprintf("missing content-type in input hash: %y", v);
         }
 
-        if ((bmd.urlEncoded && httpMethod != "POST") || bmd.urlReplacement) {
+        if ((bmd.urlEncoded && httpMethod != "POST") || exists bmd.urlReplacement) {
             # is should be processed via deserializeUrl()
             throw SOAP_DESERIALIZATION_ERROR, sprintf("urlencoded message deserialization is not supported in "
                 "binding: %y", name);
@@ -32958,28 +32960,36 @@ public class HttpBinding inherits WSDL::OperationalBinding {
         }
     }
 
-    #! checks whether a raw URI path matches this binding's URL-replacement template
+    #! checks whether a raw URI path matches this binding's operation location
     /** @param path the percent-encoded request path, without a handler mount prefix
         @return True when the complete template matches, otherwise False
         @throw URL-ENCODING-ERROR invalid percent encoding in a replacement value
-        @note Matching checks path structure and repeated values; message types are checked during decoding.
+        @note Matching checks path structure, fixed query text and repeated replacement values;
+        message types are checked during decoding.
         @par Example
         A template `/items/(id)/view` matches `/items/A%2FB/view` and supplies the id `A/B` during decoding.
+        A fixed location `/reports?revision=1` also matches `/reports?revision=1&id=71`, but not `revision=10`.
         @since %WSDL 0.5.8
     */
     bool matchesRequestPath(string path) {
+        if (!exists input.urlReplacement) {
+            path = ltrim(path, "/");
+            string prefix = ltrim(location, "/");
+            return path == prefix || path.startsWith(prefix + (prefix.contains("?") ? "&" : "?"));
+        }
         return exists getRequestPathValues(path);
     }
 
     private *hash<auto> getRequestPathValues(string path) {
-        if (!input.urlReplacement) {
+        if (!exists input.urlReplacement) {
             return NOTHING;
         }
         hash<auto> values = {};
         int pos = 0;
         list<string> tokens = keys input.urlReplacement;
         # Leading slashes do not change the operation-relative template.
-        path = ltrim(path, "/");
+        path = convert_encoding(ltrim(path, "/"), "UTF-8");
+        binary bytes = binary(path);
         for (int i = 0; i < tokens.size(); ++i) {
             string key = tokens[i];
             if (key =~ /^string/) {
@@ -32987,14 +32997,14 @@ public class HttpBinding inherits WSDL::OperationalBinding {
                 if (!i) {
                     expected = ltrim(expected, "/");
                 }
-                if (substr(path, pos, expected.size()) != expected) {
+                if (substr(bytes, pos, expected.size()) != binary(expected)) {
                     return NOTHING;
                 }
                 pos += expected.size();
             } else if (key =~ /^part/) {
                 *string next_literal = i + 1 < tokens.size() && tokens[i + 1] =~ /^string/
                     ? input.urlReplacement{tokens[i + 1]} : NOTHING;
-                int end = next_literal ? index(path, next_literal, pos) : index(path, "?", pos);
+                int end = next_literal ? bindex(path, next_literal, pos) : bindex(path, "?", pos);
                 if (end < 0) {
                     if (next_literal) {
                         return NOTHING;
@@ -33002,7 +33012,7 @@ public class HttpBinding inherits WSDL::OperationalBinding {
                     end = path.size();
                 }
                 string name = input.urlReplacement{key};
-                string value = decode_url(substr(path, pos, end - pos));
+                string value = decode_url(binary_to_string(substr(bytes, pos, end - pos), "UTF-8"));
                 if (values.hasKey(name) && values{name} != value) {
                     return NOTHING;
                 }
@@ -33010,14 +33020,14 @@ public class HttpBinding inherits WSDL::OperationalBinding {
                 pos = end;
             }
         }
-        if (pos < path.size() && path[pos] != "?") {
+        if (pos < path.size() && bytes[pos] != 63) {
             return NOTHING;
         }
         return values;
     }
 
     hash<auto> deserializeRequestPathImpl(WSOperation op, string path) {
-        if (input.urlReplacement) {
+        if (exists input.urlReplacement) {
             *hash<auto> values = getRequestPathValues(path);
             if (!exists values) {
                 throw SOAP_DESERIALIZATION_ERROR, sprintf("request path %Y does not match URL replacement template %Y",
@@ -33029,10 +33039,12 @@ public class HttpBinding inherits WSDL::OperationalBinding {
             hash<auto> h;
             if (index(path, "?") >= 0) {
                 # any params ?
-                int i = index(path, location);
+                path = convert_encoding(path, "UTF-8");
+                string prefix = convert_encoding(location, "UTF-8");
+                int i = bindex(path, prefix);
                 if (i >= 0) {
                     # strip potential prefix in URL params
-                    path = substr(path, i + location.size());
+                    path = binary_to_string(substr(binary(path), i + prefix.size()), "UTF-8");
                 }
                 # all parameters are in URL
                 i = index(path, "?");
@@ -33651,7 +33663,7 @@ public class Binding inherits WSDL::XsdNamedData {
 
             if (httpMethod) {
                 location = ophash.operation."^attributes^".location;
-                if (!location) {
+                if (!exists location) {
                     throw WSDL_ERROR, sprintf("location is missing binding %y, operation %y", name, opname);
                 }
             }
@@ -33770,7 +33782,7 @@ public class Binding inherits WSDL::XsdNamedData {
                 }
 
                 if (op{io}.hasKey("urlReplacement")) {
-                    if (!location) {
+                    if (!exists location) {
                         throw WSDL_ERROR, sprintf("%s binding %y for operation %y has a 'urlReplacement' element but does not use HTTP binding", io, name, opname);
                     }
 
@@ -33779,8 +33791,9 @@ public class Binding inherits WSDL::XsdNamedData {
                 }
 
                 if (op{io}.hasKey("urlEncoded")) {
-                    if (!location)
+                    if (!exists location) {
                         throw WSDL_ERROR, sprintf("%s binding %y for operation %y has a 'urlEncoded' element but does not use HTTP binding", io, name, opname);
+                    }
 
                     bmd.urlEncoded = True;
                     delete op{io}.urlEncoded;

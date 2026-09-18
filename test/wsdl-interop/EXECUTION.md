@@ -9401,3 +9401,25 @@ See [evidence](media-types-evidence.md), [validation](P6-33-validation.json),
 [audit](audits/P6-33-media-types.md) and [implemented design](../../design/wsdl-http-mime.md).
 Top-level WSDL constraints, remaining concrete binding/MIME behavior and attachment
 contract replay remain P6 work before P7–P9; this is not phase completion.
+
+
+## P6-34: Empty, Unicode and fixed-query HTTP locations
+
+HTTP operation locations distinguish empty relative URIs from missing attributes.
+Empty replacement maps retain their zero-part binding meaning. URI matching and
+query prefix removal use consistent UTF-8 byte offsets, including alternate
+caller encodings. Fixed-query locations use the handler template registry and
+lifecycle; static routes compare actual URI boundaries. Near-matching path names
+and query values reject instead of reaching the callback.
+The 16-fixture Qore matrix passes 17 cases / 996 assertions, including source,
+both saved-service forms, detached operations, provider examples, both directions,
+54 successful HTTP calls and 18 rejected HTTP calls. Independent Python URI
+observation and pinned Xerces check 16 valid and 16 missing-location documents.
+All 18 affected Qore suites pass (540 cases / 11,799 reported
+assertions), plus independent matrices, six CXF peer tests, docs and astparser.
+All 16 corpus gates meet expected outcomes; six semantic reports are unchanged.
+Audit: 18 Pass / 44 N/A / zero Fail; no C++ changes or push.
+See [evidence](http-uri-boundaries-evidence.md), [validation](P6-34-validation.json),
+[audit](audits/P6-34-http-uri-boundaries.md) and [implemented design](../../design/wsdl-http-mime.md).
+Remaining top-level/component constraints, binding combinations, MIME multipart
+and attachment replay stay in P6 before P7–P9. This is not phase completion.

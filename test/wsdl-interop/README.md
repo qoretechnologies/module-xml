@@ -34,6 +34,12 @@ and MIME parser check 91 declaration/wire pairs and 18 classifications. Source,
 saved and detached consumers cover parameters, charsets and opaque XML/binary/
 multipart bodies, including 38 live HTTP calls. See [evidence](media-types-evidence.md).
 
+HTTP URI boundaries use `test/wsdl-http-uri-boundaries.qtest` and
+`python3 -B test/wsdl-interop/test_http_uri_boundaries.py -v`. Empty and Unicode
+locations, fixed query strings, all three saved/source forms and route lifecycle
+have independent schema/URI and actual client/server checks. See
+[evidence](http-uri-boundaries-evidence.md).
+
 P6-01 implements [binding-specific SOAP versions](binding-version-evidence.md),
 including scoped declarations, saved services and actual HTTP exchanges on both
 ports. P6-02 fixes [detached operation ownership](operation-ownership-evidence.md),

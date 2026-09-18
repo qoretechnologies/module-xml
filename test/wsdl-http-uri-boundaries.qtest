@@ -1,0 +1,116 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires ../qlib/WSDL.qm
+%requires ../qlib/SoapClient.qm
+%requires ../qlib/SoapHandler.qm
+%requires HttpServer
+%try-module json
+%define NoJson
+%endtry
+%ifdef NoJson
+throw "MISSING-MODULE", "HTTP URI fixtures require json";
+%else
+%exec-class UriBoundaryTest
+class UriBoundaryTest inherits QUnit::Test {
+    constructor() : Test("HTTP URI boundaries", "1.0") {
+        hash<auto> data = parse_json(ReadOnlyFile::readTextFile(get_script_dir() + "/wsdl-interop/regressions/wsdl-http-uri-boundaries/cases.json"));
+        foreach hash<auto> row in (data.cases) {
+            addTestCase(row.name, \check(), (row,));
+        }
+        list<hash<auto>> rows = data.cases;
+        addTestCase("Missing locations and unrepresented parts reject", \negative(), (rows,));
+        set_return_value(main());
+    }
+    private negative(list<hash<auto>> rows) {
+        foreach hash<auto> row in (rows) {
+            string bad = row.xml =~ s/<h:operation location="[^"]*"\/>/<h:operation\/>/;
+            code<nothing()> parse = sub() { WebService ws(bad); };
+            assertThrows("WSDL-ERROR", parse);
+            if (row.mode == "urlReplacement" && !row.location) {
+                bad = replace(row.xml, '<w:message name="In"></w:message>',
+                    '<w:message name="In"><w:part name="id" type="xs:string"/></w:message>');
+                code<nothing()> missing = sub() { WebService ws(bad); };
+                assertThrows("WSDL-ERROR", missing);
+            }
+        }
+    }
+    private check(hash<auto> row) {
+        WebService original(row.xml);
+        foreach WebService ws in (original, Serializable::deserialize(original.serialize()),
+                Serializable::deserialize(original.serializeToData())) {
+            assertEq(row.xml, ws.getWSDL());
+            AbstractDataProviderType provider = ws.getMessage("In").getDataProviderType(True);
+            assertEq(row.value, provider.acceptsValue(row.value));
+            foreach WSOperation op in (ws.getOperation("send"), Serializable::deserialize(ws.getOperation("send").serialize())) {
+                hash<auto> request = op.serializeRequest(row.value);
+                assertEq(row.path, request.path);
+                assertEq(row.verb, request.method);
+                assertEq(row.body, request.body);
+                bool in_path = row.mode == "urlReplacement" || (row.mode == "urlEncoded" && row.verb == "GET");
+                hash<auto> sample = provider.getExampleValue();
+                hash<auto> sample_wire = op.serializeRequest(sample);
+                if (in_path) {
+                    assertEq(sample, op.deserializeRequestPath(sample_wire.path));
+                } else {
+                    hash<auto> decoded = op.deserializeRequest({"body":sample_wire.body,
+                        "content-type":sample_wire.hdr."Content-Type"});
+                    assertEq(sample.id, row.mode == "content" ? decoded.id."^value^" : decoded.id);
+                }
+                if (in_path) {
+                    foreach string path in (request.path, convert_encoding(request.path, "UTF-16")) {
+                        assertEq(row.value, op.deserializeRequestPath(path));
+                    }
+                    if (row.mode == "urlReplacement") {
+                        HttpBinding binding = op.getBinding();
+                        assertTrue(binding.matchesRequestPath(request.path));
+                        assertFalse(binding.matchesRequestPath(request.path + "/wrong"));
+                    }
+                } else {
+                    hash<auto> actual = op.deserializeRequest({"body":request.body,"content-type":request.hdr."Content-Type"});
+                    assertEq(row.value.id, row.mode == "content" ? actual.id."^value^" : actual.id);
+                }
+                hash<auto> response = op.serializeResponse({"result":"reply"});
+                assertEq({"result":"reply"}, op.deserializeResponse(WSDLLib::parseSOAPMessage(
+                    {"body":response.body,"content-type":response.hdr."Content-Type"})));
+            }
+            HttpServer server();
+            on_exit server.stop();
+            SoapHandler handler(new PermissiveAuthenticator());
+            server.setDefaultHandler("boundary",handler);
+            Queue received();
+            code<auto(hash<auto>, auto)> callback = auto sub(hash<auto> cx, auto data) {
+                received.push(data);
+                return {"result":"reply"};
+            };
+            handler.addMethod(ws, ws.getOperation("send"), callback, NOTHING, NOTHING, NOTHING,
+                NOTHING, NOTHING, NOTHING, "B", "boundary");
+            server.addListener(0);
+            SoapClient client({"wsdl":ws,"service":"S","port":"Endpoint","timeout":30000,
+                "url":sprintf("http://127.0.0.1:%d/",server.getListenerInfo(0).port)});
+            assertEq({"result":"reply"},client.callOperation("send",row.value));
+            hash<auto> actual = received.get(30000);
+            assertEq(row.value.id, row.mode == "content" ? actual.id."^value^" : actual.id);
+            if (row.location == "/fixed?revision=1") {
+                foreach string wrong in ("/fixed?revision=10&id=bad", "/fixedExtra?revision=1&id=bad") {
+                    HTTPClient peer({"url":sprintf("http://127.0.0.1:%d/",server.getListenerInfo(0).port),"timeout":30000});
+                    assertThrows("HTTP-CLIENT-RECEIVE-ERROR", \peer.send(),
+                        (row.verb == "POST" ? "id=bad" : NOTHING, row.verb, wrong,
+                        {"Content-Type":"application/x-www-form-urlencoded"}));
+                    assertEq(0, received.size());
+                }
+                handler.removeService("boundary");
+                assertThrows("HTTP-CLIENT-RECEIVE-ERROR", \client.callOperation(), ("send", row.value));
+                assertEq(0, received.size());
+                handler.addMethod(ws, ws.getOperation("send"), callback, NOTHING, NOTHING, NOTHING,
+                    NOTHING, NOTHING, NOTHING, "B", "boundary");
+                assertEq({"result":"reply"}, client.callOperation("send", row.value));
+                assertEq(row.value, received.get(30000));
+            }
+        }
+    }
+}
+
+%endif
