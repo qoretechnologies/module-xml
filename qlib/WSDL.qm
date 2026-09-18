@@ -118,9 +118,32 @@ module WSDL {
     Native nil and empty-record projections are unchanged; retained XML APIs preserve XML content explicitly.
 
 
+    @section wsdlmimeformats Direct HTTP MIME formats
+
+    Multiple direct MIME declarations describe alternatives. Inspect the operation's input or output
+    description with BindingMessageDescription::getMimeFormats(). Stable selectors are content:partName
+    for an opaque part, xml:partName for schema-bound XML, and form for URL encoding of all parts.
+    A concrete HTTP Content-Type selects automatically when exactly one representation accepts it.
+    Overlaps, including opaque text/xml and schema-bound text/xml, require an explicit selector.
+    Failure to validate the selected schema never selects a different format.
+
+    @code{.qore}
+    hash<auto> request = op.serializeRequest({"invoice": invoice}, NOTHING, NOTHING, NOTHING,
+        NOTHING, NOTHING, NOTHING, {"Content-Type": "text/xml"}, "xml:invoice");
+    @endcode
+    The final optional mime_format argument is available on request/response serialization and
+    deserialization. Native value shapes are unchanged. Existing single-format calls remain valid.
+    SoapClient provides request_mime_format and response_mime_format call options; SoapHandler::addMethod()
+    accepts the same choices as optional trailing arguments. Choices are local to a call or registration;
+    they are not sent as a custom HTTP header. Abstract-message provider types still describe all parts.
+
     @section wsdlrelnotes WSDL Module Release Notes
 
     @subsection wsdl_0_5_8 WSDL v0.5.8
+    - direct HTTP MIME declarations retain content, form and schema-XML alternatives by public message part;
+      Content-Type selects a unique representation and explicit format selectors resolve overlaps
+    - HTTP Content-Type participates in serialization before encoding; conflicting headers and part metadata reject
+    - MIME text decoding honors UTF-16 byte order, and neutral UTF-16 XML output includes its required BOM
     - MIME content declarations honor single-part and unrestricted-type defaults in direct and multipart
       bindings; every multipart media alternative validates its syntax and parameter constraints
     - MIME multipart declarations validate nested SOAP/MIME grammar and namespaces; nested headers,
@@ -1057,7 +1080,10 @@ class WsdlFileLocation {
 # Transport bytes are decoded once; graph state retains locations, not HTTP headers/cookies.
 class WsdlResourceHelper {
     static string text(hash<FileResourceResult> resource) {
-        binary bytes = resource.data;
+        return xmlText(resource.data, resource.info.charset);
+    }
+
+    static string xmlText(binary bytes, *string charset) {
         string prefix = bytes[0..3].toHex();
         *string encoding;
         int bom = 0;
@@ -1071,8 +1097,8 @@ class WsdlResourceHelper {
             encoding = "UTF-16LE"; bom = 2;
         } else if (prefix.startsWith("efbbbf")) {
             encoding = "UTF-8"; bom = 3;
-        } else if (resource.info.charset) {
-            encoding = resource.info.charset;
+        } else if (charset) {
+            encoding = charset;
         } else {
             # XML Appendix F signatures identify the encoding of the declaration.
             hash<string, string> signatures = {"0000003c": "UTF-32BE", "3c000000": "UTF-32LE",
@@ -1797,7 +1823,10 @@ public class WSDLLib {
         } else if (!mime_content && (WSDLLib::isSOAPMessage(msg) || WSDLLib::isMtomMessage(msg))) {
             hash<auto> xmldata;
             if (msg.body) {
-                xmldata = parse_xml(msg.body, XPF_PRESERVE_ORDER | XPF_PRESERVE_WHITESPACE);
+                *string charset = getContentTypeParameter(msg."content-type", "charset");
+                string body = WsdlResourceHelper::xmlText(binary(msg.body),
+                    WsdlLibPriv::mimeCharset(msg.body, charset));
+                xmldata = parse_xml(body, XPF_PRESERVE_ORDER | XPF_PRESERVE_WHITESPACE);
             }
             if (msg.parts) {
                 # For MTOM messages, resolve xop:Include references
@@ -1818,8 +1847,7 @@ public class WSDLLib {
             h."content-type" = msg."content-type";
             *string charset = ct.parameter("charset", "SOAP-MESSAGE-ERROR");
             if (exists charset) {
-                h.body = msg.body.typeCode() == NT_BINARY ? binary_to_string(msg.body, charset)
-                    : force_encoding(msg.body ?? "", charset);
+                h.body = binary_to_string(binary(msg.body ?? ""), WsdlLibPriv::mimeCharset(msg.body, charset));
             } else {
                 h.body = binary(msg.body ?? "");
             }
@@ -2110,6 +2138,36 @@ class WsdlLibPriv {
         return False;
     }
 
+    # Qore may already have resolved a generic UTF-16 BOM and tagged the string's byte order.
+    # Reapplying the generic label would discard that information after the BOM was removed.
+    static *string mimeCharset(auto body, *string charset) {
+        if (body.typeCode() == NT_STRING && exists charset
+                && replace(charset.upr(), "-", "") == "UTF16") {
+            string actual = body.encoding();
+            if (actual == "UTF-16LE" || actual == "UTF-16BE") {
+                return actual;
+            }
+        }
+        return charset;
+    }
+
+    static *string takeContentType(reference<*hash<auto>> headers) {
+        *string result;
+        foreach string name in (keys headers) {
+            if (name.lwr() == "content-type") {
+                auto value = remove headers{name};
+                if (value.typeCode() != NT_STRING || !WsdlMediaType::read(value)) {
+                    throw SOAP_SERIALIZATION_ERROR, "Content-Type must be one valid media-type string";
+                }
+                if (exists result && result != value) {
+                    throw SOAP_SERIALIZATION_ERROR, "conflicting Content-Type headers";
+                }
+                result = value;
+            }
+        }
+        return result;
+    }
+
     static checkContentType(*string ct, list<auto> MimeTypes) {
         if (!isContentType(ct, MimeTypes)) {
             throw "SOAP-MESSAGE-ERROR", sprintf("cannot handle content-type %Y (expecting one of: %Y)", ct, MimeTypes);
@@ -2118,6 +2176,22 @@ class WsdlLibPriv {
     static checkType(BindingContentDescription description, string type) {
         WsdlLibPriv::checkContentType(type, description.acceptAllContentTypes ? ("*/*",)
             : description.acceptedContentTypeSubtypes + description.acceptedContentTypes + description.acceptedContentPatterns);
+    }
+
+    static *string defaultContentType(BindingContentDescription description) {
+        if (description.acceptAllContentTypes || description.acceptedContentTypes
+                || description.acceptedContentPatterns || !description.acceptedContentTypeSubtypes) {
+            return NOTHING;
+        }
+        string first = description.acceptedContentTypeSubtypes[0];
+        WsdlMediaType selected = WsdlMediaType::declaration(first);
+        foreach string alternative in (description.acceptedContentTypeSubtypes) {
+            WsdlMediaType other = WsdlMediaType::declaration(alternative);
+            if (!selected.matches(other) || !other.matches(selected)) {
+                return NOTHING;
+            }
+        }
+        return first;
     }
 
     static string acceptHeader(BindingContentDescription description) {
@@ -30617,6 +30691,8 @@ public class WSOperation inherits WSDL::XsdNamedData {
 
     #! serializes a request to an XML string or HTTP payload for the operation.
     /** @param h the request to serialize; SOAP accepts the explicit maps described in @ref wsdl_soap_header_deserialization
+        @param mime_format optional direct MIME selector from the message description's getMimeFormats();
+        selects overlaps explicitly while a unique Content-Type match can select automatically
         @param header optional soap header info to serialize if required (ex: authorization info). In the first step
         headers are matched to binding/input/header WSDL definition, remaining headers are passed as-is
         @param enc the optional encoding to use; if this argument is not present, then the default encoding will be
@@ -30638,16 +30714,22 @@ public class WSOperation inherits WSDL::XsdNamedData {
 
         @throw SOAP-SERIALIZATION-ERROR no input description, missing selected part, malformed explicit maps or conflicting header sources
     */
-    hash<auto> serializeRequest(auto h, *hash<auto> header, *string enc, *hash<auto> nsh, *int xml_opts, *string req_soapaction, *string bname, *hash<auto> http_headers) {
+    hash<auto> serializeRequest(auto h, *hash<auto> header, *string enc, *hash<auto> nsh, *int xml_opts, *string req_soapaction, *string bname, *hash<auto> http_headers, *string mime_format) {
+        WsdlMimeFormatScope mime_scope(mime_format);
         XsdIdentityDocumentScope identity_document();
         @assert(nsc, "namespace container must be initialized");
         OperationalBinding binding = getBinding(bname);
+        if (exists mime_format && !(binding instanceof HttpBinding)) {
+            throw SOAP_SERIALIZATION_ERROR, "direct MIME selection requires an HTTP binding";
+        }
         return binding.serializeMessage(self, input, True, binding.isSoap12(), h, header, enc, nsh, xml_opts,
             req_soapaction, NOTHING, http_headers);
     }
 
     #! serializes a SOAP response to an XML string for the operation
     /** @param h the response to serialize; SOAP accepts the explicit maps described in @ref wsdl_soap_header_deserialization
+        @param mime_format optional direct MIME selector from the message description's getMimeFormats();
+        selects overlaps explicitly while a unique Content-Type match can select automatically
         @param header SOAP header hash. In the first step headers are matched to binding/input/header WSDL definition,
         remaining headers are passed as-is
         @param enc the optional encoding to use; if this argument is not present, then the default encoding will be
@@ -30669,10 +30751,14 @@ public class WSOperation inherits WSDL::XsdNamedData {
 
         @throw SOAP-SERIALIZATION-ERROR no output description, missing selected part, malformed explicit maps or conflicting header sources
     */
-    hash<auto> serializeResponse(auto h, *hash<auto> header, *string enc, *hash<auto> nsh, *bool soap12, *int xml_opts, *string bname, *hash<auto> http_headers) {
+    hash<auto> serializeResponse(auto h, *hash<auto> header, *string enc, *hash<auto> nsh, *bool soap12, *int xml_opts, *string bname, *hash<auto> http_headers, *string mime_format) {
+        WsdlMimeFormatScope mime_scope(mime_format);
         XsdIdentityDocumentScope identity_document();
         @assert(nsc, "namespace container must be initialized");
         OperationalBinding binding = getBinding(bname);
+        if (exists mime_format && !(binding instanceof HttpBinding)) {
+            throw SOAP_SERIALIZATION_ERROR, "direct MIME selection requires an HTTP binding";
+        }
         if (exists soap12) {
             # Preserve the explicit response override used by legacy SoapHandler consumers.
             if (!(soap12 ? nsc.hasSoap12() : nsc.hasSoap11())) {
@@ -30688,6 +30774,8 @@ public class WSOperation inherits WSDL::XsdNamedData {
 
     #! parses a hash representing a parsed XML request (parsed with @ref Qore::Xml::parse_xml "parse_xml(XPF_PRESERVE_ORDER | XPF_PRESERVE_WHITESPACE)") for the operation and returns the corresponding Qore data structure
     /** @param o the parsed SOAP or HTTP request with @ref WSDLLib::parseSOAPMessage() for the operation
+        @param mime_format optional direct MIME selector from the message description's getMimeFormats();
+        selects overlaps explicitly while a unique Content-Type match can select automatically
         @param bname SOAP binding name, leave empty to use the first assigned binding
         @param preserve_types True to retain nonidentical selected types as portable native wrappers;
         False preserves the established return shapes
@@ -30702,14 +30790,21 @@ public class WSOperation inherits WSDL::XsdNamedData {
         @par Example
         Retain a shipment part subtype before storing and later forwarding a decoded message.
     */
-    auto deserializeRequest(hash<auto> o, *string bname, bool preserve_types = False) {
+    auto deserializeRequest(hash<auto> o, *string bname, bool preserve_types = False, *string mime_format) {
+        WsdlMimeFormatScope mime_scope(mime_format);
         XsdIdentityDocumentScope identity_document();
         XsdNativeTypeValueScope type_scope(preserve_types);
-        return getBinding(bname).deserializeMessage(self, o, True);
+        OperationalBinding binding = getBinding(bname);
+        if (exists mime_format && !(binding instanceof HttpBinding)) {
+            throw SOAP_DESERIALIZATION_ERROR, "direct MIME selection requires an HTTP binding";
+        }
+        return binding.deserializeMessage(self, o, True);
     }
 
     #! parses a hash representing a parsed XML response (parsed with @ref Qore::Xml::parse_xml "parse_xml(XPF_PRESERVE_ORDER | XPF_PRESERVE_WHITESPACE)") for the operation and returns the corresponding Qore data structure
     /** @param o the parsed SOAP or HTTP request with @ref WSDLLib::parseSOAPMessage() for the operation
+        @param mime_format optional direct MIME selector from the message description's getMimeFormats();
+        selects overlaps explicitly while a unique Content-Type match can select automatically
         @param bname SOAP binding name, leave empty to use the first assigned binding
         @param preserve_types True to retain nonidentical selected types as portable native wrappers;
         False preserves the established return shapes
@@ -30724,10 +30819,15 @@ public class WSOperation inherits WSDL::XsdNamedData {
         @par Example
         Retain a shipment part subtype before storing and later forwarding a decoded message.
     */
-    auto deserializeResponse(hash<auto> o, *string bname, bool preserve_types = False) {
+    auto deserializeResponse(hash<auto> o, *string bname, bool preserve_types = False, *string mime_format) {
+        WsdlMimeFormatScope mime_scope(mime_format);
         XsdIdentityDocumentScope identity_document();
         XsdNativeTypeValueScope type_scope(preserve_types);
-        return getBinding(bname).deserializeMessage(self, o, False);
+        OperationalBinding binding = getBinding(bname);
+        if (exists mime_format && !(binding instanceof HttpBinding)) {
+            throw SOAP_DESERIALIZATION_ERROR, "direct MIME selection requires an HTTP binding";
+        }
+        return binding.deserializeMessage(self, o, False);
     }
 
     #! decodes a SOAP request into explicitly retained XML parts
@@ -31442,6 +31542,19 @@ public class WSMessage inherits WSDL::XsdNamedData {
             rv."content-type" = v."^attributes^"."^content-type^";
         }
         return rv;
+    }
+
+    #! returns the explicit MIME content type attached to a message part value
+    /** @param part the public WSDL part name
+        @param value native message data in the same form accepted by serialization
+        @return the explicit content type or NOTHING
+        @throw WSDL-ERROR unknown part
+        @par Example
+        getPartContentType("upload", value) reads the upload's ^content-type^ metadata.
+    */
+    *string getPartContentType(string part, *hash<auto> value) {
+        auto item = getValueFromHash(checkPart(part), \value, False);
+        return item.typeCode() == NT_HASH ? item."^attributes^"."^content-type^" : NOTHING;
     }
 
     #! deserialize value in string or binary form
@@ -32992,6 +33105,7 @@ public class HttpBinding inherits WSDL::OperationalBinding {
             *hash<auto> header, string enc, *hash<auto> nsh, *int xml_opts, *string req_soapaction, *string faultmsg,
             *hash<auto> http_headers) {
         hash<auto> rv;
+        *string requested_content_type = WsdlLibPriv::takeContentType(\http_headers);
 
         if (request) {
             # make sure that rv stays hash<auto> instead of hash<string, string>
@@ -33006,6 +33120,9 @@ public class HttpBinding inherits WSDL::OperationalBinding {
         string ct;
 
         *BindingMessageDescription bmd = self{io};
+        if (bmd) {
+            bmd = bmd.getMimeDescription(bmd.resolveOutputMimeFormat(msg, h, MimeFormatSelection, requested_content_type));
+        }
         if (!bmd) {
             throw SOAP_SERIALIZATION_ERROR, sprintf("no %s message description for message %y", io, name);
         }
@@ -33015,8 +33132,10 @@ public class HttpBinding inherits WSDL::OperationalBinding {
                 request ? "request" : "response", name, io, h);
 
         if (bmd.content.formUrlEncoded || (request && bmd.urlEncoded && httpMethod == "POST")) {
-            ct = bmd.content.formUrlEncoded ? bmd.content.acceptedContentTypeSubtypes[0] ?? MimeTypeFormUrlEncoded
-                : MimeTypeFormUrlEncoded;
+            ct = requested_content_type ?? (bmd.content.formUrlEncoded
+                ? bmd.content.acceptedContentTypeSubtypes[0] ?? MimeTypeFormUrlEncoded : MimeTypeFormUrlEncoded);
+            WsdlLibPriv::checkContentType(ct, bmd.content.formUrlEncoded
+                ? bmd.content.acceptedContentTypeSubtypes : (MimeTypeFormUrlEncoded,));
             # Form data always percent-encodes UTF-8; no implicit charset parameter is added.
             delete enc;
             # Non-ASCII characters (> 127) are properly percent-encoded as UTF-8 bytes
@@ -33024,16 +33143,24 @@ public class HttpBinding inherits WSDL::OperationalBinding {
             rv.body = mime_get_form_urlencoded_string(msg.serializeAllPartData(h));
         } else if (bmd.content) {
             hash<auto> v = msg.serializeData(op.nsc, bmd.content.part, h);
-            if (exists v."content-type") {
-                WsdlLibPriv::checkType(bmd.content, v."content-type");
-                ct = v."content-type";
+            *string selected_type = requested_content_type ?? v."content-type";
+            if (exists requested_content_type && exists v."content-type") {
+                *WsdlMediaType requested = WsdlMediaType::read(requested_content_type);
+                *WsdlMediaType supplied = WsdlMediaType::read(v."content-type");
+                if (!requested || !supplied || !requested.matches(supplied) || !supplied.matches(requested)) {
+                    throw SOAP_SERIALIZATION_ERROR, "HTTP and part MIME content types conflict";
+                }
+            }
+            if (exists selected_type) {
+                WsdlLibPriv::checkType(bmd.content, selected_type);
+                ct = selected_type;
             } else {
-                if (bmd.content.acceptAllContentTypes || bmd.content.acceptedContentTypes || bmd.content.acceptedContentPatterns
-                    || bmd.content.acceptedContentTypeSubtypes.size() != 1) {
+                *string default_type = WsdlLibPriv::defaultContentType(bmd.content);
+                if (!exists default_type) {
                     throw SOAP_SERIALIZATION_ERROR, sprintf("ambiguous content type in message %y related to %s "
                         "operation %y", msg.name, io, op.name);
                 }
-                ct = bmd.content.acceptedContentTypeSubtypes[0];
+                ct = default_type;
             }
             *WsdlMediaType media = WsdlMediaType::read(ct);
             @assert(media, "selected concrete MIME type must be valid");
@@ -33048,7 +33175,13 @@ public class HttpBinding inherits WSDL::OperationalBinding {
                 }
             }
         } else if (bmd.mimeXml) {
-            ct = MimeTypeXml;
+            ct = requested_content_type ?? MimeTypeXml;
+            WsdlLibPriv::checkContentType(ct, (MimeTypeXml,));
+            *WsdlMediaType media = WsdlMediaType::read(ct);
+            *string charset = media.parameter("charset", SOAP_SERIALIZATION_ERROR);
+            if (exists charset) {
+                enc = charset;
+            }
             Namespaces namespaces = op.nsc.copy();
             XsdQNameOutputScope output_scope(namespaces);
             hash<auto> document = msg.serializeDocument((bmd.mimeXml.part,), bmd, NOTHING, False, \h, False, False);
@@ -33076,14 +33209,19 @@ public class HttpBinding inherits WSDL::OperationalBinding {
             }
             XsdQNameXmlOutputHelper output();
             rv.body = make_xml(output.prepare(document), xml_opts, enc);
+            # XML 1.0/RFC 7303 require a BOM for the byte-order-neutral UTF-16 wire encoding.
+            if (replace(rv.body.encoding().upr(), "-", "") == "UTF16") {
+                rv.body = convert_encoding("\uFEFF", "UTF-16") + rv.body;
+            }
+            if (exists charset) {
+                delete enc;
+            }
         }
 
         # add request headers if necessary
         if (request) {
-            if (output.content) {
-                rv.accept = WsdlLibPriv::acceptHeader(output.content);
-            } else if (output.mimeXml) {
-                rv.accept = MimeTypeXml;
+            if (output) {
+                rv.accept = output.getMimeAcceptHeader();
             }
         }
 
@@ -33138,6 +33276,10 @@ public class HttpBinding inherits WSDL::OperationalBinding {
         string io = request ? "input" : "output";
 
         *BindingMessageDescription bmd = self{io};
+        if (bmd) {
+            bmd = bmd.getMimeDescription(bmd.resolveMimeFormat(v."content-type", MimeFormatSelection,
+                !exists v."content-type" && !v.hasKey("body")));
+        }
         if (!bmd) {
             if (!v.body.val()) {
                 return;
@@ -33502,7 +33644,7 @@ public class BindingContentDescription inherits Serializable {
     addContentType(*string type) {
         WsdlMediaType parsed = WsdlMediaType::declaration(type);
         bool form = parsed.major + "/" + parsed.minor == MimeTypeFormUrlEncoded;
-        if ((form && (acceptAllContentTypes || acceptedContentTypes || acceptedContentTypeSubtypes
+        if ((form && !formUrlEncoded && (acceptAllContentTypes || acceptedContentTypes || acceptedContentTypeSubtypes
                     || acceptedContentPatterns)) || (!form && formUrlEncoded)) {
             throw WSDL_ERROR, "form URL encoding cannot be declared with other MIME content types";
         }
@@ -33536,6 +33678,41 @@ public class MimeXmlMessageDescription inherits Serializable {
 
     constructor(string part) {
         self.part = part;
+    }
+}
+
+#! The data interpretation of a direct MIME message format
+/** @since %WSDL 0.5.8 */
+public enum WsdlMimeFormatKind : string {
+    #! One opaque message part
+    Content = "content",
+    #! All message parts encoded as a form
+    Form = "form",
+    #! One schema-bound XML document
+    Xml = "xml",
+}
+
+#! Immutable inspection data for one direct MIME representation
+/** @since %WSDL 0.5.8 */
+public hashdecl WsdlMimeFormatInfo {
+    #! The representation's encoding and schema interpretation
+    WsdlMimeFormatKind kind;
+    #! The selected public message part, or NOTHING for a complete form message
+    *string part;
+    #! The declared media types/patterns, including WSDL wildcards
+    list<string> media_types;
+}
+
+# Direct operation entry points own this per-call selection context.
+thread_local *string MimeFormatSelection;
+class WsdlMimeFormatScope {
+    private { *string previous; }
+    constructor(*string selection) {
+        previous = MimeFormatSelection;
+        MimeFormatSelection = selection;
+    }
+    destructor() {
+        MimeFormatSelection = previous;
     }
 }
 
@@ -33584,8 +33761,215 @@ public class BindingMessageDescription inherits Serializable {
     }
 
     private:internal {
+        hash<string, BindingMessageDescription> mime_formats();
         #! a list of WSDL::BindingMessageHeaderDescription objects
         list<BindingMessageHeaderDescription> headers = cast<list<BindingMessageHeaderDescription>>(());
+    }
+
+    private nothing validateMimeFormat(string id, BindingMessageDescription format) {
+        if (format === self || format.mime_formats || boolean(format.content) == boolean(format.mimeXml)) {
+            throw "SOAP-MESSAGE-ERROR", "invalid saved MIME format description";
+        }
+        string expected_id = format.mimeXml ? "xml:" + format.mimeXml.part
+            : format.content.formUrlEncoded ? "form" : "content:" + format.content.part;
+        if (id != expected_id || format.body || format.multipart || format.urlEncoded
+                || exists format.urlReplacement || format.hasHeaders()) {
+            throw "SOAP-MESSAGE-ERROR", "inconsistent saved MIME format description";
+        }
+    }
+
+    #! returns the direct MIME representations keyed by stable format selector
+    /** @return selectors such as content:payload, xml:payload, and form, with their kind, part and media types
+        @throw SOAP-MESSAGE-ERROR invalid saved representation metadata
+        @note Returned inspection data is a value copy; changing it does not change the binding.
+        @par Example
+        Select xml:invoice when an endpoint offers both an opaque file and schema-bound invoice XML.
+    */
+    hash<string, hash<WsdlMimeFormatInfo>> getMimeFormats() {
+        hash<string, hash<WsdlMimeFormatInfo>> result();
+        foreach hash<auto> entry in (mime_formats.pairIterator()) {
+            BindingMessageDescription value = entry.value;
+            validateMimeFormat(entry.key, value);
+            result{entry.key} = <WsdlMimeFormatInfo>{"kind":value.mimeXml ? WsdlMimeFormatKind::Xml
+                    : value.content.formUrlEncoded ? WsdlMimeFormatKind::Form : WsdlMimeFormatKind::Content,
+                "part":value.mimeXml ? value.mimeXml.part : value.content.formUrlEncoded ? NOTHING : value.content.part,
+                "media_types":value.mimeXml ? (MimeTypeXml,) : value.content.acceptAllContentTypes ? ("*/*",)
+                    : value.content.acceptedContentTypeSubtypes
+                        + (map $1 + "*", value.content.acceptedContentTypes) + value.content.acceptedContentPatterns};
+        }
+        return result;
+    }
+
+    #! chooses a direct MIME representation without interpreting its body
+    /** @param content_type the concrete HTTP Content-Type, if available
+        @param selection an explicit format selector from getMimeFormats()
+        @param xml_only True when the caller already supplies a parsed XML document
+        @return the selector, or NOTHING when this description has no alternative-format metadata
+        @throw SOAP-MESSAGE-ERROR unknown selector, incompatible content type, or ambiguous representation
+        @note No schema fallback occurs after selection.
+        @par Example
+        resolveMimeFormat("text/xml", "xml:invoice") explicitly selects the invoice schema.
+    */
+    *string resolveMimeFormat(*string content_type, *string selection, bool xml_only = False) {
+        if (!mime_formats) {
+            if (exists selection) {
+                throw "SOAP-MESSAGE-ERROR", "this message has no selectable MIME formats";
+            }
+            return NOTHING;
+        }
+        if (exists selection && !mime_formats.hasKey(selection)) {
+            throw "SOAP-MESSAGE-ERROR", sprintf("unknown MIME format %Y; available formats: %Y",
+                selection, keys mime_formats);
+        }
+        list<string> matches();
+        foreach string id in (exists selection ? (selection,) : keys mime_formats) {
+            BindingMessageDescription format = mime_formats{id};
+            validateMimeFormat(id, format);
+            if (xml_only && !format.mimeXml) {
+                continue;
+            }
+            if (exists content_type && !(format.mimeXml
+                    ? WsdlLibPriv::isContentType(content_type, (MimeTypeXml,))
+                    : WsdlLibPriv::isContentType(content_type, format.content.acceptAllContentTypes ? ("*/*",)
+                        : format.content.acceptedContentTypeSubtypes + format.content.acceptedContentTypes
+                            + format.content.acceptedContentPatterns))) {
+                continue;
+            }
+            push matches, id;
+        }
+        if (matches.size() != 1) {
+            throw "SOAP-MESSAGE-ERROR", sprintf("MIME representation is %s for content type %Y; matching formats: %Y",
+                matches ? "ambiguous" : "unavailable", content_type, matches);
+        }
+        return matches[0];
+    }
+
+    #! chooses an output representation from the explicit selector and native content metadata
+    /** @param message the abstract message owning part values
+        @param value the native message value
+        @param selection optional explicit format selector
+        @param content_type optional concrete media type supplied in HTTP headers
+        @return a resolved selector, or NOTHING for a legacy message
+        @throw SOAP-MESSAGE-ERROR incompatible or ambiguous selection
+        @par Example
+        A value's ^content-type^ of image/png selects its opaque upload representation.
+    */
+    *string resolveOutputMimeFormat(WSMessage message, auto value, *string selection, *string content_type) {
+        if (!exists selection && !exists content_type && mime_formats.size() > 1) {
+            hash<string, bool> selected();
+            foreach BindingMessageDescription format in (mime_formats.values()) {
+                if (format.content && !format.content.formUrlEncoded) {
+                    *string media = message.getPartContentType(format.content.part, value);
+                    if (exists media) {
+                        selected{media} = True;
+                    }
+                }
+            }
+            if (selected.size() > 1) {
+                throw "SOAP-MESSAGE-ERROR", "conflicting MIME content types in message part values";
+            }
+            content_type = selected.firstKey();
+        }
+        return resolveMimeFormat(content_type, selection);
+    }
+
+    #! returns the accepted HTTP media types for all direct representations
+    /** @return a combined Accept header, or NOTHING when a WSDL pattern has no HTTP Accept equivalent
+        @throw WSDL-ERROR an invalid saved media pattern
+        @par Example
+        An operation returning either plain text or schema XML advertises text/plain,text/xml.
+    */
+    *string getMimeAcceptHeader() {
+        if (!mime_formats) {
+            return content ? WsdlLibPriv::acceptHeader(content) : mimeXml ? MimeTypeXml : NOTHING;
+        }
+        hash<string, bool> accepted();
+        foreach BindingMessageDescription format in (mime_formats.values()) {
+            *string value = format.mimeXml ? MimeTypeXml : WsdlLibPriv::acceptHeader(format.content);
+            if (!value) {
+                return NOTHING;
+            }
+            if (value == "*/*") {
+                return value;
+            }
+            accepted{value} = True;
+        }
+        return (keys accepted).join(",");
+    }
+
+    #! reports whether the selected MIME representation carries an opaque body
+    /** @param selection a resolved format selector, or NOTHING for a legacy description
+        @return True for content/form representations and False for XML
+        @throw SOAP-MESSAGE-ERROR an unknown selector or invalid saved metadata
+        @par Example
+        isMimeContent("content:invoice") preserves an uploaded invoice's opaque bytes.
+    */
+    bool isMimeContent(*string selection) {
+        return boolean(getMimeDescription(selection).content);
+    }
+
+    #! returns a selected direct MIME description
+    /** @param selection a selector returned by resolveMimeFormat(), or NOTHING for the current description
+        @return the immutable selected metadata
+        @throw SOAP-MESSAGE-ERROR an unknown selector or invalid saved format description
+        @note Do not modify returned descriptions while the binding is in use.
+        @par Example
+        getMimeDescription("xml:invoice").mimeXml.part identifies the schema-bound invoice part.
+    */
+    BindingMessageDescription getMimeDescription(*string selection) {
+        if (!exists selection) {
+            return self;
+        }
+        if (!mime_formats.hasKey(selection)) {
+            throw "SOAP-MESSAGE-ERROR", sprintf("unknown MIME format %Y", selection);
+        }
+        validateMimeFormat(selection, mime_formats{selection});
+        return mime_formats{selection};
+    }
+
+    #! registers one content/form representation during binding construction
+    /** @param description the completed media/part description
+        @return NOTHING
+        @throw WSDL-ERROR duplicate or invalid part selection
+        @par Example
+        Register the completed upload content descriptor before publishing a binding.
+        @note Complete media alternatives in one descriptor before registering it. Do not mutate live bindings.
+    */
+    nothing addMimeContent(BindingContentDescription description) {
+        if (!description.formUrlEncoded) {
+            string checked = XsdNameLexicalHelper::lexical("NCName", description.part, WSDL_ERROR);
+        }
+        string id = description.formUrlEncoded ? "form" : "content:" + description.part;
+        if (mime_formats.hasKey(id)) {
+            throw WSDL_ERROR, sprintf("MIME format %Y is already registered", id);
+        }
+        BindingMessageDescription format();
+        format.content = description;
+        mime_formats{id} = format;
+        if (!content) {
+            content = description;
+        }
+    }
+
+    #! registers a schema-bound XML representation during binding construction
+    /** @param part the selected public WSDL part name
+        @return NOTHING
+        @throw WSDL-ERROR invalid part name
+        @par Example
+        addMimeXml("invoice") registers a schema-bound invoice representation.
+        @note Repeated declarations of the same part describe one equivalent format. Do not mutate live bindings.
+    */
+    nothing addMimeXml(string part) {
+        string checked = XsdNameLexicalHelper::lexical("NCName", part, WSDL_ERROR);
+        if (mime_formats.hasKey("xml:" + part)) {
+            return;
+        }
+        BindingMessageDescription format();
+        format.mimeXml = new MimeXmlMessageDescription(part);
+        mime_formats{"xml:" + part} = format;
+        if (!mimeXml) {
+            mimeXml = format.mimeXml;
+        }
     }
 
     addHeader(BindingMessageHeaderDescription hdr) {
@@ -34034,34 +34418,41 @@ public class Binding inherits WSDL::XsdNamedData {
                 }
 
                 if (op{io}.hasKey("content")) {
-                    BindingContentDescription bcd();
-
-                    foreach auto cnt in (op{io}.content ?? {}) {
-                        WSDL::XsdBase::removeNS(\cnt);
-                        cnt = remove cnt."^attributes^";
-
-                        bcd.addContentType(cnt.type);
-
-                        if (bcd.formUrlEncoded)
-                            continue;
-
-                        string part = checkMessagePart(selected{io}, cnt.part, sprintf("content %s operation %y", io, opname));
-                        if (exists bcd.part) {
-                            if (bcd.part != part) {
-                                throw WSDL_ERROR, sprintf("ambiguous part %y in message %y in binding %y for %s operation %y", part, selected{io}.name, name, io, opname);
+                    hash<string, BindingContentDescription> formats();
+                    foreach auto declaration in (op{io}.content ?? {}) {
+                        XsdBase::removeNS(\declaration);
+                        *hash<auto> attributes = declaration."^attributes^";
+                        BindingContentDescription candidate();
+                        candidate.addContentType(attributes.type);
+                        string id;
+                        if (candidate.formUrlEncoded) {
+                            if (exists attributes.part) {
+                                selected{io}.checkPart(attributes.part);
                             }
+                            id = "form";
                         } else {
-                            bcd.part = part;
+                            candidate.part = checkMessagePart(selected{io}, attributes.part,
+                                sprintf("content %s operation %Y", io, opname));
+                            id = "content:" + candidate.part;
+                        }
+                        if (formats.hasKey(id)) {
+                            formats{id}.addContentType(attributes.type);
+                        } else {
+                            formats{id} = candidate;
                         }
                     }
-
-                    bmd.content = bcd;
+                    foreach string id in (keys formats) {
+                        bmd.addMimeContent(formats{id});
+                    }
                     delete op{io}.content;
                 }
 
                 if (op{io}.hasKey("mimeXml")) {
-                    string part = checkMessagePart(selected{io}, op{io}.mimeXml."^attributes^".part, sprintf("%s operation %y", io, opname));
-                    bmd.mimeXml = new MimeXmlMessageDescription(part);
+                    foreach auto declaration in (op{io}.mimeXml ?? {}) {
+                        string part = checkMessagePart(selected{io}, declaration."^attributes^".part,
+                            sprintf("XML %s operation %Y", io, opname));
+                        bmd.addMimeXml(part);
+                    }
                     delete op{io}.mimeXml;
                 }
 
@@ -34074,7 +34465,7 @@ public class Binding inherits WSDL::XsdNamedData {
                 ioh{io} = bmd;
             }
 
-            if (ioh.output.content.formUrlEncoded) {
+            if (ioh.output && (ioh.output.getMimeFormats().hasKey("form") || ioh.output.content.formUrlEncoded)) {
                 throw WSDL_ERROR, sprintf("%y type is not supported as output type in binding %y for output operation %y", MimeTypeFormUrlEncoded, name, opname);
             }
 

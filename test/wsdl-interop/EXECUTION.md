@@ -9539,3 +9539,29 @@ P6 still requires MIME representation alternatives, attachment replay and comple
 HTTP URI behavior. The latter requires Qore's request-local absolute URL API;
 write-up and two-server reproducer: `/tmp/xml-http-base-resolution/QORE-REQUEST-URL.md`.
 P7–P9 remain incomplete.
+
+
+## P6-40: Direct HTTP MIME representation selection
+
+Direct content, form and schema-XML declarations retain distinct representations.
+Content-Type selects a unique format; the approved explicit-selector API resolves
+overlaps through WSOperation, SoapClient and SoapHandler. Selection precedes
+encoding/decoding, with no schema fallback. Opaque and XML media types cannot be
+relabelled by final header overlay. Saved descriptions and existing native value
+shapes remain supported. Duplicate equivalent media declarations retain a default.
+HTTP binding bytes keep their selected charset; UTF-16 BOM handling is explicit.
+
+The 17-document matrix passes 20 cases / 6,940 assertions, including 204 local
+HTTP calls, source/imported/saved/detached/provider paths and concurrent selectors.
+Forty-eight independent Python/Qore exchanges cover both directions and three
+charsets. ET, Xerces and WSDL4J independently assess the declarations. All
+32 affected Qore suites pass (1,547 cases / 51,937 assertions)
+within 47 gates; all 16 corpus commands meet expected outcomes and six semantic
+reports match P6-39. Audit: 18 Pass / 44 N/A / zero Fail. No C++ changes or push.
+See [evidence](mime-representations-evidence.md), [validation](P6-40-validation.json),
+[audit](audits/P6-40-mime-representations.md), and [design](../../design/wsdl-http-mime.md).
+
+P6 still requires mixed/nested multipart layouts, attachment contract replay and
+complete HTTP URI execution. The latter requires the Qore request-local target
+API described in `/tmp/xml-http-base-resolution/QORE-REQUEST-URL.md`. P7–P9 remain
+incomplete.

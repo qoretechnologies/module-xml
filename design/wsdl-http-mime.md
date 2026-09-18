@@ -145,8 +145,8 @@ HTTP `Accept` advertises exact types and representable media ranges. HTTP cannot
 express WSDL's `*/subtype` constraint, so such an output declaration omits Accept;
 the binding still validates the complete constraint when receiving the response.
 Wildcard or multiple-type declarations require explicit per-value
-`^attributes^.^content-type^` metadata when sending. A single concrete declaration
-can supply the default. An explicit charset controls text encoding and prevents a
+`^attributes^.^content-type^` metadata when sending. A single concrete media type can supply the default, including repeated equivalent
+declarations whose parameter order or case-insensitive components differ. An explicit charset controls text encoding and prevents a
 second charset from being appended. Binary bodies retain their bytes. Form bodies
 continue to percent-encode UTF-8 and preserve any declared media-type parameters.
 
@@ -214,3 +214,76 @@ A zero-part operation accepts the resulting empty map; other operations reject
 before a handler callback runs. Invalid requests do not change subsequent valid
 request handling. The source, saved-service and detached-operation paths share
 these rules.
+
+
+## Direct MIME representation selection
+
+Repeated direct `mime:content` and `mime:mimeXml` declarations are alternative
+representations. The binding groups content declarations by public message part,
+coalesces repeated XML declarations for the same part, and retains distinct XML
+part mappings. Form encoding has one representation covering all abstract parts.
+Content media alternatives for one part retain their declared order, including
+repeated declarations. Selectors are stable under XML prefix or declaration-order
+changes: `content:partName`, `xml:partName`, and `form`.
+
+`BindingMessageDescription::getMimeFormats()` returns copied, typed
+`WsdlMimeFormatInfo` values containing `kind`, `part`, and `media_types`.
+`WsdlMimeFormatKind` distinguishes opaque content, form encoding, and schema XML.
+The legacy `content` and `mimeXml` fields retain their first corresponding
+representation. New services compile every alternative; detached operations save
+the complete map. Descriptions saved before the map was introduced retain their
+single-description behavior and do not expose new selectors. Invalid selected
+saved maps, recursive child layouts, or selector/part mismatches fail explicitly.
+
+The final optional `mime_format` argument on the four ordinary `WSOperation`
+request/response serialization/deserialization methods selects a representation.
+Without it, a concrete Content-Type must match exactly one representation.
+Outgoing opaque values may supply that type through
+`^attributes^.^content-type^`. A single representation can use its usual default.
+Already parsed XML supplied to direct decoding considers only XML representations;
+multiple XML part mappings still need a selector. Unknown, unavailable, or
+ambiguous selections raise `SOAP-MESSAGE-ERROR`. The selected schema is applied
+once, with no fallback to opaque content after a validation failure.
+
+SoapClient call options `request_mime_format` and `response_mime_format` select the
+two directions independently. SoapHandler registration accepts the same choices
+as trailing optional `addMethod()` arguments. A handler can leave the request
+selector absent for automatic Content-Type selection and choose an explicit
+response selector. For example, an invoice operation offering both an opaque
+`text/xml` upload and a schema-bound invoice uses `xml:invoice` for the latter.
+These selectors are local API metadata, not custom wire headers. Client options
+are validated before sending, and handler selections before route registration.
+
+HTTP Content-Type headers participate in selection before serialization. Header
+names are case-insensitive; non-string, malformed, or conflicting duplicates
+reject. The chosen header cannot later overwrite the serializer with a different
+media label. Explicit headers and opaque part metadata must agree. Existing
+native part shapes and abstract-message provider types remain unchanged;
+providers describe all abstract parts, while the selected format chooses which
+part is present in an individual wire message.
+
+A per-thread scope carries selection through the existing virtual binding API
+and restores prior state on both success and exception. Binding descriptions are
+immutable while in use. Each handler request updates its local method-value copy,
+so automatic selection does not change later or concurrent requests.
+
+## MIME transport character encoding
+
+HTTP binding serialization encodes the selected media charset before sending.
+SoapClient passes these payloads to HTTPClient as bytes so the client's default
+encoding cannot convert them again. Binary content remains unchanged. Generic
+UTF-16 XML includes a byte-order mark as required by XML 1.0 and RFC 7303; explicit
+UTF-16BE/UTF-16LE retain their distinct encoding labels.
+
+Opaque content with a charset uses Qore's `binary_to_string()` to resolve a UTF-16
+BOM. If a supplied Qore string already has resolved UTF-16BE/UTF-16LE byte order,
+reapplying the generic UTF-16 label does not discard that information. Text
+without a charset retains the existing binary-body contract.
+
+SOAP/MIME XML transport decoding shares the resource decoder: BOM takes
+precedence, then transport charset, then XML declaration/signature and UTF-8
+default. The decoded UTF-8 text goes to the XML parser. This implements the wire
+encoding decision once; it does not infer a different MIME representation.
+`test_mime_representations.py` tests actual octets with an independent Python HTTP
+peer in both directions, including little-endian UTF-16 input and neutral UTF-16
+XML output, from source and saved services.

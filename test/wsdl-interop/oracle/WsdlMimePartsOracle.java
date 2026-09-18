@@ -8,6 +8,7 @@ import javax.wsdl.Definition;
 import javax.wsdl.extensions.mime.MIMEMultipartRelated;
 import javax.wsdl.extensions.mime.MIMEPart;
 import javax.wsdl.extensions.mime.MIMEContent;
+import javax.wsdl.extensions.mime.MIMEMimeXml;
 import javax.wsdl.extensions.soap.SOAPBody;
 import javax.wsdl.extensions.soap.SOAPHeader;
 import javax.wsdl.extensions.soap12.SOAP12Body;
@@ -47,6 +48,9 @@ public final class WsdlMimePartsOracle {
             } else if (value instanceof MIMEContent) {
                 MIMEContent content = (MIMEContent) value;
                 System.out.println(direction + "\tCONTENT\t" + content.getPart() + "\t" + content.getType());
+            } else if (value instanceof MIMEMimeXml) {
+                MIMEMimeXml xml = (MIMEMimeXml) value;
+                System.out.println(direction + "\tXML\t" + xml.getPart());
             } else if (value instanceof SOAPBody) {
                 SOAPBody body = (SOAPBody) value;
                 System.out.println(direction + "\tBODY\t" + body.getElementType() + "\t" + body.getUse()

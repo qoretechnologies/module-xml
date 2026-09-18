@@ -1,0 +1,272 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires ../qlib/WSDL.qm
+%requires ../qlib/SoapClient.qm
+%requires ../qlib/SoapHandler.qm
+%requires HttpServer
+%try-module json
+%define NoJson
+%endtry
+%ifdef NoJson
+throw "MISSING-MODULE", "MIME format fixtures require json";
+%else
+%exec-class MimeFormatsTest
+class MimeFormatsTest inherits QUnit::Test {
+    constructor() : Test("Direct MIME representation selection", "1.0") {
+        hash<auto> manifest = parse_json(ReadOnlyFile::readTextFile(get_script_dir()+"/wsdl-interop/regressions/wsdl-mime-representations/cases.json"));
+        foreach hash<auto> row in (manifest.cases) {
+            addTestCase(row.name, \check(), (row,));
+        }
+        addTestCase("Header validation, schema failures and recovery", \edgeCases(), (manifest.cases[0],));
+        addTestCase("Saved metadata validation and legacy defaults", \savedMetadata());
+        addTestCase("Concurrent selectors are isolated", \concurrency(), (manifest.cases[4],));
+        set_return_value(main());
+    }
+    private static hash<auto> request(WSOperation op, auto args, *hash<auto> headers, *string selector) {
+        return op.serializeRequest(args,NOTHING,NOTHING,NOTHING,NOTHING,NOTHING,NOTHING,headers,selector);
+    }
+    private edgeCases(hash<auto> row) {
+        WebService ws(row.xml,{"async_only":True});
+        WSOperation op=ws.getOperation("call");
+        hash<auto> plain=value("content:payload",row);
+        hash<auto> xml={"payload":"é"};
+        hash<auto> before=op.getBinding().input.getMimeFormats();
+        foreach string selector in ("", "XML:payload", "xml:missing") {
+            assertThrows("SOAP-MESSAGE-ERROR",\request(),(op,xml,NOTHING,selector));
+        }
+        foreach auto header in ("", "*/*", "text/xml junk", ("text/xml", "text/plain"), 17) {
+            assertThrows("SOAP-SERIALIZATION-ERROR",\request(),(op,xml,{"Content-Type":header},"xml:payload"));
+        }
+        assertThrows("SOAP-SERIALIZATION-ERROR",\request(),
+            (op,xml,{"Content-Type":"text/xml", "CONTENT-TYPE":"text/plain"},"xml:payload"));
+        hash<auto> duplicate={"Content-Type":"text/xml", "CONTENT-TYPE":"text/xml", "X-Trace":"one"};
+        hash<auto> wire=request(op,xml,duplicate,NOTHING);
+        assertEq("one",wire.hdr."X-Trace");
+        assertEq(3,duplicate.size());
+        assertEq(("Content-Type",), map $1, keys wire.hdr, $1.lwr()=="content-type");
+        assertEq(xml,op.deserializeRequest(parse_xml(wire.body),NOTHING,False,"xml:payload"));
+        assertThrows("SOAP-MESSAGE-ERROR",\request(),(op,plain,{"Content-Type":"text/xml"},"content:payload"));
+        assertThrows("SOAP-SERIALIZATION-ERROR",\request(),
+            (op,plain,{"Content-Type":"text/plain;charset=ISO-8859-1"},"content:payload"));
+        assertThrows("SOAP-SERIALIZATION-ERROR",\request(),
+            (op,xml,{"Content-Type":"text/xml;charset=UTF-8;charset=ISO-8859-1"},"xml:payload"));
+        assertThrows("SOAP-DESERIALIZATION-ERROR",\op.deserializeRequest(),
+            (parse_xml("<wrong>é</wrong>"),NOTHING,False,"xml:payload"));
+        # No failed selector or schema conversion can affect the next automatic selection.
+        assertEq("A < & č",request(op,plain).body);
+        wire=request(op,xml,{"Content-Type":"text/xml;charset=ISO-8859-1"});
+        assertTrue(bindex(wire.body,convert_encoding("é","ISO-8859-1")) >= 0);
+        assertFalse(bindex(wire.body,"é") >= 0);
+        assertEq(xml,op.deserializeRequest(parse_xml(wire.body),NOTHING,False,"xml:payload"));
+        hash<auto> response=op.serializeResponse(xml,NOTHING,NOTHING,NOTHING,NOTHING,NOTHING,NOTHING,
+            {"Content-Type":"text/xml"},"xml:payload");
+        assertEq(xml,op.deserializeResponse(parse_xml(response.body),NOTHING,False,"xml:payload"));
+        foreach binary utf16 in (<fffee900>, <feff00e9>, <00e9>) {
+            foreach auto body in (utf16, binary_to_string(utf16,"UTF-16")) {
+                hash<auto> decoded=WSDLLib::parseSOAPMessage({"body":body,"content-type":"text/plain;charset=UTF-16"},True);
+                assertEq("é",decoded.body);
+            }
+        }
+        wire=request(op,xml,{"Content-Type":"text/xml;charset=UTF-16"});
+        assertEq("feff",binary(wire.body)[0..1].toHex());
+        assertEq(xml,op.deserializeRequest(WSDLLib::parseSOAPMessage(
+            {"body":wire.body,"content-type":wire.hdr."Content-Type"}),NOTHING,False,"xml:payload"));
+        BindingContentDescription equivalent();
+        equivalent.part="payload";
+        equivalent.addContentType("text/plain;charset=UTF-8;profile=Invoice");
+        equivalent.addContentType("TEXT/PLAIN;profile=Invoice;charset=utf-8");
+        BindingMessageDescription alternatives();
+        alternatives.addMimeContent(equivalent);
+        HttpBinding selected=op.getBinding();
+        BindingMessageDescription original_input=selected.input;
+        on_exit selected.input=original_input;
+        selected.input=alternatives;
+        hash<auto> equivalent_wire=request(op,{"payload":"plain"});
+        assertEq("plain",equivalent_wire.body);
+        assertEq('text/plain;charset="UTF-8";profile="Invoice"',equivalent_wire.hdr."Content-Type");
+        selected.input=original_input;
+        assertEq(before,op.getBinding().input.getMimeFormats());
+        SoapClient client({"wsdl":ws,"url":"http://127.0.0.1:1/","timeout":1000});
+        foreach string key in ("request_mime_format", "response_mime_format") {
+            assertThrows("SOAP-CLIENT-ERROR",\client.callOperation(),("call",plain,{key:17}));
+            assertThrows("SOAP-MESSAGE-ERROR",\client.callOperation(),("call",plain,{key:"missing"}));
+            assertThrows("SOAP-CLIENT-ERROR",\client.callOperation(),
+                ("call",plain,{key:"content:payload","xml_values":True}));
+        }
+        SoapHandler handler(new PermissiveAuthenticator());
+        code<auto(hash<auto>,auto)> callback=auto sub(hash<auto> cx,auto args) { return args; };
+        assertThrows("SOAP-MESSAGE-ERROR",\handler.addMethod(),
+            (ws,op,callback,NOTHING,NOTHING,NOTHING,NOTHING,NOTHING,NOTHING,"B",NOTHING,False,False,"missing"));
+        handler.addMethod(ws,op,callback,NOTHING,NOTHING,NOTHING,NOTHING,NOTHING,NOTHING,"B",NOTHING,False,False,
+            NOTHING,"xml:payload");
+    }
+    private savedMetadata() {
+        BindingMessageDescription initial();
+        initial.addMimeXml("payload");
+        hash<auto> data=initial.serializeToData();
+        string formats=data._index."0"._class_data."WSDL::BindingMessageDescription".mime_formats._index;
+        string child=data._index{formats}._members."xml:payload"._index;
+        foreach hash<auto> changes in ({"urlEncoded":True}, {"multipart":"related"},
+                {"mimeXml":NOTHING}, {"mime_formats":{"_index":formats}}) {
+            hash<auto> altered=data;
+            altered._index{child}._class_data."WSDL::BindingMessageDescription" += changes;
+            BindingMessageDescription restored=Serializable::deserialize(altered);
+            assertThrows("SOAP-MESSAGE-ERROR",\restored.resolveMimeFormat(),("text/xml",));
+        }
+        BindingMessageDescription replacement=Serializable::deserialize(data);
+        BindingMessageDescription replacement_child=replacement.getMimeDescription("xml:payload");
+        replacement_child.urlReplacement={};
+        assertThrows("SOAP-MESSAGE-ERROR",\replacement.resolveMimeFormat(),("text/xml",));
+        hash<auto> cycle=data;
+        cycle._index{formats}._members."xml:payload"={"_index":"0"};
+        BindingMessageDescription cyclic=Serializable::deserialize(cycle);
+        assertThrows("SOAP-MESSAGE-ERROR",\cyclic.resolveMimeFormat(),("text/xml",));
+        hash<auto> wrong=data;
+        wrong._index{formats}._members."xml:other"=remove wrong._index{formats}._members."xml:payload";
+        BindingMessageDescription invalid=Serializable::deserialize(wrong);
+        assertThrows("SOAP-MESSAGE-ERROR",\invalid.resolveMimeFormat(),("text/xml",));
+        remove data._index."0"._class_data."WSDL::BindingMessageDescription".mime_formats;
+        BindingMessageDescription legacy=Serializable::deserialize(data);
+        assertEq(NOTHING,legacy.resolveMimeFormat("text/xml"));
+        assertEq("payload",legacy.getMimeDescription().mimeXml.part);
+        assertThrows("SOAP-MESSAGE-ERROR",\legacy.resolveMimeFormat(),("text/xml","xml:payload"));
+        assertEq("text/xml",legacy.getMimeAcceptHeader());
+    }
+    private concurrency(hash<auto> row) {
+        WebService ws(row.xml,{"async_only":True});
+        WSOperation op=ws.getOperation("call");
+        Queue ready();
+        Queue start();
+        Queue done();
+        foreach string selector in (row.selectors) {
+            background sub(string id) {
+                ready.push(id);
+                auto token=start.get(10000);
+                try {
+                    for (int i=0;i<20;++i) {
+                        hash<auto> args=value(id,row);
+                        hash<auto> wire=request(op,args,NOTHING,id);
+                        hash<auto> parsed=WSDLLib::parseSOAPMessage({"body":wire.body,"content-type":wire.hdr."Content-Type"},
+                            id.startsWith("content:"));
+                        @assert(op.deserializeRequest(parsed,NOTHING,False,id)==args);
+                    }
+                    done.push(id);
+                } catch (hash<ExceptionInfo> ex) {
+                    done.push(ex);
+                }
+            }(selector);
+        }
+        for (int i=0;i<row.selectors.size();++i) { auto event=ready.get(10000); }
+        for (int i=0;i<row.selectors.size();++i) { start.push(True); }
+        list<string> completed();
+        for (int i=0;i<row.selectors.size();++i) { push completed, done.get(10000); }
+        assertEq(sort(row.selectors),sort(completed));
+    }
+    private static WebService imported(string source) {
+        return new WebService('<w:definitions xmlns:w="http://schemas.xmlsoap.org/wsdl/" targetNamespace="urn:root">'
+            + '<w:import namespace="urn:mime-formats" location="formats.wsdl"/></w:definitions>',
+            {"async_only":True,"document_location":"https://example.invalid/root.wsdl",
+                "xsd_cache":{"https://example.invalid/formats.wsdl":source}});
+    }
+    private static string media(string id, hash<auto> row) {
+        return id == "form" ? "application/x-www-form-urlencoded" : id.startsWith("xml:") ? "text/xml"
+            : row.content_type ?? (id == "content:second" && !row.overlap ? "application/octet-stream" : "text/plain");
+    }
+    private static hash<auto> value(string id, hash<auto> row) {
+        if (id == "form") {
+            return {"payload":"A & č"};
+        }
+        string part = substr(id, id.find(":") + 1);
+        return id.startsWith("xml:") ? {part:"A < & č"}
+            : {part:{"^value^":"A < & č","^attributes^":{"^content-type^":media(id,row)+";charset=UTF-8"}}};
+    }
+    private check(hash<auto> row) {
+        foreach WebService original in (new WebService(row.xml,{"async_only":True}), imported(row.xml)) {
+            foreach WebService ws in (original, Serializable::deserialize(original.serialize()),
+                    Serializable::deserialize(original.serializeToData())) {
+                WSMessage message=ws.getMessage("M");
+                AbstractDataProviderType initial=message.getDataProviderType(True);
+                foreach AbstractDataProviderType provider in (initial,Serializable::deserialize(initial.serialize())) {
+                    hash<auto> sample=provider.getExampleValue();
+                    assertEq(sort(row.parts),sort(keys sample));
+                    assertEq(sample,provider.acceptsValue(sample));
+                }
+                WSOperation current = ws.getOperation("call");
+                foreach WSOperation op in (current, Serializable::deserialize(current.serialize())) {
+                    foreach string direction in ("input","output") {
+                        hash<string, hash<WsdlMimeFormatInfo>> formats=op.getBinding(){direction}.getMimeFormats();
+                        foreach string id in (keys row.expected_formats{direction}) {
+                            hash<auto> expected=row.expected_formats{direction}{id};
+                            assertEq(expected.kind,string(formats{id}.kind));
+                            assertEq(expected.part ?? NOTHING,formats{id}.part);
+                            assertEq(expected.media_types,formats{id}.media_types);
+                        }
+                    }
+                    assertEq(sort(row.selectors),sort(keys op.getBinding().input.getMimeFormats()));
+                    assertEq(sort(row.output_selectors ?? row.selectors),sort(keys op.getBinding().output.getMimeFormats()));
+                    foreach string id in (row.selectors) {
+                        hash<auto> args = value(id,row);
+                        hash<auto> wire = op.serializeRequest(args,NOTHING,NOTHING,NOTHING,NOTHING,NOTHING,NOTHING,NOTHING,id);
+                        assertEq("POST",wire.method);
+                        assertEq("/call",wire.path);
+                        string content_type = wire.hdr."Content-Type";
+                        BindingMessageDescription description=op.getBinding().input;
+                        assertEq(id,description.resolveMimeFormat(content_type,id));
+                        if (!row.overlap) {
+                            assertEq(id,description.resolveMimeFormat(content_type));
+                        } else {
+                            assertThrows("SOAP-MESSAGE-ERROR",\description.resolveMimeFormat(),(content_type,));
+                        }
+                        if (id.startsWith("content:") && row.name != "wildcard-xml") {
+                            string part=substr(id,8);
+                            hash<auto> plain_wire=request(op,{part:"plain"},NOTHING,id);
+                            assertEq("plain",plain_wire.body);
+                            assertEq(media(id,row)+";charset=UTF-8",plain_wire.hdr."Content-Type");
+                        }
+                        bool opaque = description.isMimeContent(id);
+                        hash<auto> decoded = WSDLLib::parseSOAPMessage({"body":wire.body,"content-type":content_type},opaque);
+                        assertEq(args,op.deserializeRequest(decoded,NOTHING,False,id));
+                        if (id.startsWith("xml:")) {
+                            hash<auto> document=XsdBase::expandElementNamespaces(parse_xml(wire.body));
+                            assertEq(("{}"+substr(id,4),),keys document);
+                        } else if (id == "form") {
+                            assertEq("payload=A%20%26%20%C4%8D",wire.body);
+                        } else {
+                            assertEq("A < & č",wire.body);
+                        }
+                    }
+                    assertThrows("SOAP-MESSAGE-ERROR",\op.serializeRequest(),
+                        ({"payload":"value"},NOTHING,NOTHING,NOTHING,NOTHING,NOTHING,NOTHING,NOTHING,"absent"));
+                    if (row.selectors.size()>1) {
+                        assertThrows("SOAP-MESSAGE-ERROR",\op.serializeRequest(),({"payload":"unselected"},));
+                    }
+                }
+                foreach string id in (row.selectors) {
+                    string response_id = row.output_selectors ? row.output_selectors[0] : id;
+                    HttpServer server();
+                    on_exit server.stop();
+                    SoapHandler handler(new PermissiveAuthenticator());
+                    server.setDefaultHandler("formats",handler);
+                    Queue received();
+                    hash<auto> response = value(response_id,row);
+                    code<auto(hash<auto>,auto)> callback=auto sub(hash<auto> cx,auto args) {
+                        received.push(args);
+                        return response;
+                    };
+                    handler.addMethod(ws,current,callback,NOTHING,NOTHING,NOTHING,NOTHING,NOTHING,NOTHING,"B",NOTHING,
+                        False,False,row.overlap ? id : NOTHING,response_id);
+                    server.addListener(0);
+                    SoapClient client({"wsdl":ws,"timeout":10000,
+                        "url":sprintf("http://127.0.0.1:%d/",server.getListenerInfo(0).port)});
+                    hash<auto> args=value(id,row);
+                    assertEq(response,client.callOperation("call",args,{"request_mime_format":id,"response_mime_format":response_id}));
+                    assertEq(args,received.get(10000));
+                }
+            }
+        }
+    }
+}
+%endif
