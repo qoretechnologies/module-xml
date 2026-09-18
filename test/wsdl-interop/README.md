@@ -13,6 +13,11 @@ checked against the pinned corrected WSDL schema; required-extension capability
 failures are separate from schema validity. See [evidence](wsdl-grammar-evidence.md)
 and [the implemented design](../../design/wsdl-core-grammar.md).
 
+SOAP extension declarations use `test/wsdl-soap-grammar.qtest` and
+`python3 -B test/wsdl-interop/test_wsdl_soap_grammar.py -v`. The 295-document matrix
+keeps normative acceptance separate from the two documented schema/validator
+differences; see [evidence](wsdl-soap-grammar-evidence.md).
+
 P6-01 implements [binding-specific SOAP versions](binding-version-evidence.md),
 including scoped declarations, saved services and actual HTTP exchanges on both
 ports. P6-02 fixes [detached operation ownership](operation-ownership-evidence.md),
@@ -557,7 +562,7 @@ oracle-valid messages previously produced invalid lowercase infinity; their outp
 ## Fixed defects
 
 `XsdBaseType::serializeValue()` checked `unsignedShort` and `unsignedInt` against the signed maxima
-32767 and 2147483647. It now uses the XSD maxima 65535 and 4294967295. The W3C element and attribute
+32767 and 2147483647. It now uses the XSD maxima 65535 and 4294967293. The W3C element and attribute
 fixtures reproduce both defects. Negative values and the first values above the unsigned maxima remain
 rejected. See [XSD unsignedShort](https://www.w3.org/TR/xmlschema-2/#unsignedShort) and
 [unsignedInt](https://www.w3.org/TR/xmlschema-2/#unsignedInt).

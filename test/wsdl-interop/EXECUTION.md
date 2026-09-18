@@ -9303,3 +9303,28 @@ See [evidence](wsdl-grammar-evidence.md), [validation](P6-29-validation.json),
 Remaining top-level WSDL constraints, binding extension grammar and HTTP/MIME/CXF
 acceptance stay in P6;
 P7–P9 are not complete. No push until development completion.
+
+
+## P6-30: SOAP binding extension grammar
+
+Direct SOAP binding declarations now validate version-specific attributes, required
+values and content before grouping. Headers admit same-namespace headerfaults;
+other declarations have empty content. URI/token normalization fixes legal lexical
+whitespace in transport URIs, fault names and header references while preserving
+the original WSDL text. The 295-document matrix covers both versions and seven
+contexts through source, serialized and data-serialized services, detached
+operations, provider samples, requests/responses and body/header faults.
+Xerces assesses all documents against byte-pinned original schemas. Fourteen
+ignored incomplete location hints and two SOAP 1.2 fault wildcard discrepancies
+have explicit specification-based classifications. The focused suite passes
+295 cases / 6,455 assertions. The full gate passes 181 suites / 2368
+cases / 97,458 reported assertions. All 16 corpus commands meet expected
+outcomes; six semantic reports are unchanged. Six CXF peer tests, documentation
+and astparser pass without diagnostics. Audit: 18 Pass / 44 N/A / zero Fail;
+no C++ changes or Valgrind requirement.
+See [evidence](wsdl-soap-grammar-evidence.md), [validation](P6-30-validation.json),
+[audit](audits/P6-30-soap-grammar.md) and
+[implemented design](../../design/wsdl-soap-extension-grammar.md).
+Remaining top-level WSDL constraints, HTTP/MIME grammar, SOAP binding semantics
+and attachment-specific CXF acceptance stay in P6. P7–P9 remain incomplete.
+No push until development completion.
