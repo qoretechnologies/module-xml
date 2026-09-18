@@ -28,6 +28,12 @@ HTTP replacement patterns use `test/wsdl-http-replacement-patterns.qtest` and
 matrix has independent schema and substitution checks, with 90 live GET/POST
 calls through source and saved services. See [evidence](http-replacement-patterns-evidence.md).
 
+MIME media types use `test/wsdl-media-types.qtest` and
+`python3 -B test/wsdl-interop/test_media_types.py -v`. The independent HTTP grammar
+and MIME parser check 91 declaration/wire pairs and 18 classifications. Source,
+saved and detached consumers cover parameters, charsets and opaque XML/binary/
+multipart bodies, including 38 live HTTP calls. See [evidence](media-types-evidence.md).
+
 P6-01 implements [binding-specific SOAP versions](binding-version-evidence.md),
 including scoped declarations, saved services and actual HTTP exchanges on both
 ports. P6-02 fixes [detached operation ownership](operation-ownership-evidence.md),

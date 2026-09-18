@@ -1,0 +1,264 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires xml
+%requires ../qlib/WSDL.qm
+%requires ../qlib/SoapClient.qm
+%requires ../qlib/SoapHandler.qm
+%requires HttpServer
+%try-module json
+%define NoJson
+%endtry
+%ifdef NoJson
+throw "MISSING-MODULE", "MIME fixtures require json";
+%else
+%exec-class MediaTypesTest
+
+class MediaTypesTest inherits QUnit::Test {
+    constructor() : Test("WSDL media types", "1.0") {
+        hash<auto> manifest = parse_json(ReadOnlyFile::readTextFile(get_script_dir()
+            + "/wsdl-interop/regressions/wsdl-media-types/cases.json"));
+        foreach hash<auto> row in (manifest.cases) {
+            addTestCase(row.name, \check(), (row,));
+        }
+        list<hash<auto>> classification = manifest.classification;
+        addTestCase("SOAP and XOP use complete media types", \classify(), (classification,));
+        list<hash<auto>> rows = manifest.cases;
+        addTestCase("MIME content survives client and handler dispatch", \http(), (rows,));
+        addTestCase("Failed descriptor changes preserve state", \atomic());
+        addTestCase("Quoted charset and empty MIME bodies", \body());
+        addTestCase("Form parameters retain declared constraints", \form());
+        addTestCase("Binary and multipart MIME content remain opaque", \opaque());
+        addTestCase("SOAP action parameters are quoted and decoded", \actions());
+        set_return_value(main());
+    }
+
+    private static string attribute(string value) {
+        value = replace(replace(replace(value, "&", "&amp;"), "<", "&lt;"), "\"", "&quot;");
+        return replace(replace(replace(value, "\t", "&#9;"), "\r", "&#13;"), "\n", "&#10;");
+    }
+
+    private static string source(*string pattern, string endpoint = "http://example.invalid/") {
+        string content = '<m:content part="payload"'
+            + (exists pattern ? ' type="' + attribute(pattern) + '"' : '') + '/>';
+        return '<w:definitions xmlns:w="http://schemas.xmlsoap.org/wsdl/" xmlns:h="http://schemas.xmlsoap.org/wsdl/http/"'
+            + ' xmlns:m="http://schemas.xmlsoap.org/wsdl/mime/" xmlns:t="urn:media" xmlns:xs="http://www.w3.org/2001/XMLSchema" targetNamespace="urn:media">'
+            + '<w:message name="In"><w:part name="payload" type="xs:string"/></w:message>'
+            + '<w:message name="Out"><w:part name="payload" type="xs:string"/></w:message>'
+            + '<w:portType name="P"><w:operation name="send"><w:input message="t:In"/><w:output message="t:Out"/></w:operation></w:portType>'
+            + '<w:binding name="B" type="t:P"><h:binding verb="POST"/><w:operation name="send"><h:operation location="/media"/>'
+            + '<w:input>' + content + '</w:input><w:output>' + content + '</w:output>'
+            + '</w:operation></w:binding><w:service name="S"><w:port name="Endpoint" binding="t:B">'
+            + '<h:address location="' + attribute(endpoint) + '"/></w:port></w:service></w:definitions>';
+    }
+
+    private static WebService parse(*string pattern) {
+        return new WebService(source(pattern), {"async_only":True});
+    }
+
+    private static hash<auto> value(string type, auto body = "report data") {
+        return {"payload":{"^attributes^":{"^content-type^":type}, "^value^":body}};
+    }
+
+    private check(hash<auto> row) {
+        if (!row.valid) {
+            assertThrows("WSDL-ERROR", \parse(), (row.pattern,));
+            return;
+        }
+        WebService original = parse(row.pattern);
+        foreach WebService ws in (original, Serializable::deserialize(original.serialize()),
+                Serializable::deserialize(original.serializeToData())) {
+            assertEq(source(row.pattern), ws.getWSDL());
+            AbstractDataProviderType provider = ws.getMessage("In").getDataProviderType(True);
+            assertEq({"payload":"report data"}, provider.acceptsValue({"payload":"report data"}));
+            WSOperation current = ws.getOperation("send");
+            foreach WSOperation op in (current, Serializable::deserialize(current.serialize())) {
+                if (!row.matches) {
+                    assertThrows("SOAP-MESSAGE-ERROR", \op.serializeRequest(), (value(row.wire),));
+                    assertThrows("SOAP-MESSAGE-ERROR", \op.serializeResponse(), (value(row.wire),));
+                    assertThrows("SOAP-MESSAGE-ERROR", \op.deserializeRequest(),
+                        ({"content-type":row.wire,"body":"report data"},));
+                    assertThrows("SOAP-MESSAGE-ERROR", \op.deserializeResponse(),
+                        ({"content-type":row.wire,"body":"report data"},));
+                    continue;
+                }
+                hash<auto> request = op.serializeRequest(value(row.wire));
+                assertEq("/media", request.path);
+                assertEq("POST", request.method);
+                assertEq("report data", request.body);
+                assertEq(value(request.hdr."Content-Type"), op.deserializeRequest(
+                    {"content-type":request.hdr."Content-Type","body":request.body}));
+                hash<auto> response = op.serializeResponse(value(row.wire));
+                assertEq(value(response.hdr."Content-Type"), op.deserializeResponse(
+                    {"content-type":response.hdr."Content-Type","body":response.body}));
+                if (row.pattern && row.pattern.startsWith("*/xml")) {
+                    assertFalse(exists request.hdr.Accept);
+                } else {
+                    assertTrue(exists request.hdr.Accept);
+                }
+                hash<auto> sample = provider.getExampleValue();
+                hash<auto> sample_wire = op.serializeRequest(value(row.wire, sample.payload));
+                assertEq(sample.payload, op.deserializeRequest({"content-type":sample_wire.hdr."Content-Type",
+                    "body":sample_wire.body}).payload."^value^");
+            }
+        }
+    }
+
+    private classify(list<hash<auto>> rows) {
+        foreach hash<auto> row in (rows) {
+            assertEq(row.soap, WSDLLib::isSOAPMessage({"content-type":row.type}));
+            assertEq(row.xop, WSDLLib::isMtomMessage({"content-type":row.type}));
+        }
+        string header = "text/xml;note=\"" + strmul("a\\\";\\\\", 4096) + "\"";
+        assertTrue(WSDLLib::isSOAPMessage({"content-type":header}));
+        assertFalse(WSDLLib::isSOAPMessage({"content-type":substr(header, 0, -1)}));
+    }
+
+    private http(list<hash<auto>> rows) {
+        const hash<string, bool> Cases = {"exact":True,"case":True,"minor-wildcard":True,"major-wildcard":True,
+            "both-wildcards":True,"omitted":True,"parameter-order":True,"quoted-escape":True,
+            "major-parameters":True,"all-parameters":True};
+        int count = 0;
+        foreach hash<auto> row in (rows) {
+            if (!Cases{row.name}) {
+                continue;
+            }
+            foreach int saved in (0, 1, 2) {
+                HttpServer server();
+                on_exit server.stop();
+                SoapHandler handler(new PermissiveAuthenticator());
+                server.setDefaultHandler("media", handler);
+                server.addListener(0);
+                WebService original(source(row.pattern,
+                    sprintf("http://127.0.0.1:%d/", server.getListenerInfo(0).port)));
+                WebService ws = saved == 1 ? Serializable::deserialize(original.serialize())
+                    : saved == 2 ? Serializable::deserialize(original.serializeToData()) : original;
+                Queue received();
+                code<auto(hash<auto>, auto)> callback = auto sub(hash<auto> cx, auto data) {
+                    received.push(data);
+                    return data;
+                };
+                handler.addMethod(ws, ws.getOperation("send"), callback, NOTHING, NOTHING, NOTHING,
+                    NOTHING, NOTHING, NOTHING, "B");
+                SoapClient client({"wsdl":ws,"service":"S","port":"Endpoint","timeout":30000});
+                string payload = "Příliš < opaque MIME payload";
+                hash<auto> result = client.callOperation("send", value(row.wire, payload));
+                hash<auto> actual = received.get(30000);
+                assertEq(payload, actual.payload."^value^");
+                assertEq(payload, result.payload."^value^");
+                assertEq(actual.payload."^attributes^"."^content-type^", result.payload."^attributes^"."^content-type^");
+                assertThrows("SOAP-MESSAGE-ERROR", \client.callOperation(), ("send", value("text/plainbad;broken", payload)));
+                assertEq(0, received.size());
+                ++count;
+            }
+        }
+        assertEq(30, count);
+    }
+
+    private atomic() {
+        BindingContentDescription descriptor();
+        descriptor.addContentType("image/*");
+        binary before = descriptor.serialize();
+        foreach string invalid in ("image/", "text/plain;profile=a;profile=b", "application/x-www-form-urlencoded") {
+            assertThrows("WSDL-ERROR", \descriptor.addContentType(), (invalid,));
+            assertEq(before, descriptor.serialize());
+        }
+        descriptor.addContentType("*/xml");
+        assertEq(("*/xml",), descriptor.acceptedContentPatterns);
+        BindingContentDescription restored = Serializable::deserialize(descriptor.serializeToData());
+        assertEq(descriptor.acceptedContentPatterns, restored.acceptedContentPatterns);
+        foreach bool first_form in (False, True) {
+            BindingContentDescription form();
+            form.addContentType(first_form ? "APPLICATION/X-WWW-FORM-URLENCODED" : NOTHING);
+            assertThrows("WSDL-ERROR", \form.addContentType(),
+                (first_form ? NOTHING : "application/x-www-form-urlencoded",));
+            assertEq(first_form, form.formUrlEncoded);
+            assertEq(!first_form, form.acceptAllContentTypes);
+        }
+    }
+
+    private body() {
+        string type = "Text/Plain;Charset=\"ISO-8859-1\"";
+        string text = "café";
+        WebService ws = parse(type);
+        WSOperation op = ws.getOperation("send");
+        hash<auto> request = op.serializeRequest({"payload":text});
+        assertEq(binary(convert_encoding(text, "ISO-8859-1")), binary(request.body));
+        assertEq("text/plain;charset=\"ISO-8859-1\"", request.hdr."Content-Type");
+        hash<auto> parsed = WSDLLib::parseSOAPMessage({"content-type":type,"body":binary(request.body)}, True);
+        assertEq(text, op.deserializeRequest(parsed).payload."^value^");
+        hash<auto> empty = op.serializeRequest({"payload":""});
+        assertEq("", op.deserializeRequest(WSDLLib::parseSOAPMessage({"content-type":type,"body":empty.body}, True)).payload."^value^");
+        assertThrows("SOAP-MESSAGE-ERROR", \WSDLLib::parseSOAPMessage(),
+            ({"content-type":"text/plain;charset=UTF-8;charset=US-ASCII","body":"text"}, True));
+    }
+
+    private form() {
+        string type = "APPLICATION/X-WWW-FORM-URLENCODED;profile=Report";
+        string xml = replace(source(type), '<w:output><m:content part="payload" type="' + attribute(type)
+            + '"/></w:output>', '<w:output><m:content part="payload" type="text/plain"/></w:output>');
+        WebService original(xml);
+        foreach WebService ws in (original, Serializable::deserialize(original.serialize()),
+                Serializable::deserialize(original.serializeToData())) {
+            WSOperation op = ws.getOperation("send");
+            hash<auto> data = {"payload":"A & č"};
+            hash<auto> request = op.serializeRequest(data);
+            assertEq("application/x-www-form-urlencoded;profile=\"Report\"", request.hdr."Content-Type");
+            assertEq("payload=A%20%26%20%C4%8D", request.body);
+            assertEq(data, op.deserializeRequest({"content-type":request.hdr."Content-Type","body":request.body}));
+            assertThrows("SOAP-MESSAGE-ERROR", \op.deserializeRequest(),
+                ({"content-type":"application/x-www-form-urlencoded;profile=report","body":request.body},));
+        }
+    }
+
+    private opaque() {
+        foreach string type in ("application/octet-stream", "multipart/related;boundary=frontier;type=\"text/plain\"") {
+            string xml = replace(source(type), "xs:string", "xs:binary");
+            WebService original(xml);
+            foreach WebService ws in (original, Serializable::deserialize(original.serialize())) {
+                HttpServer server();
+                on_exit server.stop();
+                SoapHandler handler(new PermissiveAuthenticator());
+                server.setDefaultHandler("opaque", handler);
+                server.addListener(0);
+                Queue received();
+                code<auto(hash<auto>, auto)> callback = auto sub(hash<auto> cx, auto data) {
+                    received.push(data);
+                    return data;
+                };
+                handler.addMethod(ws, ws.getOperation("send"), callback, NOTHING, NOTHING, NOTHING,
+                    NOTHING, NOTHING, NOTHING, "B");
+                SoapClient client({"wsdl":ws,"service":"S","port":"Endpoint","timeout":30000,
+                    "url":sprintf("http://127.0.0.1:%d/", server.getListenerInfo(0).port)});
+                binary payload = type.startsWith("multipart/")
+                    ? binary("--frontier\r\nContent-Type: text/plain\r\n\r\nbody\r\n--frontier--\r\n")
+                    : <0001FF7FC380>;
+                foreach binary body in (payload, binary()) {
+                    hash<auto> result = client.callOperation("send", value(type, body));
+                    hash<auto> actual = received.get(30000);
+                    assertEq(body, actual.payload."^value^");
+                    assertEq(body, result.payload."^value^");
+                    assertEq(type, result.payload."^attributes^"."^content-type^");
+                }
+            }
+        }
+    }
+
+    private actions() {
+        string type = "application/soap+xml;ACTION=\"urn:orders;create\";charset=UTF-8";
+        assertEq("urn:orders;create", WSDLLib::getContentTypeParameter(type, "action"));
+        assertEq("UTF-8", WSDLLib::getContentTypeParameter(type, "CHARSET"));
+        assertFalse(exists WSDLLib::getContentTypeParameter(type, "unknown"));
+        assertThrows("SOAP-MESSAGE-ERROR", \WSDLLib::getContentTypeParameter(),
+            ("text/plain;profile=a;profile=b", "profile"));
+        WebService ws(ReadOnlyFile::readTextFile(get_script_dir() + "/test.wsdl"));
+        WSOperation op = ws.getBindingOperation("b1", "getInfo");
+        hash<auto> request = op.serializeRequest({"GetInfo":{"tickerSymbol":"ABC"}},
+            NOTHING, NOTHING, NOTHING, NOTHING, "urn:orders;create", "b1");
+        assertTrue(request.hdr."Content-Type".contains(";action=\"urn:orders;create\""));
+        assertTrue(WSDLLib::isSOAPMessage({"content-type":request.hdr."Content-Type"}));
+    }
+}
+%endif

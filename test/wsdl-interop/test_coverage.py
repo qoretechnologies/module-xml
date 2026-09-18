@@ -475,8 +475,11 @@ class CoverageTest(unittest.TestCase):
     def test_full_strict_gate_keeps_later_failures_visible(self):
         path = corpus.extract(self.root / "complete")
         output = self.root / "coverage.json"
+        # The complete gate also runs independent validators and typed comparisons.
+        # Its outer deadline must allow the bounded worker to finish and report failures.
         process = subprocess.run([sys.executable, str(ROOT / "coverage.py"), str(path), "--strict", "--output",
-                                  str(output)], text=True, capture_output=True, timeout=60, check=True)
+                                  str(output), "--worker-timeout", "180"], text=True, capture_output=True,
+                                 timeout=360, check=True)
         self.assertEqual("", process.stderr)
         report = json.loads(output.read_text())
         self.assertEqual([], report["selected_failures"])

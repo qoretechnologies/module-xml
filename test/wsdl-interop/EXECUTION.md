@@ -9378,3 +9378,26 @@ See [evidence](http-replacement-patterns-evidence.md),
 and [implemented design](../../design/wsdl-http-mime.md).
 P6 top-level constraints, remaining concrete binding/MIME behavior and attachment
 contract replay remain open before P7–P9. This is not a phase-completion claim.
+
+
+## P6-33: MIME media types and opaque HTTP bodies
+
+MIME declarations and wire headers use complete media-type parsing and constraint
+matching, including both WSDL wildcard components, quoted parameters, charsets,
+nested MIME type values and duplicate-value checks. Source/saved descriptors
+retain parameters; explicit charsets control text encoding. SoapClient and
+SoapHandler preserve opaque MIME bodies even for XML and multipart types.
+SOAP 1.2 action parameters are quoted; handler routing uses exact declared actions
+or actual body elements. Invalid descriptor updates leave prior state intact.
+The independent matrix covers 91 declaration/wire pairs and 18 classifications;
+the Qore suite passes 98 cases / 2,741 assertions with 38 actual MIME HTTP calls.
+All 17 affected Qore suites pass (523 cases / 10,803 reported
+assertions), plus independent MIME/grammar checks, six CXF peer tests, docs and
+astparser. All 16 corpus gates meet expected outcomes; six semantic reports are
+unchanged. The full strict regression now uses the approved 180-second worker
+bound and a separate 360-second outer deadline for worker plus independent checks.
+Audit: 18 Pass / 44 N/A / zero Fail; no C++ changes or push.
+See [evidence](media-types-evidence.md), [validation](P6-33-validation.json),
+[audit](audits/P6-33-media-types.md) and [implemented design](../../design/wsdl-http-mime.md).
+Top-level WSDL constraints, remaining concrete binding/MIME behavior and attachment
+contract replay remain P6 work before P7–P9; this is not phase completion.

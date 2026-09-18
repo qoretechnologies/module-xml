@@ -109,3 +109,58 @@ static and replacement routes belonging to that identifier. In-flight requests
 retain their selected method, while subsequent lookups observe the removal.
 The replacement regression covers default and mounted handlers, source and saved
 services, repeated values, suffix validation, overlapping templates and removal.
+
+## MIME content and media-type constraints
+
+`mime:content` carries one opaque message part. Its optional `type` declaration is
+parsed as a complete media type, with WSDL wildcards allowed as either complete
+component (`image/*`, `*/xml`, `*/*`). Omission accepts every concrete media type;
+an explicitly empty or malformed declaration raises `WSDL-ERROR`. Wire
+Content-Type values must be concrete and syntactically complete, even for an
+unrestricted declaration. Prefixes such as `text/xml-extra` do not match `text/xml`.
+
+The parser follows HTTP token, optional whitespace, quoted-string and quoted-pair
+syntax. Type/subtype and parameter names compare without case. Declared parameters
+must be present; additional wire parameters are retained. Charset values compare
+without case; opaque parameter values, including boundaries and SOAP actions,
+compare exactly. `multipart/related`'s `type` parameter is a media type/subtype;
+XOP's `type` can contain a complete media type with its own parameters. Those
+values compare by their parsed components and parameter sets, retaining nested
+action case. Generic `start-info` and unregistered `type` parameters remain opaque.
+Repeated constrained parameters must agree. A work list handles nested type
+comparisons without recursive calls or a duplicate-value cross product.
+
+For example, `text/plain;charset="UTF-8";profile=Report` accepts
+`TEXT/PLAIN;PROFILE="Report";CHARSET=utf-8`, and rejects `profile=report`.
+`application/xop+xml;type="application/soap+xml;action=\"urn:Order\""`
+retains the case of `urn:Order` while ignoring case in the nested media-type name.
+
+`BindingContentDescription::addContentType()` validates before changing descriptor
+state. Its existing exact-type and family lists remain available; wildcard-major
+and parameterized wildcard declarations use `acceptedContentPatterns`. Saved
+services rebuild these declarations from their source; detached operations retain
+the descriptor. Descriptors are immutable while shared by active operations.
+
+HTTP `Accept` advertises exact types and representable media ranges. HTTP cannot
+express WSDL's `*/subtype` constraint, so such an output declaration omits Accept;
+the binding still validates the complete constraint when receiving the response.
+Wildcard or multiple-type declarations require explicit per-value
+`^attributes^.^content-type^` metadata when sending. A single concrete declaration
+can supply the default. An explicit charset controls text encoding and prevents a
+second charset from being appended. Binary bodies retain their bytes. Form bodies
+continue to percent-encode UTF-8 and preserve any declared media-type parameters.
+
+SoapClient and SoapHandler choose MIME content handling from the selected binding.
+They preserve the whole body even for XML and multipart media types; those values
+are not interpreted as SOAP envelopes or attachment containers.
+`WSDLLib::parseMultiPartSOAPMessage()` and `parseSOAPMessage()` expose an optional
+`mime_content` argument for this selection. Empty MIME bodies remain empty, and
+returned `^content-type^` metadata retains the complete Content-Type value.
+Explicit charset parameters determine text decoding; other raw bodies remain
+binary for the selected part's codec.
+
+SOAP and XOP classification uses the same complete media-type parser. SOAP 1.2
+serialization quotes and escapes its action parameter. SoapHandler obtains the
+decoded parameter using `WSDLLib::getContentTypeParameter()`, checks the declared
+action exactly, and uses the actual body element for body-based dispatch. URI
+suffixes do not identify operations.

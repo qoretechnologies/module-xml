@@ -121,6 +121,10 @@ module WSDL {
     @section wsdlrelnotes WSDL Module Release Notes
 
     @subsection wsdl_0_5_8 WSDL v0.5.8
+    - MIME content types use complete, case-insensitive type/subtype matching with explicit wildcard and
+      parameter constraints; HTTP MIME content retains its parameters and bypasses SOAP/XML body parsing
+    - explicit MIME charset parameters control text encoding without duplicate charset headers
+    - SOAP 1.2 action parameters are quoted and decoded without changing URI case or contents
     - HTTP URL replacement recognizes declared message-part patterns while preserving literal parentheses;
       missing part patterns fail during construction, and descriptor updates replace state atomically
     - HTTP and MIME leaf declarations validate attributes and empty content; normalized verbs, endpoint URIs
@@ -1473,8 +1477,17 @@ public class WSDLLib {
     }
 
     #! takes a hash representation of a SOAP message and handles multipart messages, checks the content-type, and handles hrefs in the message
-    static hash<auto> parseMultiPartSOAPMessage(hash<auto> msg) {
-        if (exists msg."_qore_multipart") {
+    /** @param msg the transport message, including body and Qore HTTP content-type metadata
+        @param mime_content True for an HTTP mime:content binding whose entire body must remain intact
+        @return normalized message metadata and body, with SOAP multipart parts when applicable
+        @throw SOAP-MESSAGE-ERROR an interpreted SOAP multipart message is malformed
+        @note MIME content may itself be multipart; True prevents interpreting it as SOAP attachments.
+        @par Example
+        An HTTP operation accepting an uploaded MIME document passes True to retain that document's boundaries.
+        @since %WSDL 0.5.8 supports explicit HTTP MIME content dispatch
+    */
+    static hash<auto> parseMultiPartSOAPMessage(hash<auto> msg, bool mime_content = False) {
+        if (!mime_content && exists msg."_qore_multipart") {
             if (msg."_qore_multipart" != "related") {
                 throw "SOAP-MESSAGE-ERROR", sprintf("don't understand multipart/%s messages; expected multipart/related", msg."_qore_multipart");
             }
@@ -1547,7 +1560,7 @@ public class WSDLLib {
             }
 
             # Detect MTOM/XOP messages
-            bool is_mtom = mpmsg.body.hdr."content-type" =~ /application\/xop\+xml/i;
+            bool is_mtom = isMtomMessage({"content-type": mpmsg.body.hdr."content-type"});
 
             return {
                 'content-type': mpmsg.body.hdr."content-type",
@@ -1718,19 +1731,45 @@ public class WSDLLib {
 
     #! returns True if the message is an MTOM/XOP message
     static bool isMtomMessage(hash<auto> msg) {
-        return msg."content-type" =~ /application\/xop\+xml/i;
+        return WsdlLibPriv::isContentType(msg."content-type", ("application/xop+xml",));
     }
 
-    /**!
-    takes a hash representation returned by parseMultiPartSOAPMessage and parses it to a Qore data structure, checks the content-type, and handles hrefs in the message.
-    Operation is not yet known if SoapAction header is not presented
+    #! returns one decoded media-type parameter
+    /** @param content_type a complete Content-Type value
+        @param name the case-insensitive parameter name
+        @return the unquoted parameter value, or NOTHING when the parameter is absent
+        @throw SOAP-MESSAGE-ERROR malformed media type or conflicting values for the requested parameter
+        @note Charset and known media-type-valued parameters use their defined comparison rules;
+        opaque values, including SOAP actions, retain their case.
+        @par Example
+        A SOAP 1.2 `action="urn:orders;create"` parameter returns `urn:orders;create`.
+        @since %WSDL 0.5.8
     */
-    static *hash<auto> parseSOAPMessage(hash<auto> msg) {
-        if (!msg.body) {
+    static *string getContentTypeParameter(string content_type, string name) {
+        *WsdlMediaType media = WsdlMediaType::read(content_type);
+        if (!media) {
+            throw "SOAP-MESSAGE-ERROR", sprintf("invalid content-type %Y", content_type);
+        }
+        return media.parameter(name.lwr(), "SOAP-MESSAGE-ERROR");
+    }
+
+    #! decodes a normalized SOAP/XML message or preserves explicitly selected HTTP MIME content
+    /** @param msg a message returned by parseMultiPartSOAPMessage()
+        @param mime_content True when the selected HTTP binding declares mime:content
+        @return parsed XML for SOAP/MIME XML, or body and complete Content-Type for MIME content
+        @throw SOAP-MESSAGE-ERROR malformed media type, conflicting charset parameters or invalid attachment references
+        @note MIME content remains opaque even when its media type is text/xml or application/xop+xml.
+        Explicit charset parameters tag text; content without a charset remains binary.
+        @par Example
+        `parseSOAPMessage(message, True)` preserves an uploaded XML file as a MIME value instead of an XML tree.
+        @since %WSDL 0.5.8 supports binding-directed MIME content and preserves its media-type parameters
+    */
+    static *hash<auto> parseSOAPMessage(hash<auto> msg, bool mime_content = False) {
+        if (!mime_content && !msg.body) {
             hash<auto> h."content-type" = msg."content-type" ?? "text/plain";
             h.body = NOTHING;
             return h;
-        } else if (WSDLLib::isSOAPMessage(msg) || WSDLLib::isMtomMessage(msg)) {
+        } else if (!mime_content && (WSDLLib::isSOAPMessage(msg) || WSDLLib::isMtomMessage(msg))) {
             hash<auto> xmldata;
             if (msg.body) {
                 xmldata = parse_xml(msg.body, XPF_PRESERVE_ORDER | XPF_PRESERVE_WHITESPACE);
@@ -1746,13 +1785,18 @@ public class WSDLLib {
             }
             return xmldata;
         } else {
-            string ct = msg."content-type";
-            hash<auto> h."content-type" = (ct =~ x/^([^;]+)/)[0];
-            if (ct =~ /charset=/) {
-                string c = (ct =~ x/charset=([^;]+)/)[0];
-                h.body = force_encoding(msg.body, c);
+            *WsdlMediaType ct = WsdlMediaType::read(msg."content-type");
+            if (!ct) {
+                throw "SOAP-MESSAGE-ERROR", sprintf("invalid content-type %Y", msg."content-type");
+            }
+            hash<auto> h();
+            h."content-type" = msg."content-type";
+            *string charset = ct.parameter("charset", "SOAP-MESSAGE-ERROR");
+            if (exists charset) {
+                h.body = msg.body.typeCode() == NT_BINARY ? binary_to_string(msg.body, charset)
+                    : force_encoding(msg.body ?? "", charset);
             } else {
-                h.body = binary(msg.body);  # needed or is it already ?
+                h.body = binary(msg.body ?? "");
             }
             return h;
         }
@@ -1782,22 +1826,284 @@ public class WSDLLib {
     }
 }
 
-# private, nmon-exported class
+# Parsed HTTP media types and WSDL MIME patterns; instances are request/construction local.
+class WsdlMediaType {
+    public {
+        string major;
+        string minor;
+        hash<string, list<string>> parameters();
+    }
+    private {
+        binary bytes;
+        int pos = 0;
+    }
+
+    constructor(string value) {
+        bytes = binary(convert_encoding(value, "UTF-8"));
+    }
+
+    static *WsdlMediaType read(*string value, bool pattern = False) {
+        if (!exists value) {
+            return NOTHING;
+        }
+        WsdlMediaType result(value);
+        return result.parse(pattern) ? result : NOTHING;
+    }
+
+    private bool parse(bool pattern) {
+        whitespace();
+        major = token().lwr();
+        if (!major || pos >= bytes.size() || bytes[pos++] != 47) {
+            return False;
+        }
+        minor = token().lwr();
+        if (!minor || !component(major, pattern) || !component(minor, pattern)) {
+            return False;
+        }
+        while (pos < bytes.size()) {
+            whitespace();
+            if (pos == bytes.size()) {
+                break;
+            }
+            if (bytes[pos++] != 59) {
+                return False;
+            }
+            whitespace();
+            # RFC 9110 permits empty parameter slots between semicolons.
+            if (pos == bytes.size() || bytes[pos] == 59) {
+                continue;
+            }
+            string name = token().lwr();
+            if (!name || pos == bytes.size() || bytes[pos++] != 61 || pos == bytes.size()) {
+                return False;
+            }
+            *string value;
+            if (bytes[pos] == 34) {
+                value = quoted();
+            } else {
+                value = token();
+                if (!value) {
+                    return False;
+                }
+            }
+            if (!exists value) {
+                return False;
+            }
+            push parameters{name}, value;
+        }
+        return True;
+    }
+
+    private static bool component(string value, bool pattern) {
+        return !value.contains("*") || (pattern && value == "*");
+    }
+
+    private whitespace() {
+        while (pos < bytes.size() && (bytes[pos] == 9 || bytes[pos] == 32)) {
+            ++pos;
+        }
+    }
+
+    private string token() {
+        int start = pos;
+        while (pos < bytes.size() && tokenByte(bytes[pos])) {
+            ++pos;
+        }
+        return binary_to_string(substr(bytes, start, pos - start), "UTF-8");
+    }
+
+    private static bool tokenByte(int value) {
+        return (value >= 48 && value <= 57) || (value >= 65 && value <= 90)
+            || (value >= 97 && value <= 122) || value == 33 || (value >= 35 && value <= 39)
+            || value == 42 || value == 43 || value == 45 || value == 46 || value == 94 || value == 95
+            || value == 96 || value == 124 || value == 126;
+    }
+
+    private *string quoted() {
+        ++pos;
+        int start = pos;
+        binary value = binary();
+        while (pos < bytes.size()) {
+            int c = bytes[pos];
+            if (c == 34) {
+                value += substr(bytes, start, pos - start);
+                ++pos;
+                return binary_to_string(value, "UTF-8");
+            }
+            if (c == 92) {
+                value += substr(bytes, start, pos - start);
+                if (++pos == bytes.size()) {
+                    return NOTHING;
+                }
+                start = pos;
+                c = bytes[pos];
+            }
+            if (c != 9 && (c < 32 || c == 127)) {
+                return NOTHING;
+            }
+            ++pos;
+        }
+        return NOTHING;
+    }
+
+    bool matches(WsdlMediaType pattern) {
+        if ((pattern.major != "*" && major != pattern.major)
+                || (pattern.minor != "*" && minor != pattern.minor)) {
+            return False;
+        }
+        foreach string name in (keys pattern.parameters) {
+            if (!parameters.hasKey(name)) {
+                return False;
+            }
+            string expected = pattern.parameters{name}[0];
+            if (!sameValues(name, parameters{name}, expected)
+                    || !sameValues(name, pattern.parameters{name}, expected)) {
+                return False;
+            }
+        }
+        return True;
+    }
+
+    private bool sameValues(string name, list<string> values, string expected) {
+        foreach string value in (values) {
+            if (!sameValue(name, value, expected)) {
+                return False;
+            }
+        }
+        return True;
+    }
+
+    # RFC 2387's type is a type/subtype; XOP's type may include parameters.
+    # Use an explicit work list: nested quoted XOP types must not recurse on the Qore stack.
+    private bool sameValue(string name, string left, string right) {
+        list<WsdlMediaType> owners = (self,);
+        list<string> names = (name,);
+        list<string> lhs = (left,);
+        list<string> rhs = (right,);
+        while (owners) {
+            WsdlMediaType owner = pop owners;
+            string key = pop names;
+            string a = pop lhs;
+            string b = pop rhs;
+            if (key == "charset") {
+                if (a.lwr() != b.lwr()) {
+                    return False;
+                }
+            } else if (key == "type" && ((owner.major == "multipart" && owner.minor == "related")
+                    || (owner.major == "application" && owner.minor == "xop+xml"))) {
+                *WsdlMediaType am = read(a);
+                *WsdlMediaType bm = read(b);
+                if (!am || !bm || am.major != bm.major || am.minor != bm.minor
+                        || (owner.major == "multipart" && (am.parameters || bm.parameters))
+                        || am.parameters.size() != bm.parameters.size()) {
+                    return False;
+                }
+                foreach string param in (keys am.parameters) {
+                    if (!bm.parameters.hasKey(param)) {
+                        return False;
+                    }
+                    # Compare each duplicate with one representative, avoiding a cross product.
+                    foreach string av in (am.parameters{param}) {
+                        push owners, am;
+                        push names, param;
+                        push lhs, av;
+                        push rhs, bm.parameters{param}[0];
+                    }
+                    for (int i = 1; i < bm.parameters{param}.size(); ++i) {
+                        push owners, am;
+                        push names, param;
+                        push lhs, am.parameters{param}[0];
+                        push rhs, bm.parameters{param}[i];
+                    }
+                }
+            } else if (a != b) {
+                return False;
+            }
+        }
+        return True;
+    }
+
+    *string parameter(string name, string error) {
+        *string value;
+        foreach string item in (parameters{name}) {
+            if (!sameValue(name, value ?? item, item)) {
+                throw error, sprintf("invalid or conflicting %s parameters in media type %s/%s", name, major, minor);
+            }
+            value = item;
+        }
+        return value;
+    }
+
+    bool wildcard() {
+        return major == "*" || minor == "*";
+    }
+
+    string format() {
+        string result = major + "/" + minor;
+        foreach string name in (keys parameters) {
+            foreach string value in (parameters{name}) {
+                result += ";" + name + "=" + quote(value);
+            }
+        }
+        return result;
+    }
+
+    static string quote(string value) {
+        if (value =~ /[\x{0}-\x{8}\x{A}-\x{1F}\x{7F}]/) {
+            throw SOAP_SERIALIZATION_ERROR, "a media-type parameter cannot contain control characters";
+        }
+        return "\"" + replace(replace(value, "\\", "\\\\"), "\"", "\\\"") + "\"";
+    }
+}
+
+# Private, non-exported class.
 class WsdlLibPriv {
-    static bool isContentType(string ct, list<auto> MimeTypes) {
-        ct = ltrim(ct);
+    static bool isContentType(*string ct, list<auto> MimeTypes) {
+        *WsdlMediaType actual = WsdlMediaType::read(ct);
+        if (!actual) {
+            return False;
+        }
         foreach string sct in (MimeTypes) {
-            # Content-Type := type "/" subtype *[";" parameter] ... so we can test if string is starting at index 0
-            if (bindex(ct, sct) == 0)
+            # Legacy descriptor families are stored as "type/".
+            *WsdlMediaType expected = WsdlMediaType::read(sct.endsWith("/") ? sct + "*" : sct, True);
+            if (expected && actual.matches(expected)) {
                 return True;
+            }
         }
         return False;
     }
 
-    static checkContentType(string ct, list<auto> MimeTypes) {
-        if (!WsdlLibPriv::isContentType(ct, MimeTypes)) {
-            throw "SOAP-MESSAGE-ERROR", sprintf("don't know how to handle content-type %y (expecting one of: %y)", ct, MimeTypes);
+    static checkContentType(*string ct, list<auto> MimeTypes) {
+        if (!isContentType(ct, MimeTypes)) {
+            throw "SOAP-MESSAGE-ERROR", sprintf("cannot handle content-type %Y (expecting one of: %Y)", ct, MimeTypes);
         }
+    }
+    static checkType(BindingContentDescription description, string type) {
+        WsdlLibPriv::checkContentType(type, description.acceptAllContentTypes ? ("*/*",)
+            : description.acceptedContentTypeSubtypes + description.acceptedContentTypes + description.acceptedContentPatterns);
+    }
+
+    static string acceptHeader(BindingContentDescription description) {
+        if (description.acceptAllContentTypes) {
+            return "*/*";
+        }
+        list<string> values = description.acceptedContentTypeSubtypes;
+        foreach string family in (description.acceptedContentTypes) {
+            push values, family + "*";
+        }
+        foreach string pattern in (description.acceptedContentPatterns) {
+            *WsdlMediaType parsed = WsdlMediaType::read(pattern, True);
+            if (!parsed) {
+                throw WSDL_ERROR, sprintf("invalid MIME pattern %Y", pattern);
+            }
+            if (parsed.major == "*" && parsed.minor != "*") {
+                # HTTP Accept cannot express WSDL's subtype-only wildcard. Omit the
+                # preference header and enforce the complete WSDL pattern on receipt.
+                return "";
+            }
+            push values, parsed.format();
+        }
+        return values.join(",");
     }
 }
 
@@ -31783,7 +32089,7 @@ public class SoapBinding inherits WSDL::OperationalBinding {
         if (req_soapaction) {
             rv.hdr += {"SOAPAction": req_soapaction};
             if (soap12) {
-                ct += sprintf(";action=%s", req_soapaction);
+                ct += ";action=" + WsdlMediaType::quote(req_soapaction);
             }
         } else if (request && !soap12 && default_action) {
             rv.hdr.SOAPAction = "\"\"";
@@ -32478,33 +32784,37 @@ public class HttpBinding inherits WSDL::OperationalBinding {
                 request ? "request" : "response", name, io, h);
 
         if (bmd.content.formUrlEncoded || (request && bmd.urlEncoded && httpMethod == "POST")) {
-            ct = MimeTypeFormUrlEncoded;
-            # application/x-www-form-urlencoded Content-Type does not have any parameters
+            ct = bmd.content.formUrlEncoded ? bmd.content.acceptedContentTypeSubtypes[0] ?? MimeTypeFormUrlEncoded
+                : MimeTypeFormUrlEncoded;
+            # Form data always percent-encodes UTF-8; no implicit charset parameter is added.
             delete enc;
             # Non-ASCII characters (> 127) are properly percent-encoded as UTF-8 bytes
             # per https://www.w3.org/TR/html5/forms.html#application/x-www-form-urlencoded-encoding-algorithm
             rv.body = mime_get_form_urlencoded_string(msg.serializeAllPartData(h));
         } else if (bmd.content) {
             hash<auto> v = msg.serializeData(op.nsc, bmd.content.part, h);
-            if (v."content-type") {
-                if (!bmd.content.acceptAllContentTypes) {
-                    WsdlLibPriv::checkContentType(v."content-type", bmd.content.acceptedContentTypeSubtypes
-                        + bmd.content.acceptedContentTypes);
-                }
+            if (exists v."content-type") {
+                WsdlLibPriv::checkType(bmd.content, v."content-type");
                 ct = v."content-type";
             } else {
-                if (bmd.content.acceptAllContentTypes || bmd.content.acceptedContentTypes
+                if (bmd.content.acceptAllContentTypes || bmd.content.acceptedContentTypes || bmd.content.acceptedContentPatterns
                     || bmd.content.acceptedContentTypeSubtypes.size() != 1) {
                     throw SOAP_SERIALIZATION_ERROR, sprintf("ambiguous content type in message %y related to %s "
                         "operation %y", msg.name, io, op.name);
                 }
                 ct = bmd.content.acceptedContentTypeSubtypes[0];
             }
+            *WsdlMediaType media = WsdlMediaType::read(ct);
+            @assert(media, "selected concrete MIME type must be valid");
+            *string charset = media.parameter("charset", SOAP_SERIALIZATION_ERROR);
             if (v.value.typeCode() == NT_BINARY) {
                 delete enc;
                 rv.body = v.value;
             } else {
-                rv.body = convert_encoding(v.value, enc);
+                rv.body = convert_encoding(v.value, charset ?? enc);
+                if (exists charset) {
+                    delete enc;
+                }
             }
         } else if (bmd.mimeXml) {
             ct = MimeTypeXml;
@@ -32540,13 +32850,7 @@ public class HttpBinding inherits WSDL::OperationalBinding {
         # add request headers if necessary
         if (request) {
             if (output.content) {
-                if (output.content.acceptAllContentTypes) {
-                    rv.accept = "*/*";
-                } else {
-                    softlist<auto> l = output.content.acceptedContentTypeSubtypes;
-                    map l += $1 + "*", output.content.acceptedContentTypes;
-                    rv.accept = foldl $1 + "," + $2, l;
-                }
+                rv.accept = WsdlLibPriv::acceptHeader(output.content);
             } else if (output.mimeXml) {
                 rv.accept = MimeTypeXml;
             }
@@ -32628,7 +32932,8 @@ public class HttpBinding inherits WSDL::OperationalBinding {
         *WSMessage msg = op{io};
 
         if (bmd.content.formUrlEncoded || (request && bmd.urlEncoded && httpMethod == "POST")) {
-            WsdlLibPriv::checkContentType(ct, list(MimeTypeFormUrlEncoded));
+            WsdlLibPriv::checkContentType(ct, bmd.content.formUrlEncoded
+                ? bmd.content.acceptedContentTypeSubtypes : (MimeTypeFormUrlEncoded,));
             if (v.body.typeCode() == NT_BINARY) {
                 v.body = binary_to_string(v.body);
             }
@@ -32637,10 +32942,7 @@ public class HttpBinding inherits WSDL::OperationalBinding {
         }
 
         if (bmd.content) {
-            if (!bmd.content.acceptAllContentTypes) {
-                WsdlLibPriv::checkContentType(ct,
-                    bmd.content.acceptedContentTypeSubtypes + bmd.content.acceptedContentTypes);
-            }
+            WsdlLibPriv::checkType(bmd.content, ct);
             hash<auto> v2;
             v2{bmd.content.part} = v.body;
             hash<auto> h = msg.deserializeData(bmd.content.part, v2);
@@ -32935,6 +33237,9 @@ public class BindingContentDescription inherits Serializable {
         # list of accepted specific content types
         list<auto> acceptedContentTypeSubtypes = ();
 
+        #! WSDL wildcard patterns requiring full component/parameter matching
+        list<string> acceptedContentPatterns = ();
+
         #! are all content-types form URL encoded?
         bool formUrlEncoded = False;
 
@@ -32942,41 +33247,43 @@ public class BindingContentDescription inherits Serializable {
         bool acceptAllContentTypes = False;
     }
 
-    addContentType(string type) {
-        bool isFormUrlEncoded = (type == MimeTypeFormUrlEncoded);
-        if (isFormUrlEncoded && (acceptedContentTypes || acceptedContentTypeSubtypes))
-            throw WSDL_ERROR, sprintf("%y content type cannot be declared with other content-types: %y", MimeTypeFormUrlEncoded, (acceptedContentTypes + acceptedContentTypeSubtypes));
-        if (!isFormUrlEncoded && formUrlEncoded)
-            throw WSDL_ERROR, sprintf("%y content type cannot be declared in conjunction with the %y content-type (this last type cannot be mixed with other types)", type, MimeTypeFormUrlEncoded);
-        if (isFormUrlEncoded && !formUrlEncoded)
+    #! adds one permitted MIME type or WSDL wildcard pattern
+    /** @param type a MIME type with optional parameters, or NOTHING to accept every concrete MIME type
+        @throw WSDL-ERROR malformed media type, conflicting parameter values, or form encoding mixed with other types
+        @note Type/subtype and parameter names are case-insensitive. Charset and known media-type-valued
+        parameters use their defined comparison rules; opaque values retain their case.
+        Descriptors must not be mutated while bindings are in use.
+        @par Example
+        `addContentType("image/*")` accepts PNG and JPEG; a wildcard major component with subtype xml accepts any XML subtype.
+        @since %WSDL 0.5.8 supports a wildcard in either component and validates parameters
+    */
+    addContentType(*string type) {
+        *WsdlMediaType parsed = WsdlMediaType::read(type ?? "*/*", True);
+        if (!parsed) {
+            throw WSDL_ERROR, sprintf("invalid MIME content type %Y", type);
+        }
+        foreach string parameter in (keys parsed.parameters) {
+            parsed.parameter(parameter, WSDL_ERROR);
+        }
+        bool form = parsed.major + "/" + parsed.minor == MimeTypeFormUrlEncoded;
+        if ((form && (acceptAllContentTypes || acceptedContentTypes || acceptedContentTypeSubtypes
+                    || acceptedContentPatterns)) || (!form && formUrlEncoded)) {
+            throw WSDL_ERROR, "form URL encoding cannot be declared with other MIME content types";
+        }
+        if (form) {
+            push acceptedContentTypeSubtypes, parsed.format();
             formUrlEncoded = True;
-
-        if (!type || type == "*/*") {
+            return;
+        }
+        if (parsed.major == "*" && parsed.minor == "*" && !parsed.parameters) {
             acceptAllContentTypes = True;
-            return;
+        } else if (parsed.major != "*" && parsed.minor == "*" && !parsed.parameters) {
+            push acceptedContentTypes, parsed.major + "/";
+        } else if (parsed.wildcard()) {
+            push acceptedContentPatterns, parsed.format();
+        } else {
+            push acceptedContentTypeSubtypes, parsed.format();
         }
-
-        hash<auto> act;
-
-        list<auto> st = type.split("/");
-        if (st.size() != 2)
-            throw WSDL_ERROR, sprintf("Content type %y does not match 'type/subtype' pattern", type);
-        if (bindex(st[0], "*") != -1)
-            throw WSDL_ERROR, sprintf("Content type %y contains unexpected asterisk in type part", type);
-
-        act.type = st[0];
-
-        # check for a wildcard
-        if (st[1] == "*") {
-            acceptedContentTypes += (st[0] + "/");
-            return;
-        }
-
-        if (bindex(st[1], "*") != -1) {
-            throw WSDL_ERROR, sprintf("Content type %y contains unexpected asterisk in subtype part", type);
-        }
-
-        acceptedContentTypeSubtypes += (st[0] + "/" + st[1]);
     }
 }
 
