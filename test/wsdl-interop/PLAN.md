@@ -1064,3 +1064,25 @@ P6 still requires mixed/nested multipart layouts, attachment contract replay and
 complete HTTP URI execution. The latter requires the Qore request-local target
 API described in `/tmp/xml-http-base-resolution/QORE-REQUEST-URL.md`. P7–P9 remain
 incomplete.
+
+
+## P6-41: Multipart input normalization
+
+SOAP multipart input now shares Qore Mime framing, validates its selected root
+and identifiers, decodes transfer encodings to bytes, and shares charset/BOM root
+decoding across native and retained XML consumers. Installed Qore 79348ce8c / Mime
+1.9 resolves all six shared-parser/writer regression failures. No Qore changes or
+runtime override were needed.
+
+The 50-wire matrix passes 53 cases / 798 assertions, with independent Python
+framing/byte checks and 96 HTTP exchanges covering both directions, saved services,
+retained XML, actionless XOP-root dispatch, negatives and recovery. All 50 gates
+pass: 34 Qore suites / 1,608 cases / 52,945 assertions, independent matrices, CXF
+peers, docs and astparser. All 16 corpus commands meet expected outcomes; six
+semantic reports match P6-40. Audit: 18 Pass / 44 N/A / zero Fail. No C++ changes
+or push.
+
+See [evidence](multipart-input-evidence.md), [validation](P6-41-validation.json),
+[audit](audits/P6-41-multipart-input.md), and [design](../../design/wsdl-multipart-input.md).
+P6 still requires multipart layout compilation, attachment binding replay and the
+request-local URI API integration; P7–P9 remain incomplete.

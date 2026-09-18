@@ -29,7 +29,7 @@
 %requires xml
 
 # need mime definitions
-%requires Mime >= 1.4.2
+%requires Mime >= 1.9
 
 %requires(reexport) DataProvider
 %requires FileLocationHandler >= 3.0
@@ -140,6 +140,9 @@ module WSDL {
     @section wsdlrelnotes WSDL Module Release Notes
 
     @subsection wsdl_0_5_8 WSDL v0.5.8
+    - multipart SOAP input uses the shared MIME parser, selects its root by Content-ID or first-part order,
+      decodes transfer encodings to binary, and rejects absent roots and duplicate part identifiers
+    - retained and native XML consumers share root decoding for MIME charsets and XML byte-order marks
     - direct HTTP MIME declarations retain content, form and schema-XML alternatives by public message part;
       Content-Type selects a unique representation and explicit format selectors resolve overlaps
     - HTTP Content-Type participates in serialization before encoding; conflicting headers and part metadata reject
@@ -1530,103 +1533,30 @@ public class WSDLLib {
     #! takes a hash representation of a SOAP message and handles multipart messages, checks the content-type, and handles hrefs in the message
     /** @param msg the transport message, including body and Qore HTTP content-type metadata
         @param mime_content True for an HTTP mime:content binding whose entire body must remain intact
-        @return normalized message metadata and body, with SOAP multipart parts when applicable
-        @throw SOAP-MESSAGE-ERROR an interpreted SOAP multipart message is malformed
+        @return normalized message metadata and body; multipart root and attachment bodies are binary,
+        \c parts is keyed by unbracketed Content-ID, and \c unidentified_parts retains parts without identifiers
+        @throw SOAP-MESSAGE-ERROR malformed MIME, missing root, repeated part identifier or conflicting root media type
         @note MIME content may itself be multipart; True prevents interpreting it as SOAP attachments.
         @par Example
         An HTTP operation accepting an uploaded MIME document passes True to retain that document's boundaries.
         @since %WSDL 0.5.8 supports explicit HTTP MIME content dispatch
     */
     static hash<auto> parseMultiPartSOAPMessage(hash<auto> msg, bool mime_content = False) {
-        if (!mime_content && exists msg."_qore_multipart") {
-            if (msg."_qore_multipart" != "related") {
-                throw "SOAP-MESSAGE-ERROR", sprintf("don't understand multipart/%s messages; expected multipart/related", msg."_qore_multipart");
+        if (!mime_content) {
+            *string content_type = msg."_qore_orig_content_type" ?? msg."content-type";
+            *WsdlMediaType media = WsdlMediaType::read(content_type);
+            if (exists content_type && !media) {
+                throw "SOAP-MESSAGE-ERROR", "invalid transport Content-Type";
             }
-
-            auto bdry = msg."_qore_multipart_boundary";
-            if (!bdry.val()) {
-                throw "SOAP-MESSAGE-ERROR", sprintf("multipart message received without multipart boundary; headers: %y", msg - "body");
+            if ((media && media.major == "multipart") || exists msg."_qore_multipart") {
+                return WsdlMultipartHelper::read(msg, media);
             }
-
-            hash<auto> mpmsg;
-            list<string> l = split("\r\n--" + bdry, msg.body);
-
-            for (int i = 1; i < (elements l - 1); ++i) {
-                string m = l[i];
-
-                int ie = index(m, "\r\n\r\n");
-                if (ie == -1) {
-                    throw "SOAP-MESSAGE-ERROR", sprintf("part %d has no headers: %y", i, m);
-                }
-                hash<auto> hh;
-                foreach string hl in (split("\r\n", substr(m, 2, ie))) {
-                    trim hl;
-                    (string hi, auto ignore, string ha) = hl =~ x/^(.*):([ \t])*(.*)$/;
-                    hi = tolower(hi);
-                    #printf("hl: %y hi: %y ha: %y\n", hl, hi, ha);exit();
-                    hh{hi} = ha;
-                }
-                if (!exists hh."content-id") {
-                    throw "SOAP-MESSAGE-ERROR", sprintf("expecting part header Content-ID in part %d; headers: %y",
-                        i, hh);
-                }
-
-                auto b;
-                if (hh."content-transfer-encoding" == "binary") {
-                    # unfortunately we have to do some tricks to get the binary data out here
-                    # FIXME: tricks probably not necessary with qore 0.8.1+
-                    m = force_encoding(m, "ascii");
-                    # recalculate byte offset
-                    ie = index(m, "\r\n\r\n");
-                    #printf("ie: %d m: %d\n", ie, strlen(m));exit();
-                    b = binary(substr(m, ie + 4));
-
-                    #File f(); f.open2("t.bin", O_CREAT|O_WRONLY|O_TRUNC); f.write(b); exit();
-                } else {
-                    b = substr(m, ie + 4);
-
-                    if (hh."content-type" =~ /charset=/) {
-                        string c = (hh."content-type" =~ x/charset=([^;]+)/)[0];
-                        b = force_encoding(b, c);
-                    }
-                }
-
-                if (hh."content-id" !~ /^\<.*\>$/) {
-                    throw "SOAP-MESSAGE-ERROR", sprintf("expected part ID to have the following format: <id>, "
-                        "instead got %s", hh."content-id");
-                }
-
-                hash<auto> p = (
-                    "hdr": hh,
-                    "body": b,
-                );
-
-                if ((!exists msg."_qore_multipart_start" && i == 1)
-                    || (exists msg."_qore_multipart_start" && msg."_qore_multipart_start" == hh."content-id")) {
-                    mpmsg.body = p;
-                } else {
-                    string id = substr(hh."content-id", 1, -1);
-                    mpmsg.part{id} = p;
-                }
-            }
-
-            # Detect MTOM/XOP messages
-            bool is_mtom = isMtomMessage({"content-type": mpmsg.body.hdr."content-type"});
-
-            return {
-                'content-type': mpmsg.body.hdr."content-type",
-                'header': msg.header + mpmsg.body.hdr,
-                'body': mpmsg.body.body,
-                'parts': mpmsg.part,
-                'is_mtom': is_mtom,
-            };
-        } else {
-            return {
-                'content-type': msg."_qore_orig_content_type",
-                'header': msg.header,
-                'body': msg.body,
-            };
         }
+        return {
+            "content-type": msg."_qore_orig_content_type" ?? msg."content-type",
+            "header": msg.header,
+            "body": msg.body,
+        };
     }
 
     #! Checks if an element is an xop:Include element by verifying the namespace
@@ -1804,6 +1734,22 @@ public class WSDLLib {
         return media.parameter(name.lwr(), "SOAP-MESSAGE-ERROR");
     }
 
+    #! decodes the XML root entity of a normalized transport message
+    /** @param message a message returned by parseMultiPartSOAPMessage()
+        @return XML text decoded to UTF-8 using its BOM, MIME charset and XML declaration
+        @throw SOAP-MESSAGE-ERROR invalid or conflicting MIME charset parameters
+        @throw ENCODING-CONVERSION-ERROR invalid bytes for the selected character encoding
+        @note Attachments remain separate binary entities; this method decodes only the selected root.
+        @par Example
+        Pass getXmlMessageText(message) to an operation's deserializeXmlRequest() for retained XML values.
+        @since %WSDL 0.5.8
+    */
+    static string getXmlMessageText(hash<auto> message) {
+        *string charset = getContentTypeParameter(message."content-type", "charset");
+        return WsdlResourceHelper::xmlText(binary(message.body ?? ""),
+            WsdlLibPriv::mimeCharset(message.body, charset));
+    }
+
     #! decodes a normalized SOAP/XML message or preserves explicitly selected HTTP MIME content
     /** @param msg a message returned by parseMultiPartSOAPMessage()
         @param mime_content True when the selected HTTP binding declares mime:content
@@ -1823,10 +1769,7 @@ public class WSDLLib {
         } else if (!mime_content && (WSDLLib::isSOAPMessage(msg) || WSDLLib::isMtomMessage(msg))) {
             hash<auto> xmldata;
             if (msg.body) {
-                *string charset = getContentTypeParameter(msg."content-type", "charset");
-                string body = WsdlResourceHelper::xmlText(binary(msg.body),
-                    WsdlLibPriv::mimeCharset(msg.body, charset));
-                xmldata = parse_xml(body, XPF_PRESERVE_ORDER | XPF_PRESERVE_WHITESPACE);
+                xmldata = parse_xml(getXmlMessageText(msg), XPF_PRESERVE_ORDER | XPF_PRESERVE_WHITESPACE);
             }
             if (msg.parts) {
                 # For MTOM messages, resolve xop:Include references
@@ -1876,6 +1819,116 @@ public class WSDLLib {
             } else if (xmldata{k}.typeCode() == NT_HASH)
                 WSDLLib::substHref(\xmldata{k}, parts);
         }
+    }
+}
+
+# MIME framing and transfer decoding belong to Qore's Mime module. This helper supplies SOAP root semantics.
+class WsdlMultipartHelper {
+    static hash<auto> read(hash<auto> message, *WsdlMediaType media) {
+        *string boundary;
+        *string start;
+        *WsdlMediaType declared_root;
+        if (media) {
+            if (media.major != "multipart" || media.minor != "related") {
+                throw "SOAP-MESSAGE-ERROR", "SOAP attachments require multipart/related";
+            }
+            boundary = media.parameter("boundary", "SOAP-MESSAGE-ERROR");
+            start = media.parameter("start", "SOAP-MESSAGE-ERROR");
+            *string root_type = media.parameter("type", "SOAP-MESSAGE-ERROR");
+            declared_root = WsdlMediaType::read(root_type);
+            if (!declared_root || declared_root.parameters) {
+                throw "SOAP-MESSAGE-ERROR", "multipart/related requires a type parameter containing a media type/subtype";
+            }
+        } else {
+            # Older callers may supply only Qore's already-parsed transport metadata.
+            if (message."_qore_multipart" != "related") {
+                throw "SOAP-MESSAGE-ERROR", "SOAP attachments require multipart/related";
+            }
+            boundary = message."_qore_multipart_boundary";
+            start = message."_qore_multipart_start";
+        }
+        if (!boundary || boundary.size() > 70 || boundary !~ /^[0-9A-Za-z'()+_,.\/:=? -]*[0-9A-Za-z'()+_,.\/:=?-]\z/) {
+            throw "SOAP-MESSAGE-ERROR", "missing or invalid MIME multipart boundary";
+        }
+        *string start_id;
+        if (exists start) {
+            start_id = identifier(start);
+        }
+        if (message.body.typeCode() != NT_STRING && message.body.typeCode() != NT_BINARY) {
+            throw "SOAP-MESSAGE-ERROR", "multipart message requires a string or binary body";
+        }
+        hash<Mime::MessageInfo> parsed;
+        try {
+            parsed = MultiPartMessage::parseBody(boundary, message.body, False);
+        } catch (hash<ExceptionInfo> error) {
+            if (error.err == "MULTIPART-PARSEBODY-ERROR") {
+                rethrow "SOAP-MESSAGE-ERROR", error.desc;
+            }
+            rethrow;
+        }
+        *hash<Mime::MessageInfo> root;
+        hash<string, hash<Mime::MessageInfo>> parts();
+        list<hash<Mime::MessageInfo>> unidentified();
+        hash<string, bool> seen();
+        foreach hash<Mime::MessageInfo> part in (parsed.part) {
+            foreach string header in ("content-id", "content-type", "content-transfer-encoding") {
+                if (part.hdr.hasKey(header) && part.hdr{header}.typeCode() != NT_STRING) {
+                    throw "SOAP-MESSAGE-ERROR", sprintf("ambiguous or invalid MIME %s header", header);
+                }
+            }
+            *string id;
+            if (part.hdr.hasKey("content-id")) {
+                id = identifier(part.hdr."content-id");
+                if (seen.hasKey(id)) {
+                    throw "SOAP-MESSAGE-ERROR", sprintf("duplicate MIME Content-ID %Y", id);
+                }
+                seen{id} = True;
+            }
+            string content_type = part.hdr."content-type" ?? "text/plain; charset=us-ascii";
+            *WsdlMediaType part_type = WsdlMediaType::read(content_type);
+            if (!part_type) {
+                throw "SOAP-MESSAGE-ERROR", sprintf("invalid MIME part content type %Y", content_type);
+            }
+            foreach string parameter in (keys part_type.parameters) {
+                part_type.parameter(parameter, "SOAP-MESSAGE-ERROR");
+            }
+            part.hdr."content-type" = content_type;
+            string transfer = trim(part.hdr."content-transfer-encoding" ?? "7bit").lwr();
+            try {
+                # Character decoding follows transfer decoding and remains the XML/MIME codec's responsibility.
+                part.body = binary(mime_decode_transfer_data(part.body, transfer, NOTHING, True));
+            } catch (hash<ExceptionInfo> error) {
+                if (error.err == "PROGRAM-INTERRUPTED" || error.err == "THREAD-CANCELLED") {
+                    rethrow;
+                }
+                rethrow "SOAP-MESSAGE-ERROR", sprintf("cannot decode MIME part: %s: %s", error.err, error.desc);
+            }
+            if ((exists start_id && id == start_id) || (!exists start_id && $# == 0)) {
+                if (declared_root && !part_type.matches(declared_root)) {
+                    throw "SOAP-MESSAGE-ERROR", "multipart type parameter conflicts with root Content-Type";
+                }
+                root = part;
+            } else if (exists id) {
+                parts{id} = part;
+            } else {
+                push unidentified, part;
+            }
+        }
+        if (!exists root) {
+            throw "SOAP-MESSAGE-ERROR", "multipart root part is missing";
+        }
+        return {"content-type": root.hdr."content-type", "header": message.header + root.hdr,
+            "body": root.body, "parts": parts, "unidentified_parts": unidentified,
+            "is_mtom": WSDLLib::isMtomMessage({"content-type": root.hdr."content-type"})};
+    }
+
+    private static string identifier(string value) {
+        value = trim(value, " \t");
+        if (value.size() < 3 || !value.startsWith("<") || !value.endsWith(">")
+                || value =~ /[\x00-\x1f\x7f]/ || value.substr(1, -1) =~ /[<>]/) {
+            throw "SOAP-MESSAGE-ERROR", sprintf("invalid MIME Content-ID %Y", value);
+        }
+        return value.substr(1, -1);
     }
 }
 
