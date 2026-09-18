@@ -1,0 +1,99 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires xml
+%requires ../qlib/WSDL.qm
+%requires ../qlib/SoapClient.qm
+%requires ../qlib/SoapHandler.qm
+%requires HttpServer
+%exec-class HttpFormTest
+
+class HttpFormTest inherits QUnit::Test {
+    constructor() : Test("HTTP URL-encoded form bindings", "1.0") {
+        addTestCase("GET query and POST body use the declared verb", \wire());
+        addTestCase("Form decoding validates content type and typed values", \invalid());
+        addTestCase("Source and saved bindings reach real HTTP consumers", \http());
+        set_return_value(main());
+    }
+    private static string source(string verb) {
+        return '<w:definitions xmlns:w="http://schemas.xmlsoap.org/wsdl/" xmlns:h="http://schemas.xmlsoap.org/wsdl/http/"'
+            + ' xmlns:m="http://schemas.xmlsoap.org/wsdl/mime/" xmlns:t="urn:form" xmlns:xs="http://www.w3.org/2001/XMLSchema" targetNamespace="urn:form">'
+            + '<w:message name="In"><w:part name="count" type="xs:int"/><w:part name="label" type="xs:string"/></w:message>'
+            + '<w:message name="Out"><w:part name="result" type="xs:string"/></w:message>'
+            + '<w:portType name="P"><w:operation name="send"><w:input message="t:In"/><w:output message="t:Out"/></w:operation></w:portType>'
+            + '<w:binding name="B" type="t:P"><h:binding verb="' + verb + '"/><w:operation name="send"><h:operation location="/send"/>'
+            + '<w:input><h:urlEncoded/></w:input><w:output><m:mimeXml part="result"/></w:output>'
+            + '</w:operation></w:binding><w:service name="S"><w:port name="Endpoint" binding="t:B">'
+            + '<h:address location="http://example.invalid/"/></w:port></w:service></w:definitions>';
+    }
+    private wire() {
+        foreach string verb in ("GET", "POST") {
+            WebService ws(source(verb));
+            foreach WSOperation op in (ws.getOperation("send"), Serializable::deserialize(ws.serialize()).getOperation("send"),
+                    Serializable::deserialize(ws.getOperation("send").serialize())) {
+                foreach string label in ("A & B+c/=", "Příliš", "") {
+                    hash<auto> value = {"count":17, "label":label};
+                    hash<auto> msg = op.serializeRequest(value);
+                    assertEq(verb, msg.method);
+                    if (verb == "POST") {
+                        assertEq("/send", msg.path);
+                        assertEq("application/x-www-form-urlencoded", msg.hdr."Content-Type");
+                        assertEq({"count":"17", "label":label == "" ? NOTHING : label}, mime_parse_form_urlencoded_string(msg.body));
+                        assertEq(value, op.deserializeRequest({"body":msg.body,
+                            "content-type":"application/x-www-form-urlencoded"}));
+                    } else {
+                        assertFalse(exists msg.body);
+                        assertEq(value, op.deserializeRequestPath(msg.path));
+                        assertEq({"count":"17", "label":label == "" ? NOTHING : label}, mime_parse_form_urlencoded_string(substr(msg.path, 6)));
+                    }
+                }
+            }
+        }
+    }
+    private invalid() {
+        WSOperation op = new WebService(source("POST")).getOperation("send");
+        assertThrows("SOAP-DESERIALIZATION-ERROR", \op.deserializeRequest(), ({"body":"count=17&label=ok"},));
+        assertThrows("SOAP-MESSAGE-ERROR", \op.deserializeRequest(),
+            ({"body":"count=17&label=ok", "content-type":"text/plain"},));
+        assertThrows("SOAP-DESERIALIZATION-ERROR", \op.deserializeRequest(),
+            ({"body":"count=bad&label=ok", "content-type":"application/x-www-form-urlencoded"},));
+    }
+    private http() {
+        foreach string verb in ("GET", "POST") {
+            foreach bool saved in (False, True) {
+                WebService ws(source(verb));
+                if (saved) {
+                    ws = Serializable::deserialize(ws.serialize());
+                }
+                HttpServer server();
+                on_exit server.stop();
+                SoapHandler handler(new PermissiveAuthenticator());
+                server.setDefaultHandler("form", handler);
+                Queue received();
+                code<auto(hash<auto>, auto)> callback = auto sub(hash<auto> cx, auto value) {
+                    received.push({"value":value, "method":cx.http_header.method, "body":cx.http_body, "path":cx.raw_path});
+                    return {"result":"accepted"};
+                };
+                handler.addMethod(ws, ws.getOperation("send"), callback, NOTHING, NOTHING, NOTHING, NOTHING, NOTHING, NOTHING, "B");
+                server.addListener(0);
+                SoapClient client({"wsdl":ws, "service":"S", "port":"Endpoint",
+                    "url":sprintf("http://127.0.0.1:%d/", server.getListenerInfo(0).port), "timeout":30000});
+                hash<auto> value = {"count":19, "label":"A & č+"};
+                hash<auto> info;
+                assertEq({"result":"accepted"}, client.callOperation("send", value, NOTHING, \info));
+                hash<auto> actual = received.get(30000);
+                assertEq(value, actual.value);
+                assertEq(verb, actual.method);
+                if (verb == "POST") {
+                    assertEq("/send", actual.path);
+                    assertEq({"count":"19", "label":value.label}, mime_parse_form_urlencoded_string(actual.body));
+                } else {
+                    assertTrue(!actual.body);
+                    assertEq("/send?count=19&label=A%20%26%20%C4%8D%2B", actual.path);
+                }
+            }
+        }
+    }
+}

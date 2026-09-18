@@ -9157,3 +9157,18 @@ astparser pass; audit: 18 Pass / 44 N/A / zero Fail. No C++ changes.
 See [validation](P6-22-validation.json), [audit](audits/P6-22-http-mime.md) and
 [implemented design](../../design/wsdl-http-mime.md). Full binding grammar,
 the remaining HTTP/MIME matrix and pinned CXF replay remain in P6, followed by P7–P9.
+
+
+## P6-23: HTTP form placement and URI encoding ownership
+
+`http:urlEncoded` POST uses a typed form body; GET retains query parameters.
+HTTP-bound SoapClient uses HTTPClient pre-encoded URL mode so reserved characters
+and Unicode reach the peer after exactly one encoding pass. Source, saved-service
+and detached-operation tests cover both forms, invalid types and empty values.
+Four real local exchanges assert typed callbacks and raw request targets.
+The affected gate passes 11 suites / 144 cases / 3,082 reported assertions; the
+SOAP comparator suite intentionally catches its negative assertions. Docs and
+astparser pass; audit: 18 Pass / 44 N/A / zero Fail. See
+[validation](P6-23-validation.json) and [audit](audits/P6-23-http-form.md).
+The remaining binding grammar/HTTP/MIME and pinned CXF matrix remain P6 work,
+followed by P7–P9; this increment is not a phase-completion claim.

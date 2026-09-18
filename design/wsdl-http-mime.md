@@ -25,3 +25,19 @@ that body must not become a successful MIME value.
 `test/wsdl-mimexml-parts.qtest` covers independent selections, malformed names,
 omitted-part behavior, saved metadata, exact wire values and local HTTP success
 and failure. Existing SOAP version/fault tests cover the SOAP-specific path.
+
+## URL-encoded requests
+
+`http:urlEncoded` with POST serializes all message parts to an
+`application/x-www-form-urlencoded` body. The media type has no charset parameter;
+form text is encoded as UTF-8 bytes before percent encoding. GET places the same
+part names and lexical values in the query. SoapHandler chooses body decoding for
+POST and path decoding for GET, then applies the selected message's type codecs.
+This implements [WSDL 1.1 section 4.6](https://www.w3.org/TR/2001/NOTE-wsdl-20010315#_http:urlEncoded).
+
+An HTTP-bound SoapClient enables HTTPClient's pre-encoded URL mode because the
+binding has already percent-encoded its path substitutions and query values.
+This preserves reserved delimiters and Unicode without a second encoding pass.
+A GET argument `{"label": "A & č+"}` therefore contains
+`label=A%20%26%20%C4%8D%2B` in the request target; the corresponding POST sends it
+in the body. The same behavior applies after saved-service reconstruction.
