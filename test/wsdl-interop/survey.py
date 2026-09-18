@@ -214,9 +214,24 @@ class WorkerProcessError(subprocess.CalledProcessError):
         return message
 
 
-def run_worker(cases, cache, qore="qore", *, preserve_types=False):
+def validate_worker_timeout(seconds):
+    """Keep the subprocess deadline finite and bounded, including for API callers."""
+    if type(seconds) is not int or not 1 <= seconds <= 3600:
+        raise ValueError("worker timeout must be an integer from 1 to 3600 seconds")
+    return seconds
+
+
+def parse_worker_timeout(value):
+    try:
+        return validate_worker_timeout(int(value))
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(str(error)) from error
+
+
+def run_worker(cases, cache, qore="qore", *, preserve_types=False, worker_timeout=60):
     """Run one bounded offline worker; cleanup happens on success, failure and cancellation."""
     validate_cases(cases)
+    validate_worker_timeout(worker_timeout)
     if type(preserve_types) is not bool:
         raise ValueError("invalid worker preserve_types: expected boolean")
     if not isinstance(cache, dict) or any(not isinstance(k, str) or not isinstance(v, str) for k, v in cache.items()):
@@ -226,7 +241,7 @@ def run_worker(cases, cache, qore="qore", *, preserve_types=False):
         manifest.write_text(json.dumps({"cases": cases, "cache": cache, "preserve_types": preserve_types}))
         try:
             run = subprocess.run([qore, "--enable-debug", str(Path(__file__).with_name("probe.qr")),
-                                  str(manifest)], text=True, capture_output=True, timeout=60, check=True)
+                                  str(manifest)], text=True, capture_output=True, timeout=worker_timeout, check=True)
         except subprocess.CalledProcessError as error:
             raise WorkerProcessError(error.returncode, error.cmd, error.output, error.stderr) from error
     if run.stderr.strip():
@@ -272,6 +287,8 @@ def main():
     cli.add_argument("--catalog", type=Path, help="checksum-verified offline import catalog")
     cli.add_argument("--preserve-types", action="store_true",
                      help="retain selected XSD types during decoding (default: legacy native projection)")
+    cli.add_argument("--worker-timeout", type=parse_worker_timeout, default=60,
+                     help="Qore worker deadline in seconds, 1–3600 (default: 60)")
     args = cli.parse_args()
     corpus = args.corpus.resolve()
     cases = inventory(corpus, args.soap_version)
@@ -285,7 +302,8 @@ def main():
             if uri in cache and cache[uri] != content:
                 raise ValueError(f"catalog conflicts with corpus resource: {uri}")
             cache[uri] = content
-    rows = run_worker(cases, cache, args.qore, preserve_types=args.preserve_types)
+    rows = run_worker(cases, cache, args.qore, preserve_types=args.preserve_types,
+                      worker_timeout=args.worker_timeout)
     result = examine(corpus, cases, rows, catalog)
     result["catalog_sha256"] = dict(catalog.sha256) if catalog is not None else {}
     sources = sorted({Path(c["wsdl"]) for c in cases}

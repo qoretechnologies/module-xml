@@ -9126,3 +9126,20 @@ outcomes and six reports retain semantic results. Docs/parser checks pass;
 audit: 18 Pass / 44 N/A / zero Fail. See [evidence](header-metadata-evidence.md),
 [validation](P6-19-validation.json) and [audit](audits/P6-19-header-metadata.md).
 P6–P9 remain open; headerfault handling is next.
+
+
+## P6-20/P6-21: declared header and body fault values
+
+The installed Qore fix passes the standalone forward typed-list repro and all
+saved-headerfault checks. The combined gate passes 26 suites / 505 cases /
+10,221 reported assertions. Body/header tests cover native/retained values,
+schema/part selection, imports, saved graphs, identity constraints and real
+client/server faults. All 16 corpus commands meet expected outcomes and all six
+semantic reports retain prior results apart from version metadata.
+
+After two deadline failures under concurrent local builds, the user approved a
+configurable bounded worker timeout. The default remains 60 seconds; the final
+unchanged corpus run used 180 seconds. Coverage/survey tests pass 17/19 cases;
+docs/parser checks pass; audit: 18 Pass / 44 N/A / zero Fail. See
+[evidence](headerfaults-evidence.md) and [validation](P6-20-validation.json).
+P6 binding grammar, HTTP/MIME and CXF replay remain open, followed by P7–P9.

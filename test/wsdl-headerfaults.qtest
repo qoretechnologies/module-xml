@@ -1,0 +1,306 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires xml
+%requires ../qlib/WSDL.qm
+%requires ../qlib/SoapClient.qm
+%requires ../qlib/SoapHandler.qm
+%requires HttpServer
+%exec-class HeaderFaultTest
+
+class HeaderFaultTest inherits QUnit::Test {
+    constructor() : Test("Declared SOAP header faults", "1.0") {
+        addTestCase("Headerfault descriptions retain independent owned metadata and values", \values());
+        addTestCase("Malformed headerfault descriptions reject before use", \invalid());
+        addTestCase("Selection distinguishes directions and ambiguous imported names", \selection());
+        addTestCase("Manual and saved headerfault descriptions validate nesting", \descriptors());
+        addTestCase("Detached graphs own imported headerfault-only messages", \imported());
+        addTestCase("Local headerfault namespace declarations retain declaration context", \scopes());
+        addTestCase("Explicit fault decoding validates envelopes and preserves literal XML", \decoding());
+        addTestCase("SoapHandler sends declared header faults to SoapClient", \http());
+        set_return_value(main());
+    }
+    private static string source(bool soap12 = False, bool rpc = False, bool encoded = False) {
+        string text = ReadOnlyFile::readTextFile(get_script_dir() + "/wsdl-interop/regressions/fault-bindings/literal.wsdl");
+        string fault = '<s:headerfault message="t:Failure" part="problem" use="'
+            + (encoded ? 'encoded" namespace="urn:header-fault" encodingStyle="' + SOAP_ENCODING : 'literal') + '"/>';
+        if (encoded) {
+            text = replace(text, '<w:part name="problem" element="t:Token"/>', '<w:part name="problem" type="xs:int"/>');
+        }
+        string header = '<s:header message="t:H" part="token" use="literal">' + fault + '</s:header>';
+        text = replace(text, '<w:input><s:body', '<w:input>' + header + '<s:body');
+        text = replace(text, '<w:output><s:body', '<w:output>' + header + '<s:body');
+        if (rpc) {
+            text = replace(text, 'style="document"', 'style="rpc"');
+        }
+        return soap12 ? replace(text, SOAP_11_NS, SOAP_12_NS) : text;
+    }
+    private static hash<SoapHeaderFaultInfo> info(bool request_header = True) {
+        return <SoapHeaderFaultInfo>{"message": "Failure", "part": "problem", "value": 71, "request_header": request_header};
+    }
+    private check(string wire, bool soap12, bool encoded = False) {
+        string env = soap12 ? SOAP_12_ENV : SOAP_11_ENV;
+        hash<auto> envelope = XsdBase::expandElementNamespaces(parse_xml(wire)){'{' + env + '}Envelope'};
+        hash<auto> header = envelope{'{' + env + '}Header'};
+        string part = encoded ? '{urn:header-fault}problem' : '{urn:parts}Token';
+        assertEq((part,), keys header);
+        assertEq("71", header{part}."^value^" ?? header{part});
+        hash<auto> body = envelope{'{' + env + '}Body'};
+        assertEq(('{' + env + '}Fault',), keys body);
+        hash<auto> fault = body.firstValue();
+        assertFalse(fault.hasKey(soap12 ? '{' + env + '}Detail' : '{}detail'));
+        if (soap12) {
+            assertEq("bad header", fault{'{' + env + '}Reason'}{'{' + env + '}Text'});
+        } else {
+            assertEq("bad header", fault{'{}faultstring'});
+        }
+        if (encoded) {
+            assertEq(SOAP_ENCODING, header{part}."^attributes^"."soapenv:encodingStyle");
+        }
+    }
+    private values() {
+        foreach bool soap12 in (False, True) {
+            foreach bool rpc in (False, True) {
+                foreach bool encoded in (False, True) {
+                    WebService ws(source(soap12, rpc, encoded));
+                    foreach WSOperation op in (ws.getOperation("exchange"), Serializable::deserialize(ws.serialize()).getOperation("exchange"),
+                            Serializable::deserialize(ws.getOperation("exchange").serialize())) {
+                        foreach bool request_header in (False, True) {
+                            BindingMessageHeaderDescription fault = cast<SoapBinding>(op.getBinding()).getHeaderFaultDescription("Failure", "problem", request_header);
+                            assertEq("{urn:parts}Failure", fault.msg.getExpandedName());
+                            assertEq(encoded, fault.encoded);
+                            assertEq((), fault.getHeaderFaults());
+                            string wire = op.serializeHeaderFault(info(request_header), "bad header").body;
+                            check(wire, soap12, encoded);
+                            assertEq(71, op.deserializeHeaderFault(wire, "Failure", "problem", NOTHING, request_header));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    private invalid() {
+        string text = source();
+        foreach hash<string, string> change in (
+                {"from": '<s:headerfault message="t:Failure"', "to": '<s:headerfault message="t:Missing"'},
+                {"from": 'part="problem"', "to": 'part="absent"'},
+                {"from": 'part="problem"', "to": ''},
+                {"from": '<s:headerfault message="t:Failure"', "to": '<s:headerfault'},
+                {"from": 'part="problem" use="literal"', "to": 'part="problem" use="invalid"'},
+                {"from": 'part="problem" use="literal"', "to": 'part="problem" use="encoded"'},
+                {"from": 'part="problem" use="literal"', "to": 'part="problem" use="literal" extra="x"'},
+                {"from": '<s:headerfault ', "to": '<s:headerfault xmlns:s="urn:wrong" '},
+                {"from": 'part="problem" use="literal"/>', "to": 'part="problem" use="literal"><s:headerfault message="t:Failure" part="problem" use="literal"/></s:headerfault>'},
+                {"from": 'part="problem" use="literal"/>', "to": 'part="problem" use="literal">unexpected</s:headerfault>'},
+                {"from": '</s:header>', "to": '<s:body use="literal"/></s:header>'}) {
+            assertThrows("WSDL-ERROR", sub() { new WebService(replace(text, change.from, change.to)); });
+        }
+        WSOperation op = new WebService(text).getOperation("exchange");
+        foreach auto value in (NOTHING, "invalid") {
+            hash<SoapHeaderFaultInfo> fault = info();
+            fault.value = value;
+            assertThrows("SOAP-SERIALIZATION-ERROR", \op.serializeHeaderFault(), (fault, "bad header"));
+        }
+        check(op.serializeHeaderFault(info(), "bad header").body, False);
+    }
+    private selection() {
+        string text = source();
+        text = replace(text, '<w:output><s:header message="t:H" part="token" use="literal"><s:headerfault message="t:Failure" part="problem" use="literal"/></s:header>', '<w:output>');
+        WSOperation op = new WebService(text).getOperation("exchange");
+        assertThrows("WSDL-BINDING-ERROR", \op.serializeHeaderFault(), (info(False), "bad header"));
+        hash<SoapHeaderFaultInfo> fault = info();
+        fault.message = "H";
+        assertThrows("WSDL-BINDING-ERROR", \op.serializeHeaderFault(), (fault, "bad header"));
+        fault.message = "{urn:parts}Failure";
+        check(op.serializeHeaderFault(fault, "bad header").body, False);
+        # Repeated equivalent declarations select the same wire contract.
+        text = replace(source(), '</s:header>', '<s:headerfault message="t:Failure" part="problem" use="literal" namespace="urn:hint"/></s:header>');
+        check(new WebService(text).getOperation("exchange").serializeHeaderFault(info(), "bad header").body, False);
+        # A one-way operation can still report a request-header failure without an output message.
+        text = replace(source(), '<w:output message="t:M"/>', "");
+        text = replace(text, '<w:fault name="Rejected" message="t:Failure"/>', "");
+        text = replace(text, '<w:fault name="Rejected"><s:fault name="Rejected" use="literal"/></w:fault>', "");
+        text =~ s/<w:output>.*?<\/w:output>//s;
+        check(new WebService(text).getOperation("exchange").serializeHeaderFault(info(), "bad header").body, False);
+    }
+    private descriptors() {
+        WebService ws(source());
+        BindingMessageHeaderDescription fault("problem", False, ws.messages.Failure);
+        BindingMessageHeaderDescription header("token", False, ws.messages.H, NOTHING, NOTHING, (fault,));
+        assertTrue(header.getHeaderFaults()[0] === fault);
+        BindingMessageHeaderDescription restored = Serializable::deserialize(header.serialize());
+        assertEq("Failure", restored.getHeaderFaults()[0].msg.name);
+        assertThrows("WSDL-ERROR", sub() { new BindingMessageHeaderDescription("problem", False, ws.messages.Failure, NOTHING, NOTHING, (header,)); });
+        hash<SerializationInfo> old = header.serializeToData();
+        foreach string key in (keys old._index) {
+            if (old._index{key}.hasKey("_class_data") && old._index{key}._class_data.hasKey("WSDL::BindingMessageHeaderDescription")) {
+                remove old._index{key}._class_data."WSDL::BindingMessageHeaderDescription".headerfaults;
+            }
+        }
+        assertEq((), Serializable::deserialize(old).getHeaderFaults());
+        hash<SerializationInfo> cyclic = header.serializeToData();
+        auto references;
+        foreach string key in (keys cyclic._index) {
+            if (cyclic._index{key}.hasKey("_class_data") && cyclic._index{key}._class_data.hasKey("WSDL::BindingMessageHeaderDescription")
+                    && cyclic._index{key}._class_data."WSDL::BindingMessageHeaderDescription".part == "token") {
+                references = cyclic._index{key}._class_data."WSDL::BindingMessageHeaderDescription".headerfaults;
+            }
+        }
+        assertTrue(exists references);
+        foreach string key in (keys cyclic._index) {
+            if (cyclic._index{key}.hasKey("_class_data") && cyclic._index{key}._class_data.hasKey("WSDL::BindingMessageHeaderDescription")
+                    && cyclic._index{key}._class_data."WSDL::BindingMessageHeaderDescription".part == "problem") {
+                cyclic._index{key}._class_data."WSDL::BindingMessageHeaderDescription".headerfaults = references;
+            }
+        }
+        assertThrows("DESERIALIZATION-ERROR", \Serializable::deserialize(), (cyclic,));
+        foreach auto bad in (1, (1,), (header,)) {
+            hash<SerializationInfo> data = header.serializeToData();
+            int changed = 0;
+            foreach string key in (keys data._index) {
+                if (data._index{key}.hasKey("_class_data") && data._index{key}._class_data.hasKey("WSDL::BindingMessageHeaderDescription")) {
+                    data._index{key}._class_data."WSDL::BindingMessageHeaderDescription".headerfaults = bad;
+                    ++changed;
+                }
+            }
+            assertTrue(changed > 0);
+            assertThrows("DESERIALIZATION-ERROR", \Serializable::deserialize(), (data,));
+        }
+    }
+    private imported() {
+        string directory = get_script_dir() + "/wsdl-interop/regressions/header-identities/";
+        string text = replace(source(), '<w:types>', '<w:import namespace="urn:header:a" location="a.wsdl"/>'
+            + '<w:import namespace="urn:header:b" location="b.wsdl"/><w:types>');
+        text = replace(text, '<w:fault name="Rejected" message="t:Failure"/>', "");
+        text = replace(text, '<w:fault name="Rejected"><s:fault name="Rejected" use="literal"/></w:fault>', "");
+        text = replace(text, '<s:headerfault message="t:Failure" part="problem" use="literal"/>',
+            '<s:headerfault xmlns:a="urn:header:a" message="a:H" part="token" use="literal"/>'
+            + '<s:headerfault xmlns:b="urn:header:b" message="b:H" part="token" use="literal"/>');
+        WebService ws(text, {"document_location":"https://example.invalid/root.wsdl", "async_only":True,
+            "xsd_cache":{"https://example.invalid/a.wsdl":ReadOnlyFile::readTextFile(directory + "a.wsdl"),
+                "https://example.invalid/b.wsdl":ReadOnlyFile::readTextFile(directory + "b.wsdl")}});
+        WSOperation original = ws.getOperation("exchange");
+        remove ws;
+        foreach WSOperation op in (original, Serializable::deserialize(original.serialize())) {
+            assertTrue(!op.getFaultMessages());
+            assertThrows("WSDL-BINDING-ERROR", sub() {
+                op.serializeHeaderFault(<SoapHeaderFaultInfo>{"message":"H", "part":"token", "value":71}, "bad header");
+            });
+            foreach string suffix in ("a", "b") {
+                hash<auto> wire = op.serializeHeaderFault(<SoapHeaderFaultInfo>{
+                    "message":"{urn:header:" + suffix + "}H", "part":"token", "value":71}, "bad header");
+                hash<auto> header = XsdBase::expandElementNamespaces(parse_xml(wire.body))
+                    {'{' + SOAP_11_ENV + '}Envelope'}{'{' + SOAP_11_ENV + '}Header'};
+                assertEq("71", header{'{urn:header:' + suffix + '}Token'});
+            }
+        }
+    }
+    private scopes() {
+        foreach bool soap12 in (False, True) {
+            string uri = soap12 ? SOAP_12_NS : SOAP_11_NS;
+            foreach string prefix in ("local:", "") {
+                string text = replace(source(soap12), '<s:headerfault ', '<' + prefix + 'headerfault xmlns'
+                    + (prefix ? ':local' : '') + '="' + uri + '" xmlns:f="urn:parts" ');
+                text = replace(text, 'message="t:Failure" part="problem"', 'message="f:Failure" part="problem"');
+                check(new WebService(text).getOperation("exchange").serializeHeaderFault(info(), "bad header").body, soap12);
+            }
+        }
+    }
+    private decoding() {
+        foreach bool soap12 in (False, True) {
+            WSOperation op = new WebService(source(soap12)).getOperation("exchange");
+            string wire = op.serializeHeaderFault(info(), "bad header").body;
+            string lexical = replace(wire, ">71<", ">071<");
+            XsdXmlValue xml = op.deserializeXmlHeaderFault(lexical, "Failure", "problem");
+            assertEq("{urn:parts}Token", xml.getExpandedName());
+            assertEq("071", xml.getElementData()."^value^");
+            hash<SoapHeaderFaultInfo> retained = info();
+            retained.value = xml;
+            string forwarded = op.serializeHeaderFault(retained, "bad header").body;
+            assertTrue(forwarded.contains(">071<"));
+            assertEq(71, op.deserializeHeaderFault(forwarded, "Failure", "problem"));
+            foreach string bad in (
+                    replace(wire, ">71<", ">invalid<"),
+                    replace(wire, 'xmlns:ns="urn:parts"', 'xmlns:ns="urn:wrong"'),
+                    replace(wire, '<ns:Token>71</ns:Token>', ''),
+                    replace(wire, '<ns:Token>71</ns:Token>', '<ns:Token>71</ns:Token><ns:Token>72</ns:Token>'),
+                    replace(wire, '<soapenv:Body>', '<soapenv:Header/><soapenv:Body>'),
+                    replace(wire, '</soapenv:Body>', '</soapenv:Body><soapenv:Body/>'),
+                    replace(wire, '</soapenv:Envelope>', '<soapenv:Header/></soapenv:Envelope>'),
+                    replace(wire, '<soapenv:Header>', '<soapenv:Header>unexpected'),
+                    replace(wire, '<soapenv:Body>', '<soapenv:Body>unexpected'),
+                    replace(wire, '<soapenv:Fault>', '<soapenv:Other>'),
+                    replace(wire, soap12 ? SOAP_12_ENV : SOAP_11_ENV, soap12 ? SOAP_11_ENV : SOAP_12_ENV)) {
+                # Keep the wrong-root-body case well formed.
+                bad = replace(bad, '</soapenv:Fault>', bad.contains('<soapenv:Other>') ? '</soapenv:Other>' : '</soapenv:Fault>');
+                assertThrows("SOAP-DESERIALIZATION-ERROR", \op.deserializeHeaderFault(), (bad, "Failure", "problem"));
+            }
+            assertEq(71, op.deserializeHeaderFault(wire, "Failure", "problem"));
+            string nil_source = replace(source(soap12), '<xs:element name="Token" type="xs:int"/>',
+                '<xs:element name="Token" type="xs:int" nillable="true"/>');
+            WSOperation nullable = new WebService(nil_source).getOperation("exchange");
+            hash<SoapHeaderFaultInfo> nil_info = info();
+            nil_info.value = NULL;
+            string nil_wire = nullable.serializeHeaderFault(nil_info, "bad header").body;
+            assertTrue(nil_wire.contains('xsi:nil="true"'));
+            nil_info.value = nullable.deserializeHeaderFault(nil_wire, "Failure", "problem");
+            assertNothing(nil_info.value);
+            assertNothing(nullable.deserializeHeaderFault(nullable.serializeHeaderFault(nil_info, "bad header").body,
+                "Failure", "problem"));
+            string base_source = replace(source(soap12), '<xs:element name="Token" type="xs:int"/>',
+                '<xs:element name="Token" type="xs:integer"/>');
+            WSOperation typed = new WebService(base_source).getOperation("exchange");
+            string typed_wire = replace(typed.serializeHeaderFault(info(), "bad header").body,
+                '<ns:Token>', '<ns:Token xsi:type="xsd:int">');
+            hash<auto> captured = typed.deserializeHeaderFault(typed_wire, "Failure", "problem", NOTHING, True, True);
+            assertEq(71, captured."^val^");
+            assertEq(XSD_NS, captured."^type^".getNamespaceUri());
+            assertEq("int", captured."^type^".getLocalName());
+            WSOperation encoded = new WebService(source(soap12, False, True)).getOperation("exchange");
+            assertThrows("WSDL-BINDING-ERROR", \encoded.deserializeXmlHeaderFault(),
+                (encoded.serializeHeaderFault(info(), "bad header").body, "Failure", "problem"));
+        }
+    }
+    private http() {
+        foreach bool soap12 in (False, True) {
+            foreach bool body_fault in (False, True) {
+                string text = source(soap12);
+                if (body_fault) {
+                    text = replace(text, 'name="Rejected"', 'name="SOAP-HEADER-FAULT"');
+                }
+                WebService ws = Serializable::deserialize(new WebService(text).serialize());
+                HttpServer server();
+                on_exit server.stop();
+                SoapHandler handler(new PermissiveAuthenticator());
+                server.setDefaultHandler("headerfault", handler);
+                Queue received();
+                code<auto(hash<auto>, auto)> callback = auto sub(hash<auto> cx, auto value) {
+                    received.push(value);
+                    throw SOAP_HEADER_FAULT, "bad header", body_fault ? 71 : info();
+                };
+                handler.addMethod(ws, ws.getOperation("exchange"), callback, NOTHING, NOTHING, NOTHING, "S", NOTHING, NOTHING, "B");
+                server.addListener(0);
+                SoapClient client({"wsdl": ws, "service": "S", "port": "Endpoint",
+                    "url": sprintf("http://127.0.0.1:%d/headerfault", server.getListenerInfo(0).port), "timeout": 30000});
+                hash<auto> call_info;
+                assertThrows("SOAP-SERVER-FAULT-RESPONSE", sub() {
+                    client.callOperation("exchange", {"left":1, "right":2, "H":{"token":7}}, NOTHING, \call_info);
+                });
+                assertEq({"left":1, "right":2, "H":{"token":7}}, received.get(30000));
+                if (body_fault) {
+                    # A declared application fault with the reserved name keeps its Body detail contract.
+                    string env = soap12 ? SOAP_12_ENV : SOAP_11_ENV;
+                    hash<auto> envelope = XsdBase::expandElementNamespaces(parse_xml(call_info."response-body")){'{' + env + '}Envelope'};
+                    hash<auto> fault = envelope{'{' + env + '}Body'}{'{' + env + '}Fault'};
+                    assertEq("71", fault{soap12 ? '{' + env + '}Detail' : '{}detail'}{'{urn:parts}Token'});
+                    assertEq(NOTHING, envelope{'{' + env + '}Header'});
+                } else {
+                    check(call_info."response-body", soap12);
+                    assertEq(71, ws.getOperation("exchange").deserializeHeaderFault(call_info."response-body", "Failure", "problem"));
+                }
+            }
+        }
+    }
+}

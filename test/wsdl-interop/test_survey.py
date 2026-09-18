@@ -271,6 +271,41 @@ class SurveyTest(unittest.TestCase):
             self.assertEqual(1, len(manifests))
             self.assertFalse(manifests[0].parent.exists())
 
+    def test_worker_timeout_bounds_and_cleanup(self):
+        cases = survey.inventory(FIXTURES, "11")
+        for invalid in (0, -1, 3601, True, False, None, "180", 1.0, float("inf"), float("nan")):
+            with self.subTest(invalid=invalid), patch.object(survey.subprocess, "run") as run:
+                with self.assertRaises(ValueError):
+                    survey.run_worker(cases, {}, worker_timeout=invalid)
+                run.assert_not_called()
+        for seconds in (1, 180, 3600):
+            for error in (subprocess.TimeoutExpired("qore", seconds), KeyboardInterrupt()):
+                manifests = []
+
+                def run(command, **kwargs):
+                    manifests.append(Path(command[-1]))
+                    self.assertTrue(manifests[-1].is_file())
+                    self.assertEqual(seconds, kwargs["timeout"])
+                    self.assertTrue(kwargs["check"])
+                    raise error
+
+                with self.subTest(seconds=seconds, error=type(error).__name__):
+                    with patch.object(survey.subprocess, "run", side_effect=run), self.assertRaises(type(error)):
+                        survey.run_worker(cases, {}, worker_timeout=seconds)
+                    self.assertEqual(1, len(manifests))
+                    self.assertFalse(manifests[0].parent.exists())
+
+    def test_worker_timeout_cli_validation(self):
+        for script in ("survey.py", "coverage.py"):
+            for value in ("0", "-1", "3601", "nan", "inf", "1.5", "invalid"):
+                with self.subTest(script=script, value=value):
+                    result = subprocess.run([sys.executable, "-B", str(ROOT / script), "absent-corpus",
+                                             "--output", "unused.json", "--worker-timeout", value],
+                                            text=True, capture_output=True, timeout=10)
+                    self.assertEqual(2, result.returncode)
+                    self.assertIn("--worker-timeout", result.stderr)
+                    self.assertNotIn("Traceback", result.stderr)
+
     def test_failed_worker_retains_diagnostics_and_cleanup(self):
         cases = survey.inventory(FIXTURES, "11")
         with tempfile.TemporaryDirectory(prefix="wsdl-failed-worker-") as directory:

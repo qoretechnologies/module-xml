@@ -230,8 +230,9 @@ def validate_selection(selection: dict, records: dict) -> None:
 
 
 def assess(root: Path, source: dict, selection: dict, catalog: corpus.Catalog, qore: str = "qore",
-           *, preserve_types: bool = False) -> dict:
+           *, preserve_types: bool = False, worker_timeout: int = 60) -> dict:
     """Run all cases and both directions; strict selection is a gate over the complete report."""
+    survey.validate_worker_timeout(worker_timeout)
     cases, records = prepare(root, source)
     validate_selection(selection, records)
     resources = {survey.SOURCE + p.relative_to(root).as_posix(): p.read_bytes() for p in root.rglob("*.xsd")}
@@ -240,7 +241,7 @@ def assess(root: Path, source: dict, selection: dict, catalog: corpus.Catalog, q
             raise ValueError("conflicting corpus resource")
         resources[uri] = data
     rows = survey.run_worker(cases, {uri: data.decode("utf-8") for uri, data in resources.items()}, qore,
-                             preserve_types=preserve_types)
+                             preserve_types=preserve_types, worker_timeout=worker_timeout)
     accounting = survey.stage_accounting(cases, rows)
     indexed = {(r["case"], r.get("file"), r.get("direction"), r["stage"]): r for r in rows}
     jobs, schemas = [], {}
@@ -424,6 +425,8 @@ def main() -> None:
     cli.add_argument("--strict", action="store_true", help="require every selected Qore requirement to pass")
     cli.add_argument("--preserve-types", action="store_true",
                      help="retain selected XSD types during decoding (default: legacy native projection)")
+    cli.add_argument("--worker-timeout", type=survey.parse_worker_timeout, default=60,
+                     help="Qore worker deadline in seconds, 1–3600 (default: 60)")
     args = cli.parse_args()
     root = args.corpus.resolve()
     adjudicate.verify_original_corpus(root)
@@ -431,7 +434,7 @@ def main() -> None:
     if source["unclassified"]:
         raise ValueError("source report contains unclassified disagreements")
     result = assess(root, source, corpus.read_manifest(args.selection), corpus.Catalog(),
-                    preserve_types=args.preserve_types)
+                    preserve_types=args.preserve_types, worker_timeout=args.worker_timeout)
     args.output.write_text(json.dumps(result, indent=2) + "\n")
     print(json.dumps({"scope": result["scope"], "counts": result["counts"], "stages": result["stage_accounting"]["counts"],
                       "failures": len(result["failures"]), "selected_failures": result["selected_failures"]}, indent=2))

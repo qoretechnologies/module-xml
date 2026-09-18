@@ -632,3 +632,13 @@ P6-19 retains concrete header namespace/encoding metadata and validates source,
 manual and saved descriptions. See [header metadata evidence](header-metadata-evidence.md).
 Headerfaults, typed fault consumption, full grammar, HTTP/MIME and CXF remain P6;
 P7 includes header qualification and inherited protocol metadata, followed by P8–P9.
+
+
+P6-20/P6-21 implement owned headerfault declarations, explicit serialization,
+native/retained XML consumption of header and body fault values, and SoapHandler
+headerfault dispatch. The Qore forward-container prerequisite is verified.
+All 26 affected suites and all 16 corpus commands pass their expected gates;
+all six semantic reports are unchanged. The approved configurable worker deadline
+preserves the 60-second default; this full run used 180 seconds. See
+[fault evidence](headerfaults-evidence.md). Remaining binding grammar, HTTP/MIME,
+pinned CXF replay and P7–P9 remain open.

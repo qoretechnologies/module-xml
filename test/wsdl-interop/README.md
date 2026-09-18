@@ -2304,3 +2304,34 @@ and real consumers. `test_wsdl_headers.py` independently observes the metadata
 with pinned WSDL4J. See [evidence](header-metadata-evidence.md),
 [validation](P6-19-validation.json), [audit](audits/P6-19-header-metadata.md) and
 [durable design](../../design/wsdl-soap-header-values.md).
+
+
+## Worker deadlines
+
+`survey.py` and `coverage.py` accept `--worker-timeout SECONDS`. The default is
+60 seconds; an override must be an integer from 1 through 3,600. This bounds the
+Qore worker subprocess and leaves cases, messages, schema checks and expected
+outcomes unchanged. The Python entry points `run_worker()` and `assess()` accept
+the equivalent `worker_timeout` keyword. Invalid values reject before starting
+a worker, and timeout/cancellation still cleans up temporary manifests.
+
+For a full corpus run on a busy shared host:
+
+```sh
+python3 -B test/wsdl-interop/coverage.py /path/to/databinding/examples/6/09 \
+  --strict --preserve-types --worker-timeout 180 --output /tmp/wsdl-coverage.json
+```
+
+Require the output report and inspect its contents when checking a strict run.
+An expected nonzero status for known legacy projection losses alone cannot
+distinguish a completed report from a worker timeout.
+
+
+## Declared fault values (P6-20/P6-21)
+
+`wsdl-headerfaults.qtest` and `wsdl-body-fault-values.qtest` cover declaration
+ownership, selection, serialization, explicit native/retained XML decoding,
+saved-graph validation and consumers. The installed Qore forward-container fix
+satisfies the saved-cycle gate. The full corpus completes with the approved explicit
+180-second worker deadline; its semantic results are unchanged.
+See [evidence](headerfaults-evidence.md) and [validation](P6-20-validation.json).

@@ -50,8 +50,37 @@ map means the binding declares no faults. Named serialization from a legacy grap
 requires reloading its WSDL. Generic faults without detail remain available when
 protocol-version metadata is present.
 
-The existing decoder still raises `SOAP-SERVER-FAULT-RESPONSE` with the raw fault
-hash. Concrete descriptions do not change that exception contract or add a typed
-fault-return API.
+Ordinary response decoding raises `SOAP-SERVER-FAULT-RESPONSE` with the raw
+fault hash. Explicit `WSOperation::deserializeFault(xml, fault, binding,
+preserve_types)` selects a declared fault by WSDL name and decodes its single
+application detail part. `deserializeXmlFault()` retains a literal element's
+lexical values and namespace context after schema validation. This works for
+RPC operations because detail is document style. The name must be present in
+the selected concrete binding; reason strings and fault codes do not infer a
+schema. Imported and detached saved operations use their owned fault messages.
+
+The explicit APIs require a matching SOAP envelope version and one Fault in Body.
+The version-specific detail container must occur once and contain the declared
+single part. Literal details match expanded element names, including substitution
+members. Encoded details match the fault namespace and part, consume the supported
+block-local codec attribute, and use the declared type. Retained XML requires a
+literal element-based part. Generic faults without application detail continue
+through the raw exception API rather than a declared-detail decoder.
+
+Each explicit operation decode owns identity and native-type scopes. An unrelated
+header cannot supply an ID to satisfy an IDREF within the fault detail. Native
+subtype/element capture follows the same opt-in policy as ordinary messages;
+retained values can be passed back to `serializeFault()` for lexical forwarding.
+Envelope extraction is shared with headerfault decoding; it preserves Header
+order, duplicate-container detection and qualified header checks. Full protocol
+code/reason/role processing is separate from explicit application-part decoding.
+
+For example:
+
+```qore
+auto rejection = operation.deserializeFault(call_info."response-body", "OrderRejected");
+XsdXmlValue detail = operation.deserializeXmlFault(call_info."response-body", "OrderRejected");
+hash<auto> forwarded = operation.serializeFault("OrderRejected", "Forwarded partner rejection", detail);
+```
 
 The binding rules follow [WSDL 1.1 section 3.6](https://www.w3.org/TR/2001/NOTE-wsdl-20010315#_soap:fault).

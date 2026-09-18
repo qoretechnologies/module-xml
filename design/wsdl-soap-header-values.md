@@ -87,3 +87,35 @@ validate part membership and encoded type/codec compatibility. These metadata
 checks do not make shared descriptors mutable during operation execution.
 `test/wsdl-header-metadata.qtest` covers independent metadata, schema conversion,
 manual/saved graphs, local namespace declarations and real HTTP consumers.
+
+Headerfault declarations are owned child descriptors of their ordinary header.
+Their message, part, use, namespace and encoding metadata are independent of the
+parent and of ordinary output headers. Nested headerfault declarations are not
+valid, and their wire blocks must be namespace-qualified. Imported error messages
+remain reachable through detached operation handles even when no abstract body
+fault references them. Old standalone graphs without this child metadata expose
+an empty list; reloading the source WSDL supplies declarations missing from them.
+
+`SoapHeaderFaultInfo` selects a declared error message/part and supplies its schema
+value. Its `request_header` field selects input declarations by default, or output
+declarations when false. `WSOperation::serializeHeaderFault()` emits only that
+headerfault block in Header with a generic Fault in Body and no application detail.
+Local message names are accepted when unambiguous; expanded names distinguish
+imports. Repeated descriptions with the same effective wire contract are
+compatible; conflicting selections raise a binding error.
+
+`deserializeHeaderFault()` explicitly decodes the selected block from a fault
+envelope and supports native subtype capture. `deserializeXmlHeaderFault()`
+returns its schema-validated literal element with lexical values and namespace
+context intact. Encoding-specific XML retention is not supported. The envelope
+must match the selected binding, contain one Header before Body, and contain one
+Fault. The selected block must appear exactly once. Unknown qualified header
+blocks remain outside the selected-value result. SOAP 1.2 Fault must be the sole
+Body entry; SOAP 1.1 envelope extensions after Body remain allowed.
+
+A SoapHandler callback can throw `SOAP_HEADER_FAULT` with `SoapHeaderFaultInfo` as
+its exception argument. A declared application fault with that exact name takes
+precedence. SoapClient keeps its ordinary fault exception; applications can pass
+`call_info["response-body"]` to the explicit decode methods. Ordinary output
+header descriptions and shared operation metadata are not changed during fault
+conversion. All public operation boundaries own per-call identity/type scopes.

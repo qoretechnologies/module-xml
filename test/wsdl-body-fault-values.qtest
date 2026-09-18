@@ -1,0 +1,230 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires xml
+%requires ../qlib/WSDL.qm
+%requires ../qlib/SoapClient.qm
+%requires ../qlib/SoapHandler.qm
+%requires HttpServer
+%exec-class BodyFaultValueTest
+
+class BodyFaultValueTest inherits QUnit::Test {
+    constructor() : Test("Declared SOAP body fault values", "1.0") {
+        addTestCase("Native declared fault values use their own binding schema", \values());
+        addTestCase("Independent fault envelopes select detail by expanded name", \independent());
+        addTestCase("Malformed fault envelopes and detail values reject", \invalid());
+        addTestCase("Retained XML preserves lexical values and subtype choices", \retained());
+        addTestCase("Binding selection and absent fault metadata are explicit", \selection());
+        addTestCase("SoapClient preserves raw faults for explicit typed consumption", \http());
+        addTestCase("Fault values preserve substitution roots and document identity checks", \roots());
+        addTestCase("Type-based parts and absent encoded namespaces retain their accessor contract", \partKinds());
+        set_return_value(main());
+    }
+    private static string source(bool soap12 = False, bool rpc = False, bool encoded = False) {
+        string text = ReadOnlyFile::readTextFile(get_script_dir() + "/wsdl-interop/regressions/fault-bindings/literal.wsdl");
+        if (encoded) {
+            text = replace(text, '<w:part name="problem" element="t:Token"/>', '<w:part name="problem" type="xs:int"/>');
+            text = replace(text, '<s:fault name="Rejected" use="literal"/>',
+                '<s:fault name="Rejected" use="encoded" namespace="urn:fault-wire" encodingStyle="' + SOAP_ENCODING + '"/>');
+        }
+        if (rpc) {
+            text = replace(text, 'style="document"', 'style="rpc"');
+        }
+        return soap12 ? replace(text, SOAP_11_NS, SOAP_12_NS) : text;
+    }
+    private static string envelope(bool soap12, string entry, string header = "") {
+        string uri = soap12 ? SOAP_12_ENV : SOAP_11_ENV;
+        string fields = soap12 ? '<e:Code><e:Value>e:Sender</e:Value></e:Code>'
+            + '<e:Reason><e:Text xml:lang="en">Order rejected</e:Text></e:Reason>'
+            : '<faultcode>e:Client</faultcode><faultstring>Order rejected</faultstring>';
+        string detail = soap12 ? 'e:Detail' : 'detail';
+        return '<e:Envelope xmlns:e="' + uri + '" xmlns:p="urn:parts" xmlns:i="' + XSI_NS + '">'
+            + header + '<e:Body><e:Fault>' + fields + '<' + detail + '>' + entry + '</' + detail
+            + '></e:Fault></e:Body></e:Envelope>';
+    }
+    private values() {
+        foreach bool soap12 in (False, True) {
+            foreach bool rpc in (False, True) {
+                foreach bool encoded in (False, True) {
+                    WebService original(source(soap12, rpc, encoded));
+                    foreach WSOperation op in (original.getOperation("exchange"),
+                            Serializable::deserialize(original.serialize()).getOperation("exchange"),
+                            Serializable::deserialize(original.getOperation("exchange").serialize())) {
+                        string wire = op.serializeFault("Rejected", "Order rejected", 71).body;
+                        assertEq(71, op.deserializeFault(wire, "Rejected"));
+                        assertThrows("SOAP-SERVER-FAULT-RESPONSE", \op.deserializeResponse(), (parse_xml(wire),));
+                        if (!encoded) {
+                            XsdXmlValue retained = op.deserializeXmlFault(wire, "Rejected");
+                            assertEq("{urn:parts}Token", retained.getExpandedName());
+                            assertEq(71, op.deserializeFault(op.serializeFault("Rejected", "Forwarded", retained).body, "Rejected"));
+                        } else {
+                            assertThrows("WSDL-BINDING-ERROR", \op.deserializeXmlFault(), (wire, "Rejected"));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    private independent() {
+        foreach bool soap12 in (False, True) {
+            WSOperation op = new WebService(source(soap12)).getOperation("exchange");
+            string wire = envelope(soap12, '<p:Token>071</p:Token>', '<e:Header><x:Advice xmlns:x="urn:advice">retry</x:Advice></e:Header>');
+            assertEq(71, op.deserializeFault(wire, "Rejected"));
+            assertEq(71, op.deserializeFault(replace(replace(wire, 'p:Token', 'alias:Token'), 'xmlns:p=', 'xmlns:alias='), "Rejected"));
+            WSOperation encoded = new WebService(source(soap12, False, True)).getOperation("exchange");
+            string entry = '<a:problem xmlns:a="urn:fault-wire" e:encodingStyle="' + SOAP_ENCODING + '">071</a:problem>';
+            assertEq(71, encoded.deserializeFault(envelope(soap12, entry), "Rejected"));
+            assertThrows("SOAP-DESERIALIZATION-ERROR", \encoded.deserializeFault(),
+                (envelope(soap12, replace(entry, "urn:fault-wire", "urn:wrong")), "Rejected"));
+            assertThrows("SOAP-DESERIALIZATION-ERROR", \encoded.deserializeFault(),
+                (envelope(soap12, replace(entry, SOAP_ENCODING, "urn:unsupported")), "Rejected"));
+        }
+    }
+    private partKinds() {
+        foreach bool soap12 in (False, True) {
+            foreach bool encoded in (False, True) {
+                string text = source(soap12, False, encoded);
+                if (encoded) {
+                    text = replace(text, ' namespace="urn:fault-wire"', '');
+                } else {
+                    text = replace(text, '<w:part name="problem" element="t:Token"/>', '<w:part name="problem" type="xs:int"/>');
+                }
+                WSOperation op = new WebService(text).getOperation("exchange");
+                string wire = op.serializeFault("Rejected", "Order rejected", 71).body;
+                assertEq(71, op.deserializeFault(wire, "Rejected"));
+                assertThrows("WSDL-BINDING-ERROR", \op.deserializeXmlFault(), (wire, "Rejected"));
+            }
+        }
+    }
+    private invalid() {
+        foreach bool soap12 in (False, True) {
+            WSOperation op = new WebService(source(soap12)).getOperation("exchange");
+            foreach string entry in ("", '<p:Token>invalid</p:Token>', '<p:Wrong>71</p:Wrong>',
+                    '<x:Token xmlns:x="urn:wrong">71</x:Token>', '<Token>71</Token>',
+                    '<p:Token>71</p:Token><p:Token>72</p:Token>', '<p:Token>71</p:Token><p:Other/>',
+                    'unexpected<p:Token>71</p:Token>') {
+                string wire = envelope(soap12, entry);
+                assertThrows("SOAP-DESERIALIZATION-ERROR", \op.deserializeFault(), (wire, "Rejected"));
+                assertThrows("SOAP-DESERIALIZATION-ERROR", \op.deserializeXmlFault(), (wire, "Rejected"));
+            }
+            string wire = envelope(soap12, '<p:Token>71</p:Token>');
+            string detail = soap12 ? 'e:Detail' : 'detail';
+            foreach string bad in (
+                    replace(wire, '</e:Body>', '</e:Body><e:Body/>'),
+                    replace(wire, '<e:Body>', '<e:Body>unexpected'),
+                    replace(wire, '<e:Fault>', '<e:Fault>unexpected'),
+                    replace(wire, '</e:Fault>', '</e:Fault><e:Fault/>'),
+                    replace(wire, '<' + detail + '>', '<' + detail + '/><' + detail + '>'),
+                    replace(wire, detail + '>', 'wrongDetail>'),
+                    replace(wire, soap12 ? SOAP_12_ENV : SOAP_11_ENV, soap12 ? SOAP_11_ENV : SOAP_12_ENV),
+                    replace(wire, '<e:Body>', '<e:Header><Token/></e:Header><e:Body>'),
+                    replace(wire, '</e:Body>', '</e:Body><e:Header/>'),
+                    '<?bad data?>' + wire,
+                    '<!DOCTYPE e:Envelope>' + wire) {
+                assertThrows("SOAP-DESERIALIZATION-ERROR", \op.deserializeFault(), (bad, "Rejected"));
+            }
+            assertThrows("SOAP-DESERIALIZATION-ERROR", \op.deserializeFault(),
+                (op.serializeFault(NOTHING, "generic", NOTHING).body, "Rejected"));
+            assertEq(71, op.deserializeFault(wire, "Rejected"));
+        }
+    }
+    private retained() {
+        foreach bool soap12 in (False, True) {
+            string text = replace(source(soap12), '<xs:element name="Token" type="xs:int"/>',
+                '<xs:element name="Token" type="xs:integer" nillable="true"/>');
+            WSOperation op = new WebService(text).getOperation("exchange");
+            XsdXmlValue value = op.deserializeXmlFault(envelope(soap12, '<p:Token>+00071</p:Token>'), "Rejected");
+            assertTrue(value.getXml().contains('+00071'));
+            string forwarded = op.serializeFault("Rejected", "Forwarded", value).body;
+            assertTrue(forwarded.contains('+00071'));
+            assertEq("+00071", op.deserializeFault(forwarded, "Rejected"));
+            foreach auto nil in (NULL, NOTHING) {
+                assertNothing(op.deserializeFault(op.serializeFault("Rejected", "nil", nil).body, "Rejected"));
+            }
+            string wire = envelope(soap12, '<p:Token xmlns:xs="' + XSD_NS + '" i:type="xs:int">71</p:Token>');
+            auto captured = op.deserializeFault(wire, "Rejected", NOTHING, True);
+            assertEq(71, captured."^val^");
+            assertEq("int", captured."^type^".getLocalName());
+        }
+    }
+    private selection() {
+        WSOperation op = new WebService(source()).getOperation("exchange");
+        string wire = envelope(False, '<p:Token>71</p:Token>');
+        assertThrows("WSDL-BINDING-ERROR", \op.deserializeFault(), (wire, "Unknown"));
+        assertThrows("WSDL-BINDING-ERROR", \op.deserializeFault(), (wire, "Failure"));
+        string text = replace(source(), '<w:fault name="Rejected"><s:fault name="Rejected" use="literal"/></w:fault>', "");
+        WSOperation unbound = new WebService(text).getOperation("exchange");
+        assertThrows("WSDL-BINDING-ERROR", \unbound.deserializeFault(), (wire, "Rejected"));
+        string root = '<w:definitions xmlns:w="http://schemas.xmlsoap.org/wsdl/" targetNamespace="urn:root">'
+            + '<w:import namespace="urn:parts" location="dependency.wsdl"/></w:definitions>';
+        WebService imported(root, {"document_location":"https://example.invalid/root.wsdl", "async_only":True,
+            "xsd_cache":{"https://example.invalid/dependency.wsdl":source()}});
+        WSOperation detached = imported.getBindingOperation("{urn:parts}B", "exchange");
+        remove imported;
+        foreach WSOperation copy in (detached, Serializable::deserialize(detached.serialize())) {
+            assertEq(71, copy.deserializeFault(wire, "Rejected", "{urn:parts}B"));
+            assertEq("{urn:parts}Token", copy.deserializeXmlFault(wire, "Rejected", "{urn:parts}B").getExpandedName());
+        }
+        hash<SerializationInfo> legacy = op.serializeToData();
+        foreach string key in (keys legacy._index) {
+            if (legacy._index{key}.hasKey("_class_data") && legacy._index{key}._class_data.hasKey("WSDL::SoapBinding")) {
+                remove legacy._index{key}._class_data."WSDL::SoapBinding".fault_bindings;
+            }
+        }
+        WSOperation restored = Serializable::deserialize(legacy);
+        assertThrows("WSDL-BINDING-ERROR", \restored.deserializeFault(), (wire, "Rejected"));
+    }
+    private roots() {
+        foreach bool soap12 in (False, True) {
+            string text = replace(source(soap12), '<xs:element name="Token" type="xs:int"/>',
+                '<xs:element name="Token" type="xs:decimal" abstract="true"/>'
+                + '<xs:element name="Count" type="xs:int" substitutionGroup="t:Token"/>');
+            WSOperation op = new WebService(text).getOperation("exchange");
+            string wire = envelope(soap12, '<p:Count>071</p:Count>');
+            auto value = op.deserializeFault(wire, "Rejected", NOTHING, True);
+            assertEq("Count", value."^element^".getLocalName());
+            assertEq(71, value."^val^");
+            assertEq("{urn:parts}Count", op.deserializeXmlFault(wire, "Rejected").getExpandedName());
+            assertTrue(op.serializeFault("Rejected", "forwarded", value).body.contains(':Count>'));
+            assertThrows("SOAP-DESERIALIZATION-ERROR", \op.deserializeFault(),
+                (envelope(soap12, '<p:Token>71</p:Token>'), "Rejected"));
+            text = replace(source(soap12), '<xs:element name="Token" type="xs:int"/>',
+                '<xs:element name="Token"><xs:complexType><xs:sequence><xs:element name="ref" type="xs:IDREF"/>'
+                + '<xs:element name="item"><xs:complexType><xs:attribute name="id" type="xs:ID" use="required"/>'
+                + '</xs:complexType></xs:element></xs:sequence></xs:complexType></xs:element>');
+            op = new WebService(text).getOperation("exchange");
+            string entry = '<p:Token><ref>detail-id</ref><item id="detail-id"/></p:Token>';
+            foreach WSOperation copy in (op, Serializable::deserialize(op.serialize())) {
+                assertThrows("SOAP-DESERIALIZATION-ERROR", \copy.deserializeFault(),
+                    (envelope(soap12, replace(entry, '>detail-id<', '>header-id<'),
+                        '<e:Header><p:Token><ref>header-id</ref><item id="header-id"/></p:Token></e:Header>'), "Rejected"));
+                assertEq("detail-id", copy.deserializeFault(envelope(soap12, entry), "Rejected").ref);
+                assertEq("{urn:parts}Token", copy.deserializeXmlFault(envelope(soap12, entry), "Rejected").getExpandedName());
+            }
+        }
+    }
+    private http() {
+        foreach bool soap12 in (False, True) {
+            WebService ws(source(soap12));
+            HttpServer server();
+            on_exit server.stop();
+            SoapHandler handler(new PermissiveAuthenticator());
+            server.setDefaultHandler("fault", handler);
+            code<auto(hash<auto>, auto)> callback = auto sub(hash<auto> cx, auto value) {
+                throw "Rejected", "Order rejected", 71;
+            };
+            handler.addMethod(ws, ws.getOperation("exchange"), callback, NOTHING, NOTHING, NOTHING, "S", NOTHING, NOTHING, "B");
+            server.addListener(0);
+            SoapClient client({"wsdl": ws, "service":"S", "port":"Endpoint",
+                "url":sprintf("http://127.0.0.1:%d/fault", server.getListenerInfo(0).port), "timeout":30000});
+            hash<auto> info;
+            assertThrows("SOAP-SERVER-FAULT-RESPONSE", sub() {
+                client.callOperation("exchange", {"left":1,"right":2}, NOTHING, \info);
+            });
+            assertEq(71, ws.getOperation("exchange").deserializeFault(info."response-body", "Rejected"));
+            assertEq("{urn:parts}Token", ws.getOperation("exchange").deserializeXmlFault(info."response-body", "Rejected").getExpandedName());
+        }
+    }
+}

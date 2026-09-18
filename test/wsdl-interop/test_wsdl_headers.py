@@ -80,6 +80,34 @@ class HeaderIdentitiesTests(unittest.TestCase):
                 self.assertEqual([direction + "\t{urn:parts}H\ttoken\tencoded\turn:header-wire\t[" + encoding + "]"
                                   for direction in ("input", "output")], result.stdout.splitlines())
 
+    def test_nested_headerfault_declarations(self):
+        for soap12 in (False, True):
+            for encoded in (False, True):
+                with self.subTest(soap12=soap12, encoded=encoded):
+                    raw = (ROOT / "regressions/fault-bindings/literal.wsdl").read_text()
+                    encoding = "http://schemas.xmlsoap.org/soap/encoding/"
+                    metadata = ('encoded" namespace="urn:header-fault" encodingStyle="' + encoding
+                                if encoded else 'literal')
+                    header = ('<s:header message="t:H" part="token" use="literal">'
+                              '<s:headerfault message="t:Failure" part="problem" use="' + metadata + '"/></s:header>')
+                    if encoded:
+                        raw = raw.replace('<w:part name="problem" element="t:Token"/>',
+                                          '<w:part name="problem" type="xs:int"/>')
+                    for direction in ("input", "output"):
+                        raw = raw.replace('<w:' + direction + '><s:body', '<w:' + direction + '>' + header + '<s:body')
+                    if soap12:
+                        raw = raw.replace(SOAP11, SOAP12)
+                    path = Path(self.directory.name) / "headerfault.wsdl"
+                    path.write_text(raw)
+                    result = subprocess.run(["java", "-cp", str(self.classes) + os.pathsep + str(self.jar),
+                                             "WsdlHeadersOracle", str(path), "--faults"], capture_output=True,
+                                            text=True, timeout=30)
+                    self.assertEqual(0, result.returncode, result.stderr)
+                    self.assertEqual("", result.stderr)
+                    self.assertEqual([direction + "\t{urn:parts}H\ttoken\t{urn:parts}Failure\tproblem\t"
+                                      + ("encoded\turn:header-fault\t[" + encoding + "]" if encoded else "literal\tnull\tnull")
+                                      for direction in ("input", "output")], result.stdout.splitlines())
+
 
 if __name__ == "__main__":
     unittest.main()

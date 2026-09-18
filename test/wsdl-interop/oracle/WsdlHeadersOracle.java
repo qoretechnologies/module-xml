@@ -4,7 +4,9 @@ import javax.wsdl.Binding;
 import javax.wsdl.BindingOperation;
 import javax.wsdl.Definition;
 import javax.wsdl.extensions.soap.SOAPHeader;
+import javax.wsdl.extensions.soap.SOAPHeaderFault;
 import javax.wsdl.extensions.soap12.SOAP12Header;
+import javax.wsdl.extensions.soap12.SOAP12HeaderFault;
 import javax.wsdl.factory.WSDLFactory;
 import javax.wsdl.xml.WSDLReader;
 
@@ -12,15 +14,34 @@ import javax.wsdl.xml.WSDLReader;
 public final class WsdlHeadersOracle {
     private WsdlHeadersOracle() { }
 
-    private static void headers(String direction, List<?> extensions, boolean metadata) {
+    private static void headers(String direction, List<?> extensions, boolean metadata, boolean faults) {
         for (Object extension : extensions) {
             if (extension instanceof SOAPHeader) {
                 SOAPHeader header = (SOAPHeader) extension;
+                if (faults) {
+                    for (Object value : header.getSOAPHeaderFaults()) {
+                        SOAPHeaderFault fault = (SOAPHeaderFault) value;
+                        System.out.println(direction + "\t" + header.getMessage() + "\t" + header.getPart()
+                            + "\t" + fault.getMessage() + "\t" + fault.getPart() + "\t" + fault.getUse()
+                            + "\t" + fault.getNamespaceURI() + "\t" + fault.getEncodingStyles());
+                    }
+                    continue;
+                }
                 System.out.println(direction + "\t" + header.getMessage() + "\t" + header.getPart()
                     + (metadata ? "\t" + header.getUse() + "\t" + header.getNamespaceURI()
                         + "\t" + header.getEncodingStyles() : ""));
             } else if (extension instanceof SOAP12Header) {
                 SOAP12Header header = (SOAP12Header) extension;
+                if (faults) {
+                    for (Object value : header.getSOAP12HeaderFaults()) {
+                        SOAP12HeaderFault fault = (SOAP12HeaderFault) value;
+                        String encoding = fault.getEncodingStyle() == null ? "null" : "[" + fault.getEncodingStyle() + "]";
+                        System.out.println(direction + "\t" + header.getMessage() + "\t" + header.getPart()
+                            + "\t" + fault.getMessage() + "\t" + fault.getPart() + "\t" + fault.getUse()
+                            + "\t" + fault.getNamespaceURI() + "\t" + encoding);
+                    }
+                    continue;
+                }
                 System.out.println(direction + "\t" + header.getMessage() + "\t" + header.getPart()
                     + (metadata ? "\t" + header.getUse() + "\t" + header.getNamespaceURI()
                         + "\t[" + header.getEncodingStyle() + "]" : ""));
@@ -29,8 +50,8 @@ public final class WsdlHeadersOracle {
     }
 
     public static void main(String[] args) throws Exception {
-        if (args.length < 1 || args.length > 2 || (args.length == 2 && !"--metadata".equals(args[1]))) {
-            throw new IllegalArgumentException("one local WSDL path and optional --metadata are required");
+        if (args.length < 1 || args.length > 2 || (args.length == 2 && !("--metadata".equals(args[1]) || "--faults".equals(args[1])))) {
+            throw new IllegalArgumentException("one local WSDL path and optional --metadata or --faults are required");
         }
         System.setProperty("javax.xml.accessExternalDTD", "");
         System.setProperty("javax.xml.accessExternalSchema", "");
@@ -41,8 +62,10 @@ public final class WsdlHeadersOracle {
             Binding binding = (Binding) value;
             for (Object entry : binding.getBindingOperations()) {
                 BindingOperation operation = (BindingOperation) entry;
-                headers("input", operation.getBindingInput().getExtensibilityElements(), args.length == 2);
-                headers("output", operation.getBindingOutput().getExtensibilityElements(), args.length == 2);
+                headers("input", operation.getBindingInput().getExtensibilityElements(), args.length == 2 && "--metadata".equals(args[1]),
+                    args.length == 2 && "--faults".equals(args[1]));
+                headers("output", operation.getBindingOutput().getExtensibilityElements(), args.length == 2 && "--metadata".equals(args[1]),
+                    args.length == 2 && "--faults".equals(args[1]));
             }
         }
     }

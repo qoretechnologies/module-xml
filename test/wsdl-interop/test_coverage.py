@@ -59,6 +59,18 @@ class CoverageTest(unittest.TestCase):
         self.assertTrue(row["output_lxml"]["ok"])
         self.assertFalse(row["values"]["ok"])
 
+    def test_worker_timeout_propagates_without_changing_coverage(self):
+        with patch.object(survey, "run_worker", wraps=survey.run_worker) as run:
+            report = coverage.assess(self.root, self.source, self.selection, corpus.Catalog(), worker_timeout=180)
+        self.assertEqual(180, run.call_args.kwargs["worker_timeout"])
+        self.assertEqual([], report["selected_failures"])
+        self.assertEqual(16, report["stage_accounting"]["counts"]["values"]["ok"])
+        for invalid in (0, -1, 3601, True, "180", float("inf")):
+            with self.subTest(invalid=invalid), patch.object(coverage, "prepare") as prepare:
+                with self.assertRaises(ValueError):
+                    coverage.assess(self.root, self.source, self.selection, corpus.Catalog(), worker_timeout=invalid)
+                prepare.assert_not_called()
+
     def test_explicit_type_preservation_report(self):
         legacy = coverage.assess(self.root, self.source, self.selection, corpus.Catalog())
         typed = coverage.assess(self.root, self.source, self.selection, corpus.Catalog(), preserve_types=True)
