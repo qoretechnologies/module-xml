@@ -121,6 +121,8 @@ module WSDL {
     @section wsdlrelnotes WSDL Module Release Notes
 
     @subsection wsdl_0_5_8 WSDL v0.5.8
+    - MIME multipart declarations validate nested SOAP/MIME grammar and namespaces; nested headers,
+      header faults, literal body hints and content alternatives survive compilation and saved graphs
     - concrete SOAP/HTTP extensions must match their binding protocol; duplicate declarations and
       conflicting URL mappings reject before compilation, and type-based document bodies dispatch without actions
     - HTTP query and form decoding rejects missing message parts, including empty requests;
@@ -23725,6 +23727,13 @@ class WsdlSourceProjection {
     }
 
     static bool recognized(string parent, string uri, string local) {
+        if (parent == "mimeMultipart") {
+            return uri == MIME_NS && local == "part";
+        }
+        if (parent == "mimePart") {
+            return (uri == MIME_NS && (local == "content" || local == "mimeXml" || local == "multipartRelated"))
+                || ((uri == SOAP_11_NS || uri == SOAP_12_NS) && (local == "body" || local == "header"));
+        }
         if (parent == "types") {
             return uri == XSD_NS && local == "schema";
         }
@@ -23776,6 +23785,7 @@ class WsdlSourceProjection {
         list<string> parts = name.split(":");
         string local = parts[-1];
         string uri = namespaces{parts.size() == 2 ? parts[0] : ""} ?? "";
+        bool mime_container = False;
         if (uri != Namespace) {
             bool known = recognized(parent, uri, local);
             if (known && (uri == SOAP_11_NS || uri == SOAP_12_NS)) {
@@ -23783,12 +23793,16 @@ class WsdlSourceProjection {
             } else if (known && (uri == HTTP_NS || (uri == MIME_NS && local != "multipartRelated"))) {
                 WsdlHttpMimeExtensionGrammar::normalize(\value, local);
             }
-            return !known;
+            mime_container = known && uri == MIME_NS && (local == "part" || local == "multipartRelated");
+            if (!mime_container) {
+                return !known;
+            }
         }
         if (local == "documentation") {
             return False;
         }
-        string kind = parent == "binding" ? "bindingOperation" : parent == "bindingOperation"
+        string kind = mime_container ? (local == "part" ? "mimePart" : "mimeMultipart")
+            : parent == "binding" ? "bindingOperation" : parent == "bindingOperation"
             ? (local == "input" ? "bindingInput" : local == "output" ? "bindingOutput" : "bindingFault") : local;
         if (value.typeCode() != NT_HASH) {
             return False;
@@ -24109,6 +24123,123 @@ class WsdlSoapExtensionGrammar {
                 }
             } else {
                 string checked = XsdNameLexicalHelper::lexical(type, value, WSDL_ERROR);
+                if (type == "QName") {
+                    list<string> parts = checked.split(":");
+                    if (parts.size() == 2 && !reader.lookupNamespace(parts[0])) {
+                        throw WSDL_ERROR, sprintf("unbound prefix in SOAP %s reference %Y", kind, checked);
+                    }
+                }
+            }
+        } while (reader.moveToNextAttribute());
+    }
+}
+
+#! Validate multipart containers and delegate each concrete format to its owning grammar.
+class WsdlMimeMultipartGrammar {
+    private {
+        hash<string, string> frames();
+        *string binding_namespace;
+        int payload_depth = -1;
+        *WsdlSoapExtensionGrammar soap_extension;
+        *WsdlHttpMimeExtensionGrammar mime_extension;
+    }
+
+    constructor(XmlReader reader, *string binding_namespace) {
+        self.binding_namespace = binding_namespace;
+        consume(reader);
+    }
+
+    consume(XmlReader reader) {
+        int depth = reader.depth();
+        int node_type = reader.nodeType();
+        if (payload_depth >= 0) {
+            if (soap_extension) {
+                soap_extension.consume(reader);
+            }
+            if (mime_extension) {
+                mime_extension.consume(reader);
+            }
+            if (node_type == XML_NODE_TYPE_END_ELEMENT && depth == payload_depth) {
+                payload_depth = -1;
+                soap_extension = NOTHING;
+                mime_extension = NOTHING;
+            }
+            return;
+        }
+        string key = string(depth);
+        if (node_type == XML_NODE_TYPE_END_ELEMENT) {
+            remove frames{key};
+            return;
+        }
+        if (node_type != XML_NODE_TYPE_ELEMENT) {
+            if ((node_type == XML_NODE_TYPE_TEXT || node_type == XML_NODE_TYPE_CDATA
+                    || node_type == XML_NODE_TYPE_SIGNIFICANT_WHITESPACE)
+                    && XsdSimpleType::normalizeWhiteSpace(reader.value() ?? "", "collapse")) {
+                throw WSDL_ERROR, "MIME multipart containers cannot contain character data";
+            }
+            return;
+        }
+        *string parent = frames{string(depth - 1)};
+        string uri = reader.namespaceUri() ?? "";
+        string local = reader.localName();
+        if (!parent || parent == "mimeMultipart") {
+            if (uri != MIME_NS || local != (parent ? "part" : "multipartRelated")) {
+                throw WSDL_ERROR, sprintf("unexpected MIME multipart child {%s}%s", uri, local);
+            }
+        } else {
+            @assert(parent == "mimePart");
+            bool known = WsdlSourceProjection::recognized(parent, uri, local);
+            *string required = reader.getAttributeNs("required", "http://schemas.xmlsoap.org/wsdl/");
+            if (exists required) {
+                WsdlExtensionLexicalGrammar::boolean(required);
+                required = XsdSimpleType::normalizeWhiteSpace(required, "collapse");
+                if (!known && (required == "true" || required == "1")) {
+                    throw WSDL_ERROR, sprintf("unsupported required MIME extension {%s}%s", uri, local);
+                }
+            }
+            if (!uri || uri == "http://schemas.xmlsoap.org/wsdl/" || (uri == MIME_NS && !known)) {
+                throw WSDL_ERROR, sprintf("unexpected MIME part child {%s}%s", uri, local);
+            }
+            if (known && (uri == SOAP_11_NS || uri == SOAP_12_NS)) {
+                if (uri != binding_namespace) {
+                    throw WSDL_ERROR, "a MIME SOAP part must match its binding's SOAP namespace";
+                }
+                WsdlSoapExtensionGrammar checker(reader);
+                soap_extension = reader.isEmptyElement() ? NOTHING : checker;
+            } else if (known && local != "multipartRelated") {
+                WsdlHttpMimeExtensionGrammar checker(reader);
+                mime_extension = reader.isEmptyElement() ? NOTHING : checker;
+            }
+            if (!known || local != "multipartRelated") {
+                payload_depth = reader.isEmptyElement() ? -1 : depth;
+                return;
+            }
+        }
+        attributes(reader, local);
+        if (!reader.isEmptyElement()) {
+            frames{key} = local == "part" ? "mimePart" : "mimeMultipart";
+        }
+    }
+
+    private static attributes(XmlReader reader, string kind) {
+        if (!reader.moveToFirstAttribute()) {
+            return;
+        }
+        on_exit reader.moveToElement();
+        do {
+            string uri = reader.namespaceUri() ?? "";
+            string local = reader.localName();
+            if (uri == "http://www.w3.org/2000/xmlns/"
+                    || WsdlExtensionLexicalGrammar::instanceAttribute(reader, MIME_NS,
+                        kind == "part" ? "tPart" : "multipartRelatedType")) {
+                continue;
+            }
+            if (uri == "http://schemas.xmlsoap.org/wsdl/" && local == "required" && kind != "part") {
+                WsdlExtensionLexicalGrammar::boolean(reader.value());
+            } else if (!uri && kind == "part" && local == "name") {
+                string value = XsdNameLexicalHelper::lexical("NMTOKEN", reader.value(), WSDL_ERROR);
+            } else {
+                throw WSDL_ERROR, sprintf("unexpected attribute {%s}%s on MIME %s", uri, local, kind);
             }
         } while (reader.moveToNextAttribute());
     }
@@ -24179,6 +24310,7 @@ class WsdlStructureGrammar {
         int payload_depth = -1;
         *WsdlSoapExtensionGrammar soap_extension;
         *WsdlHttpMimeExtensionGrammar http_mime_extension;
+        *WsdlMimeMultipartGrammar mime_multipart_extension;
     }
 
     consume(XmlReader reader) {
@@ -24191,10 +24323,14 @@ class WsdlStructureGrammar {
             if (http_mime_extension) {
                 http_mime_extension.consume(reader);
             }
+            if (mime_multipart_extension) {
+                mime_multipart_extension.consume(reader);
+            }
             if (node_type == XML_NODE_TYPE_END_ELEMENT && depth == payload_depth) {
                 payload_depth = -1;
                 soap_extension = NOTHING;
                 http_mime_extension = NOTHING;
+                mime_multipart_extension = NOTHING;
             }
             return;
         }
@@ -24244,6 +24380,10 @@ class WsdlStructureGrammar {
                         && WsdlSourceProjection::recognized(parent.kind, uri, local)) {
                     WsdlSoapExtensionGrammar checker(reader);
                     soap_extension = reader.isEmptyElement() ? NOTHING : checker;
+                } else if (uri == MIME_NS && local == "multipartRelated"
+                        && WsdlSourceProjection::recognized(parent.kind, uri, local)) {
+                    WsdlMimeMultipartGrammar checker(reader, parent.binding_namespace);
+                    mime_multipart_extension = reader.isEmptyElement() ? NOTHING : checker;
                 } else if ((uri == HTTP_NS || (uri == MIME_NS && local != "multipartRelated"))
                         && WsdlSourceProjection::recognized(parent.kind, uri, local)) {
                     WsdlHttpMimeExtensionGrammar checker(reader);
@@ -33427,8 +33567,10 @@ public class BindingMessageDescription inherits Serializable {
         */
         *string multipart;
 
-        #! hash of part names to content types for multipart messages
-        /** Keys are part names, values are content type strings or lists of content type strings
+        #! hash of internal message argument keys to content types for multipart messages
+        /** Use the message's pmap to look up a WSDL part name. Alternatives for one part share one key,
+            including distinct parts referencing the same global element. Values are content type strings
+            or lists of content type strings.
         */
         *hash<auto> parts;
     }
@@ -33782,6 +33924,7 @@ public class Binding inherits WSDL::XsdNamedData {
 
                     bmd.multipart = Mime::MPT_RELATED;
                     bmd.parts = {};
+                    NamespacePrefixHelper multipart_scope(nsc, op{io}.multipartRelated."^attributes^");
                     WSDL::XsdBase::removeNS(\op{io}.multipartRelated);
 
                     if (!exists op{io}.multipartRelated.part) {
@@ -33790,8 +33933,12 @@ public class Binding inherits WSDL::XsdNamedData {
                     }
 
                     foreach auto part in (op{io}.multipartRelated.part) {
+                        NamespacePrefixHelper part_scope(nsc, part."^attributes^");
                         WSDL::XsdBase::removeNS(\part);
-                        part -= "^attributes^";
+                        part -= ("^attributes^", "ns", ".wsdlExtensions");
+                        if (part.hasKey("header") && !part.hasKey("body")) {
+                            throw WSDL_ERROR, "a MIME SOAP header must belong to the part containing the SOAP body";
+                        }
                         if (exists part.body) {
                             if (bmd.body) {
                                 throw WSDL_ERROR, sprintf("%s binding %y for operation %y specifies multiple "
@@ -33803,8 +33950,11 @@ public class Binding inherits WSDL::XsdNamedData {
                                     part.body);
                             }
                             # Create body description for the SOAP body part within multipart message
-                            bmd.body = new BindingMessageBodyDescription(False, NOTHING, NOTHING,
+                            bmd.body = new BindingMessageBodyDescription(False, bodyAttrs.encodingStyle, bodyAttrs."namespace",
                                 bodyAttrs.parts);
+                            foreach hash<auto> hdr in (part.header) {
+                                bmd.addHeader(parseHeader(hdr, nsc, messages, registry, True));
+                            }
                         } else if (exists part.content) {
                             *string pcname;
                             foreach auto c in (part.content) {
@@ -33822,8 +33972,8 @@ public class Binding inherits WSDL::XsdNamedData {
                                     }
                                 } else {
                                     pcname = partName;
-                                    partName = selected{io}.checkPart(partName);
                                 }
+                                partName = selected{io}.checkPart(partName);
                                 auto contentType = contentAttrs.type;
                                 if (!exists contentType) {
                                     throw WSDL_ERROR, sprintf("unsupported content part without type "
@@ -33842,6 +33992,9 @@ public class Binding inherits WSDL::XsdNamedData {
                         } else {
                             throw WSDL_ERROR, sprintf("cannot parse part: %y", part);
                         }
+                    }
+                    if (soapTransport && !bmd.body) {
+                        throw WSDL_ERROR, "a SOAP multipart binding requires a part containing its SOAP body";
                     }
                     delete op{io}.multipartRelated;
                 }

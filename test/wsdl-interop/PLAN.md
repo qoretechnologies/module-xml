@@ -993,3 +993,26 @@ See [evidence](binding-extension-ownership-evidence.md), [validation](P6-37-vali
 MIME multipart grammar, nested header retention and alternative compilation remain
 required P6 work; the next root-cause probes are in `/tmp/xml-mime-part-grammar/`.
 P7–P9 remain incomplete.
+
+
+## P6-38: MIME multipart grammar and nested SOAP metadata
+
+The stream now validates MIME containers and delegates SOAP/MIME leaves to their
+own grammars. Namespace-aware projection isolates optional foreign payloads before
+grouping. Compilation retains root-part SOAP headers/headerfaults, body hints and
+all content alternatives under the correct internal argument identity. Missing
+primary SOAP bodies and non-root headers reject before publication.
+The pinned corrected 2004 MIME schema and WSDL4J independently assess 120 documents:
+40 supported descriptions, 26 schema-valid semantic negatives and 54 grammar
+negatives. The Qore suite passes 120 cases / 9,748 assertions and 228 actual HTTP
+header/body calls, through local/imported/saved and detached consumers. Shared-element
+attachment fixtures cover declarations and saved metadata, not attachment octets.
+All 30 affected Qore suites pass (1,457 cases / 40,361 assertions),
+plus eleven independent gates, docs and astparser. All 16 corpus commands meet
+expected outcomes; six semantic reports match P6-37. Audit: 18 Pass / 44 N/A /
+zero Fail; no C++ changes or push.
+See [evidence](mime-part-grammar-evidence.md), [validation](P6-38-validation.json),
+[audit](audits/P6-38-mime-part-grammar.md) and [design](../../design/wsdl-mime-part-grammar.md).
+Complete MIME representation alternatives and remaining HTTP URI behavior stay in
+P6. A concrete SoapClient base-URI concatenation failure is reduced in
+`/tmp/xml-http-base-resolution/` for the next increment. P7–P9 remain incomplete.
