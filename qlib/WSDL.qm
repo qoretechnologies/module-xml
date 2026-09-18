@@ -121,6 +121,9 @@ module WSDL {
     @section wsdlrelnotes WSDL Module Release Notes
 
     @subsection wsdl_0_5_8 WSDL v0.5.8
+    - CXF XML and JMS bindings/ports retain declaration metadata without disabling supported SOAP endpoints;
+      selecting an unsupported binding fails explicitly, and saved graphs retain capability information
+    - mounted WSDL rewrites only supported address elements, preserving unrelated URLs and XML node content
     - distinct message parts can share an element QName in different body/header locations without losing part identity
     - URL-replacement decoding validates complete templates and repeated values, with linear token traversal
     - http:urlEncoded uses a form body for POST and a query for GET, with typed decoding in both directions
@@ -885,6 +888,11 @@ const WSDL_ERROR = "WSDL-ERROR";
 
 #! SOAP HTTP transport URI
 const SOAP_TRANSPORT_HTTP = "http://schemas.xmlsoap.org/soap/http";
+
+# Recognized optional protocols retained as metadata, not implemented transports.
+const CXF_XML_NS = "http://cxf.apache.org/bindings/xformat";
+const CXF_JMS_NS = "http://cxf.apache.org/transports/jms";
+const SOAP_JMS_NS = "http://www.w3.org/2010/soapjms/";
 
 #! known/supported transports
 public const SOAP_TRANSPORT = (
@@ -23750,6 +23758,11 @@ class XsdSchemaSource {
         }
         in_schema = in_schema || (!annotation_content && uri == XSD_NS && local == "schema");
         bool element_content = in_schema && uri == XSD_NS && !annotation_content;
+        if (wsdl_parent == "binding" && local == "binding" && uri == CXF_XML_NS
+                && !exists value) {
+            # Preserve an empty extension's prefix when the declaration's outer keys are normalized.
+            value = hash();
+        }
         if (value.typeCode() != NT_HASH) {
             if (element_content && exists value) {
                 validateWhitespace(value, name);
@@ -32457,6 +32470,8 @@ public class Binding inherits WSDL::XsdNamedData {
 
     private {
         *string component_key;
+        *string unsupported_reason;
+        *hash<auto> declaration_data;
         const FaultAttributes = {"name": True, "use": True, "namespace": True, "encodingStyle": True};
         const HeaderAttributes = {"message": True, "part": True, "use": True, "namespace": True,
             "encodingStyle": True};
@@ -32494,7 +32509,7 @@ public class Binding inherits WSDL::XsdNamedData {
         }
 
         if (data.binding.typeCode() != NT_HASH) {
-            throw WSDL_ERROR, sprintf("binding %Y requires exactly one SOAP or HTTP binding extension", name);
+            throw WSDL_ERROR, sprintf("binding %Y requires exactly one recognized binding extension", name);
         }
         {
             *hash<auto> bba = data.binding."^attributes^";
@@ -32507,11 +32522,15 @@ public class Binding inherits WSDL::XsdNamedData {
                 }
                 httpMethod = bba.verb;
             } else if (binding_uri == SOAP_11_NS || binding_uri == SOAP_12_NS) {
-                if (exists bba.verb || !SOAP_TRANSPORT{bba.transport}) {
+                if (exists bba.verb || (!SOAP_TRANSPORT{bba.transport}
+                        && bba.transport != SOAP_JMS_NS && bba.transport != CXF_JMS_NS)) {
                     throw WSDL_ERROR, sprintf("SOAP binding %Y requires a supported transport and cannot declare "
                         "an HTTP verb (transport: %Y)", name, bba.transport);
                 }
                 soapTransport = bba.transport;
+                if (!SOAP_TRANSPORT{soapTransport}) {
+                    unsupported_reason = sprintf("SOAP JMS transport %Y is not implemented", soapTransport);
+                }
                 soap12_version = binding_uri == SOAP_12_NS;
                 if (exists bba.style) {
                     *bool ds = SoapStyleMap{bba.style};
@@ -32521,9 +32540,18 @@ public class Binding inherits WSDL::XsdNamedData {
                     }
                     docstyle = ds;
                 }
+            } else if (binding_uri == CXF_XML_NS) {
+                unsupported_reason = "the Apache CXF XML binding is not implemented";
             } else {
                 throw WSDL_ERROR, sprintf("unsupported binding extension namespace %Y in binding %Y", binding_uri, name);
             }
+        }
+
+        if (unsupported_reason) {
+            declaration_data = data;
+            hash<string, string> namespaces = nsc.getInputNamespaceState().input;
+            namespaces{""} = nsc.getDefaultNs() ?? "";
+            declaration_data."^attributes^" += XsdQNameContextHelper::attributes(namespaces);
         }
 
         foreach hash<auto> ophash in (data.operation) {
@@ -32536,6 +32564,17 @@ public class Binding inherits WSDL::XsdNamedData {
                 throw WSDL_ERROR, sprintf("binding %Y references an unknown operation signature %Y(%Y,%Y) "
                     "in port type %Y", name, opname, ophash.input."^attributes^".name,
                     ophash.output."^attributes^".name, port);
+            }
+
+            if (unsupported_reason) {
+                # Abstract operation references still validate; no callable binding is registered.
+                foreach hash<auto> fault in (ophash.fault) {
+                    string fault_name = fault."^attributes^".name;
+                    if (!selected.getFaultMessages().hasKey(fault_name)) {
+                        throw WSDL_ERROR, sprintf("binding %Y references undefined fault %Y", name, fault_name);
+                    }
+                }
+                continue;
             }
 
             *WsdlOperationPattern pattern = selected.getMessageExchangePattern();
@@ -32865,6 +32904,38 @@ public class Binding inherits WSDL::XsdNamedData {
 
     string getPort() {
         return port;
+    }
+
+    #! returns whether this binding can create callable operations
+    /** @return True for implemented SOAP/HTTP bindings, False for retained optional bindings
+        @par Example
+        Filter a service's binding choices with binding.isSupported() before offering operations.
+        @since %WSDL 0.5.8
+    */
+    bool isSupported() {
+        return !unsupported_reason && (isSoapBinding() || isHttpBinding());
+    }
+
+    #! describes why a retained binding cannot be selected
+    /** @return the unsupported capability, or NOTHING for an implemented binding
+        @par Example
+        Show binding.getUnsupportedReason() next to an unavailable endpoint in a service catalog.
+        @since %WSDL 0.5.8
+    */
+    *string getUnsupportedReason() {
+        return unsupported_reason ?? (isSupported() ? NOTHING : "no supported binding transport is available");
+    }
+
+    #! returns the normalized declaration of an unsupported binding
+    /** @return a copy-on-write parsed declaration, or NOTHING for ordinary implemented bindings
+        @note Outer child names use the parser's local-name keys and ns prefix metadata; nested
+        extension content and in-scope xmlns declarations are retained without interpreting their behavior.
+        @par Example
+        Inspect service.getBinding("headerTesterXMLBinding").getDeclarationData() for CXF rootNode mappings.
+        @since %WSDL 0.5.8
+    */
+    *hash<auto> getDeclarationData() {
+        return declaration_data;
     }
 
     bool isSoapBinding() {
@@ -33949,6 +34020,10 @@ public hashdecl ServiceInfo {
     #! service name
     string name;
     #! port info
+    /** Each port includes its address and Binding. Unsupported optional transports also include
+        unsupported_reason and a normalized parsed declaration with in-scope namespace bindings.
+        These fields describe retained metadata; they do not enable transport execution.
+    */
     hash<string, hash> port;
 }
 
@@ -35614,7 +35689,7 @@ public class WebService inherits WSDL::XsdSchema {
     /** @param bname a binding component key or expanded name; NOTHING retains global operation lookup
         @param opname an operation name or an overloaded name(input,output) key in the binding's port type
         @return the operation after verifying its association with the selected binding
-        @throw WSDL-BINDING-ERROR the binding is unknown or does not bind the operation
+        @throw WSDL-BINDING-ERROR the binding is unknown, unsupported or does not bind the operation
         @throw WSDL-OPERATION-ERROR the operation is unknown, or multiple bound overloads match the bare name
         @note Binding membership is applied before deciding whether a bare overloaded name is ambiguous.
         @par Example
@@ -35629,6 +35704,10 @@ public class WebService inherits WSDL::XsdSchema {
         } else {
             WSDL::Binding b = getBinding(bname);
             @assert(b, "binding %y must exist", bname);
+            if (!b.isSupported()) {
+                throw "WSDL-BINDING-ERROR", sprintf("binding %Y cannot be selected: %s", bname,
+                    b.getUnsupportedReason());
+            }
             hash<PortTypeInfo> pt = portType{b.getPort()};
             if (!pt.operations.hasKey(opname) && !pt.operation_candidates.hasKey(opname)) {
                 throw "WSDL-OPERATION-ERROR", sprintf("operation %Y is unknown in port type %Y", opname, b.getPort());
@@ -35758,9 +35837,29 @@ public class WebService inherits WSDL::XsdSchema {
                     throw WSDL_ERROR, sprintf("service %y port %y refers to non-existant binding %y; known bindings: %y", svcname, name, bind, binding.keys());
 
                 # add the port to the service
+                *string unsupported = binding{bind}.getUnsupportedReason();
+                if (port.address.typeCode() == NT_HASH) {
+                    NamespacePrefixHelper address_scope(nsc, port.address."^attributes^");
+                    string address_uri = port.address.ns ? nsc.getInputNamespaceUri(port.address.ns)
+                        : nsc.getDefaultNs() ?? "";
+                    *string location = port.address."^attributes^".location;
+                    if (address_uri == CXF_JMS_NS || address_uri == SOAP_JMS_NS
+                            || (location && location =~ /^[jJ][mM][sS]:/)) {
+                        unsupported = unsupported ?? "JMS port transport is not implemented";
+                    }
+                }
+                *hash<auto> declaration;
+                if (unsupported) {
+                    declaration = port;
+                    hash<string, string> namespaces = nsc.getInputNamespaceState().input;
+                    namespaces{""} = nsc.getDefaultNs() ?? "";
+                    declaration."^attributes^" += XsdQNameContextHelper::attributes(namespaces);
+                }
                 services{svcname}.port{name} = pa + (
                     "address": port.address."^attributes^".location,
                     "binding": binding{bind},
+                    "unsupported_reason": unsupported,
+                    "declaration": declaration,
                 );
             }
         }
@@ -35831,18 +35930,87 @@ public class WebService inherits WSDL::XsdSchema {
     /** @param base_url the url to be prepended before the service name;
                         it must include all the handler prefixes (like \c /SOAP)
                         to produce valid URL
-        @return the XML string for the WSDL
+        @return a UTF-8 XML document with supported endpoint addresses rewritten by service/port ownership
+        @throw PARSE-XML-EXCEPTION invalid stored XML
+        @throw MAKE-XML-ERROR an address or attribute cannot be serialized as XML
+        @note Unsupported optional endpoint addresses and unrelated XML content are retained. This overload
+        can normalize XML syntax; getWSDL() without an argument returns the original source text.
+        @par Example
+        Publish ws.getWSDL("https://gateway.example/soap") with each supported service mounted below that base.
      */
     string getWSDL(string base_url) {
-        string wstr = wsdl;
-
-        foreach hash<WSDL::ServiceInfo> sh in (services.iterator()) {
-            foreach hash<auto> ph in (sh.port.iterator()) {
-                wstr = replace(wstr, ph.address, base_url + "/" + sh.name);
+        XmlReader reader(wsdl);
+        list<string> result();
+        hash<string, string> containers();
+        *hash<auto> service;
+        *hash<auto> port;
+        string target_namespace;
+        int skip_depth = -1;
+        while (reader.read()) {
+            int depth = reader.depth();
+            int kind = reader.nodeType();
+            if (!result) {
+                push result, sprintf("<?xml version=\"%s\" encoding=\"UTF-8\"?>\n", reader.xmlVersion() ?? "1.0");
             }
+            if (skip_depth >= 0) {
+                if (depth > skip_depth || (depth == skip_depth && kind == XML_NODE_TYPE_END_ELEMENT)) {
+                    continue;
+                }
+                skip_depth = -1;
+            }
+            if (kind == XML_NODE_TYPE_END_ELEMENT) {
+                push result, "</" + reader.name() + ">";
+                remove containers{string(depth)};
+                continue;
+            }
+            if (kind != XML_NODE_TYPE_ELEMENT) {
+                push result, reader.getOuterXml() ?? "";
+                continue;
+            }
+            string local = reader.localName();
+            string uri = reader.namespaceUri() ?? "";
+            string parent = containers{string(depth - 1)} ?? "";
+            bool container = uri == "http://schemas.xmlsoap.org/wsdl/"
+                && ((!depth && local == "definitions") || (parent == "definitions" && local == "service")
+                    || (parent == "service" && local == "port"));
+            bool address = parent == "port" && local == "address" && !port.unsupported_reason
+                && (uri == SOAP_11_NS || uri == SOAP_12_NS || uri == HTTP_NS);
+            if (!container && !address) {
+                # Copy complete untouched subtrees, retaining comments, PIs, CDATA and lexical values.
+                push result, reader.getOuterXml() ?? "";
+                if (!reader.isEmptyElement()) {
+                    skip_depth = depth;
+                }
+                continue;
+            }
+            string qualified_name = reader.name();
+            hash<string, string> attributes();
+            int count = reader.attributeCount();
+            for (int i = 0; i < count; ++i) {
+                reader.moveToAttributeOffset(i);
+                attributes{reader.name()} = reader.value();
+            }
+            if (count) {
+                reader.moveToElement();
+            }
+            if (container) {
+                containers{string(depth)} = local;
+                if (local == "definitions") {
+                    target_namespace = XsdSimpleType::normalizeWhiteSpace(attributes.targetNamespace ?? "", "collapse");
+                } else if (local == "service") {
+                    service = getService(type_qname(target_namespace,
+                        XsdNameLexicalHelper::lexical("NCName", attributes.name, WSDL_ERROR)));
+                } else {
+                    port = service.port{XsdNameLexicalHelper::lexical("NCName", attributes.name, WSDL_ERROR)};
+                }
+            } else {
+                attributes.location = base_url + "/" + service.name;
+            }
+            string opening = make_xml_fragment({qualified_name: {"^attributes^":attributes}});
+            @assert(opening.endsWith("/>"), "attribute-only XML generation must produce an empty element");
+            push result, reader.isEmptyElement() ? opening : opening.substr(0, opening.size() - 2) + ">";
         }
-
-        return wstr;
+        return result.join("");
     }
 
     private string getOperationParams(WSMessage msg) {

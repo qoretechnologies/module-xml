@@ -1,0 +1,194 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires xml
+%requires ../qlib/WSDL.qm
+%requires ../qlib/SoapClient.qm
+%requires ../qlib/SoapHandler.qm
+%requires HttpServer
+%exec-class UnsupportedPortsTest
+
+class UnsupportedPortsTest inherits QUnit::Test {
+    constructor() : Test("Unsupported CXF transport metadata", "1.0") {
+        addTestCase("Mixed contracts retain XML/JMS declarations without disabling SOAP", \metadata());
+        addTestCase("Unsupported selections reject even with an HTTP URL override", \selection());
+        addTestCase("The original pinned RPC header and MTOM contracts load", \pinned());
+        addTestCase("Namespace variants and SOAP JMS bindings retain capability boundaries", \variants());
+        addTestCase("Unsupported binding references still validate", \invalid());
+        addTestCase("Mixed contracts support real SOAP HTTP exchanges", \http());
+        addTestCase("Mounted WSDL rewrites only supported address declarations", \mounted());
+        set_return_value(main());
+    }
+    private static string source() {
+        return '<w:definitions xmlns:w="http://schemas.xmlsoap.org/wsdl/" xmlns:s="http://schemas.xmlsoap.org/wsdl/soap/"'
+            + ' xmlns:x="http://cxf.apache.org/bindings/xformat" xmlns:j="http://cxf.apache.org/transports/jms"'
+            + ' xmlns:h="http://schemas.xmlsoap.org/wsdl/http/" xmlns:t="urn:opaque" xmlns:xs="http://www.w3.org/2001/XMLSchema" targetNamespace="urn:opaque">'
+            + '<w:message name="M"><w:part name="value" type="xs:string"/></w:message>'
+            + '<w:portType name="P"><w:operation name="send"><w:input message="t:M"/><w:output message="t:M"/></w:operation></w:portType>'
+            + '<w:binding name="XML" type="t:P"><x:binding/><w:operation name="send">'
+            + '<w:input><x:body rootNode="t:Input"/></w:input><w:output><x:body rootNode="t:Output"/></w:output></w:operation></w:binding>'
+            + '<w:binding name="SOAP" type="t:P"><s:binding transport="http://schemas.xmlsoap.org/soap/http" style="rpc"/>'
+            + '<w:operation name="send"><s:operation soapAction="urn:send"/>'
+            + '<w:input><s:body use="literal" namespace="urn:opaque"/></w:input>'
+            + '<w:output><s:body use="literal" namespace="urn:opaque"/></w:output></w:operation></w:binding>'
+            + '<w:service name="S"><w:port name="XML" binding="t:XML"><h:address location="http://example.invalid/xml"/></w:port>'
+            + '<w:port name="JMS" binding="t:SOAP"><j:address destinationStyle="queue" jndiConnectionFactoryName="Factory" jndiDestinationName="queue">'
+            + '<j:JMSNamingProperty name="java.naming.provider.url" value="tcp://example.invalid:61616"/></j:address></w:port>'
+            + '<w:port name="SoapJms" binding="t:SOAP"><s:address location="jms:queue:orders"/></w:port>'
+            + '<w:port name="SOAP" binding="t:SOAP"><s:address location="http://example.invalid/soap"/></w:port></w:service></w:definitions>';
+    }
+    private static list<WebService> services() {
+        WebService ws(source());
+        return (ws, Serializable::deserialize(ws.serialize()));
+    }
+    private metadata() {
+        foreach WebService ws in (services()) {
+            assertEq(("XML", "JMS", "SoapJms", "SOAP"), keys ws.getService("S").port);
+            Binding xml = ws.getBinding("XML");
+            assertFalse(xml.isSupported());
+            assertTrue(exists xml.getUnsupportedReason());
+            hash<auto> declaration = xml.getDeclarationData();
+            assertEq("http://cxf.apache.org/bindings/xformat", declaration."^attributes^"."xmlns:x");
+            assertEq("t:Input", declaration.operation."w:input"."x:body"."^attributes^".rootNode);
+            declaration."^attributes^".name = "changed";
+            assertEq("XML", xml.getDeclarationData()."^attributes^".name);
+            Binding restored = Serializable::deserialize(xml.serialize());
+            assertEq(xml.getDeclarationData(), restored.getDeclarationData());
+            assertEq(xml.getUnsupportedReason(), restored.getUnsupportedReason());
+            assertTrue(ws.getBinding("SOAP").isSupported());
+            WSOperation op = ws.getBindingOperation("SOAP", "send");
+            assertEq("ready", op.deserializeRequest(parse_xml(op.serializeRequest({"value":"ready"},
+                NOTHING, NOTHING, NOTHING, NOTHING, NOTHING, "SOAP").body), "SOAP"));
+            assertEq(source(), ws.getWSDL());
+            assertTrue(ws.getWSDL("https://example.invalid/mounted").find('location="jms:queue:orders"') >= 0);
+            hash<auto> ports = ws.getService("S").port;
+            assertTrue(exists ports.JMS.unsupported_reason);
+            assertTrue(exists ports.SoapJms.unsupported_reason);
+            assertFalse(exists ports.SOAP.unsupported_reason);
+            assertEq("queue", ports.JMS.declaration.address."^attributes^".jndiDestinationName);
+            assertEq("tcp://example.invalid:61616", ports.JMS.declaration.address."j:JMSNamingProperty"."^attributes^".value);
+        }
+    }
+    private selection() {
+        foreach WebService ws in (services()) {
+            assertThrows("WSDL-BINDING-ERROR", \ws.getBindingOperation(), ("XML", "send"));
+            foreach string port in ("XML", "JMS", "SoapJms") {
+                foreach bool override in (False, True) {
+                    hash<auto> options = {"wsdl":ws, "service":"S", "port":port};
+                    if (override) {
+                        options.url = "http://example.invalid/override";
+                    }
+                    assertThrows("SOAP-CLIENT-ERROR", sub() { new SoapClient(options); });
+                }
+            }
+            SoapClient client({"wsdl":ws, "service":"S", "port":"SOAP"});
+            assertEq("http://example.invalid/soap", client.url);
+        }
+    }
+    private variants() {
+        foreach string extension in ('<x:binding/>',
+                '<a:binding xmlns:a="http://cxf.apache.org/bindings/xformat" w:required="true"/>',
+                '<binding xmlns="http://cxf.apache.org/bindings/xformat"/>') {
+            WebService ws(replace(source(), '<x:binding/>', extension));
+            assertFalse(ws.getBinding("XML").isSupported());
+            assertEq("send", ws.getBindingOperation("SOAP", "send").name);
+        }
+        foreach string transport in ("http://www.w3.org/2010/soapjms/", "http://cxf.apache.org/transports/jms") {
+            foreach bool soap12 in (False, True) {
+                string text = replace(source(), '<w:service name="S">',
+                    '<w:binding name="JMSBinding" type="t:P"><s:binding transport="' + transport + '"/>'
+                    + '<w:operation name="send"><w:input><s:body use="literal"/></w:input>'
+                    + '<w:output><s:body use="literal"/></w:output></w:operation></w:binding><w:service name="S">');
+                if (soap12) {
+                    text = replace(text, "http://schemas.xmlsoap.org/wsdl/soap/", "http://schemas.xmlsoap.org/wsdl/soap12/");
+                }
+                WebService original(text);
+                foreach WebService ws in (original, Serializable::deserialize(original.serialize())) {
+                    Binding binding = Serializable::deserialize(ws.getBinding("JMSBinding").serialize());
+                    assertFalse(binding.isSupported());
+                    assertEq(soap12, binding.isSoap12());
+                    assertEq(transport, binding.getDeclarationData().binding."^attributes^".transport);
+                    assertThrows("WSDL-BINDING-ERROR", \ws.getBindingOperation(), ("JMSBinding", "send"));
+                    assertEq("send", ws.getBindingOperation("SOAP", "send").name);
+                }
+            }
+        }
+    }
+    private invalid() {
+        foreach string text in (replace(source(), 'type="t:P"><x:binding', 'type="t:Missing"><x:binding'),
+                replace(source(), '<x:binding/><w:operation name="send">', '<x:binding/><w:operation name="absent">'),
+                replace(source(), '<x:binding/>', '<x:binding/><s:binding transport="http://schemas.xmlsoap.org/soap/http"/>'),
+                replace(source(), '<x:binding/>', '<x:binding xmlns:x="urn:unknown"/>'),
+                replace(source(), '<w:output><x:body', '<w:fault name="absent"/><w:output><x:body')) {
+            assertThrows("WSDL-ERROR", sub() { new WebService(text); });
+        }
+        foreach WebService ws in (services()) {
+            assertThrows("SOAP-CLIENT-ERROR", sub() { new SoapClient({"wsdl":ws, "service":"S", "port":"missing"}); });
+            assertThrows("SOAP-CLIENT-ERROR", sub() { new SoapClient({"wsdl":ws, "service":"S"}); });
+        }
+    }
+    private http() {
+        foreach WebService ws in (services()) {
+            HttpServer server();
+            on_exit server.stop();
+            SoapHandler handler(new PermissiveAuthenticator());
+            server.setDefaultHandler("mixed", handler);
+            Queue received();
+            code<auto(hash<auto>, auto)> callback = auto sub(hash<auto> cx, auto input) {
+                received.push(input);
+                return {"value":"accepted"};
+            };
+            handler.addMethod(ws, ws.getOperation("send"), callback, NOTHING, NOTHING, NOTHING,
+                NOTHING, NOTHING, NOTHING, "SOAP");
+            server.addListener(0);
+            SoapClient client({"wsdl":ws, "service":"S", "port":"SOAP", "timeout":30000,
+                "url":sprintf("http://127.0.0.1:%d/", server.getListenerInfo(0).port)});
+            assertEq("accepted", client.callOperation("send", {"value":"ready"}));
+            assertEq("ready", received.get(30000));
+        }
+    }
+    private mounted() {
+        string text = replace(source(), "http://example.invalid/xml", "http://example.invalid/soap");
+        text = replace(text, '<w:service name="S">', '<w:service name="S">'
+            + '<w:documentation><!--keep--><?partner keep="yes"?><![CDATA[http://example.invalid/soap]]></w:documentation>');
+        text = replace(text, '<w:port name="SOAP"', '<?between keep="yes"?><w:port name="SOAP"');
+        foreach string prefix in ("w:", "") {
+            string input = text;
+            if (!prefix) {
+                input = replace(input, 'xmlns:w="http://schemas.xmlsoap.org/wsdl/"',
+                    'xmlns="http://schemas.xmlsoap.org/wsdl/"');
+                input = replace(input, "w:", "");
+            }
+            WebService original(input);
+            foreach WebService ws in (original, Serializable::deserialize(original.serialize())) {
+                string output = ws.getWSDL('https://example.invalid/mount?a="quoted"&b=2');
+                WebService rewritten(output);
+                hash<auto> ports = rewritten.getService("S").port;
+                assertEq("http://example.invalid/soap", ports.XML.address);
+                assertEq('https://example.invalid/mount?a="quoted"&b=2/S', ports.SOAP.address);
+                assertEq("jms:queue:orders", ports.SoapJms.address);
+                assertEq("queue", ports.JMS.declaration.address."^attributes^".jndiDestinationName);
+                assertTrue(output.find('<!--keep-->') >= 0);
+                assertTrue(output.find('<?partner keep="yes"?>') >= 0);
+                assertTrue(output.find('<?between keep="yes"?>') >= 0);
+                assertTrue(output.find('<![CDATA[http://example.invalid/soap]]>') >= 0);
+                assertEq(input, ws.getWSDL());
+            }
+        }
+    }
+    private pinned() {
+        string base = get_script_dir() + "/wsdl-interop/cxf/";
+        WebService rpc = WSDLLib::getWebServiceFromUrl(base + "header_rpc_lit.wsdl");
+        assertFalse(rpc.getBinding("headerTesterXMLBinding").isSupported());
+        assertTrue(rpc.getBinding("headerTesterSOAPBinding").isSupported());
+        assertEq("inHeader", rpc.getBindingOperation("headerTesterSOAPBinding", "inHeader").name);
+        WebService mtom = WSDLLib::getWebServiceFromUrl(base + "mtom_xop.wsdl");
+        assertTrue(exists mtom.getService("TestMtomJMSService").port.TestMtomJMSPort.unsupported_reason);
+        assertThrows("SOAP-CLIENT-ERROR", sub() {
+            new SoapClient({"wsdl":mtom, "service":"TestMtomJMSService", "port":"TestMtomJMSPort"});
+        });
+        assertThrows("WSDL-ERROR", \WSDLLib::getWebServiceFromUrl(), (base + "header_doc_lit.wsdl",));
+    }
+}

@@ -9231,3 +9231,24 @@ all 16 corpus commands meet expected outcomes. Docs/parser pass; audit: 18 Pass 
 [audit](audits/P6-26-http-xml-values.md), and the
 [implemented design](../../design/wsdl-http-mime.md).
 Remaining P6 binding/CXF work and P7–P9 are still open.
+
+
+## P6-27: retained optional CXF transport metadata
+
+CXF XML and JMS declarations now retain metadata without blocking supported SOAP
+ports. Unsupported bindings do not register callable operations; client port
+selection rejects explicitly, including URL overrides. Source/saved services and
+standalone bindings retain namespace and extension data. Mounted WSDL output
+rewrites supported address elements by component ownership and preserves other
+URLs, comments, PIs and CDATA. Real mixed-contract SOAP exchanges pass.
+The original RPC-header and MTOM contracts load. WSDL4J independently confirms
+that the original document-header contract names undefined `in`/`out` parts for
+`inoutHeader`; it remains an expected source rejection. No pinned source changed.
+The gate passes 32 suites / 531 cases / 10,984 reported assertions;
+all 16 corpus commands meet expected outcomes and six semantic reports are unchanged.
+Docs/parser and the independent observer pass; audit: 18 Pass / 44 N/A / zero Fail.
+See [validation](P6-27-validation.json), [audit](audits/P6-27-optional-transports.md)
+and [implemented design](../../design/wsdl-optional-transports.md).
+Full XML/JMS transport execution remains outside scope as approved and is tracked
+in [Qore #5454](https://github.com/qoretechnologies/qore/issues/5454).
+Remaining P6 grammar/CXF replay and P7–P9 are still open.
