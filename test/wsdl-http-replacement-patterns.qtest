@@ -1,0 +1,138 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires xml
+%requires ../qlib/WSDL.qm
+%requires ../qlib/SoapClient.qm
+%requires ../qlib/SoapHandler.qm
+%requires HttpServer
+%try-module json
+%define NoJson
+%endtry
+%ifdef NoJson
+throw "MISSING-MODULE", "HTTP replacement fixtures require json";
+%else
+%exec-class HttpReplacementPatternsTest
+
+class HttpReplacementPatternsTest inherits QUnit::Test {
+    constructor() : Test("HTTP replacement patterns", "1.0") {
+        hash<auto> manifest = parse_json(ReadOnlyFile::readTextFile(get_script_dir()
+            + "/wsdl-interop/regressions/wsdl-http-replacement/cases.json"));
+        foreach hash<auto> row in (manifest.cases) {
+            addTestCase(row.name, \check(), (row,));
+        }
+        list<hash<auto>> rows = manifest.cases;
+        addTestCase("Literal patterns survive GET and POST consumers", \http(), (rows,));
+        addTestCase("Template updates replace state atomically", \atomic(), (rows,));
+        addTestCase("Nested literal parentheses retain all bytes", \nested(), (rows,));
+        set_return_value(main());
+    }
+
+    private static WebService parse(string source) {
+        return new WebService(source, {"async_only":True});
+    }
+
+    private check(hash<auto> row) {
+        if (!row.valid) {
+            assertThrows("WSDL-ERROR", \parse(), (row.xml,));
+            return;
+        }
+        WebService original = parse(row.xml);
+        foreach WebService ws in (original, Serializable::deserialize(original.serialize()),
+                Serializable::deserialize(original.serializeToData())) {
+            assertEq(row.xml, ws.getWSDL());
+            AbstractDataProviderType provider = ws.getMessage("In").getDataProviderType(True);
+            assertEq(row.value, provider.acceptsValue(row.value));
+            WSOperation current = ws.getBindingOperation("B", "send");
+            foreach WSOperation op in (current, Serializable::deserialize(current.serialize())) {
+                hash<auto> request = op.serializeRequest(row.value);
+                assertEq(row.path, request.path);
+                assertEq("GET", request.method);
+                assertEq(row.value, op.deserializeRequestPath(request.path));
+                HttpBinding binding = op.getBinding();
+                assertTrue(binding.matchesRequestPath(request.path));
+                assertFalse(binding.matchesRequestPath("/unrelated/request"));
+                assertThrows("SOAP-DESERIALIZATION-ERROR", \op.deserializeRequestPath(),
+                    ("/unrelated/request",));
+                hash<auto> response = op.serializeResponse({"result":"response value"});
+                assertEq({"result":"response value"}, op.deserializeResponse(parse_xml(response.body)));
+                auto example = provider.getExampleValue();
+                assertEq(example, op.deserializeRequestPath(op.serializeRequest(example).path));
+            }
+        }
+    }
+
+    private http(list<hash<auto>> rows) {
+        int count = 0;
+        foreach hash<auto> row in (rows) {
+            if (!row.valid) {
+                continue;
+            }
+            foreach string verb in ("GET", "POST") {
+                foreach int saved in (0, 1, 2) {
+                    HttpServer server();
+                    on_exit server.stop();
+                    SoapHandler handler(new PermissiveAuthenticator());
+                    server.setDefaultHandler("patterns", handler);
+                    server.addListener(0);
+                    string source = replace(row.xml, "http://example.invalid/",
+                        sprintf("http://127.0.0.1:%d/", server.getListenerInfo(0).port));
+                    source = replace(source, "verb=\"GET\"", "verb=\"" + verb + "\"");
+                    WebService original(source);
+                    WebService ws = saved == 1 ? Serializable::deserialize(original.serialize())
+                        : saved == 2 ? Serializable::deserialize(original.serializeToData()) : original;
+                    Queue received();
+                    code<auto(hash<auto>, auto)> callback = auto sub(hash<auto> cx, auto value) {
+                        received.push({"method":cx.http_header.method, "path":cx.raw_path, "value":value});
+                        return {"result":"received"};
+                    };
+                    handler.addMethod(ws, ws.getOperation("send"), callback, NOTHING, NOTHING, NOTHING,
+                        NOTHING, NOTHING, NOTHING, "B");
+                    SoapClient client({"wsdl":ws, "service":"S", "port":"Endpoint", "timeout":30000});
+                    assertEq({"result":"received"}, client.callOperation("send", row.value));
+                    hash<auto> actual = received.get(30000);
+                    assertEq(row.value, actual.value);
+                    assertEq(row.path, actual.path);
+                    assertEq(verb, actual.method);
+                    ++count;
+                }
+            }
+        }
+        assertEq(90, count);
+    }
+
+    private atomic(list<hash<auto>> rows) {
+        WebService ws = parse(rows[0].xml);
+        BindingMessageDescription descriptor = ws.getOperation("send").getBinding().input;
+        WSMessage message = ws.getMessage("In");
+        hash<auto> previous = descriptor.urlReplacement;
+        foreach string invalid in ("/items/()", "/items/(id") {
+            assertThrows("WSDL-ERROR", \descriptor.setUrlReplacement(), (invalid,));
+            assertEq(previous, descriptor.urlReplacement);
+        }
+        assertThrows("WSDL-ERROR", \descriptor.setUrlReplacement(), ("/missing(pattern)", message));
+        assertEq(previous, descriptor.urlReplacement);
+        descriptor.setUrlReplacement("/next/(id)", message);
+        assertEq({"string^1":"/next/", "part^2":"id"}, descriptor.urlReplacement);
+        descriptor.setUrlReplacement("/legacy/(id)");
+        assertEq({"string^1":"/legacy/", "part^2":"id"}, descriptor.urlReplacement);
+        descriptor.setUrlReplacement(convert_encoding("/příliš/(číslo)", "UTF-16"));
+        assertEq({"string^1":"/příliš/", "part^2":"číslo"}, descriptor.urlReplacement);
+        descriptor.setUrlReplacement(convert_encoding("/příliš(v1)/(id)", "UTF-16"), message);
+        assertEq({"string^1":"/příliš(v1)/", "part^2":"id"}, descriptor.urlReplacement);
+        descriptor.setUrlReplacement("");
+        assertEq({}, descriptor.urlReplacement);
+    }
+
+    private nested(list<hash<auto>> rows) {
+        WebService ws = parse(rows[0].xml);
+        BindingMessageDescription descriptor = ws.getOperation("send").getBinding().input;
+        string prefix = "/" + strmul("(", 4096);
+        string suffix = strmul(")", 4096);
+        descriptor.setUrlReplacement(prefix + "(id)" + suffix, ws.getMessage("In"));
+        assertEq({"string^1":prefix, "part^2":"id", "string^3":suffix}, descriptor.urlReplacement);
+    }
+}
+%endif

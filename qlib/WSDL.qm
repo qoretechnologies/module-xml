@@ -121,6 +121,8 @@ module WSDL {
     @section wsdlrelnotes WSDL Module Release Notes
 
     @subsection wsdl_0_5_8 WSDL v0.5.8
+    - HTTP URL replacement recognizes declared message-part patterns while preserving literal parentheses;
+      missing part patterns fail during construction, and descriptor updates replace state atomically
     - HTTP and MIME leaf declarations validate attributes and empty content; normalized verbs, endpoint URIs
       and MIME part references are shared by source and saved service consumers
     - core WSDL declarations validate ordered structure and isolate optional foreign extensions before grouping
@@ -33096,31 +33098,93 @@ public class BindingMessageDescription inherits Serializable {
         return body.parts;
     }
 
-    setUrlReplacement(string loc) {
-        int i = 0;
-        while (i < loc.size()) {
-            int j = index(loc, "(", i);
-            if (j < 0) {
-                j = loc.size();
-            }
-            if (j > i) {
-                urlReplacement{sprintf("string^%d", urlReplacement.size() + 1)} = substr(loc, i, j - i);
-            }
-            if (j < loc.size()) {
-                i = j + 1;
-                j = index(loc, ")", i);
-                if (j == i) {
-                    throw WSDL_ERROR, sprintf("empty replace token in %y near %y", loc, substr(loc, i-1, loc.size()));
-                } else if (j < 0) {
-                    throw WSDL_ERROR, sprintf("missing close parentheses in %y near %y", loc, substr(loc, i-1, loc.size()));
+    #! compiles a URL-replacement template without changing the descriptor on failure
+    /** @param loc the operation-relative URI template
+        @param message optional message defining the replacement patterns; with a message, only its part names
+        in parentheses are patterns and all other parentheses are literal URI characters
+        @throw WSDL-ERROR a message part has no pattern, or a template without a message has malformed parentheses
+        @note Without a message, retains the legacy syntax that treats every parenthesized token as a part name.
+        Descriptions shared by operation handles must not be mutated while bindings are in use.
+        @par Example
+        For a message with part id, `/version(v1)/items/(id)` retains `(v1)` and replaces `(id)`.
+        @since %WSDL 0.5.8 the optional message argument selects WSDL-defined replacement patterns
+    */
+    setUrlReplacement(string loc, *WSMessage message) {
+        loc = convert_encoding(loc, "UTF-8");
+        binary bytes = binary(loc);
+        hash<string, string> replacement();
+        if (message) {
+            replacement = messageReplacement(loc, bytes, message);
+        } else {
+            int i = 0;
+            while (i < loc.size()) {
+                int j = bindex(loc, "(", i);
+                if (j < 0) {
+                    j = loc.size();
                 }
-                string p = substr(loc, i, j-i);
-                # if (messages)   TODO test messages / part here probably not ?
-                urlReplacement{sprintf("part^%d", urlReplacement.size() + 1)} = p;
-                ++j;
+                if (j > i) {
+                    replacement{sprintf("string^%d", replacement.size() + 1)} = byteSlice(bytes, i, j - i);
+                }
+                if (j < loc.size()) {
+                    i = j + 1;
+                    j = bindex(loc, ")", i);
+                    if (j == i) {
+                        throw WSDL_ERROR, sprintf("empty replacement pattern in %Y", loc);
+                    } else if (j < 0) {
+                        throw WSDL_ERROR, sprintf("missing closing parenthesis in %Y", loc);
+                    }
+                    replacement{sprintf("part^%d", replacement.size() + 1)} = byteSlice(bytes, i, j - i);
+                    ++j;
+                }
+                i = j;
             }
-            i = j;
         }
+        urlReplacement = replacement;
+    }
+
+    private static hash<string, string> messageReplacement(string loc, binary bytes, WSMessage message) {
+        hash<string, string> replacement();
+        hash<string, bool> selected();
+        int literal = 0;
+        int opening = bindex(loc, "(");
+        int closing = bindex(loc, ")");
+        while (opening >= 0 && closing >= 0) {
+            if (closing < opening) {
+                closing = bindex(loc, ")", opening + 1);
+                continue;
+            }
+            int next = bindex(loc, "(", opening + 1);
+            if (next >= 0 && next < closing) {
+                opening = next;
+                continue;
+            }
+            string part = byteSlice(bytes, opening + 1, closing - opening - 1);
+            if (message.pmap.hasKey(part)) {
+                if (opening > literal) {
+                    replacement{sprintf("string^%d", replacement.size() + 1)}
+                        = byteSlice(bytes, literal, opening - literal);
+                }
+                replacement{sprintf("part^%d", replacement.size() + 1)} = part;
+                selected{part} = True;
+                literal = closing + 1;
+            }
+            opening = next;
+        }
+        if (literal < loc.size()) {
+            replacement{sprintf("string^%d", replacement.size() + 1)} = byteSlice(bytes, literal);
+        }
+        foreach string part in (keys message.pmap) {
+            if (!selected{part}) {
+                throw WSDL_ERROR, sprintf("URL replacement template %Y does not encode part %Y in message %Y",
+                    loc, part, message.name);
+            }
+        }
+        return replacement;
+    }
+
+    # Delimiters are ASCII in UTF-8; every emitted byte slice ends at a character boundary.
+    private static string byteSlice(binary bytes, int start, *int length) {
+        return binary_to_string(exists length ? substr(bytes, start, length) : substr(bytes, start), "UTF-8");
     }
 }
 
@@ -33399,10 +33463,11 @@ public class Binding inherits WSDL::XsdNamedData {
                 }
 
                 if (op{io}.hasKey("urlReplacement")) {
-                    if (!location)
+                    if (!location) {
                         throw WSDL_ERROR, sprintf("%s binding %y for operation %y has a 'urlReplacement' element but does not use HTTP binding", io, name, opname);
+                    }
 
-                    bmd.setUrlReplacement(location);
+                    bmd.setUrlReplacement(location, selected{io});
                     delete op{io}.urlReplacement;
                 }
 

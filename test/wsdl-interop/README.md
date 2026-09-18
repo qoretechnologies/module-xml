@@ -23,6 +23,11 @@ HTTP and MIME leaf declarations use `test/wsdl-http-mime-grammar.qtest` and
 have independent schema assessments; 24 actual HTTP calls exercise normalized
 source and saved bindings. See [evidence](http-mime-grammar-evidence.md).
 
+HTTP replacement patterns use `test/wsdl-http-replacement-patterns.qtest` and
+`python3 -B test/wsdl-interop/test_http_replacement_patterns.py -v`. The 19-document
+matrix has independent schema and substitution checks, with 90 live GET/POST
+calls through source and saved services. See [evidence](http-replacement-patterns-evidence.md).
+
 P6-01 implements [binding-specific SOAP versions](binding-version-evidence.md),
 including scoped declarations, saved services and actual HTTP exchanges on both
 ports. P6-02 fixes [detached operation ownership](operation-ownership-evidence.md),

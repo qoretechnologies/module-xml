@@ -9355,3 +9355,26 @@ See [evidence](http-mime-grammar-evidence.md), [validation](P6-31-validation.jso
 Remaining P6 work includes top-level WSDL constraints, concrete binding semantics,
 MIME multipart grammar/alternatives and attachment contract replay. P7–P9 are still
 incomplete. No push until development completion.
+
+
+## P6-32: HTTP URL-replacement pattern compilation
+
+HTTP templates recognize exact declared message-part patterns and preserve other
+parentheses as URI literals, including nested, empty and unmatched parentheses.
+All declared parts must have patterns; missing patterns reject at construction.
+Compilation is atomic and repeated descriptor updates replace their prior maps.
+Unicode part names and UTF-16 caller strings retain their characters. The legacy
+one-argument setter keeps its documented interpretation of parenthesized tokens.
+The 19-document matrix has independent Python substitution and pinned-Xerces
+schema checks. Four schema-valid negative descriptions have explicit all-parts
+semantic adjudications. The Qore regression passes 22 cases / 1,187 assertions,
+including 90 live GET/POST exchanges through source and both saved service forms,
+plus detached operations, provider examples, rollback and nested literals.
+All 14 affected Qore suites pass (365 cases / 7,825 assertions), as do
+two independent matrix runners, six CXF peer tests, docs and astparser without
+warnings. Audit: 18 Pass / 44 N/A / zero Fail. No C++ changes or push.
+See [evidence](http-replacement-patterns-evidence.md),
+[validation](P6-32-validation.json), [audit](audits/P6-32-http-replacement-patterns.md)
+and [implemented design](../../design/wsdl-http-mime.md).
+P6 top-level constraints, remaining concrete binding/MIME behavior and attachment
+contract replay remain open before P7–P9. This is not a phase-completion claim.

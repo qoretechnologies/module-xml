@@ -70,6 +70,25 @@ in the body. The same behavior applies after saved-service reconstruction.
 
 ## URL-replacement routing
 
+The binding compiles replacement patterns using the selected abstract message.
+Only an exact, case-sensitive `(partName)` for a declared message part is a
+pattern. Other parentheses remain literal URI characters, including unmatched or
+nested parentheses. For example, `/version(v1)/items/((id))` with part `id` and
+value `A/B` produces `/version(v1)/items/(A%2FB)`. Pattern discovery completes
+before substitution; a value containing `(id)` never triggers another replacement.
+Every declared part must have a pattern. A message with no parts can use a static
+URI containing literal parentheses.
+
+`BindingMessageDescription::setUrlReplacement()` accepts an optional `WSMessage`
+for these rules. The one-argument form retains its legacy interpretation of every
+parenthesized token as a part name. Both forms build a local token map and assign
+it only after validation succeeds, so repeated calls replace the prior map and
+failed calls preserve it. Descriptors shared by operation handles must be treated
+as immutable while in use. The compiler scans UTF-8 byte offsets and emits slices
+at ASCII delimiter boundaries, preserving Unicode part names and literal text.
+Saved services rebuild from the retained source; detached operations retain the
+compiled map.
+
 `HttpBinding::matchesRequestPath()` checks the complete operation-relative
 replacement template without applying schema types. Prefix literals, internal
 separators and suffixes must match; repeated references to a part must decode to
