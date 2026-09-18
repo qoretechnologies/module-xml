@@ -2,7 +2,7 @@
 
 Copyright (C) 2026 Qore Technologies, s.r.o.
 
-The 295 documents in `regressions/wsdl-soap-grammar/cases.json` cover both SOAP
+The 303 documents in `regressions/wsdl-soap-grammar/cases.json` cover both SOAP
 binding namespaces and seven declaration contexts. They test required, unknown,
 same-namespace and foreign attributes; character and child content; whitespace;
 XML booleans; xsi types/hints; URI and name lexical values; prefix aliases; and a
@@ -57,3 +57,8 @@ python3 -B test/wsdl-interop/test_wsdl_soap_grammar.py -v
 See [the implemented design](../../design/wsdl-soap-extension-grammar.md).
 This increment does not close remaining top-level WSDL constraints, HTTP/MIME
 grammar, binding semantics, attachment interoperability or P7–P9 acceptance.
+
+The published SOAP `tFault` type derives from `tBody`. Eight additional rows
+check legal body declarations using that derived type and reject its missing name,
+prohibited parts attribute and abstract intermediate type in both SOAP versions.
+Selecting the derived schema type does not turn a body declaration into a fault.

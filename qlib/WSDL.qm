@@ -121,6 +121,8 @@ module WSDL {
     @section wsdlrelnotes WSDL Module Release Notes
 
     @subsection wsdl_0_5_8 WSDL v0.5.8
+    - HTTP and MIME leaf declarations validate attributes and empty content; normalized verbs, endpoint URIs
+      and MIME part references are shared by source and saved service consumers
     - core WSDL declarations validate ordered structure and isolate optional foreign extensions before grouping
     - SOAP binding declarations validate version-specific attributes and content; accepted URI and token values
       normalize before component lookup, including transport URIs, fault names and header part references
@@ -23449,6 +23451,8 @@ class WsdlSourceProjection {
             bool known = recognized(parent, uri, local);
             if (known && (uri == SOAP_11_NS || uri == SOAP_12_NS)) {
                 WsdlSoapExtensionGrammar::normalize(\value, local);
+            } else if (known && (uri == HTTP_NS || (uri == MIME_NS && local != "multipartRelated"))) {
+                WsdlHttpMimeExtensionGrammar::normalize(\value, local);
             }
             return !known;
         }
@@ -23485,6 +23489,132 @@ class WsdlSourceProjection {
             value.".wsdlExtensions" = extensions;
         }
         return False;
+    }
+}
+
+#! Shared lexical checks for non-nillable WSDL declaration elements.
+class WsdlExtensionLexicalGrammar {
+    static string uri(string value) {
+        try {
+            return normalize_xsd_uri(value);
+        } catch (hash<ExceptionInfo> error) {
+            if (error.err != "XSD-URI-LEXICAL-ERROR") {
+                rethrow;
+            }
+            throw WSDL_ERROR, error.desc;
+        }
+    }
+
+    static boolean(string value) {
+        value = XsdSimpleType::normalizeWhiteSpace(value, "collapse");
+        if (value != "true" && value != "false" && value != "0" && value != "1") {
+            throw WSDL_ERROR, sprintf("invalid XML boolean %Y on WSDL declaration", value);
+        }
+    }
+
+    static bool instanceAttribute(XmlReader reader, string declaration_namespace, *string declaration_type) {
+        if (reader.namespaceUri() != XSI_NS) {
+            return False;
+        }
+        string name = reader.localName();
+        if (name != "nil" && name != "type" && name != "schemaLocation" && name != "noNamespaceSchemaLocation") {
+            return False;
+        }
+        string value = XsdSimpleType::normalizeWhiteSpace(reader.value() ?? "", "collapse");
+        if (name == "nil") {
+            throw WSDL_ERROR, "WSDL declaration elements are not nillable";
+        } else if (name == "type") {
+            value = XsdNameLexicalHelper::lexical("QName", value, WSDL_ERROR);
+            list<string> parts = value.split(":");
+            *string namespace_uri = parts.size() == 2 ? reader.lookupNamespace(parts[0]) : reader.lookupNamespace();
+            if (!declaration_type || namespace_uri != declaration_namespace || parts[-1] != declaration_type) {
+                throw WSDL_ERROR, sprintf("unsupported xsi:type %Y on WSDL declaration", value);
+            }
+        } else {
+            list<string> locations = name == "schemaLocation" ? (value ? value.split(" ") : ()) : (value,);
+            if (name == "schemaLocation" && locations.size() % 2) {
+                throw WSDL_ERROR, "xsi:schemaLocation requires namespace/location pairs";
+            }
+            foreach string location in (locations) {
+                string checked = uri(location);
+            }
+        }
+        return True;
+    }
+}
+
+#! Validate the empty-content HTTP and MIME binding declarations.
+class WsdlHttpMimeExtensionGrammar {
+    private {
+        const AttributeTypes = {
+            "binding": {"verb":"NMTOKEN"},
+            "operation": {"location":"uri"},
+            "address": {"location":"uri"},
+            "content": {"part":"NMTOKEN", "type":"string"},
+            "mimeXml": {"part":"NMTOKEN"},
+        };
+        const Required = {"binding":"verb", "operation":"location", "address":"location"};
+        const Types = {"binding":"bindingType", "operation":"operationType", "address":"addressType",
+            "content":"contentType", "mimeXml":"tMimeXml"};
+    }
+
+    constructor(XmlReader reader) {
+        string kind = reader.localName();
+        string declaration_namespace = reader.namespaceUri();
+        *string required = Required{kind};
+        if (required && !exists reader.getAttribute(required)) {
+            throw WSDL_ERROR, sprintf("WSDL %s requires attribute %s", kind, required);
+        }
+        if (!reader.moveToFirstAttribute()) {
+            return;
+        }
+        on_exit reader.moveToElement();
+        do {
+            string namespace_uri = reader.namespaceUri() ?? "";
+            string name = reader.localName();
+            string value = reader.value() ?? "";
+            if (namespace_uri == "http://www.w3.org/2000/xmlns/"
+                    || WsdlExtensionLexicalGrammar::instanceAttribute(reader, declaration_namespace, Types{kind})) {
+                continue;
+            }
+            if (namespace_uri == "http://schemas.xmlsoap.org/wsdl/" && name == "required"
+                    && kind != "urlEncoded" && kind != "urlReplacement") {
+                WsdlExtensionLexicalGrammar::boolean(value);
+                continue;
+            }
+            *string type = AttributeTypes{kind}{name};
+            if (namespace_uri || !type) {
+                throw WSDL_ERROR, sprintf("unexpected attribute {%s}%s on WSDL %s", namespace_uri, name, kind);
+            }
+            if (type == "uri") {
+                string checked = WsdlExtensionLexicalGrammar::uri(value);
+            } else if (type == "NMTOKEN") {
+                string checked = XsdNameLexicalHelper::lexical(type, value, WSDL_ERROR);
+            }
+        } while (reader.moveToNextAttribute());
+    }
+
+    consume(XmlReader reader) {
+        int node_type = reader.nodeType();
+        if (node_type == XML_NODE_TYPE_ELEMENT) {
+            throw WSDL_ERROR, "HTTP/MIME binding declaration cannot contain child elements";
+        }
+        if ((node_type == XML_NODE_TYPE_TEXT || node_type == XML_NODE_TYPE_CDATA
+                || node_type == XML_NODE_TYPE_SIGNIFICANT_WHITESPACE || node_type == XML_NODE_TYPE_WHITESPACE)
+                && reader.value()) {
+            throw WSDL_ERROR, "HTTP/MIME binding declaration cannot contain character data";
+        }
+    }
+
+    static normalize(reference<auto> value, string kind) {
+        foreach string name in (keys value."^attributes^") {
+            *string type = AttributeTypes{kind}{name};
+            if (type == "uri") {
+                value."^attributes^"{name} = WsdlExtensionLexicalGrammar::uri(value."^attributes^"{name});
+            } else if (type == "NMTOKEN") {
+                value."^attributes^"{name} = XsdNameLexicalHelper::lexical(type, value."^attributes^"{name}, WSDL_ERROR);
+            }
+        }
     }
 }
 
@@ -23579,18 +23709,20 @@ class WsdlSoapExtensionGrammar {
         }
     }
 
-    private static uri(string value) {
-        try {
-            string normalized = normalize_xsd_uri(value);
-        } catch (hash<ExceptionInfo> error) {
-            if (error.err != "XSD-URI-LEXICAL-ERROR") {
-                rethrow;
-            }
-            throw WSDL_ERROR, error.desc;
-        }
-    }
-
     private static attributes(XmlReader reader, string kind, bool soap12) {
+        # The published tFault type derives from tBody. Its xsi:type changes the
+        # declaration grammar while the element retains its SOAP body role.
+        if (kind == "body") {
+            *string selected = reader.getAttributeNs("type", XSI_NS);
+            if (exists selected) {
+                selected = XsdNameLexicalHelper::lexical("QName", selected, WSDL_ERROR);
+                list<string> parts = selected.split(":");
+                *string uri = parts.size() == 2 ? reader.lookupNamespace(parts[0]) : reader.lookupNamespace();
+                if (uri == (soap12 ? SOAP_12_NS : SOAP_11_NS) && parts[-1] == "tFault") {
+                    kind = "fault";
+                }
+            }
+        }
         foreach string required in (Required{kind}) {
             if (!exists reader.getAttribute(required)) {
                 throw WSDL_ERROR, sprintf("SOAP %s requires attribute %s", kind, required);
@@ -23608,27 +23740,8 @@ class WsdlSoapExtensionGrammar {
             if (namespace_uri == "http://www.w3.org/2000/xmlns/") {
                 continue;
             }
-            if (namespace_uri == XSI_NS && (name == "nil" || name == "type"
-                    || name == "schemaLocation" || name == "noNamespaceSchemaLocation")) {
-                if (name == "nil") {
-                    throw WSDL_ERROR, "SOAP binding extension declarations are not nillable";
-                } else if (name == "type") {
-                    value = XsdNameLexicalHelper::lexical("QName", value, WSDL_ERROR);
-                    list<string> parts = value.split(":");
-                    *string ns = parts.size() == 2 ? reader.lookupNamespace(parts[0]) : reader.lookupNamespace();
-                    if (ns != (soap12 ? SOAP_12_NS : SOAP_11_NS) || parts[-1] != Types{kind}) {
-                        throw WSDL_ERROR, sprintf("unsupported xsi:type %Y on SOAP %s", value, kind);
-                    }
-                } else {
-                    value = XsdSimpleType::normalizeWhiteSpace(value, "collapse");
-                    list<string> locations = name == "schemaLocation" ? (value ? value.split(" ") : ()) : (value,);
-                    if (name == "schemaLocation" && locations.size() % 2) {
-                        throw WSDL_ERROR, "xsi:schemaLocation requires namespace/location pairs";
-                    }
-                    foreach string location in (locations) {
-                        uri(location);
-                    }
-                }
+            if (WsdlExtensionLexicalGrammar::instanceAttribute(reader, soap12 ? SOAP_12_NS : SOAP_11_NS,
+                    Types{kind})) {
                 continue;
             }
             if (namespace_uri == "http://schemas.xmlsoap.org/wsdl/" && name == "required"
@@ -23647,17 +23760,14 @@ class WsdlSoapExtensionGrammar {
                 throw WSDL_ERROR, sprintf("unexpected attribute {%s}%s on SOAP %s", namespace_uri, name, kind);
             }
             if (type == "uri") {
-                uri(value);
+                string checked = WsdlExtensionLexicalGrammar::uri(value);
             } else if (type == "encoding") {
                 value = XsdSimpleType::normalizeWhiteSpace(value, "collapse");
                 foreach string encoding in (soap12 ? (value,) : (value ? value.split(" ") : ())) {
-                    uri(encoding);
+                    string checked = WsdlExtensionLexicalGrammar::uri(encoding);
                 }
             } else if (type == "boolean") {
-                value = XsdSimpleType::normalizeWhiteSpace(value, "collapse");
-                if (value != "true" && value != "false" && value != "0" && value != "1") {
-                    throw WSDL_ERROR, sprintf("SOAP %s attribute %s requires an XML boolean", kind, name);
-                }
+                WsdlExtensionLexicalGrammar::boolean(value);
             } else if (type == "style" || type == "use") {
                 if ((type == "style" && value != "document" && value != "rpc")
                         || (type == "use" && value != "literal" && value != "encoded")) {
@@ -23738,6 +23848,7 @@ class WsdlStructureGrammar {
         hash<string, hash<WsdlStructureFrame>> frames();
         int payload_depth = -1;
         *WsdlSoapExtensionGrammar soap_extension;
+        *WsdlHttpMimeExtensionGrammar http_mime_extension;
     }
 
     consume(XmlReader reader) {
@@ -23747,9 +23858,13 @@ class WsdlStructureGrammar {
             if (soap_extension) {
                 soap_extension.consume(reader);
             }
+            if (http_mime_extension) {
+                http_mime_extension.consume(reader);
+            }
             if (node_type == XML_NODE_TYPE_END_ELEMENT && depth == payload_depth) {
                 payload_depth = -1;
                 soap_extension = NOTHING;
+                http_mime_extension = NOTHING;
             }
             return;
         }
@@ -23798,6 +23913,10 @@ class WsdlStructureGrammar {
                         && WsdlSourceProjection::recognized(parent.kind, uri, local)) {
                     WsdlSoapExtensionGrammar checker(reader);
                     soap_extension = reader.isEmptyElement() ? NOTHING : checker;
+                } else if ((uri == HTTP_NS || (uri == MIME_NS && local != "multipartRelated"))
+                        && WsdlSourceProjection::recognized(parent.kind, uri, local)) {
+                    WsdlHttpMimeExtensionGrammar checker(reader);
+                    http_mime_extension = reader.isEmptyElement() ? NOTHING : checker;
                 }
                 parent.content = True;
                 frames{string(depth - 1)} = parent;
@@ -23857,35 +23976,6 @@ class WsdlStructureGrammar {
         }
     }
 
-    private static instanceAttribute(XmlReader reader, string name, string kind) {
-        string value = XsdSimpleType::normalizeWhiteSpace(reader.value() ?? "", "collapse");
-        if (name == "nil") {
-            throw WSDL_ERROR, "core WSDL declarations are not nillable";
-        } else if (name == "type") {
-            value = XsdNameLexicalHelper::lexical("QName", value, WSDL_ERROR);
-            list<string> parts = value.split(":");
-            *string uri = parts.size() == 2 ? reader.lookupNamespace(parts[0]) : reader.lookupNamespace();
-            if (uri != Namespace || parts[-1] != SchemaTypes{kind}) {
-                throw WSDL_ERROR, sprintf("unsupported xsi:type %Y on WSDL %s", value, kind);
-            }
-        } else if (name == "schemaLocation" || name == "noNamespaceSchemaLocation") {
-            list<string> locations = name == "schemaLocation" ? (value ? value.split(" ") : ()) : (value,);
-            if (name == "schemaLocation" && locations.size() % 2) {
-                throw WSDL_ERROR, "xsi:schemaLocation requires namespace/location pairs";
-            }
-            foreach string location in (locations) {
-                try {
-                    string checked = normalize_xsd_uri(location);
-                } catch (hash<ExceptionInfo> error) {
-                    if (error.err != "XSD-URI-LEXICAL-ERROR") {
-                        rethrow;
-                    }
-                    throw WSDL_ERROR, error.desc;
-                }
-            }
-        }
-    }
-
     private static attributes(XmlReader reader, string kind) {
         if (!reader.moveToFirstAttribute()) {
             return;
@@ -23894,9 +23984,7 @@ class WsdlStructureGrammar {
         do {
             string uri = reader.namespaceUri() ?? "";
             string local = reader.localName();
-            if (uri == XSI_NS && (local == "type" || local == "nil"
-                    || local == "schemaLocation" || local == "noNamespaceSchemaLocation")) {
-                instanceAttribute(reader, local, kind);
+            if (WsdlExtensionLexicalGrammar::instanceAttribute(reader, Namespace, SchemaTypes{kind})) {
                 continue;
             }
             if (uri == "http://www.w3.org/2000/xmlns/"

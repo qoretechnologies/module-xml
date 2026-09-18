@@ -827,3 +827,30 @@ See [evidence](wsdl-soap-grammar-evidence.md), [validation](P6-30-validation.jso
 Remaining top-level WSDL constraints, HTTP/MIME grammar, SOAP binding semantics
 and attachment-specific CXF acceptance stay in P6. P7–P9 remain incomplete.
 No push until development completion.
+
+
+## P6-31: HTTP and MIME leaf declaration grammar
+
+The declaration reader checks five HTTP and two MIME leaf extension contexts.
+Attribute ownership, required values and empty content validate before grouping;
+URI/token normalization preserves original source while fixing method, endpoint
+and part lookup. Core, SOAP and HTTP/MIME declarations share schema-instance
+lexical checks. The audit fixes SOAP body xsi:type selection for the published
+tFault derivation, including its required name/prohibited parts and unchanged body
+semantics. Eight valid/invalid derived-type cases bring the SOAP matrix to 303.
+The original HTTP/MIME schemas independently assess all 187 matrix
+documents; seven unused incomplete location hints have explicit specification-based
+semantic rejections. The Qore suite passes 188 cases / 3,162 assertions, including
+24 live HTTP calls through source, serialized and data-saved services without
+endpoint overrides. Namespace aliases, GET/POST, detached operations, provider
+examples, both wire directions and invalid media types are exercised.
+All 20 affected Qore suites pass (933 cases / 20,356 assertions), with
+three independent grammar runners, six CXF peer tests, docs and astparser clean.
+Audit: 18 Pass / 44 N/A / zero Fail; no C++ changes. The P6-30 full regression/corpus
+baseline remains separately recorded; this increment reruns affected paths.
+See [evidence](http-mime-grammar-evidence.md), [validation](P6-31-validation.json),
+[audit](audits/P6-31-http-mime-grammar.md) and
+[implemented design](../../design/wsdl-http-mime-grammar.md).
+Remaining P6 work includes top-level WSDL constraints, concrete binding semantics,
+MIME multipart grammar/alternatives and attachment contract replay. P7–P9 are still
+incomplete. No push until development completion.

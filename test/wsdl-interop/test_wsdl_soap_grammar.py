@@ -19,7 +19,7 @@ class SoapGrammarTest(unittest.TestCase):
     def test_grammar(self):
         manifest = json.loads((FIXTURES / 'cases.json').read_text())
         rows = manifest['cases']
-        self.assertEqual(295, len(rows))
+        self.assertEqual(303, len(rows))
         self.assertEqual(len(rows), len({row['name'] for row in rows}))
         resources = {}
         urls = {}

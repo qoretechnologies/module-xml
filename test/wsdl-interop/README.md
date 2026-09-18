@@ -14,9 +14,14 @@ failures are separate from schema validity. See [evidence](wsdl-grammar-evidence
 and [the implemented design](../../design/wsdl-core-grammar.md).
 
 SOAP extension declarations use `test/wsdl-soap-grammar.qtest` and
-`python3 -B test/wsdl-interop/test_wsdl_soap_grammar.py -v`. The 295-document matrix
+`python3 -B test/wsdl-interop/test_wsdl_soap_grammar.py -v`. The 303-document matrix
 keeps normative acceptance separate from the two documented schema/validator
 differences; see [evidence](wsdl-soap-grammar-evidence.md).
+
+HTTP and MIME leaf declarations use `test/wsdl-http-mime-grammar.qtest` and
+`python3 -B test/wsdl-interop/test_wsdl_http_mime_grammar.py -v`. The 187 documents
+have independent schema assessments; 24 actual HTTP calls exercise normalized
+source and saved bindings. See [evidence](http-mime-grammar-evidence.md).
 
 P6-01 implements [binding-specific SOAP versions](binding-version-evidence.md),
 including scoped declarations, saved services and actual HTTP exchanges on both

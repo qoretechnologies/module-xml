@@ -1,0 +1,117 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires xml
+%requires ../qlib/WSDL.qm
+%requires ../qlib/SoapClient.qm
+%requires ../qlib/SoapHandler.qm
+%requires HttpServer
+%try-module json
+%define NoJson
+%endtry
+%ifdef NoJson
+throw "MISSING-MODULE", "HTTP/MIME grammar fixtures require json";
+%else
+%exec-class HttpGrammarTest
+class HttpGrammarTest inherits QUnit::Test {
+    constructor() : Test("HTTP and MIME declaration grammar", "1.0") {
+        hash<auto> manifest = parse_json(ReadOnlyFile::readTextFile(get_script_dir() + "/wsdl-interop/regressions/wsdl-http-mime-grammar/cases.json"));
+        foreach hash<auto> row in (manifest.cases) {
+            addTestCase(row.name, \check(), (row,));
+        }
+        list<hash<auto>> rows = manifest.cases;
+        addTestCase("Normalized declarations reach HTTP consumers", \http(), (rows,));
+        set_return_value(main());
+    }
+    private static WebService parse(string source) {
+        return new WebService(source, {"async_only":True});
+    }
+    private check(hash<auto> row) {
+        if (!row.valid) {
+            assertThrows("WSDL-ERROR", \parse(), (row.xml,));
+            return;
+        }
+        WebService original = parse(row.xml);
+        foreach WebService ws in (original, Serializable::deserialize(original.serialize()),
+                Serializable::deserialize(original.serializeToData())) {
+            assertEq(row.xml, ws.getWSDL());
+            AbstractDataProviderType provider = ws.getMessage("In").getDataProviderType(True);
+            hash<auto> value = {"id":"A/B & č+%"};
+            assertEq(value, provider.acceptsValue(value));
+            WSOperation current = ws.getBindingOperation("B", "send");
+            foreach WSOperation op in (current, Serializable::deserialize(current.serialize())) {
+                hash<auto> request = op.serializeRequest(value);
+                assertEq(row.method, request.method);
+                string prefix = row.kind == "urlReplacement" ? "/items/" : "/items?id=";
+                if (row.method == "POST") {
+                    assertEq("/items", request.path);
+                    assertEq(value, op.deserializeRequest({"body":request.body,
+                        "content-type":"application/x-www-form-urlencoded"}));
+                } else {
+                    assertEq(prefix + "A%2FB%20%26%20%C4%8D%2B%25", request.path);
+                    assertEq(value, op.deserializeRequestPath(request.path));
+                }
+                hash<auto> response = op.serializeResponse({"result":"response value"});
+                if (row.kind == "content") {
+                    assertEq("response value", op.deserializeResponse({"body":response.body,
+                        "content-type":"text/plain"}).result."^value^");
+                    assertThrows("SOAP-MESSAGE-ERROR", \op.deserializeResponse(),
+                        ({"body":response.body,"content-type":"image/png"},));
+                } else {
+                    assertEq({"result":"response value"}, op.deserializeResponse(parse_xml(response.body)));
+                }
+                auto example = provider.getExampleValue();
+                hash<auto> sample = op.serializeRequest(example);
+                assertEq(example, row.method == "POST" ? op.deserializeRequest({"body":sample.body,
+                    "content-type":"application/x-www-form-urlencoded"}) : op.deserializeRequestPath(sample.path));
+            }
+        }
+    }
+    private http(list<hash<auto>> rows) {
+        const hash<string, bool> Cases = {"binding/verb-whitespace":True, "operation/location-whitespace":True,
+            "address/location-whitespace":True, "content/part-whitespace":True,
+            "mimeXml/part-whitespace":True, "urlReplacement/baseline":True,
+            "binding/verb-whitespace-post":True, "address/location-whitespace-post":True};
+        int count = 0;
+        foreach hash<auto> row in (rows) {
+            if (!Cases{row.name}) {
+                continue;
+            }
+            ++count;
+            foreach int saved in (0, 1, 2) {
+                HttpServer server();
+                on_exit server.stop();
+                SoapHandler handler(new PermissiveAuthenticator());
+                server.setDefaultHandler("grammar", handler);
+                server.addListener(0);
+                string endpoint = sprintf("http://127.0.0.1:%d/", server.getListenerInfo(0).port);
+                string source = replace(row.xml, "http://example.invalid/", endpoint);
+                WebService original(source);
+                WebService ws = saved == 1 ? Serializable::deserialize(original.serialize())
+                    : saved == 2 ? Serializable::deserialize(original.serializeToData()) : original;
+                Queue received();
+                code<auto(hash<auto>, auto)> callback = auto sub(hash<auto> cx, auto value) {
+                    received.push({"method":cx.http_header.method, "value":value, "path":cx.raw_path});
+                    return {"result":"echo:" + value.id};
+                };
+                handler.addMethod(ws, ws.getOperation("send"), callback, NOTHING, NOTHING, NOTHING,
+                    NOTHING, NOTHING, NOTHING, "B");
+                SoapClient client({"wsdl":ws, "service":"S", "port":"Endpoint", "timeout":30000});
+                hash<auto> value = {"id":"A/B & č+%"};
+                hash<auto> result = client.callOperation("send", value);
+                assertEq("echo:" + value.id, row.kind == "content" ? result.result."^value^" : result.result);
+                hash<auto> request = received.get(30000);
+                assertEq(value, request.value);
+                assertEq(row.method, request.method);
+                string prefix = row.kind == "urlReplacement" ? "/items/" : "/items?id=";
+                assertEq(row.method == "POST" ? "/items" : prefix + "A%2FB%20%26%20%C4%8D%2B%25", request.path);
+            }
+        }
+        assertEq(Cases.size(), count);
+    }
+
+}
+
+%endif

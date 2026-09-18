@@ -31,8 +31,9 @@ and headerfaults, and adds operation-level `soapActionRequired`. Attributes in t
 element's own namespace do not satisfy its foreign-attribute wildcard.
 
 The four defined schema-instance attributes have separate handling. Declarations
-are not nillable; an explicit xsi:type must name the matching published SOAP
-declaration type. Location hints must contain lexical URIs and complete
+are not nillable; an explicit xsi:type must name a compatible published SOAP
+declaration type. SOAP body also permits the derived tFault type, requiring its
+name and prohibiting parts while retaining the element's body role. Location hints must contain lexical URIs and complete
 namespace/location pairs, but never trigger schema retrieval. Other foreign
 schema-instance names follow the applicable attribute wildcard.
 
