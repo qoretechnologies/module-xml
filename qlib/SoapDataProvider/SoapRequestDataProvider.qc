@@ -65,7 +65,7 @@ public class SoapRequestDataProvider inherits SoapDataProviderBase {
         return record_type;
     }
 
-    private *WsdlSoapMimeDataType getMimeType(bool request, bool explicit_values = False) {
+    private *AbstractDataProviderType getMimeType(bool request, bool explicit_values = False, bool direct_value = False) {
         *string selected = soapclient ? soapclient.getBindingName() : NOTHING;
         if (!exists selected) {
             # Match the default port used by the lazily constructed client without creating a transport.
@@ -77,6 +77,20 @@ public class SoapRequestDataProvider inherits SoapDataProviderBase {
         }
         OperationalBinding binding = op.getBinding(selected);
         *BindingMessageDescription description = request ? binding.input : binding.output;
+        if (binding instanceof HttpBinding && description) {
+            bool multipart = False;
+            bool direct = False;
+            foreach hash<WsdlMimeFormatInfo> info in (description.getMimeFormats().iterator()) {
+                if (info.kind == WsdlMimeFormatKind::Multipart) { multipart = True; }
+                else { direct = True; }
+            }
+            if (multipart) {
+                # Direct values receive their representation selector through call options later.
+                # Preserve their existing abstract validation until SoapClient applies those options.
+                return direct_value && direct ? (request ? op.input : op.output).getDataProviderType()
+                    : new WsdlHttpMimeDataType(op, request, binding.name);
+            }
+        }
         return binding instanceof SoapBinding && description.parts
             ? new WsdlSoapMimeDataType(op, request, binding.name, explicit_values) : NOTHING;
     }
@@ -94,7 +108,8 @@ public class SoapRequestDataProvider inherits SoapDataProviderBase {
         binding during SOAP serialization.
     */
     private *AbstractDataProviderType getRequestTypeWithDataImpl(auto req) {
-        *WsdlSoapMimeDataType mime = getMimeType(True, req.typeCode() == NT_HASH && req.hasKey("^attachments^"));
+        *AbstractDataProviderType mime = getMimeType(True, req.typeCode() == NT_HASH && req.hasKey("^attachments^"),
+            req.typeCode() != NT_HASH || !req.hasKey("^mime^"));
         if (mime) { return mime; }
         if (op.input && req.typeCode() == NT_HASH && (req.hasKey("^body^") || req.hasKey("^headers^"))) {
             HashDataType envelope("SoapMessage");
@@ -222,6 +237,27 @@ public class SoapRequestDataProvider inherits SoapDataProviderBase {
     #! Returns API options for the current operation
     private *hash<string, hash<DataProviderOptionInfo>> getApiOptions() {
         return {
+            "request_mime_format": <DataProviderOptionInfo>{
+                "display_name": "Request MIME Representation",
+                "short_desc": "Select the request MIME representation",
+                "type": new QoreUnionDataType((new QoreStringDataType(),
+                    new QoreDataType(new Type("hash<WSDL::WsdlMimeSelectionInfo>")))),
+                "desc": "Select a format identifier or a recursive entity tree.\n\n"
+                    "- `format`: representation identifier.\n- `parts`: nested selections.\n"
+                    "- `part`: WSDL entity declaration index.\n\n"
+                    "Example: `{\"parts\":[{\"part\":0,\"format\":\"xml:invoice\"}]}` selects invoice XML.",
+            },
+            "response_mime_format": <DataProviderOptionInfo>{
+                "display_name": "Response MIME Representation",
+                "short_desc": "Select the response MIME representation",
+                "type": new QoreUnionDataType((new QoreStringDataType(),
+                    new QoreDataType(new Type("hash<WSDL::WsdlMimeSelectionInfo>")))),
+                "desc": "Choose representations before decoding the response.\n\n"
+                    "- `format`: representation identifier.\n- `parts`: nested selections.\n"
+                    "- `part`: WSDL entity declaration index.\n- `content_id`: received entity identity.\n"
+                    "- `wire_index`: explicit received position when IDs are unavailable.\n\n"
+                    "Example: `{\"parts\":[{\"part\":0,\"content_id\":\"invoice@example.org\"}]}` identifies an invoice entity.",
+            },
             "soap_header": <DataProviderOptionInfo>{
                 "display_name": "SOAP Headers",
                 "short_desc": "SOAP headers to use in the message",

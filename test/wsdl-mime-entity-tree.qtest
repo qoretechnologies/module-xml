@@ -1,0 +1,397 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%requires QUnit
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires ../qlib/WSDL.qm
+%requires ../qlib/SoapClient.qm
+%requires ../qlib/SoapHandler.qm
+%requires HttpServer
+%requires ../qlib/SoapDataProvider
+%exec-class EntityTreeTest
+class EntityTreeTest inherits QUnit::Test {
+    constructor() : Test("HTTP MIME entity trees", "1.0") {
+        addTestCase("Flat related entities and saved metadata", \flat());
+        addTestCase("Nested related entities and nonfirst declared root", \nested());
+        addTestCase("Repeated WSDL parts require explicit identity", \repeated());
+        addTestCase("Overlapping schema and opaque representations", \alternatives());
+        addTestCase("Invalid trees, selections and recovery", \invalid());
+        addTestCase("Live HTTP nested entity exchange", \live());
+        addTestCase("Binding-aware MIME tree providers", \providers());
+        addTestCase("Nested MIME metadata rejects saved cycles", \metadata());
+        addTestCase("Selections fail before transport and recover", \preflight());
+        addTestCase("Live ambiguous entity selections", \liveSelections());
+        addTestCase("Wildcard media, alternate parts and charsets", \media());
+        addTestCase("Concurrent recursive selections remain isolated", \concurrent());
+        addTestCase("Direct MIME choices remain available in mixed bindings", \mixedDirect());
+        set_return_value(main());
+    }
+    private static string source(string layout) {
+        return '<w:definitions xmlns:w="http://schemas.xmlsoap.org/wsdl/" '
+            + 'xmlns:h="http://schemas.xmlsoap.org/wsdl/http/" xmlns:m="http://schemas.xmlsoap.org/wsdl/mime/" '
+            + 'xmlns:x="http://www.w3.org/2001/XMLSchema" xmlns:t="urn:mime-tree" targetNamespace="urn:mime-tree">'
+            + '<w:message name="M"><w:part name="first" type="x:string"/><w:part name="second" type="x:string"/></w:message>'
+            + '<w:portType name="P"><w:operation name="call"><w:input message="t:M"/><w:output message="t:M"/></w:operation></w:portType>'
+            + '<w:binding name="B" type="t:P"><h:binding verb="POST"/><w:operation name="call"><h:operation location="/call"/>'
+            + '<w:input>'+layout+'</w:input><w:output>'+layout+'</w:output></w:operation></w:binding>'
+            + '<w:service name="S"><w:port name="Endpoint" binding="t:B"><h:address location="http://example.invalid/"/>'
+            + '</w:port></w:service></w:definitions>';
+    }
+    private static string content(string part, string media) {
+        return '<m:content part="'+part+'" type="'+media+'"/>';
+    }
+    private static string related(list<string> parts) {
+        return '<m:multipartRelated>'+join("", map '<m:part>'+$1+'</m:part>',parts)+'</m:multipartRelated>';
+    }
+    private static list<WSOperation> operations(string layout) {
+        WebService initial(source(layout));
+        list<WSOperation> result();
+        foreach WebService ws in (initial,Serializable::deserialize(initial.serialize()),
+                Serializable::deserialize(initial.serializeToData())) {
+            WSOperation op=ws.getOperation("call");
+            push result,op;
+            push result,Serializable::deserialize(op.serialize());
+        }
+        return result;
+    }
+    private static hash<WsdlMimeEntityInfo> leaf(string format, auto value, *string id, *string media) {
+        return <WsdlMimeEntityInfo>{"format":format,"value":value,"content_id":id,"content_type":media};
+    }
+    private static hash<WsdlMimeEntityInfo> tree(list<hash<WsdlMimeEntityInfo>> parts, int root = 0) {
+        return <WsdlMimeEntityInfo>{"format":"multipart:0","parts":parts,"root":root};
+    }
+    private static hash<auto> encode(WSOperation op, hash<WsdlMimeEntityInfo> node, *WsdlMimeSelection selection) {
+        return op.serializeRequest({"^mime^":node},NOTHING,NOTHING,NOTHING,NOTHING,NOTHING,NOTHING,NOTHING,selection);
+    }
+    private static hash<WsdlMimeEntityInfo> decode(WSOperation op, hash<auto> wire, *WsdlMimeSelection selection) {
+        return op.deserializeRequest({"body":wire.body,"content-type":wire.hdr."Content-Type"},NOTHING,False,selection)."^mime^";
+    }
+    private static hash<WsdlMimeEntityInfo> values(hash<WsdlMimeEntityInfo> node) {
+        remove node.content_type;
+        remove node.part;
+        foreach hash<WsdlMimeEntityInfo> child in (node.parts) { node.parts[$#]=values(child); }
+        return node;
+    }
+    private flat() {
+        string layout=related((content("first","text/plain"),content("second","application/octet-stream")));
+        foreach WSOperation op in (operations(layout)) {
+            hash<WsdlMimeEntityInfo> node=tree((leaf("content:first","A & č","first@peer"),
+                leaf("content:second",<00ff0d0a> ,"second@peer")),1);
+            hash<auto> snapshot=node;
+            hash<auto> wire=encode(op,node);
+            assertEq(snapshot,node,"serialization leaves the caller's tree unchanged");
+            assertEq("multipart/related",op.getBinding().input.getMimeAcceptHeader());
+            assertEq("multipart",string(op.getBinding().input.getMimeFormats()."multipart:0".kind));
+            hash<WsdlMimeEntityInfo> result=decode(op,wire);
+            assertEq(values(node),values(result));
+            assertEq(1,result.root);
+            assertEq(0,result.parts[0].part);
+            assertEq(1,result.parts[1].part);
+            assertEq(values(node),values(decode(op,encode(op,result))));
+            # Child indexes refer to declaration slots, so the input tree may be listed in another order.
+            hash<WsdlMimeEntityInfo> reordered=node;
+            reordered.parts[0].part=0; reordered.parts[1].part=1;
+            reordered.parts=reverse(reordered.parts);
+            assertEq(values(node),values(decode(op,encode(op,reordered))));
+        }
+    }
+    private nested() {
+        string layout=related((related((content("first","text/plain"),)),content("second","application/octet-stream")));
+        foreach WSOperation op in (operations(layout)) {
+            hash<WsdlMimeEntityInfo> inner=tree((leaf("content:first","nested č","leaf@peer"),));
+            inner.content_id="inner@peer";
+            hash<WsdlMimeEntityInfo> node=tree((inner,leaf("content:second",<00ff>,"binary@peer")),1);
+            hash<WsdlMimeEntityInfo> result=decode(op,encode(op,node));
+            assertEq(values(node),values(result));
+            assertEq(values(node),values(decode(op,encode(op,result))));
+        }
+    }
+    private repeated() {
+        string layout=related((content("first","text/plain"),content("first","text/plain")));
+        foreach WSOperation op in (operations(layout)) {
+            hash<WsdlMimeEntityInfo> node=tree((leaf("content:first","one","left@peer"),leaf("content:first","two","right@peer")),1);
+            hash<auto> wire=encode(op,node);
+            assertThrows("SOAP-DESERIALIZATION-ERROR",\decode(),(op,wire));
+            hash<WsdlMimeSelectionInfo> selection=<WsdlMimeSelectionInfo>{"parts":(
+                <WsdlMimeSelectionInfo>{"part":1,"content_id":"right@peer"},
+                <WsdlMimeSelectionInfo>{"part":0,"content_id":"left@peer"})};
+            assertEq(values(node),values(decode(op,wire,selection)));
+            hash<WsdlMimeSelectionInfo> by_position=<WsdlMimeSelectionInfo>{"parts":(
+                <WsdlMimeSelectionInfo>{"part":0,"wire_index":1},
+                <WsdlMimeSelectionInfo>{"part":1,"wire_index":0})};
+            assertEq(values(node),values(decode(op,wire,by_position)));
+            assertThrows("SOAP-SERIALIZATION-ERROR",\encode(),(op,node,by_position));
+            selection.parts[0].content_id="absent@peer";
+            assertThrows("SOAP-DESERIALIZATION-ERROR",\decode(),(op,wire,selection));
+            assertThrows("SOAP-SERIALIZATION-ERROR",\encode(),(op,node,selection));
+            # Explicit entity identity takes precedence over a coincidental part-name prefix.
+            node.parts[0].content_id="second=opaque@peer";
+            node.parts[1].content_id="first=opaque@peer";
+            by_position.parts[0].wire_index=1;
+            by_position.parts[1].wire_index=0;
+            assertEq(values(node),values(decode(op,encode(op,node),by_position)));
+        }
+    }
+    private alternatives() {
+        string layout=related((content("first","text/xml")+'<m:mimeXml part="first"/>',
+            content("second","application/octet-stream")));
+        foreach WSOperation op in (operations(layout)) {
+            foreach string format in ("content:first","xml:first") {
+                hash<WsdlMimeEntityInfo> node=tree((leaf(format,"A & č","first@peer","text/xml"),
+                    leaf("content:second",<00ff>,"second@peer")));
+                hash<auto> wire=encode(op,node);
+                assertThrows("SOAP-DESERIALIZATION-ERROR",\decode(),(op,wire));
+                hash<WsdlMimeSelectionInfo> selection=<WsdlMimeSelectionInfo>{"parts":(
+                    <WsdlMimeSelectionInfo>{"format":format},)};
+                assertEq(values(node),values(decode(op,wire,selection)));
+                if (format=="content:first") {
+                    selection.parts[0].format="xml:first";
+                    assertThrows("PARSE-XML-EXCEPTION",\decode(),(op,wire,selection));
+                }
+            }
+        }
+    }
+    private invalid() {
+        WSOperation op=operations(related((content("first","text/plain"),content("second","application/octet-stream"))))[0];
+        hash<WsdlMimeEntityInfo> node=tree((leaf("content:first","one","first@peer"),leaf("content:second",<00ff>,"second@peer")));
+        foreach int root in (-1,2) {
+            hash<WsdlMimeEntityInfo> bad=node;bad.root=root;
+            assertThrows("SOAP-SERIALIZATION-ERROR",\encode(),(op,bad));
+        }
+        hash<WsdlMimeEntityInfo> bad=node;bad.parts[1].part=0;
+        assertThrows("SOAP-SERIALIZATION-ERROR",\encode(),(op,bad));
+        bad=node;bad.parts[1].content_id=bad.parts[0].content_id;
+        assertThrows("SOAP-SERIALIZATION-ERROR",\encode(),(op,bad));
+        bad=node;bad.value="unexpected";
+        assertThrows("SOAP-SERIALIZATION-ERROR",\encode(),(op,bad));
+        bad=node;bad.parts[0].parts=();
+        assertThrows("SOAP-SERIALIZATION-ERROR",\encode(),(op,bad));
+        bad=node;auto ignored=pop bad.parts;
+        assertThrows("SOAP-SERIALIZATION-ERROR",\encode(),(op,bad));
+        hash<auto> wire=encode(op,node);
+        foreach int part in (-1,2) {
+            hash<WsdlMimeSelectionInfo> selection=<WsdlMimeSelectionInfo>{"parts":(<WsdlMimeSelectionInfo>{"part":part},)};
+            assertThrows("SOAP-MESSAGE-ERROR",\decode(),(op,wire,selection));
+            assertThrows("SOAP-MESSAGE-ERROR",\encode(),(op,node,selection));
+        }
+        assertEq(values(node),values(decode(op,encode(op,node))));
+    }
+    private media() {
+        foreach string media in ("text/*", "*/plain", "*/*") {
+            string layout=related((content("first",media),content("second","application/octet-stream")));
+            foreach WSOperation op in (operations(layout)) {
+                hash<WsdlMimeEntityInfo> node=tree((leaf("content:first","é","first@peer","text/plain;charset=ISO-8859-1"),
+                    leaf("content:second",<00ff>,"second@peer")));
+                hash<WsdlMimeSelectionInfo> choices=<WsdlMimeSelectionInfo>{"parts":(
+                    <WsdlMimeSelectionInfo>{"content_id":"first@peer"},
+                    <WsdlMimeSelectionInfo>{"content_id":"second@peer"})};
+                assertEq(values(node),values(decode(op,encode(op,node),choices)));
+                hash<auto> encoded=encode(op,node);
+                assertTrue(binary(encoded.body).toHex().find("0d0a0d0ae90d0a")>=0);
+                assertTrue(binary(encoded.body).toHex().find("0d0a0d0ac3a90d0a")<0);
+                WsdlHttpMimeDataType provider(op,True);
+                hash<auto> sample=provider.getExampleValue();
+                assertEq(sample,provider.acceptsValue(sample));
+            }
+        }
+        WSOperation parameter_op=operations(related((content("first","text/plain"),content("second","application/octet-stream"))))[0];
+        hash<WsdlMimeEntityInfo> parameter_node=tree((leaf("content:first","value","first@peer"),leaf("content:second",<00ff>,"second@peer")));
+        parameter_node.content_type='multipart/related;start-info="example profile";boundary="old-boundary"';
+        hash<auto> encoded=encode(parameter_op,parameter_node);
+        assertTrue(encoded.hdr."Content-Type".find('start-info="example profile"')>=0);
+        assertTrue(encoded.hdr."Content-Type".find('old-boundary')<0);
+        hash<WsdlMimeEntityInfo> forwarded=decode(parameter_op,encoded);
+        assertTrue(encode(parameter_op,forwarded).hdr."Content-Type".find('start-info="example profile"')>=0);
+        parameter_node.content_type='multipart/related;start-info="first";start-info="second"';
+        assertThrows("SOAP-SERIALIZATION-ERROR",\encode(),(parameter_op,parameter_node));
+        # One entity may select different abstract parts; no repeated part map may flatten them.
+        string layout=related((content("first","text/plain")+content("second","application/octet-stream"),
+            content("first","text/plain")));
+        foreach WSOperation op in (operations(layout)) {
+            hash<WsdlMimeEntityInfo> node=tree((leaf("content:second",<00ff>,"second@peer"),
+                leaf("content:first","value","first@peer")));
+            assertEq(values(node),values(decode(op,encode(op,node))));
+        }
+    }
+    private concurrent() {
+        WSOperation op=operations(related((content("first","text/xml")+'<m:mimeXml part="first"/>',
+            content("second","application/octet-stream"))))[0];
+        Queue ready();Queue start();Queue done();
+        foreach int worker in (0,1,2,3) {
+            background sub(int id) {
+                ready.push(id);
+                auto token=start.get(10000);
+                try {
+                    string format=id%2 ? "xml:first" : "content:first";
+                    hash<WsdlMimeSelectionInfo> selection=<WsdlMimeSelectionInfo>{"parts":(
+                        <WsdlMimeSelectionInfo>{"format":format},)};
+                    for (int step=0;step<20;++step) {
+                        hash<WsdlMimeEntityInfo> node=tree((leaf(format,"worker "+id+" / "+step,"first@peer"),
+                            leaf("content:second",<00ff>,"second@peer")),id%2);
+                        @assert(values(node)==values(decode(op,encode(op,node),selection)));
+                    }
+                    done.push(id);
+                } catch (hash<ExceptionInfo> error) { done.push(error); }
+            }(worker);
+        }
+        for (int worker=0;worker<4;++worker) { auto token=ready.get(10000); }
+        for (int worker=0;worker<4;++worker) { start.push(True); }
+        list<int> finished();
+        for (int worker=0;worker<4;++worker) { push finished,done.get(30000); }
+        assertEq((0,1,2,3),sort(finished));
+    }
+    private mixedDirect() {
+        string layout=content("first","text/plain")+'<m:mimeXml part="first"/>'
+            +related(('<m:mimeXml part="first"/>',));
+        string xml=replace(source(layout),'<w:part name="second" type="x:string"/>',"");
+        WebService original(xml);
+        foreach bool multipart in (False,True) {
+        foreach WebService ws in (original,Serializable::deserialize(original.serialize())) {
+            WSOperation op=ws.getOperation("call");
+            HttpServer server();on_exit server.stop();
+            SoapHandler handler(new PermissiveAuthenticator());server.setDefaultHandler("mixed",handler);
+            Queue received();
+            code<auto(hash<auto>,auto)> callback=auto sub(hash<auto> cx,auto args) { received.push(args);return args; };
+            WsdlMimeSelection selection = multipart ? <WsdlMimeSelectionInfo>{"parts":(
+                <WsdlMimeSelectionInfo>{"format":"xml:first"},)} : "xml:first";
+            handler.addMethod(ws,op,callback,NOTHING,NOTHING,NOTHING,NOTHING,NOTHING,NOTHING,"B",NOTHING,False,False,
+                selection,selection);
+            server.addListener(0);
+            SoapClient client({"wsdl":ws,"timeout":10000,"url":sprintf("http://127.0.0.1:%d/",server.getListenerInfo(0).port)});
+            SoapRequestDataProvider provider(ws,client,op);
+            hash<auto> value=multipart ? {"^mime^":tree((leaf("xml:first","A & č","first@peer"),))} : {"first":"A & č"};
+            assertTrue(provider.getRequestType() instanceof WsdlHttpMimeDataType);
+            assertEq(multipart,provider.getRequestTypeWithData(value) instanceof WsdlHttpMimeDataType);
+            auto response=provider.doRequest(value,{"request_mime_format":selection,"response_mime_format":selection});
+            auto received_value=received.get(10000);
+            if (multipart) {
+                assertEq(values(value."^mime^"),values(response."^mime^"));
+                assertEq(values(value."^mime^"),values(received_value."^mime^"));
+                hash<WsdlMimeEntityInfo> inferred=value."^mime^";
+                remove inferred.format;
+                inferred.content_type="multipart/related";
+                hash<auto> encoded=encode(op,inferred);
+                assertEq("multipart:0",decode(op,encoded,selection).format);
+            } else {
+                assertEq(value,response);
+                assertEq(value,received_value);
+            }
+        }
+        }
+    }
+    private metadata() {
+        BindingContentDescription content();content.part="first";content.addContentType("text/plain");
+        BindingMessageDescription leaf();leaf.addMimeContent(content);
+        BindingMessageDescription shared();string format=shared.addMimeMultipart((leaf,leaf));
+        shared.validateMimeLayout();
+        BindingMessageDescription restored=Serializable::deserialize(shared.serialize());
+        restored.validateMimeLayout();
+        assertEq(2,restored.getMimeDescription(format).getMimeParts().size());
+        BindingMessageDescription cycle();format=cycle.addMimeMultipart((leaf,));
+        string second=leaf.addMimeMultipart((cycle,));
+        assertThrows("SOAP-MESSAGE-ERROR",\cycle.validateMimeLayout());
+        BindingMessageDescription saved_cycle=Serializable::deserialize(cycle.serialize());
+        assertThrows("SOAP-MESSAGE-ERROR",\saved_cycle.validateMimeLayout());
+        BindingMessageDescription empty();
+        assertThrows("WSDL-ERROR",\empty.addMimeMultipart(),((),));
+        assertThrows("WSDL-ERROR",\empty.addMimeMultipart(),((new BindingMessageDescription(),),));
+        foreach string layout in ('<m:multipartRelated/>', '<m:multipartRelated><m:part/></m:multipartRelated>') {
+            assertThrows("WSDL-ERROR",sub (string xml) { WebService invalid(xml); },(source(layout),));
+        }
+    }
+    private preflight() {
+        string layout=related((content("first","text/plain"),content("second","application/octet-stream")));
+        WebService ws(source(layout));WSOperation op=ws.getOperation("call");
+        hash<WsdlMimeEntityInfo> node=tree((leaf("content:first","one","first@peer"),leaf("content:second",<00ff>,"second@peer")));
+        SoapClient client({"wsdl":ws,"url":"http://127.0.0.1:1/","timeout":1000});
+        SoapHandler handler(new PermissiveAuthenticator());
+        code<auto(hash<auto>,auto)> callback=auto sub(hash<auto> cx,auto args) { return args; };
+        foreach hash<WsdlMimeSelectionInfo> child in (<WsdlMimeSelectionInfo>{"part":2},
+                <WsdlMimeSelectionInfo>{"format":"absent"},
+                <WsdlMimeSelectionInfo>{"parts":(<WsdlMimeSelectionInfo>{"part":0},)}) {
+            hash<WsdlMimeSelectionInfo> choice=<WsdlMimeSelectionInfo>{"format":"multipart:0","parts":(child,)};
+            assertThrows("SOAP-MESSAGE-ERROR",\client.callOperation(),
+                ("call",{"^mime^":node},{"response_mime_format":choice}));
+            assertThrows("SOAP-MESSAGE-ERROR",\handler.addMethod(),
+                (ws,op,callback,NOTHING,NOTHING,NOTHING,NOTHING,NOTHING,NOTHING,"B",NOTHING,False,False,choice));
+        }
+        hash<WsdlMimeEntityInfo> invalid=node;invalid.part=0;
+        assertThrows("SOAP-SERIALIZATION-ERROR",\encode(),(op,invalid));
+        invalid=node;invalid.content_id="outer@peer";
+        assertThrows("SOAP-SERIALIZATION-ERROR",\encode(),(op,invalid));
+        assertEq(values(node),values(decode(op,encode(op,node))));
+        foreach hash<WsdlMimeSelectionInfo> invalid_selection in (<WsdlMimeSelectionInfo>{"part":0},
+                <WsdlMimeSelectionInfo>{"content_id":"root@peer"},<WsdlMimeSelectionInfo>{"wire_index":0}) {
+            assertThrows("SOAP-MESSAGE-ERROR",\op.getBinding().input.validateMimeSelection(),(invalid_selection,));
+            assertThrows("SOAP-SERIALIZATION-ERROR",\encode(),(op,node,invalid_selection));
+        }
+    }
+    private liveSelections() {
+        string layout=related((content("first","text/xml")+'<m:mimeXml part="first"/>',content("second","application/octet-stream")));
+        WebService original(source(layout));
+        foreach WebService ws in (original,Serializable::deserialize(original.serialize())) {
+            WSOperation op=ws.getOperation("call");
+            HttpServer server();on_exit server.stop();
+            SoapHandler handler(new PermissiveAuthenticator());server.setDefaultHandler("choices",handler);
+            Queue received();
+            code<auto(hash<auto>,auto)> callback=auto sub(hash<auto> cx,auto args) { received.push(args);return args; };
+            hash<WsdlMimeSelectionInfo> selection=<WsdlMimeSelectionInfo>{"parts":(<WsdlMimeSelectionInfo>{"format":"xml:first"},)};
+            handler.addMethod(ws,op,callback,NOTHING,NOTHING,NOTHING,NOTHING,NOTHING,NOTHING,"B",NOTHING,False,False,selection,selection);
+            server.addListener(0);
+            SoapClient client({"wsdl":ws,"timeout":10000,"url":sprintf("http://127.0.0.1:%d/",server.getListenerInfo(0).port)});
+            hash<WsdlMimeEntityInfo> node=tree((leaf("xml:first","A & č","xml@peer"),leaf("content:second",<00ff>,"binary@peer")),1);
+            hash<auto> opts={"request_mime_format":selection,"response_mime_format":selection};
+            SoapRequestDataProvider provider(ws,client,op);
+            foreach bool through_provider in (False,True) {
+                hash<auto> result=through_provider ? provider.doRequest({"^mime^":node},opts)
+                    : client.callOperation("call",{"^mime^":node},opts);
+                assertEq(values(node),values(result."^mime^"));
+                assertEq(values(node),values(received.get(10000)."^mime^"));
+            }
+        }
+    }
+    private providers() {
+        string layout=related((related((content("first","text/plain"),)),content("second","application/octet-stream")));
+        foreach WSOperation op in (operations(layout)) {
+            foreach bool request in (True,False) {
+                WsdlHttpMimeDataType initial(op,request);
+                foreach AbstractDataProviderType provider in (initial, Serializable::deserialize(initial.serialize()),
+                        Serializable::deserialize(initial.serializeToData()), initial.getSoftType()) {
+                    assertTrue(exists provider.getField("^mime^"));
+                    hash<auto> example=provider.getExampleValue();
+                    assertEq("multipart:0",example."^mime^".format);
+                    assertEq("content:first",example."^mime^".parts[0].parts[0].format);
+                    assertEq(example,provider.acceptsValue(example));
+                    assertEq(NOTHING,provider.getOrNothingType().acceptsValue(NOTHING));
+                    assertThrows("MISSING-VALUE-ERROR",\provider.acceptsValue(),(NOTHING,));
+                    hash<auto> invalid=example;
+                    invalid."^mime^".parts[1].part=0;
+                    assertThrows("RUNTIME-TYPE-ERROR",\provider.acceptsValue(),(invalid,));
+                    assertEq(example,provider.acceptsValue(example));
+                }
+            }
+        }
+    }
+    private live() {
+        string layout=related((related((content("first","text/plain"),)),content("second","application/octet-stream")));
+        WebService ws(source(layout));
+        WSOperation op=ws.getOperation("call");
+        HttpServer server();on_exit server.stop();
+        SoapHandler handler(new PermissiveAuthenticator());
+        server.setDefaultHandler("tree",handler);
+        Queue received();
+        code<auto(hash<auto>,auto)> callback=auto sub(hash<auto> cx,auto args) { received.push(args);return args; };
+        handler.addMethod(ws,op,callback,NOTHING,NOTHING,NOTHING,NOTHING,NOTHING,NOTHING,"B");
+        server.addListener(0);
+        SoapClient client({"wsdl":ws,"timeout":10000,"url":sprintf("http://127.0.0.1:%d/",server.getListenerInfo(0).port)});
+        hash<WsdlMimeEntityInfo> inner=tree((leaf("content:first","live č","leaf@peer"),));inner.content_id="inner@peer";
+        hash<WsdlMimeEntityInfo> node=tree((inner,leaf("content:second",<00ff>,"binary@peer")),1);
+        assertEq(values(node),values(client.callOperation("call",{"^mime^":node})."^mime^"));
+        assertEq(values(node),values(received.get(10000)."^mime^"));
+        SoapRequestDataProvider provider(ws,client,op);
+        assertTrue(provider.getRequestType() instanceof WsdlHttpMimeDataType);
+        assertTrue(provider.getResponseType() instanceof WsdlHttpMimeDataType);
+        assertEq(values(node),values(provider.doRequest({"^mime^":node})."^mime^"));
+        assertEq(values(node),values(received.get(10000)."^mime^"));
+    }
+}

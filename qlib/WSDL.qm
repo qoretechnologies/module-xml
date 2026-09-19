@@ -127,7 +127,7 @@ module WSDL {
     Overlaps, including opaque text/xml and schema-bound text/xml, require an explicit selector.
     Failure to validate the selected schema never selects a different format.
 
-    @code{.qore}
+    @code{.py}
     hash<auto> request = op.serializeRequest({"invoice": invoice}, NOTHING, NOTHING, NOTHING,
         NOTHING, NOTHING, NOTHING, {"Content-Type": "text/xml"}, "xml:invoice");
     @endcode
@@ -137,6 +137,47 @@ module WSDL {
     accepts the same choices as optional trailing arguments. Choices are local to a call or registration;
     they are not sent as a custom HTTP header. Abstract-message provider types still describe all parts.
 
+    @section wsdlmimetrees HTTP multipart entity trees
+
+    HTTP multipart/related values use a hash containing only ^mime^. Its WsdlMimeEntityInfo tree preserves
+    each entity independently, including repeated uses of the same abstract WSDL part. Multipart nodes have
+    parts and an optional root declaration index; leaves have a native value. Select each format explicitly
+    or provide a content_type that identifies exactly one representation. multipart:0, multipart:1 and later
+    identifiers follow the order of multipart alternatives within their containing declaration.
+
+    @code{.py}
+    hash<WsdlMimeEntityInfo> package = <WsdlMimeEntityInfo>{"format":"multipart:0","parts":(
+        <WsdlMimeEntityInfo>{"format":"xml:invoice","value":invoice},
+        <WsdlMimeEntityInfo>{"format":"content:document","value":pdf_bytes})};
+    auto response = client.callOperation("upload", {"^mime^":package});
+    @endcode
+
+    Child part fields identify zero-based WSDL declaration indexes; omission uses list position when encoding.
+    Decoding returns children in declaration order and preserves the related root as its declaration index.
+    Encoding writes that root first; received entity order is never an implicit part-identity rule.
+    content_id is an optional unbracketed identifier for nested entities; missing output identifiers are generated.
+    content_type retains application media parameters. Serialization regenerates boundary, start and type
+    framing from the current tree, while preserving parameters such as start-info.
+
+    WsdlMimeSelectionInfo adds recursive selection to the existing string selector API. Its parts list follows
+    declaration order unless a child supplies an explicit part index. format resolves overlapping representations;
+    content_id selects a particular received entity. For peers whose entity order is known, an explicit wire_index
+    can identify a received entity without an ID. wire_index is only valid for decoding. Unknown and ambiguous
+    assignments reject before schema decoding; a schema error never causes fallback to a different format.
+
+    @code{.py}
+    hash<WsdlMimeSelectionInfo> response_format = <WsdlMimeSelectionInfo>{"parts":(
+        <WsdlMimeSelectionInfo>{"part":0,"format":"xml:invoice"},
+        <WsdlMimeSelectionInfo>{"part":1,"content_id":"signed-copy@example.org"})};
+    auto response = client.callOperation("upload", {"^mime^":package},
+        {"response_mime_format":response_format});
+    @endcode
+
+    BindingMessageDescription::getMimeParts() exposes the entities of a selected multipart description;
+    inspect each child with getMimeFormats(). Saved operations retain this declaration graph. SoapClient,
+    SoapHandler and SoapRequestDataProvider accept the entity tree and recursive selections. WsdlHttpMimeDataType
+    describes the concrete HTTP value contract, validates complete messages without I/O, and generates examples.
+
     @section wsdlsoapattachments SOAP MIME attachment values
 
     A MIME attachment uses its public WSDL part name, independently of the SOAP body selection.
@@ -144,7 +185,7 @@ module WSDL {
     the abstract XSD type. Element-based parts contain schema-validated XML. Media alternatives without
     one concrete default require ^attributes^.^content-type^, as with direct MIME selection.
 
-    @code{.qore}
+    @code{.py}
     hash<auto> value = {"order": order, "document": {"^value^": pdf_bytes,
         "^attributes^": {"^content-type^": "application/pdf"}}};
     hash<auto> wire = operation.serializeRequest(value);
@@ -153,7 +194,7 @@ module WSDL {
     Native results keep attachment part-name keys, even when the SOAP body is empty. When body and
     attachment selections overlap, use ^body^, ^headers^ and ^attachments^ maps to provide distinct values.
     Each map must be present in this explicit form; unknown attachment values reject.
-    @code{.qore}
+    @code{.py}
     hash<auto> value = {"^body^": {"invoice": original}, "^headers^": {},
         "^attachments^": {"invoice": signed_copy}};
     @endcode
@@ -166,6 +207,8 @@ module WSDL {
     @section wsdlrelnotes WSDL Module Release Notes
 
     @subsection wsdl_0_5_8 WSDL v0.5.8
+    - HTTP multipart MIME bindings preserve nested entity trees, independently select child representations,
+      and retain concrete provider types through saved services and operations
     - SOAP MIME attachments use independent WSDL part selection, raw type-based media and schema XML for
       element-based parts; generated Content-IDs preserve the public WSDL part name
     - Explicit ^attachments^ maps preserve body/attachment overlaps; native and retained XML consumers keep
@@ -1930,13 +1973,13 @@ class WsdlAttachmentHelper {
 
 # MIME framing and transfer decoding belong to Qore's Mime module. This helper supplies SOAP root semantics.
 class WsdlMultipartHelper {
-    static hash<auto> read(hash<auto> message, *WsdlMediaType media) {
+    static hash<auto> readEntities(hash<auto> message, *WsdlMediaType media) {
         *string boundary;
         *string start;
         *WsdlMediaType declared_root;
         if (media) {
             if (media.major != "multipart" || media.minor != "related") {
-                throw "SOAP-MESSAGE-ERROR", "SOAP attachments require multipart/related";
+                throw "SOAP-MESSAGE-ERROR", "this MIME representation requires multipart/related";
             }
             boundary = media.parameter("boundary", "SOAP-MESSAGE-ERROR");
             start = media.parameter("start", "SOAP-MESSAGE-ERROR");
@@ -1948,7 +1991,7 @@ class WsdlMultipartHelper {
         } else {
             # Older callers may supply only Qore's already-parsed transport metadata.
             if (message."_qore_multipart" != "related") {
-                throw "SOAP-MESSAGE-ERROR", "SOAP attachments require multipart/related";
+                throw "SOAP-MESSAGE-ERROR", "this MIME representation requires multipart/related";
             }
             boundary = message."_qore_multipart_boundary";
             start = message."_qore_multipart_start";
@@ -1973,8 +2016,8 @@ class WsdlMultipartHelper {
             rethrow;
         }
         *hash<Mime::MessageInfo> root;
-        hash<string, hash<Mime::MessageInfo>> parts();
-        list<hash<Mime::MessageInfo>> unidentified();
+        list<hash<Mime::MessageInfo>> entities();
+        int root_index = -1;
         hash<string, bool> seen();
         foreach hash<Mime::MessageInfo> part in (parsed.part) {
             foreach string header in ("content-id", "content-type", "content-transfer-encoding") {
@@ -2014,21 +2057,32 @@ class WsdlMultipartHelper {
                     throw "SOAP-MESSAGE-ERROR", "multipart type parameter conflicts with root Content-Type";
                 }
                 root = part;
-            } else if (exists id) {
-                parts{id} = part;
-            } else {
-                push unidentified, part;
+                root_index = $#;
             }
+            push entities, part;
         }
         if (!exists root) {
             throw "SOAP-MESSAGE-ERROR", "multipart root part is missing";
+        }
+        return {"parts": entities, "root": root_index};
+    }
+
+    static hash<auto> read(hash<auto> message, *WsdlMediaType media) {
+        hash<auto> multipart = readEntities(message, media);
+        hash<Mime::MessageInfo> root = multipart.parts[multipart.root];
+        hash<string, hash<Mime::MessageInfo>> parts();
+        list<hash<Mime::MessageInfo>> unidentified();
+        foreach hash<Mime::MessageInfo> part in (multipart.parts) {
+            if ($# == multipart.root) { continue; }
+            if (part.hdr.hasKey("content-id")) { parts{identifier(part.hdr."content-id")} = part; }
+            else { push unidentified, part; }
         }
         return {"content-type": root.hdr."content-type", "header": message.header + root.hdr,
             "body": root.body, "parts": parts, "unidentified_parts": unidentified,
             "is_mtom": WSDLLib::isMtomMessage({"content-type": root.hdr."content-type"})};
     }
 
-    private static string identifier(string value) {
+    static string identifier(string value) {
         value = trim(value, " \t");
         if (value.size() < 3 || !value.startsWith("<") || !value.endsWith(">")
                 || value =~ /[\x00-\x1f\x7f]/ || value.substr(1, -1) =~ /[<>]/) {
@@ -15609,6 +15663,170 @@ public class WsdlSoapMimeDataType inherits HashDataType {
             if (error.err == "PROGRAM-INTERRUPTED" || error.err == "THREAD-CANCELLED") { rethrow; }
             rethrow "XSD-SAMPLE-ERROR", sprintf("cannot generate a SOAP MIME example: %s", error.desc), error.arg;
         }
+    }
+}
+
+#! A native HTTP MIME message using the selected operation's concrete representations
+/** Multipart values contain a `^mime^` entity tree. Leaf values retain their declared binding contract.
+    Complete values are validated by the operation serializer without network I/O.
+    @par Example
+    Describe a document package containing independently selected XML and binary entities.
+    @since %WSDL 0.5.8
+*/
+public class WsdlHttpMimeDataType inherits HashDataType {
+    private {
+        WSOperation operation;
+        string binding_name;
+        bool request;
+    }
+    #! describes an HTTP message offering a multipart representation
+    /** @param operation the resolved operation
+        @param request True for the input message, False for output
+        @param binding_name the selected binding, or NOTHING for the operation default
+        @throw WSDL-BINDING-ERROR this direction has no HTTP multipart representation
+        @note Ordinary part fields remain available when the binding also offers nonmultipart alternatives.
+        @par Example
+        new WsdlHttpMimeDataType(operation, True) describes an upload's complete MIME tree.
+    */
+    constructor(WSOperation operation, bool request, *string binding_name) : HashDataType("HttpMimeMessage") {
+        self.operation = operation;
+        self.request = request;
+        OperationalBinding binding = operation.getBinding(binding_name);
+        self.binding_name = binding.name;
+        BindingMessageDescription description = checkedDescription();
+        bool direct = False;
+        foreach hash<WsdlMimeFormatInfo> format in (description.getMimeFormats().iterator()) {
+            if (format.kind != WsdlMimeFormatKind::Multipart) { direct = True; }
+        }
+        AbstractDataProviderType tree_type = new QoreDataType(new Type("hash<WSDL::WsdlMimeEntityInfo>"));
+        addQoreFields({"^mime^":{"display_name":"MIME Entity Tree", "type":direct ? tree_type.getOrNothingType() : tree_type,
+            "desc":"Complete MIME message tree.\n\n"
+                "- `format`: representation identifier.\n- `parts`: child entities for multipart values.\n"
+                "- `value`: native data for a leaf.\n- `root`: root entity's WSDL declaration index.\n\n"
+                "Example: `{\"format\":\"multipart:0\",\"parts\":[{\"format\":\"content:document\",\"value\":\"Invoice\"}]}`. "
+                "Binary values retain their bytes."}});
+        if (direct) {
+            WSMessage message = request ? operation.input : operation.output;
+            foreach AbstractDataField field in (message.getDataProviderType().getFields().iterator()) {
+                addField(field.getOrNothingType());
+            }
+        }
+    }
+    private BindingMessageDescription checkedDescription() {
+        OperationalBinding binding = operation.getBinding(binding_name);
+        *BindingMessageDescription description = request ? binding.input : binding.output;
+        if (binding instanceof HttpBinding && description) {
+            description.validateMimeLayout();
+            foreach hash<WsdlMimeFormatInfo> info in (description.getMimeFormats().iterator()) {
+                if (info.kind == WsdlMimeFormatKind::Multipart) { return description; }
+            }
+        }
+        throw "WSDL-BINDING-ERROR", "an HTTP MIME tree provider requires a multipart representation";
+    }
+    private:internal deserializeMembers(hash<auto> members) {
+        if (!(members.operation instanceof WSOperation) || members.binding_name.typeCode() != NT_STRING
+                || members.request.typeCode() != NT_BOOLEAN) {
+            throw "DESERIALIZATION-ERROR", "an HTTP MIME provider requires an operation, binding and direction";
+        }
+        self += members;
+        BindingMessageDescription checked = checkedDescription();
+    }
+    #! keeps complete binding validation active for native hashes
+    /** @return NOTHING */
+    *Type getValueType() { return; }
+    #! prevents enclosing providers from bypassing the binding validator
+    /** @return an empty map */
+    *hash<string, bool> getDirectTypeHash() { return {}; }
+    #! returns whether this message must be present
+    /** @return False for an optional copy */
+    bool isMandatory() { return !or_nothing_type; }
+    #! returns whether the complete message may be omitted
+    /** @return True for an optional copy */
+    bool isOrNothingType() { return or_nothing_type; }
+    #! validates the complete tree without altering native values
+    /** @param value a message containing a MIME entity tree or a supported direct representation
+        @return the original value after validation
+        @throw MISSING-VALUE-ERROR a mandatory message is missing
+        @throw RUNTIME-TYPE-ERROR the concrete binding rejects the value
+        @note Validation serializes without I/O; it never sends a request.
+        @par Example
+        provider.acceptsValue(package) checks each selected format before transport.
+    */
+    auto acceptsValue(auto value) {
+        if (!exists value) {
+            if (or_nothing_type) { return; }
+            throw "MISSING-VALUE-ERROR", "an HTTP MIME message must be supplied";
+        }
+        try {
+            auto checked = request ? operation.serializeRequest(value, NOTHING, NOTHING, NOTHING, NOTHING,
+                NOTHING, binding_name) : operation.serializeResponse(value, NOTHING, NOTHING, NOTHING, NOTHING,
+                NOTHING, binding_name);
+        } catch (hash<ExceptionInfo> error) {
+            if (error.err == "PROGRAM-INTERRUPTED" || error.err == "THREAD-CANCELLED") { rethrow; }
+            rethrow "RUNTIME-TYPE-ERROR", sprintf("invalid HTTP MIME value: %s: %s", error.err, error.desc), error.arg;
+        }
+        return value;
+    }
+    #! returns soft field metadata while retaining complete message validation
+    /** @return a soft provider copy */
+    AbstractDataProviderType getSoftType() {
+        if (soft_type) { return self; }
+        WsdlHttpMimeDataType result = self.copy();
+        foreach AbstractDataField field in (getFields().iterator()) { result.replaceField(field.getSoftType()); }
+        result.soft_type = True;
+        return result;
+    }
+    #! generates a complete example for the first multipart alternative
+    /** @param emap definitions already visited by example generation
+        @param fname optional field context
+        @return a validated example, or NOTHING for an optional message
+        @throw XSD-SAMPLE-ERROR no valid example can be generated
+        @par Example
+        Inspect getExampleValue() for a package with declared child format identifiers.
+    */
+    auto getExampleValue(*hash<string, bool> emap, *string fname) {
+        if (or_nothing_type) { return; }
+        try {
+            BindingMessageDescription description = checkedDescription();
+            WSMessage message = request ? operation.input : operation.output;
+            foreach hash<auto> entry in (description.getMimeFormats().pairIterator()) {
+                if (entry.value.kind == WsdlMimeFormatKind::Multipart) {
+                    return acceptsValue({"^mime^":sample(message, description, entry.key, emap, fname)});
+                }
+            }
+        } catch (hash<ExceptionInfo> error) {
+            if (error.err == "PROGRAM-INTERRUPTED" || error.err == "THREAD-CANCELLED") { rethrow; }
+            rethrow "XSD-SAMPLE-ERROR", sprintf("cannot generate an HTTP MIME example: %s", error.desc), error.arg;
+        }
+    }
+    private static hash<WsdlMimeEntityInfo> sample(WSMessage message, BindingMessageDescription description,
+            string id, *hash<string, bool> emap, *string fname) {
+        BindingMessageDescription format = description.getMimeDescription(id);
+        hash<WsdlMimeEntityInfo> node = <WsdlMimeEntityInfo>{"format":id};
+        *list<BindingMessageDescription> layout = format.getMimeParts();
+        if (exists layout) {
+            node.parts = ();
+            node.root = 0;
+            foreach BindingMessageDescription child in (layout) {
+                hash<WsdlMimeEntityInfo> entity = sample(message, child, child.getMimeFormats().firstKey(), emap, fname);
+                entity.part = $#;
+                entity.content_id = "entity-" + $# + "@example.invalid";
+                push node.parts, entity;
+            }
+        } else if (format.content.formUrlEncoded) {
+            node.value = message.getDataProviderType().getExampleValue(emap, fname);
+        } else {
+            string part = format.mimeXml.part ?? format.content.part;
+            node.value = format.mimeXml || message.args{message.pmap{part}}.element
+                ? message.getDataProviderType().getField(part).getExampleValue(emap, fname) : binary("");
+            if (format.content) {
+                WsdlMediaType media = WsdlMediaType::declaration(WsdlMimeTreeCodec::mediaTypes(format.content)[0]);
+                if (media.major == "*") { media.major = "application"; }
+                if (media.minor == "*") { media.minor = message.args{message.pmap{part}}.element ? "xml" : "octet-stream"; }
+                node.content_type = media.format();
+            }
+        }
+        return node;
     }
 }
 
@@ -31029,7 +31247,7 @@ public class WSOperation inherits WSDL::XsdNamedData {
         @note Declared SOAP faults use their own concrete binding and document-style detail regardless of the
         operation style. Generic faults (fault = NOTHING) have no declared detail and require h = NOTHING.
         @par Example
-        @code{.qore}
+        @code{.py}
         hash<auto> response = operation.serializeFault("OrderRejected", "Order exceeds available stock",
             {"orderId": "PO-724", "available": 12});
         @endcode
@@ -31084,7 +31302,7 @@ public class WSOperation inherits WSDL::XsdNamedData {
 
         @throw SOAP-SERIALIZATION-ERROR no input description, missing selected part, malformed explicit maps or conflicting header sources
     */
-    hash<auto> serializeRequest(auto h, *hash<auto> header, *string enc, *hash<auto> nsh, *int xml_opts, *string req_soapaction, *string bname, *hash<auto> http_headers, *string mime_format) {
+    hash<auto> serializeRequest(auto h, *hash<auto> header, *string enc, *hash<auto> nsh, *int xml_opts, *string req_soapaction, *string bname, *hash<auto> http_headers, *WsdlMimeSelection mime_format) {
         WsdlMimeFormatScope mime_scope(mime_format);
         XsdIdentityDocumentScope identity_document();
         @assert(nsc, "namespace container must be initialized");
@@ -31121,7 +31339,7 @@ public class WSOperation inherits WSDL::XsdNamedData {
 
         @throw SOAP-SERIALIZATION-ERROR no output description, missing selected part, malformed explicit maps or conflicting header sources
     */
-    hash<auto> serializeResponse(auto h, *hash<auto> header, *string enc, *hash<auto> nsh, *bool soap12, *int xml_opts, *string bname, *hash<auto> http_headers, *string mime_format) {
+    hash<auto> serializeResponse(auto h, *hash<auto> header, *string enc, *hash<auto> nsh, *bool soap12, *int xml_opts, *string bname, *hash<auto> http_headers, *WsdlMimeSelection mime_format) {
         WsdlMimeFormatScope mime_scope(mime_format);
         XsdIdentityDocumentScope identity_document();
         @assert(nsc, "namespace container must be initialized");
@@ -31160,7 +31378,7 @@ public class WSOperation inherits WSDL::XsdNamedData {
         @par Example
         Retain a shipment part subtype before storing and later forwarding a decoded message.
     */
-    auto deserializeRequest(hash<auto> o, *string bname, bool preserve_types = False, *string mime_format) {
+    auto deserializeRequest(hash<auto> o, *string bname, bool preserve_types = False, *WsdlMimeSelection mime_format) {
         WsdlMimeFormatScope mime_scope(mime_format);
         XsdIdentityDocumentScope identity_document();
         XsdNativeTypeValueScope type_scope(preserve_types);
@@ -31189,7 +31407,7 @@ public class WSOperation inherits WSDL::XsdNamedData {
         @par Example
         Retain a shipment part subtype before storing and later forwarding a decoded message.
     */
-    auto deserializeResponse(hash<auto> o, *string bname, bool preserve_types = False, *string mime_format) {
+    auto deserializeResponse(hash<auto> o, *string bname, bool preserve_types = False, *WsdlMimeSelection mime_format) {
         WsdlMimeFormatScope mime_scope(mime_format);
         XsdIdentityDocumentScope identity_document();
         XsdNativeTypeValueScope type_scope(preserve_types);
@@ -31262,7 +31480,7 @@ public class WSOperation inherits WSDL::XsdNamedData {
         @note Ordinary response decoding still raises SOAP-SERVER-FAULT-RESPONSE with its raw fault data.
         The explicit name selects a concrete WSDL fault; codes and reason strings do not select schemas.
         @par Example
-        @code{.qore}
+        @code{.py}
         auto rejection = operation.deserializeFault(call_info."response-body", "OrderRejected");
         @endcode
     */
@@ -31296,7 +31514,7 @@ public class WSOperation inherits WSDL::XsdNamedData {
         @throw WSDL-BINDING-ERROR unknown/ambiguous headerfault or a non-SOAP binding
         @throw SOAP-SERIALIZATION-ERROR invalid headerfault value
         @par Example
-        @code{.qore}
+        @code{.py}
         hash<auto> response = operation.serializeHeaderFault(<SoapHeaderFaultInfo>{
             "message": "{urn:session}SessionExpired", "part": "problem", "value": 401}, "Session expired");
         @endcode
@@ -31320,7 +31538,7 @@ public class WSOperation inherits WSDL::XsdNamedData {
         @note Ordinary response decoding retains its SOAP-SERVER-FAULT-RESPONSE exception contract.
         This explicit method selects typed header error data from the retained response XML.
         @par Example
-        @code{.qore}
+        @code{.py}
         auto problem = operation.deserializeHeaderFault(call_info."response-body",
             "{urn:session}SessionExpired", "problem");
         @endcode
@@ -33679,6 +33897,278 @@ public class SoapBinding inherits WSDL::OperationalBinding {
     }
 }
 
+class WsdlMimeTreeCodec {
+    static list<string> mediaTypes(BindingContentDescription content) {
+        return content.acceptAllContentTypes ? ("*/*",) : content.acceptedContentTypeSubtypes
+            + (map $1 + "*", content.acceptedContentTypes) + content.acceptedContentPatterns;
+    }
+
+    static hash<auto> selections(*WsdlMimeSelection selection, int count) {
+        hash<auto> result();
+        hash<string, bool> positions();
+        foreach hash<WsdlMimeSelectionInfo> child in (WsdlMimeSelectionHelper::children(selection)) {
+            int part = child.part ?? $#;
+            if (part < 0 || part >= count || result.hasKey(string(part))) {
+                throw "SOAP-MESSAGE-ERROR", "invalid or repeated MIME entity selection";
+            }
+            if (exists child.wire_index) {
+                if (child.wire_index < 0 || child.wire_index >= count || positions.hasKey(string(child.wire_index))) {
+                    throw "SOAP-MESSAGE-ERROR", "invalid or repeated received MIME entity position";
+                }
+                positions{string(child.wire_index)} = True;
+            }
+            if (exists child.content_id) {
+                string checked = WsdlMultipartHelper::identifier("<" + child.content_id + ">");
+            }
+            result{string(part)} = child;
+        }
+        return result;
+    }
+
+    static hash<Mime::MessageInfo> encode(WSMessage message, BindingMessageDescription format,
+            hash<WsdlMimeEntityInfo> node, string encoding, *int xml_options, *WsdlMimeSelection selection) {
+        if (selection.typeCode() == NT_HASH && exists selection.wire_index) {
+            throw SOAP_SERIALIZATION_ERROR, "wire_index selects received MIME entities and cannot control serialization";
+        }
+        *list<BindingMessageDescription> layout = format.getMimeParts();
+        if (exists layout) {
+            if (!exists node.parts || node.parts.size() != layout.size() || exists node.value) {
+                throw SOAP_SERIALIZATION_ERROR, "a multipart value requires exactly one child per WSDL MIME entity";
+            }
+            hash<auto> choices = selections(selection, layout.size());
+            hash<string, hash<Mime::MessageInfo>> encoded();
+            hash<string, string> ids();
+            hash<string, bool> unique();
+            foreach hash<WsdlMimeEntityInfo> child in (node.parts) {
+                int part = child.part ?? $#;
+                string key = string(part);
+                if (part < 0 || part >= layout.size() || encoded.hasKey(key)) {
+                    throw SOAP_SERIALIZATION_ERROR, "invalid or repeated WSDL MIME entity index";
+                }
+                *WsdlMimeSelection child_choice = choices{key};
+                *string requested = WsdlMimeSelectionHelper::root(child_choice);
+                if (exists requested && exists child.format && requested != child.format) {
+                    throw SOAP_SERIALIZATION_ERROR, "the MIME value and selected format conflict";
+                }
+                string id = layout[part].resolveMimeFormat(child.content_type, requested ?? child.format);
+                BindingMessageDescription child_format = layout[part].getMimeDescription(id);
+                encoded{key} = encode(message, child_format, child, encoding, xml_options, child_choice);
+                string part_name = child_format.content.part ?? child_format.mimeXml.part ?? "mime-entity-" + part;
+                *string selected_cid = choices{key}.content_id;
+                if (exists selected_cid && exists child.content_id && selected_cid != child.content_id) {
+                    throw SOAP_SERIALIZATION_ERROR, "the MIME value and selected Content-ID conflict";
+                }
+                string cid = child.content_id ?? selected_cid ?? WsdlAttachmentHelper::id(part_name);
+                string checked_id = WsdlMultipartHelper::identifier("<" + cid + ">");
+                if (unique.hasKey(cid)) { throw SOAP_SERIALIZATION_ERROR, "duplicate MIME entity Content-ID"; }
+                unique{cid} = True;
+                ids{key} = "<" + cid + ">";
+            }
+            int root = node.root ?? 0;
+            if (root < 0 || root >= layout.size()) { throw SOAP_SERIALIZATION_ERROR, "invalid MIME root entity index"; }
+            MultiPartRelatedMessage writer();
+            foreach string key in (keys encoded) {
+                if (int(key) == root) { continue; }
+                writer.addPart(encoded{key}.body, ids{key}, encoded{key}.hdr."Content-Type");
+            }
+            string key = string(root);
+            writer.splicePart(encoded{key}.body, ids{key}, encoded{key}.hdr."Content-Type");
+            hash<Mime::MessageInfo> result = writer.getMsgAndHeaders();
+            if (exists node.content_type) {
+                WsdlMediaType actual = WsdlMediaType::read(result.hdr."Content-Type");
+                *WsdlMediaType requested = WsdlMediaType::read(node.content_type);
+                # Related framing follows the current tree; application parameters retain their values.
+                if (!requested || requested.major != actual.major || requested.minor != actual.minor) {
+                    throw SOAP_SERIALIZATION_ERROR, "multipart value requires multipart/related";
+                }
+                foreach string parameter in (keys requested.parameters) {
+                    string checked = requested.parameter(parameter, SOAP_SERIALIZATION_ERROR);
+                    if (parameter != "boundary" && parameter != "start" && parameter != "type") {
+                        actual.parameters{parameter} = requested.parameters{parameter};
+                    }
+                }
+                result.hdr."Content-Type" = actual.format();
+            }
+            return result;
+        }
+        if (WsdlMimeSelectionHelper::children(selection)) {
+            throw SOAP_SERIALIZATION_ERROR, "a MIME leaf cannot have child selections";
+        }
+        if (exists node.parts || exists node.root) { throw SOAP_SERIALIZATION_ERROR, "a MIME leaf cannot contain child entities"; }
+        if (format.content.formUrlEncoded) {
+            string content_type = node.content_type ?? WsdlLibPriv::defaultContentType(format.content);
+            WsdlLibPriv::checkType(format.content, content_type);
+            return <Mime::MessageInfo>{"body":binary(mime_get_form_urlencoded_string(message.serializeAllPartData(node.value))),
+                "hdr":{"Content-Type":content_type}};
+        }
+        if (format.content) {
+            auto value = node.value;
+            if (exists node.content_type) {
+                value = {"^value^":value,"^attributes^":{"^content-type^":node.content_type}};
+            }
+            return message.serializeAttachment(format.content.part, mediaTypes(format.content),
+                {format.content.part:value}, encoding);
+        }
+        if (!format.mimeXml) { throw SOAP_SERIALIZATION_ERROR, "missing MIME leaf representation"; }
+        string content_type = node.content_type ?? MimeTypeXml;
+        WsdlLibPriv::checkContentType(content_type, (MimeTypeXml,));
+        WsdlMediaType media = WsdlMediaType::read(content_type);
+        *string charset = media.parameter("charset", SOAP_SERIALIZATION_ERROR);
+        hash<auto> values = {format.mimeXml.part:node.value};
+        string body = message.serializeXmlPart(format.mimeXml.part, \values, charset ?? encoding, xml_options);
+        if (!exists charset) { content_type += ";charset=" + WsdlMediaType::quote(body.encoding()); }
+        return <Mime::MessageInfo>{"body":binary(body),"hdr":{"Content-Type":content_type}};
+    }
+
+    static hash<auto> assign(WSMessage message, list<BindingMessageDescription> layout,
+            list<hash<Mime::MessageInfo>> entities, *WsdlMimeSelection selection) {
+        if (entities.size() != layout.size()) { throw SOAP_DESERIALIZATION_ERROR, "incorrect MIME entity count"; }
+        hash<auto> choices = selections(selection, layout.size());
+        hash<string, hash<string, list<string>>> rows();
+        hash<string, hash<string, bool>> columns();
+        # Index candidates by declared public part and media components. Parameter matching is
+        # deferred to each candidate. Overlaps cost one edge; distinct identities/media stay linear.
+        hash<auto> index();
+        foreach BindingMessageDescription description in (layout) {
+            string part = string($#);
+            *string selected = choices{part}.format;
+            hash<string, hash<WsdlMimeFormatInfo>> formats = description.getMimeFormats();
+            if (exists selected && !formats.hasKey(selected)) {
+                throw "SOAP-MESSAGE-ERROR", "unknown MIME entity format selection";
+            }
+            foreach string id in (exists selected ? (selected,) : keys formats) {
+                hash<WsdlMimeFormatInfo> info = formats{id};
+                foreach string type in (info.media_types) {
+                    WsdlMediaType media = WsdlMediaType::declaration(type);
+                    string bucket = media.major + "/" + media.minor;
+                    string selector = exists choices{part}.content_id ? "id:" + choices{part}.content_id
+                        : exists choices{part}.wire_index ? "wire:" + choices{part}.wire_index : "auto";
+                    index{selector}.""{bucket}{part}{id} = info;
+                    if (exists info.part) { index{selector}{info.part}{bucket}{part}{id} = info; }
+                }
+            }
+        }
+        foreach hash<Mime::MessageInfo> entity in (entities) {
+            string wire = string($#);
+            *string public_part;
+            *string cid;
+            if (entity.hdr.hasKey("content-id")) {
+                cid = WsdlMultipartHelper::identifier(entity.hdr."content-id");
+                int equal = cid.find("=");
+                if (equal > 0) {
+                    string encoded = cid.substr(0, equal);
+                    if (encoded !~ /%(?![0-9a-fA-F]{2})/) {
+                        string part = decode_url(encoded);
+                        if (message.pmap.hasKey(part)) { public_part = part; }
+                    }
+                }
+            }
+            WsdlMediaType media = WsdlMediaType::read(entity.hdr."content-type");
+            hash<auto> matches();
+            foreach string selector in (exists cid ? ("auto", "wire:" + wire, "id:" + cid) : ("auto", "wire:" + wire)) {
+                foreach string bucket in (media.major + "/" + media.minor, media.major + "/*", "*/" + media.minor, "*/*") {
+                    foreach hash<auto> candidate in (index{selector}{selector == "auto" ? public_part ?? "" : ""}{bucket}.pairIterator()) {
+                        string part = candidate.key;
+                        if ((exists choices{part}.content_id && choices{part}.content_id != cid)
+                                || (exists choices{part}.wire_index && choices{part}.wire_index != int(wire))) { continue; }
+                        foreach hash<auto> info in (candidate.value.pairIterator()) {
+                            if (WsdlLibPriv::isContentType(entity.hdr."content-type", info.value.media_types)) {
+                                matches{part}{info.key} = True;
+                            }
+                        }
+                    }
+                }
+            }
+            foreach string part in (keys matches) {
+                rows{wire}{part} = keys matches{part};
+                columns{part}{wire} = True;
+            }
+            if (!rows{wire}) { throw SOAP_DESERIALIZATION_ERROR, "MIME entity has no matching declared representation"; }
+        }
+        list<hash<string, string>> pending();
+        foreach string wire in (keys rows) {
+            if (rows{wire}.size() == 1) { push pending, {"wire":wire,"part":rows{wire}.firstKey()}; }
+        }
+        foreach string part in (keys columns) {
+            if (columns{part}.size() == 1) { push pending, {"wire":columns{part}.firstKey(),"part":part}; }
+        }
+        hash<auto> assigned();
+        hash<string, bool> used();
+        while (pending) {
+            hash<string, string> item = pop pending;
+            if (assigned.hasKey(item.wire) || used.hasKey(item.part) || !rows{item.wire}.hasKey(item.part)) { continue; }
+            list<string> formats = rows{item.wire}{item.part};
+            if (formats.size() != 1) { throw SOAP_DESERIALIZATION_ERROR, "ambiguous MIME format; select its representation explicitly"; }
+            assigned{item.wire} = {"part":int(item.part),"format":formats[0]};
+            used{item.part} = True;
+            list<string> wires = keys columns{item.part};
+            foreach string part in (keys rows{item.wire}) {
+                remove columns{part}{item.wire};
+                if (!used.hasKey(part) && columns{part}.size() == 1) {
+                    push pending, {"wire":columns{part}.firstKey(),"part":part};
+                }
+            }
+            remove rows{item.wire};
+            foreach string wire in (wires) {
+                if (assigned.hasKey(wire)) { continue; }
+                remove rows{wire}{item.part};
+                if (!rows{wire}) { throw SOAP_DESERIALIZATION_ERROR, "MIME entities cannot satisfy all declared parts"; }
+                if (rows{wire}.size() == 1) { push pending, {"wire":wire,"part":rows{wire}.firstKey()}; }
+            }
+            remove columns{item.part};
+        }
+        if (assigned.size() != layout.size()) {
+            throw SOAP_DESERIALIZATION_ERROR, "ambiguous MIME entity identity; select by Content-ID or received wire_index";
+        }
+        return assigned;
+    }
+
+    static hash<WsdlMimeEntityInfo> decode(WSMessage message, BindingMessageDescription format,
+            hash<Mime::MessageInfo> entity, string selected, *WsdlMimeSelection selection) {
+        if (selection.typeCode() == NT_HASH && exists selection.content_id
+                && (!entity.hdr.hasKey("content-id")
+                    || WsdlMultipartHelper::identifier(entity.hdr."content-id") != selection.content_id)) {
+            throw SOAP_DESERIALIZATION_ERROR, "MIME entity Content-ID does not match its selection";
+        }
+        hash<WsdlMimeEntityInfo> result = <WsdlMimeEntityInfo>{"format":selected,"content_type":entity.hdr."content-type"};
+        if (entity.hdr.hasKey("content-id")) { result.content_id = WsdlMultipartHelper::identifier(entity.hdr."content-id"); }
+        *list<BindingMessageDescription> layout = format.getMimeParts();
+        if (exists layout) {
+            hash<auto> parsed = WsdlMultipartHelper::readEntities({"body":entity.body}, WsdlMediaType::read(result.content_type));
+            hash<auto> assigned = assign(message, layout, parsed.parts, selection);
+            hash<auto> choices = selections(selection, layout.size());
+            list<hash<WsdlMimeEntityInfo>> parts();
+            foreach hash<Mime::MessageInfo> child in (parsed.parts) {
+                hash<auto> target = assigned{string($#)};
+                hash<WsdlMimeEntityInfo> decoded = decode(message, layout[target.part].getMimeDescription(target.format),
+                    child, target.format, choices{string(target.part)});
+                decoded.part = target.part;
+                parts[target.part] = decoded;
+                if ($# == parsed.root) { result.root = target.part; }
+            }
+            result.parts = parts;
+            return result;
+        }
+        if (WsdlMimeSelectionHelper::children(selection)) {
+            throw SOAP_DESERIALIZATION_ERROR, "a MIME leaf cannot have child selections";
+        }
+        if (format.content.formUrlEncoded) {
+            WsdlLibPriv::checkType(format.content, result.content_type);
+            result.value = message.deserializeAllPartData(mime_parse_form_urlencoded_string(binary_to_string(entity.body)));
+        } else if (format.content) {
+            list<string> types = mediaTypes(format.content);
+            result.value = message.deserializeAttachment(format.content.part, types, entity);
+            if (!exists WsdlAttachmentHelper::defaultType(types)) { result.value = result.value."^value^"; }
+        } else if (format.mimeXml) {
+            WsdlLibPriv::checkContentType(result.content_type, (MimeTypeXml,));
+            string xml = WSDLLib::getXmlMessageText({"content-type":result.content_type,"body":entity.body});
+            hash<auto> parsed = XsdBase::expandElementNamespaces(parse_xml(xml, XPF_PRESERVE_ORDER | XPF_PRESERVE_WHITESPACE));
+            result.value = message.deserializeDocument(NOTHING, parsed, (format.mimeXml.part,), False, True){format.mimeXml.part};
+        } else { throw SOAP_DESERIALIZATION_ERROR, "missing MIME leaf representation"; }
+        return result;
+    }
+}
+
 public class HttpBinding inherits WSDL::OperationalBinding {
     public {
         string httpMethod;
@@ -33711,8 +34201,34 @@ public class HttpBinding inherits WSDL::OperationalBinding {
         string ct;
 
         *BindingMessageDescription bmd = self{io};
+        *string chosen = WsdlMimeSelectionHelper::root(MimeFormatSelection);
+        bool tree = h.typeCode() == NT_HASH && h.hasKey("^mime^");
+        if (MimeFormatSelection.typeCode() == NT_HASH
+                && (exists MimeFormatSelection.part || exists MimeFormatSelection.content_id || exists MimeFormatSelection.wire_index)) {
+            throw SOAP_SERIALIZATION_ERROR, "part, content_id and wire_index select nested MIME entities only";
+        }
+        if (tree && exists h."^mime^".content_type) {
+            if (exists requested_content_type) {
+                *WsdlMediaType supplied = WsdlMediaType::read(h."^mime^".content_type);
+                *WsdlMediaType requested = WsdlMediaType::read(requested_content_type);
+                if (!supplied || !requested) { throw SOAP_SERIALIZATION_ERROR, "invalid multipart Content-Type"; }
+                foreach string parameter in ("boundary", "start", "type") {
+                    remove supplied.parameters{parameter};
+                    remove requested.parameters{parameter};
+                }
+                if (!supplied.matches(requested) || !requested.matches(supplied)) {
+                    throw SOAP_SERIALIZATION_ERROR, "HTTP and multipart value content types conflict";
+                }
+            } else { requested_content_type = h."^mime^".content_type; }
+        }
+        if (tree && h.size() != 1) { throw SOAP_SERIALIZATION_ERROR, "a MIME tree wrapper has only the ^mime^ key"; }
+        if (tree && exists h."^mime^".format) {
+            if (exists chosen && chosen != h."^mime^".format) { throw SOAP_SERIALIZATION_ERROR, "conflicting root MIME formats"; }
+            chosen = h."^mime^".format;
+        }
         if (bmd) {
-            bmd = bmd.getMimeDescription(bmd.resolveOutputMimeFormat(msg, h, MimeFormatSelection, requested_content_type));
+            bmd.validateMimeLayout();
+            bmd = bmd.getMimeDescription(bmd.resolveOutputMimeFormat(msg, h, chosen, requested_content_type));
         }
         if (!bmd) {
             throw SOAP_SERIALIZATION_ERROR, sprintf("no %s message description for message %y", io, name);
@@ -33722,7 +34238,18 @@ public class HttpBinding inherits WSDL::OperationalBinding {
             throw SOAP_SERIALIZATION_ERROR, sprintf("%s value given for operation %y with no %s message: %y",
                 request ? "request" : "response", name, io, h);
 
-        if (bmd.content.formUrlEncoded || (request && bmd.urlEncoded && httpMethod == "POST")) {
+        if (exists bmd.getMimeParts()) {
+            if (!tree) { throw SOAP_SERIALIZATION_ERROR, "multipart values require an explicit ^mime^ entity tree"; }
+            hash<WsdlMimeEntityInfo> node = new hash<WsdlMimeEntityInfo>(h."^mime^");
+            if (!exists node.content_type) { node.content_type = requested_content_type; }
+            if (exists node.part || exists node.content_id) {
+                throw SOAP_SERIALIZATION_ERROR, "part and content_id identify nested MIME entities only";
+            }
+            hash<Mime::MessageInfo> encoded = WsdlMimeTreeCodec::encode(msg, bmd, node, enc, xml_opts, MimeFormatSelection);
+            rv.body = encoded.body;
+            ct = encoded.hdr."Content-Type";
+            delete enc;
+        } else if (bmd.content.formUrlEncoded || (request && bmd.urlEncoded && httpMethod == "POST")) {
             ct = requested_content_type ?? (bmd.content.formUrlEncoded
                 ? bmd.content.acceptedContentTypeSubtypes[0] ?? MimeTypeFormUrlEncoded : MimeTypeFormUrlEncoded);
             WsdlLibPriv::checkContentType(ct, bmd.content.formUrlEncoded
@@ -33837,9 +34364,13 @@ public class HttpBinding inherits WSDL::OperationalBinding {
         string io = request ? "input" : "output";
 
         *BindingMessageDescription bmd = self{io};
+        *string selected_format;
         if (bmd) {
-            bmd = bmd.getMimeDescription(bmd.resolveMimeFormat(v."content-type", MimeFormatSelection,
-                !exists v."content-type" && !v.hasKey("body")));
+            bmd.validateMimeLayout();
+            selected_format = bmd.resolveMimeFormat(v."content-type", WsdlMimeSelectionHelper::root(MimeFormatSelection),
+                !exists v."content-type" && !v.hasKey("body"));
+            bmd.validateMimeSelection(WsdlMimeSelectionHelper::withRoot(MimeFormatSelection, selected_format));
+            bmd = bmd.getMimeDescription(selected_format);
         }
         if (!bmd) {
             if (!v.body.val()) {
@@ -33864,6 +34395,10 @@ public class HttpBinding inherits WSDL::OperationalBinding {
                 request ? "request" : "response", name, io, v);
 
         *WSMessage msg = op{io};
+        if (exists bmd.getMimeParts()) {
+            hash<Mime::MessageInfo> entity = <Mime::MessageInfo>{"body":v.body,"hdr":{"content-type":v."content-type"}};
+            return {"^mime^":WsdlMimeTreeCodec::decode(msg, bmd, entity, selected_format, MimeFormatSelection)};
+        }
 
         if (bmd.content.formUrlEncoded || (request && bmd.urlEncoded && httpMethod == "POST")) {
             WsdlLibPriv::checkContentType(ct, bmd.content.formUrlEncoded
@@ -34251,6 +34786,8 @@ public enum WsdlMimeFormatKind : string {
     Form = "form",
     #! One schema-bound XML document
     Xml = "xml",
+    #! A related MIME entity containing independently selected child entities
+    Multipart = "multipart",
 }
 
 #! Immutable inspection data for one direct MIME representation
@@ -34264,11 +34801,68 @@ public hashdecl WsdlMimeFormatInfo {
     list<string> media_types;
 }
 
+#! An explicit choice for a MIME entity and its declared children
+/** Child selections follow WSDL declaration order unless part supplies a declaration index.
+    Content-ID can disambiguate entities with overlapping representations. @since %WSDL 0.5.8 */
+public hashdecl WsdlMimeSelectionInfo {
+    #! The selected format identifier, or NOTHING for unambiguous media selection
+    *string format;
+    #! The zero-based WSDL MIME entity index, when identity/media do not identify it uniquely
+    *int part;
+    #! Content-ID without angle brackets identifying this nested entity, or NOTHING for automatic matching
+    *string content_id;
+    #! Explicit received entity position when Content-ID and media cannot distinguish siblings
+    /** Zero-based within the received multipart body; valid only for decoding. */
+    *int wire_index;
+    #! Choices for declared child entities, or NOTHING for automatic identity/media selection
+    *list<hash<WsdlMimeSelectionInfo>> parts;
+}
+
+#! A direct format identifier or explicit recursive MIME choices
+public typedef WsdlMimeSelection = union<string, hash<WsdlMimeSelectionInfo>>;
+
+#! A complete native MIME entity preserving its selected representation
+/** Multipart values use an outer hash with the single key ^mime^ containing this tree.
+    Leaf values use their declared part's native value; form values use the complete message map.
+    Child part indexes refer to WSDL declarations, not MIME wire positions. @since %WSDL 0.5.8 */
+public hashdecl WsdlMimeEntityInfo {
+    #! The selected representation identifier
+    *string format;
+    #! The WSDL MIME entity index within its containing multipart declaration
+    *int part;
+    #! A native leaf value, absent for a multipart entity
+    auto value;
+    #! Complete child entities, absent for a leaf
+    *list<hash<WsdlMimeEntityInfo>> parts;
+    #! The wire media type, including charset when supplied
+    *string content_type;
+    #! The nested wire Content-ID without angle brackets, or NOTHING to generate one
+    *string content_id;
+    #! The root entity's WSDL declaration index, defaulting to zero for serialization
+    *int root;
+}
+
+class WsdlMimeSelectionHelper {
+    static *string root(*WsdlMimeSelection selection) {
+        return selection.typeCode() == NT_STRING ? selection : selection.format;
+    }
+    static *WsdlMimeSelection withRoot(*WsdlMimeSelection selection, *string format) {
+        if (selection.typeCode() == NT_HASH) {
+            selection.format = format;
+            return selection;
+        }
+        return format;
+    }
+    static *list<hash<WsdlMimeSelectionInfo>> children(*WsdlMimeSelection selection) {
+        return selection.typeCode() == NT_HASH ? selection.parts : NOTHING;
+    }
+}
+
 # Direct operation entry points own this per-call selection context.
-thread_local *string MimeFormatSelection;
+thread_local *WsdlMimeSelection MimeFormatSelection;
 class WsdlMimeFormatScope {
-    private { *string previous; }
-    constructor(*string selection) {
+    private { *WsdlMimeSelection previous; }
+    constructor(*WsdlMimeSelection selection) {
         previous = MimeFormatSelection;
         MimeFormatSelection = selection;
     }
@@ -34323,17 +34917,21 @@ public class BindingMessageDescription inherits Serializable {
 
     private:internal {
         hash<string, BindingMessageDescription> mime_formats();
+        *list<BindingMessageDescription> mime_parts;
+        int multipart_count = 0;
         #! a list of WSDL::BindingMessageHeaderDescription objects
         list<BindingMessageHeaderDescription> headers = cast<list<BindingMessageHeaderDescription>>(());
     }
 
     private nothing validateMimeFormat(string id, BindingMessageDescription format) {
-        if (format === self || format.mime_formats || boolean(format.content) == boolean(format.mimeXml)) {
+        if (format === self || format.mime_formats || (int(boolean(format.content)) + int(boolean(format.mimeXml)) + int(exists format.mime_parts)) != 1) {
             throw "SOAP-MESSAGE-ERROR", "invalid saved MIME format description";
         }
-        string expected_id = format.mimeXml ? "xml:" + format.mimeXml.part
+        string expected_id = exists format.mime_parts ? id : format.mimeXml ? "xml:" + format.mimeXml.part
             : format.content.formUrlEncoded ? "form" : "content:" + format.content.part;
-        if (id != expected_id || format.body || format.multipart || format.urlEncoded
+        if (id != expected_id || format.body || (format.multipart && !exists format.mime_parts)
+                || (exists format.mime_parts && (id !~ /^multipart:[0-9]+$/ || format.multipart != Mime::MPT_RELATED))
+                || format.urlEncoded
                 || exists format.urlReplacement || format.hasHeaders()) {
             throw "SOAP-MESSAGE-ERROR", "inconsistent saved MIME format description";
         }
@@ -34351,10 +34949,10 @@ public class BindingMessageDescription inherits Serializable {
         foreach hash<auto> entry in (mime_formats.pairIterator()) {
             BindingMessageDescription value = entry.value;
             validateMimeFormat(entry.key, value);
-            result{entry.key} = <WsdlMimeFormatInfo>{"kind":value.mimeXml ? WsdlMimeFormatKind::Xml
+            result{entry.key} = <WsdlMimeFormatInfo>{"kind":exists value.mime_parts ? WsdlMimeFormatKind::Multipart : value.mimeXml ? WsdlMimeFormatKind::Xml
                     : value.content.formUrlEncoded ? WsdlMimeFormatKind::Form : WsdlMimeFormatKind::Content,
-                "part":value.mimeXml ? value.mimeXml.part : value.content.formUrlEncoded ? NOTHING : value.content.part,
-                "media_types":value.mimeXml ? (MimeTypeXml,) : value.content.acceptAllContentTypes ? ("*/*",)
+                "part":exists value.mime_parts ? NOTHING : value.mimeXml ? value.mimeXml.part : value.content.formUrlEncoded ? NOTHING : value.content.part,
+                "media_types":exists value.mime_parts ? ("multipart/related",) : value.mimeXml ? (MimeTypeXml,) : value.content.acceptAllContentTypes ? ("*/*",)
                     : value.content.acceptedContentTypeSubtypes
                         + (map $1 + "*", value.content.acceptedContentTypes) + value.content.acceptedContentPatterns};
         }
@@ -34371,7 +34969,8 @@ public class BindingMessageDescription inherits Serializable {
         @par Example
         resolveMimeFormat("text/xml", "xml:invoice") explicitly selects the invoice schema.
     */
-    *string resolveMimeFormat(*string content_type, *string selection, bool xml_only = False) {
+    *string resolveMimeFormat(*string content_type, *WsdlMimeSelection selection, bool xml_only = False) {
+        selection = WsdlMimeSelectionHelper::root(selection);
         if (!mime_formats) {
             if (exists selection) {
                 throw "SOAP-MESSAGE-ERROR", "this message has no selectable MIME formats";
@@ -34389,7 +34988,8 @@ public class BindingMessageDescription inherits Serializable {
             if (xml_only && !format.mimeXml) {
                 continue;
             }
-            if (exists content_type && !(format.mimeXml
+            if (exists content_type && !(exists format.mime_parts
+                    ? WsdlLibPriv::isContentType(content_type, ("multipart/related",)) : format.mimeXml
                     ? WsdlLibPriv::isContentType(content_type, (MimeTypeXml,))
                     : WsdlLibPriv::isContentType(content_type, format.content.acceptAllContentTypes ? ("*/*",)
                         : format.content.acceptedContentTypeSubtypes + format.content.acceptedContentTypes
@@ -34442,11 +35042,11 @@ public class BindingMessageDescription inherits Serializable {
     */
     *string getMimeAcceptHeader() {
         if (!mime_formats) {
-            return content ? WsdlLibPriv::acceptHeader(content) : mimeXml ? MimeTypeXml : NOTHING;
+            return exists mime_parts ? "multipart/related" : content ? WsdlLibPriv::acceptHeader(content) : mimeXml ? MimeTypeXml : NOTHING;
         }
         hash<string, bool> accepted();
         foreach BindingMessageDescription format in (mime_formats.values()) {
-            *string value = format.mimeXml ? MimeTypeXml : WsdlLibPriv::acceptHeader(format.content);
+            *string value = exists format.mime_parts ? "multipart/related" : format.mimeXml ? MimeTypeXml : WsdlLibPriv::acceptHeader(format.content);
             if (!value) {
                 return NOTHING;
             }
@@ -34466,7 +35066,8 @@ public class BindingMessageDescription inherits Serializable {
         isMimeContent("content:invoice") preserves an uploaded invoice's opaque bytes.
     */
     bool isMimeContent(*string selection) {
-        return boolean(getMimeDescription(selection).content);
+        BindingMessageDescription format = getMimeDescription(selection);
+        return boolean(format.content) || exists format.mime_parts;
     }
 
     #! returns a selected direct MIME description
@@ -34531,6 +35132,125 @@ public class BindingMessageDescription inherits Serializable {
         if (!mimeXml) {
             mimeXml = format.mimeXml;
         }
+    }
+
+    #! validates a complete recursive MIME declaration graph
+    /** @throw SOAP-MESSAGE-ERROR empty, cyclic or inconsistent saved MIME metadata
+        @return NOTHING
+        @note Validation is linear in the number of declarations and references. It runs before encoding or decoding.
+        @par Example
+        Validate a restored multipart descriptor before exposing its nested entity choices.
+    */
+    nothing validateMimeLayout() {
+        hash<string, bool> active();
+        hash<string, bool> complete();
+        list<hash<auto>> pending = ({"value":self,"close":False},);
+        while (pending) {
+            hash<auto> step = pop pending;
+            BindingMessageDescription description = step.value;
+            string identity = description.uniqueHash();
+            if (step.close) {
+                remove active{identity};
+                complete{identity} = True;
+                continue;
+            }
+            if (active.hasKey(identity)) { throw "SOAP-MESSAGE-ERROR", "cyclic MIME declaration graph"; }
+            if (complete.hasKey(identity)) { continue; }
+            active{identity} = True;
+            push pending, {"value":description,"close":True};
+            if (exists description.mime_parts) {
+                if (!description.mime_parts || description.mime_formats || description.content || description.mimeXml
+                        || description.multipart != Mime::MPT_RELATED || description.body || description.hasHeaders()
+                        || description.urlEncoded || exists description.urlReplacement || description.parts) {
+                    throw "SOAP-MESSAGE-ERROR", "invalid multipart declaration graph";
+                }
+                foreach BindingMessageDescription child in (description.mime_parts) {
+                    if (!child.mime_formats) { throw "SOAP-MESSAGE-ERROR", "MIME entity has no representations"; }
+                    push pending, {"value":child,"close":False};
+                }
+            }
+            foreach hash<auto> entry in (description.mime_formats.pairIterator()) {
+                description.validateMimeFormat(entry.key, entry.value);
+                push pending, {"value":entry.value,"close":False};
+            }
+        }
+    }
+
+    #! validates explicit recursive MIME selections before any transport call
+    /** @param selection a format identifier or selection tree
+        @return NOTHING
+        @throw SOAP-MESSAGE-ERROR unknown formats, invalid entity indexes or incompatible child choices
+        @note Unselected alternatives remain available for later Content-Type selection.
+        @par Example
+        Validate configured response selections when constructing a SOAP handler.
+    */
+    nothing validateMimeSelection(*WsdlMimeSelection selection) {
+        if (!exists selection) { return; }
+        validateMimeLayout();
+        list<hash<auto>> pending = ({"description":self,"selection":selection,"root":True},);
+        while (pending) {
+            hash<auto> step = pop pending;
+            BindingMessageDescription description = step.description;
+            *WsdlMimeSelection choice = step.selection;
+            *string requested = WsdlMimeSelectionHelper::root(choice);
+            if (step.root && choice.typeCode() == NT_HASH
+                    && (exists choice.part || exists choice.content_id || exists choice.wire_index)) {
+                throw "SOAP-MESSAGE-ERROR", "part, content_id and wire_index select nested MIME entities only";
+            }
+            if (choice.typeCode() == NT_HASH && exists choice.content_id) {
+                string checked = WsdlMultipartHelper::identifier("<" + choice.content_id + ">");
+            }
+            *list<hash<WsdlMimeSelectionInfo>> children = WsdlMimeSelectionHelper::children(choice);
+            if (!exists requested && !children) { continue; }
+            if (!exists requested && children) {
+                # Child selections imply a multipart representation. Other root media alternatives
+                # stay selectable by Content-Type when the received message is available.
+                list<string> multipart();
+                foreach hash<auto> entry in (description.getMimeFormats().pairIterator()) {
+                    if (entry.value.kind == WsdlMimeFormatKind::Multipart) { push multipart, entry.key; }
+                }
+                if (multipart.size() != 1) {
+                    throw "SOAP-MESSAGE-ERROR", "child selections require one selected multipart representation";
+                }
+                requested = multipart[0];
+            }
+            BindingMessageDescription format = description.getMimeDescription(description.resolveMimeFormat(NOTHING, requested));
+            *list<BindingMessageDescription> layout = format.getMimeParts();
+            if (children && !exists layout) { throw "SOAP-MESSAGE-ERROR", "MIME leaf cannot have child selections"; }
+            hash<auto> indexed = WsdlMimeTreeCodec::selections(choice, layout.size());
+            foreach hash<auto> child in (indexed.pairIterator()) {
+                push pending, {"description":layout[int(child.key)],"selection":child.value,"root":False};
+            }
+        }
+    }
+
+    #! returns the independently selected entities of a concrete related representation
+    /** @return entity descriptions in WSDL declaration order, or NOTHING for a nonmultipart format
+        @note The returned list is a value copy; descriptions are immutable while the binding is in use.
+        @par Example
+        Inspect each returned description with getMimeFormats() to present its alternatives.
+    */
+    *list<BindingMessageDescription> getMimeParts() { return mime_parts; }
+
+    #! registers a complete related representation during binding construction
+    /** @param parts child MIME entity descriptions in declaration order
+        @return the stable selector assigned to this multipart alternative
+        @throw WSDL-ERROR an entity has no supported representation
+        @note Do not mutate registered descriptions after publication.
+        @par Example
+        Register a document entity followed by an image entity as a related message.
+    */
+    string addMimeMultipart(list<BindingMessageDescription> parts) {
+        if (!parts) { throw WSDL_ERROR, "a MIME multipart representation requires at least one entity"; }
+        foreach BindingMessageDescription part in (parts) {
+            if (!part.getMimeFormats()) { throw WSDL_ERROR, "a MIME entity requires a supported representation"; }
+        }
+        string id = "multipart:" + multipart_count++;
+        BindingMessageDescription format();
+        format.multipart = Mime::MPT_RELATED;
+        format.mime_parts = parts;
+        mime_formats{id} = format;
+        return id;
     }
 
     addHeader(BindingMessageHeaderDescription hdr) {
@@ -34869,6 +35589,13 @@ public class Binding inherits WSDL::XsdNamedData {
                     bmd.body = new BindingMessageBodyDescription(encoded, pa.encodingStyle, pa."namespace", pa.parts);
                 }
 
+                if (httpMethod && op{io}.hasKey("multipartRelated")) {
+                    foreach auto declaration in (op{io}.multipartRelated ?? {}) {
+                        string id = bmd.addMimeMultipart(compileMimeParts(declaration, selected{io}, nsc, io));
+                    }
+                    remove op{io}.multipartRelated;
+                }
+
                 if (exists op{io}.multipartRelated) {
                     if (bmd.body) {
                         throw WSDL_ERROR, sprintf("%s binding %y for operation %y specifies both body and "
@@ -35124,6 +35851,46 @@ public class Binding inherits WSDL::XsdNamedData {
         }
         return new BindingMessageHeaderDescription(attributes.part, encoded, message, attributes."namespace",
             attributes.encodingStyle, faults);
+    }
+
+    private list<BindingMessageDescription> compileMimeParts(auto declaration, WSMessage message,
+            Namespaces namespaces, string direction) {
+        NamespacePrefixHelper scope(namespaces, declaration."^attributes^");
+        XsdBase::removeNS(\declaration);
+        list<BindingMessageDescription> result();
+        foreach auto part in (declaration.part) {
+            NamespacePrefixHelper part_scope(namespaces, part."^attributes^");
+            XsdBase::removeNS(\part);
+            BindingMessageDescription description();
+            hash<string, BindingContentDescription> contents();
+            foreach auto leaf in (part.content ?? (part.hasKey("content") ? {} : NOTHING)) {
+                BindingContentDescription candidate();
+                candidate.addContentType(leaf."^attributes^".type);
+                string id;
+                if (candidate.formUrlEncoded) {
+                    if (direction != "input") { throw WSDL_ERROR, "form MIME output is unsupported"; }
+                    if (exists leaf."^attributes^".part) { message.checkPart(leaf."^attributes^".part); }
+                    id = "form";
+                } else {
+                    candidate.part = checkMessagePart(message, leaf."^attributes^".part, "multipart content");
+                    id = "content:" + candidate.part;
+                }
+                if (contents.hasKey(id)) { contents{id}.addContentType(leaf."^attributes^".type); }
+                else { contents{id} = candidate; }
+            }
+            foreach BindingContentDescription content in (contents.iterator()) { description.addMimeContent(content); }
+            foreach auto leaf in (part.mimeXml ?? (part.hasKey("mimeXml") ? {} : NOTHING)) {
+                string name = checkMessagePart(message, leaf."^attributes^".part, "multipart XML");
+                description.addMimeXml(name);
+            }
+            foreach auto nested in (part.multipartRelated ?? (part.hasKey("multipartRelated") ? {} : NOTHING)) {
+                string id = description.addMimeMultipart(compileMimeParts(nested, message, namespaces, direction));
+            }
+            part -= ("content", "mimeXml", "multipartRelated", "^attributes^", "ns", ".wsdlExtensions");
+            if (part) { throw WSDL_ERROR, sprintf("unsupported MIME entity content: %Y", keys part); }
+            push result, description;
+        }
+        return result;
     }
 
     #! check if part exists in massage, if part is empty and message contains single part then return it otherwise raise an exception
