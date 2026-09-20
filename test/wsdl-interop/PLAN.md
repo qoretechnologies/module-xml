@@ -1436,3 +1436,22 @@ Audit: **18 Pass / 44 N/A / zero Fail**. No C++ changes; Valgrind is not require
 
 P7 remains open for transport interruption, complete applicable assertion accounting
 and SOAP-response GET MEP applicability/API review; P8–P9 follow. No push or CI trigger.
+
+
+## P7-12: SOAP transport interruption and cancellation
+
+Independent raw TCP peers verify partial headers/bodies/chunks, event-driven thread
+cancellation, peer EOF, callback isolation and same-client/server recovery. Both SOAP
+versions, request-response/one-way operations, source/object/data graphs and native/
+retained values are covered. Qore's request event and abandonment fixes are verified
+on the installed runtime; no XML production workaround was needed.
+
+Six affected native Qore suites pass: **38 cases / 2,223 assertions**. Three independent
+Python gates pass, including all **432 new transport exchanges**. The full new matrix
+also passes with freshly compiled WSDL, SoapClient and SoapHandler modules (another
+432 exchanges). Both peer scripts pass astparser without diagnostics. Installed Qore
+is `25346118e`. Audit: **16 Pass / 46 N/A / zero Fail**.
+
+See [evidence](soap-transport-evidence.md), [validation](P7-12-validation.json), and
+[audit](audits/P7-12-soap-transport.md). P7 GET and assertion accounting remain open,
+followed by P8–P9. No Qore edits, installation, push or CI trigger.

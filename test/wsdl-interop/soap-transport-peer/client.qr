@@ -1,0 +1,88 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../../../qlib"
+%requires ../../../qlib/WSDL.qm
+%requires ../../../qlib/SoapClient.qm
+%try-module json
+%define NoJson
+%endtry
+%ifdef NoJson
+throw "MISSING-MODULE", "SOAP transport integration requires json";
+%else
+hash<auto> job = parse_json(stdin.readLine());
+string source = ReadOnlyFile::readTextFile(get_script_dir() + "/../soap-envelope-peer/contract.wsdl");
+if (job.one_way) {
+    source = replace(source, '<w:output message="t:Value"/>', '');
+    source = replace(source, '<w:output><s:body use="literal"/></w:output>', '');
+    source = replace(source, '<w:output><s12:body use="literal"/></w:output>', '');
+}
+list<auto> results();
+foreach string state in ("source", "saved", "data") {
+    WebService ws(source);
+    if (state == "saved") { ws = Serializable::deserialize(ws.serialize()); }
+    if (state == "data") { ws = Serializable::deserialize(ws.serializeToData()); }
+    foreach bool retained in (False, True) {
+        Queue processed();
+        SoapProcessingNode node(<SoapNodeOptions>{"processors": {"{urn:headers}Track":
+            auto sub(hash<auto> cx, hash<SoapNodeHeader> header) { processed.push(header.name); }}});
+        SoapClient client({"wsdl": ws, "port": "Port" + job.version, "url": job.url,
+            "timeout": job.cancel ? 60000 : 10000, "soap_node": node});
+        for (int i = 0; i < job.count; ++i) {
+            hash<auto> info;
+            hash<auto> row();
+            code<nothing()> invoke = sub() {
+                try {
+                    auto result = client.callOperation("echo", {"body": "invoice"}, {"xml_values": retained}, \info);
+                    row.value = job.one_way ? result
+                        : (retained ? result.body.body.getElementData()."^value^" : result);
+                    row.error = "OK";
+                } catch (hash<ExceptionInfo> ex) {
+                    # A cancelled worker must clear its sticky flag before reporting to the main thread.
+                    bool cancelled = thread_cancelled();
+                    clear_thread_cancel();
+                    row.error = ex.err;
+                    if (job.cancel && !(i % 2)) {
+                        row.cancelled = cancelled;
+                        row.reason_preserved = ex.desc.endsWith(": SOAP transport test cancellation");
+                    }
+                }
+            };
+            if (job.cancel && !(i % 2)) {
+                Queue events(); Counter done(1);
+                client.setEventQueue(events);
+                int tid = background sub() {
+                    on_exit done.dec();
+                    invoke();
+                }();
+                # The peer sends headers and withholds the body. This native event is emitted
+                # after parsing response headers, before the body read; cancellation cannot
+                # run before the request reaches the transport receive phase.
+                try {
+                    while (True) {
+                        hash<auto> event = events.get(10000);
+                        if (event.event == EVENT_HTTP_MESSAGE_RECEIVED) {
+                            @assert(event.headers.status_code == 200);
+                            break;
+                        }
+                    }
+                    @assert(cancel_thread(tid, "SOAP transport test cancellation"));
+                } catch (hash<ExceptionInfo> ex) {
+                    cancel_thread(tid, "SOAP transport test cleanup");
+                    @assert(done.waitForZero(10000) == 0);
+                    rethrow;
+                }
+                @assert(done.waitForZero(10000) == 0);
+                client.setEventQueue();
+            } else {
+                invoke();
+            }
+            row.status = info."response-headers".status_code;
+            row.headers_processed = processed.size();
+            while (processed.size()) { processed.get(1000); }
+            results += row;
+        }
+    }
+}
+printf("%s\n", make_json(results));
+%endif

@@ -43,6 +43,13 @@ use the same check. Already-projected hashes cannot recover discarded document
 constructs; callers needing those checks must supply wire XML. HTTP MIME XML and
 opaque MIME values do not acquire SOAP restrictions.
 
+SOAP adapters consume complete HTTP entities before running header or body
+callbacks. Truncated transport input cannot become an empty one-way acknowledgment.
+SoapClient preserves native transport and cancellation exceptions; Qore owns
+abandoning a cancelled request and releasing its connection or stream. Shared
+service graphs and header capabilities are unchanged by an interrupted exchange,
+so subsequent calls can use the same client or handler.
+
 SoapHandler validates before invoking application callbacks. Protocol structure
 errors use Client/Sender faults. Version mismatch responses preserve the supported
 version, with SOAP 1.1 transition responses where required, and carry an Upgrade
