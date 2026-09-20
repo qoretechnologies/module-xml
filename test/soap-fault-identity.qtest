@@ -1,0 +1,105 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires xml
+%requires QUnit
+%requires ../qlib/WSDL.qm
+%requires ../qlib/SoapClient.qm
+%requires ../qlib/SoapHandler.qm
+%requires HttpServer
+%exec-class SoapFaultIdentityTest
+
+class SoapFaultIdentityTest inherits QUnit::Test {
+    constructor() : Test("SOAP fault expanded-name identity", "1.0") {
+        addTestCase("Application Fault elements remain application values", \application());
+        addTestCase("Protocol Fault elements retain the fault exception contract", \protocol());
+        addTestCase("Application Fault values pass through clients and handlers", \http());
+        set_return_value(main());
+    }
+    private static WebService service(string state) {
+        string source = replace(ReadOnlyFile::readTextFile(get_script_dir() + "/wsdl-interop/soap-envelope-peer/contract.wsdl"), "value", "Fault");
+        WebService ws(source);
+        if (state == "saved") { return Serializable::deserialize(ws.serialize()); }
+        if (state == "data") { return Serializable::deserialize(ws.serializeToData()); }
+        return ws;
+    }
+    private application() {
+        foreach string state in ("source", "saved", "data") {
+            WebService ws = service(state);
+            WSOperation op = ws.getOperation("echo");
+            foreach bool soap12 in (False, True) {
+                string uri = soap12 ? SOAP_12_ENV : SOAP_11_ENV;
+                string binding = soap12 ? "B12" : "B11";
+                foreach string text in ("invoice-71", "") {
+                    foreach string payload in ('<t:Fault xmlns:t="urn:soap-envelope-test">' + text + '</t:Fault>',
+                            '<Fault xmlns="urn:soap-envelope-test">' + text + '</Fault>',
+                            '<e:Fault xmlns:e="urn:soap-envelope-test">' + text + '</e:Fault>') {
+                        string xml = '<e:Envelope xmlns:e="' + uri + '"><e:Body>' + payload + '</e:Body></e:Envelope>';
+                        hash<auto> parsed = parse_xml(xml, XPF_PRESERVE_ORDER | XPF_PRESERVE_WHITESPACE);
+                        hash<auto> before = parsed;
+                        assertEq(text, op.deserializeResponse(parsed, binding));
+                        assertEq(before, parsed);
+                        XsdXmlValue retained = op.deserializeXmlResponse(xml, binding).body.body;
+                        assertEq("{urn:soap-envelope-test}Fault", retained.getExpandedName());
+                        assertEq(text, retained.getElementData()."^value^" ?? "");
+                    }
+                }
+                string generated = op.serializeResponse({"body":"invoice-71"}, NOTHING, NOTHING, NOTHING,
+                    NOTHING, NOTHING, binding).body;
+                assertEq("invoice-71", op.deserializeResponse(parse_xml(generated), binding));
+                foreach string foreign in ("urn:foreign", soap12 ? SOAP_11_ENV : SOAP_12_ENV, "") {
+                    string xml = '<e:Envelope xmlns:e="' + uri + '"><e:Body><Fault xmlns="' + foreign
+                        + '">invoice-71</Fault></e:Body></e:Envelope>';
+                    assertThrows("SOAP-DESERIALIZATION-ERROR", \op.deserializeResponse(), (parse_xml(xml), binding));
+                }
+            }
+        }
+    }
+    private protocol() {
+        WebService ws = service("source");
+        WSOperation op = ws.getOperation("echo");
+        foreach bool soap12 in (False, True) {
+            string uri = soap12 ? SOAP_12_ENV : SOAP_11_ENV;
+            string binding = soap12 ? "B12" : "B11";
+            string fault = soap12 ? '<e:Code><e:Value>e:Sender</e:Value></e:Code>'
+                + '<e:Reason><e:Text xml:lang="en">Invoice rejected</e:Text></e:Reason>'
+                : '<faultcode>e:Client</faultcode><faultstring>Invoice rejected</faultstring>';
+            string xml = '<e:Envelope xmlns:e="' + uri + '"><e:Body><e:Fault>' + fault
+                + '</e:Fault></e:Body></e:Envelope>';
+            assertThrows("SOAP-SERVER-FAULT-RESPONSE", \op.deserializeResponse(), (parse_xml(xml), binding));
+            assertThrows("SOAP-SERVER-FAULT-RESPONSE", \op.deserializeXmlResponse(), (xml, binding));
+            # Envelope aliases do not determine protocol identity.
+            xml = replace(replace(xml, 'e:', 'env:'), 'xmlns:e=', 'xmlns:env=');
+            assertThrows("SOAP-SERVER-FAULT-RESPONSE", \op.deserializeResponse(), (parse_xml(xml), binding));
+        }
+    }
+    private http() {
+        foreach string state in ("source", "saved", "data") {
+            WebService ws = service(state);
+            foreach bool soap12 in (False, True) {
+                foreach bool retained in (False, True) {
+                    HttpServer server();
+                    on_exit server.stop();
+                    SoapHandler handler(new PermissiveAuthenticator());
+                    server.setDefaultHandler("fault-identity", handler);
+                    Queue received();
+                    code<auto(hash<auto>, auto)> callback = auto sub(hash<auto> cx, auto value) {
+                        received.push(retained ? value.body.body.getElementData()."^value^" : value);
+                        return {"body":retained ? value.body.body : value};
+                    };
+                    handler.addMethod(ws, ws.getOperation("echo"), callback, NOTHING, NOTHING, NOTHING,
+                        "service", NOTHING, NOTHING, soap12 ? "B12" : "B11", NOTHING, retained);
+                    server.addListener(0);
+                    SoapClient client({"wsdl":ws,"port":soap12 ? "Port12" : "Port11",
+                        "url":sprintf("http://127.0.0.1:%d/service", server.getListenerInfo(0).port),"timeout":10000});
+                    hash<auto> info;
+                    auto result = client.callOperation("echo", {"body":"invoice-71"}, {"xml_values":retained}, \info);
+                    assertEq("invoice-71", retained ? result.body.body.getElementData()."^value^" : result);
+                    assertEq("invoice-71", received.get(10000));
+                    assertEq(200, info."response-headers".status_code);
+                }
+            }
+        }
+    }
+}

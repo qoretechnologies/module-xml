@@ -207,6 +207,10 @@ module WSDL {
     @section wsdlrelnotes WSDL Module Release Notes
 
     @subsection wsdl_0_5_8 WSDL v0.5.8
+    - SOAP fault detection uses the envelope's namespace-qualified Fault name; application elements named Fault
+      remain ordinary values in native and retained decoding, including client responses
+    - Added SoapProcessingNode with immutable explicit header capabilities, SOAP actor/role targeting,
+      mandatory-header preflight, typed processing results and version-specific intermediary relay
     - SOAP header mustUnderstand/relay attributes use their version-specific boolean lexical spaces;
       checks use expanded attribute names and do not interpret descendant or foreign attributes
     - SOAP containers validate namespace, order, cardinality and header qualification before decoding; selected
@@ -3253,6 +3257,290 @@ public final class XsdXmlValue inherits Serializable {
     */
     XmlReader getReader() {
         return new XmlReader(xml);
+    }
+}
+
+#! One SOAP header block and its node-specific processing properties
+/** @since %WSDL 0.5.8 */
+public hashdecl SoapNodeHeader {
+    #! Original XML, including inherited namespace and XML attribute context
+    XsdXmlValue xml;
+    #! Expanded header name in \c {namespace-uri}local-name form
+    string name;
+    #! Effective actor/role URI; an empty string denotes the SOAP 1.1 ultimate receiver
+    string role;
+    #! Whether this node assumes the header's role
+    bool targeted;
+    #! Whether the header requires understanding at its targeted node
+    bool must_understand;
+    #! SOAP 1.2 relay flag; always false for SOAP 1.1
+    bool relay;
+    #! Zero-based position among the original header blocks
+    int index;
+    #! True for SOAP 1.2, false for SOAP 1.1
+    bool soap12;
+}
+
+#! Implements the application semantics of an explicitly supported SOAP header
+/** The first argument is caller-supplied message context. The return value is retained in SoapNodeHeaderResult.
+    Throwing stops processing; callback side effects cannot be rolled back by the node.
+    @since %WSDL 0.5.8
+*/
+public typedef SoapHeaderProcessor = code<auto(hash<auto>, hash<SoapNodeHeader>)>;
+
+#! Immutable SOAP node configuration
+/** @since %WSDL 0.5.8 */
+public hashdecl SoapNodeOptions {
+    #! Ultimate receivers process the body separately; intermediaries receive a forwarding envelope
+    bool ultimate_receiver = True;
+    #! Additional absolute role URIs; the standard next role is always assumed
+    list<string> roles = ();
+    #! Header processors keyed by expanded header name; a WSDL declaration alone is not a capability
+    hash<string, SoapHeaderProcessor> processors = {};
+}
+
+#! The outcome for one header block
+/** @since %WSDL 0.5.8 */
+public hashdecl SoapNodeHeaderResult {
+    #! Original header and targeting metadata
+    hash<SoapNodeHeader> header;
+    #! True if the registered processor completed successfully
+    bool processed;
+    #! True if retained in the intermediary forwarding envelope
+    bool forwarded;
+    #! Processor return value; NOTHING for an unprocessed header
+    auto value;
+}
+
+#! A completed SOAP header-processing pass
+/** @since %WSDL 0.5.8 */
+public hashdecl SoapNodeResult {
+    #! Envelope version
+    bool soap12;
+    #! Outcomes in original header-block order, including untargeted blocks
+    list<hash<SoapNodeHeaderResult>> headers;
+    #! Envelope containing only targeted headers for ultimate-receiver application decoding; NOTHING for intermediaries
+    *XsdXmlValue application_message;
+    #! Forwarding envelope for an intermediary; NOTHING for an ultimate receiver
+    *XsdXmlValue forward_message;
+}
+
+#! Processes SOAP headers using explicit capabilities and immutable node roles
+/** All targeted mandatory headers are checked before invoking any processor. Known targeted optional headers
+    are processed too. Unknown optional and untargeted headers are not processed. An intermediary removes
+    processed headers and applies SOAP 1.1 actor / SOAP 1.2 relay rules to the remaining headers.
+
+    @note This class processes headers, not application body semantics or transport delivery. A caller must
+    call processMessage() before processing the body. Callbacks must implement the declared header semantics;
+    declaring an XML name or a WSDL part is not evidence that the header is understood. Node configuration
+    is immutable after construction; shared callbacks are responsible for their own thread safety.
+
+    @par Example
+    @code{.py}
+    SoapProcessingNode node(<SoapNodeOptions>{"processors":{
+        "{urn:invoicing}Tracking": auto sub(hash<auto> cx, hash<SoapNodeHeader> header) {
+            string invoice_id = header.xml.getElementData()."^value^";
+            if (!invoice_id) { throw "TRACKING-ERROR", "an invoice identifier is required"; }
+            return invoice_id;
+        }
+    }});
+    hash<SoapNodeResult> result = node.processMessage(incoming_xml, {}, "https://billing.example/submit");
+    @endcode
+    @since %WSDL 0.5.8
+*/
+public final class SoapProcessingNode {
+    private {
+        # Immutable configuration; all message state is local to processMessage().
+        hash<SoapNodeOptions> options;
+        hash<string, bool> roles;
+    }
+    private {
+        const Next11 = "http://schemas.xmlsoap.org/soap/actor/next";
+        const Next12 = "http://www.w3.org/2003/05/soap-envelope/role/next";
+        const None12 = "http://www.w3.org/2003/05/soap-envelope/role/none";
+        const Ultimate12 = "http://www.w3.org/2003/05/soap-envelope/role/ultimateReceiver";
+
+    }
+
+    #! Configures a SOAP node without shared mutable per-message state
+    /** @param options node role and header processor configuration
+        @throw SOAP-NODE-ERROR an invalid role, forbidden role or malformed expanded header name
+    */
+    constructor(hash<SoapNodeOptions> options = <SoapNodeOptions>{}) {
+        hash<string, bool> checked();
+        foreach string role in (options.roles) {
+            string uri = roleUri(role, NOTHING, "SOAP-NODE-ERROR");
+            if (uri == None12 || (!options.ultimate_receiver && uri == Ultimate12)) {
+                throw "SOAP-NODE-ERROR", "a node cannot assume the none role or contradict its ultimate receiver role";
+            }
+            checked{uri} = True;
+        }
+        foreach string name in (keys options.processors) {
+            int end = name.find("}");
+            if (!name.startsWith("{") || end < 2 || end == name.length() - 1) {
+                throw "SOAP-NODE-ERROR", "header processor keys require {namespace-uri}local-name form";
+            }
+            string local = substr(name, end + 1);
+            if (XsdNameLexicalHelper::lexical("NCName", local, "SOAP-NODE-ERROR") != local) {
+                throw "SOAP-NODE-ERROR", "expanded header names cannot contain surrounding whitespace";
+            }
+            # The implicit XML namespace can only use its reserved prefix.
+            string uri = substr(name, 1, end - 1);
+            string prefix = uri == "http://www.w3.org/XML/1998/namespace" ? "xml" : "header";
+            XsdQNameValueHelper::bindings({prefix:uri}, "SOAP-NODE-ERROR");
+        }
+        self.options = options;
+        roles = checked;
+    }
+
+    #! Reports whether this node is an ultimate receiver
+    /** @return True for an ultimate receiver; False for an intermediary */
+    bool isUltimateReceiver() {
+        return options.ultimate_receiver;
+    }
+
+    #! Validates an envelope and processes its targeted headers
+    /** @param xml complete SOAP XML; DTDs and processing instructions are forbidden
+        @param cx application context passed to each processor, using Qore copy-on-write value semantics
+        @param base_uri optional absolute document retrieval URI, used with inherited xml:base
+        @param expected_soap12 optional required envelope version
+        @param response True to allow the SOAP 1.1 VersionMismatch response required by SOAP 1.2 negotiation
+        @return ordered header outcomes, a targeted-header envelope for ultimate-receiver application decoding,
+        or a forwarding envelope for intermediaries
+        @throw SOAP-MUST-UNDERSTAND one or more targeted mandatory headers have no processor; no processor ran;
+        the exception argument contains \c soap12 and an ordered \c headers list of SoapNodeHeader values
+        @throw SOAP-DESERIALIZATION-ERROR malformed protocol structure, attributes or role URI
+        @throw SOAP-VERSION-MISMATCH unexpected envelope version
+        @throw PARSE-XML-EXCEPTION malformed XML
+        @note Processor exceptions propagate unchanged and stop further processing. Earlier callback side effects
+        remain the application's responsibility. Body content is retained without schema interpretation. Relative
+        roles require an absolute XML base or base_uri. Forwarding preserves the effective document base explicitly.
+    */
+    hash<SoapNodeResult> processMessage(string xml, hash<auto> cx = {}, *string base_uri,
+            *bool expected_soap12, bool response = False) {
+        XsdSoapXmlHelper::validateDocument(xml, SOAP_DESERIALIZATION_ERROR);
+        hash<string, string> inherited();
+        if (exists base_uri) {
+            inherited."xml:base" = roleUri(base_uri, NOTHING, SOAP_DESERIALIZATION_ERROR);
+        }
+        XsdXmlValue message(xml, inherited);
+        bool soap12 = SoapEnvelopeHelper::validate(message.getXmlDataView(), expected_soap12, response);
+        string soap_uri = soap12 ? SOAP_12_ENV : SOAP_11_ENV;
+        list<hash<SoapNodeHeader>> headers();
+        list<hash<SoapNodeHeader>> unknown();
+        foreach XsdXmlValue container in (message.getChildValues()) {
+            if (container.getExpandedName() != type_qname(soap_uri, "Header")) { continue; }
+            foreach XsdXmlValue block in (container.getChildValues()) {
+                hash<string, string> attributes();
+                foreach string key in (keys block.getElementData()."^attributes^") {
+                    if (key == "xmlns" || key.startsWith("xmlns:") || key.find(":") < 0) { continue; }
+                    attributes{block.resolveQName(key)} = string(block.getElementData()."^attributes^"{key});
+                }
+                *string supplied_role = attributes{type_qname(soap_uri, soap12 ? "role" : "actor")};
+                string role = exists supplied_role
+                    ? roleUri(XsdSimpleType::normalizeWhiteSpace(supplied_role, "collapse"),
+                        block.getXmlContext()."xml:base", SOAP_DESERIALIZATION_ERROR)
+                    : (soap12 ? Ultimate12 : "");
+                bool targeted = role == (soap12 ? Next12 : Next11)
+                    || (role == (soap12 ? Ultimate12 : "") ? options.ultimate_receiver : roles{role} ?? False);
+                if (soap12 && role == None12) { targeted = False; }
+                string mu = attributes{type_qname(soap_uri, "mustUnderstand")} ?? "0";
+                string relay = soap12 ? attributes{type_qname(soap_uri, "relay")} ?? "0" : "0";
+                hash<SoapNodeHeader> header = <SoapNodeHeader>{"xml":block,"name":block.getExpandedName(),
+                    "role":role,"targeted":targeted,"must_understand":booleanValue(mu),
+                    "relay":booleanValue(relay),"index":headers.size(),"soap12":soap12};
+                headers += header;
+                if (targeted && header.must_understand && !options.processors.hasKey(header.name)) {
+                    unknown += header;
+                }
+            }
+        }
+        if (unknown) {
+            throw "SOAP-MUST-UNDERSTAND", "one or more targeted mandatory SOAP headers are not understood",
+                {"soap12":soap12,"headers":unknown};
+        }
+        list<hash<SoapNodeHeaderResult>> results();
+        foreach hash<SoapNodeHeader> header in (headers) {
+            bool processed = header.targeted && options.processors.hasKey(header.name);
+            auto value;
+            if (processed) {
+                SoapHeaderProcessor processor = options.processors{header.name};
+                value = processor(cx, header);
+            }
+            bool forwarded = !options.ultimate_receiver && !processed
+                && (!header.targeted || (soap12 && header.relay));
+            results += <SoapNodeHeaderResult>{"header":header,"processed":processed,
+                "forwarded":forwarded,"value":value};
+        }
+        list<bool> selected = map (options.ultimate_receiver ? $1.header.targeted : $1.forwarded), results;
+        XsdXmlValue filtered = filteredMessage(message, selected, soap_uri, !options.ultimate_receiver);
+        return <SoapNodeResult>{"soap12":soap12,"headers":results,
+            "application_message":options.ultimate_receiver ? filtered : NOTHING,
+            "forward_message":options.ultimate_receiver ? NOTHING : filtered};
+    }
+
+    private static bool booleanValue(string lexical) {
+        string normalized = XsdSimpleType::normalizeWhiteSpace(lexical, "collapse");
+        return normalized == "1" || normalized == "true";
+    }
+
+    private static string roleUri(string lexical, *string base_uri, string error) {
+        try {
+            # URI reference resolution belongs to Qore. SOAP URI identifiers are not IRIs.
+            # XML Base permits IRIs; map the inherited base to a URI without changing the role's lexical identity.
+            string base = resolve_url("", base_uri ?? "", RESOLVE_URL_RELATIVE_BASE | RESOLVE_URL_ENCODE);
+            string resolved = resolve_url(base, lexical, RESOLVE_URL_ASCII | RESOLVE_URL_RELATIVE_BASE);
+            if (!WsdlUriComponents::parse(resolved).scheme) {
+                throw error, "a relative SOAP role requires an absolute base URI";
+            }
+            return resolved;
+        } catch (hash<ExceptionInfo> ex) {
+            if (ex.err == "RESOLVE-URL-ERROR" || ex.err == "WSDL-LOCATION-ERROR") {
+                throw error, ex.desc;
+            }
+            rethrow;
+        }
+    }
+
+    private static XsdXmlValue filteredMessage(XsdXmlValue message, list<bool> selected, string soap_uri,
+            bool forwarding) {
+        if (!forwarding && !inlist(False, selected)) { return message; }
+        hash<auto> document = message.getXmlDataView();
+        foreach string root in (keys document) {
+            if (root.startsWith("^") || root.startsWith(".")) { continue; }
+            hash<auto> envelope = document{root};
+            hash<string, string> bindings = XsdBase::getElementNamespaces(envelope."^attributes^");
+            foreach string key in (keys envelope) {
+                if (key.startsWith("^") || key.startsWith(".")) { continue; }
+                string name = key;
+                name =~ s/\^[0-9]+$//;
+                hash<string, string> scope = XsdBase::getElementNamespaces(envelope{key}."^attributes^", bindings);
+                XsdQNameValue qname = XsdQNameValueHelper::resolve(name, SOAP_DESERIALIZATION_ERROR, scope);
+                if (qname.getNamespaceUri() != soap_uri || qname.getLocalName() != "Header") { continue; }
+                hash<auto> header = envelope{key} ?? {};
+                int index = 0;
+                foreach string child in (keys header) {
+                    if (child.startsWith("^") || child.startsWith(".")) { continue; }
+                    bool repeated = header{child}.typeCode() == NT_LIST;
+                    list<auto> occurrences = repeated ? header{child} : (header{child},);
+                    list<auto> kept();
+                    foreach auto value in (occurrences) {
+                        @assert(index < selected.size(), "ordered header projection matches the XML header blocks");
+                        if (selected[index++]) { kept += value; }
+                    }
+                    if (!kept) { remove header{child}; }
+                    else { header{child} = repeated ? kept : kept[0]; }
+                }
+                @assert(index == selected.size(), "all header blocks were considered for forwarding");
+                envelope{key} = header;
+            }
+            # Keep relative URI identities stable when the next transport hop has a different retrieval URI.
+            if (forwarding && exists message.getXmlContext()."xml:base") {
+                envelope."^attributes^"."xml:base" = message.getXmlContext()."xml:base";
+            }
+            document{root} = envelope;
+        }
+        return new XsdXmlValue(make_xml(document), forwarding ? {} : message.getInheritedXmlAttributes());
     }
 }
 
@@ -33857,7 +34145,7 @@ public class SoapBinding inherits WSDL::OperationalBinding {
                 && orig_msg.hasKey("body") && !exists orig_msg.body && orig_msg.hasKey("content-type")))) {
             return NOTHING;
         }
-        SoapEnvelopeHelper::validate(orig_msg, isSoap12(), !request);
+        bool message_soap12 = SoapEnvelopeHelper::validate(orig_msg, isSoap12(), !request);
         hash o = orig_msg;
         remove o."^mime-parts^";
         XsdBase::inheritAttributeNamespaces(\o);
@@ -33934,14 +34222,15 @@ public class SoapBinding inherits WSDL::OperationalBinding {
                 WSDL::XsdBase::removeNS2(\msgh);
             }
 
-            if (!request) {
-                # check for Soap Fault, if so raise an exception immediately with the fault info
+            if (!request && expanded_body.hasKey(type_qname(message_soap12 ? SOAP_12_ENV : SOAP_11_ENV, "Fault"))) {
+                # Recognize the protocol's expanded name before projecting legacy fault information.
+                # An application element named Fault is ordinary schema data.
                 WSDL::XsdBase::removeNS2(\body);
 
                 if (body.Fault) {
                     WSDL::XsdBase::removeNS(\body.Fault);
                     delete body.Fault.".ns";
-                    if (envelope_namespaces{o.Envelope.".ns" ?? ""} == SOAP_12_ENV) {
+                    if (message_soap12) {
                         WSDL::XsdBase::removeNS(\body.Fault.Code);
                         WSDL::XsdBase::removeNS(\body.Fault.Reason);
                         # remove extraneous "ns" keys

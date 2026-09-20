@@ -1,0 +1,208 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires ../qlib/WSDL.qm
+%requires ../qlib/SoapClient.qm
+%requires ../qlib/SoapHandler.qm
+%requires HttpServer
+%exec-class SoapNodeHttpTest
+
+class SoapNodeHttpTest inherits QUnit::Test {
+    constructor() : Test("SOAP HTTP node capabilities", "1.0") {
+        addTestCase("Clients and handlers process targeted headers before application data", \http());
+        addTestCase("Untargeted bound headers do not enter schema decoding", \boundHeaders());
+        addTestCase("Client and handler node configuration rejects intermediary or invalid values", \configuration());
+        set_return_value(main());
+    }
+    private static string block(bool soap12, string name, *string role, bool mandatory) {
+        return '<h:' + name + ' xmlns:h="urn:tracking" xmlns:p="' + (soap12 ? SOAP_12_ENV : SOAP_11_ENV)
+            + '" p:mustUnderstand="' + (mandatory ? '1' : '0') + '"'
+            + (exists role ? ' p:' + (soap12 ? 'role' : 'actor') + '="' + role + '"' : '')
+            + '>invoice-71</h:' + name + '>';
+    }
+    private static string envelope(bool soap12, string headers, bool valid_body = True) {
+        return '<e:Envelope xmlns:e="' + (soap12 ? SOAP_12_ENV : SOAP_11_ENV)
+            + '"><e:Header>' + headers + '</e:Header><e:Body>'
+            + (valid_body ? '<t:value xmlns:t="urn:soap-envelope-test">invoice-71</t:value>' : '<invalid-body/>')
+            + '</e:Body></e:Envelope>';
+    }
+    private http() {
+        string source = ReadOnlyFile::readTextFile(get_script_dir() + "/wsdl-interop/soap-envelope-peer/contract.wsdl");
+        foreach string state in ("source", "saved", "data") {
+            WebService ws(source);
+            if (state == "saved") { ws = Serializable::deserialize(ws.serialize()); }
+            if (state == "data") { ws = Serializable::deserialize(ws.serializeToData()); }
+            ws.nsc.opt_allow_any_header = True;
+            foreach bool soap12 in (False, True) {
+                string version = soap12 ? "12" : "11";
+                foreach bool retained in (False, True) {
+                    Queue processed(); Queue called(); Queue replies();
+                    SoapHeaderProcessor processor = auto sub(hash<auto> cx, hash<SoapNodeHeader> header) {
+                        @assert(header.xml.getElementData()."^value^" == "invoice-71");
+                        processed.push(header.name);
+                        return "tracking-confirmed";
+                    };
+                    SoapProcessingNode node(<SoapNodeOptions>{"roles":("urn:billing",),
+                        "processors":{"{urn:tracking}Tracking":processor}});
+                    HttpServer server();
+                    on_exit server.stop();
+                    SoapHandler handler(new PermissiveAuthenticator(), NOTHING, False, NOTHING, node);
+                    server.setDefaultHandler("nodes", handler);
+                    code<auto(hash<auto>, auto)> callback = auto sub(hash<auto> cx, auto value) {
+                        called.push(cx.soap_processing);
+                        @assert((retained ? value.body.body.getElementData()."^value^" : value) == "invoice-71");
+                        hash<auto> result();
+                        result.body = retained ? value.body.body : value;
+                        string reply = replies.get(10000);
+                        if (reply) { result."^header^" = {"^xml^":reply}; }
+                        return result;
+                    };
+                    handler.addMethod(ws, ws.getOperation("echo"), callback, NOTHING, NOTHING, NOTHING,
+                        "service", NOTHING, NOTHING, "B" + version, NOTHING, retained);
+                    server.addListener(0);
+                    string url = sprintf("http://127.0.0.1:%d/service", server.getListenerInfo(0).port);
+                    HTTPClient peer({"url":url,"error_passthru":True,"timeout":10000,"connect_timeout":10000});
+                    hash<auto> http_headers = {"Content-Type":soap12 ? "application/soap+xml" : "text/xml",
+                        "SOAPAction":"urn:echo"};
+                    foreach hash<auto> row in (
+                            {"name":"Tracking","role":NOTHING,"mandatory":True,"target":True,"process":True},
+                            {"name":"Tracking","role":"urn:billing","mandatory":True,"target":True,"process":True},
+                            {"name":"Tracking","role":"urn:other","mandatory":True,"target":False,"process":False},
+                            {"name":"Unknown","role":"urn:other","mandatory":True,"target":False,"process":False},
+                            {"name":"Unknown","role":NOTHING,"mandatory":False,"target":True,"process":False}) {
+                        string header = block(soap12, row.name, row.role, row.mandatory);
+                        replies.push("");
+                        hash<auto> info;
+                        string response = peer.post("", envelope(soap12, header), http_headers, \info);
+                        assertEq(200, info."response-headers".status_code, response);
+                        hash<SoapNodeResult> metadata = called.get(10000);
+                        assertEq(row.target, metadata.headers[0].header.targeted);
+                        assertEq(row.process, metadata.headers[0].processed);
+                        assertEq(row.process ? "tracking-confirmed" : NOTHING, metadata.headers[0].value);
+                        assertEq(row.target ? 1 : 0,
+                            metadata.application_message.getChildValues()[0].getChildValues().size());
+                        assertEq(row.process ? 1 : 0, processed.size());
+                        if (row.process) { assertEq("{urn:tracking}Tracking", processed.get(1000)); }
+                    }
+                    # Preflight covers all headers before a known processor and before body schema validation.
+                    string bad_headers = block(soap12, "Tracking", NOTHING, True)
+                        + block(soap12, "Unknown", NOTHING, True) + block(soap12, "Other", NOTHING, True);
+                    hash<auto> info;
+                    string response = peer.post("", envelope(soap12, bad_headers, False), http_headers, \info);
+                    assertEq(500, info."response-headers".status_code, response);
+                    assertEq(0, processed.size());
+                    assertEq(0, called.size());
+                    XsdXmlValue fault(response);
+                    list<XsdXmlValue> parts = fault.getChildValues();
+                    if (soap12) {
+                        assertEq(2, parts[0].getChildValues().size());
+                        assertEq(("{urn:tracking}Unknown", "{urn:tracking}Other"),
+                            map $1.resolveQName($1.getElementData()."^attributes^".qname), parts[0].getChildValues());
+                    }
+                    XsdXmlValue fault_value = parts[-1].getChildValues()[0];
+                    XsdXmlValue code = soap12 ? fault_value.getChildValues()[0].getChildValues()[0]
+                        : fault_value.getChildValues()[0];
+                    assertEq("{" + (soap12 ? SOAP_12_ENV : SOAP_11_ENV) + "}MustUnderstand",
+                        code.resolveQName(code.getElementData()."^value^"));
+                    SoapClient client({"wsdl":ws,"port":"Port" + version,"url":url,"timeout":10000});
+                    foreach bool registered in (False, True) {
+                        foreach bool targeted in (False, True) {
+                            replies.push(block(soap12, "Tracking", targeted ? NOTHING : "urn:other", True));
+                            hash<auto> opts();
+                            opts.xml_values = retained;
+                            if (registered) { opts.soap_node = node; }
+                            info = {};
+                            if (targeted && !registered) {
+                                assertThrows("SOAP-MUST-UNDERSTAND", \client.callOperation(),
+                                    ("echo", {"body":"invoice-71"}, opts, \info));
+                            } else {
+                                auto value = client.callOperation("echo", {"body":"invoice-71"}, opts, \info);
+                                assertEq("invoice-71", retained ? value.body.body.getElementData()."^value^" : value);
+                                assertEq(targeted, info."soap-processing".headers[0].header.targeted);
+                                assertEq(targeted && registered, info."soap-processing".headers[0].processed);
+                                if (retained) { assertEq(targeted ? 1 : 0, value.unbound_headers.size()); }
+                            }
+                            assertEq(0, called.get(10000).headers.size());
+                            if (registered && targeted) {
+                                assertEq("{urn:tracking}Tracking", processed.get(1000));
+                            }
+                            assertEq(0, processed.size());
+                            # A failed call or per-call capability must not affect subsequent requests.
+                            replies.push("");
+                            auto recovered = client.callOperation("echo", {"body":"invoice-71"});
+                            assertEq("invoice-71", recovered);
+                            assertEq(0, called.get(10000).headers.size());
+                        }
+                    }
+                    assertEq(0, replies.size());
+                }
+            }
+        }
+    }
+    private boundHeaders() {
+        string source = ReadOnlyFile::readTextFile(get_script_dir() + "/wsdl-interop/soap-envelope-peer/contract.wsdl");
+        source = replace(source, "</x:schema>", '<x:element name="Tracking"><x:complexType><x:simpleContent>'
+            + '<x:extension base="x:string"><x:anyAttribute namespace="##other" processContents="lax"/>'
+            + '</x:extension></x:simpleContent></x:complexType></x:element></x:schema>');
+        source = replace(source, '<w:portType ', '<w:message name="TrackingMessage"><w:part name="tracking"'
+            + ' element="t:Tracking"/></w:message><w:portType ');
+        foreach string prefix in ("s", "s12") {
+            source = replace(source, '<' + prefix + ':body use="literal"/></w:input>',
+                '<' + prefix + ':body use="literal"/><' + prefix
+                + ':header message="t:TrackingMessage" part="tracking" use="literal"/></w:input>');
+        }
+        foreach bool soap12 in (False, True) {
+            foreach bool retained in (False, True) {
+                WebService ws(source);
+                Queue received();
+                SoapHeaderProcessor processor = auto sub(hash<auto> cx, hash<SoapNodeHeader> header) {
+                    @assert(header.xml.getElementData()."^value^" == "invoice-71");
+                    return "accepted";
+                };
+                SoapProcessingNode node(<SoapNodeOptions>{"processors":{"{urn:soap-envelope-test}Tracking":processor}});
+                HttpServer server();
+                on_exit server.stop();
+                SoapHandler handler(new PermissiveAuthenticator(), NOTHING, False, NOTHING, node);
+                server.setDefaultHandler("bound-headers", handler);
+                code<auto(hash<auto>,auto)> callback = auto sub(hash<auto> cx, auto value) {
+                    @assert(cx.soap_processing.headers.size() == 2);
+                    received.push(value);
+                    return {"body":"invoice-71"};
+                };
+                handler.addMethod(ws, ws.getOperation("echo"), callback, NOTHING, NOTHING, NOTHING,
+                    "service", NOTHING, NOTHING, soap12 ? "B12" : "B11", NOTHING, retained);
+                server.addListener(0);
+                HTTPClient peer({"url":sprintf("http://127.0.0.1:%d/service",server.getListenerInfo(0).port),
+                    "timeout":10000,"error_passthru":True});
+                string targeted = replace(block(soap12,"Tracking",NOTHING,True),"urn:tracking","urn:soap-envelope-test");
+                string other = replace(block(soap12,"Tracking","urn:other",True),"urn:tracking","urn:soap-envelope-test");
+                other = replace(other,"invoice-71","<invalid-child/>");
+                foreach bool other_first in (False,True) {
+                    hash<auto> info;
+                    string response = peer.post("",envelope(soap12,other_first ? other + targeted : targeted + other),
+                        {"Content-Type":soap12 ? "application/soap+xml" : "text/xml","SOAPAction":"urn:echo"}, \info);
+                    assertEq(200,info."response-headers".status_code,response);
+                    auto value = received.get(10000);
+                    if (retained) {
+                        assertEq("invoice-71",value.headers.TrackingMessage.tracking.getElementData()."^value^");
+                        assertEq(0,value.unbound_headers.size());
+                    } else {
+                        assertEq("invoice-71",value.TrackingMessage.tracking."^value^");
+                        assertEq("invoice-71",value.body);
+                    }
+                }
+            }
+        }
+    }
+    private configuration() {
+        SoapProcessingNode intermediate(<SoapNodeOptions>{"ultimate_receiver":False});
+        assertThrows("SOAP-HANDLER-ERROR", sub() {
+            new SoapHandler(new PermissiveAuthenticator(), NOTHING, False, NOTHING, intermediate);
+        });
+        foreach auto invalid in (intermediate, "header-processor", 1) {
+            assertThrows("SOAP-CLIENT-ERROR", sub() { new SoapClient({"soap_node":invalid}); });
+        }
+    }
+}

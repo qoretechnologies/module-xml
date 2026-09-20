@@ -1,0 +1,251 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires ../qlib/WSDL.qm
+%requires xml
+%exec-class SoapNodeTest
+
+class SoapNodeTest inherits QUnit::Test {
+    private {
+        const Next11 = "http://schemas.xmlsoap.org/soap/actor/next";
+        const Next12 = "http://www.w3.org/2003/05/soap-envelope/role/next";
+        const None12 = "http://www.w3.org/2003/05/soap-envelope/role/none";
+        const Ultimate12 = "http://www.w3.org/2003/05/soap-envelope/role/ultimateReceiver";
+    }
+    constructor() : Test("SOAP node processing", "1.0") {
+        addTestCase("Role, capability, mandatory and relay truth table", \matrix());
+        addTestCase("Mandatory preflight precedes callbacks; failures are recoverable", \preflight());
+        addTestCase("Forwarding preserves order, XML context and body values", \forwarding());
+        addTestCase("URI base resolution, attribute namespace and node configuration", \validation());
+        addTestCase("Concurrent calls share immutable capabilities and isolate results", \concurrency());
+        set_return_value(main());
+    }
+    private static string envelope(bool soap12, string headers, string root_attributes = "",
+            string header_attributes = "", string body = '<t:value>invoice-71</t:value>') {
+        return '<e:Envelope xmlns:e="' + (soap12 ? SOAP_12_ENV : SOAP_11_ENV)
+            + '" xmlns:t="urn:tracking" ' + root_attributes + '><e:Header ' + header_attributes + '>'
+            + headers + '</e:Header><e:Body>' + body + '</e:Body></e:Envelope>';
+    }
+    private static string block(bool soap12, *string role, bool mandatory, bool relay) {
+        return '<t:Tracking' + (exists role ? ' e:' + (soap12 ? 'role' : 'actor') + '="' + role + '"' : '')
+            + ' e:mustUnderstand="' + (mandatory ? '1' : '0') + '"'
+            + (soap12 ? ' e:relay="' + (relay ? 'true' : 'false') + '"' : '') + '>invoice-71</t:Tracking>';
+    }
+    private matrix() {
+        foreach bool soap12 in (False, True) {
+            foreach bool ultimate in (False, True) {
+                foreach *string role in (NOTHING, soap12 ? Next12 : Next11, Ultimate12, None12,
+                        "urn:billing", "urn:another-node", "http://example.org/%61", "http://example.org/a") {
+                    # Expected targeting is specified independently of the node implementation.
+                    bool target = !exists role ? ultimate : role == (soap12 ? Next12 : Next11)
+                        || role == "urn:billing" || role == "http://example.org/%61"
+                        || (soap12 && role == Ultimate12 && ultimate);
+                    foreach bool known in (False, True) {
+                        foreach bool mandatory in (False, True) {
+                            foreach bool relay in (False, True) {
+                                int calls = 0;
+                                SoapHeaderProcessor processor = auto sub(hash<auto> cx, hash<SoapNodeHeader> header) {
+                                    ++calls;
+                                    assertEq("invoice-71", header.xml.getElementData()."^value^");
+                                    assertEq("billing", cx.department);
+                                    assertEq(True, header.targeted);
+                                    return "accepted";
+                                };
+                                hash<SoapNodeOptions> opts = <SoapNodeOptions>{"ultimate_receiver":ultimate,
+                                    "roles":("urn:billing", "http://example.org/%61"),
+                                    "processors":known ? {"{urn:tracking}Tracking":processor} : {}};
+                                SoapProcessingNode node(opts);
+                                string xml = envelope(soap12, block(soap12, role, mandatory, relay));
+                                if (target && mandatory && !known) {
+                                    assertThrows("SOAP-MUST-UNDERSTAND", \node.processMessage(), (xml,));
+                                    assertEq(0, calls);
+                                    continue;
+                                }
+                                hash<SoapNodeResult> result = node.processMessage(xml, {"department":"billing"});
+                                assertEq(soap12, result.soap12);
+                                assertEq(1, result.headers.size());
+                                hash<SoapNodeHeaderResult> item = result.headers[0];
+                                assertEq(target, item.header.targeted);
+                                assertEq(mandatory, item.header.must_understand);
+                                assertEq(soap12 && relay, item.header.relay);
+                                assertEq(0, item.header.index);
+                                assertEq("{urn:tracking}Tracking", item.header.name);
+                                assertEq(target && known, item.processed);
+                                assertEq(target && known ? 1 : 0, calls);
+                                assertEq(item.processed ? "accepted" : NOTHING, item.value);
+                                bool forwarded = !ultimate && (!target || (!known && soap12 && relay));
+                                assertEq(forwarded, item.forwarded);
+                                assertEq(!ultimate, exists result.forward_message);
+                                if (!ultimate) {
+                                    assertEq(forwarded ? 1 : 0,
+                                        result.forward_message.getChildValues()[0].getChildValues().size());
+                                    assertEq("invoice-71", result.forward_message.getChildValues()[1]
+                                        .getChildValues()[0].getElementData()."^value^");
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    private preflight() {
+        foreach bool soap12 in (False, True) {
+            list<string> seen();
+            SoapHeaderProcessor processor = auto sub(hash<auto> cx, hash<SoapNodeHeader> header) {
+                seen += header.name;
+                if (cx.fail) { throw "INVOICE-HEADER-ERROR", "invalid invoice identifier", header.index; }
+                return header.index;
+            };
+            hash<SoapNodeOptions> opts = <SoapNodeOptions>{"processors":{
+                "{urn:tracking}Tracking":processor,"{urn:tracking}Other":processor}};
+            SoapProcessingNode node(opts);
+            # Modifying the input options after construction must not change node capabilities.
+            remove opts.processors{"{urn:tracking}Tracking"};
+            string known = block(soap12, NOTHING, True, False);
+            string unknown = replace(known, "t:Tracking", "t:Unknown");
+            string xml = envelope(soap12, known + unknown + unknown + replace(known, "t:Tracking", "t:Other"),
+                "", "", '<not-the-application-body/>');
+            try {
+                node.processMessage(xml);
+                fail("unknown mandatory headers must fail before processors run");
+            } catch (hash<ExceptionInfo> ex) {
+                assertEq("SOAP-MUST-UNDERSTAND", ex.err);
+                assertEq(soap12, ex.arg.soap12);
+                assertEq(2, ex.arg.headers.size());
+                assertEq(1, ex.arg.headers[0].index);
+                assertEq(2, ex.arg.headers[1].index);
+                assertEq("{urn:tracking}Unknown", ex.arg.headers[0].name);
+                assertEq(0, seen.size());
+            }
+            string good = envelope(soap12, known + replace(known, "t:Tracking", "t:Other"));
+            assertThrows("INVOICE-HEADER-ERROR", \node.processMessage(), (good, {"fail":True}));
+            assertEq(("{urn:tracking}Tracking",), seen);
+            seen = ();
+            hash<SoapNodeResult> result = node.processMessage(good);
+            assertEq(("{urn:tracking}Tracking", "{urn:tracking}Other"), seen);
+            assertEq((0, 1), map $1.value, result.headers);
+            assertEq(0, node.processMessage(envelope(soap12, "")).headers.size());
+        }
+    }
+    private forwarding() {
+        foreach bool soap12 in (False, True) {
+            string next = soap12 ? Next12 : Next11;
+            SoapHeaderProcessor processor = auto sub(hash<auto> cx, hash<SoapNodeHeader> header) {
+                return header.xml.resolveQName(header.xml.getElementData()."^value^");
+            };
+            SoapProcessingNode node(<SoapNodeOptions>{"ultimate_receiver":False,
+                "processors":{"{urn:tracking}Known":processor}});
+            string role_attr = soap12 ? "role" : "actor";
+            string content = '<t:Unknown e:' + role_attr + '="urn:another-node" xmlns:q="urn:first">q:A</t:Unknown>'
+                + '<!--keep-order--><t:Known e:' + role_attr + '="' + next + '" xmlns:q="urn:known">q:B</t:Known>'
+                + '<t:Unknown e:' + role_attr + '="urn:another-node" xmlns:q="urn:second">q:C</t:Unknown>';
+            string body = '<t:value xmlns:q="urn:body" xml:base="../payload/" unit="kg">009.00'
+                + '<t:Child>q:Amount</t:Child> tail <![CDATA[with <markup>]]></t:value>';
+            string xml = envelope(soap12, content, 'xml:lang="cs" xml:base="../original/"',
+                'xml:lang="" xml:space="preserve"', body);
+            hash<SoapNodeResult> result = node.processMessage(xml, {}, "https://host.example/incoming/request");
+            assertEq((False, True, False), map $1.processed, result.headers);
+            assertEq((True, False, True), map $1.forwarded, result.headers);
+            assertEq("{urn:known}B", result.headers[1].value);
+            XsdXmlValue forwarded = result.forward_message;
+            assertEq("https://host.example/original/", forwarded.getXmlContext()."xml:base");
+            list<XsdXmlValue> kept = forwarded.getChildValues()[0].getChildValues();
+            assertEq(2, kept.size());
+            assertEq("{urn:first}A", kept[0].resolveQName(kept[0].getElementData()."^value^"));
+            assertEq("{urn:second}C", kept[1].resolveQName(kept[1].getElementData()."^value^"));
+            assertEq("", kept[0].getXmlContext()."xml:lang");
+            assertEq("preserve", kept[0].getXmlContext()."xml:space");
+            assertTrue(forwarded.getXml().find("keep-order") >= 0);
+            XsdXmlValue before(xml, {"xml:base":"https://host.example/incoming/request"});
+            XsdXmlValue before_body = before.getChildValues()[1].getChildValues()[0];
+            XsdXmlValue after_body = forwarded.getChildValues()[1].getChildValues()[0];
+            assertEq(before_body.getElementData(), after_body.getElementData());
+            assertEq(before_body.getXmlContext(), after_body.getXmlContext());
+            assertEq("{urn:body}Amount", after_body.getChildValues()[0].resolveQName("q:Amount"));
+            assertEq(soap12, WSDLLib::validateSOAPEnvelope(forwarded.getXmlDataView(), soap12));
+        }
+    }
+    private validation() {
+        foreach string role in ("relative/path", "", "urn:bad value", "urn:bad%xx", "urn:é", None12) {
+            assertThrows("SOAP-NODE-ERROR", sub() { new SoapProcessingNode(<SoapNodeOptions>{"roles":(role,)}); });
+        }
+        assertThrows("SOAP-NODE-ERROR", sub() {
+            new SoapProcessingNode(<SoapNodeOptions>{"ultimate_receiver":False,"roles":(Ultimate12,)});
+        });
+        SoapHeaderProcessor processor = auto sub(hash<auto> cx, hash<SoapNodeHeader> header) { return header.role; };
+        foreach string name in ("Tracking", "{}Tracking", "{urn:t}", "{urn:t}bad:name", "{urn:t}bad name", "{urn:t} Tracking ") {
+            assertThrows("SOAP-NODE-ERROR", sub() {
+                new SoapProcessingNode(<SoapNodeOptions>{"processors":{name:processor}});
+            });
+        }
+        SoapProcessingNode node(<SoapNodeOptions>{"roles":("https://example.org/base/roles/billing",),
+            "processors":{"{urn:tracking}Tracking":processor}});
+        foreach bool soap12 in (False, True) {
+            string attribute = soap12 ? "role" : "actor";
+            string head = '<t:Tracking xmlns:p="' + (soap12 ? SOAP_12_ENV : SOAP_11_ENV)
+                + '" p:' + attribute + '=" ./billing " p:mustUnderstand="1" xml:base="roles/">invoice-71</t:Tracking>';
+            string xml = envelope(soap12, head, 'xml:base="../base/"');
+            hash<SoapNodeResult> result = node.processMessage(xml, {}, "https://example.org/incoming/request");
+            assertTrue(result.headers[0].processed);
+            assertEq("https://example.org/base/roles/billing", result.headers[0].value);
+            assertThrows("SOAP-DESERIALIZATION-ERROR", \node.processMessage(), (xml,));
+            foreach string invalid in ("urn:bad%xy", "urn:two words", "urn:é") {
+                assertThrows("SOAP-DESERIALIZATION-ERROR", \node.processMessage(),
+                    (envelope(soap12, block(soap12, invalid, False, False)),));
+            }
+            # Foreign/unqualified attributes and descendant roles are application data.
+            string scoped = envelope(soap12, '<t:Tracking role="urn:bad value" actor="urn:bad value"'
+                + ' xmlns:p="urn:another-protocol" p:role="urn:bad value"><t:Child e:' + attribute
+                + '="urn:bad value"/></t:Tracking>');
+            assertTrue(node.processMessage(scoped).headers[0].processed);
+            assertThrows("SOAP-VERSION-MISMATCH", \node.processMessage(), (scoped, {}, NOTHING, !soap12));
+            assertThrows("SOAP-DESERIALIZATION-ERROR", \node.processMessage(), (replace(scoped,
+                "</e:Body>", "<?forbidden processing?></e:Body>"),));
+        }
+    }
+    private concurrency() {
+        Queue received(); Queue ready(); Queue start(); Queue done();
+        SoapHeaderProcessor processor = auto sub(hash<auto> cx, hash<SoapNodeHeader> header) {
+            @assert(header.name == "{urn:tracking}Tracking" && header.targeted);
+            received.push(cx.id);
+            return cx.id;
+        };
+        SoapProcessingNode node(<SoapNodeOptions>{"processors":{"{urn:tracking}Tracking":processor}});
+        foreach int worker in (0, 1, 2, 3) {
+            background sub(int id) {
+                ready.push(id);
+                auto token = start.get(10000);
+                try {
+                    for (int step = 0; step < 8; ++step) {
+                        bool soap12 = (id + step) % 2 == 1;
+                        string xml = envelope(soap12, block(soap12, NOTHING, True, False));
+                        int identity = id * 8 + step;
+                        hash<SoapNodeResult> result = node.processMessage(xml, {"id":identity});
+                        @assert(result.soap12 == soap12 && result.headers[0].value == identity);
+                        bool caught = False;
+                        try { node.processMessage(replace(xml, "t:Tracking", "t:Unknown")); }
+                        catch (hash<ExceptionInfo> ex) {
+                            @assert(ex.err == "SOAP-MUST-UNDERSTAND");
+                            caught = True;
+                        }
+                        @assert(caught);
+                    }
+                    done.push(id);
+                } catch (hash<ExceptionInfo> ex) { done.push(ex); }
+            }(worker);
+        }
+        for (int i = 0; i < 4; ++i) { auto token = ready.get(10000); }
+        for (int i = 0; i < 4; ++i) { start.push(True); }
+        list<int> finished();
+        for (int i = 0; i < 4; ++i) { finished += done.get(30000); }
+        assertEq((0, 1, 2, 3), sort(finished));
+        list<int> called();
+        for (int i = 0; i < 32; ++i) { called += received.get(1000); }
+        assertEq(0 .. 31, sort(called));
+        assertEq(0, received.size());
+    }
+
+}

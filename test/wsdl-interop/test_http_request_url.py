@@ -44,7 +44,7 @@ def contract(base, reference, *, verb="GET", mode="urlEncoded", empty=False):
 
 
 @contextlib.contextmanager
-def origin(name, received, behavior=None):
+def origin(name, received, behavior=None, *, content_type="text/xml;charset=UTF-8"):
     stopped = threading.Event()
     failures = queue.Queue()
 
@@ -72,7 +72,7 @@ def origin(name, received, behavior=None):
             try:
                 status, headers, output = behavior(record) if behavior else (200, {}, f"<result>{name}</result>".encode())
                 self.send_response(status)
-                self.send_header("Content-Type", "text/xml;charset=UTF-8")
+                self.send_header("Content-Type", content_type)
                 self.send_header("Content-Length", str(len(output)))
                 for key, value in headers.items():
                     self.send_header(key, value)

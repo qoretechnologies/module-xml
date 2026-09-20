@@ -101,6 +101,8 @@ auto result = sc.call("SubmitDocument", msg);
     @section soapclientrelnotes SoapClient Release Notes
 
     @subsection soapclient_1_0_4 SoapClient v1.0.4
+    - Response headers use an explicit SoapProcessingNode; constructor and per-call capabilities reject unknown
+      targeted mandatory headers before body decoding and expose original header outcomes in call information
     - SOAP responses enforce the selected binding version and envelope structure before native or retained decoding;
       version negotiation faults retain the SOAP 1.1 transition format
     - HTTP operation references resolve against the selected endpoint with Qore's RFC 3986 support and use
@@ -212,6 +214,7 @@ public class SoapClient inherits HTTPClient {
         string port;
         string binding;
         *string url_path;
+        SoapProcessingNode soap_node;
 
         *code logc;
         *code dbglogc;
@@ -260,6 +263,8 @@ public class SoapClient inherits HTTPClient {
     /** one of either the \c wsdl or \c wsdl_file keys is required in the hash given to the constructor or an exception will be thrown
         @param h valid option keys:
         - \c wsdl: the URL of the web service or a @ref WSDL::WebService "WebService" object itself
+        - \c soap_node: optional ultimate-receiver SoapProcessingNode for response headers; the default has no
+          application header capabilities and rejects unknown targeted mandatory headers
         - \c wsdl_file: a path to use to load the %WSDL and create the @ref WSDL::WebService "WebService" object
         - \c url: override the target URL given in the %WSDL; HTTP binding operation references resolve against
           this complete base URI, including its path and query
@@ -281,6 +286,7 @@ auto result = client.callOperation("submit", {"id": "invoice-71"});
         @endcode
     */
     constructor(hash<auto> h) : HTTPClient(h{HTTPOptions}) {
+        soap_node = getProcessingNode(h.soap_node);
         if (exists h.wsdl_file && exists h.wsdl)
             throw "SOAP-CLIENT-ERROR", "only one of 'wsdl' or 'wsdl_file' keys can be given; both were passed";
 
@@ -430,6 +436,8 @@ auto result = client.callOperation("submit", {"id": "invoice-71"});
         - \c xml_opts: an integer XML generation option code; see @ref xml_generation_constants for possible values; combine multiple codes with binary or (\c |)
         - \c soapaction: an optional string that will override the SOAPAction for the request; en empty string here will prevent the SOAPAction from being sent
         - \c binding: the SOAP binding name, if not provided the first binding assigned to the operation will be used
+        - \c soap_node: optional ultimate-receiver SoapProcessingNode overriding the constructor's response
+          header capabilities for this call only
         - \c xml_values: True to return WSDL::SoapXmlMessageInfo with retained XML body parts and headers;
           the default returns native values. One-way operations still return NOTHING. Requires
           element-based literal SOAP parts.
@@ -446,6 +454,8 @@ auto result = client.callOperation("submit", {"id": "invoice-71"});
         - \c "response-headers": a hash of HTTP response headers
         - \c "response-body": the raw XML response body (in case content encoding is used, this is the decoded value)
         - \c "request-body": the raw XML request body
+        - \c "soap-processing": SoapNodeResult for a SOAP response; includes all original header blocks and
+          processor results. Ordinary response decoding sees only headers targeted at this node.
         - \c "request-soap-headers": an optional hash of SOAP headers used in the request (if applicable)
 
         @return a hash with the following keys:
@@ -500,6 +510,8 @@ auto result = client.callOperation("submit", {"id": "invoice-71"});
         - \c "response-headers": a hash of HTTP response headers
         - \c "response-body": the raw XML response body (in case content encoding is used, this is the decoded value)
         - \c "request-body": the raw XML request body
+        - \c "soap-processing": SoapNodeResult for a SOAP response; includes all original header blocks and
+          processor results. Ordinary response decoding sees only headers targeted at this node.
         - \c "request-soap-headers": an optional hash of SOAP headers used in the request (if applicable)
         @param binding the SOAP binding name, if not provided, the first binding assigned to the operation will be used
 
@@ -530,6 +542,8 @@ auto result = client.callOperation("submit", {"id": "invoice-71"});
         - \c "response-headers": a hash of HTTP response headers
         - \c "response-body": the raw XML response body (in case content encoding is used, this is the decoded value)
         - \c "request-body": the raw XML request body
+        - \c "soap-processing": SoapNodeResult for a SOAP response; includes all original header blocks and
+          processor results. Ordinary response decoding sees only headers targeted at this node.
         - \c "request-soap-headers": an optional hash of SOAP headers used in the request (if applicable)
         @param operation the operation name for the SOAP call
         @param args the arguments to the SOAP operation
@@ -554,6 +568,7 @@ auto result = client.callOperation("submit", {"id": "invoice-71"});
 
     #! makes the call to the SOAP server and ensures that SOAP fault responses returned with a 500-series status code are processed as a SOAP fault so that error information is returned in the resulting exception
     private:internal auto makeCallIntern(*reference info, string operation, auto args, *hash<auto> opts) {
+        SoapProcessingNode response_node = exists opts.soap_node ? getProcessingNode(opts.soap_node) : soap_node;
         @assert(wsdl, "WSDL object must be initialized");
         if (exists opts.xml_values && opts.xml_values.typeCode() != NT_BOOLEAN) {
             throw "SOAP-CLIENT-ERROR", "the xml_values call option must be a bool";
@@ -696,10 +711,30 @@ auto result = client.callOperation("submit", {"id": "invoice-71"});
         on_success msglog({"reason": "response"} + msg_hash);
         on_error msglog({"reason": "error"} + msg_hash);
 
+        *string response_xml;
+        if (selected_binding instanceof SoapBinding && pdata && rmsg.body) {
+            hash<SoapNodeResult> processed = response_node.processMessage(WSDLLib::getXmlMessageText(rmsg),
+                {"operation":op,"http_info":info}, info."effective-url", selected_binding.isSoap12(), True);
+            # Native HTTP info can be an untyped hash; preserve the typed result in a new typed container.
+            hash<auto> typed_info();
+            typed_info += info;
+            typed_info."soap-processing" = processed;
+            info = typed_info;
+            response_xml = processed.application_message.getXml();
+            pdata = WSDLLib::parseSOAPMessage(rmsg + {"body":response_xml}, False, True);
+        }
         if (opts.xml_values && op.output) {
-            return op.deserializeXmlResponse(WSDLLib::getXmlMessageText(rmsg), binding, rmsg.parts);
+            return op.deserializeXmlResponse(response_xml ?? WSDLLib::getXmlMessageText(rmsg), binding, rmsg.parts);
         }
         return op.deserializeResponse(pdata, binding, opts.preserve_types ?? False, opts.response_mime_format ?? response_format);
+    }
+
+    private static SoapProcessingNode getProcessingNode(auto supplied) {
+        if (!exists supplied) { return new SoapProcessingNode(); }
+        if (!(supplied instanceof SoapProcessingNode) || !supplied.isUltimateReceiver()) {
+            throw "SOAP-CLIENT-ERROR", "soap_node requires an ultimate-receiver SoapProcessingNode";
+        }
+        return supplied;
     }
 
     # Scope module-level defaults to the configured HTTP origin. Parsing and URI resolution belong to Qore;

@@ -76,6 +76,9 @@ module SoapHandler {
     @section soaphandler_relnotes SoapHandler Release History
 
     @subsection soaphandler_0_3_4 SoapHandler 0.3.4
+    - Explicit SoapProcessingNode capabilities and roles apply before application callbacks; unknown targeted
+      mandatory headers produce MustUnderstand faults with SOAP 1.2 NotUnderstood QNames. Application decoding
+      sees targeted headers, and callback context retains every original block and processor result
     - SOAP protocol validation runs before callbacks; version mismatches generate VersionMismatch faults with
       supported-envelope metadata, and SOAP 1.2 fault reasons carry xml:lang
     - HTTP routes resolve operation references against port endpoints, preserve encoded template literals, and
@@ -232,6 +235,9 @@ public namespace SoapHandler {
             # optional maximum message size in bytes; if set, messages larger than this will be rejected
             *int max_message_size;
 
+            # Immutable header capabilities and roles; per-request results live in cx.soap_processing.
+            SoapProcessingNode soap_node;
+
             # for atomicity when adding / removing methods
             RWLock rwl();
 
@@ -254,11 +260,22 @@ public namespace SoapHandler {
             call
             @param dbg this parameter is set to @ref Qore::True "True", then additional information will be logged
             when errors occur
+            @param n_soap_node optional ultimate-receiver header processing configuration; defaults to a node with
+            no application capabilities. Unknown targeted mandatory headers produce MustUnderstand faults before
+            any processor or application callback. Callbacks receive original headers and processor results in
+            \c cx.soap_processing; WSDL decoding receives only targeted headers. Intermediaries use
+            SoapProcessingNode directly instead of invoking application body operations.
+            @throw SOAP-HANDLER-ERROR an intermediary node was supplied
             @param n_max_message_size optional maximum message size in bytes; if set, messages larger than this
             will be rejected with a 413 Payload Too Large response (recommended: 1048576 for 1MB, 10485760 for 10MB)
          */
-        constructor(AbstractAuthenticator auth, *code n_getLogMessage, bool dbg = False, *int n_max_message_size)
+        constructor(AbstractAuthenticator auth, *code n_getLogMessage, bool dbg = False, *int n_max_message_size,
+                *SoapProcessingNode n_soap_node)
                 : AbstractHttpRequestHandler(auth) {
+            soap_node = n_soap_node ?? new SoapProcessingNode();
+            if (!soap_node.isUltimateReceiver()) {
+                throw "SOAP-HANDLER-ERROR", "SoapHandler requires an ultimate-receiver SoapProcessingNode";
+            }
             getLogMessage = n_getLogMessage;
             debug = dbg;
             max_message_size = n_max_message_size;
@@ -762,6 +779,10 @@ private nothing msglog(hash<auto> cx, hash<auto> msg) {
                 return makeSoapFaultResponseWithCode(cx, errLog, protocol.soap12 ?? soap12, err, desc,
                     SoapFaultVersionMismatch, fmt, protocol.supported_soap12);
             }
+            if (err == "SOAP-MUST-UNDERSTAND") {
+                return makeSoapFaultResponseWithCode(cx, errLog, soap12, err, desc, SoapFaultMustUnderstand,
+                    fmt, NOTHING, protocol.headers);
+            }
             return makeSoapFaultResponseWithCode(cx, errLog, soap12, err, desc, SoapFaultSender, fmt);
         }
 
@@ -775,6 +796,7 @@ private nothing msglog(hash<auto> cx, hash<auto> msg) {
                 "DataEncodingUnknown"
             @param fmt if True, add XML formatting
             @param supported_soap12 known supported version for a VersionMismatch Upgrade header
+            @param not_understood original unknown mandatory headers for SOAP 1.2 NotUnderstood metadata
 
             @return hash with HTTP response info including:
             - \c code: HTTP status code (400 for Sender faults, 500 for Receiver/server faults)
@@ -785,7 +807,8 @@ private nothing msglog(hash<auto> cx, hash<auto> msg) {
             @see https://www.w3.org/TR/2007/REC-soap12-part2-20070427/#soapinhttp for HTTP binding spec
         */
         private hash<auto> makeSoapFaultResponseWithCode(hash<auto> cx, string errLog, bool soap12, string err,
-                string desc, string faultCode, *bool fmt, *bool supported_soap12) {
+                string desc, string faultCode, *bool fmt, *bool supported_soap12,
+                *list<hash<SoapNodeHeader>> not_understood) {
             # do not use hash<auto> here; types must be stripped
             hash o;
 
@@ -835,6 +858,19 @@ private nothing msglog(hash<auto> cx, hash<auto> msg) {
                         "xmlns:supported":supported_soap12 ? SOAP_12_ENV : SOAP_11_ENV,
                         "qname":"supported:Envelope"}},
                 }};
+                o."soapenv:Envelope"."soapenv:Body" = fault_body;
+            }
+
+            if (soap12 && faultCode == SoapFaultMustUnderstand && not_understood) {
+                list<hash<auto>> blocks();
+                foreach hash<SoapNodeHeader> header in (not_understood) {
+                    string prefix = header.xml.getNamespaceUri() == "http://www.w3.org/XML/1998/namespace"
+                        ? "xml" : "unknown";
+                    blocks += {"^attributes^":{"xmlns:" + prefix:header.xml.getNamespaceUri(),
+                        "qname":prefix + ":" + header.xml.getLocalName()}};
+                }
+                auto fault_body = remove o."soapenv:Envelope"."soapenv:Body";
+                o."soapenv:Envelope"."soapenv:Header" = {"soapenv:NotUnderstood":blocks};
                 o."soapenv:Envelope"."soapenv:Body" = fault_body;
             }
 
@@ -888,7 +924,7 @@ private nothing msglog(hash<auto> cx, hash<auto> msg) {
                     ? get_exception_string(ex)
                     : sprintf("%s: %s: %s", get_ex_pos(ex), ex.err, ex.desc);
                 return makeSoapFaultResponse(cx, str, reqsoap12, ex.err, ex.desc, NOTHING,
-                    ex.err == "SOAP-VERSION-MISMATCH" ? ex.arg : NOTHING);
+                    inlist(ex.err, ("SOAP-VERSION-MISMATCH", "SOAP-MUST-UNDERSTAND")) ? ex.arg : NOTHING);
             }
 
             if ((method.logopt & HttpServer::LP_LEVELMASK) <= loglevel && exists cx.logfunc) {
@@ -1118,7 +1154,7 @@ private nothing msglog(hash<auto> cx, hash<auto> msg) {
                             ? get_exception_string(ex)
                             : sprintf("exception in %s: %s: %s", get_ex_pos(ex), ex.err, ex.desc);
                         return makeSoapFaultResponse(cx, str, reqsoap12, ex.err, ex.desc, NOTHING,
-                            ex.err == "SOAP-VERSION-MISMATCH" ? ex.arg : NOTHING);
+                            inlist(ex.err, ("SOAP-VERSION-MISMATCH", "SOAP-MUST-UNDERSTAND")) ? ex.arg : NOTHING);
                     }
                 }
             }
@@ -1214,6 +1250,17 @@ private nothing msglog(hash<auto> cx, hash<auto> msg) {
                     args = WSDLLib::parseSOAPMessage(msg, mime_content, soap_envelope);
                     if (soap_envelope) {
                         reqsoap12 = WSDLLib::validateSOAPEnvelope(args, expected_version);
+                        *string base_uri = hdr.host ? resolve_url((cx.ssl ? "https://" : "http://") + hdr.host + "/",
+                            cx.raw_path ?? hdr.path ?? cx.url.path, RESOLVE_URL_STRICT | RESOLVE_URL_ENCODE) : NOTHING;
+                        # Native HTTP contexts can be legacy untyped hashes, which strip nested hashdecls on assignment.
+                        # Construct a typed context before adding the public typed processing result.
+                        hash<auto> typed_cx();
+                        typed_cx += cx;
+                        cx = typed_cx;
+                        cx.soap_processing = soap_node.processMessage(WSDLLib::getXmlMessageText(msg), cx,
+                            base_uri, expected_version);
+                        xml_body = cx.soap_processing.application_message.getXml();
+                        args = WSDLLib::parseSOAPMessage(msg + {"body":xml_body}, False, True);
                     }
                     if (!mime_content && (WSDLLib::isSOAPMessage(msg) || WSDLLib::isMtomMessage(msg))) {
                         # Inspect routing and envelope metadata on a copy; preserve the original XML names
@@ -1284,7 +1331,7 @@ private nothing msglog(hash<auto> cx, hash<auto> msg) {
                             throw "SOAP-CALL-ERROR", sprintf("no operation call found in message (SOAP body "
                                 "args: %y)", keys routing_args.Envelope.Body);
                         }
-                        if (method.xml_values) {
+                        if (method.xml_values && !exists xml_body) {
                             xml_body = WSDLLib::getXmlMessageText(msg);
                         }
                         #printf("DEBUG element: %y methods: %y args: %y\n", element, methods.keys(), args);
@@ -1295,7 +1342,7 @@ private nothing msglog(hash<auto> cx, hash<auto> msg) {
                         ? get_exception_string(ex)
                         : sprintf("%s: %s: %s", get_ex_pos(ex), ex.err, ex.desc);
                     return makeSoapFaultResponse(cx, str, reqsoap12, ex.err, ex.desc, NOTHING,
-                        ex.err == "SOAP-VERSION-MISMATCH" ? ex.arg : NOTHING);
+                        inlist(ex.err, ("SOAP-VERSION-MISMATCH", "SOAP-MUST-UNDERSTAND")) ? ex.arg : NOTHING);
                 }
 
                 if (method) {
@@ -1307,7 +1354,7 @@ private nothing msglog(hash<auto> cx, hash<auto> msg) {
                             ? get_exception_string(ex)
                             : sprintf("exception in %s: %s: %s", get_ex_pos(ex), ex.err, ex.desc);
                         return makeSoapFaultResponse(cx, str, reqsoap12, ex.err, ex.desc, NOTHING,
-                            ex.err == "SOAP-VERSION-MISMATCH" ? ex.arg : NOTHING);
+                            inlist(ex.err, ("SOAP-VERSION-MISMATCH", "SOAP-MUST-UNDERSTAND")) ? ex.arg : NOTHING);
                     }
                 }
             }

@@ -9672,3 +9672,28 @@ All 21 affected Qore suites pass: **359 cases / 10,957 assertions**. Four indepe
 Audit: **18 Pass / 44 N/A / zero Fail**. No C++ or Qore changes, installation or push. P7 continues with explicit node capabilities, roles/actors, mandatory targeted headers, relay, complete faults and HTTP requirements; P8–P9 remain open.
 
 See [evidence](soap-processing-attributes-evidence.md), [validation](P7-02-validation.json), [audit](audits/P7-02-soap-processing-attributes.md), and [implemented design](../../design/soap-envelope-processing.md).
+
+
+## P7-03: Explicit SOAP nodes and HTTP adapters
+
+Immutable header capabilities implement actor/role targeting, mandatory preflight,
+typed processing outcomes, intermediary relay and targeted application envelopes.
+SoapClient and SoapHandler integrate these nodes. Unknown targeted mandatory request
+headers generate MustUnderstand faults; SOAP 1.2 faults include scoped NotUnderstood
+QNames. Response fault detection uses the envelope-qualified name, keeping application
+Fault elements as ordinary schema values; direct and HTTP regressions cover both versions. Response roles use the final request URL plus XML Base. Native, retained,
+saved, concurrent and independent CXF/Python paths cover these behaviors, including
+occurrence-list filtering of adjacent bound headers.
+
+The installed Qore strict URI fix is verified, and SOAP role validation now uses
+RESOLVE_URL_ASCII. All 25 affected Qore suites pass (373 cases / 15,340 assertions),
+including the ordinary negative URI suite. All four compiled SOAP suites pass
+(14 cases / 4,381 assertions). Independent peers pass 348 new HTTP exchanges; all
+16 corpus commands retain the P7-02 semantic results. Documentation and eleven-file
+AST checks are clean. Audit: 18 Pass / 44 N/A / zero Fail.
+
+P7 complete fault and HTTP/action rules remain open; P8–P9 follow. No C++ changes,
+Qore edits, installation, push or CI trigger belong to this increment.
+
+See [evidence](soap-node-evidence.md), [validation](P7-03-validation.json),
+[audit](audits/P7-03-soap-node.md), and [implemented design](../../design/soap-envelope-processing.md).

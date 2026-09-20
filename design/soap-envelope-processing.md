@@ -53,3 +53,65 @@ rejected requests do not alter a service graph or subsequent valid exchanges.
 For example, a SOAP 1.2 invoice endpoint receiving a SOAP 1.1 envelope returns a
 SOAP 1.1 VersionMismatch fault with a SOAP 1.2 SupportedEnvelope declaration. A
 subsequent SOAP 1.2 request on the same client connection executes normally.
+
+
+`SoapProcessingNode` holds an immutable `SoapNodeOptions` capability registry keyed
+by expanded header names. `SoapHeaderProcessor` callbacks receive a caller context
+and `SoapNodeHeader`, including the original retained XML, effective role,
+mandatory/relay flags, targeting and original index. A WSDL declaration does not
+constitute a processing capability. All targeted mandatory headers must have a
+processor before any processor runs. A missing capability raises
+`SOAP-MUST-UNDERSTAND` with the ordered unknown headers. Processor exceptions
+propagate and stop subsequent processing; application side effects from earlier
+processors cannot be rolled back.
+
+Every node assumes its SOAP version's `next` role. Ultimate receivers also assume
+the default ultimate role; additional absolute roles come from configuration.
+SOAP 1.2 `none` is never assumed. Role identities use Qore URI reference resolution
+with inherited XML Base and the document retrieval URI. Comparisons do not decode
+percent escapes or apply scheme-specific normalization. XML Base IRI references
+use Qore's URI encoding; SOAP role attribute values use Qore's strict ASCII URI
+validation (`RESOLVE_URL_ASCII`). The node
+configuration cannot change during message processing.
+
+A known targeted optional header is processed as well. `SoapNodeResult.headers`
+keeps all blocks and outcomes in input order. Its `application_message` contains
+only targeted headers for an ultimate receiver. An intermediary receives
+`forward_message` instead: processed headers are removed; untargeted headers are
+retained; targeted but unprocessed optional headers are removed in SOAP 1.1 and
+retained only with `relay=true` in SOAP 1.2. Body content, surviving header order,
+namespace bindings, XML context and lexical values survive forwarding. The
+forwarded envelope records its effective XML base so a different next-hop
+retrieval URI does not change relative identifier meanings. Intermediaries use
+this API directly and arrange their own forwarding transport; the class does not
+execute application body semantics.
+
+`SoapHandler` takes an optional ultimate-receiver node as its fifth constructor
+argument. It processes headers before application decoding and dispatch and
+provides the complete result as `cx.soap_processing`. Unknown targeted mandatory
+headers produce HTTP 500 `MustUnderstand` faults in both SOAP versions. SOAP 1.2
+faults include qualified `NotUnderstood` blocks with correctly scoped QName
+attributes. Application body callbacks receive only the targeted headers; the
+processing result retains every original block. WSDL and XSD validation remain
+responsible for the selected application values.
+
+`SoapClient` accepts an ultimate-receiver `soap_node` constructor option and an
+optional per-call override. Response processing precedes body decoding, including
+fault-body decoding. Unknown targeted mandatory response headers raise
+`SOAP-MUST-UNDERSTAND`. The call information's `soap-processing` field contains the
+complete typed result, while ordinary and retained decoding see only targeted
+headers. Relative response roles use the native HTTP client's effective response
+URL, including redirects. Empty one-way responses remain valid. Neither client
+nor handler accepts an intermediary node as an application endpoint.
+
+HTTP contexts and native information hashes can be legacy untyped containers.
+The adapters copy those fields into explicit `hash<auto>` containers before
+adding typed node results; this prevents legacy assignment semantics from stripping
+nested hash declarations. XML handed to the application decoder goes through the
+existing SOAP parser, preserving its comment projection and XOP substitution.
+
+Response fault detection compares the body's expanded element names with `Fault`
+in the actual envelope namespace before projecting the legacy exception payload.
+Application elements with the same local name remain ordinary schema values in
+native and retained decoding. The actual received version also selects fault
+decoding for the SOAP 1.1 VersionMismatch transition response to a SOAP 1.2 binding.
