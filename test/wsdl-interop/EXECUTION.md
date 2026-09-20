@@ -9956,3 +9956,36 @@ is `25346118e`. Audit: **16 Pass / 46 N/A / zero Fail**.
 See [evidence](soap-transport-evidence.md), [validation](P7-12-validation.json), and
 [audit](audits/P7-12-soap-transport.md). P7 GET and assertion accounting remain open,
 followed by P8–P9. No Qore edits, installation, push or CI trigger.
+
+
+## P7-13: SOAP 1.2 response GET resources
+
+Explicit client retrieval and safe handler-resource APIs reuse selected output/fault
+codecs, core request-local URLs and existing response processing. Tests cover both
+HTTP directions, GET/POST/WSDL coexistence, route conflicts and removal, immutable
+defaults, credential origins, compiled modules and interrupted GET recovery.
+
+Forty affected Qore suites pass: **468 cases / 27,612 assertions**. The new unit
+suite passes **4 cases / 156 assertions**. All sixteen independent Python gates pass,
+including **336 new HTTP exchanges** and **72 new GET interruption/cancellation
+exchanges**. The full transport matrix now covers 504 exchanges. Freshly compiled
+WSDL, SoapClient and SoapHandler pass four focused Qore suites (39 cases / 604
+assertions), the full new GET matrix and the complete transport matrix.
+
+All 16 corpus commands meet their recorded outcomes; all six semantic reports are
+unchanged from P7-11 except for the Qore runtime identifier. The known legacy
+projection-loss gate retains its expected exit 1. Documentation and all six changed
+Qore files pass documentation/AST checks without warnings or errors. Installed Qore
+is `25346118e`. Audit: **19 Pass / 43 N/A / zero Fail**. No C++ change; no Valgrind needed.
+
+See [evidence](soap-response-evidence.md), [validation](P7-13-validation.json), and
+[audit](audits/P7-13-soap-response.md). P7 assertion accounting remains open, followed
+by P8–P9. No push or CI trigger.
+
+The next P7 assertion review reproduced buffered-upload/early-response deadlock in
+core HTTPClient, independently of XML. The core-only and ordinary SOAP reproducers,
+positive raw-socket control and source-level root cause are handed off at
+`/tmp/qore-httpclient-buffered-duplex/README.md`. The buffered HTTP/1.1 path sends the
+whole request before starting response reads; the existing full-duplex branch is
+limited to chunked streaming sends. This remains an open P7 dependency, not an
+accepted result or an XML workaround.

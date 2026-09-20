@@ -87,6 +87,9 @@ module SoapHandler {
     @section soaphandler_relnotes SoapHandler Release History
 
     @subsection soaphandler_0_3_4 SoapHandler 0.3.4
+    - added addSoapResponseResource() for explicitly safe SOAP 1.2 GET resources; exact routes support
+      mount paths, queries, service removal and existing output/fault serialization
+    - empty root HTTP route registration no longer confuses a missing match with an existing root route
     - SOAP transport preflight returns plain HTTP 400 for malformed MIME metadata and 415 for unsupported
       media or charset; unsupported resource methods return 405 with the actual allowed method list
     - malformed encoded request bytes retain their protocol error without a secondary logging exception
@@ -394,6 +397,49 @@ public namespace SoapHandler {
             #printf("methods=%N\n", methods);
         }
 
+        #! registers an explicitly safe HTTP GET resource producing a SOAP 1.2 response
+        /** @param path absolute resource path relative to the handler mount, without query or fragment
+            @param operation supplies output and fault declarations; its input is not decoded or invoked
+            @param provider retrieves the resource from HTTP context and returns a native or retained output value
+            @param binding selects a SOAP 1.2 binding with an output declaration
+            @param unique_id optional service identifier for removeService()
+            @throw SOAP-SERVER-ADDMETHOD-PARAMETER-ERROR the selected binding lacks SOAP 1.2 output
+            @throw SOAP-PATH-ERROR invalid or duplicate path; overlapping HTTP templates reject during dispatch
+            @note This implements the SOAP-response MEP. The provider is responsible for safe retrieval semantics.
+            Requests must have no entity body. HTTP context includes the raw path/query and headers. Ordinary
+            SOAP invocation routes remain POST; GET ?wsdl retains its metadata meaning where a WSDL is registered.
+            Registration and removal are synchronized; the provider runs outside the registry lock.
+            @par Example
+            @code{.py}
+handler.addSoapResponseResource("/invoices/71", service.getBindingOperation("Soap12", "GetInvoice"),
+    auto sub(hash<auto> cx) { return {"body": invoice}; }, "Soap12", "invoices");
+            @endcode
+        */
+        addSoapResponseResource(string path, WSOperation operation, code<auto(hash<auto>)> provider,
+                *string binding, *string unique_id) {
+            OperationalBinding selected = operation.getBinding(binding);
+            if (!(selected instanceof SoapBinding) || !selected.isSoap12() || !selected.output) {
+                throw "SOAP-SERVER-ADDMETHOD-PARAMETER-ERROR",
+                    "SOAP response resources require a SOAP 1.2 binding with an output message";
+            }
+            if (!path.startsWith("/") || path.startsWith("//") || path.contains("?") || path.contains("#")) {
+                throw "SOAP-PATH-ERROR", "a SOAP response resource requires an absolute path without query or fragment";
+            }
+            path = ltrim(parse_url(resolve_url("http://soap.invalid/", path,
+                RESOLVE_URL_STRICT | RESOLVE_URL_ENCODE)).path, "/");
+            hash<auto> method = {"name":operation.name, "operation":operation, "function":provider,
+                "binding":binding, "path":path, "unique_id":unique_id, "exactMatch":True, "soap_response":True};
+            rwl.writeLock();
+            on_exit rwl.writeUnlock();
+            *hash<auto> previous = exists mapMethodPathToOperation.GET
+                ? mapMethodPathToOperation.GET.get(path) : NOTHING;
+            if (httpTemplateMethods.GET.hasKey(path) || (previous && previous.path == path)) {
+                throw "SOAP-PATH-ERROR", sprintf("GET resource %Y is already registered", path);
+            }
+            if (!mapMethodPathToOperation.GET) { mapMethodPathToOperation.GET = new TreeMap(); }
+            mapMethodPathToOperation.GET.put(path, method);
+        }
+
         #! turns on or off debugging; when debugging is enabled more verbose error messages are reported
         setDebug(bool dbg = True) {
             debug = dbg;
@@ -647,9 +693,10 @@ public namespace SoapHandler {
                 rwl.writeLock();
                 on_exit rwl.writeUnlock();
                 foreach hash<auto> route in (routes.iterator()) {
+                    *hash<auto> previous = exists mapMethodPathToOperation{hb.httpMethod}
+                        ? mapMethodPathToOperation{hb.httpMethod}.get(route.path) : NOTHING;
                     if (httpTemplateMethods{hb.httpMethod}.hasKey(route.path)
-                            || (exists mapMethodPathToOperation{hb.httpMethod}
-                                && mapMethodPathToOperation{hb.httpMethod}.get(route.path).path == route.path)) {
+                            || (previous && previous.path == route.path)) {
                         throw "SOAP-PATH-ERROR", sprintf("HTTP URI template %Y is already registered", route.path);
                     }
                 }
@@ -967,7 +1014,10 @@ private nothing msglog(hash<auto> cx, hash<auto> msg) {
             cx.operation = method.operation;
 
             try {
-                if (method.parseUrlOnly) {
+                if (method.soap_response) {
+                    @assert(reqsoap12);
+                    args = NOTHING;
+                } else if (method.parseUrlOnly) {
                     args = method.http_binding.deserializeRequestPath(method.operation, method.http_request_path);
                 } else if (method.xml_values) {
                     if (!exists xml_body) {
@@ -1214,7 +1264,7 @@ private nothing msglog(hash<auto> cx, hash<auto> msg) {
                             method.http_request_path = raw_path;
                         }
                     }
-                    if (!method) {
+                    if (!method || method.soap_response) {
                         string full_path = ltrim(cx.raw_path ?? cx.url.path, "/");
                         string relative_path = getHttpBindingPath(cx);
                         foreach hash<auto> candidate in (httpTemplateMethods{hdr.method}.iterator()) {
@@ -1228,6 +1278,23 @@ private nothing msglog(hash<auto> cx, hash<auto> msg) {
                                 method.http_request_path = matched;
                             }
                         }
+                    }
+                }
+                if (method.soap_response && !(path =~ /\?wsdl/i)) {
+                    if (body) {
+                        return {"code":400, "hdr":{"Content-Type":"text/plain;charset=UTF-8"},
+                            "body":"SOAP response retrieval requires an empty HTTP request body"};
+                    }
+                    cx.soap_response = True;
+                    try {
+                        msglog(cx, {"reason":"request", "method":"GET", "path":path, "header":hdr});
+                        return {"code":200} + callOperation(cx, NOTHING, method, True);
+                    } catch (hash<ExceptionInfo> ex) {
+                        if (ex.err == "PROGRAM-INTERRUPTED" || ex.err == "THREAD-CANCELLED") { rethrow; }
+                        string str = debug ? get_exception_string(ex)
+                            : sprintf("exception in %s: %s: %s", get_ex_pos(ex), ex.err, ex.desc);
+                        return makeSoapFaultResponse(cx, str, True, ex.err, ex.desc, NOTHING, NOTHING,
+                            SoapFaultReceiver);
                     }
                 }
                 if (method && method.parseUrlOnly) {

@@ -25,7 +25,7 @@ def response_headers(version, framing, status='200 OK'):
 
 
 @contextlib.contextmanager
-def interrupted_peer(replies, validate):
+def interrupted_peer(replies, validate, *, method="POST"):
     """Accept complete requests, deliver scripted bytes and join through a stop socket.
 
     The cancellation peer waits for client EOF after delivering response headers;
@@ -47,11 +47,11 @@ def interrupted_peer(replies, validate):
                     if len(data) > 1024 * 1024:
                         raise ValueError('unexpectedly large request')
                 headers, body = data.split(b'\r\n\r\n', 1)
-                if not headers.startswith(b'POST '):
+                if not headers.startswith(method.encode() + b' '):
                     raise ValueError('unexpected request method')
-                length = int(next(line.split(b':', 1)[1] for line in headers.split(b'\r\n')
-                                  if line.lower().startswith(b'content-length:')))
-                if not 0 < length < 1024 * 1024:
+                length = int(next((line.split(b':', 1)[1] for line in headers.split(b'\r\n')
+                                  if line.lower().startswith(b'content-length:')), b'0'))
+                if not 0 <= length < 1024 * 1024 or (method == 'POST' and not length):
                     raise ValueError('unexpected request length')
                 while len(body) < length:
                     chunk = self.request.recv(length - len(body))
@@ -106,7 +106,7 @@ class SoapTransportTests(unittest.TestCase):
         test_soap_oneway.OneWayTests.setUpClass()
         cls.schemas = test_soap_oneway.OneWayTests.schemas
 
-    def client_case(self, version, one_way, cancel):
+    def client_case(self, version, one_way, cancel, soap_response=False):
         xml = envelope(version)
         good = (response_headers(version, 'Content-Length: 0', '202 Accepted') if one_way else
                 response_headers(version, f'Content-Length: {len(xml)}') + xml)
@@ -135,14 +135,17 @@ class SoapTransportTests(unittest.TestCase):
                                  'value': None if one_way else 'response', 'headers_processed': 0 if one_way else 1})
 
         def validate(body):
+            if soap_response:
+                self.assertEqual(b'', body)
+                return
             document = etree.fromstring(body)
             self.schemas[version].assertValid(document)
             self.assertEqual('invoice', document.find('.//{urn:soap-envelope-test}value').text)
 
-        with interrupted_peer(replies, validate) as (url, received):
+        with interrupted_peer(replies, validate, method='GET' if soap_response else 'POST') as (url, received):
             result = subprocess.run(['qore', '-b', '--enable-debug', str(PEER / 'client.qr')],
                 input=json.dumps({'version': version, 'url': url, 'one_way': one_way,
-                                  'count': 2 * len(bad), 'cancel': cancel}),
+                                  'count': 2 * len(bad), 'cancel': cancel, 'soap_response':soap_response}),
                 env=ENV, text=True, capture_output=True, timeout=120)
             self.assertEqual((0, ''), (result.returncode, result.stderr), result.stdout + result.stderr)
             actual = json.loads(result.stdout)
@@ -161,6 +164,9 @@ class SoapTransportTests(unittest.TestCase):
     def test_client_cancel_and_recovery(self):
         self.assertEqual(96, sum(self.client_case(version, one_way, True)
                                 for version in ('11', '12') for one_way in (False, True)))
+
+    def test_get_response_interruption_and_recovery(self):
+        self.assertEqual(72, sum(self.client_case('12', False, cancel, True) for cancel in (False, True)))
 
     def test_handler_incomplete_requests_and_recovery(self):
         count = 0

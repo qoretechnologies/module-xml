@@ -1,0 +1,141 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires HttpServer
+%requires ../qlib/WSDL.qm
+%requires ../qlib/SoapClient.qm
+%requires ../qlib/SoapHandler.qm
+%exec-class SoapResponseTest
+
+class SoapResponseTest inherits QUnit::Test {
+    constructor() : Test("SOAP 1.2 safe response resources", "1.0") {
+        addTestCase("Client rejects incompatible bindings and request options before I/O", \clientOptions());
+        addTestCase("Resource paths, bindings, duplicates and removal are validated", \registration());
+        addTestCase("Declared and serialization faults use the selected SOAP 1.2 output codec", \faults());
+        addTestCase("SOAP resources and WSDL HTTP routes reject collisions in either registration order", \routes());
+        set_return_value(main());
+    }
+    private static string source() {
+        return ReadOnlyFile::readTextFile(get_script_dir()+"/wsdl-interop/soap-envelope-peer/contract.wsdl");
+    }
+    private static WebService graph(string text, string state) {
+        WebService ws(text);
+        if (state == "saved") { return Serializable::deserialize(ws.serialize()); }
+        if (state == "data") { return Serializable::deserialize(ws.serializeToData()); }
+        return ws;
+    }
+    private static hash<auto> requestContext(string path) { return {"url":{"path":path},"raw_path":path}; }
+    private clientOptions() {
+        foreach string state in ("source","saved","data") {
+            WebService ws = graph(source(),state);
+            SoapClient client({"wsdl":ws,"port":"Port12","url":"http://127.0.0.1:1/","timeout":1000});
+            foreach hash<auto> opts in ({"args":{}},{"soap_header":{}},{"request_mime_format":{}},
+                    {"response_mime_format":{}},{"soapaction":"urn:other"},{"xml_opts":0},{"http_header":5},
+                    {"xml_values":1},{"preserve_types":1},{"xml_values":True,"preserve_types":True}) {
+                assertThrows("SOAP-CLIENT-ERROR",\client.getSoapResponse(),("echo","/invoices/71",opts));
+            }
+            foreach string name in ("Content-Length","content-type","CONTENT-ENCODING","Content-Language",
+                    "Content-Range","SOAPAction","transfer-encoding","Trailer") {
+                assertThrows("SOAP-CLIENT-ERROR",\client.getSoapResponse(),("echo","/",{"http_header":{name:"value"}}));
+            }
+            SoapClient old({"wsdl":ws,"port":"Port11","url":"http://127.0.0.1:1/"});
+            assertThrows("SOAP-CLIENT-ERROR",\old.getSoapResponse(),("echo","/"));
+            string oneway = replace(source(), '<w:output message="t:Value"/>', '');
+            oneway = replace(oneway, '<w:output><s:body use="literal"/></w:output>', '');
+            oneway = replace(oneway, '<w:output><s12:body use="literal"/></w:output>', '');
+            SoapClient empty({"wsdl":graph(oneway,state),"port":"Port12","url":"http://127.0.0.1:1/"});
+            assertThrows("SOAP-CLIENT-ERROR",\empty.getSoapResponse(),("echo","/"));
+            assertThrows("WSDL-OPERATION-ERROR",\client.getSoapResponse(),("missing","/"));
+        }
+    }
+    private registration() {
+        foreach string state in ("source","saved","data") {
+            WebService ws = graph(source(),state);
+            WSOperation op = ws.getBindingOperation("B12","echo");
+            SoapHandler handler(new PermissiveAuthenticator());
+            code<auto(hash<auto>)> provider = auto sub(hash<auto> cx) { return {"body":"response"}; };
+            assertThrows("SOAP-SERVER-ADDMETHOD-PARAMETER-ERROR",\handler.addSoapResponseResource(),("/",op,provider,"B11"));
+            foreach string path in ("", "invoice", "//host/path", "/invoice?rev=2", "/invoice#part") {
+                assertThrows("SOAP-PATH-ERROR",\handler.addSoapResponseResource(),(path,op,provider,"B12"));
+            }
+            handler.addSoapResponseResource("/invoice",op,provider,"B12","resource");
+            assertThrows("SOAP-PATH-ERROR",\handler.addSoapResponseResource(),("/x/../invoice",op,provider,"B12"));
+            hash<auto> response = handler.handleRequest(requestContext("/invoice"),{"method":"POST"},NOTHING);
+            assertEq(405,response.code); assertEq("GET",response.hdr.Allow);
+            response = handler.handleRequest(requestContext("/invoice"),{"method":"GET"},NOTHING);
+            assertEq(200,response.code); assertTrue(response.body.contains(">response</"));
+            handler.removeService("resource");
+            handler.addSoapResponseResource("/invoice",op,provider,"B12","again");
+            assertEq(200,handler.handleRequest(requestContext("/invoice?rev=2"),{"method":"GET"},NOTHING).code);
+            assertEq(400,handler.handleRequest(requestContext("/invoice"),{"method":"GET"},"unexpected").code);
+        }
+    }
+    private faults() {
+        string text = replace(ReadOnlyFile::readTextFile(get_script_dir()+"/wsdl-interop/regressions/fault-bindings/literal.wsdl"),SOAP_11_NS,SOAP_12_NS);
+        foreach string state in ("source","saved","data") {
+            WebService ws = graph(text,state);
+            SoapHandler handler(new PermissiveAuthenticator());
+            handler.addSoapResponseResource("/declared",ws.getBindingOperation("B","exchange"),
+                auto sub(hash<auto> cx) { throw "Rejected","invoice rejected",{"problem":71}; },"B");
+            hash<auto> response = handler.handleRequest(requestContext("/declared"),{"method":"GET"},NOTHING);
+            assertEq(400,response.code); assertTrue(response.body.contains(">71</"));
+            assertTrue(response.hdr."Content-Type".startsWith("application/soap+xml"));
+            handler.addSoapResponseResource("/invalid",ws.getBindingOperation("B","exchange"),
+                auto sub(hash<auto> cx) { return {"left":"not-an-integer","right":2}; },"B");
+            response = handler.handleRequest(requestContext("/invalid"),{"method":"GET"},NOTHING);
+            assertEq(500,response.code); assertTrue(response.body.contains(":Receiver</"));
+        }
+    }
+    private routes() {
+        string text = ReadOnlyFile::readTextFile(get_script_dir()+"/wsdl-interop/http-request-url-peer/contract.wsdl");
+        foreach string state in ("source","saved","data") {
+            WebService soap = graph(source(),state);
+            code<auto(hash<auto>)> provider = auto sub(hash<auto> cx) { return {"body":"response"}; };
+            code<auto(hash<auto>, auto)> http_provider = auto sub(hash<auto> cx, auto value) { return {"result":"http"}; };
+            WebService http = graph(text,state);
+            SoapClient wrong({"wsdl":http,"url":"http://127.0.0.1:1/"});
+            assertThrows("SOAP-CLIENT-ERROR",\wrong.getSoapResponse(),("send","/send"));
+            foreach bool http_first in (False,True) {
+                SoapHandler handler(new PermissiveAuthenticator());
+                if (http_first) {
+                    handler.addMethod(http,http.getOperation("send"),http_provider,NOTHING,NOTHING,NOTHING,NOTHING,
+                        NOTHING,NOTHING,"B");
+                    assertThrows("SOAP-PATH-ERROR",\handler.addSoapResponseResource(),
+                        ("/send",soap.getOperation("echo"),provider,"B12"));
+                } else {
+                    handler.addSoapResponseResource("/send",soap.getOperation("echo"),provider,"B12");
+                    assertThrows("SOAP-PATH-ERROR",\handler.addMethod(),
+                        (http,http.getOperation("send"),http_provider,NOTHING,NOTHING,NOTHING,NOTHING,NOTHING,NOTHING,"B"));
+                }
+                # Root registration after a different path must not confuse a missing match with the empty root key.
+                handler.addMethod(http,http.getOperation("send"),http_provider,NOTHING,NOTHING,NOTHING,"/",
+                    NOTHING,NOTHING,"B");
+                assertEq(200,handler.handleRequest(requestContext("/?id=71"),{"method":"GET"},NOTHING).code);
+                assertThrows("SOAP-PATH-ERROR",\handler.addSoapResponseResource(),
+                    ("/",soap.getOperation("echo"),provider,"B12"));
+            }
+            WebService templated = graph(replace(replace(text,'location="/send"','location="/invoice/(id)"'),
+                '<h:urlEncoded/>','<h:urlReplacement/>'),state);
+            foreach bool http_first in (False,True) {
+                SoapHandler handler(new PermissiveAuthenticator());
+                if (http_first) {
+                    handler.addMethod(templated,templated.getOperation("send"),http_provider,NOTHING,NOTHING,NOTHING,
+                        NOTHING,NOTHING,NOTHING,"B");
+                }
+                handler.addSoapResponseResource("/invoice/71",soap.getOperation("echo"),provider,"B12","soap");
+                if (!http_first) {
+                    handler.addMethod(templated,templated.getOperation("send"),http_provider,NOTHING,NOTHING,NOTHING,
+                        NOTHING,NOTHING,NOTHING,"B");
+                }
+                assertThrows("SOAP-PATH-ERROR",\handler.handleRequest(),
+                    (requestContext("/invoice/71"),{"method":"GET"},NOTHING));
+                handler.removeService("soap");
+                hash<auto> response = handler.handleRequest(requestContext("/invoice/71"),{"method":"GET"},NOTHING);
+                assertEq(200,response.code); assertTrue(response.body.contains(">http</"));
+            }
+        }
+    }
+
+}

@@ -101,6 +101,8 @@ auto result = sc.call("SubmitDocument", msg);
     @section soapclientrelnotes SoapClient Release Notes
 
     @subsection soapclient_1_0_4 SoapClient v1.0.4
+    - added getSoapResponse() for explicit SOAP 1.2 GET retrieval, with selected output/fault declarations,
+      response-header processing, native/retained values and request-local URI/credential handling
     - nonempty SOAP responses require supported XML media and charset metadata before header callbacks;
       empty one-way acknowledgments and original non-SOAP HTTP errors retain their contracts
     - saved clients retain validated response-header node configuration; older saved clients without
@@ -486,6 +488,46 @@ auto result = client.callOperation("submit", {"id": "invoice-71"});
         return makeCallIntern(\info, operation, args, opts);
     }
 
+    #! retrieves a SOAP 1.2 response with an envelope-free HTTP GET request
+    /** @param operation selects the output and fault declarations in this client's binding; its input is unused
+        @param resource_url resource URI reference, resolved against the configured endpoint without changing it
+        @param opts optional \c http_header, \c soap_node, \c xml_values or \c preserve_types options, with the same
+        response semantics as callOperation(). Other options and explicit request entity/SOAPAction headers reject.
+        @param info optional call information, including HTTP metadata and \c soap-processing
+        @return the response decoded using the selected output declaration
+        @throw SOAP-CLIENT-ERROR unsupported options, request entity headers, or a binding without SOAP 1.2 output
+        @throw WSDL-OPERATION-ERROR unknown operation
+        @throw SOAP-SERVER-FAULT-RESPONSE a protocol fault was received
+        @note Uses the SOAP-response MEP from SOAP 1.2 Part 2 section 6.3. No operation invocation or SOAP request
+        envelope is sent. The resource must support safe retrieval. Qore's request-local URL, redirect and
+        origin-scoped credential rules apply. Transport, XML and response-processing errors propagate.
+        @par Example
+        @code{.py}
+auto invoice = client.getSoapResponse("GetInvoice", "/invoices/71", {"preserve_types": True});
+        @endcode
+    */
+    auto getSoapResponse(string operation, string resource_url, *hash<auto> opts, *reference info) {
+        foreach string name in (keys opts) {
+            if (!inlist(name, ("http_header", "soap_node", "xml_values", "preserve_types"))) {
+                throw "SOAP-CLIENT-ERROR", sprintf("option %Y is not available for SOAP response retrieval", name);
+            }
+        }
+        if (exists opts.http_header && opts.http_header.typeCode() != NT_HASH) {
+            throw "SOAP-CLIENT-ERROR", "http_header must be a hash";
+        }
+        foreach string name in (keys opts.http_header) {
+            if (exists opts.http_header{name} && soapResponseEntityHeader(name)) {
+                throw "SOAP-CLIENT-ERROR", sprintf("SOAP response retrieval cannot send request header %Y", name);
+            }
+        }
+        return makeCallIntern(\info, operation, NOTHING, opts, resource_url);
+    }
+
+    private static bool soapResponseEntityHeader(string name) {
+        name = name.lwr();
+        return name.startsWith("content-") || inlist(name, ("soapaction", "transfer-encoding", "trailer"));
+    }
+
     #! makes a server call with the given operation and arguments and returns the deserialized result
     /** @param operation the operation name for the SOAP call
         @param args the arguments to the SOAP operation
@@ -579,7 +621,9 @@ auto result = client.callOperation("submit", {"id": "invoice-71"});
     }
 
     #! makes the call to the SOAP server and ensures that SOAP fault responses returned with a 500-series status code are processed as a SOAP fault so that error information is returned in the resulting exception
-    private:internal auto makeCallIntern(*reference info, string operation, auto args, *hash<auto> opts) {
+    private:internal auto makeCallIntern(*reference info, string operation, auto args, *hash<auto> opts,
+            *string soap_response_url) {
+        bool soap_response = exists soap_response_url;
         SoapProcessingNode response_node = exists opts.soap_node ? getProcessingNode(opts.soap_node) : soap_node;
         @assert(wsdl, "WSDL object must be initialized");
         if (exists opts.xml_values && opts.xml_values.typeCode() != NT_BOOLEAN) {
@@ -604,9 +648,19 @@ auto result = client.callOperation("submit", {"id": "invoice-71"});
             throw "SOAP-CLIENT-ERROR", "MIME format selectors require native response values";
         }
         WSOperation op;
-        hash<auto> msg = exists opts.request_mime_format
-            ? getMsg(operation, args, soap_headers, \op, http_headers, xml_opts, soapaction, opts.request_mime_format)
-            : getMsg(operation, args, soap_headers, \op, http_headers, xml_opts, soapaction);
+        hash<auto> msg;
+        if (soap_response) {
+            op = wsdl.getBindingOperation(binding, operation);
+            OperationalBinding selected = op.getBinding(binding);
+            if (!(selected instanceof SoapBinding) || !selected.isSoap12() || !selected.output) {
+                throw "SOAP-CLIENT-ERROR", "SOAP response retrieval requires a SOAP 1.2 binding with an output message";
+            }
+            msg = {"method":"GET", "hdr":{"Accept":"application/soap+xml"} + (http_headers ?? {})};
+        } else {
+            msg = exists opts.request_mime_format
+                ? getMsg(operation, args, soap_headers, \op, http_headers, xml_opts, soapaction, opts.request_mime_format)
+                : getMsg(operation, args, soap_headers, \op, http_headers, xml_opts, soapaction);
+        }
         if (exists opts.response_mime_format) {
             OperationalBinding response_binding = op.getBinding(binding);
             if (!(response_binding instanceof HttpBinding) || !response_binding.output) {
@@ -618,10 +672,11 @@ auto result = client.callOperation("submit", {"id": "invoice-71"});
         bool http_binding = selected_binding instanceof HttpBinding;
         *string request_url;
         hash<auto> defaults = headers;
-        if (http_binding) {
+        if (http_binding || soap_response) {
             # Replacement and form query generation have already completed. Qore owns URI resolution.
             string base_url = getURL(UC_TARGET | UC_PATH);
-            request_url = resolve_url(base_url, msg.path ?? "", RESOLVE_URL_ENCODE | RESOLVE_URL_NO_FRAGMENT);
+            request_url = resolve_url(base_url, soap_response ? soap_response_url : (msg.path ?? ""),
+                RESOLVE_URL_ENCODE | RESOLVE_URL_NO_FRAGMENT);
             if (!sameHttpOrigin(base_url, request_url)) {
                 # These are client defaults, whereas msg.hdr contains explicit per-call headers.
                 foreach string name in (keys defaults) {
@@ -633,6 +688,12 @@ auto result = client.callOperation("submit", {"id": "invoice-71"});
             msg.path = parse_url(request_url).path;
         }
         hash<auto> hdr = defaults + msg.hdr;
+        if (soap_response) {
+            # A NOTHING-valued per-request header suppresses a native default without changing client state.
+            foreach string name in (keys (getDefaultHeaders() + hdr)) {
+                if (soapResponseEntityHeader(name)) { hdr{name} = NOTHING; }
+            }
+        }
 
         date now = now_us();
         on_exit {
@@ -643,7 +704,7 @@ auto result = client.callOperation("submit", {"id": "invoice-71"});
         # we have to write the request key after the HTTPClient::post() call but before the log message above
         # (on_exit statements are executed in reverse order when the block is exited)
         on_exit info += ("request-body": msg.body, "request-soap-headers": soap_headers);
-        if (!http_binding) {
+        if (!http_binding && !soap_response) {
             if (msg.path) {
                 if (msg.path !~ /^[\/\?]/ ) {
                     msg.path = "/" + msg.path;
@@ -679,7 +740,8 @@ auto result = client.callOperation("submit", {"id": "invoice-71"});
         *hash<auto> pdata;
         try {
             # only try to read a message body in the response if the operation has an output message
-            rh = http_binding ? sendUrl(body, msg.method, request_url, hdr, exists op.output, \info)
+            rh = soap_response ? sendUrl(NOTHING, "GET", request_url, hdr, True, \info)
+                : http_binding ? sendUrl(body, msg.method, request_url, hdr, exists op.output, \info)
                 : send(body, msg.method, msg.path, hdr, exists op.output, \info);
             info."response-body" = rh.body;
             http_status_code = rh.status_code;

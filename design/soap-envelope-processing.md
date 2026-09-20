@@ -357,3 +357,31 @@ all targeted mandatory headers, raises a single MustUnderstand fault if any capa
 is missing, then completes Body/fault validation before calling processors. The
 public envelope validator retains complete validation by default. This ordering is
 shared by direct nodes, handler requests and client responses, including HTTP faults.
+
+SOAP 1.2 SOAP-response retrieval uses an explicit envelope-free GET API.
+`SoapClient::getSoapResponse(operation, resource_url, opts, info)` uses the selected
+SOAP 1.2 operation's output and fault declarations; it does not serialize the input
+message. The URI reference resolves through Qore's RFC 3986 API against the configured
+endpoint and uses `HTTPClient::sendUrl()` without mutating client defaults. Native and
+legacy entity/SOAPAction defaults are suppressed for this request. Explicit entity
+headers and request-only options reject before I/O. Same-origin credential rules,
+redirect handling, cancellation and response decoding are shared with existing calls.
+The default Accept is application/soap+xml; response media, mandatory headers, faults,
+native values, retained XML and type preservation use the ordinary SOAP response path.
+
+`SoapHandler::addSoapResponseResource(path, operation, provider, binding, unique_id)`
+registers a safe GET resource using an existing SOAP 1.2 output declaration. Providers
+receive HTTP context (including the raw path/query and `soap_response=True`) without
+input decoding. They are responsible for safe retrieval semantics. Output serialization
+and declared/generic fault handling use the selected operation. Nonempty GET bodies
+reject with HTTP 400 before providers run. Ordinary SOAP operations remain POST, and
+GET ?wsdl retains metadata retrieval where a WebService is registered.
+
+Resource paths are absolute relative to the handler mount, encoded/resolved with the
+core URI API, and matched exactly apart from the query. Registration shares the GET
+route index with WSDL HTTP bindings. Duplicate static routes reject before publication;
+an overlapping HTTP template rejects at dispatch instead of silently choosing either
+callback. Allow discovery includes GET and ordinary SOAP/HTTP methods. Registry updates
+and removal use the existing write lock; providers execute outside the read lock and
+may remove their own service. A missing route is checked as a missing object before
+comparing path strings, including the empty string used for a registered root path.
