@@ -273,3 +273,40 @@ in either SOAP version. SOAP 1.2 requires this status when there is no response 
 WS-I Basic Profile 1.2 lists it as a preferred SOAP 1.1 one-way acknowledgment.
 Processing failures still generate the applicable SOAP fault and HTTP status. The
 handler does not synthesize an application response or change HTTP WSDL bindings.
+
+Request actions have version-specific transport representations. SOAP 1.1 uses a
+quoted SOAPAction HTTP header, including the quoted empty default. SOAP 1.2 uses
+the quoted action parameter of the XML root's application/soap+xml media type and
+omits SOAPAction. Responses do not inherit a request action. The per-call override
+remains available; an explicit empty override suppresses both representations.
+
+`WSDLLib::getSOAPAction()` decodes normalized root metadata. For SOAP 1.1 it removes
+HTTP quoting and surrounding optional whitespace, while accepting legacy unquoted
+URI references. For SOAP 1.2 it ignores SOAPAction and reads the media-type action;
+XOP places that media type inside its type parameter. Qore's RFC 3986 ASCII mode
+validates syntax: SOAP 1.1 permits empty/relative references, while a present SOAP
+1.2 action must be nonempty and absolute. Validation does not resolve, percent-decode,
+case-fold or otherwise change the action's lexical identity. Conflicting duplicate
+media parameters reject; identical duplicates retain the same value.
+
+SoapHandler dispatches actions after MIME root normalization and envelope version
+validation. The callback and header processors receive the decoded `cx.soap_action`,
+or NOTHING when absent. Bound actions can disambiguate empty Bodies. Otherwise the
+Body or registered route must identify a unique operation. A nonempty action that
+disagrees with a nonempty selected binding action produces a Client/Sender fault
+before the body callback. SOAP 1.2 does not depend on the legacy SOAPAction header;
+its absence and presence alone do not prevent Body dispatch. HTTP WSDL bindings
+continue to use their registered method/path and MIME selection.
+
+SoapProcessingNode implements Serializable for its immutable configuration. Restore
+uses the same role/name checks as construction and reconstructs the transient role
+lookup; missing configuration rejects. Default and role-only nodes can be saved,
+including through a URL-loaded WebService whose transport options retain a SoapClient.
+Qore call references and closures are not serializable: nodes containing processors
+raise SERIALIZATION-ERROR. Serialization never silently removes callback capabilities,
+and a failed attempt leaves the original node usable.
+
+SoapClient restoration validates the saved node as an ultimate receiver before
+assigning members. A saved client without a processing-node field receives the same
+default node as a new client. Invalid node objects and intermediary configurations
+reject during restoration, before any request can use the client.

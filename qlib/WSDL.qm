@@ -207,6 +207,11 @@ module WSDL {
     @section wsdlrelnotes WSDL Module Release Notes
 
     @subsection wsdl_0_5_8 WSDL v0.5.8
+    - SOAP 1.1 request actions are quoted; SOAP 1.2 requests use only the media-type action parameter,
+      validated as an absolute URI; response serialization does not copy the request action
+    - WSDLLib::getSOAPAction() decodes version-specific request metadata while preserving URI identity
+    - default and role-only SoapProcessingNode configurations support Serializable, restoring URL-loaded
+      WebService graphs that retain a SoapClient; configured callbacks are never silently discarded
     - one-way response decoding reports protocol faults before checking for an application output message;
       empty and whitespace-only SOAP Bodies are equivalent, and unexpected application output still rejects
     - WSDLLib::getSOAPFaultInfo() exposes scoped QName codes/subcodes, ordered multilingual reasons,
@@ -1865,6 +1870,45 @@ public class WSDLLib {
         return media.parameter(name.lwr(), "SOAP-MESSAGE-ERROR");
     }
 
+    #! returns the decoded action of a normalized SOAP request
+    /** @param message transport metadata returned by parseMultiPartSOAPMessage()
+        @param soap12 the validated envelope version
+        @param soapaction the SOAPAction HTTP header; ignored for SOAP 1.2
+        @return the original URI spelling without HTTP quotes, or NOTHING when absent
+        @throw SOAP-MESSAGE-ERROR malformed quoting, conflicting media parameters or an invalid action URI
+        @note SOAP 1.1 accepts an empty value and relative URI references, including legacy unquoted
+        values. SOAP 1.2 uses only the root media type's action parameter, which must be a nonempty
+        absolute URI. URI validation uses Qore's RFC 3986 implementation without resolving or normalizing
+        the returned action. For XOP, the action belongs to the nested type parameter.
+        @par Example
+        A SOAP 1.1 invoice request with SOAPAction: "urn:invoice:create" returns urn:invoice:create.
+        @since %WSDL 0.5.8
+    */
+    static *string getSOAPAction(hash<auto> message, bool soap12, *string soapaction) {
+        *string action;
+        if (soap12) {
+            *WsdlMediaType media = WsdlMediaType::read(message."content-type");
+            if (!media) {
+                throw "SOAP-MESSAGE-ERROR", "invalid SOAP action media type";
+            }
+            if (media && media.major == "application" && media.minor == "xop+xml") {
+                media = WsdlMediaType::read(media.parameter("type", "SOAP-MESSAGE-ERROR"));
+                if (!media) {
+                    throw "SOAP-MESSAGE-ERROR", "invalid XOP action media type";
+                }
+            }
+            if (media && media.major == "application" && media.minor == "soap+xml") {
+                action = media.parameter("action", "SOAP-MESSAGE-ERROR");
+            }
+        } else if (exists soapaction) {
+            action = WsdlMediaType::unquoteHeader(soapaction);
+        }
+        if (exists action) {
+            SoapActionHelper::validate(action, soap12, "SOAP-MESSAGE-ERROR");
+        }
+        return action;
+    }
+
     #! decodes the XML root entity of a normalized transport message
     /** @param message a message returned by parseMultiPartSOAPMessage()
         @return XML text decoded to UTF-8 using its BOM, MIME charset and XML declaration
@@ -2403,11 +2447,43 @@ class WsdlMediaType {
         return result;
     }
 
+    # Decode one HTTP quoted string, preserving legacy unquoted SOAP 1.1 URI references.
+    static string unquoteHeader(string value) {
+        WsdlMediaType parser(value);
+        parser.whitespace();
+        if (parser.pos < parser.bytes.size() && parser.bytes[parser.pos] == 34) {
+            *string result = parser.quoted();
+            parser.whitespace();
+            if (!exists result || parser.pos != parser.bytes.size()) {
+                throw "SOAP-MESSAGE-ERROR", "invalid SOAPAction quoted string";
+            }
+            return result;
+        }
+        return trim(value, " \t");
+    }
+
     static string quote(string value) {
         if (value =~ /[\x{0}-\x{8}\x{A}-\x{1F}\x{7F}]/) {
             throw SOAP_SERIALIZATION_ERROR, "a media-type parameter cannot contain control characters";
         }
         return "\"" + replace(replace(value, "\\", "\\\\"), "\"", "\\\"") + "\"";
+    }
+}
+
+# Action values retain their lexical identity; only the core URI validator interprets their grammar.
+class SoapActionHelper {
+    static validate(string value, bool soap12, string error) {
+        try {
+            if (soap12) {
+                # An absolute base is required; using the action as base validates without a private URI parser.
+                string checked = resolve_url(value, "", RESOLVE_URL_ASCII);
+            } else {
+                string checked = resolve_url("", value, RESOLVE_URL_ASCII | RESOLVE_URL_RELATIVE_BASE);
+            }
+        } catch (hash<ExceptionInfo> ex) {
+            if (ex.err != "RESOLVE-URL-ERROR") { rethrow; }
+            throw error, sprintf("invalid SOAP %s action URI %Y: %s", soap12 ? "1.2" : "1.1", value, ex.desc);
+        }
     }
 }
 
@@ -3433,6 +3509,9 @@ public hashdecl SoapNodeResult {
     call processMessage() before processing the body. Callbacks must implement the declared header semantics;
     declaring an XML name or a WSDL part is not evidence that the header is understood. Node configuration
     is immutable after construction; shared callbacks are responsible for their own thread safety.
+    Serializable preserves the node configuration and revalidates it on restoration. Qore call references
+    and closures cannot be serialized, so a node containing processors raises SERIALIZATION-ERROR;
+    no processor capability is discarded. Default nodes and nodes with only role configuration can be saved.
 
     @par Example
     @code{.py}
@@ -3447,11 +3526,11 @@ public hashdecl SoapNodeResult {
     @endcode
     @since %WSDL 0.5.8
 */
-public final class SoapProcessingNode {
+public final class SoapProcessingNode inherits Serializable {
     private {
         # Immutable configuration; all message state is local to processMessage().
         hash<SoapNodeOptions> options;
-        hash<string, bool> roles;
+        transient hash<string, bool> roles;
     }
     private {
         const Next11 = "http://schemas.xmlsoap.org/soap/actor/next";
@@ -3466,6 +3545,17 @@ public final class SoapProcessingNode {
         @throw SOAP-NODE-ERROR an invalid role, forbidden role or malformed expanded header name
     */
     constructor(hash<SoapNodeOptions> options = <SoapNodeOptions>{}) {
+        initialize(options);
+    }
+
+    private:internal deserializeMembers(hash<auto> members) {
+        if (members.options.typeCode() != NT_HASH) {
+            throw "DESERIALIZATION-ERROR", "a saved SOAP processing node requires its configuration";
+        }
+        initialize(new hash<SoapNodeOptions>(members.options));
+    }
+
+    private initialize(hash<SoapNodeOptions> options) {
         hash<string, bool> checked();
         foreach string role in (options.roles) {
             string uri = roleUri(role, NOTHING, "SOAP-NODE-ERROR");
@@ -34101,10 +34191,12 @@ public class SoapBinding inherits WSDL::OperationalBinding {
         if (replace(rv.body.encoding().upr(), "-", "") == "UTF16") {
             rv.body = convert_encoding("\uFEFF", "UTF-16") + rv.body;
         }
-        if (req_soapaction) {
-            rv.hdr.SOAPAction = req_soapaction;
+        if (request && req_soapaction) {
+            SoapActionHelper::validate(req_soapaction, soap12, SOAP_SERIALIZATION_ERROR);
             if (soap12) {
                 ct += ";action=" + WsdlMediaType::quote(req_soapaction);
+            } else {
+                rv.hdr.SOAPAction = WsdlMediaType::quote(req_soapaction);
             }
         } else if (request && !soap12 && default_action) {
             rv.hdr.SOAPAction = "\"\"";

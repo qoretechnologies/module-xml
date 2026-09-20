@@ -1,0 +1,242 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires xml
+%requires ../qlib/WSDL.qm
+%requires ../qlib/SoapClient.qm
+%requires ../qlib/SoapHandler.qm
+%requires HttpServer
+%exec-class SoapActionTest
+
+class SoapActionTest inherits QUnit::Test {
+    constructor() : Test("SOAP action metadata and dispatch", "1.0") {
+        addTestCase("Version-specific actions retain URI identity and reject malformed syntax", \metadata());
+        addTestCase("Requests quote the version-specific action and responses omit request actions", \serialization());
+        addTestCase("HTTP action dispatch uses normalized root metadata and rejects mismatches", \http());
+        addTestCase("Saved SOAP node configuration preserves roles and rejects unsavable capabilities", \savedNodes());
+        set_return_value(main());
+    }
+    private static string source(bool soap12) {
+        string text = ReadOnlyFile::readTextFile(get_script_dir() + "/wsdl-interop/soap-action-peer/contract.wsdl");
+        return soap12 ? replace(text,SOAP_11_NS,SOAP_12_NS) : text;
+    }
+    private static list<WebService> graphs(string text) {
+        WebService ws(text);
+        return (ws,Serializable::deserialize(ws.serialize()),Serializable::deserialize(ws.serializeToData()));
+    }
+    private static hash<auto> media(bool soap12, *string action) {
+        string ct = soap12 ? "application/soap+xml" : "text/xml";
+        if (soap12 && exists action) { ct += ';action="' + replace(replace(action,"\\","\\\\"),'"','\\"') + '"'; }
+        return {"content-type":ct};
+    }
+    private metadata() {
+        foreach bool soap12 in (False,True) {
+            assertEq(NOTHING,WSDLLib::getSOAPAction(media(soap12),soap12));
+            foreach string action in ("urn:first", "HTTP://Example.org/a%2fb?x=1#x", "urn:a;b=c", "http://[::1]/",
+                    "mailto:a@example.org", "urn:%c3%a9") {
+                assertEq(action,WSDLLib::getSOAPAction(media(soap12,action),soap12,'"'+action+'"'));
+            }
+            foreach string action in ("urn:two words","urn:bad{value","urn:bad|value","urn:bad\\value",
+                    "http://[bad","http://host:invalid/","urn:é","urn:%XX","urn:bad\nheader") {
+                assertThrows("SOAP-MESSAGE-ERROR",\WSDLLib::getSOAPAction(),(media(soap12,action),soap12,action));
+            }
+        }
+        foreach string action in ("", "../orders", "#order", "?id=1") {
+            assertEq(action,WSDLLib::getSOAPAction(media(False),False,'"'+action+'"'));
+            assertEq(action,WSDLLib::getSOAPAction(media(False),False,action));
+            assertThrows("SOAP-MESSAGE-ERROR",\WSDLLib::getSOAPAction(),(media(True,action),True));
+        }
+        assertEq("urn:first",WSDLLib::getSOAPAction(media(False),False," \t\"urn:first\" \t"));
+        assertEq("urn:first",WSDLLib::getSOAPAction(media(False),False,"\"urn:\\first\""));
+        foreach string value in ('"urn:first', '"urn:first" trailing', '"urn:first","urn:second"', 'urn:first"',
+                '"urn:first\\"', "urn:first\r\nX: injected") {
+            assertThrows("SOAP-MESSAGE-ERROR",\WSDLLib::getSOAPAction(),(media(False),False,value));
+        }
+        assertEq(NOTHING,WSDLLib::getSOAPAction(media(True),True,'"malformed legacy header'));
+        assertEq("urn:first",WSDLLib::getSOAPAction({"content-type":
+            'Application/SOAP+XML;ACTION="urn:first";action="urn:first"'},True));
+        assertThrows("SOAP-MESSAGE-ERROR",\WSDLLib::getSOAPAction(),({"content-type":
+            'application/soap+xml;action="urn:first";action="urn:second"'},True));
+        assertEq("urn:first",WSDLLib::getSOAPAction({"content-type":
+            "application/xop+xml;type=\"application/soap+xml;action=\\\"urn:first\\\"\""},True));
+    }
+    private serialization() {
+        foreach bool soap12 in (False,True) {
+            foreach WebService ws in (graphs(source(soap12))) {
+                WSOperation op = ws.getBindingOperation("B","first");
+                hash<auto> request = op.serializeRequest({});
+                assertEq(soap12 ? NOTHING : '"urn:first"',request.hdr.SOAPAction);
+                assertEq(soap12 ? "urn:first" : NOTHING,
+                    WSDLLib::getContentTypeParameter(request.hdr."Content-Type","action"));
+                assertEq("urn:first",WSDLLib::getSOAPAction({"content-type":request.hdr."Content-Type"},
+                    soap12,request.hdr.SOAPAction));
+                hash<auto> response = op.serializeResponse({"body":"first"});
+                assertFalse(exists response.hdr.SOAPAction);
+                assertEq(NOTHING,WSDLLib::getContentTypeParameter(response.hdr."Content-Type","action"));
+                request = op.serializeRequest({},NOTHING,NOTHING,NOTHING,NOTHING,"");
+                assertFalse(exists request.hdr.SOAPAction);
+                assertEq(NOTHING,WSDLLib::getContentTypeParameter(request.hdr."Content-Type","action"));
+                foreach string action in ("urn:override","HTTP://Example.org/a%2fb") {
+                    request = op.serializeRequest({},NOTHING,NOTHING,NOTHING,NOTHING,action);
+                    assertEq(action,WSDLLib::getSOAPAction({"content-type":request.hdr."Content-Type"},soap12,
+                        request.hdr.SOAPAction));
+                }
+                foreach string action in ("urn:bad{value","urn:two words","urn:é","urn:%XY","urn:x\r\nInjected: x") {
+                    assertThrows("SOAP-SERIALIZATION-ERROR",\op.serializeRequest(),
+                        ({},NOTHING,NOTHING,NOTHING,NOTHING,action));
+                }
+                if (soap12) {
+                    assertThrows("SOAP-SERIALIZATION-ERROR",\op.serializeRequest(),
+                        ({},NOTHING,NOTHING,NOTHING,NOTHING,"relative"));
+                } else {
+                    assertEq('"relative"',op.serializeRequest({},NOTHING,NOTHING,NOTHING,NOTHING,"relative").hdr.SOAPAction);
+                }
+            }
+            foreach WebService ws in (graphs(replace(source(soap12),'soapAction="urn:first"','soapAction=""'))) {
+                hash<auto> request = ws.getBindingOperation("B","first").serializeRequest({});
+                assertEq(soap12 ? NOTHING : '""',request.hdr.SOAPAction);
+                assertEq(NOTHING,WSDLLib::getContentTypeParameter(request.hdr."Content-Type","action"));
+            }
+        }
+    }
+    private savedNodes() {
+        foreach bool ultimate in (False,True) {
+            SoapProcessingNode original(<SoapNodeOptions>{"ultimate_receiver":ultimate,"roles":("urn:billing",)});
+            foreach SoapProcessingNode node in (original,Serializable::deserialize(original.serialize()),
+                    Serializable::deserialize(original.serializeToData())) {
+                assertEq(ultimate,node.isUltimateReceiver());
+                foreach bool soap12 in (False,True) {
+                    string xml = '<e:Envelope xmlns:e="'+(soap12 ? SOAP_12_ENV : SOAP_11_ENV)
+                        +'"><e:Header><b:Track xmlns:b="urn:billing" e:'+(soap12 ? "role" : "actor")
+                        +'="urn:billing" e:mustUnderstand="1"/></e:Header><e:Body/></e:Envelope>';
+                    assertThrows("SOAP-MUST-UNDERSTAND",\node.processMessage(),(xml,));
+                    hash<SoapNodeResult> result = node.processMessage(replace(xml,'e:mustUnderstand="1"','e:mustUnderstand="0"'));
+                    assertTrue(result.headers[0].header.targeted);
+                    assertEq(ultimate,exists result.application_message);
+                    assertEq(!ultimate,exists result.forward_message);
+                }
+            }
+        }
+        SoapProcessingNode role_node(<SoapNodeOptions>{"roles":("urn:billing",)});
+        hash<SerializationInfo> missing = role_node.serializeToData();
+        remove missing._index{missing._data._index}._class_data."WSDL::SoapProcessingNode".options;
+        assertThrows("DESERIALIZATION-ERROR",\Serializable::deserialize(),(missing,));
+        foreach string invalid in ("urn:bad{role", "http://www.w3.org/2003/05/soap-envelope/role/none") {
+            hash<SerializationInfo> changed = role_node.serializeToData();
+            string options_id = changed._index{changed._data._index}._class_data."WSDL::SoapProcessingNode".options._index;
+            string roles_id = changed._index{options_id}._members.roles._index;
+            changed._index{roles_id}._elements[0] = invalid;
+            assertThrows("SOAP-NODE-ERROR",\Serializable::deserialize(),(changed,));
+        }
+        SoapProcessingNode restored = Serializable::deserialize((new SoapProcessingNode()).serialize());
+        assertTrue(restored.isUltimateReceiver());
+        SoapProcessingNode configured(<SoapNodeOptions>{"processors":{"{urn:billing}Track":
+            auto sub(hash<auto> cx, hash<SoapNodeHeader> header) { return header.name; }}});
+        assertThrows("SERIALIZATION-ERROR",\configured.serialize());
+        assertThrows("SERIALIZATION-ERROR",\configured.serializeToData());
+        # A failed serialization must leave the source callback usable.
+        hash<SoapNodeResult> result = configured.processMessage('<e:Envelope xmlns:e="'+SOAP_12_ENV
+            +'"><e:Header><b:Track xmlns:b="urn:billing" e:mustUnderstand="1"/></e:Header><e:Body/></e:Envelope>');
+        assertTrue(result.headers[0].processed);
+        assertEq("{urn:billing}Track",result.headers[0].value);
+    }
+    private http() {
+        foreach bool soap12 in (False,True) {
+            foreach WebService ws in (graphs(source(soap12))) {
+                foreach bool retained in (False,True) {
+                    Queue received();
+                    SoapHandler handler(new PermissiveAuthenticator());
+                    foreach string name in ("first","second","scalar") {
+                        handler.addMethod(ws,ws.getBindingOperation("B",name),auto sub(hash<auto> cx,auto value) {
+                            received.push({"operation":cx.operation.name,"action":cx.soap_action});
+                            return {"body":retained ? new XsdXmlValue('<t:value xmlns:t="urn:empty-route">'
+                                +cx.operation.name+'</t:value>') : cx.operation.name};
+                        },NOTHING,NOTHING,NOTHING,"service",NOTHING,NOTHING,"B",name,retained);
+                    }
+                    HttpServer server(); on_exit server.stop();
+                    server.setDefaultHandler("actions",handler); server.addListener(0);
+                    string url = sprintf("http://127.0.0.1:%d/service",server.getListenerInfo(0).port);
+                    HTTPClient client({"url":url,"timeout":10000,"error_passthru":True});
+                    SoapClient original({"wsdl":ws,"binding":"B","url":url,"timeout":10000});
+                    hash<SerializationInfo> legacy = original.serializeToData();
+                    remove legacy._index{legacy._data._index}._class_data."SoapClient::SoapClient".soap_node;
+                    foreach SoapClient saved in (original,Serializable::deserialize(original.serialize()),
+                            Serializable::deserialize(original.serializeToData()),Serializable::deserialize(legacy)) {
+                        assertThrows("SOAP-CLIENT-ERROR",\saved.callOperation(),("first",{}, {"xml_values":"invalid"}));
+                        auto value = saved.callOperation("first",{}, {"xml_values":retained});
+                        assertEq("first",retained ? value.body.body.getElementData()."^value^" : value);
+                        assertEq({"operation":"first","action":"urn:first"},received.get(1000));
+                        assertEq(0,received.size());
+                    }
+                    hash<SerializationInfo> malformed = original.serializeToData();
+                    malformed._index{malformed._data._index}._class_data."SoapClient::SoapClient".soap_node = "invalid";
+                    assertThrows("SOAP-CLIENT-ERROR",\Serializable::deserialize(),(malformed,));
+                    hash<SerializationInfo> intermediary = original.serializeToData();
+                    string node_id = intermediary._index{intermediary._data._index}._class_data."SoapClient::SoapClient".soap_node._index;
+                    string options_id = intermediary._index{node_id}._class_data."WSDL::SoapProcessingNode".options._index;
+                    intermediary._index{options_id}._members.ultimate_receiver = False;
+                    assertThrows("SOAP-CLIENT-ERROR",\Serializable::deserialize(),(intermediary,));
+
+                    string empty = '<e:Envelope xmlns:e="'+(soap12 ? SOAP_12_ENV : SOAP_11_ENV)+'"><e:Body/></e:Envelope>';
+                    string scalar = replace(empty,'<e:Body/>','<e:Body><t:value xmlns:t="urn:empty-route">invoice</t:value></e:Body>');
+                    list<hash<auto>> rows();
+                    foreach string name in ("first","second") {
+                        push rows,{"body":empty,"action":"urn:"+name,"result":name};
+                        push rows,{"body":empty,"action":"urn:"+name,"result":name,"multipart":True};
+                    }
+                    push rows,{"body":scalar,"result":"scalar"};
+                    push rows,{"body":scalar,"action":"urn:scalar","result":"scalar"};
+                    push rows,{"body":scalar,"action":"urn:first","error":"SOAP-DESERIALIZATION-ERROR"};
+                    push rows,{"body":scalar,"action":"urn:unknown","error":"does not match"};
+                    push rows,{"body":empty,"error":"ambiguous empty"};
+                    push rows,{"body":scalar,"action":"urn:bad{value","error":"action URI"};
+                    push rows,{"body":scalar,"action":"","error":soap12 ? "action URI" : NOTHING,"result":"scalar"};
+                    if (soap12) {
+                        push rows,{"body":scalar,"action":"relative","error":"action URI"};
+                        push rows,{"body":scalar,"action":"urn:scalar","legacy":"urn:first","result":"scalar"};
+                        push rows,{"body":empty,"legacy":"urn:first","error":"ambiguous empty"};
+                        push rows,{"body":scalar,"action":"urn:scalar","multipart":True,"xop":True,"result":"scalar"};
+                    } else {
+                        push rows,{"body":empty,"action":"urn:first","unquoted":True,"result":"first"};
+                        push rows,{"body":scalar,"legacy":'"urn:scalar" trailing',"error":"quoted string"};
+                    }
+                    foreach hash<auto> row in (rows) {
+                        string ct = media(soap12,row.action)."content-type";
+                        hash<auto> hdr = {"Content-Type":ct};
+                        if (soap12 && exists row.legacy) { hdr.SOAPAction = row.legacy; }
+                        if (!soap12 && exists row.action) {
+                            hdr.SOAPAction = row.unquoted ? row.action : '"'+row.action+'"';
+                        }
+                        if (!soap12 && exists row.legacy) { hdr.SOAPAction = row.legacy; }
+                        string body = row.body;
+                        if (row.multipart) {
+                            if (row.xop) { ct = 'application/xop+xml;type="'+replace(ct, "\"", "\\\"")+'"'; }
+                            body = "--root\r\nContent-Type: "+ct+"\r\nContent-ID: <body>\r\n\r\n"+body+"\r\n--root--\r\n";
+                            hdr."Content-Type" = 'multipart/related;boundary="root";start="<body>";type="'
+                                +(row.xop ? "application/xop+xml" : soap12 ? "application/soap+xml" : "text/xml")+'"';
+                        }
+                        hash<auto> info;
+                        string reply = client.post("",body,hdr,\info);
+                        assertEq(row.error ? (soap12 ? 400 : 500) : 200,info."response-headers".status_code,sprintf("%Y response %s",row,reply));
+                        if (row.error) {
+                            hash<SoapFaultInfo> fault = WSDLLib::getSOAPFaultInfo(reply,soap12);
+                            assertEq(soap12 ? "Sender" : "Client",fault.code.getLocalName());
+                            assertTrue(fault.reasons[0].text.contains(row.error),fault.reasons[0].text);
+                        } else {
+                            assertEq(row.result,ws.getBindingOperation("B",row.result).deserializeResponse(parse_xml(reply)));
+                            assertEq({"operation":row.result,"action":row.action},received.get(1000));
+                        }
+                        assertEq(0,received.size());
+                        # Recovery and real SoapClient serialization must work after every failure.
+                        SoapClient adapter({"wsdl":ws,"binding":"B","url":url,"timeout":10000});
+                        auto result = adapter.callOperation("first",{}, {"xml_values":retained});
+                        assertEq("first",retained ? result.body.body.getElementData()."^value^" : result);
+                        assertEq({"operation":"first","action":"urn:first"},received.get(1000));
+                    }
+                }
+            }
+        }
+    }
+}

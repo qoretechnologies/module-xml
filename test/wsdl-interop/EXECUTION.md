@@ -9878,3 +9878,34 @@ accounting remain open, followed by P8–P9. No Qore edits, installation, push o
 
 See [evidence](soap-oneway-evidence.md), [validation](P7-09-validation.json),
 [audit](audits/P7-09-soap-oneway.md), and [design](../../design/soap-envelope-processing.md).
+
+
+## P7-10: SOAP request action transport and dispatch
+
+Requests emit version-specific quoted actions. Handlers decode normalized root action
+metadata, expose cx.soap_action and reject malformed or mismatched actions before
+application dispatch. Route version metadata remains independent of action lookup.
+The pinned CXF relative-action source remains a negative control; explicitly named
+and hash-recorded corrected bindings drive positive SOAP 1.2 HTTP exchanges.
+
+All **216 Qore suites pass: 3,307 cases / 152,066 assertions**.
+Eleven focused SOAP suites also pass compiled: **39 cases / 13,352 assertions**.
+The new action suite passes **4 cases / 1,444 assertions** across source/saved service
+graphs, native/retained values, raw headers, root media parameters and failure recovery.
+
+All twelve independent Python gates pass. The new two-test gate checks **396 HTTP
+exchanges**: 48 external-server/client exchanges and 348 external-client/handler
+exchanges. The pinned CXF 4.1.3 gate passes with seven tests, including the explicit
+absolute-action derivative and unchanged-source negative controls. All 16 corpus
+commands meet their recorded outcomes; all six semantic reports match P7-09 except
+for the WSDL source digest. Installed Qore is `9d8ce440b`.
+Documentation and thirty-one-file astparser checks pass without warnings/errors.
+
+Audit: **18 Pass / 44 N/A / zero Fail**. No C++ changes; Valgrind is not required.
+
+P7 remaining media/method rules, transport interruption and complete assertion
+accounting remain open, followed by P8–P9. No Qore edits, installation, push or CI trigger.
+
+See [evidence](soap-action-evidence.md), [validation](P7-10-validation.json),
+[audit](audits/P7-10-soap-actions.md), [CXF source adjudication](cxf-derived/README.md),
+and [design](../../design/soap-envelope-processing.md).

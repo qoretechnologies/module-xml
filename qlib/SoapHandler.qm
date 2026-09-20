@@ -60,6 +60,13 @@ module SoapHandler {
 
     This module provides the @ref SoapHandler::SoapHandler "SoapHandler" class which can be used to provide an RPC handler for the HttpServer class provided by the HttpServer module.
 
+    @par Request actions
+    SOAP callbacks receive \c cx.soap_action with the decoded request action, or NOTHING when absent.
+    SOAP 1.1 uses the SOAPAction HTTP header; SOAP 1.2 uses the normalized XML root's media-type action.
+    Actions retain their URI spelling. Absent or empty SOAP 1.1 actions allow unambiguous Body routing;
+    an explicit nonempty action must match the selected binding when that binding declares an action.
+    SOAP 1.2 ignores the legacy SOAPAction header.
+
     @par Declared header-processing errors
     A body callback or registered header processor can select a WSDL headerfault without placing its value in the body's fault detail:
     @code{.py}
@@ -80,6 +87,8 @@ module SoapHandler {
     @section soaphandler_relnotes SoapHandler Release History
 
     @subsection soaphandler_0_3_4 SoapHandler 0.3.4
+    - action routing decodes quoted SOAP 1.1 headers and SOAP 1.2 multipart root parameters, exposes
+      \c cx.soap_action, and rejects malformed actions or mismatches before application dispatch
     - SOAP one-way operations return an empty HTTP 202 acknowledgment on success; processing failures
       still return SOAP faults, and the acknowledgment alone does not promise application delivery
     - header processing reparses its generated XML as UTF-8 independently of the request's wire charset,
@@ -1089,6 +1098,23 @@ private nothing msglog(hash<auto> cx, hash<auto> msg) {
             return path;
         }
 
+        # Identify the route's version before parsing an unrecognized envelope namespace.
+        # This is independent of request actions and never selects an application operation.
+        private *bool getSoapVersionForRoute(string path, *string alt_path) {
+            rwl.readLock();
+            on_exit rwl.readUnlock();
+            *bool version;
+            foreach hash<auto> candidate in ((uri_methods{path} ?? uri_methods{alt_path} ?? methods).iterator()) {
+                OperationalBinding binding = candidate.operation.getBinding(candidate.binding);
+                if (binding instanceof SoapBinding) {
+                    bool current = binding.isSoap12();
+                    if (exists version && version != current) { return NOTHING; }
+                    version = current;
+                }
+            }
+            return version;
+        }
+
         # method called by HttpServer
         # don't reimplement this method; fix/enhance it in the module
         final hash<auto> handleRequest(hash<auto> cx, hash<auto> hdr, *data body) {
@@ -1126,27 +1152,6 @@ private nothing msglog(hash<auto> cx, hash<auto> msg) {
                 alt_path =~ s/^\///;
             }
             #printf("DEBUG: path: %y alt: %y root: %y hdr.method: %y\n", path, alt_path, cx.root_path, hdr.method);
-
-            if (hdr.method == "POST") {
-                # try SoapBinding
-                *string content_type = hdr."_qore_orig_content_type" ?? hdr."content-type";
-                *string soapaction = WSDLLib::isSOAPMessage({"content-type": content_type})
-                    ? WSDLLib::getContentTypeParameter(content_type, "action") : NOTHING;
-                soapaction = soapaction ?? hdr.soapaction;
-                if (soapaction) {
-                    rwl.readLock();
-                    on_exit rwl.readUnlock();
-
-                    #printf("DEBUG: path: %y alt_path: %y soapaction: %y us: %y urs: %y s: %y\n", path, alt_path,
-                    #   soapaction, exists uri_sam{path}{soapaction}, exists uri_sam{alt_path}{soapaction},
-                    #   exists sam{soapaction});
-
-                    # issue #2783 respect URI paths when matching
-                    method = uri_sam{path}{soapaction} ?? uri_sam{alt_path}{soapaction} ?? sam{soapaction};
-                    #printf("DEBUG: request matched with SoapAction %y method: %y us: %y\n", soapaction, keys method,
-                    #   keys uri_sam);
-                }
-            }
 
             if (!method) {
                 # SOAP action is not explicitly specified, e.g. HTTP binding, try get it from path
@@ -1278,9 +1283,10 @@ private nothing msglog(hash<auto> cx, hash<auto> msg) {
                 bool processor_failure = False;
                 try {
                     *string ct = hdr."_qore_orig_content_type";
-                    # Exact declared actions were checked above. Body dispatch uses its
-                    # actual element name, never the last URI segment of an action.
+                    # Action dispatch uses normalized root metadata and the validated envelope version.
+                    # Body dispatch uses its actual element name, never the last URI segment of an action.
                     *string element;
+                    *string soap_action;
                     *OperationalBinding selected_binding = method ? method.operation.getBinding(method.binding) : NOTHING;
                     bool mime_content = False;
                     if (selected_binding instanceof HttpBinding && selected_binding.input) {
@@ -1292,11 +1298,26 @@ private nothing msglog(hash<auto> cx, hash<auto> msg) {
                     hash<auto> msg = WSDLLib::parseMultiPartSOAPMessage(hdr + ("body" : body), mime_content);
                     msglog(cx, ('reason': 'request', 'header': hdr, 'method': hdr.method, 'body': msg.body));
                     bool soap_envelope = !selected_binding || selected_binding instanceof SoapBinding;
-                    *bool expected_version = selected_binding instanceof SoapBinding ? selected_binding.isSoap12() : NOTHING;
+                    *bool expected_version = selected_binding instanceof SoapBinding ? selected_binding.isSoap12()
+                        : soap_envelope ? getSoapVersionForRoute(path, alt_path) : NOTHING;
                     reqsoap12 = expected_version ?? WSDLLib::isSOAPMessage12(msg);
                     args = WSDLLib::parseSOAPMessage(msg, mime_content, soap_envelope);
                     if (soap_envelope) {
                         reqsoap12 = WSDLLib::validateSOAPEnvelope(args, expected_version);
+                        soap_action = WSDLLib::getSOAPAction(msg, reqsoap12, hdr.soapaction);
+                        if (!method && soap_action) {
+                            {
+                                rwl.readLock();
+                                on_exit rwl.readUnlock();
+                                method = uri_sam{path}{soap_action} ?? uri_sam{alt_path}{soap_action}
+                                    ?? sam{soap_action};
+                            }
+                            if (method) {
+                                selected_binding = method.operation.getBinding(method.binding);
+                                expected_version = selected_binding.isSoap12();
+                                WSDLLib::validateSOAPEnvelope(args, expected_version);
+                            }
+                        }
                         *string base_uri = hdr.host ? resolve_url((cx.ssl ? "https://" : "http://") + hdr.host + "/",
                             cx.raw_path ?? hdr.path ?? cx.url.path, RESOLVE_URL_STRICT | RESOLVE_URL_ENCODE) : NOTHING;
                         # Native HTTP contexts can be legacy untyped hashes, which strip nested hashdecls on assignment.
@@ -1304,6 +1325,7 @@ private nothing msglog(hash<auto> cx, hash<auto> msg) {
                         hash<auto> typed_cx();
                         typed_cx += cx;
                         cx = typed_cx;
+                        cx.soap_action = soap_action;
                         try {
                             cx.soap_processing = soap_node.processMessage(WSDLLib::getXmlMessageText(msg), cx,
                                 base_uri, expected_version);
@@ -1390,9 +1412,13 @@ private nothing msglog(hash<auto> cx, hash<auto> msg) {
                             }
                         }
 
-                        if (!method && !exists element) {
+                        if (!method) {
                             throw "SOAP-CALL-ERROR", sprintf("no operation call found in message (SOAP body "
                                 "args: %y)", keys routing_args.Envelope.Body);
+                        }
+                        if (soap_action && method.soap_action && soap_action != method.soap_action) {
+                            throw "SOAP-CALL-ERROR", sprintf("action %Y does not match operation %Y action %Y",
+                                soap_action, method.operation.name, method.soap_action);
                         }
                         if (method.xml_values && !exists xml_body) {
                             xml_body = WSDLLib::getXmlMessageText(msg);

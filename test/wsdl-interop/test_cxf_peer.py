@@ -83,6 +83,18 @@ def endpoint(command, env=None):
                 raise AssertionError(f"endpoint exit {process.returncode}: {output}\n{errors}")
 
 
+def execution_wsdl(row):
+    # Pinned captures remain original; live SOAP 1.2 uses the explicit standards-corrected action.
+    return ROOT / ('cxf-derived/hello_world_soap12_absolute_action.wsdl' if row['fixture'] == 'soap12' else row['wsdl'])
+
+
+def execution_headers(row):
+    headers = dict(row['request_headers'])
+    if row['fixture'] == 'soap12' and row['operation'] == 'sayHi':
+        headers['Content-Type'] = headers['Content-Type'].replace('action="sayHiAction"','action="urn:cxf:sayHiAction"')
+    return headers
+
+
 class CxfPeerTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -132,7 +144,7 @@ class CxfPeerTests(unittest.TestCase):
             output = checked([*java, "-cp", jars, "org.apache.cxf.tools.wsdlto.WSDLToJava",
                               "-d", str(generated), "-suppress-generated-date", "-faultSerialVersionUID", "1",
                               "-b", str(PEER / "serializable.xjb"),
-                              "-sn", row["service"], str(ROOT / row["wsdl"])])
+                              "-sn", row["service"], str(execution_wsdl(row))])
             if output:
                 raise AssertionError("unexpected code generation output: " + output)
         output = checked(["javac", "--release", "17", "-Xlint:all", "-Werror", "-cp", jars,
@@ -173,13 +185,28 @@ class CxfPeerTests(unittest.TestCase):
                             self.assertEqual(infoset(expected[direction]), infoset(actual[direction]["body"]),
                                              expected["id"] + " " + direction)
 
+    def test_soap12_absolute_action_derivative(self):
+        provenance = json.loads((ROOT / "cxf-derived/soap12-action.json").read_text())
+        source = (ROOT / provenance['source']).read_bytes()
+        derived = (ROOT / provenance['derived']).read_bytes()
+        self.assertEqual(provenance['source_sha256'],hashlib.sha256(source).hexdigest())
+        self.assertEqual(provenance['derived_sha256'],hashlib.sha256(derived).hexdigest())
+        transform = provenance['transform']
+        self.assertEqual(1,source.count(transform['from'].encode()))
+        expected = source.replace(transform['from'].encode(),transform['to'].encode()).replace(
+            b'<definitions ',provenance['modification_notice'].encode()+b'<definitions ',1)
+        self.assertEqual(expected,derived)
+        captured = next(row for row in self.cases if row['fixture']=='soap12' and row['operation']=='sayHi')
+        self.assertIn('action="sayHiAction"',captured['request_headers']['Content-Type'])
+        self.assertIn('action="urn:cxf:sayHiAction"',execution_headers(captured)['Content-Type'])
+
     def test_cxf_server_accepts_reference_and_qore_requests(self):
         for fixture, rows in self.groups.items():
             with self.subTest(fixture=fixture):
-                with endpoint([*self.java, "server", fixture, str(ROOT / rows[0]["wsdl"])]) as (url, port):
+                with endpoint([*self.java, "server", fixture, str(execution_wsdl(rows[0]))]) as (url, port):
                     for row in rows:
                         with contextlib.closing(http.client.HTTPConnection("127.0.0.1", port, timeout=30)) as client:
-                            client.request("POST", "/service", row["request"].encode(), row["request_headers"])
+                            client.request("POST", "/service", row["request"].encode(), execution_headers(row))
                             response = client.getresponse()
                             body = response.read()
                             self.assertEqual(row["status"], response.status)
@@ -192,9 +219,17 @@ class CxfPeerTests(unittest.TestCase):
         for fixture, rows in self.groups.items():
             for graph in ("source", "saved"):
                 with self.subTest(fixture=fixture, graph=graph):
-                    with endpoint([*self.qore, "server", fixture, graph], self.env) as (url, _):
+                    with endpoint([*self.qore, "server", fixture, graph], self.env) as (url, port):
+                        if fixture == "soap12":
+                            # The historical captured relative action is a required negative control.
+                            original = next(row for row in rows if row['operation']=='sayHi')
+                            with contextlib.closing(http.client.HTTPConnection("127.0.0.1",port,timeout=30)) as peer:
+                                peer.request("POST","/service",original['request'].encode(),original['request_headers'])
+                                response = peer.getresponse(); body = response.read()
+                                self.assertEqual(400,response.status,body)
+                                self.assertIn(b"invalid SOAP 1.2 action URI",body)
                         self.assertEqual("PASS\t" + fixture + "\n", checked(
-                            [*self.java, "client", fixture, str(ROOT / rows[0]["wsdl"]), url]))
+                            [*self.java, "client", fixture, str(execution_wsdl(rows[0])), url]))
 
     def test_infoset_comparison_keeps_semantics(self):
         self.assertEqual(infoset('<p:r xmlns:p="urn:r"><x> a </x></p:r>'),

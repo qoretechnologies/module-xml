@@ -339,6 +339,14 @@ class CoverageTest(unittest.TestCase):
         wsdl = ROOT / "cxf/hello_world_soap12.wsdl"
         case = {"name": "CxfSoap12", "wsdl": str(wsdl), "base": "http://cxf.invalid/",
                 "operation": "sayHi", "binding": "Greeter_SOAPBinding", "messages": messages}
+        original = survey.run_worker([case], {})
+        rejected = [row for row in original if not row["ok"]]
+        self.assertEqual(1,len(rejected))
+        self.assertEqual(("serialize","request","SOAP-SERIALIZATION-ERROR"),
+                         tuple(rejected[0][key] for key in ("stage","direction","err")))
+        self.assertIn("sayHiAction",rejected[0]["desc"])
+        # Keep the historical source as a negative control and name the standards-corrected positive binding.
+        case["wsdl"] = str(ROOT / "cxf-derived/hello_world_soap12_absolute_action.wsdl")
         rows = survey.run_worker([case], {})
         self.assertEqual(2, survey.stage_accounting([case], rows)["counts"]["serialize"]["ok"])
         schema = etree.XMLSchema(etree.parse(str(wsdl)).find(
