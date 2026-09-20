@@ -1,0 +1,227 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires xml
+%requires QUnit
+%requires ../qlib/WSDL.qm
+%try-module json
+%define NoJson
+%endtry
+%ifdef NoJson
+throw "MISSING-MODULE", "SOAP fault metadata tests require json";
+%else
+%exec-class FaultDataTest
+
+class FaultDataTest inherits QUnit::Test {
+    constructor() : Test("SOAP fault protocol metadata and generation", "1.0") {
+        addTestCase("Independent fault matrix retains complete envelopes and validated metadata", \matrix());
+        addTestCase("Local QName scopes, language, XML context and extensions are retained", \metadata());
+        addTestCase("Generic, declared and header faults support explicit protocol fields", \generation());
+        addTestCase("Invalid or incompatible options reject without losing subsequent valid messages", \invalid());
+        addTestCase("Empty values, long subcode chains and version negotiation keep their identities", \boundaries());
+        addTestCase("Fault encodingStyle placement matches the SOAP application/protocol boundary", \attributes());
+        set_return_value(main());
+    }
+    private static WSOperation operation(bool soap12, string state = "source") {
+        string source = ReadOnlyFile::readTextFile(get_script_dir() + "/wsdl-interop/regressions/fault-bindings/literal.wsdl");
+        source = replace(source, '<w:input><s:body', '<w:input><s:header message="t:H" part="token" use="literal">'
+            + '<s:headerfault message="t:Failure" part="problem" use="literal"/></s:header><s:body');
+        if (soap12) { source = replace(source, SOAP_11_NS, SOAP_12_NS); }
+        WebService ws(source);
+        if (state == "saved") { ws = Serializable::deserialize(ws.serialize()); }
+        if (state == "data") { ws = Serializable::deserialize(ws.serializeToData()); }
+        return ws.getOperation("exchange");
+    }
+    private static string generate(WSOperation op, hash<SoapFaultOptions> options, bool declared = False) {
+        return op.serializeFault(declared ? "Rejected" : NOTHING, "Order rejected", declared ? 71 : NOTHING,
+            NOTHING, NOTHING, NOTHING, NOTHING, NOTHING, NOTHING, options).body;
+    }
+    private matrix() {
+        foreach bool soap12 in (False, True) {
+            list<auto> rows = parse_json(ReadOnlyFile::readTextFile(get_script_dir()
+                + "/wsdl-interop/soap-fault-peer/soap" + (soap12 ? "12" : "11") + "-cases.json")).cases;
+            foreach hash<auto> row in (rows) {
+                if (!row.valid) {
+                    assertThrows("SOAP-DESERIALIZATION-ERROR", \WSDLLib::getSOAPFaultInfo(), (row.xml,soap12));
+                    continue;
+                }
+                hash<SoapFaultInfo> info = WSDLLib::getSOAPFaultInfo(row.xml, soap12);
+                assertEq(row.xml, info.envelope.getXml(), row.name);
+                assertEq(soap12, info.soap12);
+                assertEq("{" + (soap12 ? SOAP_12_ENV : SOAP_11_ENV) + "}Fault", info.fault.getExpandedName());
+                assertTrue(info.reasons.size() > 0);
+                if (!soap12) { assertEq((), info.subcodes); }
+                else { assertEq(SOAP_12_ENV, info.code.getNamespaceUri()); }
+                hash<SoapFaultInfo> copy = Serializable::deserialize(Serializable::serialize(info));
+                assertEq(row.xml, copy.envelope.getXml());
+                assertTrue(copy.code.equals(info.code));
+            }
+        }
+        assertThrows("SOAP-DESERIALIZATION-ERROR", \WSDLLib::getSOAPFaultInfo(),
+            ('<e:Envelope xmlns:e="' + SOAP_12_ENV + '"><e:Body/></e:Envelope>',));
+    }
+    private metadata() {
+        string xml = '<e:Envelope xmlns:e="' + SOAP_12_ENV + '" xml:base="https://example.test/orders/" xml:lang="cs">'
+            + '<e:Header><t:Trace xmlns:t="urn:trace">71</t:Trace></e:Header><e:Body><e:Fault><!--retain-->'
+            + '<e:Code><e:Value>e:Sender</e:Value><e:Subcode><e:Value xmlns="urn:default">BadOrder</e:Value>'
+            + '<e:Subcode><e:Value xmlns:t="urn:items">t:Missing</e:Value></e:Subcode></e:Subcode></e:Code>'
+            + '<e:Reason><e:Text xml:lang="en"> Bad &amp; missing </e:Text><e:Text xml:lang="cs">Chybí</e:Text>'
+            + '<e:Text xml:lang="">Reset</e:Text></e:Reason><e:Node> ../node </e:Node><e:Role>urn:receiver</e:Role>'
+            + '<e:Detail xml:base="detail/"><x:item xmlns:x="urn:items" x:code="007">009.00</x:item></e:Detail>'
+            + '</e:Fault></e:Body></e:Envelope>';
+        hash<SoapFaultInfo> info = WSDLLib::getSOAPFaultInfo(xml);
+        assertEq(xml, info.envelope.getXml());
+        assertEq(("urn:default", "urn:items"), map $1.getNamespaceUri(), info.subcodes);
+        assertEq(("BadOrder", "Missing"), map $1.getLocalName(), info.subcodes);
+        assertEq(("en", "cs", ""), map $1.language, info.reasons);
+        assertEq(" Bad & missing ", info.reasons[0].text);
+        assertEq("../node", info.node);
+        assertEq("urn:receiver", info.role);
+        assertFalse(exists info.actor);
+        assertEq("{urn:trace}Trace", info.headers[0].getExpandedName());
+        assertEq("https://example.test/orders/detail/", info.detail.getXmlContext()."xml:base");
+        assertEq("009.00", info.detail.getChildValues()[0].getElementData()."^value^");
+        assertTrue(info.fault.getXml().find("<!--retain-->") >= 0);
+        string old = '<e:Envelope xmlns:e="' + SOAP_11_ENV + '" xmlns:t="urn:tracking"><e:Body><t:Fault>app</t:Fault>'
+            + '<e:Fault><faultcode xmlns:a="urn:order">a:Rejected</faultcode><faultstring xml:lang="fr">Refusé</faultstring>'
+            + '<faultactor></faultactor><detail/><t:faultcode>trace71</t:faultcode></e:Fault></e:Body></e:Envelope>';
+        info = WSDLLib::getSOAPFaultInfo(old);
+        assertEq("urn:order", info.code.getNamespaceUri());
+        assertEq("fr", info.reasons[0].language);
+        assertEq("", info.actor);
+        assertTrue(exists info.detail);
+        assertEq("{urn:tracking}faultcode", info.extensions[0].getExpandedName());
+        assertEq(old, info.envelope.getXml());
+    }
+    private generation() {
+        foreach bool soap12 in (False, True) {
+            string uri = soap12 ? SOAP_12_ENV : SOAP_11_ENV;
+            foreach string state in ("source", "saved", "data") {
+                WSOperation op = operation(soap12, state);
+                hash<SoapFaultOptions> options = <SoapFaultOptions>{
+                    "code":new XsdQNameValue(uri, soap12 ? "Receiver" : "Server"),
+                    "reasons":(<SoapFaultReason>{"text":"Refusé & <réessayer>","language":"fr"},)};
+                if (soap12) {
+                    options.subcodes = (new XsdQNameValue("urn:order", "soapenv:Rejected"),
+                        new XsdQNameValue("", "Missing"), new XsdQNameValue("http://www.w3.org/XML/1998/namespace", "xml:Problem"));
+                    options.reasons += <SoapFaultReason>{"text":"拒否","language":"ja"};
+                    options.node = "../node#71";
+                    options.role = "urn:receiver";
+                } else { options.actor = "https://example.test/actor"; }
+                foreach bool declared in (False, True) {
+                    hash<SoapFaultOptions> before = options;
+                    string wire = generate(op, options, declared);
+                    assertEq(before, options);
+                    hash<SoapFaultInfo> info = WSDLLib::getSOAPFaultInfo(wire, soap12);
+                    assertTrue(options.code.equals(info.code));
+                    assertEq(options.reasons, info.reasons);
+                    assertEq(options.node, info.node);
+                    assertEq(options.role, info.role);
+                    assertEq(options.actor, info.actor);
+                    assertEq(options.subcodes.size(), info.subcodes.size());
+                    for (int i = 0; i < info.subcodes.size(); ++i) {
+                        assertTrue(options.subcodes[i].equals(info.subcodes[i]));
+                    }
+                    assertEq(declared, exists info.detail);
+                    if (declared) { assertEq(71, op.deserializeFault(wire, "Rejected")); }
+                    assertThrows("SOAP-SERVER-FAULT-RESPONSE", \op.deserializeResponse(), (parse_xml(wire),));
+                }
+                string header = op.serializeHeaderFault(<SoapHeaderFaultInfo>{"message":"Failure","part":"problem","value":71},
+                    "Header failed", NOTHING, "UTF-8", options).body;
+                hash<SoapFaultInfo> info = WSDLLib::getSOAPFaultInfo(header);
+                assertTrue(options.code.equals(info.code));
+                assertEq(options.reasons, info.reasons);
+                assertFalse(exists info.detail);
+                assertEq(71, op.deserializeHeaderFault(header, "Failure", "problem"));
+                assertEq(1, info.headers.size());
+            }
+        }
+    }
+    private boundaries() {
+        WSOperation op = operation(True);
+        hash<SoapFaultOptions> options = <SoapFaultOptions>{
+            "reasons":(<SoapFaultReason>{"text":"","language":""},),"node":"","role":""};
+        for (int i = 0; i < 64; ++i) {
+            options.subcodes += new XsdQNameValue("urn:level:" + i, "s:Level" + i);
+        }
+        string wire = generate(op, options);
+        hash<SoapFaultInfo> info = WSDLLib::getSOAPFaultInfo(wire);
+        assertEq(options.reasons, info.reasons);
+        assertEq("", info.node);
+        assertEq("", info.role);
+        assertEq(64, info.subcodes.size());
+        for (int i = 0; i < info.subcodes.size(); ++i) { assertTrue(options.subcodes[i].equals(info.subcodes[i])); }
+        assertThrows("SOAP-VERSION-MISMATCH", \WSDLLib::getSOAPFaultInfo(), (wire,False));
+        assertThrows("SOAP-DESERIALIZATION-ERROR", \WSDLLib::getSOAPFaultInfo(), (replace(wire, '<soapenv:Body>', '<soapenv:Body><?invalid test?>'),));
+        WSOperation old = operation(False);
+        foreach XsdQNameValue code in (new XsdQNameValue("", "Application.Error"),
+                new XsdQNameValue("urn:app", "Application.Error"), new XsdQNameValue("urn:app", "soapenv:Error")) {
+            options = <SoapFaultOptions>{"code":code,"reasons":(<SoapFaultReason>{"text":""},),"actor":""};
+            info = WSDLLib::getSOAPFaultInfo(generate(old, options));
+            assertTrue(code.equals(info.code));
+            assertEq("", info.reasons[0].text);
+            assertFalse(exists info.reasons[0].language);
+            assertEq("", info.actor);
+        }
+        wire = generate(old, <SoapFaultOptions>{"code":new XsdQNameValue(SOAP_11_ENV, "VersionMismatch")});
+        assertFalse(WSDLLib::getSOAPFaultInfo(wire, True).soap12);
+        assertThrows("SOAP-VERSION-MISMATCH", \WSDLLib::getSOAPFaultInfo(), (generate(old, <SoapFaultOptions>{}),True));
+    }
+
+    private attributes() {
+        list<auto> cases = parse_json(ReadOnlyFile::readTextFile(get_script_dir()
+            + "/wsdl-interop/soap-fault-peer/soap12-attributes.json")).cases;
+        assertEq(14, cases.size());
+        foreach string state in ("source", "saved", "data") {
+            WSOperation op = operation(True, state);
+            SoapProcessingNode node();
+            foreach hash<auto> row in (cases) {
+                hash<auto> data = parse_xml(row.xml);
+                hash<auto> before = data;
+                if (row.valid) {
+                    assertEq(row.xml, WSDLLib::getSOAPFaultInfo(row.xml).envelope.getXml());
+                    assertThrows("SOAP-SERVER-FAULT-RESPONSE", \op.deserializeResponse(), (data,));
+                    assertThrows("SOAP-SERVER-FAULT-RESPONSE", \op.deserializeXmlResponse(), (row.xml,));
+                    assertEq(row.xml, node.processMessage(row.xml).application_message.getXml());
+                } else {
+                    assertThrows("SOAP-DESERIALIZATION-ERROR", \WSDLLib::getSOAPFaultInfo(), (row.xml,));
+                    assertThrows("SOAP-DESERIALIZATION-ERROR", \op.deserializeResponse(), (data,));
+                    assertThrows("SOAP-DESERIALIZATION-ERROR", \op.deserializeXmlResponse(), (row.xml,));
+                    assertThrows("SOAP-DESERIALIZATION-ERROR", \node.processMessage(), (row.xml,));
+                }
+                assertEq(before, data);
+            }
+        }
+    }
+
+    private invalid() {
+        foreach bool soap12 in (False, True) {
+            WSOperation op = operation(soap12);
+            list<hash<SoapFaultOptions>> invalid = (
+                <SoapFaultOptions>{"reasons":()},
+                <SoapFaultOptions>{"reasons":(<SoapFaultReason>{"text":"Bad","language":" "},)},
+                <SoapFaultOptions>{soap12 ? "node" : "actor":"urn:bad{value"},
+                <SoapFaultOptions>{soap12 ? "role" : "actor":"https://example.test/ü"},
+                <SoapFaultOptions>{"reasons":(<SoapFaultReason>{"text":"bad\x01","language":"en"},)},
+                <SoapFaultOptions>{"reasons":(<SoapFaultReason>{"text":"bad\x00tail","language":"en"},)});
+            if (soap12) {
+                invalid += (<SoapFaultOptions>{"actor":""},
+                    <SoapFaultOptions>{"code":new XsdQNameValue("urn:wrong", "Sender")},
+                    <SoapFaultOptions>{"code":new XsdQNameValue(SOAP_12_ENV, "Custom")},
+                    <SoapFaultOptions>{"reasons":(<SoapFaultReason>{"text":"no language"},)});
+            } else {
+                invalid += (<SoapFaultOptions>{"node":""}, <SoapFaultOptions>{"role":""},
+                    <SoapFaultOptions>{"subcodes":(new XsdQNameValue("urn:order", "Problem"),)},
+                    <SoapFaultOptions>{"reasons":(<SoapFaultReason>{"text":"one"},<SoapFaultReason>{"text":"two"})});
+            }
+            foreach hash<SoapFaultOptions> options in (invalid) {
+                assertThrows("SOAP-SERIALIZATION-ERROR", \generate(), (op,options));
+                hash<SoapFaultInfo> info = WSDLLib::getSOAPFaultInfo(generate(op, <SoapFaultOptions>{}));
+                assertEq(soap12 ? "Sender" : "Client", info.code.getLocalName());
+                assertEq("Order rejected", info.reasons[0].text);
+            }
+        }
+    }
+}
+%endif

@@ -207,6 +207,9 @@ module WSDL {
     @section wsdlrelnotes WSDL Module Release Notes
 
     @subsection wsdl_0_5_8 WSDL v0.5.8
+    - WSDLLib::getSOAPFaultInfo() exposes scoped QName codes/subcodes, ordered multilingual reasons,
+      actor/node/role references and retained detail/header/envelope XML; SoapFaultOptions controls these
+      protocol fields when generating generic, declared and header faults without changing default decoding
     - SOAP 1.1 faults validate required fields, QName codes, faultactor URI syntax and detail content while
       accepting qualified extensions and faultstring xml:lang; exception data keeps extensions distinct from
       protocol fields and selects the real Fault independently of application Body siblings
@@ -1231,6 +1234,28 @@ public class WSDLLib {
 
     static string getSoapMimeType12(bool soap12) {
         return soap12 ? MimeTypeSoapXml : MimeTypeXml;
+    }
+
+    #! Decodes protocol fault metadata without projecting away namespace or XML information
+    /** @param xml a complete SOAP fault envelope
+        @param expected_soap12 optional expected SOAP version
+        @return typed fault codes, reasons, optional fields and retained original XML
+        @throw SOAP-DESERIALIZATION-ERROR malformed SOAP fault or a message without a Fault
+        @throw SOAP-VERSION-MISMATCH an incompatible envelope version
+        @throw PARSE-XML-EXCEPTION malformed XML
+        @note This validates the SOAP protocol, not application detail schemas. Use
+        WSOperation::deserializeFault() or deserializeHeaderFault() for declared application values.
+        The SOAP 1.1 VersionMismatch response to a SOAP 1.2 request is accepted.
+        @par Example
+        @code{.py}
+        hash<SoapFaultInfo> failure = WSDLLib::getSOAPFaultInfo(call_info."response-body");
+        string category = "{" + failure.code.getNamespaceUri() + "}" + failure.code.getLocalName();
+        string original = failure.envelope.getXml();
+        @endcode
+        @since %WSDL 0.5.8
+    */
+    static hash<SoapFaultInfo> getSOAPFaultInfo(string xml, *bool expected_soap12) {
+        return SoapFaultHelper::read(xml, expected_soap12);
     }
 
     #! retrieves a local file and returns the file's contents as a string
@@ -2987,6 +3012,73 @@ public hashdecl SoapHeaderFaultInfo {
     bool request_header = True;
 }
 
+#! One human-readable fault reason
+/** SOAP 1.2 requires an explicit language, including an explicit empty language reset.
+    SOAP 1.1 accepts one reason with an optional language. @since %WSDL 0.5.8
+*/
+public hashdecl SoapFaultReason {
+    #! Human-readable explanation, preserving whitespace
+    string text;
+    #! Explicit xml:lang value; NOTHING means absent, not an empty reset
+    *string language;
+}
+
+#! Optional protocol fields for declared, generic and header SOAP faults
+/** Omitted fields retain the ordinary Client/Sender code and supplied reason (English for SOAP 1.2).
+    SOAP 1.1 accepts actor and exactly one reason; SOAP 1.2 accepts subcodes, node, role
+    and one or more reasons. Incompatible options reject instead of being discarded.
+    QName identities are preserved; generated prefix spelling may change.
+    @since %WSDL 0.5.8
+*/
+public hashdecl SoapFaultOptions {
+    #! Explicit top-level fault code; NOTHING selects Client/Sender
+    *XsdQNameValue code;
+    #! SOAP 1.2 subcodes in outermost-to-innermost order
+    list<XsdQNameValue> subcodes = ();
+    #! Explicit reasons, or NOTHING to use the existing reason argument
+    *list<hash<SoapFaultReason>> reasons;
+    #! SOAP 1.2 node URI reference
+    *string node;
+    #! SOAP 1.2 role URI reference
+    *string role;
+    #! SOAP 1.1 faultactor URI reference
+    *string actor;
+}
+
+#! Complete protocol fault metadata with retained XML
+/** QName codes are resolved in each Value's own namespace scope. Ordered reasons retain
+    explicit language and text. The original envelope preserves all XML, including
+    comments, attributes, extension fields and SOAP 1.1 Body siblings. This is an explicit
+    API; ordinary response decoding retains its SOAP-SERVER-FAULT-RESPONSE contract.
+    @since %WSDL 0.5.8
+*/
+public hashdecl SoapFaultInfo {
+    #! True for SOAP 1.2; False for SOAP 1.1
+    bool soap12;
+    #! Namespace-resolved top-level code
+    XsdQNameValue code;
+    #! Nested SOAP 1.2 subcodes in document order
+    list<XsdQNameValue> subcodes = ();
+    #! Ordered fault reasons
+    list<hash<SoapFaultReason>> reasons = ();
+    #! SOAP 1.2 Node URI reference with XML Schema whitespace normalization
+    *string node;
+    #! SOAP 1.2 Role URI reference with XML Schema whitespace normalization
+    *string role;
+    #! SOAP 1.1 faultactor URI reference with XML Schema whitespace normalization
+    *string actor;
+    #! Original complete envelope; use this for exact forwarding
+    XsdXmlValue envelope;
+    #! Original Fault subtree with its namespace and inherited XML context
+    XsdXmlValue fault;
+    #! Original optional Detail/detail container, distinguishing absent and empty
+    *XsdXmlValue detail;
+    #! Original SOAP header blocks in document order
+    list<XsdXmlValue> headers = ();
+    #! SOAP 1.1 qualified Fault extension fields in document order
+    list<XsdXmlValue> extensions = ();
+}
+
 #! An explicit XML value retaining lexical text, namespaces and ordered content
 /** Unlike a native scalar or flat record, this value retains the complete supplied XML document.
     getXmlDataView() exposes parse_xml()'s ordered data representation for convenient access to
@@ -3559,7 +3651,7 @@ hashdecl SoapEnvelopeElement {
 # Validate protocol containers before native projection discards their qualified names.
 # Protocol containers and SOAP faults are traversed; application payloads retain their own validators.
 class SoapEnvelopeHelper {
-    private static list<hash<SoapEnvelopeElement>> children(auto value, hash<string, string> inherited,
+    static list<hash<SoapEnvelopeElement>> children(auto value, hash<string, string> inherited,
             string description) {
         *hash<auto> content = XsdScalarTextHelper::elementContent(value, description);
         list<hash<SoapEnvelopeElement>> result();
@@ -3771,6 +3863,16 @@ class SoapEnvelopeHelper {
         }
     }
 
+    # SOAP 1.2 section 5.1.1 allows encodingStyle only in application payloads, not protocol fault fields.
+    private static faultAttributes(hash<SoapEnvelopeElement> element) {
+        hash<auto> attributes = XsdBase::getExpandedAttributes(
+            XsdQNameContextHelper::attributes(element.namespaces) + element.value."^attributes^");
+        if (attributes.hasKey(type_qname(SOAP_12_ENV, "encodingStyle"))) {
+            throw SOAP_DESERIALIZATION_ERROR,
+                sprintf("SOAP 1.2 encodingStyle is not allowed on fault %s", element.local);
+        }
+    }
+
     # Validate SOAP 1.2 fault structure while element and QName namespaces are still available.
     private static validateFault12(hash<SoapEnvelopeElement> body) {
         list<hash<SoapEnvelopeElement>> values = children(body.value, body.namespaces, "SOAP Body");
@@ -3779,6 +3881,7 @@ class SoapEnvelopeHelper {
         if (values.size() != 1 || faults.size() != 1) {
             throw SOAP_DESERIALIZATION_ERROR, "a SOAP 1.2 Fault must be the only Body child";
         }
+        faultAttributes(faults[0]);
         list<hash<SoapEnvelopeElement>> fields = children(faults[0].value, faults[0].namespaces, "SOAP Fault");
         hash<string, int> order = {"Code":0,"Reason":1,"Node":2,"Role":3,"Detail":4};
         int previous = -1;
@@ -3787,6 +3890,7 @@ class SoapEnvelopeHelper {
                 throw SOAP_DESERIALIZATION_ERROR, "SOAP 1.2 Fault fields require Code, Reason, Node, Role, Detail order without repetition";
             }
             previous = order{field.local};
+            faultAttributes(field);
             if (field.local == "Code") {
                 validateFaultCode12(field);
             } else if (field.local == "Reason") {
@@ -3796,6 +3900,7 @@ class SoapEnvelopeHelper {
                     if (text.uri != SOAP_12_ENV || text.local != "Text") {
                         throw SOAP_DESERIALIZATION_ERROR, "SOAP fault Reason only accepts SOAP Text children";
                     }
+                    faultAttributes(text);
                     faultLanguage(text, True);
                     faultText(text);
                 }
@@ -3811,7 +3916,7 @@ class SoapEnvelopeHelper {
         }
     }
 
-    private static string faultText(hash<SoapEnvelopeElement> element) {
+    static string faultText(hash<SoapEnvelopeElement> element) {
         auto value = XsdScalarTextHelper::value(element.value, SOAP_DESERIALIZATION_ERROR);
         if (exists value && !value.strp()) {
             throw SOAP_DESERIALIZATION_ERROR, sprintf("SOAP fault %s requires text content", element.local);
@@ -3822,11 +3927,13 @@ class SoapEnvelopeHelper {
     private static validateFaultCode12(hash<SoapEnvelopeElement> code) {
         bool top = True;
         while (True) {
+            faultAttributes(code);
             list<hash<SoapEnvelopeElement>> fields = children(code.value, code.namespaces, "SOAP fault Code/Subcode");
             if (!fields || fields.size() > 2 || fields[0].uri != SOAP_12_ENV || fields[0].local != "Value"
                     || (fields.size() == 2 && (fields[1].uri != SOAP_12_ENV || fields[1].local != "Subcode"))) {
                 throw SOAP_DESERIALIZATION_ERROR, "SOAP fault Code/Subcode requires Value followed by optional Subcode";
             }
+            faultAttributes(fields[0]);
             XsdQNameValue value = XsdQNameValueHelper::resolve(faultText(fields[0]), SOAP_DESERIALIZATION_ERROR,
                 fields[0].namespaces);
             if (top && (value.getNamespaceUri() != SOAP_12_ENV || !inlist(value.getLocalName(),
@@ -3853,6 +3960,133 @@ class SoapEnvelopeHelper {
             }
         }
         return False;
+    }
+}
+
+# Shared protocol metadata and generation; application detail schemas remain owned by the binding.
+class SoapFaultHelper {
+    static hash<SoapFaultInfo> read(string xml, *bool expected) {
+        XsdXmlValue envelope(xml);
+        XsdSoapXmlHelper::validate(envelope, SOAP_DESERIALIZATION_ERROR);
+        bool soap12 = SoapEnvelopeHelper::validate(envelope.getXmlDataView(), expected, True);
+        string uri = soap12 ? SOAP_12_ENV : SOAP_11_ENV;
+        *XsdXmlValue fault;
+        list<XsdXmlValue> headers();
+        foreach XsdXmlValue container in (envelope.getChildValues()) {
+            if (container.getExpandedName() == type_qname(uri, "Header")) {
+                headers = container.getChildValues();
+            } else if (container.getExpandedName() == type_qname(uri, "Body")) {
+                foreach XsdXmlValue value in (container.getChildValues()) {
+                    if (value.getExpandedName() == type_qname(uri, "Fault")) { fault = value; }
+                }
+            }
+        }
+        if (!fault) { throw SOAP_DESERIALIZATION_ERROR, "expected a SOAP Fault in Body"; }
+        hash<string, hash<SoapEnvelopeElement>> fields();
+        foreach hash<SoapEnvelopeElement> field in (SoapEnvelopeHelper::children(fault.getElementData(),
+                XsdBase::getElementNamespaces(fault.getElementData()."^attributes^"), "SOAP Fault")) {
+            if (field.uri == (soap12 ? uri : "")) { fields{field.local} = field; }
+        }
+        list<XsdQNameValue> codes = readCodes(fields{soap12 ? "Code" : "faultcode"}, soap12);
+        XsdQNameValue code = shift codes;
+        hash<SoapFaultInfo> result = <SoapFaultInfo>{"soap12":soap12,"code":code,"subcodes":codes,
+            "envelope":envelope,"fault":fault,"headers":headers};
+        list<hash<SoapEnvelopeElement>> reasons = soap12
+            ? SoapEnvelopeHelper::children(fields.Reason.value, fields.Reason.namespaces, "SOAP Reason")
+            : (fields.faultstring,);
+        foreach hash<SoapEnvelopeElement> reason in (reasons) {
+            result.reasons += <SoapFaultReason>{"text":SoapEnvelopeHelper::faultText(reason),
+                "language":reason.value."^attributes^"."xml:lang"};
+        }
+        foreach string name in (soap12 ? ("Node", "Role") : ("faultactor",)) {
+            if (fields.hasKey(name)) {
+                result{name == "faultactor" ? "actor" : name.lwr()} = XsdSimpleType::normalizeWhiteSpace(
+                    SoapEnvelopeHelper::faultText(fields{name}), "collapse");
+            }
+        }
+        foreach XsdXmlValue field in (fault.getChildValues()) {
+            if (field.getExpandedName() == type_qname(soap12 ? uri : "", soap12 ? "Detail" : "detail")) {
+                result.detail = field;
+            } else if (!soap12 && field.getNamespaceUri()) {
+                result.extensions += field;
+            }
+        }
+        return result;
+    }
+
+    private static list<XsdQNameValue> readCodes(hash<SoapEnvelopeElement> code, bool soap12) {
+        list<XsdQNameValue> result();
+        if (!soap12) {
+            result += XsdQNameValueHelper::resolve(SoapEnvelopeHelper::faultText(code),
+                SOAP_DESERIALIZATION_ERROR, code.namespaces);
+            return result;
+        }
+        while (True) {
+            list<hash<SoapEnvelopeElement>> fields = SoapEnvelopeHelper::children(code.value, code.namespaces,
+                "SOAP fault Code/Subcode");
+            result += XsdQNameValueHelper::resolve(SoapEnvelopeHelper::faultText(fields[0]),
+                SOAP_DESERIALIZATION_ERROR, fields[0].namespaces);
+            if (fields.size() == 1) { return result; }
+            code = fields[1];
+        }
+    }
+
+    # Local declarations avoid collisions with envelope/schema aliases and unprefixed QName scopes.
+    private static hash<auto> qname(XsdQNameValue code) {
+        string uri = code.getNamespaceUri();
+        string prefix = uri == "http://www.w3.org/XML/1998/namespace" ? "xml" : "fc";
+        return {"^attributes^":{"xmlns":""} + (uri ? {"xmlns:" + prefix:uri} : {}),
+            "^value^":(uri ? prefix + ":" : "") + code.getLocalName()};
+    }
+
+    static apply(reference<hash<auto>> envelope, bool soap12, string reason, hash<SoapFaultOptions> options) {
+        if ((soap12 && exists options.actor)
+                || (!soap12 && (options.subcodes || exists options.node || exists options.role))) {
+            throw SOAP_SERIALIZATION_ERROR, "fault options contain fields incompatible with the SOAP version";
+        }
+        list<hash<SoapFaultReason>> reasons = options.reasons
+            ?? (<SoapFaultReason>{"text":reason,"language":soap12 ? "en" : NOTHING},);
+        if (!reasons || (!soap12 && reasons.size() != 1)) {
+            throw SOAP_SERIALIZATION_ERROR, "SOAP faults require reasons; SOAP 1.1 accepts exactly one";
+        }
+        foreach hash<SoapFaultReason> text in (reasons) {
+            if (text.text =~ /[^\x{9}\x{A}\x{D}\x{20}-\x{D7FF}\x{E000}-\x{FFFD}\x{10000}-\x{10FFFF}]/) {
+                throw SOAP_SERIALIZATION_ERROR, "SOAP fault reason must contain XML 1.0 characters";
+            }
+        }
+        hash<auto> current = envelope."soapenv:Envelope"."soapenv:Body"."soapenv:Fault";
+        @assert(exists current, "fault options apply only to a generated SOAP Fault");
+        XsdQNameValue code = options.code
+            ?? new XsdQNameValue(soap12 ? SOAP_12_ENV : SOAP_11_ENV, soap12 ? "e:Sender" : "e:Client");
+        hash<auto> result();
+        if (soap12) {
+            *hash<auto> subcode;
+            for (int i = options.subcodes.size() - 1; i >= 0; --i) {
+                subcode = {"soapenv:Value":qname(options.subcodes[i])}
+                    + (exists subcode ? {"soapenv:Subcode":subcode} : {});
+            }
+            result."soapenv:Code" = {"soapenv:Value":qname(code)}
+                + (exists subcode ? {"soapenv:Subcode":subcode} : {});
+            list<hash<auto>> texts();
+            foreach hash<SoapFaultReason> text in (reasons) {
+                if (!exists text.language) {
+                    throw SOAP_SERIALIZATION_ERROR, "SOAP 1.2 fault reasons require explicit language";
+                }
+                texts += {"^attributes^":{"xml:lang":text.language},"^value^":text.text};
+            }
+            result."soapenv:Reason" = {"soapenv:Text":texts};
+            if (exists options.node) { result."soapenv:Node" = options.node; }
+            if (exists options.role) { result."soapenv:Role" = options.role; }
+            if (current.hasKey("soapenv:Detail")) { result."soapenv:Detail" = current."soapenv:Detail"; }
+        } else {
+            result."^attributes^" = {"xmlns":""};
+            result.faultcode = qname(code);
+            result.faultstring = {"^value^":reasons[0].text}
+                + (exists reasons[0].language ? {"^attributes^":{"xml:lang":reasons[0].language}} : {});
+            if (exists options.actor) { result.faultactor = options.actor; }
+            if (current.hasKey("detail")) { result.detail = current.detail; }
+        }
+        envelope."soapenv:Envelope"."soapenv:Body"."soapenv:Fault" = result;
     }
 }
 
@@ -31908,9 +32142,12 @@ public class WSOperation inherits WSDL::XsdNamedData {
         - \c hdr: hash of HTTP headers
         - \c path: the path part of URL. Used when urlEncoded is defined
         - \c method: the HTTP request method
+        @param options optional code/subcodes, multilingual reasons and version-specific actor/node/role;
+        omitted options retain existing defaults, and incompatible fields raise SOAP-SERIALIZATION-ERROR
     */
     hash<auto> serializeFault(*string fault, string faultmsg, auto h, *hash<auto> header, *string enc,
-            *hash<auto> nsh, *int xml_opts, *string req_soapaction, *string bname) {
+            *hash<auto> nsh, *int xml_opts, *string req_soapaction, *string bname,
+            *hash<SoapFaultOptions> options) {
         XsdIdentityDocumentScope identity_document();
         if (exists fault && !faults{fault}) {
             throw SOAP_SERIALIZATION_ERROR, sprintf("cannot serialize unknown fault %y for operation %y; known "
@@ -31919,8 +32156,9 @@ public class WSOperation inherits WSDL::XsdNamedData {
         OperationalBinding binding = getBinding(bname);
         if (binding instanceof SoapBinding) {
             return cast<SoapBinding>(binding).serializeFaultMessage(self, fault, faultmsg, h, header, enc,
-                nsh, xml_opts, req_soapaction);
+                nsh, xml_opts, req_soapaction, options);
         }
+        if (exists options) { throw "WSDL-BINDING-ERROR", "SOAP fault options require a SOAP binding"; }
         return binding.serializeMessage(self, faults{fault}, False, binding.isSoap12(), h, header, enc, nsh,
             xml_opts, req_soapaction, faultmsg);
     }
@@ -32170,11 +32408,13 @@ public class WSOperation inherits WSDL::XsdNamedData {
         hash<auto> response = operation.serializeHeaderFault(<SoapHeaderFaultInfo>{
             "message": "{urn:session}SessionExpired", "part": "problem", "value": 401}, "Session expired");
         @endcode
+        @param options optional code/subcodes, multilingual reasons and version-specific actor/node/role;
+        omitted options retain existing defaults, and incompatible fields raise SOAP-SERIALIZATION-ERROR
     */
     hash<auto> serializeHeaderFault(hash<SoapHeaderFaultInfo> info, string reason, *string bname,
-            string enc = "UTF-8") {
+            string enc = "UTF-8", *hash<SoapFaultOptions> options) {
         XsdIdentityDocumentScope identity_document();
-        return getSoapBinding(bname).serializeHeaderFaultMessage(self, info, reason, enc);
+        return getSoapBinding(bname).serializeHeaderFaultMessage(self, info, reason, enc, options);
     }
 
     #! decodes a selected headerfault block from a SOAP fault envelope
@@ -33559,9 +33799,12 @@ public class SoapBinding inherits WSDL::OperationalBinding {
         @par Example
         Use WSOperation::serializeFault("Rejected", "Order rejected", detail) to select the operation's binding.
         @since %WSDL 0.5.8
+        @param options optional code/subcodes, multilingual reasons and version-specific actor/node/role;
+        omitted options retain existing defaults, and incompatible fields raise SOAP-SERIALIZATION-ERROR
     */
     hash<auto> serializeFaultMessage(WSOperation op, *string fault, string reason, auto value,
-            *hash<auto> header, string enc = "UTF-8", *hash<auto> nsh, *int xml_opts, *string action) {
+            *hash<auto> header, string enc = "UTF-8", *hash<auto> nsh, *int xml_opts, *string action,
+            *hash<SoapFaultOptions> options) {
         BindingMessageDescription description();
         *WSMessage message;
         if (exists fault) {
@@ -33591,7 +33834,7 @@ public class SoapBinding inherits WSDL::OperationalBinding {
             }
         }
         return serializeMessageWithDescription(op, message, False, isSoap12(), value, header, enc, nsh,
-            xml_opts, action, reason, NOTHING, description);
+            xml_opts, action, reason, NOTHING, description, options);
     }
 
     #! decodes the single detail part of a selected declared fault
@@ -33688,15 +33931,18 @@ public class SoapBinding inherits WSDL::OperationalBinding {
         @throw SOAP-SERIALIZATION-ERROR invalid headerfault value
         @par Example
         Prefer WSOperation::serializeHeaderFault() to select the operation's binding explicitly.
+        @param options optional code/subcodes, multilingual reasons and version-specific actor/node/role;
+        omitted options retain existing defaults, and incompatible fields raise SOAP-SERIALIZATION-ERROR
     */
     hash<auto> serializeHeaderFaultMessage(WSOperation op, hash<SoapHeaderFaultInfo> info, string reason,
-            string enc = "UTF-8") {
+            string enc = "UTF-8", *hash<SoapFaultOptions> options) {
         BindingMessageHeaderDescription fault = getHeaderFaultDescription(info.message, info.part, info.request_header);
         BindingMessageDescription description();
         description.body = new BindingMessageBodyDescription(False);
         description.addHeader(fault);
         return serializeMessageWithDescription(op, NOTHING, False, isSoap12(), NOTHING,
-            {fault.msg.name: {fault.part: info.value}}, enc, NOTHING, NOTHING, NOTHING, reason, NOTHING, description);
+            {fault.msg.name: {fault.part: info.value}}, enc, NOTHING, NOTHING, NOTHING, reason, NOTHING,
+            description, options);
     }
 
     #! decodes one declared headerfault block independently of the normal output message
@@ -33799,7 +34045,8 @@ public class SoapBinding inherits WSDL::OperationalBinding {
 
     private hash<auto> serializeMessageWithDescription(WSOperation op, *WSMessage msg, bool request, bool soap12,
             auto h, *hash<auto> header, string enc, *hash<auto> nsh, *int xml_opts, *string req_soapaction,
-            *string faultmsg, *hash<auto> http_headers, *BindingMessageDescription bmd) {
+            *string faultmsg, *hash<auto> http_headers, *BindingMessageDescription bmd,
+            *hash<SoapFaultOptions> fault_options) {
         hash<auto> rv;
 
         if (request) {
@@ -33827,6 +34074,9 @@ public class SoapBinding inherits WSDL::OperationalBinding {
         XsdQNameXmlOutputHelper output();
         hash<auto> envelope = serializeSoapMessage(op, msg, h, header, nsh, request, soap12, \mpm, faultmsg, bmd, enc);
         envelope = output.prepare(envelope);
+        if (exists fault_options) {
+            SoapFaultHelper::apply(\envelope, soap12, faultmsg, fault_options);
+        }
         try {
             SoapEnvelopeHelper::validate(envelope, soap12);
         } catch (hash<ExceptionInfo> ex) {

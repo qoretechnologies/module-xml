@@ -155,3 +155,53 @@ SOAP 1.1 extension field names remain qualified, so a qualified extension named
 in-scope namespace declarations in `^attributes^` for interpreting QName values and
 qualified extension fields. This namespace context is retained for SOAP 1.2 faults
 as well. Standard field names and the fault exception category remain unchanged.
+
+`WSDLLib::getSOAPFaultInfo(xml, expected_soap12)` provides an explicit protocol
+view. `SoapFaultInfo` resolves Code/Subcode QNames in each Value's own scope,
+retains ordered `SoapFaultReason` text/language pairs, distinguishes absent from
+empty actor/node/role references and Detail containers, and retains header and
+SOAP 1.1 extension elements. URI fields use XSD whitespace normalization without
+resolving relative references; retained XML context supplies their original base.
+Its `envelope` retains the supplied document for exact forwarding, including
+attributes, comments and SOAP 1.1 application Body siblings. The `fault` and
+`detail` subtrees also retain namespace bindings and inherited XML context.
+
+This protocol view does not validate application detail schemas. Declared detail
+and header-fault values continue through the operation's existing explicit fault
+consumers. Ordinary response decoding keeps its existing exception category and
+native representation. An expected SOAP 1.2 version permits the protocol-defined
+SOAP 1.1 VersionMismatch reply; other mismatches reject.
+
+`WSOperation::serializeFault()` and `serializeHeaderFault()` accept a trailing
+`SoapFaultOptions` argument. It selects a QName code, an ordered subcode chain,
+explicit reasons, and the version's actor/node/role fields. Omitted options keep
+existing defaults. SOAP 1.1 requires one reason and rejects subcodes/node/role;
+SOAP 1.2 requires one or more reasons with explicit language and rejects actor.
+Invalid codes, URI/language values, empty reason lists and XML-invalid reason
+characters raise `SOAP-SERIALIZATION-ERROR`. Empty reason text and explicit empty
+language/URI values remain distinguishable from absence.
+
+Fault options are applied after schema detail and header serialization, before the
+shared envelope validator and XML generator. QName fields receive local bindings
+and namespace resets, preserving expanded identities even when a caller's prefix
+collides with an envelope alias. Generated prefixes may differ from input spellings.
+Subcode creation and reading use iterative traversals. Operation metadata and input
+options are never mutated.
+
+```qore
+hash<SoapFaultOptions> fields = <SoapFaultOptions>{
+    "code": new XsdQNameValue(SOAP_12_ENV, "Receiver"),
+    "subcodes": (new XsdQNameValue("urn:orders", "o:Unavailable"),),
+    "reasons": (<SoapFaultReason>{"text": "Stock service unavailable", "language": "en"},
+                <SoapFaultReason>{"text": "Service de stock indisponible", "language": "fr"}),
+    "node": "https://orders.example/soap",
+};
+hash<auto> response = operation.serializeFault("OrderRejected", "Unavailable", detail,
+    NOTHING, NOTHING, NOTHING, NOTHING, NOTHING, "Soap12Binding", fields);
+hash<SoapFaultInfo> received = WSDLLib::getSOAPFaultInfo(response.body, True);
+```
+
+SOAP 1.2 `encodingStyle` is rejected on Fault, Code, Value, Subcode, Reason, Text,
+Node, Role and Detail. It remains permitted on application detail entries and their
+descendants. An application-qualified attribute also named `encodingStyle` is
+independent. Detail retains the normative schema's qualified-attribute restriction.
