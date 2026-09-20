@@ -1160,3 +1160,14 @@ The pinned W3C archive remains unchanged; SOAP 1.2 payloads explicitly select na
 Audit: **18 Pass / 44 N/A / zero Fail**. No C++ or Qore checkout changes, installation or push. P7 continues with processing attributes, roles/actors, mustUnderstand/relay, complete faults and action/media/HTTP requirements; P8–P9 remain open.
 
 See [evidence](soap-envelope-evidence.md), [validation](P7-01-validation.json), [audit](audits/P7-01-soap-envelope.md), [binding derivatives](soap12-binding-derivatives.md), and [implemented design](../../design/soap-envelope-processing.md).
+
+
+## P7-02: SOAP header boolean lexical validation
+
+SOAP 1.1 mustUnderstand and SOAP 1.2 mustUnderstand/relay now validate their version-specific lexical spaces before decoding or emission. Namespace context selects the protocol attributes; unqualified, foreign-version and descendant attributes are not interpreted as header processing directives. Native attribute conversion and raw compatibility fragments cannot bypass validation.
+
+All 21 affected Qore suites pass: **359 cases / 10,957 assertions**. Four independent Python gates pass, including 261 new HTTP exchanges and the pinned W3C attribute-declaration matrix. The new suite passes **3 cases / 927 assertions** with both source and compiled WSDL. Documentation and two-file astparser checks pass without warnings/errors. All 16 corpus commands meet their expected outcomes; six semantic reports match P7-01 apart from the WSDL source hash.
+
+Audit: **18 Pass / 44 N/A / zero Fail**. No C++ or Qore changes, installation or push. P7 continues with explicit node capabilities, roles/actors, mandatory targeted headers, relay, complete faults and HTTP requirements; P8–P9 remain open.
+
+See [evidence](soap-processing-attributes-evidence.md), [validation](P7-02-validation.json), [audit](audits/P7-02-soap-processing-attributes.md), and [implemented design](../../design/soap-envelope-processing.md).

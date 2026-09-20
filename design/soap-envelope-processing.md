@@ -19,6 +19,15 @@ isolation and pass the same header checks in the enclosing namespace context. En
 literal headers without qualified element names cannot produce valid SOAP blocks
 and reject when emitted.
 
+Header-block attributes are identified by their expanded names in the active
+SOAP envelope namespace. SOAP 1.1 `mustUnderstand` accepts `0` and `1` after XML
+whitespace collapse. SOAP 1.2 `mustUnderstand` and `relay` use `xs:boolean` lexical
+forms, including `true` and `false`. Unqualified, foreign-version and descendant
+attributes are not interpreted as these protocol attributes. Serialization checks
+the actual attribute string representation: native booleans and integer zero/one
+produce valid forms, while a floating `1.0` cannot pass as the lexical form `1`.
+These checks validate attribute syntax; they do not execute header application semantics.
+
 `WSDLLib::validateSOAPEnvelope()` exposes the structure check and optional expected
 version for parsed data. `SoapBinding` supplies its immutable version for native
 and retained decoding. The serialized response override only affects output.
