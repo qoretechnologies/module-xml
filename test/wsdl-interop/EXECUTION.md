@@ -9816,3 +9816,34 @@ P8–P9. No Qore edits, installation, push or CI trigger.
 
 See [evidence](soap-handler-fault-evidence.md), [validation](P7-07-validation.json),
 [audit](audits/P7-07-soap-handler-faults.md), and [design](../../design/soap-envelope-processing.md).
+
+
+## P7-08: HTTP fault identity and post-processing charset boundaries
+
+SOAP HTTP faults are recognized through MIME/charset decoding and expanded XML
+names. Valid UTF-16 and whitespace variants work; fault-shaped application data
+retains the original HTTP error. Client and handler reparse generated node XML
+as UTF-8 independently of the original wire charset, preserving exact values.
+
+All **30 affected Qore suites pass: 391 cases / 22,088 assertions**. Nine focused
+SOAP suites also pass compiled: **32 cases / 11,125 assertions**. The new HTTP fault
+suite passes **3 cases / 2,832 assertions**, covering both SOAP versions, source and
+saved service graphs, native/retained values, five encodings, fault identity, HTTP
+status boundaries, malformed documents and recovery after failures.
+
+Nine independent Python gates pass. The new three-test gate checks **1,806 HTTP
+exchanges**: 1,440 encoded fault/success exchanges, 336 transport-error/document
+checks, and 30 external-client/handler encoding checks. Generated fixtures validate
+against unchanged pinned SOAP schemas and exact Unicode value assertions.
+All 16 corpus commands meet their recorded outcomes; all six reports exactly match
+P7-07. Installed Qore is `9d8ce440b`, including the verified strict URI fix.
+Documentation and four-file astparser checks pass without warnings/errors.
+
+Audit: **18 Pass / 44 N/A / zero Fail**. No C++ changes; Valgrind is not required.
+
+P7 remaining HTTP/action/media rules, one-way/empty responses, interruption and
+complete assertion accounting remain open, followed by P8–P9. No Qore edits,
+installation, push or CI trigger.
+
+See [evidence](soap-http-fault-evidence.md), [validation](P7-08-validation.json),
+[audit](audits/P7-08-soap-http-faults.md), and [design](../../design/soap-envelope-processing.md).

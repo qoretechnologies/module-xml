@@ -101,6 +101,10 @@ auto result = sc.call("SubmitDocument", msg);
     @section soapclientrelnotes SoapClient Release Notes
 
     @subsection soapclient_1_0_4 SoapClient v1.0.4
+    - HTTP 400 and 500-series SOAP faults are recognized by namespace and XML structure after MIME/charset
+      decoding; application Fault names, comments and CDATA retain the original HTTP error
+    - header processing preserves UTF-16 and other wire encodings by tagging its generated XML as UTF-8;
+      malformed SOAP error documents report XML/protocol errors rather than relying on a text signature
     - Response headers use an explicit SoapProcessingNode; constructor and per-call capabilities reject unknown
       targeted mandatory headers before body decoding and expose original header outcomes in call information
     - SOAP responses enforce the selected binding version and envelope structure before native or retained decoding;
@@ -663,6 +667,8 @@ auto result = client.callOperation("submit", {"id": "invoice-71"});
 
         int http_status_code;
         hash<auto> rh;
+        *hash<auto> rmsg;
+        *hash<auto> pdata;
         try {
             # only try to read a message body in the response if the operation has an output message
             rh = http_binding ? sendUrl(body, msg.method, request_url, hdr, exists op.output, \info)
@@ -672,12 +678,19 @@ auto result = client.callOperation("submit", {"id": "invoice-71"});
         } catch (hash<ExceptionInfo> ex) {
             # issue #3336 an HTTP status code is not available with all errors (ex: SOCKET-CONNECT-ERROR)
             http_status_code = ex.arg.status_code ?? -1;
-            # allow fault responses returned with a 500-series status code to be processed as a SOAP fault so that error information is returned in the exception
-            # check for SOAP fault: look for Fault element (with or without namespace prefix)
-            # handles: <soap:Fault>, <SOAP-ENV:Fault>, <Fault>, etc.
+            # Decode MIME and character encoding before recognizing a protocol Fault by expanded name.
+            # XML spelling, comments, CDATA and application elements must not determine HTTP error handling.
+            bool fault = False;
             if (ex.err == "HTTP-CLIENT-RECEIVE-ERROR" && op.getBinding(binding) instanceof SoapBinding
-                    && (http_status_code == 400 || (http_status_code >= 500 && http_status_code < 600))
-                    && ex.arg.body =~ /:Fault>|<Fault[> ]/i) {
+                    && (http_status_code == 400 || (http_status_code >= 500 && http_status_code < 600))) {
+                info."response-body" = ex.arg.body;
+                rmsg = WSDLLib::parseMultiPartSOAPMessage(ex.arg);
+                if (rmsg.body && (WSDLLib::isSOAPMessage(rmsg) || WSDLLib::isMtomMessage(rmsg))) {
+                    pdata = WSDLLib::parseSOAPMessage(rmsg, False, True);
+                    fault = hasSoapFault(pdata);
+                }
+            }
+            if (fault) {
                 info."response-body" = ex.arg.body;
                 rh = ex.arg;
             } else {
@@ -699,8 +712,8 @@ auto result = client.callOperation("submit", {"id": "invoice-71"});
                 opts.response_mime_format);
             mime_content = selected_binding.output.isMimeContent(response_format);
         }
-        hash<auto> rmsg = WSDLLib::parseMultiPartSOAPMessage(rh, mime_content);
-        *hash<auto> pdata = WSDLLib::parseSOAPMessage(rmsg, mime_content, selected_binding instanceof SoapBinding);
+        rmsg = rmsg ?? WSDLLib::parseMultiPartSOAPMessage(rh, mime_content);
+        pdata = pdata ?? WSDLLib::parseSOAPMessage(rmsg, mime_content, selected_binding instanceof SoapBinding);
 
         hash<auto> msg_hash = {
             "code": http_status_code,
@@ -721,12 +734,36 @@ auto result = client.callOperation("submit", {"id": "invoice-71"});
             typed_info."soap-processing" = processed;
             info = typed_info;
             response_xml = processed.application_message.getXml();
-            pdata = WSDLLib::parseSOAPMessage(rmsg + {"body":response_xml}, False, True);
+            # Node output is UTF-8 XML, independent of the original HTTP/MIME root charset.
+            pdata = WSDLLib::parseSOAPMessage(rmsg + {"body":response_xml,
+                "content-type":"application/xml;charset=UTF-8"}, False, True);
         }
         if (opts.xml_values && op.output) {
             return op.deserializeXmlResponse(response_xml ?? WSDLLib::getXmlMessageText(rmsg), binding, rmsg.parts);
         }
         return op.deserializeResponse(pdata, binding, opts.preserve_types ?? False, opts.response_mime_format ?? response_format);
+    }
+
+    # Recognition only: normal SOAP processing still validates the complete envelope and fault grammar.
+    private static bool hasSoapFault(hash<auto> document) {
+        hash<auto> expanded = WSDL::XsdBase::expandElementNamespaces(document);
+        foreach string uri in (SOAP_11_ENV, SOAP_12_ENV) {
+            string prefix = "{" + uri + "}";
+            auto root = expanded{prefix + "Envelope"};
+            list<auto> envelopes = root.typeCode() == NT_LIST ? root : (root,);
+            foreach auto envelope in (envelopes) {
+                foreach string key in (keys envelope) {
+                    # Ordered parsing gives nonadjacent repeated elements an occurrence suffix.
+                    if (key != prefix + "Body" && !key.startsWith(prefix + "Body^")) { continue; }
+                    auto body = envelope{key};
+                    list<auto> bodies = body.typeCode() == NT_LIST ? body : (body,);
+                    foreach auto value in (bodies) {
+                        if (value.typeCode() == NT_HASH && value.hasKey(prefix + "Fault")) { return True; }
+                    }
+                }
+            }
+        }
+        return False;
     }
 
     private static SoapProcessingNode getProcessingNode(auto supplied) {

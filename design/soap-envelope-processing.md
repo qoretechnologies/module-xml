@@ -235,3 +235,21 @@ XML 1.0's character repertoire appear as visible `\u{XXXX}` escapes. This render
 applies only to generated diagnostic text; application payloads and original error
 logging are unchanged. Empty text, ordinary Unicode, tabs and newlines retain their
 values. Character traversal is linear and uses a Unicode character iterator.
+
+For HTTP 400 and 500-series errors on a SOAP binding, SoapClient normalizes the MIME
+root and decodes its charset before recognizing a Fault by expanded name under a
+matching SOAP Envelope and Body. It reuses the parsed message for ordinary processing,
+which still validates envelope structure, fault fields and header capabilities.
+Recognition accounts for repeated Body occurrences so an invalid envelope containing
+a Fault reaches protocol validation. Prefix spelling and XML whitespace do not affect
+recognition. Application names, comments, CDATA and Fault elements outside Body do not
+replace the original HTTP error. Malformed SOAP/XML error entities report the parsing
+or protocol error; non-SOAP entities and other HTTP status errors retain the original
+transport exception. HTTP WSDL bindings retain their independent error behavior.
+
+SoapProcessingNode emits UTF-8 XML after selecting application-visible headers. Both
+SoapClient and SoapHandler reparse that generated document with a UTF-8 content type,
+while retaining original HTTP/MIME metadata and attachment entities separately. The
+wire charset applies to incoming bytes only; it does not describe the generated XML.
+This distinction applies to ordinary messages and faults, including native and retained
+values. No transport metadata or shared service graph is rewritten.

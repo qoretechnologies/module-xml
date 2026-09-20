@@ -1,0 +1,160 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires ../qlib/WSDL.qm
+%requires ../qlib/SoapClient.qm
+%requires ../qlib/SoapHandler.qm
+%requires HttpServer
+%exec-class SoapHttpFaultTest
+
+class SoapFaultReplyHandler inherits AbstractHttpRequestHandler {
+    private { Queue replies; }
+    constructor(Queue replies) { self.replies = replies; }
+    hash<HttpResponseInfo> handleRequest(hash<auto> cx, hash<auto> hdr, *data body) {
+        return replies.get(10000);
+    }
+}
+
+class SoapHttpFaultTest inherits QUnit::Test {
+    constructor() : Test("SOAP HTTP fault identity and encoding", "1.0") {
+        addTestCase("HTTP faults recognize XML identity after charset decoding and recover", \faults());
+        addTestCase("Fault-shaped application data retains the original HTTP error", \nonFaults());
+        addTestCase("Handlers decode node output independently of the request charset", \handlerEncoding());
+        set_return_value(main());
+    }
+    private static WebService service(string state = "source") {
+        WebService ws(ReadOnlyFile::readTextFile(get_script_dir() + "/wsdl-interop/soap-envelope-peer/contract.wsdl"));
+        if (state == "saved") { ws = Serializable::deserialize(ws.serialize()); }
+        if (state == "data") { ws = Serializable::deserialize(ws.serializeToData()); }
+        return ws;
+    }
+    private static string envelope(bool soap12, string payload, string header = "") {
+        return '<s:Envelope xmlns:s="' + (soap12 ? SOAP_12_ENV : SOAP_11_ENV) + '">'
+            + header + '<s:Body>' + payload + '</s:Body></s:Envelope>';
+    }
+    private static string fault(bool soap12) {
+        return envelope(soap12, '<s:Fault>' + (soap12
+            ? '<s:Code><s:Value>s:Receiver</s:Value></s:Code><s:Reason><s:Text xml:lang="fr">refusé</s:Text></s:Reason>'
+            : '<faultcode>s:Server</faultcode><faultstring>refusé</faultstring>') + '</s:Fault>');
+    }
+    private static string success(bool soap12) {
+        return envelope(soap12, '<t:value xmlns:t="urn:soap-envelope-test">réponse</t:value>');
+    }
+    private static hash<HttpResponseInfo> reply(bool soap12, string xml, string encoding, int status) {
+        return <HttpResponseInfo>{"code":status,"hdr":{"Content-Type":(soap12 ? "application/soap+xml" : "text/xml")
+            + ';charset="' + encoding + '"'},
+            "body":binary(convert_encoding((encoding == "UTF-16" ? "\uFEFF" : "") + xml, encoding))};
+    }
+    private nothing recover(SoapClient client, Queue replies, bool soap12, bool retained, string encoding = "UTF-8") {
+        replies.push(reply(soap12,success(soap12),encoding,200));
+        hash<auto> info;
+        auto result = client.callOperation("echo", {"body":"invoice-71"}, {"xml_values":retained}, \info);
+        assertEq(200,info."response-headers".status_code);
+        assertEq("réponse",retained ? result.body.body.getElementData()."^value^" : result);
+    }
+    private faults() {
+        foreach string state in ("source", "saved", "data") {
+            WebService ws = service(state);
+            foreach bool soap12 in (False, True) {
+                foreach bool retained in (False, True) {
+                    Queue replies(); HttpServer server(); on_exit server.stop();
+                    server.setDefaultHandler("faults",new SoapFaultReplyHandler(replies)); server.addListener(0);
+                    SoapClient client({"wsdl":ws,"port":soap12 ? "Port12" : "Port11",
+                        "url":sprintf("http://127.0.0.1:%d/service",server.getListenerInfo(0).port),"timeout":10000});
+                    foreach string encoding in ("UTF-8", "UTF-16", "UTF-16LE", "UTF-16BE", "ISO-8859-1") {
+                        foreach int status in (200,400,500,503) {
+                            foreach bool space in (False,True) {
+                                string xml = space ? replace(fault(soap12),'Fault>','Fault >') : fault(soap12);
+                                replies.push(reply(soap12,xml,encoding,status));
+                                hash<auto> info;
+                                assertThrows("SOAP-SERVER-FAULT-RESPONSE", \client.callOperation(),
+                                    ("echo",{"body":"invoice-71"},{"xml_values":retained},\info));
+                                assertEq(status,info."response-headers".status_code);
+                                assertTrue(exists info."response-body");
+                                recover(client,replies,soap12,retained,encoding);
+                            }
+                        }
+                    }
+                    assertEq(0,replies.size());
+                }
+            }
+        }
+    }
+    private nonFaults() {
+        foreach bool soap12 in (False,True) {
+            foreach bool retained in (False,True) {
+                WebService ws = service();
+                Queue replies(); HttpServer server(); on_exit server.stop();
+                server.setDefaultHandler("faults",new SoapFaultReplyHandler(replies)); server.addListener(0);
+                SoapClient client({"wsdl":ws,"port":soap12 ? "Port12" : "Port11",
+                    "url":sprintf("http://127.0.0.1:%d/service",server.getListenerInfo(0).port),"timeout":10000});
+                foreach string xml in (success(soap12),
+                        envelope(soap12,'<t:Fault xmlns:t="urn:application">unavailable</t:Fault>'),
+                        envelope(soap12,'<s:Fault xmlns:s="urn:application">unavailable</s:Fault>'),
+                        envelope(soap12,'<s:fault/>'),
+                        envelope(soap12,'<t:value xmlns:t="urn:soap-envelope-test"><![CDATA[<Fault>]]></t:value>'),
+                        envelope(soap12,'<!-- <s:Fault> --><t:value xmlns:t="urn:soap-envelope-test">value</t:value>'),
+                        envelope(soap12,'<t:value xmlns:t="urn:soap-envelope-test">value</t:value>',
+                            '<s:Header><s:Fault>application header</s:Fault></s:Header>'),
+                        replace(fault(soap12),'s:Body','x:Body xmlns:x="urn:application"'),
+                        '<html><Fault>Gateway unavailable</Fault></html>') {
+                    # The wrong-Body case needs separate valid opening/closing tag spelling.
+                    xml = replace(xml,'</x:Body xmlns:x="urn:application">','</x:Body>');
+                    replies.push(reply(soap12,xml,"UTF-8",500));
+                    hash<auto> info;
+                    assertThrows("HTTP-CLIENT-RECEIVE-ERROR",\client.callOperation(),
+                        ("echo",{"body":"invoice-71"},{"xml_values":retained},\info));
+                    assertEq(500,info."response-headers".status_code);
+                    recover(client,replies,soap12,retained);
+                }
+                foreach hash<auto> row in (
+                        {"xml":fault(soap12),"code":404,"type":"text/xml","error":"HTTP-CLIENT-RECEIVE-ERROR"},
+                        {"xml":fault(soap12),"code":500,"type":"text/plain","error":"HTTP-CLIENT-RECEIVE-ERROR"},
+                        {"xml":"not XML","code":500,"type":"text/plain","error":"HTTP-CLIENT-RECEIVE-ERROR"},
+                        {"xml":"<broken>","code":500,"type":"text/xml","error":"PARSE-XML-EXCEPTION"},
+                        {"xml":replace(fault(soap12),'<s:Body>','<s:Body/><s:Header/><s:Body>'),
+                            "code":500,"type":"text/xml","error":"SOAP-DESERIALIZATION-ERROR"},
+                        {"xml":'<!DOCTYPE s:Envelope>' + fault(soap12),"code":500,"type":"text/xml",
+                            "error":"SOAP-DESERIALIZATION-ERROR"}) {
+                    replies.push(<HttpResponseInfo>{"code":row.code,"body":row.xml,"hdr":{"Content-Type":row.type}});
+                    hash<auto> info;
+                    assertThrows(row.error,\client.callOperation(),
+                        ("echo",{"body":"invoice-71"},{"xml_values":retained},\info));
+                    assertEq(row.code,info."response-headers".status_code);
+                    recover(client,replies,soap12,retained);
+                }
+            }
+        }
+    }
+    private handlerEncoding() {
+        foreach string state in ("source", "saved", "data") {
+            WebService ws = service(state);
+            foreach bool soap12 in (False,True) {
+                foreach bool retained in (False,True) {
+                    Queue received();
+                    SoapHandler handler(new PermissiveAuthenticator());
+                    code<auto(hash<auto>,auto)> callback = auto sub(hash<auto> cx, auto value) {
+                        received.push(retained ? value.body.body.getElementData()."^value^" : value);
+                        return {"body":retained ? value.body.body : value};
+                    };
+                    handler.addMethod(ws,ws.getOperation("echo"),callback,NOTHING,NOTHING,NOTHING,
+                        "service",NOTHING,NOTHING,soap12 ? "B12" : "B11",NOTHING,retained);
+                    HttpServer server(); on_exit server.stop();
+                    server.setDefaultHandler("encoding",handler); server.addListener(0);
+                    HTTPClient client({"url":sprintf("http://127.0.0.1:%d/service",server.getListenerInfo(0).port),
+                        "timeout":10000});
+                    foreach string encoding in ("UTF-8", "UTF-16", "UTF-16LE", "UTF-16BE", "ISO-8859-1") {
+                        hash<HttpResponseInfo> request = reply(soap12,success(soap12),encoding,200);
+                        hash<auto> info;
+                        string xml = client.post("",request.body,request.hdr,\info);
+                        assertEq(200,info."response-headers".status_code);
+                        assertEq("réponse",received.get(10000));
+                        assertEq("réponse",ws.getOperation("echo").deserializeResponse(parse_xml(xml),soap12 ? "B12" : "B11"));
+                    }
+                }
+            }
+        }
+    }
+}
