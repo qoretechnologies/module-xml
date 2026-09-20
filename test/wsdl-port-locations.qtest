@@ -1,0 +1,178 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires ../qlib/WSDL.qm
+%requires ../qlib/SoapClient.qm
+%requires ../qlib/SoapHandler.qm
+%requires ../qlib/SoapDataProvider
+%requires HttpServer
+%exec-class PortLocationsTest
+
+string sub portXmlAttribute(string value) {
+    return replace(replace(replace(value, "&", "&amp;"), '"', "&quot;"), "<", "&lt;");
+}
+string sub portContract(string address, string protocol = "http") {
+    string uri = protocol == "http" ? HTTP_NS : protocol == "12" ? SOAP_12_NS : SOAP_11_NS;
+    string binding = protocol == "http" ? '<p:binding verb="GET"/>'
+        : '<p:binding style="rpc" transport="http://schemas.xmlsoap.org/soap/http"/>';
+    string operation = protocol == "http" ? '<p:operation location="send"/>' : '<p:operation soapAction="urn:send"/>';
+    string input = protocol == "http" ? '<p:urlEncoded/>' : '<p:body use="literal" namespace="urn:port-location"/>';
+    string output = protocol == "http" ? '<m:mimeXml part="result"/>' : '<p:body use="literal" namespace="urn:port-location"/>';
+    return '<w:definitions xmlns:w="http://schemas.xmlsoap.org/wsdl/" xmlns:p="'+uri+'"'
+        +' xmlns:m="http://schemas.xmlsoap.org/wsdl/mime/" xmlns:t="urn:port-location"'
+        +' xmlns:x="http://www.w3.org/2001/XMLSchema" targetNamespace="urn:port-location">'
+        +'<w:message name="In"><w:part name="id" type="x:string"/></w:message>'
+        +'<w:message name="Out"><w:part name="result" type="x:string"/></w:message>'
+        +'<w:portType name="P"><w:operation name="send"><w:input message="t:In"/><w:output message="t:Out"/></w:operation></w:portType>'
+        +'<w:binding name="B" type="t:P">'+binding+'<w:operation name="send">'+operation
+        +'<w:input>'+input+'</w:input><w:output>'+output+'</w:output></w:operation></w:binding>'
+        +'<w:service name="S"><w:port name="Endpoint" binding="t:B"><p:address location="'
+        +portXmlAttribute(address)+'"/></w:port></w:service></w:definitions>';
+}
+string sub portRoot() {
+    return '<w:definitions xmlns:w="http://schemas.xmlsoap.org/wsdl/" targetNamespace="urn:port-root">'
+        +'<w:import namespace="urn:port-location" location="../deps/start.wsdl"/></w:definitions>';
+}
+
+class PortLocationPeer inherits AbstractHttpRequestHandler {
+    private { hash<string,string> documents; Queue paths; SoapHandler soap; }
+    constructor(hash<string,string> documents, Queue paths) {
+        self.documents=documents;self.paths=paths;soap=new SoapHandler(new PermissiveAuthenticator());
+    }
+    registerService(WebService ws, Queue values) {
+        code<auto(hash<auto>, auto)> callback=auto sub(hash<auto> cx, auto value) {
+            values.push(value); return {"result":"received"};
+        };
+        soap.addMethod(ws,ws.getOperation("send"),callback,NOTHING,NOTHING,NOTHING,
+            NOTHING,NOTHING,NOTHING,"B");
+    }
+    hash<HttpResponseInfo> handleRequest(hash<auto> cx, hash<auto> hdr, *data body) {
+        paths.push(cx.raw_path);
+        if (cx.raw_path=="/start.wsdl") {
+            return makeResponse({"Location":"/catalog/root.wsdl"},302,"");
+        }
+        if (cx.raw_path=="/deps/start.wsdl") {
+            return makeResponse({"Location":"/effective/v2/service.wsdl"},302,"");
+        }
+        if (documents.hasKey(cx.raw_path)) {
+            return makeResponse({"Content-Type":"text/xml;charset=UTF-8"},200,documents{cx.raw_path});
+        }
+        return new hash<HttpResponseInfo>(soap.handleRequest(cx,hdr,body));
+    }
+}
+
+class PortLocationsTest inherits QUnit::Test {
+    constructor() : Test("WSDL port document locations","1.0") {
+        addTestCase("Address references use the containing document URI",\references());
+        addTestCase("Imported services use their own document context",\imports());
+        addTestCase("Redirected imports work through clients handlers providers and saved services",\http());
+        addTestCase("Inline context and explicit endpoint override remain distinct",\inline());
+        set_return_value(main());
+    }
+    private references() {
+        string base="https://example.invalid/contracts/service.wsdl?old=1";
+        foreach string protocol in ("http","11","12") {
+            foreach hash<string,string> row in (
+                    {"ref":"../api/","uri":"https://example.invalid/api/"},
+                    {"ref":"endpoint","uri":"https://example.invalid/contracts/endpoint"},
+                    {"ref":"/root/","uri":"https://example.invalid/root/"},
+                    {"ref":"//other.invalid/api/","uri":"https://other.invalid/api/"},
+                    {"ref":"?rev=2","uri":"https://example.invalid/contracts/service.wsdl?rev=2"},
+                    {"ref":"?","uri":"https://example.invalid/contracts/service.wsdl?"},
+                    {"ref":"","uri":base},
+                    {"ref":"#part","uri":base+"#part"},
+                    {"ref":"../č/a b/","uri":"https://example.invalid/%C4%8D/a%20b/"},
+                    {"ref":"../%2e/a%2Fb","uri":"https://example.invalid/%2e/a%2Fb"},
+                    {"ref":"https://other.invalid/fixed/","uri":"https://other.invalid/fixed/"}) {
+                string xml=portContract(row.ref,protocol);
+                WebService original(xml,{"document_location":base});
+                foreach WebService ws in (original,Serializable::deserialize(original.serialize()),
+                        Serializable::deserialize(original.serializeToData())) {
+                    assertEq(row.uri,ws.getService("S").port.Endpoint.address);
+                    assertEq(xml,ws.getWSDL());
+                    assertEq(base,ws.document_location);
+                }
+            }
+        }
+    }
+    private imports() {
+        string base="https://example.invalid/catalog/root.wsdl";
+        string imported="https://example.invalid/deps/start.wsdl";
+        foreach string protocol in ("http","11","12") {
+            WebService original(portRoot(),{"document_location":base,"async_only":True,
+                "xsd_cache":{imported:portContract("api/",protocol)}});
+            foreach WebService ws in (original,Serializable::deserialize(original.serialize()),
+                    Serializable::deserialize(original.serializeToData())) {
+                assertEq("https://example.invalid/deps/api/",ws.getService("S").port.Endpoint.address);
+                assertEq(base,ws.document_location);
+                assertEq(portRoot(),ws.getWSDL());
+            }
+        }
+    }
+    private static WebService asyncLoad(string location) {
+        WsdlPollOperation operation(location,{"timeout":10000,"connect_timeout":10000});
+        on_error operation.abort();
+        date deadline=now_us()+30s;
+        while (!operation.goalReached()) {
+            *hash<SocketPollInfo> info=operation.continuePoll();
+            if (info) {
+                int remaining=(deadline-now_us()).durationMilliseconds();
+                if (remaining<=0) { throw "TEST-ERROR","WSDL async retrieval deadline exceeded"; }
+                Socket::poll((info,),remaining);
+            }
+        }
+        return operation.getOutput();
+    }
+    private http() {
+        foreach string protocol in ("http","11","12") {
+        foreach string mode in ("sync","async","client") {
+            HttpServer server();on_exit server.stop();Queue paths();Queue values();
+            PortLocationPeer peer({"/catalog/root.wsdl":portRoot(),
+                "/effective/v2/service.wsdl":portContract("../api/",protocol)},paths);
+            server.setDefaultHandler("ports",peer);server.addListener(0);
+            string origin=sprintf("http://127.0.0.1:%d",server.getListenerInfo(0).port);
+            WebService original;
+            if (mode=="async") {
+                original=asyncLoad(origin+"/start.wsdl");
+            } else if (mode=="client") {
+                SoapClient loader({"wsdl":origin+"/start.wsdl","timeout":10000,"connect_timeout":10000});
+                original=loader.getWebService();
+                assertEq(origin+"/effective/api/",loader.getInfo().url);
+            } else {
+                original=WSDLLib::getWebServiceFromUrl(origin+"/start.wsdl",
+                    new HTTPClient({"timeout":10000,"connect_timeout":10000}));
+            }
+            peer.registerService(original,values);
+            foreach string path in ("/start.wsdl","/catalog/root.wsdl","/deps/start.wsdl","/effective/v2/service.wsdl") {
+                assertEq(path,paths.get(10000));
+            }
+            foreach WebService ws in (original,Serializable::deserialize(original.serialize()),
+                    Serializable::deserialize(original.serializeToData())) {
+                string address=origin+"/effective/api/";
+                assertEq(address,ws.getService("S").port.Endpoint.address);
+                SoapClient client({"wsdl":ws,"timeout":10000,"connect_timeout":10000});
+                assertEq(address,client.getInfo().url);
+                SoapRequestDataProvider provider(ws,client,ws.getOperation("send"));
+                assertEq(protocol=="http" ? {"result":"received"} : "received",
+                    provider.doRequest({"id":"invoice-71"}));
+                assertEq(protocol=="http" ? {"id":"invoice-71"} : "invoice-71",values.get(10000));
+                assertEq(protocol=="http" ? "/effective/api/send?id=invoice-71" : "/effective/api",paths.get(10000));
+            }
+            assertEq(0,paths.size());
+            auto saved=original.serialize();server.stop();
+            WebService restored=Serializable::deserialize(saved);
+            assertEq(origin+"/effective/api/",restored.getService("S").port.Endpoint.address);
+        }
+        }
+    }
+    private inline() {
+        string xml=portContract("../api/");
+        WebService ws(xml);
+        assertEq("../api/",ws.getService("S").port.Endpoint.address);
+        SoapClient client({"wsdl":ws,"url":"http://example.invalid/override/"});
+        assertEq("http://example.invalid/override/",client.getInfo().url);
+        assertEq(xml,ws.getWSDL());
+    }
+}

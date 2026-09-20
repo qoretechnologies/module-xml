@@ -46,6 +46,20 @@ corresponding directory through its existing output reference. For example,
 `/current.wsdl` redirecting to `/v2/root.wsdl` causes a relative `types.xsd`
 import to resolve to `/v2/types.xsd`. Inline XML has no retrieval metadata.
 
+Service parsing receives the URI of the document declaring each service, including
+imported documents. It resolves port address references with Qore `resolve_url()`
+and `RESOLVE_URL_ENCODE`. This converts URI characters such as spaces and Unicode
+to their encoded form while preserving existing escapes and explicit empty queries.
+The source WSDL remains unchanged. Imported services use their own effective
+retrieval URI, not the root document's URI; saved document contexts reproduce the
+same addresses without fetching again. For example, an address `../api/` declared
+at `https://partner.example/contracts/v2/service.wsdl` becomes
+`https://partner.example/contracts/api/`.
+
+Inline sources without a document URI retain their lexical port addresses. An
+explicit SoapClient `url` option still selects the deployment endpoint. No
+document base is invented from the client's retrieval configuration.
+
 The loaders decode resource bytes using [RFC 7303 section 3.2](https://www.rfc-editor.org/rfc/rfc7303#section-3.2)
 and XML encoding detection: a BOM takes precedence, followed by an explicit
 transport charset, followed by the XML declaration/signature and UTF-8 default.

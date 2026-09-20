@@ -4,7 +4,7 @@ Copyright (C) 2026 Qore Technologies, s.r.o.
 
 Execution started 2026-09-07 on `develop` at `c81b2db`, with a clean working tree.
 The authoritative scope and acceptance criteria remain in [PLAN.md](PLAN.md).
-P1–P5 acceptance is complete under the recorded explicit native/retained-XML contracts; P6 binding/component implementation is in progress. No scope reductions or workarounds are approved.
+P1–P5 acceptance is complete under the recorded explicit native/retained-XML contracts; P6 binding/component acceptance is complete within the [approved optional-transport scope](P6-acceptance.md). P7 SOAP processing is next. No workarounds are approved.
 
 ## P1: corpus provenance and adjudication (complete)
 
@@ -9637,3 +9637,14 @@ All 45 affected Qore suites pass: **1,698 cases / 55,868 assertions**. All 17 in
 The full audit reports **18 Pass / 44 N/A / zero Fail**. This increment changes no C++, Qore source or installation and is committed only to the main `develop` checkout. P6 remains open for final binding acceptance; P7–P9 are incomplete. No push until development completion.
 
 See [evidence](http-request-url-evidence.md), [validation](P6-44-validation.json), [audit](audits/P6-44-http-request-url.md), and [design](../../design/wsdl-http-request-url.md).
+
+
+## P6-45: Declaring-document service port addresses and P6 acceptance
+
+Service port addresses now resolve with Qore against the URI of the WSDL document declaring the service. Imported services use their own effective retrieval URI, including redirects. Saved sources reproduce the same address without network access; inline sources without document context retain the declared reference, and explicit client endpoint overrides remain authoritative.
+
+All 203 phase-boundary Qore suites pass: **3,257 cases / 136,416 assertions**. All 18 independent Python gates and 16 corpus commands meet their expected outcomes. The new port-address suite passes 4 cases / 519 assertions in both source and compiled WSDL; its loopback loaders cover 63 HTTP exchanges, while the independent Python peer covers another 28. Six corpus reports match P6-44 except for the WSDL source hash. Documentation and three-file astparser checks pass without warnings/errors.
+
+The full audit reports **18 Pass / 44 N/A / zero Fail**. P6 acceptance is complete within the approved optional-transport scope; P7 SOAP processing is next, followed by P8 attachments/encoding and P9 CI/runtime acceptance. No C++ or Qore changes, installation or push.
+
+See [port evidence](port-locations-evidence.md), [validation](P6-45-validation.json), [audit](audits/P6-45-port-locations.md), [P6 acceptance](P6-acceptance.md), and [implemented location design](../../design/wsdl-location-resolution.md).
