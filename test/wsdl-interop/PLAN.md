@@ -1408,3 +1408,31 @@ accounting remain open, followed by P8–P9. No Qore edits, installation, push o
 See [evidence](soap-action-evidence.md), [validation](P7-10-validation.json),
 [audit](audits/P7-10-soap-actions.md), [CXF source adjudication](cxf-derived/README.md),
 and [design](../../design/soap-envelope-processing.md).
+
+## P7-11: SOAP HTTP media and method boundaries
+
+SOAP adapters explicitly validate transport/root media and charset support. Handlers
+return plain HTTP 400/405/415 for transport failures and preserve SOAP faults for
+recognized-envelope errors. Allow reflects SOAP and explicit HTTP routes; response
+validation precedes header callbacks. Invalid request encoding cannot mask the
+original error through logging. See [evidence](soap-http-binding-evidence.md).
+
+The **217-suite broad Qore gate passes: 3,309 cases / 152,203 assertions**.
+The standards audit then fixed mandatory-header precedence. On that final source,
+**35 affected Qore suites pass: 411 cases / 24,802 assertions**.
+Thirteen focused SOAP suites also pass compiled: **43 cases / 13,735 assertions**.
+The new media/transport suite passes **2 cases / 137 assertions**; mandatory-header
+priority passes **2 cases / 246 assertions**.
+
+All fourteen independent Python gates pass on the final source. The new media gate
+covers **1,167 HTTP exchanges**; the priority gate adds **192 exchanges** (72 handler,
+120 client). Tests check statuses, media/Allow headers, WSDL retrieval, HTTP routes,
+invalid bytes, callback counts and recovery across source/object/data service graphs
+and native/retained values. All 16 corpus commands meet their recorded outcomes;
+all six semantic reports match P7-10 except for the WSDL source digest. Installed
+Qore is `9d8ce440b`. Documentation and seven-file AST checks pass without warnings/errors.
+
+Audit: **18 Pass / 44 N/A / zero Fail**. No C++ changes; Valgrind is not required.
+
+P7 remains open for transport interruption, complete applicable assertion accounting
+and SOAP-response GET MEP applicability/API review; P8–P9 follow. No push or CI trigger.

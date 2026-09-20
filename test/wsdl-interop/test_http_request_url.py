@@ -72,7 +72,8 @@ def origin(name, received, behavior=None, *, content_type="text/xml;charset=UTF-
             try:
                 status, headers, output = behavior(record) if behavior else (200, {}, f"<result>{name}</result>".encode())
                 self.send_response(status)
-                self.send_header("Content-Type", content_type)
+                if content_type is not None:
+                    self.send_header("Content-Type", content_type)
                 self.send_header("Content-Length", str(len(output)))
                 for key, value in headers.items():
                     self.send_header(key, value)

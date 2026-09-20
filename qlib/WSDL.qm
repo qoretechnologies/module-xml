@@ -207,6 +207,11 @@ module WSDL {
     @section wsdlrelnotes WSDL Module Release Notes
 
     @subsection wsdl_0_5_8 WSDL v0.5.8
+    - unknown targeted mandatory headers take precedence over SOAP Body content/fault errors;
+      complete body validation still occurs before understood header callbacks
+    - explicit SOAP transport validation checks root media, XOP type and charset support;
+      application/soap+xml requires a SOAP 1.2 envelope, and generic XML representations remain supported
+    - validateSOAPEnvelope() can validate response-version negotiation before header callbacks
     - SOAP 1.1 request actions are quoted; SOAP 1.2 requests use only the media-type action parameter,
       validated as an absolute URI; response serialization does not copy the request action
     - WSDLLib::getSOAPAction() decodes version-specific request metadata while preserving URI identity
@@ -1657,15 +1662,20 @@ public class WSDLLib {
     #! takes a hash representation of a SOAP message and handles multipart messages, checks the content-type, and handles hrefs in the message
     /** @param msg the transport message, including body and Qore HTTP content-type metadata
         @param mime_content True for an HTTP mime:content binding whose entire body must remain intact
+        @param soap_envelope True to require supported SOAP transport and root media types
         @return normalized message metadata and body; multipart root and attachment bodies are binary,
         \c parts is keyed by unbracketed Content-ID, and \c unidentified_parts retains parts without identifiers
         @throw SOAP-MESSAGE-ERROR malformed MIME, missing root, repeated part identifier or conflicting root media type
+        @throw SOAP-MEDIA-TYPE-ERROR unsupported SOAP transport or root media when soap_envelope is True
         @note MIME content may itself be multipart; True prevents interpreting it as SOAP attachments.
         @par Example
         An HTTP operation accepting an uploaded MIME document passes True to retain that document's boundaries.
         @since %WSDL 0.5.8 supports explicit HTTP MIME content dispatch
     */
-    static hash<auto> parseMultiPartSOAPMessage(hash<auto> msg, bool mime_content = False) {
+    static hash<auto> parseMultiPartSOAPMessage(hash<auto> msg, bool mime_content = False, bool soap_envelope = False) {
+        if (mime_content && soap_envelope) {
+            throw "SOAP-MESSAGE-ERROR", "opaque MIME content cannot also be a SOAP envelope representation";
+        }
         if (!mime_content) {
             *string content_type = msg."_qore_orig_content_type" ?? msg."content-type";
             *WsdlMediaType media = WsdlMediaType::read(content_type);
@@ -1673,14 +1683,21 @@ public class WSDLLib {
                 throw "SOAP-MESSAGE-ERROR", "invalid transport Content-Type";
             }
             if ((media && media.major == "multipart") || exists msg."_qore_multipart") {
-                return WsdlMultipartHelper::read(msg, media);
+                if (soap_envelope && (media ? media.minor != "related" : msg."_qore_multipart" != "related")) {
+                    throw "SOAP-MEDIA-TYPE-ERROR", "SOAP multipart transport requires multipart/related";
+                }
+                hash<auto> normalized = WsdlMultipartHelper::read(msg, media);
+                if (soap_envelope) { validateSOAPMediaType(normalized); }
+                return normalized;
             }
         }
-        return {
+        hash<auto> normalized = {
             "content-type": msg."_qore_orig_content_type" ?? msg."content-type",
             "header": msg.header,
             "body": msg.body,
         };
+        if (soap_envelope) { validateSOAPMediaType(normalized); }
+        return normalized;
     }
 
     #! Checks if an element is an xop:Include element by verifying the namespace
@@ -1870,6 +1887,45 @@ public class WSDLLib {
         return media.parameter(name.lwr(), "SOAP-MESSAGE-ERROR");
     }
 
+    #! validates the media type of a normalized SOAP XML root
+    /** @param message transport metadata returned by parseMultiPartSOAPMessage()
+        @param soap12 optional actual envelope version, after envelope validation
+        @return the normalized XML media type, excluding parameters and the XOP wrapper
+        @throw SOAP-MESSAGE-ERROR malformed media syntax, empty charset or ambiguous charset/type parameters
+        @throw SOAP-MEDIA-TYPE-ERROR unsupported root media/charset or a SOAP 1.1 envelope labeled application/soap+xml
+        @note text/xml and application/xml retain the generic XML representation. application/soap+xml
+        identifies SOAP 1.2 only. XOP supplies the XML media type through its required type parameter.
+        This validates transport representation; validateSOAPEnvelope() validates the XML protocol containers.
+        @par Example
+        Validate a normalized invoice request before XML decoding, then pass its validated envelope version
+        to enforce application/soap+xml version identity before invoking header processors.
+        @since %WSDL 0.5.8
+    */
+    static string validateSOAPMediaType(hash<auto> message, *bool soap12) {
+        *string content_type = message."content-type";
+        if (!exists content_type) {
+            throw "SOAP-MEDIA-TYPE-ERROR", "a SOAP XML root requires a Content-Type";
+        }
+        *WsdlMediaType media = WsdlMediaType::read(content_type);
+        if (!media) {
+            throw "SOAP-MESSAGE-ERROR", "invalid SOAP root Content-Type";
+        }
+        WsdlLibPriv::validateSoapCharset(media.parameter("charset", "SOAP-MESSAGE-ERROR"));
+        if (media.major == "application" && media.minor == "xop+xml") {
+            media = WsdlMediaType::read(media.parameter("type", "SOAP-MESSAGE-ERROR"));
+            if (!media) {
+                throw "SOAP-MESSAGE-ERROR", "an XOP root requires a valid type parameter";
+            }
+            WsdlLibPriv::validateSoapCharset(media.parameter("charset", "SOAP-MESSAGE-ERROR"));
+        }
+        string type = media.major + "/" + media.minor;
+        if (!inlist(type, SoapMimeTypes) || (type == MimeTypeSoapXml && exists soap12 && !soap12)) {
+            throw "SOAP-MEDIA-TYPE-ERROR", sprintf("unsupported SOAP root media type %Y%s", type,
+                exists soap12 ? sprintf(" for a SOAP %s envelope", soap12 ? "1.2" : "1.1") : "");
+        }
+        return type;
+    }
+
     #! returns the decoded action of a normalized SOAP request
     /** @param message transport metadata returned by parseMultiPartSOAPMessage()
         @param soap12 the validated envelope version
@@ -1986,6 +2042,9 @@ public class WSDLLib {
     #! validates parsed SOAP protocol containers before payload decoding
     /** @param message ordered parse_xml() data for the complete envelope
         @param soap12 optional expected version; NOTHING accepts either supported version
+        @param response True to allow the SOAP 1.1 VersionMismatch response required by SOAP 1.2 negotiation
+        @param headers_pending True only before SoapProcessingNode::processMessage(); defers Body content/fault
+        checks so unknown mandatory headers take precedence; full validation remains the default
         @return True for SOAP 1.2, False for SOAP 1.1
         @throw SOAP-VERSION-MISMATCH the root or expected SOAP version does not match
         @throw SOAP-DESERIALIZATION-ERROR invalid container structure or unqualified header blocks
@@ -1994,8 +2053,9 @@ public class WSDLLib {
         Validate an incoming invoice envelope before dispatching its document body.
         @since %WSDL 0.5.8
     */
-    static bool validateSOAPEnvelope(hash<auto> message, *bool soap12) {
-        return SoapEnvelopeHelper::validate(message, soap12);
+    static bool validateSOAPEnvelope(hash<auto> message, *bool soap12, bool response = False,
+            bool headers_pending = False) {
+        return SoapEnvelopeHelper::validate(message, soap12, response, !headers_pending);
     }
 
     private static processHref(reference xmldata, string hr, hash<auto> parts) {
@@ -2489,6 +2549,19 @@ class SoapActionHelper {
 
 # Private, non-exported class.
 class WsdlLibPriv {
+    static validateSoapCharset(*string charset) {
+        if (!exists charset) { return; }
+        if (!charset) { throw "SOAP-MESSAGE-ERROR", "a SOAP charset parameter cannot be empty"; }
+        try {
+            # The core stream constructor validates conversion support without consuming any payload.
+            EncodingConversionInputStream converter(new BinaryInputStream(binary()), charset, "UTF-8");
+        } catch (hash<ExceptionInfo> ex) {
+            # Unsupported conversion has no argument; system failures retain the core errno argument.
+            if (ex.err != "ENCODING-CONVERSION-ERROR" || exists ex.arg) { rethrow; }
+            throw "SOAP-MEDIA-TYPE-ERROR", sprintf("unsupported SOAP charset %Y", charset);
+        }
+    }
+
     static bool isContentType(*string ct, list<auto> MimeTypes) {
         *WsdlMediaType actual = WsdlMediaType::read(ct);
         if (!actual) {
@@ -3613,7 +3686,7 @@ public final class SoapProcessingNode inherits Serializable {
             inherited."xml:base" = roleUri(base_uri, NOTHING, SOAP_DESERIALIZATION_ERROR);
         }
         XsdXmlValue message(xml, inherited);
-        bool soap12 = SoapEnvelopeHelper::validate(message.getXmlDataView(), expected_soap12, response);
+        bool soap12 = SoapEnvelopeHelper::validate(message.getXmlDataView(), expected_soap12, response, False);
         string soap_uri = soap12 ? SOAP_12_ENV : SOAP_11_ENV;
         list<hash<SoapNodeHeader>> headers();
         list<hash<SoapNodeHeader>> unknown();
@@ -3648,6 +3721,8 @@ public final class SoapProcessingNode inherits Serializable {
             throw "SOAP-MUST-UNDERSTAND", "one or more targeted mandatory SOAP headers are not understood",
                 {"soap12":soap12,"headers":unknown};
         }
+        # Mandatory-header failures take precedence over errors in SOAP Body content.
+        SoapEnvelopeHelper::validate(message.getXmlDataView(), expected_soap12, response);
         list<hash<SoapNodeHeaderResult>> results();
         foreach hash<SoapNodeHeader> header in (headers) {
             bool processed = header.targeted && options.processors.hasKey(header.name);
@@ -3826,7 +3901,7 @@ class SoapEnvelopeHelper {
         }
     }
 
-    static bool validate(hash<auto> message, *bool expected, bool response = False) {
+    static bool validate(hash<auto> message, *bool expected, bool response = False, bool body_checks = True) {
         list<hash<SoapEnvelopeElement>> roots = children(message, {}, "SOAP document");
         if (roots.size() != 1) {
             throw SOAP_DESERIALIZATION_ERROR, "SOAP requires exactly one document element";
@@ -3864,8 +3939,10 @@ class SoapEnvelopeHelper {
                 }
                 body_seen = True;
                 body = child;
-                XsdScalarTextHelper::elementContent(child.value, "SOAP Body");
-                if (soap12) { containerAttributes(child, soap12); }
+                if (body_checks) {
+                    XsdScalarTextHelper::elementContent(child.value, "SOAP Body");
+                    if (soap12) { containerAttributes(child, soap12); }
+                }
             } else if (soap12 || !body_seen || !child.uri) {
                 throw SOAP_DESERIALIZATION_ERROR, sprintf("unexpected SOAP envelope child %Y",
                     type_qname(child.uri, child.local));
@@ -3874,8 +3951,10 @@ class SoapEnvelopeHelper {
         if (!body_seen) {
             throw SOAP_DESERIALIZATION_ERROR, "missing SOAP Body";
         }
-        if (soap12) { validateFault12(body); }
-        else { validateFault11(body); }
+        if (body_checks) {
+            if (soap12) { validateFault12(body); }
+            else { validateFault11(body); }
+        }
         if (exists expected && expected != soap12) {
             # SOAP 1.2 Part 1 appendix A requires a SOAP 1.1 VersionMismatch response to a SOAP 1.1 request.
             # A SOAP 1.2 caller can therefore receive a legitimate SOAP 1.1 version negotiation fault.

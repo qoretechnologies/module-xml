@@ -310,3 +310,43 @@ SoapClient restoration validates the saved node as an ultimate receiver before
 assigning members. A saved client without a processing-node field receives the same
 default node as a new client. Invalid node objects and intermediary configurations
 reject during restoration, before any request can use the client.
+
+SOAP HTTP media validation is separate from XML protocol processing.
+`parseMultiPartSOAPMessage(..., soap_envelope=True)` requires a supported transport
+and normalized XML root. Multipart SOAP uses multipart/related; XOP declares its XML
+media type in the type parameter. `validateSOAPMediaType()` accepts text/xml,
+application/xml and application/soap+xml, validates charset/type ambiguity, and uses
+Qore's conversion-stream constructor to check charset support without consuming the
+payload. Empty charsets reject. The application/soap+xml representation requires an
+actual SOAP 1.2 envelope. Generic XML representations remain available for either
+supported SOAP version. Opaque WSDL HTTP MIME bindings opt out of SOAP validation.
+
+SoapHandler returns plain UTF-8 HTTP 400 responses for malformed transport metadata
+and 415 for unsupported transport, root media or charset. These failures precede
+header and body callbacks. Envelope-version negotiation precedes the final media/
+envelope identity check, preserving VersionMismatch and Upgrade behavior. Errors
+while interpreting a recognized SOAP envelope retain protocol faults. Error logging
+records the input byte count and original exception without decoding invalid body
+text. Valid character encodings with malformed payload bytes therefore retain their
+original protocol error and do not trigger a secondary logging failure.
+
+Unsupported methods on registered resources return HTTP 405 with an Allow header
+computed from applicable SOAP and WSDL HTTP bindings. SOAP WSDL invocation uses POST;
+registered HTTP binding methods retain their explicit routes. GET ?wsdl retrieval
+continues independently. Method discovery holds the registry read lock and does not
+invoke application callbacks.
+
+SoapClient validates nonempty SOAP response media before header processing. The
+response mode of `validateSOAPEnvelope()` permits the SOAP 1.1 VersionMismatch fault
+required for SOAP 1.2 negotiation, sharing the processing node's version rules.
+Empty one-way acknowledgments require no XML media type. Non-SOAP HTTP error responses
+retain the original HTTP exception and status. MIME-content HTTP bindings retain
+their declared opaque format and body.
+
+Mandatory-header capability checks precede validation of SOAP Body content and fault
+grammar. Adapter envelope preflight sets `headers_pending=True` to check container
+structure and version without issuing Body-content faults. SoapProcessingNode scans
+all targeted mandatory headers, raises a single MustUnderstand fault if any capability
+is missing, then completes Body/fault validation before calling processors. The
+public envelope validator retains complete validation by default. This ordering is
+shared by direct nodes, handler requests and client responses, including HTTP faults.

@@ -87,6 +87,9 @@ module SoapHandler {
     @section soaphandler_relnotes SoapHandler Release History
 
     @subsection soaphandler_0_3_4 SoapHandler 0.3.4
+    - SOAP transport preflight returns plain HTTP 400 for malformed MIME metadata and 415 for unsupported
+      media or charset; unsupported resource methods return 405 with the actual allowed method list
+    - malformed encoded request bytes retain their protocol error without a secondary logging exception
     - action routing decodes quoted SOAP 1.1 headers and SOAP 1.2 multipart root parameters, exposes
       \c cx.soap_action, and rejects malformed actions or mismatches before application dispatch
     - SOAP one-way operations return an empty HTTP 202 acknowledgment on success; processing failures
@@ -1115,6 +1118,44 @@ private nothing msglog(hash<auto> cx, hash<auto> msg) {
             return version;
         }
 
+        # Accepted methods belong to the selected resource, including explicitly registered HTTP bindings.
+        private list<string> getAllowedMethods(hash<auto> cx, string path, *string alt_path) {
+            hash<string, bool> allowed();
+            string full_path = ltrim(cx.raw_path ?? cx.url.path, "/");
+            string relative_path = getHttpBindingPath(cx);
+            rwl.readLock();
+            on_exit rwl.readUnlock();
+            foreach hash<auto> candidate in ((uri_methods{path} ?? uri_methods{alt_path} ?? methods).iterator()) {
+                if (candidate.operation.getBinding(candidate.binding) instanceof SoapBinding) {
+                    allowed.POST = True;
+                    break;
+                }
+            }
+            foreach string verb in (keys mapMethodPathToOperation) {
+                *string args;
+                TreeMap routes = mapMethodPathToOperation{verb};
+                if (matchMethod(routes, full_path, \args) || matchMethod(routes, relative_path, \args)) {
+                    allowed{verb} = True;
+                }
+            }
+            foreach string verb in (keys httpTemplateMethods) {
+                foreach hash<auto> candidate in (httpTemplateMethods{verb}.iterator()) {
+                    if (candidate.http_binding.matchesRequestPath(full_path)
+                            || candidate.http_binding.matchesRequestPath(relative_path)) {
+                        allowed{verb} = True;
+                        break;
+                    }
+                }
+            }
+            return sort(keys allowed);
+        }
+
+        private static hash<auto> makeMediaErrorResponse(hash<ExceptionInfo> error) {
+            return {"code":error.err == "SOAP-MEDIA-TYPE-ERROR" ? 415 : 400,
+                "hdr":{"Content-Type":"text/plain;charset=UTF-8"},
+                "body":sprintf("%s: %s", error.err, error.desc)};
+        }
+
         # method called by HttpServer
         # don't reimplement this method; fix/enhance it in the module
         final hash<auto> handleRequest(hash<auto> cx, hash<auto> hdr, *data body) {
@@ -1274,6 +1315,14 @@ private nothing msglog(hash<auto> cx, hash<auto> msg) {
                 };
             }
 
+            if (!method) {
+                list<string> allowed = getAllowedMethods(cx, path, alt_path);
+                if (allowed && !inlist(hdr.method, allowed)) {
+                    return {"code":405, "hdr":{"Allow":allowed.join(", "), "Content-Type":"text/plain;charset=UTF-8"},
+                        "body":sprintf("method %s is not allowed for this resource", hdr.method)};
+                }
+            }
+
             if (method || hdr.method == "POST") {
                 # still chance to get method from xml element in case of SoapBinding (i.e.POST), we need parse message
                 # now
@@ -1288,6 +1337,7 @@ private nothing msglog(hash<auto> cx, hash<auto> msg) {
                     *string element;
                     *string soap_action;
                     *OperationalBinding selected_binding = method ? method.operation.getBinding(method.binding) : NOTHING;
+                    bool soap_envelope = !selected_binding || selected_binding instanceof SoapBinding;
                     bool mime_content = False;
                     if (selected_binding instanceof HttpBinding && selected_binding.input) {
                         *string format = selected_binding.input.resolveMimeFormat(ct, method.request_mime_format);
@@ -1295,15 +1345,28 @@ private nothing msglog(hash<auto> cx, hash<auto> msg) {
                         else { method.request_mime_format = format; }
                         mime_content = selected_binding.input.isMimeContent(format);
                     }
-                    hash<auto> msg = WSDLLib::parseMultiPartSOAPMessage(hdr + ("body" : body), mime_content);
+                    hash<auto> msg;
+                    try {
+                        msg = WSDLLib::parseMultiPartSOAPMessage(hdr + ("body" : body), mime_content, soap_envelope);
+                    } catch (hash<ExceptionInfo> ex) {
+                        if (soap_envelope && inlist(ex.err, ("SOAP-MESSAGE-ERROR", "SOAP-MEDIA-TYPE-ERROR"))) {
+                            return makeMediaErrorResponse(ex);
+                        }
+                        rethrow;
+                    }
                     msglog(cx, ('reason': 'request', 'header': hdr, 'method': hdr.method, 'body': msg.body));
-                    bool soap_envelope = !selected_binding || selected_binding instanceof SoapBinding;
                     *bool expected_version = selected_binding instanceof SoapBinding ? selected_binding.isSoap12()
                         : soap_envelope ? getSoapVersionForRoute(path, alt_path) : NOTHING;
                     reqsoap12 = expected_version ?? WSDLLib::isSOAPMessage12(msg);
                     args = WSDLLib::parseSOAPMessage(msg, mime_content, soap_envelope);
                     if (soap_envelope) {
-                        reqsoap12 = WSDLLib::validateSOAPEnvelope(args, expected_version);
+                        reqsoap12 = WSDLLib::validateSOAPEnvelope(args, expected_version, False, True);
+                        try {
+                            WSDLLib::validateSOAPMediaType(msg, reqsoap12);
+                        } catch (hash<ExceptionInfo> ex) {
+                            if (ex.err == "SOAP-MEDIA-TYPE-ERROR") { return makeMediaErrorResponse(ex); }
+                            rethrow;
+                        }
                         soap_action = WSDLLib::getSOAPAction(msg, reqsoap12, hdr.soapaction);
                         if (!method && soap_action) {
                             {
@@ -1315,7 +1378,7 @@ private nothing msglog(hash<auto> cx, hash<auto> msg) {
                             if (method) {
                                 selected_binding = method.operation.getBinding(method.binding);
                                 expected_version = selected_binding.isSoap12();
-                                WSDLLib::validateSOAPEnvelope(args, expected_version);
+                                WSDLLib::validateSOAPEnvelope(args, expected_version, False, True);
                             }
                         }
                         *string base_uri = hdr.host ? resolve_url((cx.ssl ? "https://" : "http://") + hdr.host + "/",
@@ -1427,7 +1490,8 @@ private nothing msglog(hash<auto> cx, hash<auto> msg) {
                     }
                 } catch (hash<ExceptionInfo> ex) {
                     if (ex.err == "PROGRAM-INTERRUPTED" || ex.err == "THREAD-CANCELLED") { rethrow; }
-                    SoapHandler::log(cx, "exception parsing SOAP msg: %y\n%y", body, ex);
+                    SoapHandler::log(cx, "exception parsing SOAP message (%d bytes): %s: %s",
+                        body.size(), ex.err, ex.desc);
                     string str = debug
                         ? get_exception_string(ex)
                         : sprintf("%s: %s: %s", get_ex_pos(ex), ex.err, ex.desc);
