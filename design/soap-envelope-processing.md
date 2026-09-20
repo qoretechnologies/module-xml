@@ -138,3 +138,20 @@ fault structures raise `SOAP-DESERIALIZATION-ERROR` on input and
 `SOAP-SERIALIZATION-ERROR` on the WSDL serialization path. Valid faults retain the
 existing `SOAP-SERVER-FAULT-RESPONSE` exception contract. Application detail schemas
 and declared fault selection remain separate from this protocol validation.
+
+SOAP 1.1 faults have separate validation rules. Body contains at most one protocol
+Fault, with required unqualified `faultcode` and `faultstring` and optional
+unqualified `faultactor` and `detail`, each occurring once. These fields are
+recognized by name; the generic receiver does not impose SOAP 1.2 field ordering.
+Codes use QName syntax and may name application codes or dotted subcategories.
+Fault strings accept optional `xml:lang`, including an empty reset. Fault actors
+use URI-reference syntax; detail contains element content. Qualified extension
+fields and additional Body entries remain accepted under the SOAP 1.1 protocol.
+
+Native fault decoding selects the original protocol Fault before namespace
+projection. An application Body sibling named Fault cannot merge with it.
+SOAP 1.1 extension field names remain qualified, so a qualified extension named
+`faultcode` cannot replace the protocol field. The exception argument retains
+in-scope namespace declarations in `^attributes^` for interpreting QName values and
+qualified extension fields. This namespace context is retained for SOAP 1.2 faults
+as well. Standard field names and the fault exception category remain unchanged.

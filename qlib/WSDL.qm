@@ -207,6 +207,9 @@ module WSDL {
     @section wsdlrelnotes WSDL Module Release Notes
 
     @subsection wsdl_0_5_8 WSDL v0.5.8
+    - SOAP 1.1 faults validate required fields, QName codes, faultactor URI syntax and detail content while
+      accepting qualified extensions and faultstring xml:lang; exception data keeps extensions distinct from
+      protocol fields and selects the real Fault independently of application Body siblings
     - SOAP 1.2 faults validate ordered fields, Code/Subcode QNames, multilingual Reason text with explicit xml:lang,
       Node/Role URI syntax, Detail content and fault-only Body structure before native namespace projection
     - SOAP fault detection uses the envelope's namespace-qualified Fault name; application elements named Fault
@@ -3554,7 +3557,7 @@ hashdecl SoapEnvelopeElement {
 }
 
 # Validate protocol containers before native projection discards their qualified names.
-# Protocol containers and SOAP 1.2 faults are traversed; application payloads retain their own validators.
+# Protocol containers and SOAP faults are traversed; application payloads retain their own validators.
 class SoapEnvelopeHelper {
     private static list<hash<SoapEnvelopeElement>> children(auto value, hash<string, string> inherited,
             string description) {
@@ -3688,6 +3691,7 @@ class SoapEnvelopeHelper {
             throw SOAP_DESERIALIZATION_ERROR, "missing SOAP Body";
         }
         if (soap12) { validateFault12(body); }
+        else { validateFault11(body); }
         if (exists expected && expected != soap12) {
             # SOAP 1.2 Part 1 appendix A requires a SOAP 1.1 VersionMismatch response to a SOAP 1.1 request.
             # A SOAP 1.2 caller can therefore receive a legitimate SOAP 1.1 version negotiation fault.
@@ -3697,6 +3701,74 @@ class SoapEnvelopeHelper {
             }
         }
         return soap12;
+    }
+
+    private static validateFault11(hash<SoapEnvelopeElement> body) {
+        list<hash<SoapEnvelopeElement>> faults = select children(body.value, body.namespaces, "SOAP Body"),
+            $1.uri == SOAP_11_ENV && $1.local == "Fault";
+        if (!faults) { return; }
+        if (faults.size() != 1) {
+            throw SOAP_DESERIALIZATION_ERROR, "SOAP 1.1 Body cannot contain more than one Fault";
+        }
+        hash<string, bool> seen();
+        foreach hash<SoapEnvelopeElement> field in (children(faults[0].value, faults[0].namespaces, "SOAP Fault")) {
+            # SOAP 1.1 permits qualified extension fields; they cannot replace the unqualified protocol fields.
+            if (field.uri) { continue; }
+            if (!inlist(field.local, ("faultcode", "faultstring", "faultactor", "detail")) || seen{field.local}) {
+                throw SOAP_DESERIALIZATION_ERROR, "unexpected or repeated SOAP 1.1 Fault field";
+            }
+            seen{field.local} = True;
+            if (field.local == "faultcode") {
+                XsdQNameValue code = XsdQNameValueHelper::resolve(faultText(field), SOAP_DESERIALIZATION_ERROR,
+                    field.namespaces);
+            } else if (field.local == "faultstring") {
+                faultLanguage(field, False);
+                faultText(field);
+            } else if (field.local == "detail") {
+                children(field.value, field.namespaces, "SOAP fault detail");
+            } else {
+                faultUri(field);
+            }
+        }
+        if (!seen.faultcode || !seen.faultstring) {
+            throw SOAP_DESERIALIZATION_ERROR, "SOAP 1.1 Fault requires faultcode and faultstring";
+        }
+    }
+
+    # Select before legacy projection so an application Fault sibling cannot merge with the protocol Fault.
+    static hash<auto> getFaultValue(hash<auto> body, hash<string, string> inherited, bool soap12) {
+        hash<string, string> namespaces = XsdBase::getElementNamespaces(body."^attributes^", inherited);
+        foreach hash<SoapEnvelopeElement> value in (children(body, namespaces, "SOAP Body")) {
+            if (value.uri == (soap12 ? SOAP_12_ENV : SOAP_11_ENV) && value.local == "Fault") {
+                hash<auto> result = value.value;
+                # Retain the bindings of qualified extension fields and QName code values in the exception data.
+                result."^attributes^" = XsdQNameContextHelper::attributes(value.namespaces) + result."^attributes^";
+                return result;
+            }
+        }
+        throw SOAP_DESERIALIZATION_ERROR, "expected a SOAP Fault in Body";
+    }
+
+    private static faultLanguage(hash<SoapEnvelopeElement> text, bool required) {
+        hash<auto> attributes = XsdBase::getExpandedAttributes(
+            XsdQNameContextHelper::attributes(text.namespaces) + text.value."^attributes^");
+        string key = type_qname("http://www.w3.org/XML/1998/namespace", "lang");
+        if (!attributes.hasKey(key)) {
+            if (required) { throw SOAP_DESERIALIZATION_ERROR, "SOAP fault Text requires an explicit xml:lang attribute"; }
+            return;
+        }
+        string language = string(attributes{key});
+        # The union's empty-string member preserves whitespace; only a truly empty value resets language.
+        if (language) { XsdTextLexicalHelper::lexical("language", language, SOAP_DESERIALIZATION_ERROR); }
+    }
+
+    private static faultUri(hash<SoapEnvelopeElement> field) {
+        string uri = XsdSimpleType::normalizeWhiteSpace(faultText(field), "collapse");
+        try { string validated_uri = resolve_url("", uri, RESOLVE_URL_ASCII | RESOLVE_URL_RELATIVE_BASE); }
+        catch (hash<ExceptionInfo> ex) {
+            if (ex.err != "RESOLVE-URL-ERROR") { rethrow; }
+            throw SOAP_DESERIALIZATION_ERROR, ex.desc;
+        }
     }
 
     # Validate SOAP 1.2 fault structure while element and QName namespaces are still available.
@@ -3724,27 +3796,14 @@ class SoapEnvelopeHelper {
                     if (text.uri != SOAP_12_ENV || text.local != "Text") {
                         throw SOAP_DESERIALIZATION_ERROR, "SOAP fault Reason only accepts SOAP Text children";
                     }
-                    hash<auto> attributes = XsdBase::getExpandedAttributes(
-                        XsdQNameContextHelper::attributes(text.namespaces) + text.value."^attributes^");
-                    string key = type_qname("http://www.w3.org/XML/1998/namespace", "lang");
-                    if (!attributes.hasKey(key)) {
-                        throw SOAP_DESERIALIZATION_ERROR, "SOAP fault Text requires an explicit xml:lang attribute";
-                    }
-                    string language = string(attributes{key});
-                    # The union's empty-string member preserves whitespace; only a truly empty value resets language.
-                    if (language) { XsdTextLexicalHelper::lexical("language", language, SOAP_DESERIALIZATION_ERROR); }
+                    faultLanguage(text, True);
                     faultText(text);
                 }
             } else if (field.local == "Detail") {
                 containerAttributes(field, True);
                 children(field.value, field.namespaces, "SOAP fault Detail");
             } else {
-                string uri = XsdSimpleType::normalizeWhiteSpace(faultText(field), "collapse");
-                try { string validated_uri = resolve_url("", uri, RESOLVE_URL_ASCII | RESOLVE_URL_RELATIVE_BASE); }
-                catch (hash<ExceptionInfo> ex) {
-                    if (ex.err != "RESOLVE-URL-ERROR") { rethrow; }
-                    throw SOAP_DESERIALIZATION_ERROR, ex.desc;
-                }
+                faultUri(field);
             }
         }
         if (fields.size() < 2 || fields[0].local != "Code" || fields[1].local != "Reason") {
@@ -34307,44 +34366,31 @@ public class SoapBinding inherits WSDL::OperationalBinding {
             }
 
             if (!request && expanded_body.hasKey(type_qname(message_soap12 ? SOAP_12_ENV : SOAP_11_ENV, "Fault"))) {
-                # Recognize the protocol's expanded name before projecting legacy fault information.
-                # An application element named Fault is ordinary schema data.
-                WSDL::XsdBase::removeNS2(\body);
-
-                if (body.Fault) {
-                    WSDL::XsdBase::removeNS(\body.Fault);
-                    delete body.Fault.".ns";
-                    if (message_soap12) {
-                        WSDL::XsdBase::removeNS(\body.Fault.Code);
-                        WSDL::XsdBase::removeNS(\body.Fault.Reason);
-                        # remove extraneous "ns" keys
-                        remove body.Fault.Code.ns;
-                        remove body.Fault.Reason.ns;
-                        string desc = sprintf("The following fault response was received from the server: code: %y",
-                            body.Fault.Code.Value);
-                        auto sc = body.Fault.Code.Subcode;
-                        while (exists sc) {
-                            WSDL::XsdBase::removeNS(\sc);
-                            # remove extraneous "ns" keys
-                            remove sc.ns;
-                            desc += sprintf(", subcode: %y", sc.Value);
-                            sc = sc.Subcode;
-                        }
-                        foreach auto rn in (body.Fault.Reason.Text) {
-                            desc += sprintf(", text: %y", rn);
-                        }
-
-                        throw "SOAP-SERVER-FAULT-RESPONSE", desc, body.Fault;
-                    } else {
-                        string desc = sprintf("The following fault response was received from the server: code: %y",
-                            body.Fault.faultcode);
-                        if (exists body.Fault.faultstring)
-                            desc += sprintf(", faultstring: %y", body.Fault.faultstring);
-                        if (exists body.Fault.desc)
-                            desc += sprintf(", desc: %y", body.Fault.desc);
-
-                        throw "SOAP-SERVER-FAULT-RESPONSE", desc, body.Fault;
+                hash<auto> fault = SoapEnvelopeHelper::getFaultValue(body, envelope_namespaces, message_soap12);
+                if (message_soap12) {
+                    WSDL::XsdBase::removeNS(\fault);
+                    WSDL::XsdBase::removeNS(\fault.Code);
+                    WSDL::XsdBase::removeNS(\fault.Reason);
+                    remove fault.Code.ns;
+                    remove fault.Reason.ns;
+                    string desc = sprintf("The following fault response was received from the server: code: %y",
+                        fault.Code.Value);
+                    auto sc = fault.Code.Subcode;
+                    while (exists sc) {
+                        WSDL::XsdBase::removeNS(\sc);
+                        remove sc.ns;
+                        desc += sprintf(", subcode: %y", sc.Value);
+                        sc = sc.Subcode;
                     }
+                    foreach auto rn in (fault.Reason.Text) {
+                        desc += sprintf(", text: %y", rn);
+                    }
+                    throw "SOAP-SERVER-FAULT-RESPONSE", desc, fault;
+                } else {
+                    # SOAP 1.1 protocol fields are unqualified; keep extension fields qualified and distinct.
+                    string desc = sprintf("The following fault response was received from the server: code: %y, "
+                        "faultstring: %y", fault.faultcode, fault.faultstring);
+                    throw "SOAP-SERVER-FAULT-RESPONSE", desc, fault;
                 }
             }
 

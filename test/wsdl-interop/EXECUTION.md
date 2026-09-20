@@ -9726,3 +9726,33 @@ edits, installation, push or CI trigger.
 
 See [evidence](soap12-fault-evidence.md), [validation](P7-04-validation.json),
 [audit](audits/P7-04-soap12-faults.md), and [design](../../design/soap-envelope-processing.md).
+
+
+## P7-05: SOAP 1.1 fault grammar and namespace isolation
+
+SOAP 1.1 faults validate required and optional singleton fields, scoped QName codes,
+optional language, faultactor URI syntax and detail content while accepting qualified
+extensions. Native decoding selects the expanded-name Fault before projection and
+retains qualified extension names and in-scope namespace bindings, preventing
+collisions with application Body siblings and protocol fields.
+
+All **27 affected Qore suites pass: 377 cases / 17,142 assertions**. Six focused
+SOAP suites also pass compiled: **18 cases / 6,183 assertions**. The new SOAP 1.1
+suite passes **2 cases / 704 assertions** across source, saved-object and saved-data
+services, with additional native/retained namespace-collision checks.
+
+Six independent Python gates pass. The combined fault gate checks the exact pinned
+W3C schema expectations and **720 HTTP response exchanges** (276 SOAP 1.1 and 444
+SOAP 1.2), including persistent-client recovery after negative messages. All 16
+corpus commands meet their recorded outcomes. Six semantic reports match P7-04
+except for the WSDL source digest. Documentation and three-file astparser checks
+pass without warnings/errors.
+
+Audit: **18 Pass / 44 N/A / zero Fail**. No C++ changes; Valgrind is not required.
+
+P7 complete fault data/generation, header-fault integration, HTTP/action rules and
+applicable assertion accounting remain open, followed by P8–P9. No Qore edits,
+installation, push or CI trigger.
+
+See [evidence](soap11-fault-evidence.md), [validation](P7-05-validation.json),
+[audit](audits/P7-05-soap11-faults.md), and [design](../../design/soap-envelope-processing.md).
