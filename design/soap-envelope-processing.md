@@ -205,3 +205,33 @@ SOAP 1.2 `encodingStyle` is rejected on Fault, Code, Value, Subcode, Reason, Tex
 Node, Role and Detail. It remains permitted on application detail entries and their
 descendants. An application-qualified attribute also named `encodingStyle` is
 independent. Detail retains the normative schema's qualified-attribute restriction.
+
+
+SoapHandler separates header processing, body conversion and application dispatch
+when mapping faults. A header processor's `SOAP_HEADER_FAULT` exception is retained
+while the handler resolves the operation identity from the action or Body element.
+It then uses that binding's header-fault declaration without converting the Body or
+calling the application. Unknown targeted mandatory headers still fail preflight
+before any processor runs. The selected binding's SOAP version is checked before
+sending a declared header fault.
+
+Body callbacks and header processors share declared-fault serialization. A body
+callback preserves the precedence of a declared application fault named
+`SOAP-HEADER-FAULT`; a header processor always selects header-fault metadata.
+Invalid header-fault declarations or values are server-side failures. Error hooks
+receive the selected operation context when declared fault serialization fails.
+
+Input conversion and routing failures produce Client/Sender faults. Unexpected
+header processor, application callback and output serialization failures produce
+Server/Receiver faults. SOAP 1.1 uses HTTP 500 for both; SOAP 1.2 uses HTTP 400 for
+Sender and HTTP 500 for Receiver, MustUnderstand and VersionMismatch.
+`THREAD-CANCELLED` and `PROGRAM-INTERRUPTED` propagate across these boundaries
+without invoking error hooks or being converted to SOAP responses.
+
+Generic fault diagnostics accept arbitrary exception code/description values.
+Strings retain their text; non-string values use Qore's diagnostic representation,
+and an absent description becomes `no description provided`. Unicode points outside
+XML 1.0's character repertoire appear as visible `\u{XXXX}` escapes. This rendering
+applies only to generated diagnostic text; application payloads and original error
+logging are unchanged. Empty text, ordinary Unicode, tabs and newlines retain their
+values. Character traversal is linear and uses a Unicode character iterator.

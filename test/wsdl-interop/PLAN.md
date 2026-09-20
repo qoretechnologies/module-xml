@@ -1285,3 +1285,33 @@ accounting remain open, followed by P8–P9. No Qore edits, installation, push o
 
 See [evidence](soap-fault-data-evidence.md), [validation](P7-06-validation.json),
 [audit](audits/P7-06-soap-fault-data.md), and [design](../../design/soap-envelope-processing.md).
+
+
+## P7-07: Handler header faults and application failure boundaries
+
+Declared header-processor faults retain their binding metadata before Body conversion
+and dispatch. Application/output failures use Server/Receiver with HTTP 500; protocol
+and input faults retain version-specific codes/statuses. Interruption exceptions
+propagate. Missing, structured and XML-invalid exception diagnostics produce valid
+fault text. Existing client expectations now verify the corrected application behavior.
+
+All **29 affected Qore suites pass: 388 cases / 19,256 assertions**. Eight focused
+SOAP suites also pass compiled: **29 cases / 8,293 assertions**. The new handler
+suite passes **5 cases / 1,174 assertions**, including both SOAP versions, source and
+saved service graphs, native and retained values, action/body routing, fault recovery,
+cancellation, and missing/structured/XML-invalid exception diagnostics.
+
+Eight independent Python gates pass. The new gate checks **576 HTTP exchanges**
+against unchanged pinned SOAP schemas, independently checking QName fault identities,
+status codes, declared header/detail placement, preflight priority and callback counts.
+All 16 corpus commands meet their recorded outcomes; all six reports exactly match
+P7-06. Installed Qore is `9d8ce440b`, including the verified strict URI fix.
+Documentation and four-file astparser checks pass without warnings/errors.
+
+Audit: **18 Pass / 44 N/A / zero Fail**. No C++ changes; Valgrind is not required.
+
+P7 action/media/HTTP rules and complete assertion accounting remain open, followed by
+P8–P9. No Qore edits, installation, push or CI trigger.
+
+See [evidence](soap-handler-fault-evidence.md), [validation](P7-07-validation.json),
+[audit](audits/P7-07-soap-handler-faults.md), and [design](../../design/soap-envelope-processing.md).

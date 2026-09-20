@@ -1,0 +1,215 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires xml
+%requires QUnit
+%requires ../qlib/WSDL.qm
+%requires ../qlib/SoapHandler.qm
+%requires HttpServer
+%exec-class HandlerFaultTest
+
+class HandlerFaultTest inherits QUnit::Test {
+    constructor() : Test("SOAP handler fault boundaries", "1.0") {
+        addTestCase("Header processors return declared faults before body conversion and dispatch", \headers());
+        addTestCase("Application, output and declared fault failures retain correct codes and recovery", \applications());
+        addTestCase("Interruption exceptions escape header and application fault translation", \interruptions());
+        addTestCase("A declared application fault named SOAP-HEADER-FAULT retains its legacy path", \marker());
+        addTestCase("Missing, structured and XML-invalid exception diagnostics produce valid faults", \diagnostics());
+        set_return_value(main());
+    }
+    private static WebService service(bool soap12, string state = "source", bool marker = False) {
+        string source = ReadOnlyFile::readTextFile(get_script_dir() + "/wsdl-interop/regressions/fault-bindings/literal.wsdl");
+        source = replace(source, '<w:input><s:body', '<w:input><s:header message="t:H" part="token" use="literal">'
+            + '<s:headerfault message="t:Failure" part="problem" use="literal"/></s:header><s:body');
+        if (soap12) { source = replace(source, SOAP_11_NS, SOAP_12_NS); }
+        if (marker) { source = replace(source, 'name="Rejected"', 'name="SOAP-HEADER-FAULT"'); }
+        WebService ws(source);
+        if (state == "saved") { ws = Serializable::deserialize(ws.serialize()); }
+        if (state == "data") { ws = Serializable::deserialize(ws.serializeToData()); }
+        return ws;
+    }
+    private static string request(bool soap12, *string token, bool unknown = False, bool invalid_body = False) {
+        string uri = soap12 ? SOAP_12_ENV : SOAP_11_ENV;
+        string header = exists token ? '<t:Token e:mustUnderstand="1">' + token + '</t:Token>' : "";
+        if (unknown) { header += '<t:Unknown e:mustUnderstand="1"/>'; }
+        return '<e:Envelope xmlns:e="' + uri + '" xmlns:t="urn:parts">'
+            + (header ? '<e:Header>' + header + '</e:Header>' : '')
+            + '<e:Body><t:Left>' + (invalid_body ? 'bad' : '1') + '</t:Left><t:Right>2</t:Right></e:Body></e:Envelope>';
+    }
+    private static hash<auto> headersFor(bool soap12, bool action = True) {
+        hash<auto> h(); h."Content-Type" = soap12 ? "application/soap+xml" : "text/xml";
+        if (action) { h.SOAPAction = "urn:exchange"; }
+        return h;
+    }
+    private headers() {
+        foreach bool soap12 in (False, True) {
+            foreach string state in ("source", "saved", "data") {
+                foreach bool retained in (False, True) {
+                    WebService ws = service(soap12, state);
+                    Queue processed(); Queue called();
+                    SoapHeaderProcessor processor = auto sub(hash<auto> cx, hash<SoapNodeHeader> header) {
+                        processed.push(header.name);
+                        string token = header.xml.getElementData()."^value^";
+                        if (token == "8") { throw "HEADER-PROCESSOR-FAILED", "Session database unavailable"; }
+                        throw SOAP_HEADER_FAULT, "Session expired", <SoapHeaderFaultInfo>{
+                            "message":token == "9" ? "Missing" : "Failure","part":"problem","value":71};
+                    };
+                    SoapProcessingNode node(<SoapNodeOptions>{"processors":{"{urn:parts}Token":processor}});
+                    SoapHandler handler(new PermissiveAuthenticator(), NOTHING, False, NOTHING, node);
+                    code<auto(hash<auto>,auto)> callback = auto sub(hash<auto> cx, auto value) {
+                        called.push(True); return {"left":1,"right":2};
+                    };
+                    handler.addMethod(ws, ws.getOperation("exchange"), callback, NOTHING, NOTHING, NOTHING,
+                        "service", NOTHING, NOTHING, "B", NOTHING, retained);
+                    HttpServer server(); on_exit server.stop();
+                    server.setDefaultHandler("faults", handler); server.addListener(0);
+                    HTTPClient client({"url":sprintf("http://127.0.0.1:%d/service",server.getListenerInfo(0).port),
+                        "error_passthru":True,"timeout":10000});
+                    foreach bool action in (False, True) {
+                        foreach bool invalid_body in (False, True) {
+                            hash<auto> info;
+                            string reply = client.post("", request(soap12, "7", False, invalid_body), headersFor(soap12, action), \info);
+                            assertEq(soap12 ? 400 : 500, info."response-headers".status_code);
+                            hash<SoapFaultInfo> fault = WSDLLib::getSOAPFaultInfo(reply, soap12);
+                            assertEq(soap12 ? "Sender" : "Client", fault.code.getLocalName());
+                            assertEq("Session expired", fault.reasons[0].text);
+                            assertEq(1, fault.headers.size());
+                            assertFalse(exists fault.detail);
+                            assertEq(71, ws.getOperation("exchange").deserializeHeaderFault(reply,"Failure","problem"));
+                            assertEq("{urn:parts}Token", processed.get(1000));
+                            assertEq(0, called.size());
+                        }
+                        hash<auto> info;
+                        string reply = client.post("", request(soap12, "7", True, True), headersFor(soap12, action), \info);
+                        assertEq(500, info."response-headers".status_code);
+                        assertEq("MustUnderstand", WSDLLib::getSOAPFaultInfo(reply).code.getLocalName());
+                        assertEq(0, processed.size());
+                        assertEq(0, called.size());
+                        foreach string token in ("8", "9") {
+                            reply = client.post("", request(soap12, token), headersFor(soap12, action), \info);
+                            assertEq(500, info."response-headers".status_code);
+                            hash<SoapFaultInfo> fault = WSDLLib::getSOAPFaultInfo(reply);
+                            assertEq(soap12 ? "Receiver" : "Server", fault.code.getLocalName());
+                            assertEq(0, fault.headers.size());
+                            assertEq(0, called.size());
+                            assertEq("{urn:parts}Token", processed.get(1000));
+                            if (token == "8") { assertTrue(fault.reasons[0].text.find("HEADER-PROCESSOR-FAILED") >= 0); }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    private applications() {
+        foreach bool soap12 in (False, True) {
+            foreach string state in ("source", "saved", "data") {
+                WebService ws = service(soap12, state);
+                Queue behavior(); Queue called();
+                SoapHandler handler(new PermissiveAuthenticator());
+                code<auto(hash<auto>,auto)> callback = auto sub(hash<auto> cx, auto value) {
+                    string mode = behavior.get(10000); called.push(mode);
+                    if (mode == "runtime") { throw "APPLICATION-FAILED", "Inventory database unavailable"; }
+                    if (mode == "declared") { throw "Rejected", "Order rejected", 71; }
+                    if (mode == "header") {
+                        throw SOAP_HEADER_FAULT, "Session expired", <SoapHeaderFaultInfo>{"message":"Failure","part":"problem","value":71};
+                    }
+                    return {"left":mode == "output" ? "invalid" : 1,"right":2};
+                };
+                handler.addMethod(ws, ws.getOperation("exchange"), callback, NOTHING, NOTHING, NOTHING,
+                    "service", NOTHING, NOTHING, "B");
+                HttpServer server(); on_exit server.stop();
+                server.setDefaultHandler("faults", handler); server.addListener(0);
+                HTTPClient client({"url":sprintf("http://127.0.0.1:%d/service",server.getListenerInfo(0).port),
+                    "error_passthru":True,"timeout":10000});
+                foreach bool action in (False, True) {
+                    foreach string mode in ("runtime", "output", "declared", "header") {
+                        behavior.push(mode);
+                        hash<auto> info;
+                        string reply = client.post("", request(soap12, NOTHING), headersFor(soap12, action), \info);
+                        bool server_error = mode == "runtime" || mode == "output";
+                        assertEq(!soap12 || server_error ? 500 : 400, info."response-headers".status_code);
+                        hash<SoapFaultInfo> fault = WSDLLib::getSOAPFaultInfo(reply);
+                        assertEq(server_error ? (soap12 ? "Receiver" : "Server") : (soap12 ? "Sender" : "Client"),
+                            fault.code.getLocalName());
+                        assertEq(mode, called.get(1000));
+                        if (mode == "declared") { assertEq(71, ws.getOperation("exchange").deserializeFault(reply,"Rejected")); }
+                        if (mode == "header") { assertEq(71, ws.getOperation("exchange").deserializeHeaderFault(reply,"Failure","problem")); }
+                        behavior.push("success");
+                        reply = client.post("", request(soap12, NOTHING), headersFor(soap12, action), \info);
+                        assertEq(200, info."response-headers".status_code);
+                        assertEq("success", called.get(1000));
+                        assertEq({"left":1,"right":2}, ws.getOperation("exchange").deserializeResponse(parse_xml(reply)));
+                    }
+                    hash<auto> info;
+                    string reply = client.post("", request(soap12, NOTHING, False, True), headersFor(soap12, action), \info);
+                    assertEq(soap12 ? 400 : 500, info."response-headers".status_code);
+                    assertEq(soap12 ? "Sender" : "Client", WSDLLib::getSOAPFaultInfo(reply).code.getLocalName());
+                    assertEq(0, called.size());
+                    assertEq(0, behavior.size());
+                }
+            }
+        }
+    }
+    private interruptions() {
+        foreach bool soap12 in (False, True) {
+            foreach bool header_error in (False, True) {
+                foreach string error in ("THREAD-CANCELLED", "PROGRAM-INTERRUPTED") {
+                    WebService ws = service(soap12);
+                    SoapHeaderProcessor processor = auto sub(hash<auto> cx, hash<SoapNodeHeader> header) { throw error,"stop",71; };
+                    SoapProcessingNode node(<SoapNodeOptions>{"processors":{"{urn:parts}Token":processor}});
+                    SoapHandler handler(new PermissiveAuthenticator(), NOTHING, False, NOTHING, node);
+                    code<auto(hash<auto>,auto)> callback = auto sub(hash<auto> cx, auto value) { throw error,"stop",71; };
+                    handler.addMethod(ws, ws.getOperation("exchange"), callback, NOTHING, NOTHING, NOTHING,
+                        "service", NOTHING, NOTHING, "B");
+                    hash<auto> cx(); cx.url = {"path":"/service"};
+                    hash<auto> hdr = {"method":"POST","content-type":soap12 ? "application/soap+xml" : "text/xml", "soapaction":"urn:exchange"};
+                    bool caught = False;
+                    try { handler.handleRequest(cx,hdr,request(soap12,header_error ? "7" : NOTHING)); }
+                    catch (hash<ExceptionInfo> ex) { caught = True; assertEq(error,ex.err); assertEq("stop",ex.desc); assertEq(71,ex.arg); }
+                    assertTrue(caught);
+                }
+            }
+        }
+    }
+    private diagnostics() {
+        foreach bool soap12 in (False, True) {
+            foreach hash<auto> row in (
+                    {"err":"MISSING","desc":NOTHING,"text":"MISSING: no description provided"},
+                    {"err":"EMPTY","desc":"","text":"EMPTY: "},
+                    {"err":71,"desc":{"order":7}},
+                    {"err":"CONTROL","desc":"bad\x00after\x01end","text":"CONTROL: bad\\u{0000}after\\u{0001}end"},
+                    {"err":"Unicode","desc":"拒否 & <é>\nnext\tline","text":"Unicode: 拒否 & <é>\nnext\tline"}) {
+                WebService ws = service(soap12);
+                SoapHandler handler(new PermissiveAuthenticator());
+                code<auto(hash<auto>,auto)> callback = auto sub(hash<auto> cx, auto value) { throw row.err,row.desc; };
+                handler.addMethod(ws, ws.getOperation("exchange"), callback, NOTHING, NOTHING, NOTHING,
+                    "service", NOTHING, NOTHING, "B");
+                hash<auto> cx(); cx.url = {"path":"/service"};
+                hash<auto> result = handler.handleRequest(cx,{"method":"POST",
+                    "content-type":soap12 ? "application/soap+xml" : "text/xml","soapaction":"urn:exchange"},request(soap12,NOTHING));
+                hash<SoapFaultInfo> info = WSDLLib::getSOAPFaultInfo(result.body);
+                assertEq(500,result.code);
+                assertEq(soap12 ? "Receiver" : "Server",info.code.getLocalName());
+                if (exists row.text) { assertEq(row.text,info.reasons[0].text); }
+                else { assertTrue(info.reasons[0].text.startsWith("71:")); assertTrue(info.reasons[0].text.find("order") >= 0); }
+            }
+        }
+    }
+
+    private marker() {
+        foreach bool soap12 in (False, True) {
+            WebService ws = service(soap12,"source",True);
+            SoapHandler handler(new PermissiveAuthenticator());
+            code<auto(hash<auto>,auto)> callback = auto sub(hash<auto> cx, auto value) { throw SOAP_HEADER_FAULT,"Application fault",71; };
+            handler.addMethod(ws, ws.getOperation("exchange"), callback, NOTHING, NOTHING, NOTHING,
+                "service", NOTHING, NOTHING, "B");
+            hash<auto> cx(); cx.url = {"path":"/service"};
+            hash<auto> result = handler.handleRequest(cx,{"method":"POST","content-type":soap12 ? "application/soap+xml" : "text/xml",
+                "soapaction":"urn:exchange"},request(soap12,NOTHING));
+            assertEq(soap12 ? 400 : 500,result.code);
+            assertEq(71,ws.getOperation("exchange").deserializeFault(result.body,SOAP_HEADER_FAULT));
+            assertEq(0,WSDLLib::getSOAPFaultInfo(result.body).headers.size());
+        }
+    }
+}
