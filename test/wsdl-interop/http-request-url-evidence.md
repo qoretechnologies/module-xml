@@ -1,0 +1,19 @@
+# P6-44 Resolved HTTP client and handler URLs
+
+Copyright (C) 2026 Qore Technologies, s.r.o.
+
+The original `/tmp/xml-http-base-resolution/probe.qr` sends `/base/send` for a root-relative `/send`, and the old native path API sends a target naming B to origin A. These independently reduced failures motivated the shared Qore API; XML contains no client cloning or temporary URL mutation. Installed Qore d0935ef4b includes the API and response media classification fixes. The core source's 11f0ee988 change corrects only its expected octet-stream result.
+
+WSDL 1.1 [HTTP binding sections 4.3, 4.5 and 4.7](https://www.w3.org/TR/2001/NOTE-wsdl-20010315) require resolving operation references after replacement. [RFC 3986 section 5.2](https://www.rfc-editor.org/rfc/rfc3986.html#section-5.2) supplies the reference algorithm, implemented by Qore.
+
+Qore's installed `HTTPClient::sendUrl()` passes its 13-case / 186-assertion core suite. SoapClient resolves HTTP operation references with Qore's RFC 3986 API after serialization, keeps per-call targets separate from persistent configuration, and scopes its default Authorization/Cookie/Host headers to the configured origin. Explicit call headers retain their target scope. The constructor now applies username/password options after endpoint selection, preserving URL-credential precedence.
+
+All 45 affected Qore suites pass: **1,698 cases / 55,868 assertions**. All 17 independent Python gates and 16 corpus commands meet their expected outcomes. The new Python peer checks 56 actual HTTP exchanges. Six corpus reports retain P6-43's semantic results. Documentation, eight-file astparser checks and the compiled WSDL/SoapClient/SoapHandler suites' 14 cases / 471 assertions pass without warnings/errors.
+
+The full audit reports **18 Pass / 44 N/A / zero Fail**. This increment changes no C++, Qore source or installation and is committed only to the main `develop` checkout. P6 remains open for final binding acceptance; P7–P9 are incomplete. No push until development completion.
+
+The focused Qore suite covers source/saved/data services, relative/root/dot/query/network-path references, encoded octets, empty queries, replacement values, POST/provider endpoint overrides, header scope, URL credentials and 20 concurrent alternating-origin calls. The Python peer independently checks request lines and payload bytes, a cross-origin redirect, explicit headers, and a server-error/recovery pair. The old constructor dropped option credentials when it selected the WSDL endpoint; credential precedence and cross-origin absence now have direct assertions.
+
+The separately reduced handler defect was `/tmp/xml-http-handler-url/probe.qr`: WSDL base `/base/` and operation `send` reach the correct `/base/send` URL, but the old handler registered only `send` and returned HTTP 501. The handler now resolves and compiles port-relative templates, including Unicode literals, in registration-local binding copies. Overrides control both matching and decoding; all multi-port paths are checked before publishing. The regression suite also exposed dot-only replacement values being removed as navigation, now percent-encoded as data. Mounted-client fixtures now use relative operation locations as required by their intended mount behavior. The synthetic test.wsdl HTTP port addresses use the HTTP extension and server root, matching the client override; SOAP keeps its own endpoint. Existing value assertions remain intact. An independent Python sender verifies callback values for source/saved/data services, including negative-route recovery.
+
+Validation: [P6-44-validation.json](P6-44-validation.json). Audit: [P6-44-http-request-url.md](audits/P6-44-http-request-url.md). Durable implementation: [wsdl-http-request-url.md](../../design/wsdl-http-request-url.md). Logs and compiled artifacts are in `/tmp/xml-http-request-url/`; the core suite log is `/tmp/xml-http-base-resolution/core-request-url-installed.log`.

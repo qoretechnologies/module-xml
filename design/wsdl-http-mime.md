@@ -100,8 +100,10 @@ SoapHandler stores replacement routes separately from static HTTP paths, under
 the HTTP verb and template. It tries exact static routes first, then complete
 replacement templates. Duplicate template registration fails; a request matching
 multiple replacement routes fails instead of selecting an arbitrary callback.
-Template matching and decoding use HttpServer's raw request path, with the handler
-mount prefix removed, so encoded slashes and percent signs are decoded once.
+Template matching and decoding use HttpServer's raw request path, trying the full
+path and then the path with the handler mount prefix removed. Port-relative
+templates resolve through Qore before registration; explicit registration paths
+override both matching and decoding. Encoded slashes and percent signs are decoded once.
 For example, `/items/A%2FB%252F/view` supplies `A/B%2F` to the callback.
 
 HTTP route registration holds the write lock. `removeService(unique_id)` removes

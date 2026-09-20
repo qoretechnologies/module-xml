@@ -1,0 +1,199 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires ../qlib/WSDL.qm
+%requires ../qlib/SoapClient.qm
+%requires ../qlib/SoapDataProvider
+%requires HttpServer
+%exec-class RequestUrlTest
+
+class RequestUrlPeer inherits AbstractHttpRequestHandler {
+    private { string name; Queue received; }
+    constructor(string name, Queue received) { self.name = name; self.received = received; }
+    hash<HttpResponseInfo> handleRequest(hash<auto> cx, hash<auto> hdr, *data body) {
+        received.push({"origin":name,"path":cx.raw_path,"headers":hdr,"body":body});
+        return makeResponse({"Content-Type":"text/xml;charset=UTF-8"}, 200, "<result>"+name+"</result>");
+    }
+}
+
+class RequestUrlTest inherits QUnit::Test {
+    private { string source; }
+    constructor() : Test("WSDL HTTP request URLs", "1.0") {
+        source = ReadOnlyFile::readTextFile(get_script_dir()+"/wsdl-interop/http-request-url-peer/contract.wsdl");
+        addTestCase("Operation references resolve against the selected endpoint", \references());
+        addTestCase("Cross-origin defaults and explicit call headers", \headers());
+        addTestCase("URL replacement precedes endpoint resolution", \replacement());
+        addTestCase("POST bodies and endpoint override retain their values", \post());
+        addTestCase("Empty input preserves empty and inherited queries", \empty());
+        addTestCase("Concurrent operations leave the endpoint unchanged", \concurrent());
+        addTestCase("Target user information does not replace configured credentials", \userinfo());
+        set_return_value(main());
+    }
+    private string contract(string base, string location, string verb = "GET", string input = "<h:urlEncoded/>") {
+        string xml = replace(source, "http://example.invalid/base/", html_encode(base));
+        xml = replace(xml, 'location="/send"', 'location="'+html_encode(location)+'"');
+        xml = replace(xml, 'verb="GET"', 'verb="'+verb+'"');
+        return replace(xml, "<h:urlEncoded/>", input);
+    }
+    private static HttpServer server(string name, Queue queue) {
+        HttpServer result();
+        result.setDefaultHandler(name, new RequestUrlPeer(name, queue));
+        result.addListener(0);
+        return result;
+    }
+    private static string endpoint(HttpServer server) {
+        return sprintf("http://127.0.0.1:%d", server.getListenerInfo(0).port);
+    }
+    private references() {
+        Queue received();
+        HttpServer a=server("A",received); on_exit a.stop();
+        HttpServer b=server("B",received); on_exit b.stop();
+        string origin=endpoint(a);
+        foreach hash<auto> row in (
+                {"base":"/base/","ref":"/send","path":"/send?id=hello","origin":"A"},
+                {"base":"/base/","ref":"send","path":"/base/send?id=hello","origin":"A"},
+                {"base":"/base/file","ref":"send","path":"/base/send?id=hello","origin":"A"},
+                {"base":"/base/dir/","ref":"../send","path":"/base/send?id=hello","origin":"A"},
+                {"base":"/base/","ref":"./x/../send","path":"/base/send?id=hello","origin":"A"},
+                {"base":"/base/file?old=1","ref":"?rev=2","path":"/base/file?rev=2&id=hello","origin":"A"},
+                {"base":"/base/file?old=1","ref":"","path":"/base/file?id=hello","origin":"A"},
+                {"base":"/base/","ref":"//127.0.0.1:"+b.getListenerInfo(0).port+"/send","path":"/send?id=hello","origin":"B"},
+                {"base":"/base/","ref":"/%2e/enc%2Fpart","path":"/%2e/enc%2Fpart?id=hello","origin":"A"}) {
+            WebService initial(contract(origin+row.base,row.ref));
+            foreach WebService ws in (initial, Serializable::deserialize(initial.serialize()),
+                    Serializable::deserialize(initial.serializeToData())) {
+                SoapClient client({"wsdl":ws,"timeout":10000});
+                hash<auto> before=client.getHttpConfig();
+                hash<auto> info;
+                assertEq({"result":row.origin},client.callOperation("send",{"id":"hello"},NOTHING,\info));
+                hash<auto> request=received.get(10000);
+                assertEq(row.path,request.path);
+                assertEq(row.origin,request.origin);
+                assertEq((row.origin=="A" ? origin : endpoint(b))+row.path, info."effective-url");
+                assertEq(before,client.getHttpConfig());
+                assertEq(origin+row.base,client.getInfo().url);
+            }
+        }
+    }
+    private headers() {
+        Queue received();
+        HttpServer a=server("A",received); on_exit a.stop();
+        HttpServer b=server("B",received); on_exit b.stop();
+        foreach bool cross in (False,True) {
+            string location="//127.0.0.1:"+(cross ? b : a).getListenerInfo(0).port+"/headers";
+            WebService ws(contract(endpoint(a)+"/base/",location));
+            hash<auto> defaults={"aUtHoRiZaTiOn":"Bearer base-fixture", "cOoKiE":"base=1", "hOsT":"base.example", "X-Default":"kept"};
+            SoapClient client({"wsdl":ws,"headers":defaults,"timeout":10000});
+            hash<auto> before=client.getHttpConfig();
+            foreach bool explicit_headers in (False,True) {
+                hash<auto> opts=explicit_headers ? {"http_header":{"Authorization":"Bearer target-fixture","Cookie":"target=1","Host":"target.example"}} : {};
+                auto response=client.callOperation("send",{"id":"value"},opts);
+                hash<auto> request=received.get(10000);
+                assertEq("kept",request.headers."x-default");
+                assertEq(explicit_headers ? "Bearer target-fixture" : cross ? NOTHING : "Bearer base-fixture", request.headers.authorization);
+                assertEq(explicit_headers ? "target=1" : cross ? NOTHING : "base=1", request.headers.cookie);
+                assertEq(explicit_headers ? "target.example" : cross ? "127.0.0.1:"+b.getListenerInfo(0).port : "base.example", request.headers.host);
+                assertEq(before,client.getHttpConfig());
+                assertEq(defaults+SoapClient::Headers,client.getDefaultHeaders());
+            }
+        }
+    }
+    private replacement() {
+        Queue received(); HttpServer a=server("A",received); on_exit a.stop();
+        WebService ws(contract(endpoint(a)+"/base/dir/", "../items/(id)?fixed=1", "GET", "<h:urlReplacement/>"));
+        SoapClient client({"wsdl":ws,"timeout":10000});
+        auto response=client.callOperation("send",{"id":"A/B ?#č"});
+        assertEq({"result":"A"},response);
+        assertEq("/base/items/A%2FB%20%3F%23%C4%8D?fixed=1",received.get(10000).path);
+    }
+    private post() {
+        Queue received(); HttpServer a=server("A",received); on_exit a.stop();
+        HttpServer b=server("B",received); on_exit b.stop();
+        WebService ws(contract(endpoint(a)+"/wrong/", "send", "POST"));
+        SoapClient client({"wsdl":ws,"url":endpoint(b)+"/selected/file","timeout":10000});
+        SoapRequestDataProvider provider(ws,client,ws.getOperation("send"));
+        assertEq({"result":"B"},provider.doRequest({"id":"A & č"}));
+        hash<auto> request=received.get(10000);
+        assertEq("/selected/send",request.path);
+        assertEq("B",request.origin);
+        assertEq("id=A%20%26%20%C4%8D",binary_to_string(binary(request.body)));
+        assertEq(endpoint(b)+"/selected/file",client.getInfo().url);
+    }
+    private empty() {
+        Queue received(); HttpServer a=server("A",received); on_exit a.stop();
+        foreach hash<string,string> row in (
+                {"ref":"","path":"/base/file?old=1"},
+                {"ref":"?","path":"/base/file?"},
+                {"ref":"?new=2","path":"/base/file?new=2"}) {
+            string xml=replace(contract(endpoint(a)+"/base/file?old=1",row.ref),
+                '<w:part name="id" type="x:string"/>',"");
+            WebService ws(xml);
+            SoapClient client({"wsdl":ws,"timeout":10000});
+            assertEq({"result":"A"},client.callOperation("send",{}));
+            assertEq(row.path,received.get(10000).path);
+        }
+    }
+    private concurrent() {
+        Queue received(); HttpServer a=server("A",received); on_exit a.stop();
+        HttpServer b=server("B",received); on_exit b.stop();
+        string xml=contract(endpoint(a)+"/base/", "send");
+        xml=replace(xml,"</w:portType>",'<w:operation name="other"><w:input message="t:Input"/>'
+            +'<w:output message="t:Output"/></w:operation></w:portType>');
+        xml=replace(xml,"</w:binding>",'<w:operation name="other"><h:operation location="//127.0.0.1:'
+            +b.getListenerInfo(0).port+'/other"/><w:input><h:urlEncoded/></w:input>'
+            +'<w:output><m:mimeXml part="result"/></w:output></w:operation></w:binding>');
+        WebService ws(xml);
+        SoapClient client({"wsdl":ws,"timeout":10000,"headers":{"Authorization":"Bearer base-fixture"}});
+        hash<auto> before=client.getHttpConfig();
+        Queue ready(); Queue start(); Queue done();
+        foreach int worker in (0,1,2,3) {
+            background sub(int id) {
+                ready.push(id);
+                auto token=start.get(10000);
+                try {
+                    for (int step=0;step<5;++step) {
+                        string operation=(id+step)%2 ? "other" : "send";
+                        auto result=client.callOperation(operation,{"id":string(id)+"-"+step});
+                        @assert(result.result==(operation=="send" ? "A" : "B"));
+                    }
+                    done.push(id);
+                } catch (hash<ExceptionInfo> error) { done.push(error); }
+            }(worker);
+        }
+        for (int worker=0;worker<4;++worker) { auto token=ready.get(10000); }
+        for (int worker=0;worker<4;++worker) { start.push(True); }
+        list<int> finished();
+        for (int worker=0;worker<4;++worker) { push finished,done.get(30000); }
+        assertEq((0,1,2,3),sort(finished));
+        assertEq(before,client.getHttpConfig());
+        hash<string,int> counts();
+        for (int step=0;step<20;++step) {
+            hash<auto> request=received.get(10000);
+            ++counts{request.origin};
+            assertEq(request.origin=="A" ? "Bearer base-fixture" : NOTHING,request.headers.authorization);
+            assertTrue(request.path.startsWith(request.origin=="A" ? "/base/send?" : "/other?"));
+        }
+        assertEq({"A":10,"B":10},counts);
+    }
+    private userinfo() {
+        Queue received(); HttpServer a=server("A",received); on_exit a.stop();
+        HttpServer b=server("B",received); on_exit b.stop();
+        foreach bool cross in (False,True) {
+        foreach bool url_credentials in (False,True) {
+            string location="//ignored:fixture@127.0.0.1:"+(cross ? b : a).getListenerInfo(0).port+"/target";
+            string base=endpoint(a)+"/base/";
+            if (url_credentials) { base=replace(base,"http://","http://url-user:url-fixture@"); }
+            WebService ws(contract(base,location));
+            SoapClient client({"wsdl":ws,"timeout":10000,"username":"base-user","password":"base-fixture"});
+            auto result=client.callOperation("send",{"id":"x"});
+            hash<auto> request=received.get(10000);
+            assertEq(cross ? NOTHING : "Basic "+make_base64_string(url_credentials
+                ? "url-user:url-fixture" : "base-user:base-fixture"),request.headers.authorization);
+            assertEq(cross ? "B" : "A",result.result);
+            assertEq(url_credentials ? "url-user" : "base-user",client.getUsername());
+        }
+        }
+    }
+}

@@ -1,0 +1,193 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires ../qlib/WSDL.qm
+%requires ../qlib/SoapClient.qm
+%requires ../qlib/SoapHandler.qm
+%requires HttpServer
+%exec-class HandlerUrlTest
+
+class HandlerUrlTest inherits QUnit::Test {
+    private { string source; }
+    constructor() : Test("WSDL HTTP handler URLs", "1.0") {
+        source = ReadOnlyFile::readTextFile(get_script_dir()+"/wsdl-interop/http-request-url-peer/contract.wsdl");
+        addTestCase("Endpoint-relative routes round trip", \routes());
+        addTestCase("Mounted routes retain raw replacement values", \mounts());
+        addTestCase("Explicit path overrides apply to matching and decoding", \overrides());
+        addTestCase("Multiple ports register atomically and remove together", \ports());
+        addTestCase("Bindings without ports retain mount-relative routes", \noport());
+        addTestCase("Dot values remain data during URI resolution", \dots());
+        addTestCase("Failed template compilation leaves registrations unchanged", \atomic());
+        set_return_value(main());
+    }
+    private static string attribute(string text) {
+        return replace(replace(replace(text, "&", "&amp;"), '"', "&quot;"), "<", "&lt;");
+    }
+    private string contract(string base, string location, string verb = "GET", string input = "<h:urlEncoded/>") {
+        string xml = replace(source, "http://example.invalid/base/", attribute(base));
+        xml = replace(xml, 'location="/send"', 'location="'+attribute(location)+'"');
+        xml = replace(xml, 'verb="GET"', 'verb="'+verb+'"');
+        return replace(xml, "<h:urlEncoded/>", input);
+    }
+    private static string endpoint(HttpServer server) {
+        return sprintf("http://127.0.0.1:%d", server.getListenerInfo(0).port);
+    }
+    private static code<auto(hash<auto>, auto)> callback(Queue received) {
+        return auto sub(hash<auto> cx, auto value) {
+            received.push({"value":value,"raw":cx.raw_path});
+            return {"result":"received"};
+        };
+    }
+    private routes() {
+        foreach hash<auto> row in (
+                {"base":"/base/","ref":"send"},
+                {"base":"/base/file","ref":"send"},
+                {"base":"/base/dir/","ref":"../send"},
+                {"base":"/base/","ref":"/send"},
+                {"base":"/base/","ref":"./a/../send"},
+                {"base":"/base/file?old=1","ref":"?new=2"},
+                {"base":"/base/file?old=1","ref":""},
+                {"base":"/base/","ref":"č/(id)/é","replacement":True},
+                {"base":"/base/dir/","ref":"../items/(id)?f=1","replacement":True},
+                {"base":"/base/","ref":"//example.invalid/other/(id)","replacement":True}) {
+            foreach string verb in ("GET","POST") {
+                string xml=contract("http://example.invalid"+row.base,row.ref,verb,
+                    row.replacement ? "<h:urlReplacement/>" : "<h:urlEncoded/>");
+                WebService initial(xml);
+                foreach WebService ws in (initial,Serializable::deserialize(initial.serialize()),
+                        Serializable::deserialize(initial.serializeToData())) {
+                    HttpServer server(); on_exit server.stop();
+                    SoapHandler handler(new PermissiveAuthenticator());
+                    server.setDefaultHandler("routes",handler);
+                    Queue received();
+                    WSOperation operation=ws.getOperation("send");
+                    hash<auto> before=operation.serializeRequest({"id":"A/B č"});
+                    handler.addMethod(ws,operation,callback(received),NOTHING,NOTHING,NOTHING,
+                        NOTHING,NOTHING,NOTHING,"B");
+                    assertEq(before,operation.serializeRequest({"id":"A/B č"}));
+                    server.addListener(0);
+                    # A network-path reference needs the listener authority on both client and server metadata.
+                    if (row.ref.startsWith("//")) {
+                        string target=replace(xml,"//example.invalid/other",endpoint(server).substr(5)+"/other");
+                        ws=new WebService(target);
+                    }
+                    SoapClient client({"wsdl":ws,"url":endpoint(server)+row.base,"timeout":10000});
+                    assertEq({"result":"received"},client.callOperation("send",{"id":"A/B č"}));
+                    assertEq({"id":"A/B č"},received.get(10000).value);
+                }
+            }
+        }
+    }
+    private mounts() {
+        foreach string mount in ("api", "api č") {
+            HttpServer server(); on_exit server.stop();
+            SoapHandler handler(new PermissiveAuthenticator());
+            server.setHandler("mounted",mount,NOTHING,handler,NOTHING,False);
+            Queue received();
+            string base="http://example.invalid/"+encode_url(mount)+"/base/";
+            WebService ws(contract(base,"items/(id)","GET","<h:urlReplacement/>"));
+            handler.addMethod(ws,ws.getOperation("send"),callback(received),NOTHING,NOTHING,NOTHING,
+                NOTHING,NOTHING,NOTHING,"B");
+            server.addListener(0);
+            SoapClient client({"wsdl":ws,"url":endpoint(server)+"/"+encode_url(mount)+"/base/","timeout":10000});
+            assertEq({"result":"received"},client.callOperation("send",{"id":"A/B"}));
+            hash<auto> actual=received.get(10000);
+            assertEq({"id":"A/B"},actual.value);
+            assertEq("/"+encode_url(mount)+"/base/items/A%2FB",actual.raw);
+        }
+    }
+    private overrides() {
+        foreach bool saved in (False,True) {
+            string xml=replace(contract("http://example.invalid/base/","items/(id)","GET","<h:urlReplacement/>"),
+                "id", "číslo");
+            WebService ws(xml);
+            if (saved) { ws=Serializable::deserialize(ws.serialize()); }
+            HttpServer server(); on_exit server.stop();
+            SoapHandler handler(new PermissiveAuthenticator()); server.setDefaultHandler("override",handler);
+            Queue received();
+            handler.addMethod(ws,ws.getOperation("send"),callback(received),NOTHING,NOTHING,NOTHING,
+                "č/(číslo)/é",NOTHING,NOTHING,"B");
+            server.addListener(0);
+            HTTPClient peer({"url":endpoint(server),"timeout":10000}); peer.setPreEncodedUrls();
+            hash<auto> response=peer.send(NOTHING,"GET","/%C4%8D/A%2FB/%C3%A9");
+            assertEq(200,response.status_code);
+            assertEq({"číslo":"A/B"},received.get(10000).value);
+            assertEq("items/A%2FB",ws.getOperation("send").serializeRequest({"číslo":"A/B"}).path);
+        }
+    }
+    private ports() {
+        string xml=contract("http://example.invalid/one/","send");
+        xml=replace(xml,"</w:service>",'<w:port name="Second" binding="t:B"><h:address location="http://example.invalid/two/"/></w:port></w:service>');
+        WebService ws(xml);
+        HttpServer server(); on_exit server.stop();
+        SoapHandler handler(new PermissiveAuthenticator()); server.setDefaultHandler("ports",handler);
+        Queue received();
+        handler.addMethod(ws,ws.getOperation("send"),callback(received),NOTHING,NOTHING,NOTHING,
+            NOTHING,NOTHING,NOTHING,"B","owner");
+        server.addListener(0);
+        HTTPClient peer({"url":endpoint(server),"timeout":10000});
+        foreach string path in ("/one/send?id=a","/two/send?id=b") {
+            assertEq(200,peer.send(NOTHING,"GET",path).status_code);
+            assertEq(path.endsWith("a") ? "a" : "b",received.get(10000).value.id);
+        }
+        # The first route is new; the second conflicts. Neither is published on failure.
+        WebService conflict(replace(xml,"/one/","/three/"));
+        assertThrows("SOAP-PATH-ERROR",\handler.addMethod(),(conflict,conflict.getOperation("send"),
+            callback(received),NOTHING,NOTHING,NOTHING,NOTHING,NOTHING,NOTHING,"B","other"));
+        assertThrows("HTTP-CLIENT-RECEIVE-ERROR",\peer.send(),(NOTHING,"GET","/three/send?id=c"));
+        handler.removeService("owner");
+        foreach string path in ("/one/send?id=a","/two/send?id=b") {
+            assertThrows("HTTP-CLIENT-RECEIVE-ERROR",\peer.send(),(NOTHING,"GET",path));
+        }
+        assertEq(0,received.size());
+        handler.addMethod(ws,ws.getOperation("send"),callback(received),NOTHING,NOTHING,NOTHING,
+            NOTHING,NOTHING,NOTHING,"B","owner");
+        assertEq(200,peer.send(NOTHING,"GET","/one/send?id=recovered").status_code);
+        assertEq("recovered",received.get(10000).value.id);
+    }
+    private noport() {
+        string xml=contract("http://example.invalid/base/", "send");
+        int start=index(xml,"<w:service");
+        int end=index(xml,"</w:service>")+12;
+        xml=xml.substr(0,start)+xml.substr(end);
+        WebService ws(xml);
+        HttpServer server(); on_exit server.stop();
+        SoapHandler handler(new PermissiveAuthenticator());
+        server.setHandler("mount","api",NOTHING,handler,NOTHING,False);
+        Queue received();
+        handler.addMethod(ws,ws.getOperation("send"),callback(received),NOTHING,NOTHING,NOTHING,
+            NOTHING,NOTHING,NOTHING,"B");
+        server.addListener(0);
+        HTTPClient peer({"url":endpoint(server),"timeout":10000});
+        assertEq(200,peer.send(NOTHING,"GET","/api/send?id=value").status_code);
+        assertEq({"id":"value"},received.get(10000).value);
+    }
+    private dots() {
+        WebService ws(contract("http://example.invalid/base/", "items/(id)/view", "GET", "<h:urlReplacement/>"));
+        HttpServer server(); on_exit server.stop();
+        SoapHandler handler(new PermissiveAuthenticator()); server.setDefaultHandler("dots",handler);
+        Queue received();
+        handler.addMethod(ws,ws.getOperation("send"),callback(received),NOTHING,NOTHING,NOTHING,
+            NOTHING,NOTHING,NOTHING,"B");
+        server.addListener(0);
+        SoapClient client({"wsdl":ws,"url":endpoint(server)+"/base/","timeout":10000});
+        foreach string value in (".", "..", "a.b") {
+            assertEq({"result":"received"},client.callOperation("send",{"id":value}));
+            hash<auto> actual=received.get(10000);
+            assertEq({"id":value},actual.value);
+            assertEq("/base/items/"+(value=="." ? "%2E" : value==".." ? "%2E%2E" : "a.b")+"/view",actual.raw);
+        }
+    }
+    private atomic() {
+        WebService ws(contract("http://example.invalid/base/","items/(id)","GET","<h:urlReplacement/>"));
+        HttpBinding binding=ws.getOperation("send").getBinding();
+        hash<auto> before=binding.input.urlReplacement;
+        SoapHandler handler(new PermissiveAuthenticator()); Queue received();
+        assertThrows("WSDL-ERROR",\handler.addMethod(),(ws,ws.getOperation("send"),callback(received),
+            NOTHING,NOTHING,NOTHING,"items/(id)/../send",NOTHING,NOTHING,"B"));
+        assertEq(before,binding.input.urlReplacement);
+        assertEq("items/(id)",binding.location);
+    }
+}

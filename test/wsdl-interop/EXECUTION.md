@@ -9626,3 +9626,14 @@ All 43 affected Qore suites pass: **1,684 cases / 55,397 assertions**. All 16 in
 The full audit reports **28 Pass / 34 N/A / zero Fail**. All work targets `develop` in the main checkout. No C++ change, Qore source change, installation or push was made. Request-local HTTP URL support and its XML integration remain required P6 work; P7–P9 remain incomplete.
 
 See [evidence](mime-entity-tree-evidence.md), [validation](P6-43-validation.json), [audit](audits/P6-43-mime-entity-trees.md), and [design](../../design/wsdl-http-multipart.md).
+
+
+## P6-44: Resolved HTTP client and handler URLs
+
+Qore's installed `HTTPClient::sendUrl()` passes its 13-case / 186-assertion core suite. SoapClient resolves HTTP operation references with Qore's RFC 3986 API after serialization, keeps per-call targets separate from persistent configuration, and scopes its default Authorization/Cookie/Host headers to the configured origin. Explicit call headers retain their target scope. The constructor now applies username/password options after endpoint selection, preserving URL-credential precedence.
+
+All 45 affected Qore suites pass: **1,698 cases / 55,868 assertions**. All 17 independent Python gates and 16 corpus commands meet their expected outcomes. The new Python peer checks 56 actual HTTP exchanges. Six corpus reports retain P6-43's semantic results. Documentation, eight-file astparser checks and the compiled WSDL/SoapClient/SoapHandler suites' 14 cases / 471 assertions pass without warnings/errors.
+
+The full audit reports **18 Pass / 44 N/A / zero Fail**. This increment changes no C++, Qore source or installation and is committed only to the main `develop` checkout. P6 remains open for final binding acceptance; P7–P9 are incomplete. No push until development completion.
+
+See [evidence](http-request-url-evidence.md), [validation](P6-44-validation.json), [audit](audits/P6-44-http-request-url.md), and [design](../../design/wsdl-http-request-url.md).

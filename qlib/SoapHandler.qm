@@ -62,7 +62,7 @@ module SoapHandler {
 
     @par Declared header-processing errors
     A callback can select a WSDL headerfault without placing its value in the body's fault detail:
-    @code{.qore}
+    @code{.py}
     throw SOAP_HEADER_FAULT, "Session expired", <SoapHeaderFaultInfo>{
         "message": "{urn:session}SessionExpired", "part": "problem", "value": 401};
     @endcode
@@ -76,6 +76,8 @@ module SoapHandler {
     @section soaphandler_relnotes SoapHandler Release History
 
     @subsection soaphandler_0_3_4 SoapHandler 0.3.4
+    - HTTP routes resolve operation references against port endpoints, preserve encoded template literals, and
+      apply explicit path overrides consistently to matching and decoding; multi-port registration validates before publication
     - native and retained XML calls preserve WSDL attachment parts independently of SOAP body/header values
     - HTTP multipart callbacks preserve nested MIME entity trees and recursive representation choices
     - SOAP multipart requests share MIME parameter parsing and decode binary XML roots before routing
@@ -270,7 +272,8 @@ public namespace SoapHandler {
             @param logopt log options which can be used by a custom logger (see the \a getLogMessage parameter in the
             constructor)
             @param cmark an optional "context marker" for the method
-            @param path an optional path for the method (assumed to be the name of the service)
+            @param path for SOAP, an optional service name; for HTTP, an explicit URI template relative to the
+            handler mount, overriding port-address resolution for this registration
             @param err_func a call reference, a closure, or a string function name to call with error information if
             an exception is thrown with SOAP data
             @param altpath an alternate path for the service / WSDL
@@ -286,6 +289,12 @@ public namespace SoapHandler {
             @param response_mime_format optional format identifier or recursive response MIME selection tree
             @throw SOAP-SERVER-ADDMETHOD-PARAMETER-ERROR invalid callback or conflicting representation choices
             @throw SOAP-MESSAGE-ERROR an explicit MIME selector is unavailable
+            @throw SOAP-PATH-ERROR an HTTP route is already registered
+            @throw WSDL-ERROR a resolved replacement template no longer represents every input part
+            @note HTTP routes resolve against each matching WSDL port address using Qore's RFC 3986 API.
+            Matching and decoding share an immutable registration-local template. Unicode literals are URI encoded;
+            saved and source operations are not modified. A supplied path or a binding without ports uses the
+            handler mount root. Root-relative client operations replace the endpoint path, including any mount.
             @par Example
             Register xml:invoice as the response format when returning schema-bound invoice values from a
             contract that also offers an opaque invoice document.
@@ -588,24 +597,26 @@ public namespace SoapHandler {
                 }
             } else if (binding instanceof HttpBinding) {
                 HttpBinding hb = binding;
-                # http binding
+                # Resolve and compile all routes before publishing any registration.
+                hash<string, hash<auto>> routes = makeHttpRoutes(ws, method, hb);
                 rwl.writeLock();
                 on_exit rwl.writeUnlock();
+                foreach hash<auto> route in (routes.iterator()) {
+                    if (httpTemplateMethods{hb.httpMethod}.hasKey(route.path)
+                            || (exists mapMethodPathToOperation{hb.httpMethod}
+                                && mapMethodPathToOperation{hb.httpMethod}.get(route.path).path == route.path)) {
+                        throw "SOAP-PATH-ERROR", sprintf("HTTP URI template %Y is already registered", route.path);
+                    }
+                }
                 if (!mapMethodPathToOperation{hb.httpMethod}) {
                     mapMethodPathToOperation{hb.httpMethod} = new TreeMap();
                 }
-                method.parseUrlOnly = (hb.input.urlEncoded && hb.httpMethod != "POST") || exists hb.input.urlReplacement;
-                method.exactMatch = !exists hb.input.urlReplacement;
-                method.path = ltrim(method.path ?? hb.location, "/");
-                if (exists hb.input.urlReplacement || method.path.contains("?")) {
-                    if (httpTemplateMethods{hb.httpMethod}.hasKey(method.path)) {
-                        throw "SOAP-PATH-ERROR", sprintf("HTTP URI template %Y is already registered",
-                            method.path);
+                foreach hash<auto> route in (routes.iterator()) {
+                    if (exists hb.input.urlReplacement || route.path.contains("?")) {
+                        httpTemplateMethods{hb.httpMethod}{route.path} = route;
+                    } else {
+                        mapMethodPathToOperation{hb.httpMethod}.put(route.path, route);
                     }
-                    method.http_binding = hb;
-                    httpTemplateMethods{hb.httpMethod}{method.path} = method;
-                } else {
-                    mapMethodPathToOperation{hb.httpMethod}.put(method.path, method);
                 }
             } else if (!exists binding) {
                 throw "SOAPACTION-ERROR", sprintf("cannot register operation %y because it has no binding",
@@ -615,6 +626,75 @@ public namespace SoapHandler {
                     "binding: %y", method.operation.name, binding.className());
             }
             #printf("DEBUG: SoapHandler::addMethodInternal() %N %N\n", method.name, method.path);
+        }
+
+        private hash<string, hash<auto>> makeHttpRoutes(WebService ws, hash<auto> method, HttpBinding binding) {
+            hash<string, bool> bases();
+            if (!exists method.path) {
+                foreach hash<ServiceInfo> service in (ws.listServices()) {
+                    foreach hash<auto> port in (service.port.iterator()) {
+                        if (port.binding.getComponentKey() == binding.name) {
+                            bases{port.address} = True;
+                        }
+                    }
+                }
+            }
+            # Explicit paths and bindings without ports are relative to the handler's mount root.
+            # This URI is only a parsing context; no connection is made to it.
+            if (!bases) { bases{"http://localhost/"} = True; }
+            hash<string, hash<auto>> result();
+            foreach string base in (keys bases) {
+                string reference = method.path ?? binding.location;
+                hash<string, string> patterns();
+                string marker;
+                bool generated_query = !reference && binding.input.urlEncoded && binding.httpMethod != "POST"
+                    && boolean(method.operation.input.pmap);
+                if (exists binding.input.urlReplacement) {
+                    # Protect Unicode part names from URI encoding while preserving literal parentheses.
+                    marker = "qore-wsdl-replacement-";
+                    while (reference.contains(marker) || base.contains(marker)) { marker += "x"; }
+                    BindingMessageDescription template = binding.input.copy();
+                    template.setUrlReplacement(reference, method.operation.input);
+                    reference = "";
+                    foreach string token in (keys template.urlReplacement) {
+                        if (token.startsWith("string")) {
+                            reference += template.urlReplacement{token};
+                        } else {
+                            string key = marker + patterns.size() + "-end";
+                            patterns{key} = "(" + template.urlReplacement{token} + ")";
+                            reference += key;
+                        }
+                    }
+                } else if (generated_query) {
+                    # Generated GET parameters replace a base query even with an empty operation reference.
+                    reference = "?";
+                }
+                string path = parse_url(resolve_url(base, reference,
+                    RESOLVE_URL_ENCODE | RESOLVE_URL_NO_FRAGMENT)).path;
+                if (generated_query) { path = path.substr(0, path.size() - 1); }
+                if (patterns) {
+                    list<string> pieces = split(marker, path);
+                    path = shift pieces;
+                    foreach string piece in (pieces) {
+                        int end = index(piece, "-end") + 4;
+                        string key = marker + piece.substr(0, end);
+                        @assert(patterns.hasKey(key));
+                        path += patterns{key} + piece.substr(end);
+                    }
+                }
+                HttpBinding route = binding.copy();
+                route.location = path;
+                if (exists binding.input.urlReplacement) {
+                    route.input = binding.input.copy();
+                    route.input.setUrlReplacement(path, method.operation.input);
+                }
+                string key = ltrim(path, "/");
+                result{key} = method + {"path":key, "http_binding":route,
+                    "parseUrlOnly":(binding.input.urlEncoded && binding.httpMethod != "POST")
+                        || exists binding.input.urlReplacement,
+                    "exactMatch":!exists binding.input.urlReplacement};
+            }
+            return result;
         }
 
         private *hash<auto> help(hash<auto> cx) {
@@ -770,8 +850,7 @@ private nothing msglog(hash<auto> cx, hash<auto> msg) {
 
             try {
                 if (method.parseUrlOnly) {
-                    args = method.operation.deserializeRequestPath(method.http_binding
-                        ? getHttpBindingPath(cx) : cx.url.path, method.binding);
+                    args = method.http_binding.deserializeRequestPath(method.operation, method.http_request_path);
                 } else if (method.xml_values) {
                     if (!exists xml_body) {
                         throw "SOAP-DESERIALIZATION-ERROR", "retained XML decoding requires a SOAP XML message";
@@ -981,19 +1060,28 @@ private nothing msglog(hash<auto> cx, hash<auto> msg) {
 
                     if (exists mapMethodPathToOperation{hdr.method}) {
                         TreeMap tm = mapMethodPathToOperation{hdr.method};
-                        method = matchMethod(tm, path, \args);
-                        if (!method && alt_path) {
-                            method = matchMethod(tm, alt_path, \args);
+                        string raw_path = ltrim(cx.raw_path ?? cx.url.path, "/");
+                        method = matchMethod(tm, raw_path, \args);
+                        if (!method) {
+                            raw_path = getHttpBindingPath(cx);
+                            method = matchMethod(tm, raw_path, \args);
+                        }
+                        if (method) {
+                            method.http_request_path = raw_path;
                         }
                     }
                     if (!method) {
-                        string raw_path = getHttpBindingPath(cx);
+                        string full_path = ltrim(cx.raw_path ?? cx.url.path, "/");
+                        string relative_path = getHttpBindingPath(cx);
                         foreach hash<auto> candidate in (httpTemplateMethods{hdr.method}.iterator()) {
-                            if (candidate.http_binding.matchesRequestPath(raw_path)) {
+                            *string matched = candidate.http_binding.matchesRequestPath(full_path) ? full_path
+                                : candidate.http_binding.matchesRequestPath(relative_path) ? relative_path : NOTHING;
+                            if (exists matched) {
                                 if (method) {
-                                    throw "SOAP-PATH-ERROR", sprintf("ambiguous HTTP URI template path %Y", raw_path);
+                                    throw "SOAP-PATH-ERROR", sprintf("ambiguous HTTP URI template path %Y", full_path);
                                 }
                                 method = candidate;
+                                method.http_request_path = matched;
                             }
                         }
                     }

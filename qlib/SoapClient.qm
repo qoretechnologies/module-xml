@@ -101,6 +101,10 @@ auto result = sc.call("SubmitDocument", msg);
     @section soapclientrelnotes SoapClient Release Notes
 
     @subsection soapclient_1_0_4 SoapClient v1.0.4
+    - HTTP operation references resolve against the selected endpoint with Qore's RFC 3986 support and use
+      HTTPClient::sendUrl(); requests can select another origin without changing the client configuration
+    - Default Authorization, Cookie and Host headers retain their configured-origin scope; explicit call headers
+      address the selected target. Username/password options survive endpoint selection, with URL credentials taking precedence
     - HTTP multipart calls preserve nested MIME entity trees and accept recursive format/identity selections
     - native and retained XML calls preserve WSDL attachment parts independently of SOAP body/header values
     - retained XML responses decode the selected multipart root using its charset and byte-order mark
@@ -255,7 +259,8 @@ public class SoapClient inherits HTTPClient {
         @param h valid option keys:
         - \c wsdl: the URL of the web service or a @ref WSDL::WebService "WebService" object itself
         - \c wsdl_file: a path to use to load the %WSDL and create the @ref WSDL::WebService "WebService" object
-        - \c url: override the target URL given in the %WSDL
+        - \c url: override the target URL given in the %WSDL; HTTP binding operation references resolve against
+          this complete base URI, including its path and query
         - \c send_encoding: a @ref EncodingSupport "send data encoding option" or the value \c "auto" which means to use automatic encoding; if not present defaults to no content-encoding on sent message bodies
         - \c content_encoding: for possible values, see @ref EncodingSupport; this sets the send encoding (if the \c "send_encoding" option is not set) and the requested response encoding
         - [\c service]: in case multiple service entries are found in the WSDL, give the one to be used here
@@ -263,6 +268,15 @@ public class SoapClient inherits HTTPClient {
         - [\c log]: a log closure or call reference taking a single string giving the log message
         - [\c dbglog]: a log closure or call reference taking a single string giving the debug log message
         - also all options from @ref SoapClient::SoapClient::HTTPOptions "SoapClient::HTTPOptions", which are passed to @ref Qore::HTTPClient::constructor() "HTTPClient::constructor()"
+        @note For HTTP bindings, a root-relative operation such as /send replaces the endpoint path. A relative
+        send resolves within an endpoint ending in a slash, or replaces its final path segment otherwise.
+        SOAP bindings keep their configured endpoint behavior. Request-local targets never change the client URL.
+        @par Example
+        @code{.py}
+SoapClient client({"wsdl": service, "url": "https://example.org/packages/v1/"});
+# An HTTP operation location of ../submit addresses https://example.org/packages/submit.
+auto result = client.callOperation("submit", {"id": "invoice-71"});
+        @endcode
     */
     constructor(hash<auto> h) : HTTPClient(h{HTTPOptions}) {
         if (exists h.wsdl_file && exists h.wsdl)
@@ -350,6 +364,12 @@ public class SoapClient inherits HTTPClient {
 
         # set URL
         setURL(url);
+        # Selecting the service endpoint clears credentials initially set by the native constructor.
+        # Apply explicit options after that selection, with the same URL-credential precedence as HTTPClient.
+        if (!getUsername() && !getPassword() && h.username.typeCode() == NT_STRING
+                && h.password.typeCode() == NT_STRING) {
+            setUserPassword(h.username, h.password);
+        }
 
         if (h.log)
             logc = h.log;
@@ -565,7 +585,25 @@ public class SoapClient inherits HTTPClient {
             }
             response_binding.output.validateMimeSelection(opts.response_mime_format);
         }
-        hash<auto> hdr = headers + msg.hdr;
+        OperationalBinding selected_binding = op.getBinding(binding);
+        bool http_binding = selected_binding instanceof HttpBinding;
+        *string request_url;
+        hash<auto> defaults = headers;
+        if (http_binding) {
+            # Replacement and form query generation have already completed. Qore owns URI resolution.
+            string base_url = getURL(UC_TARGET | UC_PATH);
+            request_url = resolve_url(base_url, msg.path ?? "", RESOLVE_URL_ENCODE | RESOLVE_URL_NO_FRAGMENT);
+            if (!sameHttpOrigin(base_url, request_url)) {
+                # These are client defaults, whereas msg.hdr contains explicit per-call headers.
+                foreach string name in (keys defaults) {
+                    if (name.lwr() == "authorization" || name.lwr() == "cookie" || name.lwr() == "host") {
+                        remove defaults{name};
+                    }
+                }
+            }
+            msg.path = parse_url(request_url).path;
+        }
+        hash<auto> hdr = defaults + msg.hdr;
 
         date now = now_us();
         on_exit {
@@ -576,13 +614,15 @@ public class SoapClient inherits HTTPClient {
         # we have to write the request key after the HTTPClient::post() call but before the log message above
         # (on_exit statements are executed in reverse order when the block is exited)
         on_exit info += ("request-body": msg.body, "request-soap-headers": soap_headers);
-        if (msg.path) {
-            if (msg.path !~ /^[\/\?]/ ) {
-                msg.path = "/" + msg.path;
+        if (!http_binding) {
+            if (msg.path) {
+                if (msg.path !~ /^[\/\?]/ ) {
+                    msg.path = "/" + msg.path;
+                }
             }
-        }
-        if (url_path) {
-            msg.path = rtrim(url_path, "/") + msg.path;
+            if (url_path) {
+                msg.path = rtrim(url_path, "/") + msg.path;
+            }
         }
         msglog({
             'reason': 'request',
@@ -595,7 +635,7 @@ public class SoapClient inherits HTTPClient {
         });
         # apply content encoding here
         data body = msg.body ?? "";
-        if (op.getBinding(binding) instanceof HttpBinding && body.typeCode() == NT_STRING) {
+        if (http_binding && body.typeCode() == NT_STRING) {
             # The binding has already applied its selected media charset.
             body = binary(body);
         }
@@ -608,7 +648,8 @@ public class SoapClient inherits HTTPClient {
         hash<auto> rh;
         try {
             # only try to read a message body in the response if the operation has an output message
-            rh = send(body, msg.method, msg.path, hdr, exists op.output, \info);
+            rh = http_binding ? sendUrl(body, msg.method, request_url, hdr, exists op.output, \info)
+                : send(body, msg.method, msg.path, hdr, exists op.output, \info);
             info."response-body" = rh.body;
             http_status_code = rh.status_code;
         } catch (hash<ExceptionInfo> ex) {
@@ -634,7 +675,6 @@ public class SoapClient inherits HTTPClient {
                 rethrow;
             }
         }
-        OperationalBinding selected_binding = op.getBinding(binding);
         *string response_format;
         bool mime_content = False;
         if (selected_binding instanceof HttpBinding && selected_binding.output) {
@@ -658,6 +698,19 @@ public class SoapClient inherits HTTPClient {
             return op.deserializeXmlResponse(WSDLLib::getXmlMessageText(rmsg), binding, rmsg.parts);
         }
         return op.deserializeResponse(pdata, binding, opts.preserve_types ?? False, opts.response_mime_format ?? response_format);
+    }
+
+    # Scope module-level defaults to the configured HTTP origin. Parsing and URI resolution belong to Qore;
+    # redirects and native authentication remain scoped by HTTPClient::sendUrl(). UNIX socket paths are case-sensitive.
+    private static bool sameHttpOrigin(string base_url, string target_url) {
+        hash<UrlInfo> base = parse_url(base_url);
+        hash<UrlInfo> target = parse_url(target_url);
+        string scheme = base.protocol.lwr();
+        if (scheme != target.protocol.lwr() || (scheme != "http" && scheme != "https")) { return False; }
+        int default_port = scheme == "https" ? 443 : 80;
+        if ((base.port ?? default_port) != (target.port ?? default_port)) { return False; }
+        return base.host.startsWith("/") || target.host.startsWith("/")
+            ? base.host == target.host : base.host.lwr() == target.host.lwr();
     }
 
     #! uses SoapClient::call() to transparently serialize the argument and make a call to the given operation and return the deserialized results
@@ -755,7 +808,7 @@ soap.setContentEncoding("gzip");
         headers."Accept-Encoding" = seh.ce ?? "identity";
     }
 
-    #! adds default headers to each request; these headers will be sent in all requests but can be overridden in requests as well
+    #! adds default headers to each request, subject to origin scoping for HTTP binding targets
     /** @par Example:
         @code{.py}
 # disable gzip and bzip encoding in responses
@@ -764,7 +817,9 @@ soap.addDefaultHeaders(("Accept-Encoding": "compress"));
 
         @param h a hash of headers to add to the default headers to send on each request
 
-        @note default headers can also be set in the constructor
+        @note Default headers can also be set in the constructor. Authorization, Cookie and Host defaults belong
+        to the configured endpoint's origin. For HTTP bindings, use the call's http_header option to explicitly
+        supply those headers for a different target. Qore applies its redirect header rules after the first request.
 
         @see @ref SoapClient::SoapClient::getDefaultHeaders() "SoapClient::getDefaultHeaders()"
 
