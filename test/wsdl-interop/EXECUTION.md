@@ -9697,3 +9697,32 @@ Qore edits, installation, push or CI trigger belong to this increment.
 
 See [evidence](soap-node-evidence.md), [validation](P7-03-validation.json),
 [audit](audits/P7-03-soap-node.md), and [implemented design](../../design/soap-envelope-processing.md).
+
+
+## P7-04: SOAP 1.2 fault grammar
+
+SOAP 1.2 fault fields now validate before native namespace projection: ordered
+required/singleton fields, scoped Code/Subcode QNames and top codes, multilingual
+Text with explicit xml:lang, Node/Role URI syntax, Detail content and the sole-Fault
+Body rule. Valid fault exceptions keep their existing contract. The XML language
+union distinguishes a true empty reset from whitespace-only invalid values.
+
+All **26 affected Qore suites pass: 375 cases / 16,438 assertions**. Five focused
+SOAP suites also pass compiled: **16 cases / 5,479 assertions**. The new fault suite
+passes **2 cases / 1,098 assertions**, covering 73 explicit cases across source,
+saved-object and saved-data services and a 64-level Subcode chain.
+
+Six independent Python gates pass. The new fault gate checks the exact pinned W3C
+schema expectations and **444 HTTP response exchanges**, including negative-message
+recovery with persistent clients and native/retained decoding. All 16 corpus commands
+meet their recorded outcomes. Six semantic reports match P7-03 except for the WSDL
+source digest. Documentation and three-file astparser checks pass without warnings/errors.
+
+Audit: **18 Pass / 44 N/A / zero Fail**. No C++ changes; Valgrind is not required.
+
+P7 SOAP 1.1 faults, full fault data/generation and header-fault integration, HTTP/action
+rules and applicable assertion accounting remain open, followed by P8–P9. No Qore
+edits, installation, push or CI trigger.
+
+See [evidence](soap12-fault-evidence.md), [validation](P7-04-validation.json),
+[audit](audits/P7-04-soap12-faults.md), and [design](../../design/soap-envelope-processing.md).

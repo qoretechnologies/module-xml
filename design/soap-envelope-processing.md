@@ -115,3 +115,26 @@ in the actual envelope namespace before projecting the legacy exception payload.
 Application elements with the same local name remain ordinary schema values in
 native and retained decoding. The actual received version also selects fault
 decoding for the SOAP 1.1 VersionMismatch transition response to a SOAP 1.2 binding.
+
+SOAP 1.2 fault validation runs in the shared envelope validator before namespace
+projection. A protocol `Fault` must be the sole Body child. Its fields occur once
+in the order `Code`, `Reason`, optional `Node`, optional `Role`, optional `Detail`;
+the first two are required. Code and each nested Subcode contain `Value` followed
+by at most one Subcode. Values resolve as QNames in their own namespace scopes,
+and the top code must name one of the five SOAP 1.2 standard codes. Subcode chains
+are traversed iteratively.
+
+Reason contains one or more text-only SOAP `Text` elements, each carrying its own
+explicit `xml:lang`; inherited language alone does not satisfy this requirement.
+Language values follow the XML language declaration, including an empty reset.
+Repeated languages remain accepted because distinct languages are recommended,
+not mandatory. Node and Role allow relative URI references and use Qore's ASCII
+URI grammar validation without rewriting their original spelling. Detail allows
+element content and qualified attributes but forbids SOAP `encodingStyle`.
+
+The same validation covers native and retained response consumers, saved services,
+node processing, HTTP clients/handlers and generated WSDL fault envelopes. Malformed
+fault structures raise `SOAP-DESERIALIZATION-ERROR` on input and
+`SOAP-SERIALIZATION-ERROR` on the WSDL serialization path. Valid faults retain the
+existing `SOAP-SERVER-FAULT-RESPONSE` exception contract. Application detail schemas
+and declared fault selection remain separate from this protocol validation.
