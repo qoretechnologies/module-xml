@@ -26,6 +26,28 @@ SOAP_NAMESPACES = (
 )
 
 
+def soap12_binding_derivative(wsdl):
+    """The pinned W3C corpus supplies SOAP 1.2 payloads with a SOAP 1.1-only WSDL.
+
+    Create an explicit derivative by changing the one pinned namespace declaration.
+    Original bytes, payloads and all schema declarations remain untouched.
+    """
+    source = wsdl.read_text()
+    declaration = 'xmlns:soap="http://schemas.xmlsoap.org/wsdl/soap/"'
+    if source.count(declaration) != 1:
+        raise ValueError(f"expected the pinned W3C SOAP 1.1 declaration in {wsdl}")
+    derived = source.replace(declaration, 'xmlns:soap="http://schemas.xmlsoap.org/wsdl/soap12/"')
+    return {"name": wsdl.stem + "-soap12-binding.wsdl", "xml": derived,
+            "source_sha256": hashlib.sha256(wsdl.read_bytes()).hexdigest(),
+            "sha256": hashlib.sha256(derived.encode()).hexdigest(),
+            "transform": "replace the sole xmlns:soap WSDL binding namespace with SOAP 1.2"}
+
+
+def binding_derivatives(cases):
+    return {case["name"]: {key: value for key, value in case["soap12_binding"].items() if key != "xml"}
+            for case in cases if "soap12_binding" in case}
+
+
 def inventory(corpus, version):
     """Include every echo WSDL 1.1; never silently drop a case that fails to parse."""
     cases = []
@@ -37,9 +59,12 @@ def inventory(corpus, version):
         for path in sorted(directory.glob("*-soap*.xml")):
             if version != "both" and not path.name.endswith(f"-soap{version}.xml"):
                 continue
-            messages.append({"file": path.relative_to(corpus).as_posix(), "path": str(path)})
+            messages.append({"file": path.relative_to(corpus).as_posix(), "path": str(path),
+                             "soap_version": "12" if path.name.endswith("-soap12.xml") else "11"})
         cases.append({"name": directory.name, "wsdl": str(wsdl),
                       "base": SOURCE + directory.name + "/", "messages": messages})
+        if any(message["soap_version"] == "12" for message in messages):
+            cases[-1]["soap12_binding"] = soap12_binding_derivative(wsdl)
     if not cases:
         raise ValueError(f"no echo WSDL 1.1 fixtures found in {corpus}")
     return cases
@@ -190,10 +215,20 @@ def validate_cases(cases):
         for key in ("binding", "operation"):
             if key in case and (not isinstance(case[key], str) or not case[key]):
                 raise ValueError(f"invalid worker {key}")
+        if "soap12_binding" in case:
+            derivative = case["soap12_binding"]
+            if (not isinstance(derivative, dict)
+                    or any(not isinstance(derivative.get(key), str) or not derivative[key].strip()
+                           for key in ("name", "xml", "source_sha256", "sha256", "transform"))
+                    or len(derivative["source_sha256"]) != 64
+                    or any(char not in "0123456789abcdef" for char in derivative["source_sha256"])
+                    or hashlib.sha256(derivative["xml"].encode()).hexdigest() != derivative["sha256"]):
+                raise ValueError("invalid worker SOAP 1.2 binding derivative")
         for message in case["messages"]:
             if (not isinstance(message, dict) or
                     any(not isinstance(message.get(key), str) or not message[key] for key in ("file", "path"))
-                    or message.get("direction", "request") not in ("request", "response")):
+                    or message.get("direction", "request") not in ("request", "response")
+                    or message.get("soap_version", "11") not in ("11", "12")):
                 raise ValueError("invalid worker message")
             identity = (message["file"], message.get("direction", "request"))
             if identity in identities:
@@ -240,7 +275,7 @@ def run_worker(cases, cache, qore="qore", *, preserve_types=False, worker_timeou
         manifest = Path(temporary) / "manifest.json"
         manifest.write_text(json.dumps({"cases": cases, "cache": cache, "preserve_types": preserve_types}))
         try:
-            run = subprocess.run([qore, "--enable-debug", str(Path(__file__).with_name("probe.qr")),
+            run = subprocess.run([qore, "-b", "--enable-debug", str(Path(__file__).with_name("probe.qr")),
                                   str(manifest)], text=True, capture_output=True, timeout=worker_timeout, check=True)
         except subprocess.CalledProcessError as error:
             raise WorkerProcessError(error.returncode, error.cmd, error.output, error.stderr) from error
@@ -305,6 +340,7 @@ def main():
     rows = run_worker(cases, cache, args.qore, preserve_types=args.preserve_types,
                       worker_timeout=args.worker_timeout)
     result = examine(corpus, cases, rows, catalog)
+    result["binding_derivatives"] = binding_derivatives(cases)
     result["catalog_sha256"] = dict(catalog.sha256) if catalog is not None else {}
     sources = sorted({Path(c["wsdl"]) for c in cases}
                      | {Path(m["path"]) for c in cases for m in c["messages"]}

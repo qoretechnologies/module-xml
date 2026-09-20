@@ -41,6 +41,11 @@ class CoverageTest(unittest.TestCase):
         report = coverage.assess(self.root, self.source, self.selection, corpus.Catalog())
         self.assertIs(False, report["scope"]["preserve_types"])
         self.assertEqual([], report["selected_failures"])
+        for case in report["cases"]:
+            for message in case["messages"]:
+                version = "12" if message["file"].endswith("-soap12.xml") else "11"
+                self.assertEqual(version, message["binding_version_expected"])
+                self.assertEqual(version == "12", message["binding_source"].endswith("-soap12-binding.wsdl"))
         self.assertEqual([], report["failures"])
         self.assertEqual({"wsdls": 1, "message_directions": 16}, report["selected_scope"])
         self.assertEqual(16, report["stage_accounting"]["counts"]["values"]["ok"])
@@ -376,10 +381,11 @@ class CoverageTest(unittest.TestCase):
             inputs[entry["derivative"]] = etree.tostring(payload)
             for direction in ("request", "response"):
                 messages.append({"file": entry["derivative"], "direction": direction,
+                    "soap_version": "12" if "soap12" in entry["derivative"] else "11",
                     "path": str(ROOT / "derivatives" / entry["derivative"])})
         rows = survey.run_worker([{"name": "CorrectedAttributeExtension", "wsdl": str(wsdl),
             "operation": "echo" + name, "binding": "SoapBinding", "base": survey.SOURCE + name + "/",
-            "messages": messages}], {})
+            "soap12_binding": survey.soap12_binding_derivative(wsdl), "messages": messages}], {})
         outputs = {}
         for row in rows:
             self.assertTrue(row["ok"], row)

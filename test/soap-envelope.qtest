@@ -1,0 +1,292 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires ../qlib/WSDL.qm
+%requires ../qlib/SoapClient.qm
+%requires ../qlib/SoapHandler.qm
+%requires HttpServer
+%exec-class SoapEnvelopeTest
+
+string sub envelopeName(string uri, string local) {
+    return "{" + uri + "}" + local;
+}
+string sub envelope(string content, bool soap12, string attributes = "") {
+    return '<e:Envelope xmlns:e="' + (soap12 ? SOAP_12_ENV : SOAP_11_ENV)
+        + '" xmlns:t="urn:soap-envelope-test" ' + attributes + '>' + content + '</e:Envelope>';
+}
+string sub envelopeBody(string value = "invoice-71") {
+    return '<e:Body><t:value>' + value + '</t:value></e:Body>';
+}
+class SoapEnvelopeTest inherits QUnit::Test {
+    private {
+        string source = ReadOnlyFile::readTextFile(get_script_dir()
+            + "/wsdl-interop/soap-envelope-peer/contract.wsdl");
+    }
+    constructor() : Test("SOAP envelope validation", "1.0") {
+        addTestCase("Both versions preserve valid envelope namespace scopes and content", \valid());
+        addTestCase("Malformed containers reject before native or retained payload decoding", \invalid());
+        addTestCase("Protocol container attributes follow each version's rules", \attributes());
+        addTestCase("Selected versions reject mismatches without changing the next decode", \versions());
+        addTestCase("Wire documents reject DTDs and processing instructions only in SOAP mode", \documents());
+        addTestCase("HTTP handlers reject before callbacks and recover on valid requests", \http());
+        addTestCase("Serialization rejects unqualified compatibility headers and containers", \output());
+        addTestCase("Version negotiation faults preserve SOAP 1.1 transition semantics", \negotiation());
+        set_return_value(main());
+    }
+    private list<WebService> services() {
+        WebService original(source);
+        return (original, Serializable::deserialize(original.serialize()),
+            Serializable::deserialize(original.serializeToData()));
+    }
+    private valid() {
+        foreach WebService ws in (services()) {
+            WSOperation op = ws.getOperation("echo");
+            foreach bool version in (False, True) {
+                string binding = version ? "B12" : "B11";
+                foreach string xml in (envelope(envelopeBody(), version),
+                        envelope('<e:Header><t:optional>note</t:optional></e:Header>' + envelopeBody(), version),
+                        envelope("\n<!--comment-->\t" + envelopeBody() + "\r\n", version, 'xml:lang="en"'),
+                        '<Envelope xmlns="' + (version ? SOAP_12_ENV : SOAP_11_ENV)
+                            + '"><Body><value xmlns="urn:soap-envelope-test">invoice-71</value></Body></Envelope>',
+                        envelope('<h:Header xmlns:h="' + (version ? SOAP_12_ENV : SOAP_11_ENV)
+                            + '"><t:optional/></h:Header><b:Body xmlns:b="'
+                            + (version ? SOAP_12_ENV : SOAP_11_ENV)
+                            + '"><t:value>invoice-71</t:value></b:Body>', version)) {
+                    hash<auto> data = parse_xml(xml, XPF_PRESERVE_ORDER | XPF_PRESERVE_WHITESPACE);
+                    hash<auto> before = data;
+                    assertEq("invoice-71", op.deserializeRequest(data, binding));
+                    assertEq("invoice-71", op.deserializeResponse(data, binding));
+                    assertEq("invoice-71", op.deserializeXmlRequest(xml, binding).body.body.getElementData()."^value^");
+                    assertEq(before, data);
+                }
+                string extension = envelope(envelopeBody() + '<t:extension/>', version);
+                if (version) {
+                    assertThrows("SOAP-DESERIALIZATION-ERROR", \op.deserializeRequest(),
+                        (parse_xml(extension, XPF_PRESERVE_ORDER), binding));
+                } else {
+                    assertEq("invoice-71", op.deserializeRequest(parse_xml(extension, XPF_PRESERVE_ORDER), binding));
+                    assertEq(1, op.deserializeXmlRequest(extension, binding).extensions.size());
+                }
+            }
+        }
+    }
+    private invalid() {
+        foreach WebService ws in (services()) {
+            WSOperation op = ws.getOperation("echo");
+            foreach bool version in (False, True) {
+                string binding = version ? "B12" : "B11";
+                foreach string content in (
+                        envelopeBody() + '<e:Body/>', '<e:Body/>' + envelopeBody(),
+                        '<e:Header/><e:Header/>' + envelopeBody(), envelopeBody() + '<e:Header/>',
+                        '<t:before/>' + envelopeBody(), '<t:Body><t:value>invoice-71</t:value></t:Body>',
+                        '<Body><t:value>invoice-71</t:value></Body>', '<e:Header/>',
+                        '<e:Header><unqualified/></e:Header>' + envelopeBody(),
+                        '<e:Header>bad</e:Header>' + envelopeBody(), 'bad' + envelopeBody(),
+                        '<e:Body>bad<t:value>invoice-71</t:value></e:Body>',
+                        '<e:Body><t:value>invoice-71</t:value></e:Body><unqualified/>') {
+                    string xml = envelope(content, version);
+                    hash<auto> data = parse_xml(xml, XPF_PRESERVE_ORDER | XPF_PRESERVE_WHITESPACE);
+                    hash<auto> before = data;
+                    assertThrows("SOAP-DESERIALIZATION-ERROR", \op.deserializeRequest(), (data, binding));
+                    assertThrows("SOAP-DESERIALIZATION-ERROR", \op.deserializeResponse(), (data, binding));
+                    assertThrows("SOAP-DESERIALIZATION-ERROR", \op.deserializeXmlRequest(), (xml, binding));
+                    assertEq(before, data);
+                    assertEq("invoice-71", op.deserializeRequest(parse_xml(envelope(envelopeBody(), version)), binding));
+                }
+                string xml = envelope(envelopeBody(), version, 'unqualified="bad"');
+                assertThrows("SOAP-DESERIALIZATION-ERROR", \op.deserializeRequest(), (parse_xml(xml), binding));
+                assertThrows("SOAP-DESERIALIZATION-ERROR", \op.deserializeXmlRequest(), (xml, binding));
+            }
+        }
+    }
+    private attributes() {
+        WebService ws(source);
+        WSOperation op = ws.getOperation("echo");
+        foreach bool version in (False, True) {
+            string binding = version ? "B12" : "B11";
+            foreach string container in ("Envelope", "Header", "Body") {
+                string valid = envelope('<e:Header><t:optional/></e:Header>' + envelopeBody(), version);
+                string tag = "<e:" + container;
+                string qualified = replace(valid, tag, tag + ' t:tracking="invoice-71"');
+                assertEq(version, WSDLLib::validateSOAPEnvelope(parse_xml(qualified), version));
+                assertEq("invoice-71", op.deserializeRequest(parse_xml(qualified), binding));
+                assertEq("invoice-71", op.deserializeXmlRequest(qualified, binding).body.body.getElementData()."^value^");
+                foreach string attribute in ('tracking="invoice-71"', 'e:encodingStyle="urn:encoding"') {
+                    string xml = replace(valid, tag, tag + " " + attribute);
+                    if (version || (container == "Envelope" && attribute.startsWith("tracking="))) {
+                        assertThrows("SOAP-DESERIALIZATION-ERROR", \WSDLLib::validateSOAPEnvelope(),
+                            (parse_xml(xml), version));
+                        assertThrows("SOAP-DESERIALIZATION-ERROR", \op.deserializeRequest(), (parse_xml(xml), binding));
+                        assertThrows("SOAP-DESERIALIZATION-ERROR", \op.deserializeXmlRequest(), (xml, binding));
+                    } else {
+                        assertFalse(WSDLLib::validateSOAPEnvelope(parse_xml(xml), version));
+                    }
+                }
+            }
+        }
+    }
+    private versions() {
+        foreach WebService ws in (services()) {
+            WSOperation op = ws.getOperation("echo");
+            foreach bool version in (False, True) {
+                string binding = version ? "B12" : "B11";
+                string malformed_other = envelope("<e:Header><unqualified/></e:Header>", !version);
+                assertThrows("SOAP-VERSION-MISMATCH", \op.deserializeRequest(), (parse_xml(malformed_other), binding));
+                assertThrows("SOAP-VERSION-MISMATCH", \op.deserializeXmlRequest(), (malformed_other, binding));
+                foreach string xml in (envelope(envelopeBody(), !version),
+                        replace(envelope(envelopeBody(), version), version ? SOAP_12_ENV : SOAP_11_ENV, "urn:unknown"),
+                        replace(envelope(envelopeBody(), version), "Envelope", "Container")) {
+                    assertThrows("SOAP-VERSION-MISMATCH", \op.deserializeRequest(), (parse_xml(xml), binding));
+                    assertThrows("SOAP-VERSION-MISMATCH", \op.deserializeResponse(), (parse_xml(xml), binding));
+                    assertThrows("SOAP-VERSION-MISMATCH", \op.deserializeXmlRequest(), (xml, binding));
+                }
+            }
+        }
+    }
+    private documents() {
+        foreach bool version in (False, True) {
+            WebService ws(source);
+            WSOperation op = ws.getOperation("echo");
+            string binding = version ? "B12" : "B11";
+            string good = envelope(envelopeBody(), version);
+            foreach string xml in ('<!DOCTYPE e:Envelope>' + good, '<?work test?>' + good,
+                    envelope('<?work test?>' + envelopeBody(), version),
+                    envelope('<e:Body><t:value><?work test?>invoice-71</t:value></e:Body>', version),
+                    good + '<?work test?>') {
+                assertThrows("SOAP-DESERIALIZATION-ERROR", \op.deserializeXmlRequest(), (xml, binding));
+                assertThrows("SOAP-DESERIALIZATION-ERROR", \WSDLLib::parseSOAPMessage(),
+                    ({"body":xml, "content-type":version ? "application/soap+xml" : "text/xml"}, False, True));
+            }
+            assertEq("invoice-71", op.deserializeRequest(WSDLLib::parseSOAPMessage(
+                {"body":good, "content-type":version ? "application/soap+xml" : "text/xml"}, False, True), binding));
+        }
+        string document = '<?work allowed?><value>opaque</value>';
+        assertEq(document, WSDLLib::parseSOAPMessage({"body":document,"content-type":"text/xml;charset=UTF-8"}, True).body);
+        assertEq("opaque", WSDLLib::parseSOAPMessage({"body":document,"content-type":"text/xml"}).value);
+    }
+    private http() {
+        foreach WebService ws in (services()) {
+            foreach bool version in (False, True) {
+                string binding = version ? "B12" : "B11";
+                foreach bool retained in (False, True) {
+                    HttpServer server();
+                    on_exit server.stop();
+                    SoapHandler handler(new PermissiveAuthenticator());
+                    server.setDefaultHandler("envelopes", handler);
+                    Queue called();
+                    code<auto(hash<auto>, auto)> callback = auto sub(hash<auto> cx, auto value) {
+                        called.push(True);
+                        return {"body":retained ? value.body.body : value};
+                    };
+                    handler.addMethod(ws, ws.getOperation("echo"), callback, NOTHING, NOTHING, NOTHING,
+                        "service", NOTHING, NOTHING, binding, NOTHING, retained);
+                    server.addListener(0);
+                    string url = sprintf("http://127.0.0.1:%d", server.getListenerInfo(0).port);
+                    HTTPClient peer({"url":url,"error_passthru":True,"timeout":10000,"connect_timeout":10000});
+                    string content_type = version ? "application/soap+xml" : "text/xml";
+                    foreach hash<auto> row in (
+                            {"xml":envelope(envelopeBody(), !version),"code":"VersionMismatch","status":500,"version":False},
+                            {"xml":replace(envelope(envelopeBody(), version), version ? SOAP_12_ENV : SOAP_11_ENV, "urn:future"),
+                                "code":"VersionMismatch","status":500,"version":version},
+                            {"xml":envelope(envelopeBody() + '<e:Header/>', version),
+                                "code":version ? "Sender" : "Client","status":version ? 400 : 500,"version":version},
+                            {"xml":envelope('<e:Header><unqualified/></e:Header>' + envelopeBody(), version),
+                                "code":version ? "Sender" : "Client","status":version ? 400 : 500,"version":version},
+                            {"xml":'<?work test?>' + envelope(envelopeBody(), version),
+                                "code":version ? "Sender" : "Client","status":version ? 400 : 500,"version":version}) {
+                        hash<auto> info;
+                        string response = peer.post("/service", row.xml,
+                            {"Content-Type":content_type,"SOAPAction":"urn:echo"}, \info);
+                        assertEq(row.status, info."response-headers".status_code);
+                        XsdXmlValue value(response);
+                        string fault_uri = row.version ? SOAP_12_ENV : SOAP_11_ENV;
+                        assertEq(envelopeName(fault_uri, "Envelope"), value.getExpandedName());
+                        hash<auto> data = XsdBase::expandElementNamespaces(value.getXmlDataView());
+                        hash<auto> env = data{envelopeName(fault_uri, "Envelope")};
+                        hash<auto> fault = env{envelopeName(fault_uri, "Body")}{envelopeName(fault_uri, "Fault")};
+                        string code = row.version ? fault{envelopeName(fault_uri, "Code")}{envelopeName(fault_uri, "Value")}
+                            : fault."{}faultcode";
+                        assertEq("soapenv:" + row.code, code);
+                        if (row.version) {
+                            assertEq("en", fault{envelopeName(fault_uri,"Reason")}{envelopeName(fault_uri,"Text")}."^attributes^"."xml:lang");
+                        }
+                        if (row.code == "VersionMismatch") {
+                            hash<auto> supported = env{envelopeName(fault_uri,"Header")}{envelopeName(SOAP_12_ENV,"Upgrade")}
+                                {envelopeName(SOAP_12_ENV,"SupportedEnvelope")};
+                            assertEq("supported:Envelope", supported."^attributes^".qname);
+                            assertEq(version ? SOAP_12_ENV : SOAP_11_ENV, supported."^attributes^"."xmlns:supported");
+                        }
+                        assertEq(0, called.size());
+                        response = peer.post("/service", envelope(envelopeBody(), version),
+                            {"Content-Type":content_type,"SOAPAction":"urn:echo"}, \info);
+                        assertEq(200, info."response-headers".status_code);
+                        assertTrue(called.get(10000));
+                        assertEq("invoice-71", ws.getOperation("echo").deserializeResponse(parse_xml(response), binding));
+                    }
+                }
+            }
+        }
+    }
+    private output() {
+        foreach WebService ws in (services()) {
+            ws.nsc.opt_allow_any_header = True;
+            WSOperation op = ws.getOperation("echo");
+            foreach bool version in (False, True) {
+                string binding = version ? "B12" : "B11";
+                foreach hash<auto> header in ({"unqualified":"bad"}, {"^attributes^":{"tracking":"bad"}},
+                        {"^xml^":"<unqualified>bad</unqualified>"}, {"^xml^":"plain text"},
+                        {"^xml^":'<t:Trace xmlns:t="urn:tracking"/><unqualified/>'},
+                        {"^attributes^":{"xmlns":"urn:tracking"}, "^xml^":'<Trace xmlns=""/>'},
+                        {"^xml^":"<unclosed>"},
+                        {"^attributes^":{"xmlns:t":"urn:tracking"}, "^xml^":"<t:Trace/>"}) {
+                    if (header.hasKey("^attributes^") && !version) { continue; }
+                    assertThrows("SOAP-SERIALIZATION-ERROR", \op.serializeRequest(),
+                        ({"body":"invoice-71"}, header, NOTHING, NOTHING, NOTHING, NOTHING, binding));
+                    assertThrows("SOAP-SERIALIZATION-ERROR", \op.serializeResponse(),
+                        ({"body":"invoice-71"}, header, NOTHING, NOTHING, NOTHING, NOTHING, binding));
+                }
+                assertThrows("SOAP-SERIALIZATION-ERROR", \op.serializeRequest(),
+                    ({"body":"invoice-71"}, {"^xml^":'<t:Trace xmlns:t="urn:tracking"><?work forbidden?></t:Trace>'},
+                        NOTHING, NOTHING, NOTHING, NOTHING, binding));
+                hash<auto> header = {"t:Trace":{"^attributes^":{"xmlns:t":"urn:tracking"},"^value^":"invoice-71"}};
+                string xml = op.serializeRequest({"body":"invoice-71"}, header, NOTHING,
+                    NOTHING, NOTHING, NOTHING, binding).body;
+                assertEq("invoice-71", op.deserializeRequest(parse_xml(xml), binding));
+                hash<SoapXmlMessageInfo> retained = op.deserializeXmlRequest(xml, binding);
+                assertEq("{urn:tracking}Trace", retained.unbound_headers[0].getExpandedName());
+                foreach hash<auto> fragments in (
+                        {"^attributes^":{"xmlns:t":"urn:other"},
+                            "^xml^":'<t:Trace xmlns:t="urn:tracking">invoice-71</t:Trace>'},
+                        {"^attributes^":{"xmlns":"urn:other"},
+                            "^xml^":'<Trace xmlns="urn:tracking">invoice-71</Trace>'},
+                        {"^xml^":'<t:Trace xmlns:t="urn:tracking">invoice-71</t:Trace>',
+                            "^xml^second":'<Other xmlns="urn:tracking">invoice-72</Other>'}) {
+                    hash<auto> before = fragments;
+                    string wire = op.serializeRequest({"body":"invoice-71"}, fragments, NOTHING,
+                        NOTHING, NOTHING, NOTHING, binding).body;
+                    hash<SoapXmlMessageInfo> parsed = op.deserializeXmlRequest(wire, binding);
+                    assertEq("{urn:tracking}Trace", parsed.unbound_headers[0].getExpandedName());
+                    assertEq("invoice-71", parsed.unbound_headers[0].getElementData()."^value^");
+                    assertEq(fragments.hasKey("^attributes^") ? 1 : 2, parsed.unbound_headers.size());
+                    assertEq(before, fragments);
+                }
+            }
+        }
+    }
+    private negotiation() {
+        WebService ws(source);
+        WSOperation op = ws.getOperation("echo");
+        string fault = '<s:Envelope xmlns:s="' + SOAP_11_ENV + '"><s:Body><s:Fault>'
+            + '<faultcode>s:VersionMismatch</faultcode><faultstring>Use SOAP 1.1</faultstring>'
+            + '</s:Fault></s:Body></s:Envelope>';
+        assertThrows("SOAP-SERVER-FAULT-RESPONSE", \op.deserializeResponse(), (parse_xml(fault), "B12"));
+        assertThrows("SOAP-SERVER-FAULT-RESPONSE", \op.deserializeXmlResponse(), (fault, "B12"));
+        assertThrows("SOAP-VERSION-MISMATCH", \op.deserializeRequest(), (parse_xml(fault), "B12"));
+        assertThrows("SOAP-VERSION-MISMATCH", \op.deserializeResponse(),
+            (parse_xml(replace(fault, "s:VersionMismatch", "s:Server")), "B12"));
+        assertThrows("SOAP-VERSION-MISMATCH", \op.deserializeResponse(),
+            (parse_xml(replace(fault, "s:VersionMismatch", "VersionMismatch")), "B12"));
+    }
+}

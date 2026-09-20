@@ -294,7 +294,10 @@ def assess(root: Path, source: dict, selection: dict, catalog: corpus.Catalog, q
             decision = record["messages"][file]["decision"]
             decode = indexed.get((name, file, direction, "deserialize"))
             encode = indexed.get((name, file, direction, "serialize"))
+            selected_version = "12" if message.get("soap_version") == "12" and case.get("soap12_binding") else case["identity"]["soap_version"]
             result = {"file": file, "direction": direction, "source_valid": decision["valid"],
+                      "binding_version_expected": selected_version,
+                      "binding_source": case["soap12_binding"]["name"] if selected_version == "12" and case.get("soap12_binding") else "original",
                       "requirements": decision["requirements"], "expected_deserialize": "success" if
                       decision["valid"] else "SOAP-DESERIALIZATION-ERROR", "failures": [],
                       "deserialize": decode, "serialize": encode}
@@ -349,7 +352,7 @@ def assess(root: Path, source: dict, selection: dict, catalog: corpus.Catalog, q
                             result["failures"].append("typed_reference_unavailable")
                     envelope = etree.fromstring(encode["body"].encode(), survey.parser(root, catalog))
                     result["binding_version_passed"] = envelope.tag == "{" + survey.SOAP_NAMESPACES[
-                        0 if case["identity"]["soap_version"] == "11" else 1] + "}Envelope"
+                        0 if selected_version == "11" else 1] + "}Envelope"
                 except (etree.LxmlError, ValueError, OSError) as error:
                     result["values"] = {"ok": False, "reason": str(error)}
                     result["binding_version_passed"] = False
@@ -395,13 +398,13 @@ def assess(root: Path, source: dict, selection: dict, catalog: corpus.Catalog, q
     version = subprocess.run([qore, "--version"], text=True, capture_output=True, check=True, timeout=10)
     if version.stderr or not version.stdout:
         raise RuntimeError("missing Qore version or unexpected version diagnostics")
-    return {"format": 1, "scope": {"wsdls": len(cases), "input_files": sum(len(c["messages"]) for c in cases) // 2,
+    return {"format": 1, "binding_derivatives": survey.binding_derivatives(cases), "scope": {"wsdls": len(cases), "input_files": sum(len(c["messages"]) for c in cases) // 2,
                 "directions": list(DIRECTIONS), "input_soap_versions": ["11", "12"], "network": False,
                 "preserve_types": preserve_types,
                 "typed_values": {"format": 1, "default_element_only_order": "per-name",
                                  "selected_order": "explicit typed assertion overrides default"},
                 "not_assessed": ["complete XML carrier comments/PI/lexical boundaries", "HTTP", "SOAP processing",
-                                 "actual SOAP 1.2 binding interoperability in the W3C echo set"]},
+                                 "live SOAP 1.2 binding interoperability in the W3C echo set"]},
             "source_report_sha256": hashlib.sha256(json.dumps(source, sort_keys=True).encode()).hexdigest(),
             "selection_sha256": hashlib.sha256(json.dumps(selection, sort_keys=True).encode()).hexdigest(),
             "versions": {**oracle["versions"], "qore": version.stdout,

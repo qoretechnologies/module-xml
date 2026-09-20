@@ -525,8 +525,13 @@ and a schema-valid changed boolean that the strict value gate rejects.
 ## Whole-archive source accounting
 
 ```sh
-python3 test/wsdl-interop/archive_roles.py /tmp/wsdl-corpus --output /tmp/wsdl-archive.json
+python3 test/wsdl-interop/archive_roles.py /tmp/wsdl-corpus \
+  --worker-timeout 600 --output /tmp/wsdl-archive.json
 ```
+
+The aggregate-contract worker has a configurable 1–3600-second deadline; the full
+integration check uses 600 seconds for its 18 historical contracts. The CLI/API
+default remains 60 seconds. Timeouts fail the check without omitting any contract.
 
 [archive-report.json](archive-report.json) assigns a role and provenance to all 4,191 original files.
 It checks that all 293 standalone pattern schemas are exact duplicates of their echo schemas, and

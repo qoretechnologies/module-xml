@@ -39,6 +39,42 @@ class SurveyTest(unittest.TestCase):
         for item in json.loads((FIXTURES / "manifest.json").read_text()):
             self.assertEqual(item["sha256"], hashlib.sha256((FIXTURES / item["path"]).read_bytes()).hexdigest())
 
+    def test_explicit_soap12_derivative(self):
+        case = survey.inventory(FIXTURES, "both")[0]
+        derived = case["soap12_binding"]
+        original = Path(case["wsdl"]).read_bytes()
+        old = 'xmlns:soap="http://schemas.xmlsoap.org/wsdl/soap/"'
+        new = 'xmlns:soap="http://schemas.xmlsoap.org/wsdl/soap12/"'
+        self.assertEqual(original.decode().replace(old, new), derived["xml"])
+        self.assertEqual(hashlib.sha256(original).hexdigest(), derived["source_sha256"])
+        self.assertEqual(hashlib.sha256(derived["xml"].encode()).hexdigest(), derived["sha256"])
+        self.assertTrue(derived["name"].endswith("-soap12-binding.wsdl"))
+        self.assertNotIn("xml", survey.binding_derivatives([case])[case["name"]])
+        rows = survey.run_worker([case], {})
+        for row in rows:
+            if row["stage"] == "serialize":
+                uri = "http://www.w3.org/2003/05/soap-envelope" if row["file"].endswith("-soap12.xml") else "http://schemas.xmlsoap.org/soap/envelope/"
+                self.assertEqual("{" + uri + "}Envelope", etree.fromstring(row["body"].encode()).tag)
+        for key in ("name", "xml", "source_sha256", "sha256", "transform"):
+            for value in (None, "", " ", False):
+                broken = deepcopy(case)
+                broken["soap12_binding"][key] = value
+                with self.subTest(key=key, value=value), self.assertRaisesRegex(ValueError, "binding derivative"):
+                    survey.validate_cases([broken])
+        for digest in ("a" * 63, "z" * 64):
+            broken = deepcopy(case)
+            broken["soap12_binding"]["source_sha256"] = digest
+            with self.assertRaisesRegex(ValueError, "binding derivative"):
+                survey.validate_cases([broken])
+        derived["xml"] += "modified"
+        with self.assertRaisesRegex(ValueError, "binding derivative"):
+            survey.run_worker([case], {})
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "bad.wsdl"
+            path.write_text("<definitions/>")
+            with self.assertRaisesRegex(ValueError, "pinned W3C"):
+                survey.soap12_binding_derivative(path)
+
     def test_empty_inventory(self):
         with tempfile.TemporaryDirectory() as directory:
             with self.assertRaisesRegex(ValueError, "no echo WSDL"):

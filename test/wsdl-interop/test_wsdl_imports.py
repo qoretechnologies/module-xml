@@ -63,7 +63,7 @@ class WsdlImportTests(unittest.TestCase):
             "body\t{urn:bindings}B/send/input\turn:wire",
             "body\t{urn:bindings}B/send/output\turn:wire",
             "message\t{urn:headers}H", "message\t{urn:messages}M",
-            "part\t{urn:headers}H/token\ttype:{http://www.w3.org/2001/XMLSchema}string",
+            "part\t{urn:headers}H/token\telement:{urn:headers}token",
             "part\t{urn:messages}M/value\ttype:{http://www.w3.org/2001/XMLSchema}string",
             "operation\t{urn:ports}P/send\t{urn:messages}M\t{urn:messages}M",
             "port\t{urn:root}S/Endpoint\t{urn:bindings}B",

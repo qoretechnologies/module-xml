@@ -76,6 +76,8 @@ module SoapHandler {
     @section soaphandler_relnotes SoapHandler Release History
 
     @subsection soaphandler_0_3_4 SoapHandler 0.3.4
+    - SOAP protocol validation runs before callbacks; version mismatches generate VersionMismatch faults with
+      supported-envelope metadata, and SOAP 1.2 fault reasons carry xml:lang
     - HTTP routes resolve operation references against port endpoints, preserve encoded template literals, and
       apply explicit path overrides consistently to matching and decoding; multi-port registration validates before publication
     - native and retained XML calls preserve WSDL attachment parts independently of SOAP body/header values
@@ -755,8 +757,11 @@ private nothing msglog(hash<auto> cx, hash<auto> msg) {
 
         # don't reimplement this method; fix/enhance it in the module
         private hash<auto> makeSoapFaultResponse(hash<auto> cx, string errLog, bool soap12, string err, string desc,
-                *bool fmt) {
-            # Default to Sender/Client fault for backward compatibility
+                *bool fmt, *hash<auto> protocol) {
+            if (err == "SOAP-VERSION-MISMATCH") {
+                return makeSoapFaultResponseWithCode(cx, errLog, protocol.soap12 ?? soap12, err, desc,
+                    SoapFaultVersionMismatch, fmt, protocol.supported_soap12);
+            }
             return makeSoapFaultResponseWithCode(cx, errLog, soap12, err, desc, SoapFaultSender, fmt);
         }
 
@@ -769,6 +774,7 @@ private nothing msglog(hash<auto> cx, hash<auto> msg) {
             @param faultCode SOAP fault code: "Sender", "Receiver", "VersionMismatch", "MustUnderstand", or
                 "DataEncodingUnknown"
             @param fmt if True, add XML formatting
+            @param supported_soap12 known supported version for a VersionMismatch Upgrade header
 
             @return hash with HTTP response info including:
             - \c code: HTTP status code (400 for Sender faults, 500 for Receiver/server faults)
@@ -779,7 +785,7 @@ private nothing msglog(hash<auto> cx, hash<auto> msg) {
             @see https://www.w3.org/TR/2007/REC-soap12-part2-20070427/#soapinhttp for HTTP binding spec
         */
         private hash<auto> makeSoapFaultResponseWithCode(hash<auto> cx, string errLog, bool soap12, string err,
-                string desc, string faultCode, *bool fmt) {
+                string desc, string faultCode, *bool fmt, *bool supported_soap12) {
             # do not use hash<auto> here; types must be stripped
             hash o;
 
@@ -802,14 +808,15 @@ private nothing msglog(hash<auto> cx, hash<auto> msg) {
                             "soapenv:Value": "soapenv:" + faultCode,
                         },
                         "soapenv:Reason": {
-                            "soapenv:Text": sprintf("%s: %s", err, desc),
+                            "soapenv:Text": {"^attributes^":{"xml:lang":"en"},"^value^":sprintf("%s: %s", err, desc)},
                         },
                     },
                 };
                 # optional Node, Role, Detail, see https://www.w3.org/TR/soap12/, 5.4 Fault
             } else {
                 # SOAP 1.1 uses Client/Server instead of Sender/Receiver
-                string soap11Code = (faultCode == SoapFaultSender) ? "Client" : "Server";
+                string soap11Code = faultCode == SoapFaultSender ? "Client"
+                    : faultCode == SoapFaultReceiver ? "Server" : faultCode;
                 o = ENVELOPE_11_NS;
                 o."soapenv:Envelope"."soapenv:Body" = {
                     "soapenv:Fault": {
@@ -818,6 +825,17 @@ private nothing msglog(hash<auto> cx, hash<auto> msg) {
                     },
                 };
                 # optional faultActor, see https://www.w3.org/TR/2000/NOTE-SOAP-20000508/ 4.4 SOAP fault
+            }
+
+            if (faultCode == SoapFaultVersionMismatch && exists supported_soap12) {
+                auto fault_body = remove o."soapenv:Envelope"."soapenv:Body";
+                o."soapenv:Envelope"."soapenv:Header" = {"upgrade:Upgrade": {
+                    "^attributes^":{"xmlns:upgrade":SOAP_12_ENV},
+                    "upgrade:SupportedEnvelope":{"^attributes^":{
+                        "xmlns:supported":supported_soap12 ? SOAP_12_ENV : SOAP_11_ENV,
+                        "qname":"supported:Envelope"}},
+                }};
+                o."soapenv:Envelope"."soapenv:Body" = fault_body;
             }
 
             hash<auto> msg = {
@@ -869,7 +887,8 @@ private nothing msglog(hash<auto> cx, hash<auto> msg) {
                 string str = debug
                     ? get_exception_string(ex)
                     : sprintf("%s: %s: %s", get_ex_pos(ex), ex.err, ex.desc);
-                return makeSoapFaultResponse(cx, str, reqsoap12, ex.err, ex.desc);
+                return makeSoapFaultResponse(cx, str, reqsoap12, ex.err, ex.desc, NOTHING,
+                    ex.err == "SOAP-VERSION-MISMATCH" ? ex.arg : NOTHING);
             }
 
             if ((method.logopt & HttpServer::LP_LEVELMASK) <= loglevel && exists cx.logfunc) {
@@ -1098,7 +1117,8 @@ private nothing msglog(hash<auto> cx, hash<auto> msg) {
                         string str = debug
                             ? get_exception_string(ex)
                             : sprintf("exception in %s: %s: %s", get_ex_pos(ex), ex.err, ex.desc);
-                        return makeSoapFaultResponse(cx, str, reqsoap12, ex.err, ex.desc);
+                        return makeSoapFaultResponse(cx, str, reqsoap12, ex.err, ex.desc, NOTHING,
+                            ex.err == "SOAP-VERSION-MISMATCH" ? ex.arg : NOTHING);
                     }
                 }
             }
@@ -1188,7 +1208,13 @@ private nothing msglog(hash<auto> cx, hash<auto> msg) {
                     }
                     hash<auto> msg = WSDLLib::parseMultiPartSOAPMessage(hdr + ("body" : body), mime_content);
                     msglog(cx, ('reason': 'request', 'header': hdr, 'method': hdr.method, 'body': msg.body));
-                    args = WSDLLib::parseSOAPMessage(msg, mime_content);
+                    bool soap_envelope = !selected_binding || selected_binding instanceof SoapBinding;
+                    *bool expected_version = selected_binding instanceof SoapBinding ? selected_binding.isSoap12() : NOTHING;
+                    reqsoap12 = expected_version ?? WSDLLib::isSOAPMessage12(msg);
+                    args = WSDLLib::parseSOAPMessage(msg, mime_content, soap_envelope);
+                    if (soap_envelope) {
+                        reqsoap12 = WSDLLib::validateSOAPEnvelope(args, expected_version);
+                    }
                     if (!mime_content && (WSDLLib::isSOAPMessage(msg) || WSDLLib::isMtomMessage(msg))) {
                         # Inspect routing and envelope metadata on a copy; preserve the original XML names
                         # and content for the selected binding's schema validation.
@@ -1254,22 +1280,6 @@ private nothing msglog(hash<auto> cx, hash<auto> msg) {
                             }
                         }
 
-                        # set soap version in request - determine the namespace of the
-                        # Envelope element itself (not just any xmlns declaration)
-                        *hash<auto> attr = routing_args.Envelope."^attributes^";
-                        # Get the prefix used for the Envelope element from the parsed XML.
-                        # If no prefix was used (default namespace), this will be NOTHING,
-                        # and we'll look for "xmlns" instead of "xmlns:prefix" below.
-                        *string envPrefix = routing_args.Envelope.ns;
-                        # Build the xmlns attribute key for that prefix
-                        string nsKey = envPrefix ? ("xmlns:" + envPrefix) : "xmlns";
-                        *string envelopeNs = attr{nsKey};
-                        if (envelopeNs == SOAP_12_ENV) {
-                            reqsoap12 = True;
-                        } else if (envelopeNs && envelopeNs != SOAP_11_ENV) {
-                            throw "SOAP-CALL-ERROR", sprintf("unsupported SOAP envelope received: %n",
-                                envelopeNs);
-                        }
                         if (!method && !exists element) {
                             throw "SOAP-CALL-ERROR", sprintf("no operation call found in message (SOAP body "
                                 "args: %y)", keys routing_args.Envelope.Body);
@@ -1284,7 +1294,8 @@ private nothing msglog(hash<auto> cx, hash<auto> msg) {
                     string str = debug
                         ? get_exception_string(ex)
                         : sprintf("%s: %s: %s", get_ex_pos(ex), ex.err, ex.desc);
-                    return makeSoapFaultResponse(cx, str, reqsoap12, ex.err, ex.desc);
+                    return makeSoapFaultResponse(cx, str, reqsoap12, ex.err, ex.desc, NOTHING,
+                        ex.err == "SOAP-VERSION-MISMATCH" ? ex.arg : NOTHING);
                 }
 
                 if (method) {
@@ -1295,7 +1306,8 @@ private nothing msglog(hash<auto> cx, hash<auto> msg) {
                         string str = debug
                             ? get_exception_string(ex)
                             : sprintf("exception in %s: %s: %s", get_ex_pos(ex), ex.err, ex.desc);
-                        return makeSoapFaultResponse(cx, str, reqsoap12, ex.err, ex.desc);
+                        return makeSoapFaultResponse(cx, str, reqsoap12, ex.err, ex.desc, NOTHING,
+                            ex.err == "SOAP-VERSION-MISMATCH" ? ex.arg : NOTHING);
                     }
                 }
             }

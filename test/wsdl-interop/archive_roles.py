@@ -66,8 +66,9 @@ def schema_grammar_errors(schema: etree._Element) -> list[dict]:
     return errors
 
 
-def assess(root: Path) -> dict:
+def assess(root: Path, *, worker_timeout=60) -> dict:
     """Verify the complete archive, classify every file role and close source dependency evidence."""
+    survey.validate_worker_timeout(worker_timeout)
     inventory = corpus.verify_extraction(root)
     expected = set(inventory["files"])
     actual = {p.relative_to(root).as_posix() for p in (root / "databinding").rglob("*") if p.is_file()}
@@ -211,7 +212,8 @@ def assess(root: Path) -> dict:
     qore_cases = [{"name": c["file"], "wsdl": str(root / c["file"]),
                    "base": BASE + c["file"].rsplit("/", 1)[0] + "/", "messages": [],
                    "schema_only": c["file"].endswith(".xsd"), "parse_only": True} for c in extras]
-    parsed = survey.run_worker(qore_cases, {uri: data.decode("utf-8") for uri, data in resources.items()})
+    parsed = survey.run_worker(qore_cases, {uri: data.decode("utf-8") for uri, data in resources.items()},
+                               worker_timeout=worker_timeout)
     for record, row in zip(extras, parsed):
         record["qore"] = row
         empty_import = any(e["source"] == record["file"] and e["status"] == "invalid-empty-source" for e in imports)
@@ -280,8 +282,10 @@ def main() -> None:
     cli = argparse.ArgumentParser(description=__doc__)
     cli.add_argument("extraction", type=Path, help="directory containing databinding/")
     cli.add_argument("--output", type=Path, required=True)
+    cli.add_argument("--worker-timeout", type=survey.parse_worker_timeout, default=60,
+                     help="bounded Qore worker timeout in seconds (1–3600; default: 60)")
     args = cli.parse_args()
-    report = assess(args.extraction.resolve())
+    report = assess(args.extraction.resolve(), worker_timeout=args.worker_timeout)
     args.output.write_text(json.dumps(report, indent=2) + "\n")
     print(json.dumps({"roles": report["role_counts"], "import_edges": len(report["imports"]),
                       "additional_contracts": len(report["additional_contracts"]),

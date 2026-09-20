@@ -207,6 +207,9 @@ module WSDL {
     @section wsdlrelnotes WSDL Module Release Notes
 
     @subsection wsdl_0_5_8 WSDL v0.5.8
+    - SOAP containers validate namespace, order, cardinality and header qualification before decoding; selected
+      bindings reject wrong-version envelopes, and SOAP wire paths reject DTDs and processing instructions
+    - Outgoing SOAP headers require qualified names; generated SOAP 1.2 fault reasons include xml:lang
     - Service port addresses resolve against their declaring WSDL document's effective URI, including imports,
       redirects and saved services; inline sources without a document URI retain their declared address
     - URL replacement escapes dot-only part values so URI resolution preserves them as message data
@@ -1788,6 +1791,18 @@ public class WSDLLib {
         return WsdlLibPriv::isContentType(msg."content-type", SoapMimeTypes);
     }
 
+    #! returns whether normalized transport metadata declares SOAP 1.2 XML
+    /** @param msg transport metadata with a content-type key
+        @return True for application/soap+xml, ignoring case and media parameters
+        @note This inspects media metadata; validateSOAPEnvelope() checks the actual envelope version.
+        @par Example
+        Use this hint when choosing an error response before a malformed invoice envelope can be parsed.
+        @since %WSDL 0.5.8
+    */
+    static bool isSOAPMessage12(hash<auto> msg) {
+        return WsdlLibPriv::isContentType(msg."content-type", (MimeTypeSoapXml,));
+    }
+
     #! returns True if the message is an MTOM/XOP message
     static bool isMtomMessage(hash<auto> msg) {
         return WsdlLibPriv::isContentType(msg."content-type", ("application/xop+xml",));
@@ -1831,16 +1846,18 @@ public class WSDLLib {
     #! decodes a normalized SOAP/XML message or preserves explicitly selected HTTP MIME content
     /** @param msg a message returned by parseMultiPartSOAPMessage()
         @param mime_content True when the selected HTTP binding declares mime:content
+        @param soap_envelope True to reject SOAP-prohibited DTDs and processing instructions before projection
         @return parsed XML for SOAP/MIME XML, or body and complete Content-Type for MIME content;
         parsed SOAP retains normalized attachment entities under ^mime-parts^ for binding-directed decoding
         @throw SOAP-MESSAGE-ERROR malformed media type, conflicting charset parameters or invalid attachment references
+        @throw SOAP-DESERIALIZATION-ERROR a SOAP document contains a DTD or processing instruction
         @note MIME content remains opaque even when its media type is text/xml or application/xop+xml.
         Explicit charset parameters tag text; content without a charset remains binary.
         @par Example
         `parseSOAPMessage(message, True)` preserves an uploaded XML file as a MIME value instead of an XML tree.
         @since %WSDL 0.5.8 supports binding-directed MIME content and preserves its media-type parameters
     */
-    static *hash<auto> parseSOAPMessage(hash<auto> msg, bool mime_content = False) {
+    static *hash<auto> parseSOAPMessage(hash<auto> msg, bool mime_content = False, bool soap_envelope = False) {
         if (!mime_content && !msg.body) {
             hash<auto> h."content-type" = msg."content-type" ?? "text/plain";
             h.body = NOTHING;
@@ -1848,7 +1865,11 @@ public class WSDLLib {
         } else if (!mime_content && (WSDLLib::isSOAPMessage(msg) || WSDLLib::isMtomMessage(msg))) {
             hash<auto> xmldata;
             if (msg.body) {
-                xmldata = parse_xml(getXmlMessageText(msg), XPF_PRESERVE_ORDER | XPF_PRESERVE_WHITESPACE);
+                string xml = getXmlMessageText(msg);
+                if (soap_envelope) {
+                    XsdSoapXmlHelper::validateDocument(xml, SOAP_DESERIALIZATION_ERROR);
+                }
+                xmldata = parse_xml(xml, XPF_PRESERVE_ORDER | XPF_PRESERVE_WHITESPACE);
             }
             if (msg.parts) {
                 # For MTOM messages, resolve xop:Include references
@@ -1878,6 +1899,21 @@ public class WSDLLib {
             }
             return h;
         }
+    }
+
+    #! validates parsed SOAP protocol containers before payload decoding
+    /** @param message ordered parse_xml() data for the complete envelope
+        @param soap12 optional expected version; NOTHING accepts either supported version
+        @return True for SOAP 1.2, False for SOAP 1.1
+        @throw SOAP-VERSION-MISMATCH the root or expected SOAP version does not match
+        @throw SOAP-DESERIALIZATION-ERROR invalid container structure or unqualified header blocks
+        @note Use parseSOAPMessage() with soap_envelope=True to check raw XML document restrictions too.
+        @par Example
+        Validate an incoming invoice envelope before dispatching its document body.
+        @since %WSDL 0.5.8
+    */
+    static bool validateSOAPEnvelope(hash<auto> message, *bool soap12) {
+        return SoapEnvelopeHelper::validate(message, soap12);
     }
 
     private static processHref(reference xmldata, string hr, hash<auto> parts) {
@@ -3218,6 +3254,153 @@ public final class XsdXmlValue inherits Serializable {
     }
 }
 
+hashdecl SoapEnvelopeElement {
+    string local;
+    string uri;
+    auto value;
+    hash<string, string> namespaces;
+}
+
+# Validate protocol containers before native projection discards their qualified names.
+# Only Envelope, Header and Body are traversed; schema payloads retain their own validators.
+class SoapEnvelopeHelper {
+    private static list<hash<SoapEnvelopeElement>> children(auto value, hash<string, string> inherited,
+            string description) {
+        *hash<auto> content = XsdScalarTextHelper::elementContent(value, description);
+        list<hash<SoapEnvelopeElement>> result();
+        foreach string key in (keys content) {
+            if (key.startsWith("^xml^")) {
+                # Apply the XML generator's standalone-fragment namespace isolation first,
+                # then inspect emitted elements in the enclosing container's namespace context.
+                string fragment = content{key};
+                hash<auto> parsed;
+                try {
+                    string wrapper = make_xml({"soap_fragment":{
+                        "^attributes^":XsdQNameContextHelper::attributes(inherited), "^xml^":fragment}});
+                    parsed = parse_xml(wrapper, XPF_PRESERVE_ORDER | XPF_PRESERVE_WHITESPACE);
+                } catch (hash<ExceptionInfo> ex) {
+                    if (ex.err == "PARSE-XML-EXCEPTION") {
+                        rethrow SOAP_DESERIALIZATION_ERROR, ex.desc, ex.arg;
+                    }
+                    rethrow;
+                }
+                result += children(parsed.soap_fragment, inherited, description);
+                continue;
+            }
+            if (key.startsWith("^") || key.startsWith(".")) {
+                continue;
+            }
+            string name = key;
+            name =~ s/\^[0-9]+$//;
+            list<auto> occurrences = content{key}.typeCode() == NT_LIST ? content{key} : (content{key},);
+            if (!occurrences) {
+                throw SOAP_DESERIALIZATION_ERROR, sprintf("empty element occurrence list for %Y", key);
+            }
+            foreach auto child in (occurrences) {
+                if (exists child."^attributes^" && child."^attributes^".typeCode() != NT_HASH) {
+                    throw SOAP_DESERIALIZATION_ERROR, "XML attributes require a hash";
+                }
+                hash<string, string> namespaces = XsdBase::getElementNamespaces(child."^attributes^", inherited);
+                XsdQNameValue qname = XsdQNameValueHelper::resolve(name, SOAP_DESERIALIZATION_ERROR, namespaces);
+                result += <SoapEnvelopeElement>{"local":qname.getLocalName(), "uri":qname.getNamespaceUri(),
+                    "value":child, "namespaces":namespaces};
+            }
+        }
+        return result;
+    }
+
+    private static containerAttributes(hash<SoapEnvelopeElement> element, bool soap12) {
+        foreach string key in (keys element.value."^attributes^") {
+            if (key == "xmlns" || key.startsWith("xmlns:")) {
+                continue;
+            }
+            # Default element namespaces do not qualify attributes.
+            if (key.find(":") < 0) {
+                throw SOAP_DESERIALIZATION_ERROR,
+                    sprintf("SOAP %s attributes must be namespace-qualified", element.local);
+            }
+            XsdQNameValue qname = XsdQNameValueHelper::resolve(key, SOAP_DESERIALIZATION_ERROR, element.namespaces);
+            if (soap12 && qname.getNamespaceUri() == SOAP_12_ENV && qname.getLocalName() == "encodingStyle") {
+                throw SOAP_DESERIALIZATION_ERROR, sprintf("SOAP 1.2 encodingStyle is not allowed on %s", element.local);
+            }
+        }
+    }
+
+    static bool validate(hash<auto> message, *bool expected, bool response = False) {
+        list<hash<SoapEnvelopeElement>> roots = children(message, {}, "SOAP document");
+        if (roots.size() != 1) {
+            throw SOAP_DESERIALIZATION_ERROR, "SOAP requires exactly one document element";
+        }
+        hash<SoapEnvelopeElement> root = roots[0];
+        if (root.local != "Envelope" || !inlist(root.uri, (SOAP_11_ENV, SOAP_12_ENV))) {
+            throw "SOAP-VERSION-MISMATCH", "expected a supported SOAP Envelope element",
+                {"soap12":expected ?? False,"supported_soap12":expected};
+        }
+        bool soap12 = root.uri == SOAP_12_ENV;
+        if (exists expected && expected != soap12 && (!response || soap12)) {
+            throw "SOAP-VERSION-MISMATCH", "envelope does not match the binding's SOAP version",
+                {"soap12":expected && soap12,"supported_soap12":expected};
+        }
+        containerAttributes(root, soap12);
+        bool body_seen = False;
+        bool header_seen = False;
+        *hash<SoapEnvelopeElement> body;
+        foreach hash<SoapEnvelopeElement> child in (children(root.value, root.namespaces, "SOAP Envelope")) {
+            if (child.uri == root.uri && child.local == "Header") {
+                if (header_seen || body_seen) {
+                    throw SOAP_DESERIALIZATION_ERROR, "SOAP Header must occur once before Body";
+                }
+                header_seen = True;
+                if (soap12) { containerAttributes(child, soap12); }
+                foreach hash<SoapEnvelopeElement> header in (children(child.value, child.namespaces, "SOAP Header")) {
+                    if (!header.uri) {
+                        throw SOAP_DESERIALIZATION_ERROR, "SOAP header blocks must be namespace-qualified";
+                    }
+                }
+            } else if (child.uri == root.uri && child.local == "Body") {
+                if (body_seen) {
+                    throw SOAP_DESERIALIZATION_ERROR, "duplicate SOAP Body";
+                }
+                body_seen = True;
+                body = child;
+                XsdScalarTextHelper::elementContent(child.value, "SOAP Body");
+                if (soap12) { containerAttributes(child, soap12); }
+            } else if (soap12 || !body_seen || !child.uri) {
+                throw SOAP_DESERIALIZATION_ERROR, sprintf("unexpected SOAP envelope child %Y",
+                    type_qname(child.uri, child.local));
+            }
+        }
+        if (!body_seen) {
+            throw SOAP_DESERIALIZATION_ERROR, "missing SOAP Body";
+        }
+        if (exists expected && expected != soap12) {
+            # SOAP 1.2 Part 1 appendix A requires a SOAP 1.1 VersionMismatch response to a SOAP 1.1 request.
+            # A SOAP 1.2 caller can therefore receive a legitimate SOAP 1.1 version negotiation fault.
+            if (!response || soap12 || !versionMismatchFault(body)) {
+                throw "SOAP-VERSION-MISMATCH", "envelope does not match the binding's SOAP version",
+                    {"soap12":expected && soap12,"supported_soap12":expected};
+            }
+        }
+        return soap12;
+    }
+
+    private static bool versionMismatchFault(hash<SoapEnvelopeElement> body) {
+        list<hash<SoapEnvelopeElement>> values = children(body.value, body.namespaces, "SOAP Body");
+        if (values.size() != 1 || values[0].local != "Fault" || values[0].uri != SOAP_11_ENV) {
+            return False;
+        }
+        foreach hash<SoapEnvelopeElement> value in (children(values[0].value, values[0].namespaces, "SOAP Fault")) {
+            if (value.local == "faultcode" && !value.uri) {
+                auto code = XsdScalarTextHelper::value(value.value, SOAP_DESERIALIZATION_ERROR);
+                if (code.typeCode() != NT_STRING) { return False; }
+                XsdQNameValue qname = XsdQNameValueHelper::resolve(code, SOAP_DESERIALIZATION_ERROR, value.namespaces);
+                return qname.getNamespaceUri() == SOAP_11_ENV && qname.getLocalName() == "VersionMismatch";
+            }
+        }
+        return False;
+    }
+}
+
 # SOAP 1.1 section 3 and SOAP 1.2 section 5 prohibit sender processing instructions and DTDs.
 class XsdSoapXmlHelper {
     static mergeContext(reference<*hash<string, string>> target, hash<string, string> attributes) {
@@ -3229,7 +3412,14 @@ class XsdSoapXmlHelper {
     }
 
     static validate(XsdXmlValue value, string error) {
-        XmlReader reader = value.getReader();
+        validateReader(value.getReader(), error);
+    }
+
+    static validateDocument(string xml, string error) {
+        validateReader(new XmlReader(xml), error);
+    }
+
+    private static validateReader(XmlReader reader, string error) {
         while (reader.read()) {
             if (reader.nodeType() == XML_NODE_TYPE_DOCUMENT_TYPE
                     || reader.nodeType() == XML_NODE_TYPE_PROCESSING_INSTRUCTION) {
@@ -31373,6 +31563,7 @@ public class WSOperation inherits WSDL::XsdNamedData {
         @return the Qore data structure corresponding to the request data; see @ref wsdl_soap_header_deserialization
         for the body/header merge rules. HTTP bindings match the content type against the WSDL binding, including
         wildcards, and apply the current value to \c "^attributes^"."^content-type^".
+        @throw SOAP-VERSION-MISMATCH a SOAP envelope differs from the selected binding version
         @throw SOAP-DESERIALIZATION-ERROR invalid message, type selection or content
         @note A retained type uses XsdQNameValue in \c ^type^ and its native value in \c ^val^;
         output resolves that QName in its own schema and repeats all compatibility and content checks.
@@ -31402,6 +31593,7 @@ public class WSOperation inherits WSDL::XsdNamedData {
         @return the Qore data structure corresponding to the response data; see @ref wsdl_soap_header_deserialization
         for the body/header merge rules. HTTP bindings match the content type against the WSDL binding, including
         wildcards, and apply the current value to \c "^attributes^"."^content-type^".
+        @throw SOAP-VERSION-MISMATCH a SOAP envelope differs from the selected binding version
         @throw SOAP-DESERIALIZATION-ERROR invalid message, type selection or content
         @note A retained type uses XsdQNameValue in \c ^type^ and its native value in \c ^val^;
         output resolves that QName in its own schema and repeats all compatibility and content checks.
@@ -31426,6 +31618,7 @@ public class WSOperation inherits WSDL::XsdNamedData {
         @param mime_parts normalized attachment entities returned by WSDLLib::parseMultiPartSOAPMessage(), if any
         @param bname the binding name, or NOTHING for the first assigned binding
         @return body/header XML values and attachment values keyed by their WSDL part and message identities
+        @throw SOAP-VERSION-MISMATCH a SOAP envelope differs from the selected binding version
         @throw SOAP-DESERIALIZATION-ERROR an invalid request or payload
         @throw WSDL-BINDING-ERROR the binding does not use element-based literal SOAP parts
         @par Example
@@ -31445,6 +31638,7 @@ public class WSOperation inherits WSDL::XsdNamedData {
         @param mime_parts normalized attachment entities returned by WSDLLib::parseMultiPartSOAPMessage(), if any
         @param bname the binding name, or NOTHING for the first assigned binding
         @return body/header XML values and attachment values keyed by their WSDL part and message identities
+        @throw SOAP-VERSION-MISMATCH a SOAP envelope differs from the selected binding version
         @throw SOAP-DESERIALIZATION-ERROR an invalid response or payload
         @throw SOAP-SERVER-FAULT-RESPONSE a SOAP fault was received
         @throw WSDL-BINDING-ERROR the binding does not use element-based literal SOAP parts
@@ -33092,6 +33286,7 @@ public class SoapBinding inherits WSDL::OperationalBinding {
         if (envelope.getExpandedName() != type_qname(uri, "Envelope")) {
             throw SOAP_DESERIALIZATION_ERROR, "fault envelope does not match the binding's SOAP version";
         }
+        SoapEnvelopeHelper::validate(envelope.getXmlDataView(), isSoap12());
         XsdSoapXmlHelper::validate(envelope, SOAP_DESERIALIZATION_ERROR);
         XsdScalarTextHelper::elementContent(envelope.getElementData(), "SOAP Envelope");
         bool body_seen = False;
@@ -33175,7 +33370,18 @@ public class SoapBinding inherits WSDL::OperationalBinding {
         Namespaces output_namespaces = op.nsc.copy();
         XsdQNameOutputScope output_scope(output_namespaces);
         XsdQNameXmlOutputHelper output();
-        rv.body = make_xml(output.prepare(serializeSoapMessage(op, msg, h, header, nsh, request, soap12, \mpm, faultmsg, bmd, enc)), xml_opts, enc);
+        hash<auto> envelope = serializeSoapMessage(op, msg, h, header, nsh, request, soap12, \mpm, faultmsg, bmd, enc);
+        envelope = output.prepare(envelope);
+        try {
+            SoapEnvelopeHelper::validate(envelope, soap12);
+        } catch (hash<ExceptionInfo> ex) {
+            if (ex.err == SOAP_DESERIALIZATION_ERROR || ex.err == "SOAP-VERSION-MISMATCH") {
+                rethrow SOAP_SERIALIZATION_ERROR, ex.desc, ex.arg;
+            }
+            rethrow;
+        }
+        rv.body = make_xml(envelope, xml_opts, enc);
+        XsdSoapXmlHelper::validateDocument(rv.body, SOAP_SERIALIZATION_ERROR);
 
         # The charset and SOAP 1.2 action describe the XML root, not the multipart container.
         string ct = WSDLLib::getSoapMimeType12(soap12) + ";charset=" + WsdlMediaType::quote(rv.body.encoding());
@@ -33362,6 +33568,12 @@ public class SoapBinding inherits WSDL::OperationalBinding {
                     outh += h;
                 }
             }
+            foreach string identity in (emitted_header_names) {
+                if (identity.startsWith("{}")) {
+                    throw SOAP_SERIALIZATION_ERROR, "SOAP header blocks require namespace-qualified names; "
+                        "supply a namespace for encoded headers or a qualified element for literal headers";
+                }
+            }
             try {
                 matchHeaders(bmd, emitted_header_names);
             } catch (hash<ExceptionInfo> error) {
@@ -33405,7 +33617,7 @@ public class SoapBinding inherits WSDL::OperationalBinding {
                             "soapenv:Value": "soapenv:Sender",
                         },
                         "soapenv:Reason": {
-                            "soapenv:Text": faultmsg,
+                            "soapenv:Text": {"^attributes^":{"xml:lang":"en"},"^value^":faultmsg},
                         },
                     } + (body ? {"soapenv:Detail": body} : NOTHING),
                 };
@@ -33452,6 +33664,7 @@ public class SoapBinding inherits WSDL::OperationalBinding {
             throw "WSDL-BINDING-ERROR", "retained XML decoding requires an element-based literal SOAP binding";
         }
         XsdXmlValue envelope(xml);
+        SoapEnvelopeHelper::validate(envelope.getXmlDataView(), isSoap12(), !request);
         if (envelope.getLocalName() != "Envelope"
                 || !inlist(envelope.getNamespaceUri(), (SOAP_11_ENV, SOAP_12_ENV))) {
             throw SOAP_DESERIALIZATION_ERROR, "expected a SOAP Envelope element";
@@ -33616,6 +33829,11 @@ public class SoapBinding inherits WSDL::OperationalBinding {
         #printf("DEBUG: deserializeSoapMessage(%N, %y)\n", o, request);
         string io = request ? "input" : "output";
         # NOTE: types must be stripped on "o"; cannot use hash<auto> here
+        if (!request && !op.output && (!orig_msg || (orig_msg.size() == 2
+                && orig_msg.hasKey("body") && !exists orig_msg.body && orig_msg.hasKey("content-type")))) {
+            return NOTHING;
+        }
+        SoapEnvelopeHelper::validate(orig_msg, isSoap12(), !request);
         hash o = orig_msg;
         remove o."^mime-parts^";
         XsdBase::inheritAttributeNamespaces(\o);

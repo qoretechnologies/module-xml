@@ -2,7 +2,7 @@
 
 Copyright (C) 2026 Qore Technologies, s.r.o.
 
-Status: P1–P5 acceptance is complete under the approved explicit native-capture and retained-XML contracts. P5-22b adds complete typed corpus accounting and an exact-order P5 selection; see [P5 acceptance](P5-acceptance.md). The ordinary decoding default and its documented projection losses remain unchanged and separately reported. P6 binding/component acceptance is complete; see [P6 acceptance](P6-acceptance.md). P7 SOAP processing is next, followed by P8–P9; the recorded QName AOT stack issue remains assigned to P9 runtime acceptance.
+Status: P1–P5 acceptance is complete under the approved explicit native-capture and retained-XML contracts. P5-22b adds complete typed corpus accounting and an exact-order P5 selection; see [P5 acceptance](P5-acceptance.md). The ordinary decoding default and its documented projection losses remain unchanged and separately reported. P6 binding/component acceptance is complete; see [P6 acceptance](P6-acceptance.md). P7 SOAP processing is in progress, followed by P8–P9; the recorded QName AOT stack issue remains assigned to P9 runtime acceptance.
 See [EXECUTION.md](EXECUTION.md) for acceptance evidence and remaining implementation criteria.
 Prepared 2026-09-07 after `cc13171` on `develop`.
 Keep proposals here; put durable implementation details in `design/` only after implementation.
@@ -1147,3 +1147,16 @@ All 203 phase-boundary Qore suites pass: **3,257 cases / 136,416 assertions**. A
 The full audit reports **18 Pass / 44 N/A / zero Fail**. P6 acceptance is complete within the approved optional-transport scope; P7 SOAP processing is next, followed by P8 attachments/encoding and P9 CI/runtime acceptance. No C++ or Qore changes, installation or push.
 
 See [port evidence](port-locations-evidence.md), [validation](P6-45-validation.json), [audit](audits/P6-45-port-locations.md), [P6 acceptance](P6-acceptance.md), and [implemented location design](../../design/wsdl-location-resolution.md).
+
+
+## P7-01: SOAP envelope structure, version and document restrictions
+
+Native and retained SOAP consumers now share container validation before namespace projection. Serialization rejects unqualified header blocks, including raw compatibility fragments. Selected binding versions are enforced, version-negotiation faults retain their required SOAP 1.1 transition behavior, and SOAP 1.2 fault reasons carry xml:lang. Invalid requests reject before callbacks and valid requests recover on the same client.
+
+All 204 Qore suites pass: **3,265 cases / 137,774 assertions**, including the audit follow-ups. All 22 independent Python gates and 16 corpus commands meet their expected outcomes. The focused envelope suite passes **8 cases / 1,330 assertions** with source and compiled WSDL/SoapClient/SoapHandler modules. Independent peers pass 168 HTTP exchanges; the Qore suite adds 120. Documentation and 15-file astparser checks pass without warnings/errors. All six corpus comparisons preserve classifications, outcomes and values, with only the explicitly recorded SOAP 1.2 binding/output-context changes.
+
+The pinned W3C archive remains unchanged; SOAP 1.2 payloads explicitly select named, hash-recorded binding derivatives. Earlier positive test bindings and synthetic header fixtures now produce conforming envelopes. The archive-role worker accepts a bounded configurable timeout; its complete integration test covers every original archive file.
+
+Audit: **18 Pass / 44 N/A / zero Fail**. No C++ or Qore checkout changes, installation or push. P7 continues with processing attributes, roles/actors, mustUnderstand/relay, complete faults and action/media/HTTP requirements; P8–P9 remain open.
+
+See [evidence](soap-envelope-evidence.md), [validation](P7-01-validation.json), [audit](audits/P7-01-soap-envelope.md), [binding derivatives](soap12-binding-derivatives.md), and [implemented design](../../design/soap-envelope-processing.md).

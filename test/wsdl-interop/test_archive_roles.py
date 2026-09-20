@@ -20,7 +20,8 @@ class ArchiveRolesTest(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="wsdl-archive-roles-test-") as temporary:
             root = Path(temporary) / "corpus"
             corpus.extract(root)
-            report = archive_roles.assess(root)
+            # This single worker constructs all 18 historical aggregate contracts.
+            report = archive_roles.assess(root, worker_timeout=600)
             self.assertEqual(4191, len(report["files"]))
             self.assertEqual(4191, sum(report["role_counts"].values()))
             self.assertEqual([], report["unclassified"])
@@ -59,6 +60,11 @@ class ArchiveRolesTest(unittest.TestCase):
             (root / "databinding/extra.xml").write_text("<extra/>")
             with self.assertRaisesRegex(ValueError, "missing or extra files"):
                 archive_roles.assess(root)
+
+    def test_worker_timeout_validation_precedes_archive_access(self):
+        for value in (0, -1, 3601, True, 1.5, "180"):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                archive_roles.assess(Path("/nonexistent-wsdl-archive"), worker_timeout=value)
 
     def test_normative_schema_grammar(self):
         xs = archive_roles.contract.XSD

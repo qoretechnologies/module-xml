@@ -45,12 +45,16 @@ argument. No version is inferred from a saved document's unrelated declarations.
 
 The explicit `WSOperation.serializeResponse(..., soap12, ...)` override retains
 its historical availability check against the document namespace registry.
-Existing `SoapHandler` consumers use it to reply in the incoming message version.
-This compatibility path is separate from binding-derived defaults and does not
-establish binding conformance. Native fault interpretation follows the actual
-received envelope namespace, including a default namespace, rather than declared
-WSDL namespaces. Full version-mismatch enforcement and fault grammar belong to
-P7 and remain open; ordinary cross-version decoding is still accepted.
+SoapHandler validates the registered binding before invoking callbacks, so ordinary
+request/response decoding uses the selected version. Root names/namespaces and
+cross-version ordinary envelopes raise `SOAP-VERSION-MISMATCH`. Native fault
+interpretation then follows the received envelope namespace. A SOAP 1.1
+`VersionMismatch` response remains interpretable by a SOAP 1.2 client, as required
+for version transition; other mismatched responses reject. The explicit response
+serialization override does not change the binding's accepted input version.
+
+See [SOAP envelope processing](soap-envelope-processing.md) for shared structure,
+document checks and protocol-fault generation.
 
 Regression coverage is in `test/wsdl-binding-version.qtest`, the existing large
 multi-binding golden messages in `test/soap.qtest`, and the independent

@@ -77,9 +77,11 @@ attributes still undergo schema validation. Literal element headers keep their
 schema-defined names and treat namespace/encoding metadata as format hints.
 
 Old standalone header descriptors without optional namespace or encoding fields
-retain absent values when restored. A descriptor without an encoded namespace
-retains the existing unqualified accessor convention. Applications should supply
-an explicit namespace for type-based encoded header blocks.
+retain absent values when restored. Emitting an unqualified header block raises
+`SOAP-SERIALIZATION-ERROR`: encoded headers need an explicit binding namespace,
+and literal headers need a namespace-qualified schema element. Compatibility
+headers can be outside the WSDL but must still satisfy SOAP name and container
+rules. Incoming unqualified header blocks reject even if no header is bound.
 
 Source headers require message, part and valid use, a matching SOAP extension
 namespace and recognized unqualified attributes. Manual and saved descriptors
