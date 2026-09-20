@@ -207,6 +207,8 @@ module WSDL {
     @section wsdlrelnotes WSDL Module Release Notes
 
     @subsection wsdl_0_5_8 WSDL v0.5.8
+    - one-way response decoding reports protocol faults before checking for an application output message;
+      empty and whitespace-only SOAP Bodies are equivalent, and unexpected application output still rejects
     - WSDLLib::getSOAPFaultInfo() exposes scoped QName codes/subcodes, ordered multilingual reasons,
       actor/node/role references and retained detail/header/envelope XML; SoapFaultOptions controls these
       protocol fields when generating generic, declared and header faults without changing default decoding
@@ -32286,6 +32288,8 @@ public class WSOperation inherits WSDL::XsdNamedData {
         @return the Qore data structure corresponding to the response data; see @ref wsdl_soap_header_deserialization
         for the body/header merge rules. HTTP bindings match the content type against the WSDL binding, including
         wildcards, and apply the current value to \c "^attributes^"."^content-type^".
+        A one-way SOAP operation returns NOTHING for an empty acknowledgment or empty Body.
+        @throw SOAP-SERVER-FAULT-RESPONSE a SOAP fault was received, including on a one-way operation
         @throw SOAP-VERSION-MISMATCH a SOAP envelope differs from the selected binding version
         @throw SOAP-DESERIALIZATION-ERROR invalid message, type selection or content
         @note A retained type uses XsdQNameValue in \c ^type^ and its native value in \c ^val^;
@@ -32335,6 +32339,10 @@ public class WSOperation inherits WSDL::XsdNamedData {
         @throw SOAP-DESERIALIZATION-ERROR an invalid response or payload
         @throw SOAP-SERVER-FAULT-RESPONSE a SOAP fault was received
         @throw WSDL-BINDING-ERROR the binding does not use element-based literal SOAP parts
+        @note A one-way operation has no retained application output parts. Protocol faults still raise
+        SOAP-SERVER-FAULT-RESPONSE; an otherwise empty envelope raises SOAP-DESERIALIZATION-ERROR for the
+        missing output declaration. SoapClient one-way calls use ordinary empty-acknowledgment handling
+        even when the xml_values call option is selected.
         @see deserializeXmlRequest()
     */
     hash<SoapXmlMessageInfo> deserializeXmlResponse(string xml, *string bname,
@@ -34362,6 +34370,11 @@ public class SoapBinding inherits WSDL::OperationalBinding {
         string io = request ? "input" : "output";
         *BindingMessageDescription description = self{io};
         *WSMessage message = op{io};
+        if (!request && !message) {
+            # Retained response calls still report protocol faults before the absent-output contract.
+            XsdSoapXmlHelper::validateDocument(xml, SOAP_DESERIALIZATION_ERROR);
+            deserializeMessageImpl(op, parse_xml(xml, XPF_PRESERVE_ORDER | XPF_PRESERVE_WHITESPACE), False);
+        }
         if (!description || !message) {
             throw SOAP_DESERIALIZATION_ERROR, sprintf("operation %y has no %s message", op.name, io);
         }
@@ -34587,10 +34600,42 @@ public class SoapBinding inherits WSDL::OperationalBinding {
         XsdQNameNamespaceScope body_scope(o.Envelope.Body."^attributes^");
         *hash<auto> body = XsdScalarTextHelper::elementContent(o.Envelope.Body, "SOAP Body");
 
+        hash<auto> expanded_body = exists body ? XsdBase::expandElementNamespaces(body, envelope_namespaces) : {};
+        # Protocol faults are valid even when a one-way operation has no application output message.
+        if (!request && expanded_body.hasKey(type_qname(message_soap12 ? SOAP_12_ENV : SOAP_11_ENV, "Fault"))) {
+            hash<auto> fault = SoapEnvelopeHelper::getFaultValue(body, envelope_namespaces, message_soap12);
+            if (message_soap12) {
+                WSDL::XsdBase::removeNS(\fault);
+                WSDL::XsdBase::removeNS(\fault.Code);
+                WSDL::XsdBase::removeNS(\fault.Reason);
+                remove fault.Code.ns;
+                remove fault.Reason.ns;
+                string desc = sprintf("The following fault response was received from the server: code: %y",
+                    fault.Code.Value);
+                auto sc = fault.Code.Subcode;
+                while (exists sc) {
+                    WSDL::XsdBase::removeNS(\sc);
+                    remove sc.ns;
+                    desc += sprintf(", subcode: %y", sc.Value);
+                    sc = sc.Subcode;
+                }
+                foreach auto rn in (fault.Reason.Text) {
+                    desc += sprintf(", text: %y", rn);
+                }
+                throw "SOAP-SERVER-FAULT-RESPONSE", desc, fault;
+            } else {
+                # SOAP 1.1 protocol fields are unqualified; keep extension fields qualified and distinct.
+                string desc = sprintf("The following fault response was received from the server: code: %y, "
+                    "faultstring: %y", fault.faultcode, fault.faultstring);
+                throw "SOAP-SERVER-FAULT-RESPONSE", desc, fault;
+            }
+        }
+
         if (!op{io}) {
-            if (exists body) {
+            if (body) {
                 throw SOAP_DESERIALIZATION_ERROR, sprintf("%s value given for operation %y binding %y with no %s message: %y", request ? "request" : "response", op.name, name, io, body);
             }
+            return hrv;
         } else if (!exists body) {
             if (docstyle && o.Envelope.hasKey("Body")
                     && !(bmd.getBodyPartNames(op{io}) ?? keys op{io}.pmap)) {
@@ -34604,7 +34649,6 @@ public class SoapBinding inherits WSDL::OperationalBinding {
 
         auto rv;
         if (exists body) {
-            hash<auto> expanded_body = XsdBase::expandElementNamespaces(body, envelope_namespaces);
             hash<auto> msgh = docstyle ? expanded_body : body;
             *hash<auto> mrh;
             # Literal parts use their concrete schema: id and href can be ordinary attributes.
@@ -34613,35 +34657,6 @@ public class SoapBinding inherits WSDL::OperationalBinding {
                 (mrh, msgh) = processMultiRef(msgh);
             } else if (!docstyle) {
                 WSDL::XsdBase::removeNS2(\msgh);
-            }
-
-            if (!request && expanded_body.hasKey(type_qname(message_soap12 ? SOAP_12_ENV : SOAP_11_ENV, "Fault"))) {
-                hash<auto> fault = SoapEnvelopeHelper::getFaultValue(body, envelope_namespaces, message_soap12);
-                if (message_soap12) {
-                    WSDL::XsdBase::removeNS(\fault);
-                    WSDL::XsdBase::removeNS(\fault.Code);
-                    WSDL::XsdBase::removeNS(\fault.Reason);
-                    remove fault.Code.ns;
-                    remove fault.Reason.ns;
-                    string desc = sprintf("The following fault response was received from the server: code: %y",
-                        fault.Code.Value);
-                    auto sc = fault.Code.Subcode;
-                    while (exists sc) {
-                        WSDL::XsdBase::removeNS(\sc);
-                        remove sc.ns;
-                        desc += sprintf(", subcode: %y", sc.Value);
-                        sc = sc.Subcode;
-                    }
-                    foreach auto rn in (fault.Reason.Text) {
-                        desc += sprintf(", text: %y", rn);
-                    }
-                    throw "SOAP-SERVER-FAULT-RESPONSE", desc, fault;
-                } else {
-                    # SOAP 1.1 protocol fields are unqualified; keep extension fields qualified and distinct.
-                    string desc = sprintf("The following fault response was received from the server: code: %y, "
-                        "faultstring: %y", fault.faultcode, fault.faultstring);
-                    throw "SOAP-SERVER-FAULT-RESPONSE", desc, fault;
-                }
             }
 
             #any ns = msgh.".ns";

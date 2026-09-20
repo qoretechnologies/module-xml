@@ -253,3 +253,23 @@ while retaining original HTTP/MIME metadata and attachment entities separately. 
 wire charset applies to incoming bytes only; it does not describe the generated XML.
 This distinction applies to ordinary messages and faults, including native and retained
 values. No transport metadata or shared service graph is rewritten.
+
+One-way SOAP operations have no application output declaration. Native response
+decoding recognizes protocol faults before testing for that declaration or applying
+SOAP encoding to application values. Empty Bodies, including whitespace-only content,
+return NOTHING; unexpected application children still reject. Direct retained XML
+response decoding also reports protocol faults first, but otherwise requires an output
+declaration because its result represents declared application parts.
+
+SoapClient accepts empty one-way HTTP acknowledgments and applies the ordinary SOAP
+processing model to any supplied envelope. This includes registered response-header
+processors and unknown targeted mandatory-header rejection. The `xml_values` option
+does not require output parts for an empty one-way acknowledgment. Response processing
+metadata remains in call information. An HTTP success status confirms transmission;
+it is not an application validation or delivery guarantee.
+
+SoapHandler sends an empty HTTP 202 acknowledgment for a successful one-way operation
+in either SOAP version. SOAP 1.2 requires this status when there is no response envelope;
+WS-I Basic Profile 1.2 lists it as a preferred SOAP 1.1 one-way acknowledgment.
+Processing failures still generate the applicable SOAP fault and HTTP status. The
+handler does not synthesize an application response or change HTTP WSDL bindings.

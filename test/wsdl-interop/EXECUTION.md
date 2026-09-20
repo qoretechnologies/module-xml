@@ -9847,3 +9847,34 @@ installation, push or CI trigger.
 
 See [evidence](soap-http-fault-evidence.md), [validation](P7-08-validation.json),
 [audit](audits/P7-08-soap-http-faults.md), and [design](../../design/soap-envelope-processing.md).
+
+
+## P7-09: One-way acknowledgments and protocol faults
+
+One-way response decoding reports protocol faults before application-output checks,
+accepts whitespace-only empty Bodies, and preserves explicit response-header processing.
+SOAP handlers return empty HTTP 202 acknowledgments for successful one-way calls;
+processing errors still produce SOAP faults. Success does not imply application delivery.
+
+All **31 affected Qore suites pass: 394 cases / 22,871 assertions**. Ten focused
+SOAP suites also pass compiled: **35 cases / 11,908 assertions**. The new one-way
+suite passes **3 cases / 783 assertions**, covering source/saved service graphs,
+both SOAP versions, direct/native/retained fault handling, generated faults, version
+negotiation, whitespace-only Bodies, acknowledgments, header capabilities and recovery.
+
+Ten independent Python gates pass. The new two-test gate checks **228 HTTP exchanges**:
+180 external-server/client exchanges and 48 external-client/handler exchanges. It
+verifies exact 200/202/204 acknowledgments, optional envelope/header processing,
+protocol errors, empty handler bodies with no Content-Type, fault QName identities
+against pinned schemas, and callback counts before deterministic shutdown.
+All 16 corpus commands meet their recorded outcomes; all six semantic reports match
+P7-08 except for the WSDL source digest. Installed Qore is `9d8ce440b`.
+Documentation and five-file astparser checks pass without warnings/errors.
+
+Audit: **18 Pass / 44 N/A / zero Fail**. No C++ changes; Valgrind is not required.
+
+P7 remaining HTTP/action/media rules, transport interruption and complete assertion
+accounting remain open, followed by P8–P9. No Qore edits, installation, push or CI trigger.
+
+See [evidence](soap-oneway-evidence.md), [validation](P7-09-validation.json),
+[audit](audits/P7-09-soap-oneway.md), and [design](../../design/soap-envelope-processing.md).

@@ -1,0 +1,183 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires ../qlib/WSDL.qm
+%requires ../qlib/SoapClient.qm
+%requires ../qlib/SoapHandler.qm
+%requires HttpServer
+%exec-class SoapOneWayTest
+
+class OneWayReplyHandler inherits AbstractHttpRequestHandler {
+    private { Queue replies; }
+    constructor(Queue replies) { self.replies = replies; }
+    hash<HttpResponseInfo> handleRequest(hash<auto> cx, hash<auto> hdr, *data body) { return replies.get(10000); }
+}
+
+class SoapOneWayTest inherits QUnit::Test {
+    constructor() : Test("SOAP one-way responses", "1.0") {
+        addTestCase("Protocol faults precede the absent application-output contract", \direct());
+        addTestCase("Empty HTTP acknowledgments and optional SOAP envelopes preserve processing", \http());
+        addTestCase("Handlers return empty 202 acknowledgments and real faults", \handlers());
+        set_return_value(main());
+    }
+    private static WebService service(string state = "source") {
+        string source = ReadOnlyFile::readTextFile(get_script_dir() + "/wsdl-interop/soap-envelope-peer/contract.wsdl");
+        source = replace(source,'<w:output message="t:Value"/>','');
+        source = replace(source,'<w:output><s:body use="literal"/></w:output>','');
+        source = replace(source,'<w:output><s12:body use="literal"/></w:output>','');
+        WebService ws(source);
+        if (state == "saved") { ws = Serializable::deserialize(ws.serialize()); }
+        if (state == "data") { ws = Serializable::deserialize(ws.serializeToData()); }
+        return ws;
+    }
+    private static string envelope(bool soap12, string body, string header = "") {
+        return '<e:Envelope xmlns:e="' + (soap12 ? SOAP_12_ENV : SOAP_11_ENV) + '">'
+            + header + '<e:Body>' + body + '</e:Body></e:Envelope>';
+    }
+    private static string fault(bool soap12, string code = "MustUnderstand") {
+        return envelope(soap12,'<e:Fault>' + (soap12
+            ? '<e:Code><e:Value>e:'+code+'</e:Value></e:Code><e:Reason><e:Text xml:lang="en">Unsupported header</e:Text></e:Reason>'
+            : '<faultcode>e:'+code+'</faultcode><faultstring>Unsupported header</faultstring>')+'</e:Fault>');
+    }
+    private static string header(bool soap12, string name = "Received") {
+        return '<e:Header><a:'+name+' xmlns:a="urn:ack" e:mustUnderstand="1">invoice-71</a:'+name+'></e:Header>';
+    }
+    private static hash<HttpResponseInfo> reply(bool soap12, int code, *string body) {
+        return <HttpResponseInfo>{"code":code,"body":body,"hdr":exists body
+            ? {"Content-Type":soap12 ? "application/soap+xml" : "text/xml"} : NOTHING};
+    }
+    private direct() {
+        foreach string state in ("source","saved","data") {
+            WebService ws = service(state);
+            WSOperation op = ws.getOperation("echo");
+            assertFalse(exists op.output);
+            foreach bool soap12 in (False,True) {
+                string binding = soap12 ? "B12" : "B11";
+                foreach string code in ("MustUnderstand","VersionMismatch",soap12 ? "Sender" : "Client",
+                        soap12 ? "Receiver" : "Server") {
+                    string xml = fault(soap12,code);
+                    assertThrows("SOAP-SERVER-FAULT-RESPONSE",\op.deserializeResponse(),(parse_xml(xml),binding));
+                    assertThrows("SOAP-SERVER-FAULT-RESPONSE",\op.deserializeXmlResponse(),(xml,binding));
+                    assertEq(code,WSDLLib::getSOAPFaultInfo(xml,soap12).code.getLocalName());
+                    assertEq("Unsupported header",WSDLLib::getSOAPFaultInfo(xml,soap12).reasons[0].text);
+                }
+                string generated = op.serializeFault(NOTHING,"Submission rejected",NOTHING,
+                    NOTHING,NOTHING,NOTHING,NOTHING,NOTHING,binding).body;
+                assertThrows("SOAP-SERVER-FAULT-RESPONSE",\op.deserializeResponse(),(parse_xml(generated),binding));
+                assertEq("Submission rejected",WSDLLib::getSOAPFaultInfo(generated,soap12).reasons[0].text);
+                if (soap12) {
+                    assertThrows("SOAP-SERVER-FAULT-RESPONSE",\op.deserializeResponse(),
+                        (parse_xml(fault(False,"VersionMismatch")),binding));
+                    assertThrows("SOAP-VERSION-MISMATCH",\op.deserializeResponse(),
+                        (parse_xml(fault(False)),binding));
+                }
+                foreach string text in (""," ","\n\t\r\n") {
+                    string xml = envelope(soap12,text);
+                    assertEq(NOTHING,op.deserializeResponse(parse_xml(xml,XPF_PRESERVE_ORDER|XPF_PRESERVE_WHITESPACE),binding));
+                }
+                assertEq(NOTHING,op.deserializeResponse(parse_xml(replace(envelope(soap12,""),'<e:Body></e:Body>','<e:Body/>')),binding));
+                assertEq(NOTHING,op.deserializeResponse({"body":NOTHING,"content-type":"text/plain"},binding));
+                # There are no retained application parts when the WSDL has no output message.
+                assertThrows("SOAP-DESERIALIZATION-ERROR",\op.deserializeXmlResponse(),(envelope(soap12,""),binding));
+                foreach string xml in (envelope(soap12,'<t:value xmlns:t="urn:soap-envelope-test">unexpected</t:value>'),
+                        replace(fault(soap12),'Unsupported header','<invalid/>'),
+                        replace(fault(soap12),'e:MustUnderstand','missing:MustUnderstand')) {
+                    assertThrows("SOAP-DESERIALIZATION-ERROR",\op.deserializeResponse(),(parse_xml(xml),binding));
+                    assertThrows("SOAP-DESERIALIZATION-ERROR",\op.deserializeXmlResponse(),(xml,binding));
+                }
+                assertThrows("SOAP-DESERIALIZATION-ERROR",\op.deserializeXmlResponse(),
+                    ('<!DOCTYPE e:Envelope>'+fault(soap12),binding));
+            }
+        }
+    }
+    private http() {
+        foreach string state in ("source","saved","data") {
+            WebService ws = service(state);
+            foreach bool soap12 in (False,True) {
+                foreach bool retained in (False,True) {
+                    Queue processed(); Queue replies();
+                    SoapHeaderProcessor processor = auto sub(hash<auto> cx, hash<SoapNodeHeader> block) {
+                        processed.push(block.xml.getElementData()."^value^"); return "acknowledged";
+                    };
+                    SoapProcessingNode node(<SoapNodeOptions>{"processors":{"{urn:ack}Received":processor}});
+                    HttpServer server(); on_exit server.stop();
+                    server.setDefaultHandler("replies",new OneWayReplyHandler(replies)); server.addListener(0);
+                    SoapClient client({"wsdl":ws,"port":soap12 ? "Port12" : "Port11",
+                        "url":sprintf("http://127.0.0.1:%d/service",server.getListenerInfo(0).port),"timeout":10000,
+                        "soap_node":node});
+                    # HttpServer intentionally rewrites empty 200 replies to 204; the external peer covers 200.
+                    foreach int status in (202,204) {
+                        replies.push(reply(soap12,status,NOTHING));
+                        hash<auto> info;
+                        assertEq(NOTHING,client.callOperation("echo",{"body":"invoice-71"},{"xml_values":retained},\info));
+                        assertEq(status,info."response-headers".status_code);
+                    }
+                    foreach int status in (200,202) {
+                        replies.push(reply(soap12,status,envelope(soap12," \n",header(soap12))));
+                        hash<auto> info;
+                        assertEq(NOTHING,client.callOperation("echo",{"body":"invoice-71"},{"xml_values":retained},\info));
+                        assertEq(status,info."response-headers".status_code);
+                        assertEq("invoice-71",processed.get(10000));
+                        assertEq("acknowledged",info."soap-processing".headers[0].value);
+                        assertTrue(info."soap-processing".headers[0].processed);
+                    }
+                    foreach hash<auto> row in (
+                            {"code":500,"xml":fault(soap12),"error":"SOAP-SERVER-FAULT-RESPONSE"},
+                            {"code":400,"xml":fault(soap12,soap12 ? "Sender" : "Client"),"error":"SOAP-SERVER-FAULT-RESPONSE"},
+                            {"code":200,"xml":envelope(soap12,"",header(soap12,"Unknown")),"error":"SOAP-MUST-UNDERSTAND"},
+                            {"code":200,"xml":envelope(soap12,'<unexpected/>'),"error":"SOAP-DESERIALIZATION-ERROR"},
+                            {"code":500,"xml":replace(fault(soap12),'Unsupported header','<invalid/>'),"error":"SOAP-DESERIALIZATION-ERROR"}) {
+                        replies.push(reply(soap12,row.code,row.xml));
+                        hash<auto> info;
+                        assertThrows(row.error,\client.callOperation(),("echo",{"body":"invoice-71"},{"xml_values":retained},\info));
+                        assertEq(row.code,info."response-headers".status_code);
+                        replies.push(reply(soap12,202,NOTHING));
+                        assertEq(NOTHING,client.callOperation("echo",{"body":"invoice-71"},{"xml_values":retained},\info));
+                        assertEq(202,info."response-headers".status_code);
+                    }
+                    assertEq(0,processed.size());
+                    assertEq(0,replies.size());
+                }
+            }
+        }
+    }
+    private handlers() {
+        foreach string state in ("source","saved","data") {
+            WebService ws = service(state);
+            foreach bool soap12 in (False,True) {
+                foreach bool retained in (False,True) {
+                    Queue received();
+                    SoapHandler handler(new PermissiveAuthenticator());
+                    code<auto(hash<auto>,auto)> callback = auto sub(hash<auto> cx, auto value) {
+                        string text = retained ? value.body.body.getElementData()."^value^" : value;
+                        received.push(text);
+                        if (text == "error") { throw "APPLICATION-FAILED","Queue unavailable"; }
+                    };
+                    handler.addMethod(ws,ws.getOperation("echo"),callback,NOTHING,NOTHING,NOTHING,
+                        "service",NOTHING,NOTHING,soap12 ? "B12" : "B11",NOTHING,retained);
+                    HttpServer server(); on_exit server.stop();
+                    server.setDefaultHandler("oneway",handler); server.addListener(0);
+                    SoapClient client({"wsdl":ws,"port":soap12 ? "Port12" : "Port11",
+                        "url":sprintf("http://127.0.0.1:%d/service",server.getListenerInfo(0).port),"timeout":10000});
+                    foreach string text in ("invoice-71","error","invoice-72") {
+                        hash<auto> info;
+                        if (text == "error") {
+                            assertThrows("SOAP-SERVER-FAULT-RESPONSE",\client.callOperation(),
+                                ("echo",{"body":text},{"xml_values":retained},\info));
+                            assertEq(500,info."response-headers".status_code);
+                            assertEq(soap12 ? "Receiver" : "Server",WSDLLib::getSOAPFaultInfo(info."response-body").code.getLocalName());
+                        } else {
+                            assertEq(NOTHING,client.callOperation("echo",{"body":text},{"xml_values":retained},\info));
+                            assertEq(202,info."response-headers".status_code);
+                            assertEq(0,info."response-body".size());
+                        }
+                        assertEq(text,received.get(10000));
+                    }
+                    assertEq(0,received.size());
+                }
+            }
+        }
+    }
+}
