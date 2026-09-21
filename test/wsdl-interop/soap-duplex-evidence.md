@@ -101,14 +101,34 @@ gate against the freshly compiled modules. Documentation and both new Qore files
 documentation and AST checks without warnings or errors. Installed Qore is `a6744554`.
 Audit: **16 Pass / 46 N/A / zero Fail**.
 
-## Open item
+## Peer defects found after the first run
 
-`test_soap_transport.py::test_get_response_interruption_and_recovery` intermittently
-reports `SOCKET-CLOSED` for a GET recovery step that the peer answered normally. It is
-not caused by this increment, it predates it, and it is not yet root-caused: an initial
-hypothesis of stale connection reuse was disproved by counting accepted connections
-(72 accepted for 72 client calls) and by a focused core-only reproducer in which
-`HTTPClient` reconnects correctly. It is recorded here rather than explained away.
+Running this gate under concurrent load exposed two defects in its own raw peer, both fixed:
+
+- The scripted connection was published through a shared attribute on the server and read by
+  the handler thread, so overlapping accepts could hand two handlers the same script and a
+  connection could be served the wrong behavior.  Each accepted socket now carries its own
+  assignment, made on the accept thread before the handler starts.
+- Records were collected in handler-completion order, but a draining handler outlives the
+  client call it answered, so a slower handler could report after a later one.  Each record
+  now carries its accept order and the sequence is sorted before comparison.
+
+The peer step-accounting assertion was also moved ahead of the per-call outcome comparison.
+That ordering matters: a client that reused a pooled connection the peer had already closed
+would fail a call without opening a connection, and the accounting assertion names that
+directly instead of letting it surface as an unexplained transport error on a later row.
+With that guard in place, the peer-EOF step accepts either terminal error, because when both
+directions are active either side may legitimately observe the closure first.
+
+## Related core defect
+
+`test_soap_transport.py::test_get_response_interruption_and_recovery` fails intermittently on
+this runtime with `SOCKET-CLOSED` for a GET recovery step. It is not caused by this increment
+and does not affect this gate. It was root-caused to Qore core HTTP connection management: a
+connection whose response read failed is published to the waiting application thread before it
+is marked closed, so the pool can hand the dead connection to the next request. Counting
+accepted connections during failing runs shows the shortfall directly (324 and 328 accepted
+for 336 client calls). See `/tmp/qore-soap-get-recovery-flake/README.md`.
 
 ## Scope
 

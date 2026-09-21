@@ -162,8 +162,11 @@ def served(server):
 def duplex_peer(version, connections, observed, requests, errors, releases, capture=False):
     """Answer each scripted request before the buffered request body has been drained."""
     pending = queue.Queue()
-    for connection in connections:
-        pending.put(connection)
+    for index, connection in enumerate(connections):
+        pending.put((index, connection))
+    # Each accepted socket carries its own scripted connection. The accept thread assigns it before
+    # the handler thread starts, so overlapping accepts cannot race over a shared attribute.
+    assignments = {}
     payload = response_envelope(version, RESPONSE)
     fault = fault_envelope(version, RESPONSE)
 
@@ -171,9 +174,13 @@ def duplex_peer(version, connections, observed, requests, errors, releases, capt
         def handle(self):
             try:
                 self.request.settimeout(120)
-                for exchange in self.server.next_script:
+                index, connection_script = assignments.pop(self.request)
+                for position, exchange in enumerate(connection_script):
                     length, body = read_headers(self.request)
-                    record = {'step': exchange.step, 'length': length, 'behavior': exchange.behavior}
+                    # Records are queued when a handler finishes, and a draining handler can outlive
+                    # the client call it answered, so each record carries its accept order.
+                    record = {'step': exchange.step, 'length': length, 'behavior': exchange.behavior,
+                              'order': (index, position)}
                     if exchange.behavior == 'respond':
                         reply = headers(version, f'Content-Length: {len(payload)}', keep=exchange.keep) + payload
                     elif exchange.behavior == 'respond-chunked':
@@ -211,7 +218,6 @@ def duplex_peer(version, connections, observed, requests, errors, releases, capt
     class Server(socketserver.ThreadingTCPServer):
         daemon_threads = True
         allow_reuse_address = True
-        next_script = ()
 
         def server_bind(self):
             self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, BUFFER)
@@ -220,7 +226,7 @@ def duplex_peer(version, connections, observed, requests, errors, releases, capt
 
         def process_request(self, request, client_address):
             try:
-                self.next_script = pending.get_nowait()
+                assignments[request] = pending.get_nowait()
             except queue.Empty:
                 errors.put(AssertionError('unscripted peer connection'))
                 self.close_request(request)
@@ -263,8 +269,12 @@ class SoapDuplexTests(unittest.TestCase):
             'fault': {'error': 'SOAP-SERVER-FAULT-RESPONSE', 'status': 500,
                       'fault_code': f's:{FAULT_CODE[version]}', 'fault_text': FAULT_REASON,
                       'fault_detail_size': RESPONSE, 'fault_detail_ns': 'urn:soap-envelope-test'},
-            # The peer closes while the client is still sending, so the failure surfaces on the send side.
-            'eof': {'error': 'SOCKET-SEND-ERROR', 'status': None},
+            # Both directions are active when the peer closes, so either side may observe the
+            # closure first depending on how much of the request the transport had buffered; both
+            # are correct and both are terminal. This is safe to accept only because the peer
+            # step-accounting assertion above runs first and would already have failed if the client
+            # had skipped the exchange instead of performing it.
+            'eof': {'error': ('SOCKET-SEND-ERROR', 'SOCKET-CLOSED'), 'status': None},
             'cancel': {'error': 'THREAD-CANCELLED', 'status': None,
                        'cancelled': True, 'reason_preserved': True},
             'timeout': {'error': 'SOCKET-TIMEOUT', 'status': None},
@@ -293,23 +303,35 @@ class SoapDuplexTests(unittest.TestCase):
         observed, requests, errors = queue.Queue(), queue.Queue(), queue.Queue()
         actual = self.drive(version, states, modes, STEPS, connections, observed, requests, errors)
 
-        expected = [dict(row, name=step, state=state, retained=mode)
-                    for state in states for mode in modes
-                    for step, row in zip(STEPS, self.expectations(version))]
-        self.assertEqual(len(expected), len(actual))
-        for want, row in zip(expected, actual):
-            self.assertEqual(want, row, (version, row['name'], row['state'], row['retained']))
-
         records = []
         while not observed.empty():
             records.append(observed.get_nowait())
+        records.sort(key=lambda record: record['order'])
+        # Checked before the per-call outcomes: every scripted step must have reached the peer. A
+        # client that reused a pooled connection the peer had already closed would fail a call
+        # without opening a connection, and this is the assertion that says so plainly instead of
+        # surfacing as an unexplained transport error on the next row.
         self.assertEqual([step for _ in range(cells) for step in STEPS],
-                         [record['step'] for record in records])
+                         [record['step'] for record in records],
+                         f'{version}: the peer was not asked for every scripted step')
         for record in records:
             self.assertLess(record['before'], record['length'], record['step'])
             if record['behavior'] in DRAINING:
                 self.assertGreater(record['sent'], RESPONSE, record['step'])
                 self.assertEqual(record['length'], record['drained'], record['step'])
+
+        expected = [dict(row, name=step, state=state, retained=mode)
+                    for state in states for mode in modes
+                    for step, row in zip(STEPS, self.expectations(version))]
+        self.assertEqual(len(expected), len(actual))
+        for want, row in zip(expected, actual):
+            context = (version, row['name'], row['state'], row['retained'])
+            if isinstance(want['error'], tuple):
+                self.assertIn(row['error'], want['error'], context)
+                self.assertEqual({k: v for k, v in want.items() if k != 'error'},
+                                 {k: v for k, v in row.items() if k != 'error'}, context)
+            else:
+                self.assertEqual(want, row, context)
         return len(actual)
 
     def test_duplex_matrix(self):
