@@ -102,6 +102,7 @@ set(QMOD
     qlib/XmlRpcHandler.qm
     qlib/XmlRpcConnection.qm
     qlib/XmlRpcClientIo
+    qlib/SoapClientIo
     qlib/CdaDataProvider
     qlib/SaxDataProvider
     qlib/SoapDataProvider
@@ -157,6 +158,7 @@ qore_external_user_module("qlib/WSDL.qm" "")
 qore_external_user_module("qlib/SoapClient.qm" "WSDL")
 qore_external_user_module("qlib/SoapHandler.qm" "WSDL")
 qore_external_user_module("qlib/SalesforceSoapClient.qm" "WSDL;SoapClient")
+qore_external_user_module("qlib/SoapClientIo" "WSDL")
 qore_external_user_module("qlib/SoapDataProvider" "WSDL;SoapClient")
 qore_external_user_module("qlib/CargoXmlDataProvider" "WSDL")
 qore_external_user_module("qlib/WebDavClient.qm" "")

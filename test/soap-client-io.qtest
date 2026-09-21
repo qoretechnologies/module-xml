@@ -1,0 +1,336 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires HttpServer
+%requires ../qlib/WSDL.qm
+%requires ../qlib/SoapHandler.qm
+%requires ../qlib/SoapClientIo
+%exec-class SoapClientIoTest
+
+class SoapClientIoTest inherits QUnit::Test {
+    public {
+        const Versions = ("11", "12");
+        const States = ("source", "saved", "data");
+    }
+
+    private {
+        HttpServer server;
+        int port;
+        Queue calls();
+    }
+
+    constructor() : Test("SOAP client async I/O", "1.0") {
+        addTestCase("Operations complete over async I/O in every graph and value mode", \operations());
+        addTestCase("Declared faults and HTTP errors are reported with their SOAP data", \faults());
+        addTestCase("One-way operations return nothing and still deliver the request", \oneWay());
+        addTestCase("SOAP 1.2 response resources are retrieved without an envelope", \responses());
+        addTestCase("Invalid options, services, ports and bindings reject before I/O", \options());
+        addTestCase("Credentials become a Basic authorization header", \credentials());
+        addTestCase("Buffered requests complete against an early response", \duplex());
+        addTestCase("The connection provider returns a usable client", \connections());
+        set_return_value(main());
+    }
+
+    private static string source() {
+        return ReadOnlyFile::readTextFile(get_script_dir() + "/wsdl-interop/soap-envelope-peer/contract.wsdl");
+    }
+
+    private static WebService graph(string text, string state) {
+        WebService ws(text);
+        if (state == "saved") { return Serializable::deserialize(ws.serialize()); }
+        if (state == "data") { return Serializable::deserialize(ws.serializeToData()); }
+        return ws;
+    }
+
+    #! starts a SOAP service for the given version and value mode and returns its endpoint URL
+    private string listen(string version, bool retained, *string one_way_source) {
+        WebService ws(one_way_source ?? source());
+        SoapHandler handler(new PermissiveAuthenticator());
+        bool has_output = !one_way_source;
+        handler.addMethod(ws, ws.getBindingOperation("B" + version, "echo"),
+            auto sub (hash<auto> cx, auto value) {
+                calls.push((retained ? value.body.body.getElementData()."^value^" : value));
+                if (has_output) {
+                    return {"body": retained
+                        ? new XsdXmlValue('<t:value xmlns:t="urn:soap-envelope-test">reply</t:value>')
+                        : "reply"};
+                }
+            }, NOTHING, NOTHING, NOTHING, "service", NOTHING, NOTHING, "B" + version, "echo", retained);
+        server = new HttpServer();
+        server.setDefaultHandler("soap", handler);
+        port = server.addListener(0).port;
+        return sprintf("http://127.0.0.1:%d/service", port);
+    }
+
+    private stop() {
+        if (server) {
+            server.stop();
+            delete server;
+        }
+        while (calls.size()) { calls.get(1000); }
+    }
+
+    private operations() {
+        int count = 0;
+        foreach string version in (Versions) {
+            foreach bool retained in ((False, True)) {
+                string url = listen(version, retained);
+                on_exit stop();
+                foreach string state in (States) {
+                    string label = sprintf("%s/%s/%s", version, state, retained ? "retained" : "native");
+                    SoapClientIo client({"wsdl": graph(source(), state), "port": "Port" + version,
+                        "url": url});
+                    on_exit client.close();
+                    hash<auto> info;
+                    auto result = client.callOperation("echo", {"body": "invoice-71"},
+                        {"xml_values": retained}, \info);
+                    assertEq("reply", retained ? result.body.body.getElementData()."^value^" : result,
+                        label + " response value");
+                    assertEq(200, info."response-code", label + " response code");
+                    assertEq("invoice-71", calls.get(10000), label + " delivered request");
+                    assertEq("Port" + version, client.getPort(), label + " selected port");
+                    assertEq("B" + version, client.getBinding(), label + " selected binding");
+                    assertTrue(info."request-body".val(), label + " recorded request body");
+                    assertEq(url, client.getUrl(), label + " endpoint");
+                    ++count;
+                }
+            }
+        }
+        assertEq(12, count, "operation matrix cells");
+    }
+
+    private faults() {
+        foreach string version in (Versions) {
+            WebService ws(source());
+            SoapHandler handler(new PermissiveAuthenticator());
+            handler.addMethod(ws, ws.getBindingOperation("B" + version, "echo"),
+                auto sub (hash<auto> cx, auto value) {
+                    throw "ECHO-ERROR", "the echo service refused " + value;
+                }, NOTHING, NOTHING, NOTHING, "service", NOTHING, NOTHING, "B" + version, "echo");
+            server = new HttpServer();
+            server.setDefaultHandler("soap", handler);
+            port = server.addListener(0).port;
+            on_exit stop();
+
+            SoapClientIo client({"wsdl": graph(source(), "source"), "port": "Port" + version,
+                "url": sprintf("http://127.0.0.1:%d/service", port)});
+            on_exit client.close();
+            hash<auto> info;
+            try {
+                client.callOperation("echo", {"body": "invoice-71"}, NOTHING, \info);
+                fail(version + " a server error must not return normally");
+            } catch (hash<ExceptionInfo> ex) {
+                # The handler's generic error becomes a conforming fault, which the client reports with
+                # its decoded fault data rather than as a bare HTTP failure.
+                assertEq("SOAP-SERVER-FAULT-RESPONSE", ex.err, version + " fault exception");
+                assertEq(NT_HASH, ex.arg.typeCode(), version + " fault data");
+                assertEq(500, info."response-code", version + " fault status");
+                assertRegex("refused", version == "11" ? ex.arg.faultstring : ex.arg.Reason.Text."^value^",
+                    version + " fault reason");
+            }
+            # the same client must complete an ordinary call afterwards
+            try {
+                client.callOperation("echo", {"body": "invoice-72"});
+                fail(version + " the service refuses every call");
+            } catch (hash<ExceptionInfo> ex) {
+                assertEq("SOAP-SERVER-FAULT-RESPONSE", ex.err, version + " recovery fault exception");
+            }
+        }
+    }
+
+    private oneWay() {
+        string one_way = replace(replace(replace(source(),
+            '<w:output message="t:Value"/>', ''),
+            '<w:output><s:body use="literal"/></w:output>', ''),
+            '<w:output><s12:body use="literal"/></w:output>', '');
+        foreach string version in (Versions) {
+            string url = listen(version, False, one_way);
+            on_exit stop();
+            SoapClientIo client({"wsdl": graph(one_way, "source"), "port": "Port" + version, "url": url});
+            on_exit client.close();
+            hash<auto> info;
+            assertNothing(client.callOperation("echo", {"body": "invoice-71"}, NOTHING, \info),
+                version + " one-way result");
+            assertEq(202, info."response-code", version + " one-way status");
+            assertEq("invoice-71", calls.get(10000), version + " one-way delivered request");
+        }
+
+        # a fault returned for a one-way operation must still be reported, not discarded
+        foreach string version in (Versions) {
+            WebService ws(one_way);
+            SoapHandler handler(new PermissiveAuthenticator());
+            handler.addMethod(ws, ws.getBindingOperation("B" + version, "echo"),
+                auto sub (hash<auto> cx, auto value) {
+                    throw "ECHO-ERROR", "the echo service refused " + value;
+                }, NOTHING, NOTHING, NOTHING, "service", NOTHING, NOTHING, "B" + version, "echo");
+            server = new HttpServer();
+            server.setDefaultHandler("soap", handler);
+            port = server.addListener(0).port;
+            on_exit stop();
+            SoapClientIo client({"wsdl": graph(one_way, "source"), "port": "Port" + version,
+                "url": sprintf("http://127.0.0.1:%d/service", port)});
+            on_exit client.close();
+            assertThrows("SOAP-SERVER-FAULT-RESPONSE", \client.callOperation(),
+                ("echo", {"body": "invoice-71"}), version + " one-way fault");
+        }
+    }
+
+    private responses() {
+        WebService ws(source());
+        SoapHandler handler(new PermissiveAuthenticator());
+        handler.addSoapResponseResource("/resource", ws.getBindingOperation("B12", "echo"),
+            auto sub (hash<auto> cx) {
+                calls.push(cx.raw_path ?? cx.url.path);
+                return {"body": "retrieved"};
+            }, "B12", "resource");
+        server = new HttpServer();
+        server.setDefaultHandler("soap", handler);
+        port = server.addListener(0).port;
+        on_exit stop();
+
+        SoapClientIo client({"wsdl": graph(source(), "source"), "port": "Port12",
+            "url": sprintf("http://127.0.0.1:%d/service", port)});
+        on_exit client.close();
+        hash<auto> info;
+        assertEq("retrieved", client.getSoapResponse("echo", "/resource", NOTHING, \info),
+            "SOAP 1.2 response value");
+        assertEq(200, info."response-code", "SOAP 1.2 response status");
+        assertRegex("/resource", calls.get(10000), "SOAP 1.2 response resource path");
+
+        # request-only options and SOAP 1.1 bindings reject before any I/O
+        assertThrows("SOAP-CLIENT-IO-ERROR", "request-only option",
+            \client.getSoapResponse(), ("echo", "/resource", {"soapaction": "urn:echo"}));
+        SoapClientIo soap11({"wsdl": graph(source(), "source"), "port": "Port11",
+            "url": sprintf("http://127.0.0.1:%d/service", port)});
+        on_exit soap11.close();
+        assertThrows("SOAP-CLIENT-IO-ERROR", "SOAP 1.2 binding",
+            \soap11.getSoapResponse(), ("echo", "/resource"));
+    }
+
+    private options() {
+        string text = source();
+        assertThrows("SOAP-CLIENT-IO-ERROR", "only one of",
+            sub () { new SoapClientIo({"wsdl": text, "wsdl_file": "/nonexistent.wsdl"}); });
+        assertThrows("SOAP-CLIENT-IO-ERROR", "neither one of",
+            sub () { new SoapClientIo({"port": "Port12"}); });
+        assertThrows("SOAP-CLIENT-IO-ERROR", "has no port",
+            sub () { new SoapClientIo({"wsdl": text, "port": "Missing"}); });
+        assertThrows("SOAP-CLIENT-IO-ERROR", "ultimate-receiver",
+            sub () { new SoapClientIo({"wsdl": text, "soap_node": "not a node"}); });
+        SoapClientIo client({"wsdl": text, "port": "Port12", "url": "http://127.0.0.1:1/service"});
+        on_exit client.close();
+        assertThrows("SOAP-CLIENT-IO-ERROR", "cannot be combined",
+            \client.callOperation(), ("echo", {"body": "x"}, {"xml_values": True, "preserve_types": True}));
+        assertEq("S", client.getService(), "selected service");
+        assertEq(text, client.getWebService().getWSDL(), "retained web service source");
+    }
+
+    #! answers with a complete response before reading any of the request body
+    /** Sized past any plausible kernel socket buffer, so the write can only finish while the client is
+        still sending; a client that serialized the two directions would block both ends until the
+        bounded deadline expired. See design/soap-envelope-processing.md for the contract.
+    */
+    private duplex() {
+        const int Request = 8 * 1024 * 1024;
+        const int Response = 4 * 1024 * 1024;
+        string payload = sprintf('<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope"><s:Body>'
+            '<t:value xmlns:t="urn:soap-envelope-test">%s</t:value></s:Body></s:Envelope>',
+            strmul("y", Response));
+        binary reply = binary(sprintf("HTTP/1.1 200 OK\r\nConnection: close\r\n"
+            "Content-Type: application/soap+xml\r\nContent-Length: %d\r\n\r\n%s", payload.size(),
+            payload));
+        Socket listener();
+        listener.bindINET("127.0.0.1", 0, True);
+        listener.listen();
+        Counter running(1);
+        int drained_before_response = -1;
+        int request_length = -1;
+        int drained_after_response = -1;
+        *hash<ExceptionInfo> failure;
+        background sub () {
+            on_exit running.dec();
+            try {
+                *Socket connection = listener.accept(120000);
+                @assert(connection);
+                on_exit connection.close();
+                hash<auto> header = connection.readHTTPHeader(120000);
+                @assert(header.method == "POST");
+                request_length = header."content-length".toInt();
+                # nothing of the request body has been read yet
+                connection.send(reply, 120000);
+                drained_before_response = 0;
+                drained_after_response = connection.recvBinary(request_length, 120000).size();
+            } catch (hash<ExceptionInfo> ex) {
+                failure = ex;
+            }
+        }();
+        SoapClientIo client({"wsdl": graph(source(), "source"), "port": "Port12",
+            "url": sprintf("http://127.0.0.1:%d/service", listener.getSocketInfo().port),
+            "timeout": 120000});
+        on_error client.close();
+        auto result = client.callOperation("echo", {"body": strmul("x", Request)});
+        client.close();
+        @assert(running.waitForZero(120000) == 0);
+        listener.close();
+        if (failure) { throw failure.err, failure.desc, failure.arg; }
+        assertEq(Response, result.size(), "duplex response value");
+        assertEq(0, drained_before_response, "request bytes read when the response completed");
+        assertGt(Request, request_length, "declared request length");
+        assertEq(request_length, drained_after_response, "drained request");
+    }
+
+    private credentials() {
+        WebService ws(source());
+        Queue seen();
+        SoapHandler handler(new PermissiveAuthenticator());
+        handler.addMethod(ws, ws.getBindingOperation("B12", "echo"),
+            auto sub (hash<auto> cx, auto value) {
+                seen.push(cx.hdr.authorization ?? "");
+                return {"body": "reply"};
+            }, NOTHING, NOTHING, NOTHING, "service", NOTHING, NOTHING, "B12", "echo");
+        server = new HttpServer();
+        server.setDefaultHandler("soap", handler);
+        port = server.addListener(0).port;
+        on_exit stop();
+        string expected = "Basic " + make_base64_string("alice:s3cret");
+
+        # credentials given as options
+        SoapClientIo with_opts({"wsdl": graph(source(), "source"), "port": "Port12",
+            "url": sprintf("http://127.0.0.1:%d/service", port), "username": "alice",
+            "password": "s3cret"});
+        on_exit with_opts.close();
+        assertEq("reply", with_opts.callOperation("echo", {"body": "x"}), "option credentials call");
+        assertEq(expected, seen.get(10000), "option credentials header");
+
+        # credentials carried by the endpoint URL
+        SoapClientIo with_url({"wsdl": graph(source(), "source"), "port": "Port12",
+            "url": sprintf("http://alice:s3cret@127.0.0.1:%d/service", port)});
+        on_exit with_url.close();
+        assertEq("reply", with_url.callOperation("echo", {"body": "x"}), "URL credentials call");
+        assertEq(expected, seen.get(10000), "URL credentials header");
+
+        # without credentials no authorization header is sent
+        SoapClientIo anonymous({"wsdl": graph(source(), "source"), "port": "Port12",
+            "url": sprintf("http://127.0.0.1:%d/service", port)});
+        on_exit anonymous.close();
+        assertEq("reply", anonymous.callOperation("echo", {"body": "x"}), "anonymous call");
+        assertEq("", seen.get(10000), "anonymous request sends no authorization");
+    }
+
+    private connections() {
+        string url = listen("12", False);
+        on_exit stop();
+        SoapIoConnection conn("soapio", "SOAP async I/O test connection",
+            replace(url, "http:", "soapio:"), {"monitor": False},
+            {"wsdl": source(), "port": "Port12", "target_url": url});
+        assertEq("soapio", conn.getType(), "connection type");
+        SoapClientIo client = conn.get(False);
+        on_exit client.close();
+        assertEq("Port12", client.getPort(), "connection port");
+        assertEq(url, client.getUrl(), "connection endpoint");
+        assertEq("reply", client.callOperation("echo", {"body": "invoice-71"}), "connection call");
+        assertEq("invoice-71", calls.get(10000), "connection delivered request");
+    }
+}

@@ -10038,3 +10038,32 @@ See [evidence](soap-duplex-evidence.md), [validation](P7-14-validation.json),
 [audit](audits/P7-14-soap-duplex.md) and
 [implemented design](../../design/soap-envelope-processing.md). P7 assertion accounting
 remains open, followed by P8–P9. No push or CI trigger.
+
+
+## SoapClientIo: SOAP over async I/O
+
+Outside the P7-P9 sequence, at the user's direction, SOAP gained an async I/O client. `SoapClientIo`
+is a new module rather than a change to `SoapClient`, following the `XmlRpcClientIo` and
+`WebDavClientIo` pattern already established in this repository: `SoapClient` publicly inherits
+`HTTPClient`, so re-basing it would have removed that API surface from existing callers, including
+`SalesforceSoapClient` and `SoapConnection`.
+
+Only the transport differs. Both clients drive the same `WSDL::WebService` model and the same
+serialization, envelope validation, mandatory-header processing, fault grammar and response decoding,
+so behavior is identical by construction. `SoapClientIo` composes
+`HttpClientIo::HttpClientConnectionManager` for pooling, redirects, cookies and protocol negotiation
+from HTTP/3 down to HTTP/1.1.
+
+`test/soap-client-io.qtest` passes **8 cases / 128 assertions** against a real `SoapHandler`, covering
+SOAP 1.1/1.2 operations across source, saved-object and saved-data graphs and native/retained values,
+declared faults with their decoded fault data, one-way operations, SOAP 1.2 envelope-free response
+retrieval, option rejection, Basic credentials from options and from the endpoint URL, the
+ConnectionProvider integration, and the P7-14 full-duplex contract on the async transport. It passes
+identically against the source module and the AOT-compiled qmod. Documentation and AST checks are
+clean.
+
+Audit: **24 Pass / 38 N/A / zero Fail**, after fixing a connection-scheme recursion that exhausted the
+thread stack, an unguarded connection-manager swap in `close()`, silently dropped credentials, and
+three Doxygen cross-references that would have required a dependency the module does not have.
+
+See [design](../../design/soap-async-io-client.md) and [audit](audits/soap-client-io.md).
