@@ -10101,3 +10101,40 @@ phase, so this is assertion accounting for the W3C collection, not P7 acceptance
 
 See [evidence](assertion-ledger-evidence.md), [ledger](assertion-ledger.json) and
 [audit](audits/assertion-ledger.md).
+
+
+## P7 assertion accounting: the WS-I profiles
+
+The ledger now covers both sources: **493 rows — 140 W3C assertions and 353 WS-I Basic Profile
+requirements — with 388 covered by executable cases, 49 recorded gaps, 30 not applicable and 26 routed
+to P8, over 815 verified mappings.**
+
+The profiles are pinned as extracted requirement statements rather than as raw documents. They are
+served through a CDN that rewrites contributor addresses per response, so two downloads have identical
+length but different bytes and a digest of the HTML is not reproducible; the extract is, and two
+independent downloads produce byte-identical extracts. Extraction also found that `R4005` (BP 1.2) and
+`R5010` (BP 2.0) carry their anchor on the preceding rationale paragraph, so keying on the anchor
+silently drops them, and that `R9999` in both profiles is the specification's own notational example
+rather than a requirement.
+
+The 49 gaps are the requirements that depend on WS-Addressing. This module provides no WS-Addressing
+support, so they are recorded as gaps rather than excluded: marking them not applicable would have
+converted a conformance shortfall into a clean total. The verifier enforces the distinction, and
+nothing in the accounting appeals to WS-I's own `TESTABLE`/`NOT_TESTED` classification.
+
+Running the mapped suites that the P7 sweep did not already cover surfaced an unresolved defect.
+`test_soap_container_whitespace.py::test_header_part_round_trip_requirement_p6` and
+`::test_single_rpc_parameter_round_trip_requirement_p6` still fail. They were recorded at P3 as
+binding-selection and part-representation requirements that "remain failing tests until P6", and
+`P6-acceptance.md` does not account for them. Three defects stand behind them: a selected single body
+part serializing a scalar round trip without a Body, RPC deserialization iterating every message part
+instead of the selected body parts, and a single RPC parameter deserializing to an unwrapped scalar
+against a `reference<hash<auto>>` serializer requirement. The ledger records them under
+`known_defects`; the case it maps from that gate passes, so no row rests on a failing test.
+
+**P7 acceptance is therefore still open.** The assertion accounting required by the plan is complete,
+but acceptance also requires the mandatory behavior for the advertised scope to pass, and these P6
+part-representation defects are unresolved.
+
+See [evidence](assertion-ledger-evidence.md), [ledger](assertion-ledger.json) and
+[audit](audits/assertion-ledger-wsi.md).

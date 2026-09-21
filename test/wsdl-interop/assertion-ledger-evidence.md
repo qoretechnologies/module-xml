@@ -1,13 +1,13 @@
-# W3C SOAP 1.2 assertion ledger
+# SOAP assertion and profile-requirement ledger
 
 Copyright (C) 2026 Qore Technologies, s.r.o.
 
 ## What this is
 
 [`assertion-ledger.json`](assertion-ledger.json) accounts for every one of the 140 assertion
-identifiers published in the W3C SOAP 1.2 test collection. Each row records the requirement as the
-*current* specification states it, whether that requirement applies to this implementation, and which
-executable cases cover it.
+identifiers published in the W3C SOAP 1.2 test collection and every requirement in the WS-I Basic
+Profiles 1.2 and 2.0 — 493 rows in all. Each row records the requirement as its source states it,
+whether it applies to this implementation, and which executable cases cover it.
 
 The plan for this phase requires that no assertion be marked not-applicable merely because an older
 test collection says it was not tested, and that every applicable assertion carry a
@@ -62,16 +62,58 @@ The gate was checked against deliberate damage: an invented quote, a mapping to 
 not exist, a mapping to a file that does not exist, a collection-based excuse, an applicable row with
 no mapping, and a deleted row. All six were reported, each with the correct diagnosis.
 
+## The WS-I profiles
+
+The profiles are pinned differently from the W3C documents, for a reason worth recording. They are
+served through a CDN that rewrites contributor email addresses into per-response obfuscation tokens,
+so two downloads of the same document have the same length but different bytes: **a digest of the raw
+HTML is not reproducible and cannot pin the source.** What is reproducible is the requirement text.
+[`wsi_requirements.py`](wsi_requirements.py) extracts each numbered statement, and two independent
+downloads produce byte-identical extracts. The extracts carry the digests
+([`normative/wsi12-requirements.json`](normative/wsi12-requirements.json),
+[`normative/wsi20-requirements.json`](normative/wsi20-requirements.json)) and are what the ledger
+quotes. This also keeps 86 KB of requirement text in the repository instead of 2.7 MB of unstable HTML.
+
+Extracting them surfaced two things:
+
+- `R4005` in BP 1.2 and `R5010` in BP 2.0 carry their anchor on the *preceding rationale paragraph*
+  rather than on the statement. Keying extraction off the `<a name=...>` anchor silently drops them;
+  keying off the statement's own leading identifier finds all 184 and 169.
+- `R9999` in both profiles is the specification's own notational example — "Any WIDGET SHOULD be round
+  in shape" — used to demonstrate how a requirement is written. It is not a requirement, and the
+  ledger says so rather than quietly counting it.
+
+Nothing in the WS-I accounting appeals to WS-I's own `TESTABLE`/`NOT_TESTED` classification. That is
+the profile's statement about its own test suite, not about this implementation; the classification is
+carried on each row as metadata and the verifier rejects any rationale that leans on it.
+
 ## Accounting
 
-| Outcome | Rows |
-| --- | --- |
-| Applicable, covered in this phase | 100 |
-| Not applicable, with a specification-based rationale | 14 |
-| Applicable, routed to P8 | 26 |
-| **Total** | **140** |
+| Outcome | W3C | BP 1.2 | BP 2.0 | Total |
+| --- | --- | --- | --- | --- |
+| Covered by executable cases | 100 | 151 | 137 | 388 |
+| Recorded gap | 0 | 25 | 24 | 49 |
+| Not applicable, with a source-based rationale | 14 | 8 | 8 | 30 |
+| Routed to P8 | 26 | 0 | 0 | 26 |
+| **Total** | **140** | **184** | **169** | **493** |
 
-179 executable mappings, every one verified to exist.
+815 executable mappings, every one verified to exist.
+
+## Gaps are recorded as gaps
+
+49 rows are recorded as gaps, not exclusions. They are the profile requirements that depend on
+WS-Addressing: the `wsa:Action` header block, the `wsam:Addressing` policy assertion and the
+anonymous/non-anonymous response rules. This module implements SOAP 1.1 and 1.2 messaging over WSDL
+1.1 and provides no WS-Addressing support, so those requirements apply to a Basic Profile conformance
+claim and are not met.
+
+Calling them "not applicable" would have been the easy accounting and the wrong answer: it converts a
+conformance shortfall into a clean total. The verifier enforces the distinction — a gap must say what
+is missing, and a row cannot be both applicable and excluded.
+
+The module makes no formal Basic Profile conformance claim; it cites individual requirements (R2745,
+R2933, R2943) as guidance. This ledger does not create such a claim, and with 49 open gaps it could
+not support one.
 
 The 14 not-applicable rows are not a residue of untested requirements. Two are the conformance
 statements of Part 1 section 1.2, which range over the other mandatory requirements rather than
@@ -99,12 +141,33 @@ response information while transmitting could not complete the exchange at all. 
 streaming permission in section 6.2.3 — that a responding node MAY begin transmitting a response
 while the request is still being received — is covered by the same suite.
 
+## A defect this accounting must not hide
+
+`test/wsdl-interop/test_soap_container_whitespace.py` has two methods that still fail:
+`test_header_part_round_trip_requirement_p6` and
+`test_single_rpc_parameter_round_trip_requirement_p6`. They were written at P3 and recorded in
+[union-whitespace-evidence.md](union-whitespace-evidence.md) as binding-selection and
+part-representation requirements that "remain failing tests until P6", reproduced against an
+independent baseline with the previous WSDL and native module. Three defects stand behind them:
+
+- an explicitly selected single body part can serialize a scalar round-trip result without a Body,
+  because the getter expects part-keyed input where deserialization returned an unwrapped scalar;
+- RPC deserialization iterates every message part rather than the selected body parts, so a declared
+  header is demanded again as an RPC body parameter;
+- a single RPC parameter deserializes to an unwrapped scalar while `serializeRpcValue()` requires
+  `reference<hash<auto>>`, producing `RUNTIME-TYPE-ERROR`.
+
+[P6-acceptance.md](audits/../P6-acceptance.md) does not account for them, and they still fail. The
+case this ledger maps from that gate — `test_document_and_rpc_container_boundaries` — passes, so no
+row here rests on a failing test. But the adjacent behavior is broken, so the ledger records the
+defects under `known_defects` rather than letting a clean total imply that selected body-part and RPC
+accessor round trips are wholly correct.
+
 ## Scope
 
-This is the W3C ledger only. The WS-I Basic Profile 1.2 and 2.0 identifiers are not adjudicated here,
-are not pinned in the repository, and no WS-I row is claimed; they remain open work for this phase.
-Recording the W3C accounting does not by itself constitute P7 acceptance, which also requires the
-WS-I accounting and the mandatory behavior for the advertised profiles to pass.
+The accounting is complete for both sources, but it is accounting, not acceptance. P7 acceptance also
+requires the mandatory behavior for the advertised scope to pass, and the defects above are unresolved.
+The 26 W3C rows routed to P8 are not claimed, and the 49 WS-Addressing gaps are open by construction.
 
 ## Reproduction
 

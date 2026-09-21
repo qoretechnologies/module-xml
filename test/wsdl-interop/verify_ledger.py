@@ -11,10 +11,15 @@ and which executable cases cover it. This script is what stops that ledger from 
 - every assertion identifier must appear exactly once, with no extras;
 - every quoted requirement must still appear verbatim in the section it cites, so a quote cannot be
   paraphrased, invented, or left behind when the source changes;
-- every applicable assertion routed to this phase must name at least one executable case, and every
-  named case must actually exist in the suite;
+- every assertion states its coverage explicitly as covered, routed to a later phase, a recorded gap,
+  or not applicable, and each of those carries what it needs: a covered assertion names executable
+  cases that exist, a routed one names a later phase, a gap states the capability that is missing;
 - every assertion excluded from testing must carry a specification-based rationale, and "the test
   collection did not test it" is explicitly not such a rationale.
+
+A recorded gap is the point of the coverage field. Where a profile requires a capability this
+implementation does not provide, the honest entry is a gap, not an exclusion: calling it "not
+applicable" would quietly convert a conformance shortfall into an accounting success.
 """
 import hashlib
 import json
@@ -82,28 +87,54 @@ def main():
     rows = ledger['assertions']
     inventory = build_inventory()
 
-    expected_ids = meta['collection']['assertion_ids']
-    seen = [row['id'] for row in rows]
-    duplicates = sorted({i for i in seen if seen.count(i) > 1})
-    if duplicates:
-        fail(problems, f'duplicate ledger rows: {duplicates}')
-    for missing in sorted(set(expected_ids) - set(seen)):
-        fail(problems, f'{missing}: published assertion is absent from the ledger')
-    for extra in sorted(set(seen) - set(expected_ids)):
-        fail(problems, f'{extra}: ledger row is not a published assertion identifier')
+    profiles = {}
+    for name in ('wsi12', 'wsi20'):
+        pinned = json.loads((NORMATIVE / f'{name}-requirements.json').read_text())
+        profiles[name] = pinned['requirements']
+        if len(profiles[name]) != pinned['requirement_count']:
+            fail(problems, f'{name}: {len(profiles[name])} requirements, pinned as '
+                           f'{pinned["requirement_count"]}')
+
+    expected = {'w3c-soap12': set(meta['collection']['assertion_ids'])}
+    for name in profiles:
+        expected[name] = set(profiles[name])
+    for source, ids in expected.items():
+        seen = [row['id'] for row in rows if row.get('source') == source]
+        duplicates = sorted({i for i in seen if seen.count(i) > 1})
+        if duplicates:
+            fail(problems, f'{source}: duplicate ledger rows: {duplicates}')
+        for missing in sorted(ids - set(seen)):
+            fail(problems, f'{source} {missing}: published requirement is absent from the ledger')
+        for extra in sorted(set(seen) - ids):
+            fail(problems, f'{source} {extra}: ledger row is not a published requirement identifier')
+    for row in rows:
+        if row.get('source') not in expected:
+            fail(problems, f'{row.get("id")}: unknown source {row.get("source")!r}')
 
     for row in rows:
         rid = row['id']
-        part, number = row.get('part'), row.get('section')
-        found = sections.get(f'soap12-{part}', {}).get(number)
-        if found is None:
-            fail(problems, f'{rid}: section {part} {number} has no heading in the pinned document')
-        else:
-            haystack = found['text']
+        source = row.get('source')
+        if source == 'w3c-soap12':
+            part, number = row.get('part'), row.get('section')
+            found = sections.get(f'soap12-{part}', {}).get(number)
+            if found is None:
+                fail(problems, f'{rid}: section {part} {number} has no heading in the pinned document')
+            else:
+                haystack = found['text']
+                for quote in row.get('normative_quotes', []):
+                    if normalize(quote) not in haystack:
+                        fail(problems, f'{rid}: quoted requirement is not present verbatim in '
+                                       f'{part} section {number}: {quote[:70]!r}')
+        elif source in profiles:
+            pinned = profiles[source].get(rid)
+            if pinned is None:
+                continue
             for quote in row.get('normative_quotes', []):
-                if normalize(quote) not in haystack:
-                    fail(problems, f'{rid}: quoted requirement is not present verbatim in '
-                                   f'{part} section {number}: {quote[:70]!r}')
+                if normalize(quote) not in normalize(pinned['statement']):
+                    fail(problems, f'{rid}: quoted requirement is not present verbatim in the pinned '
+                                   f'{source} statement: {quote[:70]!r}')
+            if not row.get('normative_quotes'):
+                fail(problems, f'{rid}: quotes no part of its requirement statement')
         if (not row.get('normative_quotes') and row.get('applicability') == 'applicable'
                 and row.get('phase') == 'P7'):
             # A later phase revalidates its own rows against the current text when it covers them;
@@ -126,6 +157,12 @@ def main():
         if phase not in ('P7', 'P8', 'P9'):
             fail(problems, f'{rid}: phase must be P7, P8 or P9')
 
+        coverage = row.get('coverage')
+        if coverage not in ('covered', 'routed', 'gap', 'not-applicable'):
+            fail(problems, f'{rid}: coverage must be covered, routed, gap or not-applicable')
+        if (coverage == 'not-applicable') != (applicability == 'not-applicable'):
+            fail(problems, f'{rid}: coverage and applicability disagree about whether it applies')
+
         tests = row.get('tests', [])
         for entry in tests:
             path, case = entry.get('file'), entry.get('case')
@@ -133,12 +170,18 @@ def main():
                 fail(problems, f'{rid}: mapped file {path} does not exist')
             elif case not in inventory[path]:
                 fail(problems, f'{rid}: {path} has no case {case!r}')
-        if applicability == 'applicable' and phase == 'P7' and not tests:
-            fail(problems, f'{rid}: applicable P7 assertion has no executable case')
+        if coverage == 'covered' and not tests:
+            fail(problems, f'{rid}: recorded as covered but names no executable case')
+        if coverage == 'routed' and phase == 'P7':
+            fail(problems, f'{rid}: routed to a later phase but still recorded against P7')
+        if coverage == 'gap' and not (row.get('gap') or '').strip():
+            fail(problems, f'{rid}: recorded as a gap without saying what is missing')
+        if coverage != 'gap' and row.get('gap'):
+            fail(problems, f'{rid}: records a gap but is not marked as one')
 
     counts = {}
     for row in rows:
-        key = f'{row.get("phase")}/{row.get("applicability")}'
+        key = row.get('coverage') if row.get('coverage') != 'routed' else f'routed to {row.get("phase")}'
         counts[key] = counts.get(key, 0) + 1
     print(f'ledger rows: {len(rows)}')
     for key in sorted(counts):
