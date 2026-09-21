@@ -10067,3 +10067,37 @@ thread stack, an unguarded connection-manager swap in `close()`, silently droppe
 three Doxygen cross-references that would have required a dependency the module does not have.
 
 See [design](../../design/soap-async-io-client.md) and [audit](audits/soap-client-io.md).
+
+
+## P7 assertion accounting: the W3C ledger
+
+The Qore core defect behind the intermittent SOAP 1.2 GET recovery failure is fixed
+(`b26260494`, "close a failed HTTP connection before waking the caller waiting on it"). The
+fresh-process harness that previously failed 10 of 25 runs now passes 25 of 25 with accepted-
+connection counting attached, so `test_soap_transport.py` is stable again.
+
+`assertion-ledger.json` now accounts for all 140 assertion identifiers published in the W3C SOAP 1.2
+test collection: **100 applicable and covered in this phase, 14 not applicable with a
+specification-based rationale, and 26 routed to P8**, with 179 executable mappings.
+
+The requirements are revalidated against the Second Edition (W3C Recommendation 27 April 2007),
+pinned in the repository with digests, rather than against the 2003 collection. That revalidation
+found stale section numbers, thirty-three rows carrying superseded wording or renumbered tables, and one error in our own earlier
+review: the fault `Role` assumed-role constraint we had recorded as dropped is in fact present in
+section 5.4.4.
+
+`verify_ledger.py` enforces the accounting mechanically: digests, exactly one row per published
+identifier, every quotation still verbatim in the section it cites, every mapped case actually
+present in the suite, and an explicit rejection of any exclusion that appeals to the old collection's
+coverage instead of the specification. It was checked against six deliberate defects and reported all
+six correctly.
+
+`x2-bindformdesc-dlock` and `x2-http-reqsoapnode-dlock`, recorded as blocked on a core defect at
+P7-13, are now covered by the duplex suite; the requirement they carry is the streaming deadlock
+rule of Part 2 section 6.2.3.
+
+The WS-I Basic Profile 1.2 and 2.0 identifiers are not yet adjudicated and remain open for this
+phase, so this is assertion accounting for the W3C collection, not P7 acceptance.
+
+See [evidence](assertion-ledger-evidence.md), [ledger](assertion-ledger.json) and
+[audit](audits/assertion-ledger.md).
