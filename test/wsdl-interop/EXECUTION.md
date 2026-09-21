@@ -10169,9 +10169,9 @@ Those 13 baseline failures were each root-caused:
   declare a bare `soapAction="submit"` on a SOAP 1.2 binding. P7-10 made SOAP 1.2 actions require an
   absolute URI, which SOAP 1.2 Part 2 section 6.5.3 mandates ("MUST be an absolute URI"). The validator
   is right and the fixtures are non-conforming.
-- **1** — `multipart_reader` — was recorded passing at P6-41, P6-42 and P6-44. P7-11 (`2ad12f9`)
-  restricted MIME error responses to SOAP envelopes, so a malformed multipart request on a WSDL HTTP
-  binding route now returns 500 instead of 400.
+- **1** — `multipart_reader` — was recorded passing at P6-41, P6-42 and P6-44. Since P7-11 (`2ad12f9`), a
+  malformed multipart request on a SOAP route gets a plain HTTP 400. The gate still expects the P6-era
+  HTTP 500 SOAP fault.
 - **2** — `ieee_conversion` and `ieee_scalars` — fail on a **Qore core** NaN-boxing defect: every negative
   double with magnitude in [2^1021, 2^1023) is decoded as a short string (exponent 1021) or as nothing
   (exponent 1022). Reproducible with `-pow(2.0, 1022)` and no module loaded. Handed off at
@@ -10205,3 +10205,18 @@ The gate now checks both groups on the generic and policy paths, asserting exact
 decoded identities. It pins the matrix counts: 22 invalid schemas, 1,440 rejected documents, 8 legacy
 projection rejections and 1,288 preserved rows, with 1,288 independently validated outputs. The 24-row findings list is gone. Against the pre-`9b8276d` WSDL the gate fails on
 every notation-alias row, so the assertions are not vacuous. Evidence: `notation-values-evidence.md`.
+
+### Triage: multipart reader rejections follow the P7-11 transport preflight
+
+`test_multipart_reader.test_http_rejections_and_recovery` posts four malformed multipart SOAP requests:
+missing root, duplicate Content-ID, invalid part media type, and an unregistered
+Content-Transfer-Encoding. The gate expected an HTTP 500 SOAP 1.1 fault. P7-11 defined MIME packaging
+failures as transport errors that precede SOAP reception: SoapHandler returns a plain UTF-8 HTTP 400
+before header or body callbacks run. That rule is recorded in `design/soap-envelope-processing.md` and
+`soap-http-binding-evidence.md`, grounded in SOAP 1.2 Part 2 section 7.5.2.1 and WS-I BP R1113. No
+SOAP message exists yet to carry a fault. This gate was outside the P7 sweep, so its expectation was
+never updated. The handler is correct.
+
+The gate now asserts status 400, `text/plain;charset=UTF-8`, and the exact diagnostic body for each
+case. The following valid request must still return the expected payload. All three multipart reader
+tests pass.

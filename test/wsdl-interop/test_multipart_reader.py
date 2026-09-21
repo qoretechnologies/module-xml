@@ -21,6 +21,13 @@ from test_cxf_peer import endpoint
 ROOT = Path(__file__).resolve().parent
 REPO = ROOT.parent.parent
 FIXTURES = ROOT / 'regressions/wsdl-multipart-reader'
+REJECTIONS = {
+    'missing-root': 'SOAP-MESSAGE-ERROR: multipart root part is missing',
+    'duplicate-id': 'SOAP-MESSAGE-ERROR: duplicate MIME Content-ID "root@example.test"',
+    'invalid-media': 'SOAP-MESSAGE-ERROR: invalid MIME part content type "not a type"',
+    'unknown-transfer': 'SOAP-MESSAGE-ERROR: cannot decode MIME part: MIME-TRANSFER-ENCODING-ERROR: '
+                        'Content-Transfer-Encoding: "gzip" is unknown',
+}
 
 
 def cases():
@@ -112,7 +119,7 @@ class MultipartReaderTests(unittest.TestCase):
         self.assertEqual(72, exchanges)
 
     def test_http_rejections_and_recovery(self):
-        names = {'missing-root', 'duplicate-id', 'invalid-media', 'unknown-transfer'}
+        names = set(REJECTIONS)
         rows = cases()
         valid = next(row for row in rows if row['name'] == 'root-at-byte-zero')
         env = os.environ.copy()
@@ -151,8 +158,10 @@ class MultipartReaderTests(unittest.TestCase):
                         self.assertFalse(thread.is_alive())
                         self.assertEqual((0, 'PASS\n', ''),
                                          (result.returncode, result.stdout, result.stderr))
+                    # Malformed MIME packaging is rejected before SOAP reception with a plain HTTP 400
+                    # (design/soap-envelope-processing.md; WS-I BP R1113), not with a SOAP fault.
                     with endpoint([*qore, 'server', saved], env) as (_, port):
-                        for message, status in ((row, 500), (valid, 200)):
+                        for message, status in ((row, 400), (valid, 200)):
                             conn = http.client.HTTPConnection('127.0.0.1', port, timeout=10)
                             try:
                                 conn.request('POST', '/service', base64.b64decode(message['wire']),
@@ -160,11 +169,11 @@ class MultipartReaderTests(unittest.TestCase):
                                 response = conn.getresponse()
                                 result = response.read()
                                 self.assertEqual(status, response.status, result)
-                                tree = ET.fromstring(result)
-                                if status == 500:
-                                    self.assertIn('SOAP-MESSAGE-ERROR', tree.find('.//faultstring').text)
+                                if status == 400:
+                                    self.assertEqual('text/plain;charset=UTF-8', response.getheader('Content-Type'))
+                                    self.assertEqual(REJECTIONS[row['name']].encode(), result)
                                 else:
-                                    self.assertEqual('hello', tree.find('.//payload').text)
+                                    self.assertEqual('hello', ET.fromstring(result).find('.//payload').text)
                             finally:
                                 conn.close()
                     exchanges += 3
