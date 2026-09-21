@@ -141,27 +141,27 @@ response information while transmitting could not complete the exchange at all. 
 streaming permission in section 6.2.3 — that a responding node MAY begin transmitting a response
 while the request is still being received — is covered by the same suite.
 
-## A defect this accounting must not hide
+## A defect this accounting surfaced, now fixed
 
-`test/wsdl-interop/test_soap_container_whitespace.py` has two methods that still fail:
+Running the mapped suites the P7 sweep did not already cover surfaced two long-standing failing
+methods in `test/wsdl-interop/test_soap_container_whitespace.py`:
 `test_header_part_round_trip_requirement_p6` and
-`test_single_rpc_parameter_round_trip_requirement_p6`. They were written at P3 and recorded in
-[union-whitespace-evidence.md](union-whitespace-evidence.md) as binding-selection and
-part-representation requirements that "remain failing tests until P6", reproduced against an
-independent baseline with the previous WSDL and native module. Three defects stand behind them:
+`test_single_rpc_parameter_round_trip_requirement_p6`. They had been recorded at P3 in
+[union-whitespace-evidence.md](union-whitespace-evidence.md) as requirements that "remain failing
+tests until P6", and [P6-acceptance.md](P6-acceptance.md) did not account for them.
 
-- an explicitly selected single body part can serialize a scalar round-trip result without a Body,
-  because the getter expects part-keyed input where deserialization returned an unwrapped scalar;
-- RPC deserialization iterates every message part rather than the selected body parts, so a declared
-  header is demanded again as an RPC body parameter;
-- a single RPC parameter deserializes to an unwrapped scalar while `serializeRpcValue()` requires
-  `reference<hash<auto>>`, producing `RUNTIME-TYPE-ERROR`.
+Both came down to one gap: serialization did not accept the bare value that decoding returns for a
+single selected part. A binding with `parts="body"` over a message that also carries a header-bound
+part decodes the body to a bare scalar, but serialization then counted *message* parts rather than
+*selected* parts and sent the bare value into part matching, which rejected it; the RPC path failed the
+same way with `RUNTIME-TYPE-ERROR`. The fix is on the serialization side and leaves the documented
+decoded shape untouched. All three methods now pass. The design is recorded in
+[wsdl-body-parts.md](../../design/wsdl-body-parts.md).
 
-[P6-acceptance.md](audits/../P6-acceptance.md) does not account for them, and they still fail. The
-case this ledger maps from that gate — `test_document_and_rpc_container_boundaries` — passes, so no
-row here rests on a failing test. But the adjacent behavior is broken, so the ledger records the
-defects under `known_defects` rather than letting a clean total imply that selected body-part and RPC
-accessor round trips are wholly correct.
+A first attempt changed the decoded shape instead, keying it off the binding's declared headers. The
+full suite caught that it broke `soap.qtest`, `wsdl-header-identities.qtest` and
+`wsdl-header-merge.qtest`, which deliberately pin the existing shape; it was withdrawn in favour of
+the serialization-side fix.
 
 ## Scope
 

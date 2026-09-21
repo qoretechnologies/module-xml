@@ -10138,3 +10138,50 @@ part-representation defects are unresolved.
 
 See [evidence](assertion-ledger-evidence.md), [ledger](assertion-ledger.json) and
 [audit](audits/assertion-ledger-wsi.md).
+
+
+## P6 part-representation round trips fixed
+
+The two failing P6 requirement methods in `test_soap_container_whitespace.py`, recorded at P3 as
+"failing tests until P6" and not accounted for in `P6-acceptance.md`, now pass. Both were one gap:
+serialization did not accept the bare value that decoding returns for a single selected part.
+
+A binding that selects `parts="body"` over a message which also carries a header-bound part decodes the
+body to a bare scalar — the documented single-part shape. `serializeDocument()` then counted message
+parts rather than selected parts, so the bare value skipped its legacy single-argument branch and was
+rejected by part matching. `serializeRpc()` failed the same way, surfacing as `RUNTIME-TYPE-ERROR`
+because `serializeRpcValue()` declares `reference<hash<auto>>`. Both now wrap a bare value as the one
+selected part; `serializeRpc()` rejects a bare value when several parts are selected. The decoded shape
+is unchanged.
+
+The first attempt changed the decoded shape instead. The full suite showed that it broke `soap.qtest`,
+`wsdl-header-identities.qtest` and `wsdl-header-merge.qtest`, which deliberately pin the existing
+shape, and it was withdrawn. With the serialization-side fix the full suite runs 449 targets — 3,581
+cases and 172,677 assertions — and the only failures are 13 that fail identically on the unmodified
+baseline.
+
+## Full-suite triage: earlier P7 increments regressed gates outside the P7 sweep
+
+Those 13 baseline failures were each root-caused:
+
+- **7** — `character_whitespace`, `element_defaults`, `numeric_constraints`, `notation_values`,
+  `calendar_constraints`, `ieee_constraints` and `binary_constraints` — share four worker fixtures that
+  declare a bare `soapAction="submit"` on a SOAP 1.2 binding. P7-10 made SOAP 1.2 actions require an
+  absolute URI, which SOAP 1.2 Part 2 section 6.5.3 mandates ("MUST be an absolute URI"). The validator
+  is right and the fixtures are non-conforming.
+- **1** — `multipart_reader` — was recorded passing at P6-41, P6-42 and P6-44. P7-11 (`2ad12f9`)
+  restricted MIME error responses to SOAP envelopes, so a malformed multipart request on a WSDL HTTP
+  binding route now returns 500 instead of 400.
+- **2** — `ieee_conversion` and `ieee_scalars` — fail on a **Qore core** NaN-boxing defect: every negative
+  double with magnitude in [2^1021, 2^1023) is decoded as a short string (exponent 1021) or as nothing
+  (exponent 1022). Reproducible with `-pow(2.0, 1022)` and no module loaded. Handed off at
+  `/tmp/qore-nanbox-negative-double/README.md`; no XML workaround.
+- **2** — `regex_classes` and `ieee_facets` — time out in a shared 90-second worker. Not yet separated
+  into a genuine slowdown versus load; `ieee_facets` is an IEEE gate and may share the core defect.
+- **1** — `particle_corpus` — reads a `/tmp` corpus that no longer exists. Environmental.
+
+The P7 sweep covered the SOAP suites only, so regressions P7-10 and P7-11 introduced elsewhere went
+unseen. Validation for the remainder of the plan runs the full suite.
+
+**P7 acceptance remains open** on the P7-10 fixture and P7-11 status regressions, the two timeouts,
+and the core NaN-boxing defect.

@@ -87,3 +87,19 @@ part map with the separate `soap_header` request option.
 Source and saved services apply the same standard default. WSDLs relying on
 implicit removal of header-bound parts must add explicit body `parts` lists.
 This follows [WSDL 1.1 section 3.5](https://www.w3.org/TR/2001/NOTE-wsdl-20010315#_soap:body).
+
+Serialization accepts, for a single *selected* part, the bare value that decoding
+returns for it. Decoding already returns a single body part's value directly, and
+that documented shape is unchanged; what was missing was the matching acceptance on
+the way back out. The count that matters is the number of selected parts, not the
+number of message parts: a message can carry more parts than its body selects, such
+as a header-bound part, and a binding with `parts="body"` over a two-part message
+previously sent the bare value past the legacy single-argument branch and into part
+matching, which rejected it.
+
+`serializeDocument()` therefore wraps a bare scalar as the one selected part, as it
+already did for a bare retained XML value, and `serializeRpc()` does the same for a
+single RPC parameter instead of failing with `RUNTIME-TYPE-ERROR` inside part
+conversion. `serializeRpc()` rejects a bare value when more than one part is selected,
+since it cannot know which part the value belongs to. Together these make a decoded
+message re-encodable through the operation that produced it.
