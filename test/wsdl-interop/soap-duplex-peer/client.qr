@@ -1,0 +1,111 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../../../qlib"
+%requires ../../../qlib/WSDL.qm
+%requires ../../../qlib/SoapClient.qm
+%try-module json
+%define NoJson
+%endtry
+%ifdef NoJson
+throw "MISSING-MODULE", "SOAP full-duplex integration requires json";
+%else
+# Drives one SoapClient per web-service graph and value mode through an ordered step list against a raw
+# peer that answers before draining the buffered request.  Each step reports its observable outcome; the
+# peer independently records how much of the request it had read when it finished writing the response.
+hash<auto> job = parse_json(stdin.readLine());
+string source = ReadOnlyFile::readTextFile(get_script_dir() + "/../soap-envelope-peer/contract.wsdl");
+string request_value = strmul("x", job.request_size);
+
+# A held peer never drains the request, so the interrupted client must announce its own completion
+# instead of the peer inferring it from transport state.
+code<nothing(string)> release = sub (string step) {
+    Socket control();
+    control.connect("127.0.0.1:" + job.control_port, 10000);
+    control.send(step + "\n");
+    control.close();
+};
+
+list<auto> results();
+foreach string state in (job.states) {
+    WebService ws(source);
+    if (state == "saved") { ws = Serializable::deserialize(ws.serialize()); }
+    if (state == "data") { ws = Serializable::deserialize(ws.serializeToData()); }
+    foreach bool retained in (job.modes) {
+        SoapClient client({"wsdl": ws, "port": "Port" + job.version, "url": job.url, "timeout": job.timeout});
+        foreach string step in (job.steps) {
+            hash<auto> info;
+            hash<auto> row = {"name": step, "state": state, "retained": retained};
+            code<nothing()> invoke = sub () {
+                try {
+                    auto result = client.callOperation("echo", {"body": request_value},
+                        {"xml_values": retained}, \info);
+                    row.value_size = (retained ? result.body.body.getElementData()."^value^" : result).size();
+                    row.error = "OK";
+                } catch (hash<ExceptionInfo> ex) {
+                    # A cancelled worker must clear its sticky flag before reporting to the main thread.
+                    bool cancelled = thread_cancelled();
+                    clear_thread_cancel();
+                    row.error = ex.err;
+                    if (ex.err == "SOAP-SERVER-FAULT-RESPONSE") {
+                        # An early fault must arrive with its code, reason, detail content and the
+                        # in-scope namespace binding of the detail element intact.
+                        hash<auto> detail = job.version == "11" ? ex.arg.detail : ex.arg.Detail;
+                        row.fault_code = job.version == "11" ? ex.arg.faultcode : ex.arg.Code.Value;
+                        row.fault_text = job.version == "11"
+                            ? ex.arg.faultstring
+                            : ex.arg.Reason.Text."^value^";
+                        row.fault_detail_size = detail."d:info"."^value^".size();
+                        row.fault_detail_ns = detail."d:info"."^attributes^"."xmlns:d";
+                    }
+                    if (step == "cancel") {
+                        row.cancelled = cancelled;
+                        row.reason_preserved = ex.desc.endsWith(": SOAP duplex test cancellation");
+                    }
+                }
+            };
+            if (step == "cancel") {
+                Queue events(); Counter done(1);
+                client.setEventQueue(events);
+                int tid = background sub () {
+                    on_exit done.dec();
+                    invoke();
+                }();
+                try {
+                    # The peer withholds both the response body and the request drain.  This native event
+                    # is emitted after the response headers are parsed, which can only happen while the
+                    # buffered request is still sending; cancellation therefore interrupts an active
+                    # full-duplex exchange rather than a quiescent receive.
+                    while (True) {
+                        hash<auto> event = events.get(job.timeout);
+                        if (event.event == EVENT_HTTP_MESSAGE_RECEIVED) {
+                            @assert(event.headers.status_code == 200);
+                            break;
+                        }
+                    }
+                    @assert(cancel_thread(tid, "SOAP duplex test cancellation"));
+                } catch (hash<ExceptionInfo> ex) {
+                    cancel_thread(tid, "SOAP duplex test cleanup");
+                    @assert(done.waitForZero(job.timeout) == 0);
+                    client.setEventQueue();
+                    release(step);
+                    rethrow;
+                }
+                @assert(done.waitForZero(job.timeout) == 0);
+                client.setEventQueue();
+                release(step);
+            } else if (step == "timeout") {
+                client.setTimeout(job.short_timeout);
+                on_exit client.setTimeout(job.timeout);
+                invoke();
+                release(step);
+            } else {
+                invoke();
+            }
+            row.status = info."response-headers".status_code;
+            results += row;
+        }
+    }
+}
+printf("%s\n", make_json(results));
+%endif

@@ -1,0 +1,425 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires ../qlib/WSDL.qm
+%requires ../qlib/SoapClient.qm
+%exec-class SoapDuplexTest
+
+#! A raw HTTP peer that writes its whole response before reading any of the request body.
+/** Qore's %Socket class exposes no receive-buffer control, so the exchange is sized well beyond any
+    plausible kernel socket buffer instead.  The peer reads the request header, writes the complete
+    response and only then reads the request body, so the write can only complete while the client is
+    still sending: a client that finished sending before reading would leave both ends blocked and the
+    bounded test deadline would expire.  The recorded @ref drained_before_response is therefore zero
+    for every exchange, and the request is larger than anything the transport can buffer unread.
+*/
+class DuplexPeer {
+    public {
+        #! request body bytes the peer had read when its response was completely written
+        int drained_before_response = -1;
+        #! declared length of the request body
+        int request_length = -1;
+        #! request body bytes read after the response was written
+        int drained_after_response = -1;
+        #! the complete request body, retained only when the peer is asked to capture it
+        *binary request_body;
+    }
+    private {
+        Socket listener();
+        Counter running(1);
+        Counter held(1);
+        Mutex lock();
+        bool released = False;
+        binary reply;
+        string behavior;
+        bool capture;
+        int deadline;
+        *hash<ExceptionInfo> failure;
+    }
+
+    constructor(binary reply, string behavior, bool capture = False, int deadline = 120000) {
+        self.reply = reply;
+        self.behavior = behavior;
+        self.capture = capture;
+        self.deadline = deadline;
+        listener.bindINET("127.0.0.1", 0, True);
+        listener.listen();
+        background serve();
+    }
+
+    int port() { return listener.getSocketInfo().port; }
+
+    string url() { return sprintf("http://127.0.0.1:%d/service", port()); }
+
+    #! lets a held connection close; the peer holds it open until the client has given up
+    release() {
+        AutoLock al(lock);
+        if (!released) {
+            released = True;
+            held.dec();
+        }
+    }
+
+    #! releases and joins the peer while another exception is propagating
+    /** The caller is already reporting a primary failure, so a secondary peer-side failure is
+        recorded in the peer and discarded here instead of replacing it during unwinding.
+    */
+    stop() {
+        release();
+        try {
+            join();
+        } catch (hash<ExceptionInfo> ex) {
+        }
+    }
+
+    #! joins the peer thread and rethrows any peer-side failure in the caller's thread
+    join() {
+        @assert(running.waitForZero(deadline) == 0);
+        listener.close();
+        if (failure) { throw failure.err, failure.desc, failure.arg; }
+    }
+
+    private serve() {
+        on_exit running.dec();
+        try {
+            *Socket connection = listener.accept(deadline);
+            @assert(connection);
+            on_exit connection.close();
+            hash<auto> header = connection.readHTTPHeader(deadline);
+            @assert(header.method == "POST");
+            request_length = header."content-length".toInt();
+            # Nothing of the request body has been read at this point; the whole response is written
+            # first, which requires the client to be reading while it is still sending.
+            connection.send(reply, deadline);
+            drained_before_response = 0;
+            if (behavior == "close") {
+                # The peer disappears while the client is still sending.
+                return;
+            }
+            if (behavior == "hold") {
+                # A held exchange is never drained and the connection stays open, so the client's own
+                # deadline is the only thing that can end it.
+                @assert(held.waitForZero(deadline) == 0);
+                return;
+            }
+            binary body = connection.recvBinary(request_length, deadline);
+            drained_after_response = body.size();
+            if (capture) { request_body = body; }
+        } catch (hash<ExceptionInfo> ex) {
+            failure = ex;
+        }
+    }
+}
+
+class SoapDuplexTest inherits QUnit::Test {
+    public {
+        #! larger than any plausible kernel socket buffer for an unread loopback transport
+        const Request = 8 * 1024 * 1024;
+        #! larger than any plausible kernel socket buffer for an unread loopback transport
+        const Response = 4 * 1024 * 1024;
+        const Uri = {
+            "11": "http://schemas.xmlsoap.org/soap/envelope/",
+            "12": "http://www.w3.org/2003/05/soap-envelope",
+        };
+        const Media = {"11": "text/xml", "12": "application/soap+xml"};
+        const Versions = ("11", "12");
+        const States = ("source", "saved", "data");
+        const FaultReason = "duplex fault";
+        const FaultCode = {"11": "Server", "12": "Receiver"};
+    }
+
+    constructor() : Test("SOAP full-duplex buffered requests", "1.0") {
+        addTestCase("Buffered requests complete against early responses in every graph and value mode",
+            \earlyResponses());
+        addTestCase("Early responses honor length and chunked framing", \framing());
+        addTestCase("Early faults preserve their code, reason, detail and namespace bindings", \faults());
+        addTestCase("Interrupted duplex exchanges clean up and the same client recovers", \interruption());
+        addTestCase("Cancelling an active duplex exchange preserves its reason and recovers", \cancellation());
+        set_return_value(main());
+    }
+
+    private static string source() {
+        return ReadOnlyFile::readTextFile(get_script_dir() + "/wsdl-interop/soap-envelope-peer/contract.wsdl");
+    }
+
+    private static WebService graph(string text, string state) {
+        WebService ws(text);
+        if (state == "saved") { return Serializable::deserialize(ws.serialize()); }
+        if (state == "data") { return Serializable::deserialize(ws.serializeToData()); }
+        return ws;
+    }
+
+    private static string responseEnvelope(string version, int size) {
+        return sprintf('<s:Envelope xmlns:s="%s"><s:Body><t:value xmlns:t="urn:soap-envelope-test">%s'
+            '</t:value></s:Body></s:Envelope>', Uri{version}, strmul("y", size));
+    }
+
+    private static string faultEnvelope(string version, int size) {
+        string detail = sprintf('<d:info xmlns:d="urn:soap-envelope-test">%s</d:info>', strmul("z", size));
+        string body = version == "11"
+            ? sprintf('<s:Fault><faultcode>s:%s</faultcode><faultstring>%s</faultstring>'
+                '<detail>%s</detail></s:Fault>', FaultCode{version}, FaultReason, detail)
+            : sprintf('<s:Fault><s:Code><s:Value>s:%s</s:Value></s:Code><s:Reason>'
+                '<s:Text xml:lang="en">%s</s:Text></s:Reason><s:Detail>%s</s:Detail></s:Fault>',
+                FaultCode{version}, FaultReason, detail);
+        return sprintf('<s:Envelope xmlns:s="%s"><s:Body>%s</s:Body></s:Envelope>', Uri{version}, body);
+    }
+
+    private static binary reply(string version, string payload, string framing, string status = "200 OK",
+            bool keep = False) {
+        string head = sprintf("HTTP/1.1 %s\r\nConnection: %s\r\nContent-Type: %s\r\n%s\r\n\r\n",
+            status, keep ? "keep-alive" : "close", Media{version}, framing);
+        return binary(head + payload);
+    }
+
+    private static binary lengthReply(string version, string payload, string status = "200 OK",
+            bool keep = False) {
+        return reply(version, payload, sprintf("Content-Length: %d", payload.size()), status, keep);
+    }
+
+    #! response headers announcing a body that a held exchange never delivers
+    private static binary holdReply(string version, int size) {
+        return reply(version, "", sprintf("Content-Length: %d", size), "200 OK", True);
+    }
+
+    private static binary chunkedReply(string version, string payload) {
+        return reply(version, sprintf("%x\r\n%s\r\n0\r\n\r\n", payload.size(), payload),
+            "Transfer-Encoding: chunked");
+    }
+
+    #! runs one duplex exchange and returns the client outcome together with the peer's observations
+    private hash<auto> exchange(string version, string state, bool retained, binary reply,
+            string behavior = "respond", bool capture = False, *int timeout) {
+        DuplexPeer peer(reply, behavior, capture);
+        on_error peer.stop();
+        hash<auto> row();
+        {
+            SoapClient client({"wsdl": graph(source(), state), "port": "Port" + version,
+                "url": peer.url(), "timeout": timeout ?? 60000});
+            hash<auto> info;
+            try {
+                auto result = client.callOperation("echo", {"body": strmul("x", Request)},
+                    {"xml_values": retained}, \info);
+                row += {
+                    "error": "OK",
+                    "value_size": (retained ? result.body.body.getElementData()."^value^" : result).size(),
+                    "status": info."response-headers".status_code,
+                };
+            } catch (hash<ExceptionInfo> ex) {
+                row += {"error": ex.err, "status": info."response-headers".status_code};
+                if (ex.err == "SOAP-SERVER-FAULT-RESPONSE") {
+                    hash<auto> detail = version == "11" ? ex.arg.detail : ex.arg.Detail;
+                    row += {
+                        "fault_code": version == "11" ? ex.arg.faultcode : ex.arg.Code.Value,
+                        "fault_text": version == "11" ? ex.arg.faultstring : ex.arg.Reason.Text."^value^",
+                        "fault_detail_size": detail."d:info"."^value^".size(),
+                        "fault_detail_ns": detail."d:info"."^attributes^"."xmlns:d",
+                    };
+                }
+            }
+            # A recovered client must complete an ordinary duplex exchange on a new connection.
+            if (row.error != "OK") {
+                DuplexPeer recovery(lengthReply(version, responseEnvelope(version, Response)), "respond");
+                on_error recovery.stop();
+                client.setURL(recovery.url());
+                client.setTimeout(60000);
+                row.recovered = client.callOperation("echo", {"body": strmul("x", Request)}).size();
+                recovery.join();
+                row.recovered_drained = recovery.drained_after_response;
+            }
+        }
+        peer.release();
+        peer.join();
+        return row + {
+            "peer_before": peer.drained_before_response,
+            "peer_after": peer.drained_after_response,
+            "peer_length": peer.request_length,
+            "peer_body": peer.request_body,
+        };
+    }
+
+    #! asserts the peer proved the exchange was full duplex
+    private checkDuplex(hash<auto> row, string label) {
+        assertEq(0, row.peer_before, label + " request bytes read when the response completed");
+        assertGt(Request, row.peer_length, label + " declared request length");
+    }
+
+    private earlyResponses() {
+        # The scripted sizes must exceed what an unread loopback transport can buffer, or the peer
+        # could write its whole response without the client reading concurrently.
+        assertGt(4 * 1024 * 1024 - 1, Response, "response size precondition");
+        assertGt(Response, Request, "request size precondition");
+        int count = 0;
+        foreach string version in (Versions) {
+            binary reply = lengthReply(version, responseEnvelope(version, Response));
+            foreach string state in (States) {
+                foreach bool retained in ((False, True)) {
+                    string label = sprintf("%s/%s/%s", version, state, retained ? "retained" : "native");
+                    hash<auto> row = exchange(version, state, retained, reply);
+                    assertEq("OK", row.error, label + " outcome");
+                    assertEq(200, row.status, label + " status");
+                    assertEq(Response, row.value_size, label + " response value");
+                    assertEq(row.peer_length, row.peer_after, label + " drained request");
+                    checkDuplex(row, label);
+                    ++count;
+                }
+            }
+        }
+        assertEq(12, count, "early response matrix cells");
+    }
+
+    private framing() {
+        foreach string version in (Versions) {
+            string payload = responseEnvelope(version, Response);
+            hash<auto> length = exchange(version, "source", False, lengthReply(version, payload),
+                "respond", True);
+            assertEq("OK", length.error, version + " length framing outcome");
+            assertEq(Response, length.value_size, version + " length framing value");
+            checkDuplex(length, version + " length framing");
+            # The request the peer finally drained is the complete, well-formed envelope the client
+            # was still sending when the response arrived.
+            assertEq(length.peer_length, length.peer_body.size(), version + " captured request size");
+            string text = length.peer_body.toString("UTF-8");
+            hash<auto> request = parse_xml(text);
+            assertEq(1, request.size(), version + " captured request root count");
+            assertTrue(((keys request)[0]).endsWith("Envelope"), version + " captured request root");
+            assertTrue(text.find(strmul("x", Request)) > -1, version + " captured request value");
+            hash<auto> chunks = exchange(version, "source", True, chunkedReply(version, payload));
+            assertEq("OK", chunks.error, version + " chunked framing outcome");
+            assertEq(Response, chunks.value_size, version + " chunked framing value");
+            checkDuplex(chunks, version + " chunked framing");
+        }
+    }
+
+    private faults() {
+        foreach string version in (Versions) {
+            binary reply = lengthReply(version, faultEnvelope(version, Response), "500 Internal Server Error");
+            foreach bool retained in ((False, True)) {
+                string label = sprintf("%s/%s fault", version, retained ? "retained" : "native");
+                hash<auto> row = exchange(version, "source", retained, reply);
+                assertEq("SOAP-SERVER-FAULT-RESPONSE", row.error, label + " outcome");
+                assertEq(500, row.status, label + " status");
+                assertEq("s:" + FaultCode{version}, row.fault_code, label + " code");
+                assertEq(FaultReason, row.fault_text, label + " reason");
+                assertEq(Response, row.fault_detail_size, label + " detail");
+                assertEq("urn:soap-envelope-test", row.fault_detail_ns, label + " detail namespace");
+                assertEq(row.peer_length, row.peer_after, label + " drained request");
+                checkDuplex(row, label);
+                assertEq(Response, row.recovered, label + " recovery value");
+                assertEq(row.peer_length, row.recovered_drained, label + " recovery drained request");
+            }
+        }
+    }
+
+    private interruption() {
+        foreach string version in (Versions) {
+            # An early response whose body is truncated is detected on the receive side once the
+            # request has been delivered in full.
+            string payload = responseEnvelope(version, Response);
+            binary truncated = binary(sprintf("HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Type: %s\r\n"
+                "Content-Length: %d\r\n\r\n%s", Media{version}, payload.size(), payload.substr(0, 64)));
+            hash<auto> short_body = exchange(version, "source", False, truncated);
+            assertEq("SOCKET-CLOSED", short_body.error, version + " truncated response outcome");
+            assertNothing(short_body.status, version + " truncated response status");
+            assertEq(short_body.peer_length, short_body.peer_after, version + " truncated response drain");
+            checkDuplex(short_body, version + " truncated response");
+            assertEq(Response, short_body.recovered, version + " truncated response recovery");
+            assertEq(short_body.peer_length, short_body.recovered_drained,
+                version + " truncated response recovery drain");
+
+            # A peer that disappears while the client is still sending must surface a send failure and
+            # leave the client able to complete an ordinary exchange on a new connection.
+            hash<auto> vanished = exchange(version, "source", False, truncated, "close");
+            # Both directions are active, so either side may observe the closure first depending on how
+            # much of the request the transport had buffered; both are correct and both are terminal.
+            assertTrue(vanished.error == "SOCKET-SEND-ERROR" || vanished.error == "SOCKET-CLOSED",
+                version + " peer close outcome");
+            assertNothing(vanished.status, version + " peer close status");
+            assertEq(0, vanished.peer_before, version + " peer close request bytes read");
+            assertEq(-1, vanished.peer_after, version + " peer close request never drained");
+            assertEq(Response, vanished.recovered, version + " peer close recovery");
+            assertEq(vanished.peer_length, vanished.recovered_drained, version + " peer close recovery drain");
+
+            # A held exchange withholds both the response body and the request drain, so the client's
+            # own deadline is the only thing that can end it.
+            hash<auto> held = exchange(version, "source", True,
+                holdReply(version, payload.size()), "hold", False, 3000);
+            assertEq("SOCKET-TIMEOUT", held.error, version + " held outcome");
+            assertNothing(held.status, version + " held status");
+            assertEq(0, held.peer_before, version + " held request bytes read");
+            assertEq(-1, held.peer_after, version + " held request never drained");
+            assertEq(Response, held.recovered, version + " held recovery");
+            assertEq(held.peer_length, held.recovered_drained, version + " held recovery drain");
+        }
+    }
+
+    private cancellation() {
+        foreach string version in (Versions) {
+            string payload = responseEnvelope(version, Response);
+            # The peer answers with headers only and never drains, so the exchange is still sending in
+            # one direction and receiving in the other when the worker is cancelled.
+            DuplexPeer peer(holdReply(version, payload.size()), "hold");
+            on_error peer.stop();
+            SoapClient client({"wsdl": graph(source(), "source"), "port": "Port" + version,
+                "url": peer.url(), "timeout": 60000});
+            Queue events();
+            Counter done(1);
+            hash<auto> row();
+            client.setEventQueue(events);
+            int tid = background sub () {
+                on_exit done.dec();
+                try {
+                    client.callOperation("echo", {"body": strmul("x", Request)});
+                    row.error = "OK";
+                } catch (hash<ExceptionInfo> ex) {
+                    # A cancelled worker must clear its sticky flag before reporting to the test thread.
+                    bool cancelled = thread_cancelled();
+                    clear_thread_cancel();
+                    row += {
+                        "error": ex.err,
+                        "cancelled": cancelled,
+                        "reason_preserved": ex.desc.endsWith(": SOAP duplex test cancellation"),
+                    };
+                }
+            }();
+            try {
+                # This native event is emitted once the response headers are parsed, which can only
+                # happen while the buffered request is still being sent.
+                while (True) {
+                    hash<auto> event = events.get(60000);
+                    if (event.event == EVENT_HTTP_MESSAGE_RECEIVED) {
+                        assertEq(200, event.headers.status_code, version + " cancelled response status");
+                        break;
+                    }
+                }
+                assertTrue(cancel_thread(tid, "SOAP duplex test cancellation"), version + " cancellation");
+            } catch (hash<ExceptionInfo> ex) {
+                cancel_thread(tid, "SOAP duplex test cleanup");
+                done.waitForZero(60000);
+                rethrow;
+            }
+            assertEq(0, done.waitForZero(60000), version + " cancelled worker exit");
+            client.setEventQueue();
+            peer.release();
+            peer.join();
+            assertEq("THREAD-CANCELLED", row.error, version + " cancelled outcome");
+            assertTrue(row.cancelled, version + " cancellation flag");
+            assertTrue(row.reason_preserved, version + " cancellation reason");
+            assertEq(0, peer.drained_before_response, version + " cancelled request bytes read");
+            assertEq(-1, peer.drained_after_response, version + " cancelled request never drained");
+            assertGt(Request, peer.request_length, version + " cancelled declared request length");
+
+            # The same client must complete an ordinary duplex exchange after the cancellation.
+            DuplexPeer recovery(lengthReply(version, payload), "respond");
+            on_error recovery.stop();
+            client.setURL(recovery.url());
+            assertEq(Response, client.callOperation("echo", {"body": strmul("x", Request)}).size(),
+                version + " cancellation recovery");
+            recovery.join();
+            assertEq(recovery.request_length, recovery.drained_after_response,
+                version + " cancellation recovery drain");
+        }
+    }
+}

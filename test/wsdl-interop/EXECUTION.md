@@ -9989,3 +9989,52 @@ positive raw-socket control and source-level root cause are handed off at
 whole request before starting response reads; the existing full-duplex branch is
 limited to chunked streaming sends. This remains an open P7 dependency, not an
 accepted result or an XML workaround.
+
+
+## P7-14: SOAP full-duplex buffered requests and early responses
+
+The P7-13 buffered-upload dependency is resolved. Qore fixed the core HTTP/1.1 defect in
+`fix: read the HTTP/1.1 response while a buffered request body is still sending`
+(on `develop` as `8a1c3e5f3`); the installed runtime is now `a6744554`. The core-only
+reproducer, the raw-socket reference control and the SOAP reproducer all succeed,
+uploading 8 MiB while receiving a 4 MiB response.
+
+This increment adds no XML production code. It states the SOAP-level contract that
+depends on the core progression and supplies executable evidence for it, so the behavior
+is protected by CI rather than resting on the core fix alone. Both gates prove full
+duplex rather than assuming it: the peer records how much of the request it had read when
+its whole response had been written, and the payload sizes were measured against a
+serialized reference client that deadlocks at 512 KiB/256 KiB with bounded socket buffers
+and at 8 MiB/4 MiB with default buffers.
+
+`test/soap-duplex.qtest` passes **5 cases / 203 assertions** over 40 exchanges of 8 MiB
+each, covering early responses across SOAP 1.1/1.2, source/saved-object/saved-data graphs
+and native/retained values, length and chunked framing, early faults with their code,
+reason, detail and detail namespace binding, truncated responses, a peer that disappears
+mid-upload, a withheld response ended only by the client's deadline, cancellation while
+both directions are active, and same-client recovery after every failure. The new
+`test_soap_duplex.py` gate adds **146 independent HTTP exchanges**, including a
+144-exchange twelve-step matrix on one client per graph and value mode and two
+schema-validated duplex requests; interrupted steps answer on keep-alive connections and
+their recovery steps are scripted as new connections, so a client reusing a connection
+with an incomplete upload would never be served.
+
+All 41 affected Qore suites pass: **473 cases / 27,857 assertions**. All 17 independent
+Python gates and 16 corpus commands meet their expected outcomes; the six semantic reports
+are unchanged from P7-13 apart from the Qore runtime identifier. The compiled matrix
+passes **11 gates / 44 cases / 849 assertions** against freshly built WSDL, SoapClient and
+SoapHandler qmods. Documentation and AST checks pass without warnings or errors.
+Audit: **16 Pass / 46 N/A / zero Fail**, after fixing a peer-thread leak on a throwing
+recovery exchange and replacing two constant assertions with a single sizing precondition.
+
+One open item is recorded rather than explained away:
+`test_soap_transport.py::test_get_response_interruption_and_recovery` intermittently
+reports `SOCKET-CLOSED` for a GET recovery step the peer answered normally. It predates
+this increment. A stale-connection-reuse hypothesis was disproved by counting accepted
+connections (72 for 72 client calls) and by a core-only reproducer in which `HTTPClient`
+reconnects correctly, so it is not yet root-caused.
+
+See [evidence](soap-duplex-evidence.md), [validation](P7-14-validation.json),
+[audit](audits/P7-14-soap-duplex.md) and
+[implemented design](../../design/soap-envelope-processing.md). P7 assertion accounting
+remains open, followed by P8–P9. No push or CI trigger.

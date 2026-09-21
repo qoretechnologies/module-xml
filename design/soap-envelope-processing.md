@@ -385,3 +385,26 @@ callback. Allow discovery includes GET and ordinary SOAP/HTTP methods. Registry 
 and removal use the existing write lock; providers execute outside the read lock and
 may remove their own service. A missing route is checked as a missing object before
 comparing path strings, including the empty string used for a registered root path.
+
+SOAP requests are ordinary buffered HTTP bodies, so a peer is free to write a complete
+response before it has drained the request. Qore's HTTP/1.1 client reads response data
+while the remaining buffered body is still being sent, and SOAP processing depends on
+that progression: neither SoapClient nor SoapHandler serializes the two directions and
+neither substitutes a streaming send to avoid the interleaving. A response that cannot
+fit in the transport's unread buffers is therefore delivered while the request is still
+in flight, for SOAP 1.1 and SOAP 1.2, for Content-Length and chunked response framing,
+for native and retained values, and for source, saved-object and saved-data graphs.
+
+An early fault is a response like any other: its version-specific code, reason, detail
+content and the in-scope namespace bindings of the detail element survive delivery
+before the request completes. An early response whose body is truncated fails on the
+receive side once the request has been delivered; a peer that disappears while the
+request is still being sent fails terminally on whichever side first observes the
+closure, which depends on how much the transport had buffered. A peer that withholds
+both the response body and the request drain leaves the client's own timeout as the
+only terminating condition, and thread cancellation during an exchange that is sending
+and receiving at once reports `THREAD-CANCELLED` with its cancellation reason intact.
+Every interrupted exchange closes its transport, and the same client completes ordinary
+exchanges afterwards; a connection carrying an incomplete upload is never reused, so a
+recovered request is served on a new connection even when the interrupted response
+offered keep-alive.
