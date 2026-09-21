@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""NOTATION binding coverage, typed identities and explicit outstanding P5 findings.
+"""NOTATION binding coverage, typed identities and legacy identity projection.
 
 Copyright (C) 2026 Qore Technologies, s.r.o.
-This test verifies the coverage report as well as implemented conversions. The
-report's open findings remain failed compatibility rows, not passing verdicts.
+This test verifies the coverage report as well as implemented conversions. Legacy
+identity projections are rejected as test/wsdl-interop/legacy-identity-projection.md
+requires; they are counted separately and never as lossless round trips.
 """
 import collections
 import json
@@ -17,6 +18,9 @@ from lxml import etree
 from independent import SchemaJob, run
 
 ROOT = Path(__file__).parent
+DUPLICATE_KEY = 'identity constraint "{urn:notation}key" has duplicate field values'
+LEGACY_QNAME_IDENTITY = {'item': [{'primitive': 'NOTATION', 'uri': 'urn:notation', 'local': 'item'},
+                                  {'primitive': 'QName', 'uri': 'urn:notation', 'local': 'item'}]}
 
 
 def models():
@@ -27,7 +31,7 @@ def models():
 
 
 class WsdlNotationValuesTest(unittest.TestCase):
-    def test_bindings_and_reported_identity_gaps(self):
+    def test_bindings_identities_and_legacy_projection(self):
         fixtures = models()
         self.assertEqual(66, len(fixtures))
         with tempfile.TemporaryDirectory(prefix='wsdl-notation-values-') as directory:
@@ -43,7 +47,6 @@ class WsdlNotationValuesTest(unittest.TestCase):
         jobs = []
         output_expected = {}
         oracle_disagreements = []
-        findings = []
         counts = collections.Counter()
         for index, (model, row) in enumerate(zip(fixtures, rows)):
             with self.subTest(schema=model['name']):
@@ -64,34 +67,28 @@ class WsdlNotationValuesTest(unittest.TestCase):
             for ordinal, result in enumerate(row['documents']):
                 document = documents[result['name']]
                 label = {key: result[key] for key in ['name', 'version', 'saved', 'response', 'preserve']}
-                failures = []
                 with self.subTest(**label):
-                    # These diagnoses are retained in the report as failures. All
-                    # additional verdict or typed-value differences fail this gate.
-                    duplicate = result['name'] == 'primitive-identity/notation-alias'
-                    legacy_loss = result['name'] == 'primitive-identity/qname-same-name' and not result['preserve']
-                    self.assertEqual(document['expected'] or duplicate, result['decoded'], result)
+                    self.assertEqual(document['expected'], result['decoded'], result)
                     if not result['decoded']:
                         self.assertEqual('SOAP-DESERIALIZATION-ERROR', result['error'], result)
+                        if result['name'] == 'primitive-identity/notation-alias':
+                            self.assertEqual(DUPLICATE_KEY, result['description'], result)
                         counts['invalid_document_rejected'] += 1
                         continue
+                    if result['name'] == 'primitive-identity/qname-same-name' and not result['preserve']:
+                        # Approved legacy projection policy: decoding keeps both primitive
+                        # identities, but legacy output omits the xsi:type that keeps them
+                        # distinct, so serialization rejects the projected duplicate.
+                        self.assertEqual(LEGACY_QNAME_IDENTITY, result['identity'], result)
+                        self.assertEqual('RUNTIME-TYPE-ERROR', result['error'], result)
+                        self.assertEqual('WSDL message part "body": ' + DUPLICATE_KEY, result['description'], result)
+                        self.assertNotIn('xml', result)
+                        counts['legacy_projection_rejected'] += 1
+                        continue
                     self.assertNotIn('error', result)
-                    if duplicate:
-                        failures.append('invalid_input_accepted')
-                    self.assertEqual(not (duplicate or legacy_loss), result['output_valid'], result)
-                    if not result['output_valid']:
-                        self.assertEqual('XSD-ERROR', result['output_error'])
-                        failures.append('invalid_output')
-                    same = result['identity'] == result['output_identity']
-                    self.assertEqual(not legacy_loss, same, result)
-                    if not same:
-                        failures.append('primitive_identity_changed')
-                    if failures:
-                        findings.append(dict(label, status='failed', failures=failures,
-                                             owner='P5 identity constraints and typed accounting'))
-                        counts['failed_compatibility_rows'] += 1
-                    else:
-                        counts['valid_document_preserved'] += 1
+                    self.assertTrue(result['output_valid'], result)
+                    self.assertEqual(result['identity'], result['output_identity'], result)
+                    counts['valid_document_preserved'] += 1
                     envelope = etree.fromstring(result['xml'].encode())
                     namespace = 'http://schemas.xmlsoap.org/soap/envelope/' if result['version'] == '11' else 'http://www.w3.org/2003/05/soap-envelope'
                     self.assertEqual('{' + namespace + '}Envelope', envelope.tag)
@@ -103,7 +100,7 @@ class WsdlNotationValuesTest(unittest.TestCase):
                     disagreement = result['preserve'] and result['name'] in {
                         'default/empty', 'fixed/empty', 'constraint-default/empty', 'constraint-fixed/empty',
                         'notation/default/empty', 'notation/fixed/empty'}
-                    output_expected[key] = result['output_valid'] and not disagreement
+                    output_expected[key] = not disagreement
                     if disagreement:
                         oracle_disagreements.append(dict(label, native=True, xerces=False,
                             reason='Xerces resolves the schema default in the instance namespace context'))
@@ -120,10 +117,12 @@ class WsdlNotationValuesTest(unittest.TestCase):
         for name, row in oracle['documents'].items():
             self.assertEqual(output_expected[name], row['ok'], (name, row))
             self.assertEqual([], row['warnings'])
-        self.assertEqual(24, len(findings))
         self.assertEqual(48, len(oracle_disagreements))
+        self.assertEqual({'invalid_schema_rejected': 22, 'invalid_document_rejected': 1440,
+                          'legacy_projection_rejected': 8, 'valid_document_preserved': 1288}, dict(counts))
+        self.assertEqual(1288, len(output_expected))
         report = {'schema_count': len(fixtures), 'binding_rows': sum(len(r['documents']) for r in rows),
-                  'counts': dict(counts), 'open_findings': findings, 'oracle_disagreements': oracle_disagreements,
+                  'counts': dict(counts), 'oracle_disagreements': oracle_disagreements,
                   'independently_validated_outputs': len(output_expected)}
         if target := os.environ.get('QORE_NOTATION_REPORT'):
             Path(target).write_text(json.dumps(report, indent=2) + '\n')

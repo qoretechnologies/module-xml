@@ -44,6 +44,7 @@ string example that is outside the declared value space.
   changes producing invalid uniqueness results. Key/unique/keyref and complete
   typed accounting remain the next P5 implementation work. These are not passing
   compatibility results or a reduction in supported scope.
+  **Resolved by P5-20j** (`9b8276d`, see the resolution section below).
 - **48 pinned-Xerces disagreements** concern empty default namespace context.
   A separate four-schema/12-document QName/NOTATION reduction records the actual
   native and Xerces verdicts with unchanged original fixtures and derivative
@@ -66,3 +67,25 @@ matrix remain P9 work; this local acceptance does not claim CI or full SOAP comp
 
 Remaining P5 work includes general annotation/document-ID grammar, identity
 constraints and complete typed-preservation accounting. P6–P9 remain required.
+
+## Resolution of the 24 compatibility rows
+
+Scoped identity tuple validation (P5-20j, `9b8276d`) resolved both groups. The gate
+was updated during P7 triage, when the SOAP 1.2 fixture actions became absolute and the
+matrix ran again:
+
+- The 16 duplicate-NOTATION rows (`primitive-identity/notation-alias`) now reject at
+  decoding with `SOAP-DESERIALIZATION-ERROR`, as the oracle expects. The gate asserts
+  the exact duplicate-key diagnostic.
+- The eight legacy-mode `primitive-identity/qname-same-name` rows decode with both
+  distinct primitive identities. Serialization then rejects them with
+  `RUNTIME-TYPE-ERROR` because legacy output omits the `xsi:type` that keeps them
+  distinct. This is the [approved legacy projection policy](legacy-identity-projection.md).
+  The gate counts these rows as `legacy_projection_rejected`, never as lossless round
+  trips.
+
+The matrix now pins exact counts. It has 22 invalid schemas, 1,440 rejected invalid
+documents, eight legacy projection rejections, and 1,288 preserved rows. All 1,288
+emitted payloads are validated independently. No compatibility rows remain open. The
+updated gate fails against the pre-`9b8276d` WSDL, which accepted the duplicate
+NOTATION input.

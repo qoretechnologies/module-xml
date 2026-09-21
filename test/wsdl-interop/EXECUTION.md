@@ -10185,3 +10185,23 @@ unseen. Validation for the remainder of the plan runs the full suite.
 
 **P7 acceptance remains open** on the P7-10 fixture and P7-11 status regressions, the two timeouts,
 and the core NaN-boxing defect.
+
+### Triage: SOAP 1.2 fixture actions and the NOTATION identity gate
+
+`1ea8a76` declared absolute `urn:submit` actions in the four shared worker fixtures. Six of the seven
+gates pass again. `notation_values` then reached its identity checks and failed on 24 rows. A bisect
+found `9b8276d` (P5-20j, scoped identity tuples) as the first commit where they fail. The code is
+right; the gate's expectations are stale:
+
+- `primitive-identity/notation-alias` (16 rows) lists two NOTATION items that resolve to the same
+  expanded name under a `unique` constraint. The oracle expects rejection. The gate special-cased them as
+  an accepted "finding"; they now reject at decoding with the duplicate-key diagnostic.
+- `primitive-identity/qname-same-name` in legacy mode (8 rows) decodes both distinct primitive
+  identities. Legacy output omits the `xsi:type` that distinguishes them, so serialization now rejects
+  the projected duplicate with `RUNTIME-TYPE-ERROR`. This is the approved policy in
+  `legacy-identity-projection.md`. Previously the gate accepted invalid output here.
+
+The gate now checks both groups on the generic and policy paths, asserting exact diagnostics and the
+decoded identities. It pins the matrix counts: 22 invalid schemas, 1,440 rejected documents, 8 legacy
+projection rejections and 1,288 preserved rows, with 1,288 independently validated outputs. The 24-row findings list is gone. Against the pre-`9b8276d` WSDL the gate fails on
+every notation-alias row, so the assertions are not vacuous. Evidence: `notation-values-evidence.md`.
