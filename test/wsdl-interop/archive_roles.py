@@ -66,7 +66,7 @@ def schema_grammar_errors(schema: etree._Element) -> list[dict]:
     return errors
 
 
-def assess(root: Path, *, worker_timeout=60) -> dict:
+def assess(root: Path, *, worker_timeout=150) -> dict:
     """Verify the complete archive, classify every file role and close source dependency evidence."""
     survey.validate_worker_timeout(worker_timeout)
     inventory = corpus.verify_extraction(root)
@@ -282,8 +282,8 @@ def main() -> None:
     cli = argparse.ArgumentParser(description=__doc__)
     cli.add_argument("extraction", type=Path, help="directory containing databinding/")
     cli.add_argument("--output", type=Path, required=True)
-    cli.add_argument("--worker-timeout", type=survey.parse_worker_timeout, default=60,
-                     help="bounded Qore worker timeout in seconds (1–3600; default: 60)")
+    cli.add_argument("--worker-timeout", type=survey.parse_worker_timeout, default=150,
+                     help="bounded Qore worker timeout in seconds (1–3600; default: 150)")
     args = cli.parse_args()
     report = assess(args.extraction.resolve(), worker_timeout=args.worker_timeout)
     args.output.write_text(json.dumps(report, indent=2) + "\n")

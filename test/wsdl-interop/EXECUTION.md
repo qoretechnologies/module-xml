@@ -10253,3 +10253,37 @@ deterministic benchmark item.
 Profiling found a separate Qore core defect: `get_all_thread_call_stacks()` reads partially destroyed
 JIT/AOT stack locations. It is handed off at `/tmp/qore-thread-call-stacks-race/README.md`. `module-xml`
 does not use that API.
+
+### Performance pass result and hang-guard recalibration
+
+Per the 2026-09-22 decision, a performance pass preceded any guard change. It found one defect, fixed in
+`8f1f8b2` (the list-values worker went from 91.4 s to 79.7 s). Three further candidates were measured on the
+same manifest, and none justified its risk:
+
+- caching each simple type's derived facet kind, base names and facet summaries: no measurable gain;
+- caching compiled particle programs per content model: -1.3 s, but it needs invalidation when
+  substitution-group membership changes;
+- a native fast path for structural XSD patterns: pattern matching is only 1.6 s of this workload.
+
+AST and IR execution show the same old/new ratio. The remaining growth is broad per-value validation added
+by design in P5-P7. Finer attribution needs a Qore-level sampling profiler, which is blocked on the
+`get_all_thread_call_stacks()` core defect. A native `perf` profile attributes the time to general
+interpretation and allocation, not to one routine.
+
+The guard is still needed. A timed run of all 178 Python gates, with a shim recording every
+`subprocess.run()` duration and limit, hit the 90 s list-values limit twice (maximum 90.04 s). Guards with
+under 2.5x headroom over their measured maximum were raised to at least 3.5x:
+
+| Guard | Measured maximum | Old limit | New limit |
+| --- | --- | --- | --- |
+| `test_list_values.py` sized-facet worker (also used by `test_regex_classes.py` and `test_ieee_facets.py`) | 90.0 s | 90 s | 360 s |
+| survey worker default (`survey.py`, `coverage.py`, `archive_roles.py`; 123 runs) | 34.7 s | 60 s | 150 s |
+| `test_corpus.py` survey CLI, kept above the inner worker deadline | 35.2 s | 60 s | 180 s |
+| `test_numeric_constraints.py` worker | 90.1 s | 180 s | 360 s |
+| `test_wsdl_calendar_constraints.py` worker | 84.1 s | 180 s | 360 s |
+
+These are hang guards. Performance is tracked by the new P9 benchmark item in `PLAN.md`, which records the
+list-values worker at 79.7 s against 25.9 s on 2026-09-09. `test_survey.py` checks that the default
+deadline reaches the worker subprocess, so it now expects 150; the README documents the new default. All
+nine affected gates pass: list values, regex classes, IEEE facets, corpus, survey, coverage, archive roles,
+and numeric and calendar constraints.

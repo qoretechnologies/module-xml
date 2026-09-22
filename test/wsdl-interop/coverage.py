@@ -230,7 +230,7 @@ def validate_selection(selection: dict, records: dict) -> None:
 
 
 def assess(root: Path, source: dict, selection: dict, catalog: corpus.Catalog, qore: str = "qore",
-           *, preserve_types: bool = False, worker_timeout: int = 60) -> dict:
+           *, preserve_types: bool = False, worker_timeout: int = 150) -> dict:
     """Run all cases and both directions; strict selection is a gate over the complete report."""
     survey.validate_worker_timeout(worker_timeout)
     cases, records = prepare(root, source)
@@ -428,8 +428,8 @@ def main() -> None:
     cli.add_argument("--strict", action="store_true", help="require every selected Qore requirement to pass")
     cli.add_argument("--preserve-types", action="store_true",
                      help="retain selected XSD types during decoding (default: legacy native projection)")
-    cli.add_argument("--worker-timeout", type=survey.parse_worker_timeout, default=60,
-                     help="Qore worker deadline in seconds, 1–3600 (default: 60)")
+    cli.add_argument("--worker-timeout", type=survey.parse_worker_timeout, default=150,
+                     help="Qore worker deadline in seconds, 1–3600 (default: 150)")
     args = cli.parse_args()
     root = args.corpus.resolve()
     adjudicate.verify_original_corpus(root)

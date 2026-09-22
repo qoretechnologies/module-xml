@@ -48,7 +48,7 @@ class WsdlCalendarConstraintsTest(unittest.TestCase):
         worker = Path(os.environ.get('QORE_CALENDAR_CONSTRAINT_WORKER',
                                      Path(__file__).with_name('numeric-constraints.qr')))
         process = subprocess.run(['qore', '-b', '--enable-debug', str(worker), str(FIXTURE)],
-                                 capture_output=True, text=True, timeout=180)
+                                 capture_output=True, text=True, timeout=360)
         self.assertEqual(0, process.returncode, process.stderr + process.stdout[-2000:])
         self.assertEqual('', process.stderr)
         rows = [json.loads(line) for line in process.stdout.splitlines()]

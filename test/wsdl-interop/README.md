@@ -531,7 +531,7 @@ python3 test/wsdl-interop/archive_roles.py /tmp/wsdl-corpus \
 
 The aggregate-contract worker has a configurable 1–3600-second deadline; the full
 integration check uses 600 seconds for its 18 historical contracts. The CLI/API
-default remains 60 seconds. Timeouts fail the check without omitting any contract.
+default is 150 seconds. Timeouts fail the check without omitting any contract.
 
 [archive-report.json](archive-report.json) assigns a role and provenance to all 4,191 original files.
 It checks that all 293 standalone pattern schemas are exact duplicates of their echo schemas, and
@@ -2356,7 +2356,7 @@ with pinned WSDL4J. See [evidence](header-metadata-evidence.md),
 ## Worker deadlines
 
 `survey.py` and `coverage.py` accept `--worker-timeout SECONDS`. The default is
-60 seconds; an override must be an integer from 1 through 3,600. This bounds the
+150 seconds; an override must be an integer from 1 through 3,600. This bounds the
 Qore worker subprocess and leaves cases, messages, schema checks and expected
 outcomes unchanged. The Python entry points `run_worker()` and `assess()` accept
 the equivalent `worker_timeout` keyword. Invalid values reject before starting

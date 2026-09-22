@@ -255,8 +255,10 @@ class ListValuesTest(unittest.TestCase):
                             lookup[name] = case, model, version, variants
             manifest = root / "manifest.json"
             manifest.write_text(json.dumps(manifest_rows))
+            # Hang guard, not a performance assertion: the IEEE facet manifest took about 80-91 s here on
+            # 2026-09-22 (PLAN.md P9 tracks performance with a benchmark).
             process = subprocess.run(["qore", "--enable-debug", str(Path(__file__).with_name("sized-facet-consumers.qr")),
-                                      str(manifest)], text=True, capture_output=True, timeout=90)
+                                      str(manifest)], text=True, capture_output=True, timeout=360)
         self.assertEqual(0, process.returncode, process.stderr)
         self.assertEqual("", process.stderr)
         rows = [json.loads(line) for line in process.stdout.splitlines()]

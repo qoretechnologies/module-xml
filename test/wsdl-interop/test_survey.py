@@ -299,7 +299,7 @@ class SurveyTest(unittest.TestCase):
                 manifests.append(Path(command[-1]))
                 self.assertTrue(manifests[0].is_file())
                 self.assertTrue(kwargs["check"])
-                self.assertEqual(60, kwargs["timeout"])
+                self.assertEqual(150, kwargs["timeout"])
                 raise error
 
             with patch.object(survey.subprocess, "run", side_effect=run), self.assertRaises(type(error)):

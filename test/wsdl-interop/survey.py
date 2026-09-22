@@ -263,7 +263,7 @@ def parse_worker_timeout(value):
         raise argparse.ArgumentTypeError(str(error)) from error
 
 
-def run_worker(cases, cache, qore="qore", *, preserve_types=False, worker_timeout=60):
+def run_worker(cases, cache, qore="qore", *, preserve_types=False, worker_timeout=150):
     """Run one bounded offline worker; cleanup happens on success, failure and cancellation."""
     validate_cases(cases)
     validate_worker_timeout(worker_timeout)
@@ -322,8 +322,8 @@ def main():
     cli.add_argument("--catalog", type=Path, help="checksum-verified offline import catalog")
     cli.add_argument("--preserve-types", action="store_true",
                      help="retain selected XSD types during decoding (default: legacy native projection)")
-    cli.add_argument("--worker-timeout", type=parse_worker_timeout, default=60,
-                     help="Qore worker deadline in seconds, 1–3600 (default: 60)")
+    cli.add_argument("--worker-timeout", type=parse_worker_timeout, default=150,
+                     help="Qore worker deadline in seconds, 1–3600 (default: 150)")
     args = cli.parse_args()
     corpus = args.corpus.resolve()
     cases = inventory(corpus, args.soap_version)

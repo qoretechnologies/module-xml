@@ -402,6 +402,15 @@ must not mistake success on RPC/encoded tests for WS-I literal-profile conforman
 - Audit all changes before each commit and publish implemented capabilities/limits, examples, release
   notes and durable design details. Preserve the original findings as evidence and publish a separate
   current result set; do not rewrite the old baseline to conceal failures.
+- Track performance with a deterministic benchmark rather than with test timeouts. Use pinned workloads,
+  starting with the captured list-values worker manifest and one SOAP message per binding style. Record
+  per-phase costs (WSDL construction, `Serializable` copy, provider construction, value conversion,
+  serialization, sample generation) against a recorded reference, with byte-identical output. Report a
+  regression beyond a stated tolerance as a finding. Treat subprocess timeouts in gates as hang guards with
+  measured headroom, never as performance assertions. On 2026-09-22 the list-values worker took 79.7 s,
+  against 25.9 s on 2026-09-09, after P5-P7 validation work; see the performance triage in `EXECUTION.md`.
+  Per-function attribution needs a Qore-level sampling profiler, which is blocked on the core
+  `get_all_thread_call_stacks()` defect (`/tmp/qore-thread-call-stacks-race/README.md`).
 
 **Final acceptance:** zero unclassified findings or missing corpus dependencies; zero rejected valid
 inputs in supported scope; zero serialization failures or invalid outputs for those inputs; no value,

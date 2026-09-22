@@ -53,7 +53,7 @@ class NumericConstraintsTest(unittest.TestCase):
         worker = Path(os.environ.get('QORE_NUMERIC_CONSTRAINT_WORKER',
                                      Path(__file__).with_name('numeric-constraints.qr')))
         process = subprocess.run(['qore', '-b', '--enable-debug', str(worker), str(FIXTURE)],
-                                 text=True, capture_output=True, timeout=180)
+                                 text=True, capture_output=True, timeout=360)
         self.assertEqual(0, process.returncode, process.stderr + process.stdout[-2000:])
         self.assertEqual('', process.stderr)
         rows = [json.loads(line) for line in process.stdout.splitlines()]

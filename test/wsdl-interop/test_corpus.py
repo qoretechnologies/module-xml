@@ -257,7 +257,7 @@ class CorpusTest(unittest.TestCase):
         report = self.root / "report.json"
         run = subprocess.run([sys.executable, str(Path(survey.__file__)), str(root),
                               "--soap-version", "both", "--catalog", str(corpus.CATALOG),
-                              "--output", str(report)], capture_output=True, text=True, check=True, timeout=60)
+                              "--output", str(report)], capture_output=True, text=True, check=True, timeout=180)
         self.assertEqual("", run.stderr)
         result = json.loads(report.read_text())
         self.assertEqual(293, result["scope"]["wsdls"])
