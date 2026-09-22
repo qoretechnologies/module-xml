@@ -214,7 +214,11 @@ module WSDL {
         WSDL::SoapFaultOptions argument; \c enc:id with \c enc:ref on one element, reference cycles and
         identifiers outside the encoding's scope are rejected;
       - \c enc:nodeType values are validated against their element's content;
-      - Body data scoped with an unsupported encoding raises the \c env:DataEncodingUnknown code
+      - Body data scoped with an unsupported encoding raises the \c env:DataEncodingUnknown code;
+      - arrays use \c enc:itemType and \c enc:arraySize in both directions: extents in row-major order, an
+        asterisk only for the first extent, omitted trailing members as \c NOTHING, and the dimension count
+        checked against the declared rank; SOAP 1.2-encoded parts previously used SOAP 1.1's
+        \c SOAP-ENC:arrayType
     - encoded structs match their distinct members by name, as SOAP 1.1 and 1.2 encoding define, instead of
       requiring the schema's sequence order; literal content keeps its order
     - whitespace between encoded array members is ignored under the numbered text keys of a
@@ -13918,12 +13922,137 @@ public class XsdArrayType inherits WSDL::XsdAbstractType {
                 string member = "item";
                 auto items = val;
                 if (val.typeCode() == NT_HASH && val.size() == 1) {
-                    member = "soapenc:" + val.firstKey();
+                    # SOAP 1.2 member names are unqualified; SOAP 1.1 names keep their #2899 soapenc: prefix
+                    member = (EncodingRules == SOAP_12_ENCODING ? "" : "soapenc:") + val.firstKey();
                     items = val.firstValue();
                 }
                 return encodeArray(nsc, items, omitType, generic ? inferShape(items) : shape, member);
             }
         }
+    }
+
+    # Encodes one array level with SOAP 1.2 Encoding (SOAP 1.2 Part 2 section 3.1.3): members in row-major order,
+    # enc:arraySize with every extent, and enc:itemType naming the members' type. A jagged level's members are
+    # arrays with their own attributes, so the level names no item type.
+    private hash<auto> encodeArray12(Namespaces nsc, list<auto> items, *softbool omitType,
+            hash<XsdEncodedArrayShape> level, string member) {
+        list<int> lengths = (items.size(),);
+        if (level.rank > 1) {
+            *list<int> rectangular = XsdEncodedArrayHelper::rectangular(items, level.rank);
+            if (!exists rectangular) {
+                throw SOAP_SERIALIZATION_ERROR, sprintf("a rank-%d array %Y needs a rectangular value; a jagged "
+                    "array type carries rows of different lengths", level.rank, name);
+            }
+            XsdEncodedArrayHelper::slots(rectangular, SOAP_SERIALIZATION_ERROR);
+            items = XsdEncodedArrayHelper::flat(items, level.rank);
+            lengths = rectangular;
+        }
+        string prefix = nsc.getOutputNamespacePrefix(SOAP_12_ENCODING);
+        list<auto> members();
+        foreach auto item in (items) {
+            if (!exists item) {
+                push members, {"^attributes^": {"xsi:nil": "true"}};
+            } else if (level.nested) {
+                push members, encodeArray(nsc, item, omitType, XsdEncodedArrayHelper::member(level), "item");
+            } else {
+                push members, XsdDocumentValueHelper::serializeSelectedValue(elementType, nsc, item, omitType);
+            }
+        }
+        string size = foldl $1 + " " + $2, (map $1.toString(), lengths);
+        # built empty: a hash literal keeps its value type and would reject the member list
+        hash<auto> rv();
+        rv."^attributes^"{prefix + ":arraySize"} = size;
+        if (!omitType && !level.nested) {
+            rv."^attributes^"{prefix + ":itemType"} = elementType.getNameWithNS();
+        }
+        if (members) {
+            rv{member} = members;
+        }
+        return rv;
+    }
+
+    # Parses an enc:arraySize value (SOAP 1.2 Part 2 section 3.1.6): an asterisk may stand only for the first extent
+    static list<*int> arraySize(string value) {
+        list<string> tokens = XsdSimpleType::normalizeWhiteSpace(value, "collapse").split(" ");
+        list<*int> extents();
+        foreach string token in (tokens) {
+            if (token == "*" && !$#) {
+                push extents, NOTHING;
+            } else if (token =~ /^[0-9]+$/) {
+                push extents, token.toInt();
+            } else {
+                throw SOAP_DESERIALIZATION_ERROR, sprintf("invalid enc:arraySize %y: %s", value, token == "*"
+                    ? "an asterisk may stand only for the first extent" : "extents are non-negative integers");
+            }
+        }
+        if (!extents) {
+            throw SOAP_DESERIALIZATION_ERROR, sprintf("invalid enc:arraySize %y: no extent", value);
+        }
+        return extents;
+    }
+
+    # Decodes one array level with SOAP 1.2 Encoding: enc:itemType gives the members' type name unless a member
+    # has xsi:type, and enc:arraySize (default "*") the extents, the last varying fastest. SOAP 1.2 has no partial
+    # or sparse arrays; trailing members may be omitted and are NOTHING.
+    private auto decodeArray12(string en, hash<string, XsdAbstractType> tmap, *hash<auto> mrh, list<hash<auto>> members,
+            *string shared, hash<auto> attributes, hash<XsdEncodedArrayShape> declared, *XsdAbstractType expected) {
+        hash<string, string> namespaces = XsdBase::getAttributeNamespaces(attributes);
+        *string item_attribute;
+        *string size_attribute;
+        foreach string key in (keys attributes) {
+            (*string prefix, *string local) = key =~ x/^([^:]+):([^:]+)$/;
+            if (prefix && namespaces{prefix} == SOAP_12_ENCODING) {
+                if (local == "itemType") {
+                    item_attribute = attributes{key};
+                } else if (local == "arraySize") {
+                    size_attribute = attributes{key};
+                }
+            }
+        }
+        list<*int> extents = arraySize(size_attribute ?? "*");
+        if (exists expected && extents.size() != declared.rank) {
+            throw SOAP_DESERIALIZATION_ERROR, sprintf("enc:arraySize %y has %d dimension%s; array %Y declares %d",
+                size_attribute ?? "*", extents.size(), extents.size() == 1 ? "" : "s", name, declared.rank);
+        }
+        XsdAbstractType item = exists item_attribute ? memberType(item_attribute, tmap, expected)
+            : (expected ?? nsc.getBaseType("anyType"));
+        # the extents after the first, whose product is the size of one row
+        list<int> rest();
+        int inner = 1;
+        for (int i = 1; i < extents.size(); ++i) {
+            push rest, extents[i];
+            inner *= extents[i];
+        }
+        list<int> lengths = (extents[0] ?? (inner ? (members.size() / inner) : 0),) + rest;
+        if (!exists extents[0] && inner && members.size() % inner) {
+            throw SOAP_DESERIALIZATION_ERROR, sprintf("array %Y has %d members, which do not fill rows of %d", name,
+                members.size(), inner);
+        }
+        int slots = XsdEncodedArrayHelper::slots(lengths, SOAP_DESERIALIZATION_ERROR);
+        if (members.size() > slots) {
+            throw SOAP_DESERIALIZATION_ERROR, sprintf("array %Y transmits more members than its enc:arraySize %y",
+                name, size_attribute);
+        }
+        hash<XsdEncodedArrayShape> level = <XsdEncodedArrayShape>{"item": declared.item, "rank": extents.size(),
+            "nested": declared.nested, "lengths": lengths};
+        list<auto> flat();
+        foreach hash<auto> entry in (members) {
+            auto value = getValue(mrh, entry.value);
+            if (XsdArrayType::isNil(value)) {
+                push flat, NOTHING;
+            } else if (level.nested) {
+                push flat, decodeRow(en, tmap, mrh, value, XsdEncodedArrayHelper::member(level), item);
+            } else {
+                auto converted = XsdDocumentValueHelper::deserializeValue(item, en, tmap, mrh, value, True);
+                push flat, XsdNativeTypeValueHelper::isWrapper(converted) ? converted
+                    : XsdNativeTypeValueHelper::retain(elementType, item, converted);
+            }
+        }
+        while (flat.size() < slots) {
+            push flat, NOTHING;
+        }
+        list<auto> result = extents.size() > 1 ? XsdEncodedArrayHelper::reshape(flat, lengths) : flat;
+        return exists shared ? {shared: result} : result;
     }
 
     # Infers the SOAP 1.1 section 5.4.2 shape of a native value of the generic array, whose nested lists are arrays:
@@ -13970,6 +14099,9 @@ public class XsdArrayType inherits WSDL::XsdAbstractType {
             string member) {
         if (items.typeCode() != NT_LIST) {
             items = exists items ? (items,) : ();
+        }
+        if (EncodingRules == SOAP_12_ENCODING) {
+            return encodeArray12(nsc, items, omitType, level, member);
         }
         string asize = "[]";
         if (level.rank > 1) {
@@ -14088,6 +14220,9 @@ public class XsdArrayType inherits WSDL::XsdAbstractType {
         }
         if (named && val.firstKey() == "^value^") {
             shared = NOTHING;
+        }
+        if (EncodingRules == SOAP_12_ENCODING) {
+            return decodeArray12(en, tmap, mrh, members, shared, attributes, declared, expected);
         }
         hash<string, string> namespaces = XsdBase::getAttributeNamespaces(attributes);
         *string type_attribute;
@@ -30181,6 +30316,23 @@ class XsdNativeTypeValueScope {
     }
 }
 
+# The SOAP encoding rules of the message part being converted: SOAP_ENCODING or SOAP_12_ENCODING. NOTHING outside
+# SOAP messages, where encoded array types keep the SOAP 1.1 form.
+thread_local *string EncodingRules;
+
+class XsdEncodingRulesScope {
+    private {
+        *string previous;
+    }
+    constructor(*string rules) {
+        previous = EncodingRules;
+        EncodingRules = rules;
+    }
+    destructor() {
+        EncodingRules = previous;
+    }
+}
+
 class XsdNativeTypeOutputScope {
     private {
         *hash<string, XsdAbstractType> previous;
@@ -35348,6 +35500,7 @@ public class SoapBinding inherits WSDL::OperationalBinding {
             }
             # Fault detail belongs to its own message, not the ordinary output body selection.
             *list<string> body_parts = fault ? NOTHING : bmd.body.parts;
+            XsdEncodingRulesScope body_rules(encoded ? SoapEncodingStyleHelper::rules(bmd.body.encodingStyle) : NOTHING);
             if (docstyle || fault) {
                 # bmd.body.encoded == False = literal encoding
                 #printf("parts: %y, args: %y\n", bmd.body.parts, msg.args.keys());
@@ -35372,6 +35525,9 @@ public class SoapBinding inherits WSDL::OperationalBinding {
             }
             if (encoded) {
                 rh{soapenvEnvelope}."^attributes^"."xmlns:soapenc" = SOAP_ENCODING;
+                if (EncodingRules == SOAP_12_ENCODING) {
+                    rh{soapenvEnvelope}."^attributes^"."xmlns:enc" = SOAP_12_ENCODING;
+                }
             }
             #printf("DEBUG: body: %N\nval: %N\n", body, val);
         }
@@ -35388,6 +35544,10 @@ public class SoapBinding inherits WSDL::OperationalBinding {
                 # only style="document" is assumed since headers do not contain parameters.
                 *hash<auto> h;
                 string field = header_keys{hdr.msg.getExpandedName()};
+                XsdEncodingRulesScope header_rules(hdr.encoded ? SoapEncodingStyleHelper::rules(hdr.encodingStyle) : NOTHING);
+                if (hdr.encoded && EncodingRules == SOAP_12_ENCODING) {
+                    rh{soapenvEnvelope}."^attributes^"."xmlns:enc" = SOAP_12_ENCODING;
+                }
                 if (header) {
                     h = serializeHeaderPart(hdr, field, \header);
                 }
@@ -35749,6 +35909,7 @@ public class SoapBinding inherits WSDL::OperationalBinding {
                     isSoap12() ? SOAP_12_ENV : SOAP_11_ENV, SoapEncodingStyleHelper::rules(hdr.encodingStyle))
                     : header_values[index];
                 bool rules12 = hdr.encoded && SoapEncodingStyleHelper::rules(hdr.encodingStyle) == SOAP_12_ENCODING;
+                XsdEncodingRulesScope header_rules(hdr.encoded ? SoapEncodingStyleHelper::rules(hdr.encodingStyle) : NOTHING);
                 hrv{header_keys{hdr.msg.getExpandedName()}} += hdr.msg.deserializeDocument(rules12 ? context12 : NOTHING,
                     {hdr.encoded ? type_qname("", hdr.part) : header_names[index]: value}, hdr.part, NOTHING, True);
             }
@@ -35809,6 +35970,8 @@ public class SoapBinding inherits WSDL::OperationalBinding {
         if (exists body) {
             hash<auto> msgh = docstyle ? expanded_body : body;
             *hash<auto> mrh;
+            XsdEncodingRulesScope body_rules(bmd.body.encoded ? SoapEncodingStyleHelper::rules(bmd.body.encodingStyle)
+                : NOTHING);
             # Literal parts use their concrete schema: id and href can be ordinary attributes.
             # Only an encoded body supplies a SOAP reference context to schema value conversion.
             if (body12) {

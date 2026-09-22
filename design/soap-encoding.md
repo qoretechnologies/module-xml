@@ -182,6 +182,27 @@ therefore walks the Header and Body before either is converted:
   neither SOAP 1.2 or SOAP 1.1 encoding nor `http://www.w3.org/2003/05/soap-envelope/encoding/none` raises
   `env:DataEncodingUnknown` (SOAP 1.2 Part 1 section 5.4.6, the collection's XMLP-9).
 
+### Arrays
+
+The rules selected for a part are kept in a thread-local scope (`EncodingRules`) while its value is converted,
+so `XsdArrayType` reads and writes the matching array form. Outside SOAP messages, such as a literal element of
+an encoded array type, the SOAP 1.1 form is kept. Array types are still declared the WSDL 1.1 way, as
+`SOAP-ENC:Array` restrictions with `wsdl:arrayType`.
+
+- **Decoding** (sections 3.1.3, 3.1.4 and 3.1.6):
+  - `enc:itemType` names the members' type unless a member has `xsi:type`. It is resolved and checked against
+    the declared item type like a SOAP 1.1 item QName. Without it the declared item type applies, or
+    `xsd:anyType` for the generic array.
+  - `enc:arraySize` is `("*" | n) (whitespace n)*`, and `*` is its default. The number of extents must equal
+    the declared rank. Only the first extent may be `*`, which the member count then determines; members that
+    do not fill whole rows are an error (the collection's T61 puts `*` second).
+  - Members are in row-major order. SOAP 1.2 has no partial or sparse arrays, so omitted trailing members are
+    `NOTHING`, and more members than the extents allow is an error. `xsi:nil` members are `NOTHING`.
+  - A jagged level's members are arrays with their own attributes.
+- **Encoding**: `enc:arraySize` lists every extent, such as `"2 3"`, and `enc:itemType` names the declared item
+  type; a jagged level names none. Member names are unqualified: `item`, or the #2899 key. The envelope
+  declares the `enc` prefix.
+
 ### Faults
 
 These errors are `SOAP-DESERIALIZATION-ERROR` exceptions whose argument is a `hash<SoapFaultOptions>` naming the

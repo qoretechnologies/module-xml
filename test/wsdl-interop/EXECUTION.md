@@ -10587,3 +10587,33 @@ All six cases fail against HEAD's modules. Full suite: 455 targets, 3,612 Qore c
 only failures are the three core-blocked gates: the two IEEE gates and the HTTP/1.0 direction of
 `test_axis_interop.py`. Documentation builds with no warnings. SOAP 1.2 arrays (`enc:itemType`, `enc:arraySize`)
 follow in P8-03b.
+
+## P8-03b: SOAP 1.2 arrays
+
+SOAP 1.2 encoded arrays now use `enc:itemType` and `enc:arraySize` in both directions (SOAP 1.2 Part 2 sections
+3.1.3, 3.1.4 and 3.1.6). Before, SOAP 1.2-encoded parts were read and written with SOAP 1.1's
+`SOAP-ENC:arrayType`. The collection's rank-2 array (`enc:arraySize="2 3"`) therefore failed, and its invalid
+`"2 *"` (T61) was accepted.
+
+A thread-local scope carries the rules selected for each part while it is converted, and `XsdArrayType` reads
+and writes the matching form:
+- **Decoding:** the item type comes from `enc:itemType`, checked like SOAP 1.1 item types. The extents come from
+  `enc:arraySize`: an asterisk only first, its extent determined by the members, and the dimension count equal
+  to the declared rank. Members are row-major; omitted trailing members and nil members are `NOTHING`.
+- **Encoding:** every extent, the item type, and unqualified member names.
+
+`test/soap12-encoding.qtest` gains an arrays case: 7 cases and 114 assertions in all. It covers:
+- the collection's array tests (T47, T48, T49 without `itemType`, T50, T60 with `*`, the 2-D test, T46);
+- T61 and T58 faults;
+- invalid, empty, excess, unfilled, mis-ranked and mistyped sizes and types;
+- omitted and nil members;
+- the output forms with round trips.
+
+The case fails against the P8-03a module. The SOAP 1.1 array suites are unchanged.
+
+The user installed Qore `acc8ea401` during this increment, with the `HttpServer` HTTP/1.0 close fix in its working
+tree (the handoff is resolved). `build-debug` was clean-rebuilt. The full suite ran on that one runtime, and the
+before and after hashes and library times are identical: 455 targets, 3,613 Qore cases, 173,679 assertions. The
+only failures are the two IEEE gates, still blocked by core NaN-boxing (`block missing return statement`). Both
+directions of `test_axis_interop.py` now pass, so Axis 1.4's own `TestClient` verifies all 31 operations against
+the Qore `SoapHandler`. Documentation builds with no warnings.

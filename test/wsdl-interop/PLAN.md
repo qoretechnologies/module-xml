@@ -1633,3 +1633,12 @@ whitespace between array members is no longer taken as members. An authored
 [contract](encoded-corpus/w3c-soap12.wsdl) runs the W3C collection's requests.
 [soap12-encoding](../soap12-encoding.qtest) has 6 cases and 74 assertions. See the
 [design](../../design/soap-encoding.md) and `EXECUTION.md`.
+
+## P8-03b: SOAP 1.2 arrays
+
+SOAP 1.2-encoded arrays use `enc:itemType` and `enc:arraySize` in both directions instead of SOAP 1.1's
+`SOAP-ENC:arrayType`. The rules are selected per part through a thread-local scope. Extents are row-major, an
+asterisk may stand only for the first extent (T61), omitted trailing members are `NOTHING`, and the dimension
+count must match the declared rank. [soap12-encoding](../soap12-encoding.qtest) has 7 cases and 114 assertions.
+The full suite passes on one runtime except the two core-blocked IEEE gates. With the core HTTP/1.0 fix
+installed, the Axis interop gate passes in both directions.
