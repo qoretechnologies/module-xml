@@ -207,6 +207,17 @@ module WSDL {
     @section wsdlrelnotes WSDL Module Release Notes
 
     @subsection wsdl_0_5_8 WSDL v0.5.8
+    - SOAP 1.1 encoded arrays follow section 5.4.2:
+      - rank-n arrays travel as row-major members with asserted lengths (\c "xsd:int[2,3]") instead of nested
+        row elements with \c "[,]";
+      - jagged arrays (\c "xsd:int[][]") nest member arrays with their own \c arrayType;
+      - decoding honors \c SOAP-ENC:offset and \c SOAP-ENC:position, keeping untransmitted and \c xsi:nil members
+        as \c NOTHING and bounding the slots an asserted size may allocate;
+      - a rank-n declaration also accepts the jagged form that Java peers such as Apache Axis send, provided it is
+        rectangular;
+      - members sharing one name keep it as the value's key (qorelanguage/qore#2899), now as the local name;
+      - a plain list names its members \c item, so it can be written as XML;
+      - an element whose type is an encoded array takes a list as its one value, not as repeated occurrences
     - SOAP 1.1 encoded decoding follows the section 5 reference model:
       - independent elements are found however their names repeat;
       - their \c SOAP-ENC:root and \c SOAP-ENV:encodingStyle metadata is consumed instead of rejected as instance
@@ -13361,9 +13372,158 @@ public class XsdBaseType inherits WSDL::XsdAbstractType {
 }
 
 #! class for XSD array types; supports single and multi-dimensional arrays
+# A SOAP 1.1 section 5.4.2 arrayType value: atype = QName *(rank), asize = "[" #length "]".
+hashdecl XsdEncodedArrayShape {
+    # the innermost member type QName as written
+    string item;
+    # ranks of the nested array levels that atype names, innermost first ("int[][,]" gives (1, 2))
+    list<int> nested();
+    # the rank of the array itself
+    int rank = 1;
+    # the asserted lengths; empty when no quantity is asserted
+    list<int> lengths();
+}
+
+# SOAP 1.1 section 5.4.2 array shapes, positions and bounded slot allocation.
+class XsdEncodedArrayHelper {
+    public {
+        #! the largest number of member slots one encoded array level may allocate
+        /** Partial and sparse arrays assert a size larger than the members they transmit; absent members occupy
+            a slot. The bound keeps a hostile asserted size from forcing an unbounded allocation.
+        */
+        const MaxSlots = 1048576;
+    }
+
+    #! parses an arrayType value
+    static hash<XsdEncodedArrayShape> parse(string value, string error) {
+        string text = XsdSimpleType::normalizeWhiteSpace(value, "collapse");
+        (*string head, *string size) = text =~ x/^(.*)\[([0-9,]*)\]$/;
+        if (!exists head || !head.val()) {
+            throw error, sprintf("invalid SOAP-ENC:arrayType %y", value);
+        }
+        hash<XsdEncodedArrayShape> shape();
+        # the rank is the number of commas plus one; split() would drop a trailing empty length
+        shape.rank = size.size() - replace(size, ",", "").size() + 1;
+        if (size.size() != shape.rank - 1) {
+            list<string> parts = size.split(",");
+            if (parts.size() != shape.rank || (select parts, !$1.val())) {
+                throw error, sprintf("SOAP-ENC:arrayType %y must assert every length or none", value);
+            }
+            shape.lengths = map $1.toInt(), parts;
+        }
+        while (*string group = (head =~ x/(\[,*\])$/)[0]) {
+            # "[]" is one level of rank 1, "[,]" one level of rank 2
+            unshift shape.nested, group.size() - 1;
+            head = head.substr(0, head.size() - group.size());
+        }
+        if (!head.val() || head =~ /[\[\]]/) {
+            throw error, sprintf("invalid SOAP-ENC:arrayType %y", value);
+        }
+        shape.item = head;
+        return shape;
+    }
+
+    #! returns the shape of a jagged level's members: the outermost nested rank with the levels inside it
+    static hash<XsdEncodedArrayShape> member(hash<XsdEncodedArrayShape> level) {
+        list<int> inside = level.nested;
+        int rank = pop inside;
+        return derive(level.item, rank, inside);
+    }
+
+    #! returns a shape without asserted lengths
+    static hash<XsdEncodedArrayShape> derive(string item, int rank, list<int> nested) {
+        return <XsdEncodedArrayShape>{"item": item, "rank": rank, "nested": nested};
+    }
+
+    #! parses an offset or position: a bracketed comma-separated index list; a single bare index is accepted
+    static list<int> indices(string value, int rank, string what, string error) {
+        string text = XsdSimpleType::normalizeWhiteSpace(value, "collapse");
+        *string inner = (text =~ x/^\[([0-9,]+)\]$/)[0] ?? (text =~ /^[0-9]+$/ ? text : NOTHING);
+        int count = exists inner ? inner.size() - replace(inner, ",", "").size() + 1 : 0;
+        list<string> parts = exists inner ? inner.split(",") : ();
+        if (count != rank || parts.size() != rank || (select parts, !$1.val())) {
+            throw error, sprintf("invalid SOAP-ENC:%s %y for a rank-%d array", what, value, rank);
+        }
+        return map $1.toInt(), parts;
+    }
+
+    #! returns the row-major index of a position, checked against the lengths
+    static int flatten(list<int> index, list<int> lengths, string error) {
+        int flat = 0;
+        foreach int i in (index) {
+            if (i >= lengths[$#]) {
+                throw error, sprintf("array index %y is outside the asserted size %y", index, lengths);
+            }
+            flat = flat * lengths[$#] + i;
+        }
+        return flat;
+    }
+
+    #! returns the product of the lengths, bounded by MaxSlots
+    static int slots(list<int> lengths, string error) {
+        int count = 1;
+        foreach int length in (lengths) {
+            count *= length;
+            if (count > MaxSlots) {
+                throw error, sprintf("encoded array size %y exceeds the limit of %d members", lengths, MaxSlots);
+            }
+        }
+        return count;
+    }
+
+    #! reshapes a row-major member list into nested lists
+    static list<auto> reshape(list<auto> flat, list<int> lengths) {
+        if (lengths.size() <= 1) {
+            return flat;
+        }
+        list<int> inner = lengths[1..];
+        int width = 1;
+        map width *= $1, inner;
+        list<auto> rows();
+        for (int i = 0; i < lengths[0]; ++i) {
+            push rows, reshape(flat[(i * width)..((i + 1) * width - 1)] ?? (), inner);
+        }
+        return rows;
+    }
+
+    #! returns the lengths of a rectangular nested list of the given rank, or NOTHING when it is ragged
+    static *list<int> rectangular(auto value, int rank) {
+        if (rank == 1) {
+            # a row must itself be a list; a scalar where a row belongs means the value is not of this rank
+            return value.typeCode() == NT_LIST ? (value.size(),) : NOTHING;
+        }
+        if (value.typeCode() != NT_LIST) {
+            return;
+        }
+        *list<int> inner;
+        foreach auto row in (value) {
+            *list<int> lengths = rectangular(row, rank - 1);
+            if (!exists lengths || (exists inner && inner != lengths)) {
+                return;
+            }
+            inner = lengths;
+        }
+        return (value.size(),) + (inner ?? map 0, xrange(rank - 1));
+    }
+
+    #! flattens a nested list of the given rank in row-major order
+    static list<auto> flat(list<auto> value, int rank) {
+        if (rank == 1) {
+            return value;
+        }
+        list<auto> result();
+        foreach auto row in (value) {
+            result += flat(row, rank - 1);
+        }
+        return result;
+    }
+}
+
 public class XsdArrayType inherits WSDL::XsdAbstractType {
     private {
         bool finalized;
+        # the declared shape from wsdl:arrayType
+        hash<XsdEncodedArrayShape> shape;
         hash<string, bool> blocked_substitutions();
         bool abstract_type = False;
     }
@@ -13393,43 +13553,25 @@ public class XsdArrayType inherits WSDL::XsdAbstractType {
             : XsdAbstractType(t, ns, nsc, final_derivations) {
         self.blocked_substitutions = blocked_substitutions ?? {};
         self.abstract_type = abstract_type ?? False;
-        # Parse array dimensions - handles both [] and [,] notation
-        # SOAP 1.1 Section 5.4.2 supports:
-        # - Single dimension: type[] or type[n]
-        # - Multi-dimension: type[,] or type[n,m] (comma-separated)
-        # - Nested arrays: type[][] (multiple bracket pairs)
-
-        # Count dimensions from bracket notation using extract mode (x//)
-        # Handle comma-separated dimensions first (e.g., [,] = 2D, [n,m] = 2D)
-        # Note: use + not * to only match brackets with actual content
-        *list<*string> match = (arrayType =~ x/\[([,\d]+)\]$/);
-        if (match) {
-            *string dimSpec = match[0];
-            # Count commas + 1 for comma-separated dimensions (e.g., [,] = 2D, [,,] = 3D)
-            # Use regex_subst to remove commas and calculate count from length difference
-            string noCommas = regex_subst(dimSpec, ",", "", RE_Global);
-            int commaCount = dimSpec.length() - noCommas.length();
-            dimensions = commaCount + 1;
-            # Remove the bracket suffix
-            arrayType =~ s/\[([,\d]+)\]$//;
-        }
-
-        # Handle empty bracket pairs (e.g., type[][] = 2D, type[] = 1D)
-        # Count all [] pairs and set dimensions to that count
-        int bracketCount = 0;
-        while (arrayType =~ /\[\]$/) {
-            bracketCount++;
-            arrayType =~ s/\[\]$//;
-        }
-        if (bracketCount > 0) {
-            dimensions = bracketCount;
-        }
+        # SOAP 1.1 section 5.4.2: "xsd:int[,]" is a rank-2 array; "xsd:int[][]" is a rank-1 array of int[] arrays.
+        shape = XsdEncodedArrayHelper::parse(arrayType, WSDL_ERROR);
+        # the nesting depth of the decoded Qore list, which the data provider type mirrors
+        dimensions = shape.rank;
+        map dimensions += $1, shape.nested;
+        arrayType = shape.item;
 
         if (!nsc.doType(arrayType, \typeinfo, \elementType)) {
             unresolved.add(self);
         } else {
             finalized = True;
         }
+    }
+
+    #! returns True: a native list represents one encoded array value, not repeated element occurrences
+    /** @since %WSDL 0.5.8
+    */
+    bool hasNativeListValue() {
+        return True;
     }
 
     AbstractDataProviderType getDataProviderType() {
@@ -13491,37 +13633,59 @@ public class XsdArrayType inherits WSDL::XsdAbstractType {
             }
 
             default: {
-                # this must be an untyped hash
-                hash rv;
-                if (!omitType) {
-                    # Build arrayType attribute with proper dimension notation
-                    string dimSuffix = dimensions > 1
-                        ? "[" + strmul(",", dimensions - 1) + "]"
-                        : "[]";
-                    rv."^attributes^" = {"soapenc:arrayType": elementType.getNameWithNS() + dimSuffix};
-                }
+                # A {member name: list} hash names its members (qorelanguage/qore#2899); a plain list uses "item".
+                string member = "item";
+                auto items = val;
                 if (val.typeCode() == NT_HASH && val.size() == 1) {
-                    rv += {
-                        "soapenc:" + val.firstKey(): map serializeElement(nsc, $1, omitType, dimensions),
-                            val.firstValue(),
-                    };
-                } else {
-                    rv += {
-                        "^value^": (map serializeElement(nsc, $1, omitType, dimensions), val),
-                    };
+                    member = "soapenc:" + val.firstKey();
+                    items = val.firstValue();
                 }
-                return rv;
+                return encodeArray(nsc, items, omitType, shape, member);
             }
         }
     }
 
-    #! Serialize a single element, handling nested dimensions for multi-dimensional arrays
-    private auto serializeElement(Namespaces nsc, auto val, *softbool omitType, int remainingDims) {
-        if (remainingDims > 1 && val.typeCode() == NT_LIST) {
-            # For multi-dimensional arrays, recursively serialize nested lists
-            return map serializeElement(nsc, $1, omitType, remainingDims - 1), val;
+    # Encodes one array level (SOAP 1.1 section 5.4.2). A rank-n level is transmitted as its members in row-major
+    # order with the asserted lengths; the members of a jagged level are arrays with their own arrayType.
+    private hash<auto> encodeArray(Namespaces nsc, auto items, *softbool omitType, hash<XsdEncodedArrayShape> level,
+            string member) {
+        if (items.typeCode() != NT_LIST) {
+            items = exists items ? (items,) : ();
         }
-        return XsdDocumentValueHelper::serializeValue(elementType, nsc, val, omitType);
+        string asize = "[]";
+        if (level.rank > 1) {
+            *list<int> lengths = XsdEncodedArrayHelper::rectangular(items, level.rank);
+            if (!exists lengths) {
+                throw SOAP_SERIALIZATION_ERROR, sprintf("a rank-%d array %Y needs a rectangular value; a jagged "
+                    "array type carries rows of different lengths", level.rank, name);
+            }
+            XsdEncodedArrayHelper::slots(lengths, SOAP_SERIALIZATION_ERROR);
+            items = XsdEncodedArrayHelper::flat(items, level.rank);
+            asize = "[" + (foldl $1 + "," + $2, (map $1.toString(), lengths)) + "]";
+        }
+        list<auto> members();
+        foreach auto item in (items) {
+            if (!exists item) {
+                push members, {"^attributes^": {"xsi:nil": "true"}};
+            } else if (level.nested) {
+                hash<auto> encoded = encodeArray(nsc, item, omitType, XsdEncodedArrayHelper::member(level), "item");
+                if (!omitType) {
+                    encoded."^attributes^"."xsi:type" = "soapenc:Array";
+                }
+                push members, encoded;
+            } else {
+                push members, XsdDocumentValueHelper::serializeValue(elementType, nsc, item, omitType);
+            }
+        }
+        hash<auto> rv;
+        if (!omitType) {
+            rv."^attributes^" = {"soapenc:arrayType": elementType.getNameWithNS()
+                + (foldl $1 + $2, (map "[" + strmul(",", $1 - 1) + "]", level.nested)) + asize};
+        }
+        if (members) {
+            rv{member} = members;
+        }
+        return rv;
     }
 
     auto deserializeValue(string en, hash<string, XsdAbstractType> tmap, *hash<auto> mrh, auto val) {
@@ -13540,33 +13704,178 @@ public class XsdArrayType inherits WSDL::XsdAbstractType {
 
             default: {
                 # remove any namespace marker from value
-                *string ns = remove val.".ns";
-                softint attr = val.hasKey("^attributes^");
-                if (val.typeCode() == NT_HASH) {
-                    # Handle ^value^ key specially - return deserialized content directly
-                    if (val.hasKey("^value^")) {
-                        return map deserializeElement(en, tmap, mrh, $1, dimensions), val."^value^";
-                    }
-                    # For other single-key hashes, preserve the element name
-                    if (val.size() == (1 + attr)) {
-                        string ename = (map $1, keys val, $1 != "^attributes^")[0];
-                        return {ename: (map deserializeElement(en, tmap, mrh, $1, dimensions), val{ename})};
-                    }
-                }
-                return map deserializeElement(en, tmap, mrh, $1, dimensions), val;
+                remove val.".ns";
+                return decodeArray(en, tmap, mrh, val, shape);
             }
         }
     }
 
-    #! Deserialize a single element, handling nested dimensions for multi-dimensional arrays
-    private auto deserializeElement(string en, hash<string, XsdAbstractType> tmap, *hash<auto> mrh, auto val,
-            int remainingDims) {
-        if (remainingDims > 1 && val.typeCode() == NT_LIST) {
-            # For multi-dimensional arrays, recursively deserialize nested lists
-            return map deserializeElement(en, tmap, mrh, $1, remainingDims - 1), val;
+    # Decodes one array level (SOAP 1.1 section 5.4.2). Members are placed by SOAP-ENC:offset and
+    # SOAP-ENC:position; untransmitted members are NOTHING. Members that all share one element name keep that
+    # name as the result's key (qorelanguage/qore#2899); otherwise the result is a list.
+    private auto decodeArray(string en, hash<string, XsdAbstractType> tmap, *hash<auto> mrh, auto val,
+            hash<XsdEncodedArrayShape> declared) {
+        if (!exists val || (val.typeCode() == NT_STRING && val =~ /^\s*$/)) {
+            return ();
         }
-        # An array member can itself be an accessor to an independent element (SOAP 1.1 section 5.1 rule 2).
-        return XsdDocumentValueHelper::deserializeValue(elementType, en, tmap, mrh, getValue(mrh, val));
+        list<hash<auto>> members();
+        *string shared;
+        bool named = False;
+        hash<auto> attributes;
+        if (val.typeCode() == NT_LIST) {
+            members = map ("value": $1), val;
+        } else if (val.typeCode() != NT_HASH) {
+            throw SOAP_DESERIALIZATION_ERROR, sprintf("array %Y requires member elements", name);
+        } else {
+            attributes = val."^attributes^" ?? {};
+            foreach string key in (keys val) {
+                if (key == "^attributes^" || key =~ /^\^comment/) {
+                    continue;
+                }
+                if (key == "^value^") {
+                    # members given as a list of values (the pre-P8 nested representation)
+                    if (val{key}.typeCode() == NT_LIST) {
+                        members += map ("value": $1), val{key};
+                    } else if (val{key}.typeCode() != NT_STRING || val{key} !~ /^\s*$/) {
+                        throw SOAP_DESERIALIZATION_ERROR, sprintf("array %Y cannot contain text", name);
+                    }
+                    continue;
+                }
+                # Member names are not significant (SOAP 1.1 section 5.4.2); the kept name is the local name, so
+                # the soapenc: prefix this module writes on member elements reads back unchanged.
+                string element = key;
+                element =~ s/\^[0-9]+\^?$//;
+                # both a prefixed name and the {uri}local form of expanded literal documents reduce to the local name
+                element =~ s/^\{[^}]*\}//;
+                element =~ s/^[^:]+://;
+                if (!named) {
+                    shared = element;
+                    named = True;
+                } else if (shared != element) {
+                    shared = NOTHING;
+                }
+                members += map ("value": $1), (val{key}.typeCode() == NT_LIST ? val{key} : (val{key},));
+            }
+        }
+        if (named && val.firstKey() == "^value^") {
+            shared = NOTHING;
+        }
+        hash<string, string> namespaces = XsdBase::getAttributeNamespaces(attributes);
+        *string type_attribute;
+        *string offset_attribute;
+        foreach string key in (keys attributes) {
+            (*string prefix, *string local) = key =~ x/^([^:]+):([^:]+)$/;
+            if (prefix && namespaces{prefix} == SOAP_ENCODING) {
+                if (local == "arrayType") {
+                    type_attribute = attributes{key};
+                } else if (local == "offset") {
+                    offset_attribute = attributes{key};
+                }
+            }
+        }
+        hash<XsdEncodedArrayShape> instance = exists type_attribute
+            ? XsdEncodedArrayHelper::parse(type_attribute, SOAP_DESERIALIZATION_ERROR) : declared;
+        list<auto> result;
+        if (instance.rank == declared.rank && instance.nested == declared.nested) {
+            result = decodeMembers(en, tmap, mrh, members, instance, offset_attribute);
+        } else if (declared.rank > 1 && instance.rank == 1
+                && instance.nested == declared.nested + (map 1, xrange(declared.rank - 1))) {
+            # Java peers such as Apache Axis send a rank-n array as a jagged array of arrays; the value must still
+            # be rectangular.
+            hash<XsdEncodedArrayShape> row = XsdEncodedArrayHelper::derive(declared.item, declared.rank - 1,
+                declared.nested);
+            result = map decodeRow(en, tmap, mrh, $1.value, row), members;
+            if (!exists XsdEncodedArrayHelper::rectangular(result, declared.rank)) {
+                throw SOAP_DESERIALIZATION_ERROR, sprintf("jagged instance of rank-%d array %Y is not rectangular",
+                    declared.rank, name);
+            }
+        } else {
+            throw SOAP_DESERIALIZATION_ERROR, sprintf("SOAP-ENC:arrayType %y does not match the declared shape of "
+                "array %Y", type_attribute, name);
+        }
+        return exists shared ? {shared: result} : result;
+    }
+
+    # decodes a member that is itself an array; the member's #2899 name wrapper is not part of the value
+    private list<auto> decodeRow(string en, hash<string, XsdAbstractType> tmap, *hash<auto> mrh, auto member,
+            hash<XsdEncodedArrayShape> level) {
+        auto row = decodeArray(en, tmap, mrh, getValue(mrh, member), level);
+        return row.typeCode() == NT_HASH ? row.firstValue() : row;
+    }
+
+    private list<auto> decodeMembers(string en, hash<string, XsdAbstractType> tmap, *hash<auto> mrh,
+            list<hash<auto>> members, hash<XsdEncodedArrayShape> level, *string offset_attribute) {
+        if (level.rank > 1 && !level.lengths) {
+            if (exists offset_attribute) {
+                throw SOAP_DESERIALIZATION_ERROR, sprintf("SOAP-ENC:offset on array %Y needs asserted lengths", name);
+            }
+            # rows transmitted as nested members, as this module produced them before P8
+            hash<XsdEncodedArrayShape> row = XsdEncodedArrayHelper::derive(level.item, level.rank - 1, level.nested);
+            return map decodeRow(en, tmap, mrh, $1.value, row), members;
+        }
+        list<int> offset = exists offset_attribute
+            ? XsdEncodedArrayHelper::indices(offset_attribute, level.rank, "offset", SOAP_DESERIALIZATION_ERROR)
+            : map 0, xrange(level.rank);
+        # without asserted lengths a rank-1 array holds the transmitted members after the offset
+        list<int> lengths = level.lengths ?: (members.size() + offset[0],);
+        int slots = XsdEncodedArrayHelper::slots(lengths, SOAP_DESERIALIZATION_ERROR);
+        # the offset is checked against the size only when members are placed: an empty array may start at [0]
+        int next = members ? XsdEncodedArrayHelper::flatten(offset, lengths, SOAP_DESERIALIZATION_ERROR) : 0;
+        list<auto> flat();
+        for (int i = 0; i < slots; ++i) {
+            push flat, NOTHING;
+        }
+        hash<string, bool> placed();
+        foreach hash<auto> entry in (members) {
+            # SOAP-ENC:position belongs to the member accessor, which may itself refer to an independent element
+            auto accessor = entry.value;
+            int index = next;
+            if (accessor.typeCode() == NT_HASH && accessor."^attributes^") {
+                hash<string, string> member_namespaces = XsdBase::getAttributeNamespaces(accessor."^attributes^");
+                foreach string key in (keys accessor."^attributes^") {
+                    (*string prefix, *string local) = key =~ x/^([^:]+):([^:]+)$/;
+                    if (prefix && member_namespaces{prefix} == SOAP_ENCODING && local == "position") {
+                        index = XsdEncodedArrayHelper::flatten(XsdEncodedArrayHelper::indices(
+                            remove accessor."^attributes^"{key}, level.rank, "position", SOAP_DESERIALIZATION_ERROR),
+                            lengths, SOAP_DESERIALIZATION_ERROR);
+                    }
+                }
+            }
+            auto value = getValue(mrh, accessor);
+            if (index >= slots) {
+                throw SOAP_DESERIALIZATION_ERROR, sprintf("array %Y transmits more members than its asserted size %y",
+                    name, lengths);
+            }
+            if (placed{index}) {
+                throw SOAP_DESERIALIZATION_ERROR, sprintf("array %Y transmits member %d twice", name, index);
+            }
+            placed{index} = True;
+            next = index + 1;
+            if (XsdArrayType::isNil(value)) {
+                continue;
+            }
+            if (level.nested) {
+                flat[index] = decodeRow(en, tmap, mrh, value, XsdEncodedArrayHelper::member(level));
+            } else {
+                flat[index] = XsdDocumentValueHelper::deserializeValue(elementType, en, tmap, mrh, value);
+            }
+        }
+        return level.lengths ? XsdEncodedArrayHelper::reshape(flat, level.lengths) : flat;
+    }
+
+    # an xsi:nil member is an absent value
+    private static bool isNil(auto value) {
+        if (value.typeCode() != NT_HASH || !value."^attributes^") {
+            return False;
+        }
+        hash<string, string> namespaces = XsdBase::getAttributeNamespaces(value."^attributes^");
+        foreach string key in (keys value."^attributes^") {
+            (*string prefix, *string local) = key =~ x/^([^:]+):([^:]+)$/;
+            if (prefix && namespaces{prefix} == XSI_NS && local == "nil") {
+                return inlist(XsdSimpleType::normalizeWhiteSpace(value."^attributes^"{key}, "collapse"), ("true", "1"));
+            }
+        }
+        return False;
     }
 }
 

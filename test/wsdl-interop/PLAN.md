@@ -1575,3 +1575,18 @@ fragment references resolve; `SOAP-ENC:Array` and the encoding namespace's built
 a single type-based RPC part serializes its bare struct. [soap-encoded-references](../soap-encoded-references.qtest)
 has 7 cases and 52 assertions. 29 of the 31 Axis round 2 operations now decode and re-encode. See the
 [design](../../design/soap-encoding.md) and `EXECUTION.md`.
+
+## P8-02b: SOAP 1.1 arrays
+
+Encoded arrays follow SOAP 1.1 section 5.4.2:
+
+- rank-n arrays travel as row-major members with asserted lengths;
+- jagged arrays nest member arrays with their own `arrayType`;
+- `SOAP-ENC:offset` and `SOAP-ENC:position` place members, with untransmitted and nil members as `NOTHING`;
+- the slots an asserted size may allocate are bounded;
+- Axis's jagged form of a rank-n declaration is accepted when it is rectangular;
+- the qorelanguage/qore#2899 member-name representation is kept;
+- a literal element of an encoded array type takes a list as its one value.
+
+[soap-encoded-arrays](../soap-encoded-arrays.qtest) has 9 cases and 68 assertions. All 31 Axis round 2
+operations decode and re-encode. See the [design](../../design/soap-encoding.md) and `EXECUTION.md`.

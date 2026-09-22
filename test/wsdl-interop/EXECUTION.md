@@ -10399,3 +10399,38 @@ the worker took 204 s at low host load and 307-416 s at load averages of 11-18, 
 P8-02a parallel full-suite run. Under the recalibration policy, which requires at least 3.5x headroom over the
 measured maximum, the deadline is now 1800 s (4.3x of 416 s). The README example matches. The gate passes in
 271 s.
+
+## P8-02b: SOAP 1.1 arrays
+
+`XsdArrayType` now follows SOAP 1.1 section 5.4.2. The earlier code confused multi-dimensional with jagged arrays
+(`int[,]` and `int[][]` both became "2 dimensions"). It wrote rank-n arrays as nested row elements with
+`arrayType="xsd:int[,]"` and no lengths, which a receiver cannot reshape and Axis cannot read. It ignored
+`SOAP-ENC:offset` and `SOAP-ENC:position`. It never resolved member references before P8-02a. And it serialized
+a plain list into a `^value^` list, which `make_xml` rejects, so plain-list arrays had never produced XML. See
+`design/soap-encoding.md` for the model.
+
+Findings while building it:
+
+- Axis encodes the WSDL's `string[,]` as the jagged `xsd:string[][2]`, because Java's `String[][]` is jagged. A
+  rank-n declaration accepts that form when the result is rectangular.
+- A literal element whose type is an encoded array rejected a list as too many occurrences, because
+  `XsdArrayType` inherited `hasNativeListValue() == False`. The same failure exists at HEAD. It now reports
+  `True`: a native list is one array value.
+- Decoded member names are reduced to the local name: the prefixed name of encoded messages and the `{uri}local`
+  name of expanded literal documents alike, so `SOAP-ENC:`-named output members read back unchanged.
+- Negative and edge tests found three defects during development. A flat list passed for a rank-2 type crashed in
+  `flat()`: the rank-1 rectangularity check accepted scalars. A one-element nested-rank list slice recursed until
+  the stack limit. And a referenced member's `position` was read from the resolved independent element instead
+  of its accessor.
+
+The #2899 representation (`{member name: list}`) is kept. The one place where it is inherently ambiguous is a
+single RPC array part whose members are named after the part, as Axis names them. The data round-trips, and the
+member names become `item`; they are not significant, and this is documented.
+
+`test/soap-encoded-arrays.qtest` has 9 cases and 68 assertions: rank 2 and 3 with lengths, jagged arrays, Axis's
+jagged-for-rank form, partial and sparse arrays in 1-D and 2-D, nil members, malformed and mismatched shapes,
+duplicate and out-of-range positions, the slot limit, member names, references inside arrays, and a literal array
+element. Two mutations (no reshape, positions ignored) fail 4 and 2 cases respectively. `soap-features.qtest` and
+`wsdl-array-context.qtest` pinned the non-conformant wire form and the hash-level `^value^` round trip. They now
+assert the section 5.4.2 form, the #2899 key and an explicit error for a flat list passed to a rank-2 type.
+All 273 Qore suites pass. All 31 Axis round 2 operations decode and re-encode.

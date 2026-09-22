@@ -1,0 +1,234 @@
+#!/usr/bin/env qore
+# -*- mode: qore; indent-tabs-mode: nil -*-
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires xml
+%requires ../qlib/WSDL.qm
+
+%exec-class SoapEncodedArraysTest
+
+# SOAP 1.1 section 5.4.2 arrays: rank and asserted lengths, jagged arrays, partially transmitted and sparse
+# arrays, nil members and the qorelanguage/qore#2899 member-name representation.
+public class SoapEncodedArraysTest inherits QUnit::Test {
+    private {
+        const Array = '<complexType name="%s"><complexContent><restriction base="SOAP-ENC:Array">
+            <attribute ref="SOAP-ENC:arrayType" wsdl:arrayType="%s"/></restriction></complexContent></complexType>';
+        const Operation = '<operation name="%s"><soap:operation soapAction=""/>
+            <input><soap:body use="encoded" namespace="urn:arrays" encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"/></input>
+            <output><soap:body use="encoded" namespace="urn:arrays" encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"/></output></operation>';
+        const Types = {"echoMatrix": "Matrix", "echoCube": "Cube", "echoJagged": "Jagged", "echoInts": "Ints"};
+
+        const Envelope = '<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/"
+            xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+            xmlns:soapenc="http://schemas.xmlsoap.org/soap/encoding/"><soapenv:Body><ns1:%s
+            soapenv:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/" xmlns:ns1="urn:arrays">%s</ns1:%s>%s
+            </soapenv:Body></soapenv:Envelope>';
+
+        list<WebService> services;
+    }
+
+    constructor() : QUnit::Test("SOAP encoded arrays", "1.0") {
+        WebService source(wsdl());
+        services = (source, Serializable::deserialize(source.serialize()));
+        addTestCase("a rank-n array travels flat with its asserted lengths", \multiDimensional());
+        addTestCase("jagged arrays nest arrays with their own arrayType", \jagged());
+        addTestCase("a jagged instance of a rank-n declaration must be rectangular", \jaggedForRank());
+        addTestCase("partially transmitted arrays honor SOAP-ENC:offset", \partial());
+        addTestCase("sparse arrays place members by SOAP-ENC:position", \sparse());
+        addTestCase("nil members are absent values", \nilMembers());
+        addTestCase("malformed or mismatched arrayType values and sizes are rejected", \invalidShapes());
+        addTestCase("member names and references", \members());
+        addTestCase("a literal element of an encoded array type", \literalElement());
+        set_return_value(main());
+    }
+
+    static string wsdl() {
+        string types = sprintf(Array, "Matrix", "xsd:int[,]") + sprintf(Array, "Cube", "xsd:string[,,]")
+            + sprintf(Array, "Jagged", "xsd:int[][]") + sprintf(Array, "Ints", "xsd:int[]");
+        string messages;
+        string operations;
+        string bindings;
+        foreach hash<auto> op in (Types.pairIterator()) {
+            messages += sprintf('<message name="%sRequest"><part name="input" type="s:%s"/></message>'
+                '<message name="%sResponse"><part name="return" type="s:%s"/></message>', op.key, op.value, op.key, op.value);
+            operations += sprintf('<operation name="%s"><input message="tns:%sRequest"/><output message="tns:%sResponse"/>'
+                '</operation>', op.key, op.key, op.key);
+            bindings += sprintf(Operation, op.key);
+        }
+        return '<definitions xmlns="http://schemas.xmlsoap.org/wsdl/" xmlns:soap="http://schemas.xmlsoap.org/wsdl/soap/"
+            xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:SOAP-ENC="http://schemas.xmlsoap.org/soap/encoding/"
+            xmlns:wsdl="http://schemas.xmlsoap.org/wsdl/" xmlns:tns="urn:arrays" xmlns:s="urn:arrays:xsd"
+            targetNamespace="urn:arrays"><types><schema xmlns="http://www.w3.org/2001/XMLSchema" targetNamespace="urn:arrays:xsd">
+            <import namespace="http://schemas.xmlsoap.org/soap/encoding/"/>' + types + '
+            <element name="literal" type="s:Ints"/></schema></types>' + messages + '
+            <message name="literalMessage"><part name="body" element="s:literal"/></message>
+            <portType name="Port">' + operations + '<operation name="echoLiteral"><input message="tns:literalMessage"/>
+            <output message="tns:literalMessage"/></operation></portType>
+            <binding name="Binding" type="tns:Port"><soap:binding style="rpc" transport="http://schemas.xmlsoap.org/soap/http"/>'
+            + bindings + '</binding>
+            <binding name="Literal" type="tns:Port"><soap:binding style="document" transport="http://schemas.xmlsoap.org/soap/http"/>
+            <operation name="echoLiteral"><soap:operation soapAction="urn:literal"/><input><soap:body use="literal"/></input>
+            <output><soap:body use="literal"/></output></operation></binding>
+            <service name="Service"><port name="Port" binding="tns:Binding"><soap:address location="http://example.invalid/"/></port>
+            <port name="LiteralPort" binding="tns:Literal"><soap:address location="http://example.invalid/literal"/></port></service>
+            </definitions>';
+    }
+
+    static string request(string operation, string accessor, *string independent) {
+        return sprintf(Envelope, operation, accessor, operation, independent ?? "");
+    }
+
+    static auto decode(WSOperation op, string xml) {
+        return op.deserializeRequest(parse_xml(xml, XPF_PRESERVE_ORDER));
+    }
+
+    # serializes an argument and returns the decoded value and the accessor's arrayType
+    static list<auto> roundTrip(WSOperation op, auto value) {
+        string body = op.serializeRequest(value).body;
+        *string array_type = (body =~ x/<input [^>]*soapenc:arrayType="([^"]+)"/)[0];
+        return (decode(op, body), array_type);
+    }
+
+    multiDimensional() {
+        foreach WebService ws in (services) {
+            WSOperation op = ws.getOperation("echoMatrix");
+            (auto value, *string array_type) = roundTrip(op, ((1, 2, 3), (4, 5, 6)));
+            assertEq("xsd:int[2,3]", array_type);
+            assertEq({"item": ((1, 2, 3), (4, 5, 6))}, value);
+            # row-major members from another sender, named freely
+            assertEq({"m": ((1, 2), (3, 4), (5, 6))}, decode(op, request("echoMatrix",
+                '<input soapenc:arrayType="xsd:int[3,2]"><m>1</m><m>2</m><m>3</m><m>4</m><m>5</m><m>6</m></input>')));
+            assertThrows("SOAP-SERIALIZATION-ERROR", "needs a rectangular value", \op.serializeRequest(), (((1, 2), (3,)),));
+            op = ws.getOperation("echoCube");
+            (value, array_type) = roundTrip(op, (((("a", "b"), ("c", "d")), (("e", "f"), ("g", "h")))));
+            assertEq("xsd:string[2,2,2]", array_type);
+            assertEq({"item": (((("a", "b"), ("c", "d")), (("e", "f"), ("g", "h"))))}, value);
+        }
+    }
+
+    jagged() {
+        foreach WebService ws in (services) {
+            WSOperation op = ws.getOperation("echoJagged");
+            (auto value, *string array_type) = roundTrip(op, ((1,), (2, 3, 4), ()));
+            assertEq("xsd:int[][]", array_type);
+            assertEq({"item": ((1,), (2, 3, 4), ())}, value);
+            string xml = request("echoJagged", '<input soapenc:arrayType="xsd:int[][2]">'
+                '<row soapenc:arrayType="xsd:int[1]" xsi:type="soapenc:Array"><v>7</v></row>'
+                '<row soapenc:arrayType="xsd:int[2]" xsi:type="soapenc:Array"><v>8</v><v>9</v></row></input>');
+            assertEq({"row": ((7,), (8, 9))}, decode(op, xml));
+        }
+    }
+
+    jaggedForRank() {
+        foreach WebService ws in (services) {
+            WSOperation op = ws.getOperation("echoMatrix");
+            # Apache Axis sends Java's int[][] for an int[,] declaration
+            string rows = '<input soapenc:arrayType="xsd:int[][2]" xsi:type="soapenc:Array">'
+                '<input soapenc:arrayType="xsd:int[2]" xsi:type="soapenc:Array"><input>1</input><input>2</input></input>'
+                '<input soapenc:arrayType="xsd:int[%d]" xsi:type="soapenc:Array"><input>3</input>%s</input></input>';
+            assertEq({"input": ((1, 2), (3, 4))}, decode(op, request("echoMatrix", sprintf(rows, 2, '<input>4</input>'))));
+            assertThrows("SOAP-DESERIALIZATION-ERROR", "is not rectangular", \decode(),
+                (op, request("echoMatrix", sprintf(rows, 1, ""))));
+        }
+    }
+
+    partial() {
+        foreach WebService ws in (services) {
+            WSOperation op = ws.getOperation("echoInts");
+            # SOAP 1.1 section 5.4.2.1: members 2 and 3 of a five-member array
+            assertEq({"i": (NOTHING, NOTHING, 20, 30, NOTHING)}, decode(op, request("echoInts",
+                '<input soapenc:arrayType="xsd:int[5]" soapenc:offset="[2]"><i>20</i><i>30</i></input>')));
+            # without asserted lengths the array ends with its last transmitted member
+            assertEq({"i": (NOTHING, 5)}, decode(op, request("echoInts",
+                '<input soapenc:arrayType="xsd:int[]" soapenc:offset="[1]"><i>5</i></input>')));
+            # a bare index is accepted for a rank-1 offset
+            assertEq({"i": (1, 2)}, decode(op, request("echoInts",
+                '<input soapenc:arrayType="xsd:int[]" soapenc:offset="0"><i>1</i><i>2</i></input>')));
+            op = ws.getOperation("echoMatrix");
+            assertEq({"i": ((NOTHING, NOTHING), (NOTHING, 4))}, decode(op, request("echoMatrix",
+                '<input soapenc:arrayType="xsd:int[2,2]" soapenc:offset="[1,1]"><i>4</i></input>')));
+            assertThrows("SOAP-DESERIALIZATION-ERROR", "needs asserted lengths", \decode(), (op, request("echoMatrix",
+                '<input soapenc:arrayType="xsd:int[,]" soapenc:offset="[1,1]"><i>4</i></input>')));
+        }
+    }
+
+    sparse() {
+        foreach WebService ws in (services) {
+            WSOperation op = ws.getOperation("echoInts");
+            # SOAP 1.1 section 5.4.2.2
+            assertEq({"i": (NOTHING, 10, NOTHING, 30)}, decode(op, request("echoInts", '<input soapenc:arrayType="xsd:int[4]">'
+                '<i soapenc:position="[3]">30</i><i soapenc:position="[1]">10</i></input>')));
+            op = ws.getOperation("echoMatrix");
+            assertEq({"i": ((NOTHING, 1), (2, NOTHING))}, decode(op, request("echoMatrix",
+                '<input soapenc:arrayType="xsd:int[2,2]"><i soapenc:position="[0,1]">1</i>'
+                '<i soapenc:position="[1,0]">2</i></input>')));
+            assertThrows("SOAP-DESERIALIZATION-ERROR", "transmits member 1 twice", \decode(), (op, request("echoMatrix",
+                '<input soapenc:arrayType="xsd:int[2,2]"><i soapenc:position="[0,1]">1</i>'
+                '<i soapenc:position="[0,1]">2</i></input>')));
+            assertThrows("SOAP-DESERIALIZATION-ERROR", "outside the asserted size", \decode(), (op, request("echoMatrix",
+                '<input soapenc:arrayType="xsd:int[2,2]"><i soapenc:position="[2,0]">1</i></input>')));
+            assertThrows("SOAP-DESERIALIZATION-ERROR", "invalid SOAP-ENC:position", \decode(), (op, request("echoMatrix",
+                '<input soapenc:arrayType="xsd:int[2,2]"><i soapenc:position="[1]">1</i></input>')));
+        }
+    }
+
+    nilMembers() {
+        foreach WebService ws in (services) {
+            WSOperation op = ws.getOperation("echoInts");
+            assertEq({"i": (1, NOTHING, 3)}, decode(op, request("echoInts", '<input soapenc:arrayType="xsd:int[3]">'
+                '<i>1</i><i xsi:nil="true"/><i>3</i></input>')));
+            (auto value, *string array_type) = roundTrip(op, (1, NOTHING, 3));
+            assertEq({"item": (1, NOTHING, 3)}, value);
+        }
+    }
+
+    invalidShapes() {
+        foreach WebService ws in (services) {
+            WSOperation op = ws.getOperation("echoMatrix");
+            assertThrows("SOAP-DESERIALIZATION-ERROR", "invalid SOAP-ENC:arrayType", \decode(),
+                (op, request("echoMatrix", '<input soapenc:arrayType="xsd:int[x,2]"><i>1</i></input>')));
+            assertThrows("SOAP-DESERIALIZATION-ERROR", "must assert every length or none", \decode(),
+                (op, request("echoMatrix", '<input soapenc:arrayType="xsd:int[2,]"><i>1</i></input>')));
+            assertThrows("SOAP-DESERIALIZATION-ERROR", "does not match the declared shape", \decode(),
+                (op, request("echoMatrix", '<input soapenc:arrayType="xsd:int[4]"><i>1</i></input>')));
+            assertThrows("SOAP-DESERIALIZATION-ERROR", "more members than its asserted size", \decode(),
+                (op, request("echoMatrix", '<input soapenc:arrayType="xsd:int[1,1]"><i>1</i><i>2</i></input>')));
+            # an asserted size cannot force an unbounded allocation
+            assertThrows("SOAP-DESERIALIZATION-ERROR", "exceeds the limit", \decode(),
+                (op, request("echoMatrix", '<input soapenc:arrayType="xsd:int[2000,2000]"><i>1</i></input>')));
+        }
+    }
+
+    members() {
+        foreach WebService ws in (services) {
+            WSOperation op = ws.getOperation("echoInts");
+            # a shared member name is kept as its local name, whatever the prefix
+            assertEq({"v": (1, 2)}, decode(op, request("echoInts",
+                '<input soapenc:arrayType="xsd:int[2]"><soapenc:v>1</soapenc:v><soapenc:v>2</soapenc:v></input>')));
+            # differently named members give a plain list
+            assertEq((1, 2), decode(op, request("echoInts",
+                '<input soapenc:arrayType="xsd:int[2]"><a>1</a><b>2</b></input>')));
+            # a {name: list} value names its members
+            string body = op.serializeRequest({"input": {"entry": (5, 6)}}).body;
+            assertTrue(body =~ /<soapenc:entry[^>]*>5</, body);
+            assertEq({"entry": (5, 6)}, decode(op, body));
+            # members of multi-dimensional and sparse arrays can be references
+            op = ws.getOperation("echoMatrix");
+            assertEq({"i": ((10, NOTHING), (NOTHING, 20))}, decode(op, request("echoMatrix",
+                '<input soapenc:arrayType="xsd:int[2,2]"><i href="#a"/><i soapenc:position="[1,1]" href="#b"/></input>',
+                '<multiRef id="a" xsi:type="xsd:int">10</multiRef><multiRef id="b" xsi:type="xsd:int">20</multiRef>')));
+        }
+    }
+
+    literalElement() {
+        foreach WebService ws in (services) {
+            WSOperation op = ws.getBindingOperation("Literal", "echoLiteral");
+            # a plain list is one array value, not repeated occurrences of the element
+            string body = op.serializeRequest((3, 4), NOTHING, NOTHING, NOTHING, NOTHING, NOTHING, "Literal").body;
+            assertEq({"item": (3, 4)}, op.deserializeRequest(parse_xml(body, XPF_PRESERVE_ORDER), "Literal"));
+        }
+    }
+}
