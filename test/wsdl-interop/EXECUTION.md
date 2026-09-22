@@ -10220,3 +10220,36 @@ never updated. The handler is correct.
 The gate now asserts status 400, `text/plain;charset=UTF-8`, and the exact diagnostic body for each
 case. The following valid request must still return the expected payload. All three multipart reader
 tests pass.
+
+### Triage: list-values worker performance regression and compiled constant regexes
+
+`test_regex_classes.py` and `test_ieee_facets.py` subclass `ListValuesTest` and share its
+`sized-facet-consumers.qr` worker, which runs under a fixed 90 s limit. The gates pass in isolation only
+when the worker finishes just under that limit. Load is not the cause. On one captured 384-row manifest,
+with byte-identical output, the worker takes **91.4 s** at the current WSDL against **25.9 s** at `039958f`
+(2026-09-09). AST and IR execution modes show the same ratio, so the extra time is module work, not JIT
+tiering.
+
+A timing profile of all 121 first-parent qlib commits since `039958f` spreads the growth over about 25 P5-P7
+validation commits of 3 to 4 s each. The largest steps are `5dd9f22` (P7-01 envelope validation, +9.2 s)
+and `b1f38c4` (ordered particle serialization, +7.4 s). Every worker phase grew. Serialization went from
+5.3 s to 25.8 s and value conversion from 1.8 s to 9.8 s.
+
+One cause was a defect. `XsdNameLexicalHelper::lexical()` checked every Name, NCName, QName and NMTOKEN
+with `regex()` against a multi-kilobyte Unicode class, recompiling it on every call. `Namespaces::isNCName()`,
+the XSD pattern matcher's character classes, sample-character search and the XSD regex parser did the same.
+Every SOAP element name and QName value passes through these checks, so P7 envelope validation multiplied
+the cost. These patterns are now compiled once. A pattern that fails to compile still reports its error when
+a match evaluates it, as before. The worker drops to **79.7 s** with byte-identical output. The full suite
+passes 449 targets, 3,581 cases and 172,677 assertions, except the two IEEE gates blocked on the core
+NaN-boxing defect. Its total time drops from 6,043 s to 5,401 s. Audit:
+`audits/compiled-constant-regexes.md`.
+
+The rest of the growth is spread thinly. Caching each simple type's derived facet kind, base names and facet
+summaries gave no measurable gain (79.6 s), so that change was not made. As decided on 2026-09-22, a
+performance pass follows before P7 acceptance. The guard is recalibrated only if still needed, and P9 gains a
+deterministic benchmark item.
+
+Profiling found a separate Qore core defect: `get_all_thread_call_stacks()` reads partially destroyed
+JIT/AOT stack locations. It is handed off at `/tmp/qore-thread-call-stacks-race/README.md`. `module-xml`
+does not use that API.
