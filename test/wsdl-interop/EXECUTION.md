@@ -10316,3 +10316,15 @@ the PCRE2 JIT class of P2-10.
 The Qore `get_all_thread_call_stacks()` race handed off during the performance pass is fixed in `fb66fa989`. Its
 reproducer passes 3 of 3 runs with about 16 million samples each. A Qore-level sampling profile of the list-values
 worker is now possible and is flat, with no function above about 3.6% self time.
+
+## P8 start: approved scope
+
+On 2026-09-22 the user approved implementing SOAP 1.2 Encoding and the SOAP 1.2 RPC Representation (Part 2
+sections 3-4, Appendix B) instead of declaring them unsupported. Apache Axis 1.4 is pinned as the live
+independent SOAP 1.1 rpc/encoded peer, with W3C test-collection and SOAPBuilders interop messages as a pinned
+corpus.
+
+A probe before the decision found the defect this phase must remove. A SOAP 1.2 RPC binding declaring
+`encodingStyle="http://www.w3.org/2003/05/soap-encoding"` serializes its wrapper with
+`soapenv:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"` and the SOAP 1.1 `soapenc` namespace. The
+declared encoding is silently replaced. The PLAN.md P8 section records the scope and seven increments.

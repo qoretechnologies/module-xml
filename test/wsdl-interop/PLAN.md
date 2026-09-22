@@ -378,6 +378,32 @@ and every generated fault validates. Test transport interruption and exception-s
 - Make limits on depth, references, counts and payload size explicit and testable. Implement cancellation
   and deterministic cleanup for interrupted transfers and invalid graphs without truncating valid data.
 
+**Approved scope (2026-09-22):** implement SOAP 1.2 Encoding and the SOAP 1.2 RPC Representation (Part 2
+sections 3-4 and Appendix B), which covers all 26 W3C assertions routed to P8. The SOAP 1.1 section 5 rules stay
+distinct. Today a SOAP 1.2 binding that declares the SOAP 1.2 `encodingStyle` is serialized with the SOAP 1.1
+encoding namespace; that silent substitution is a defect this phase removes. The independent encoding peer is
+Apache Axis 1.4: Maven Central JARs, pinned offline by SHA-256 like CXF, for live SOAP 1.1 rpc/encoded exchanges
+in both directions. It is complemented by a pinned corpus of W3C SOAP 1.2 test-collection and SOAPBuilders
+interop messages. CXF 4.1.3, already pinned, is the live SwA and MTOM/XOP peer.
+
+Increments:
+
+1. P8-01 - pin and verify the independent sources: the Axis 1.4 closure with a manifest and notices, a Java 17
+   smoke exchange, and the encoded message corpus with provenance.
+2. P8-02 - SOAP 1.1 encoding completeness: arrays (rank, dimensions, offset, position/sparse, partial), multi-ref
+   sharing and cycles, nil and mixed values, both directions, against Axis and the corpus.
+3. P8-03 - SOAP 1.2 encoding graph: `enc:id`/`enc:ref` with the uniqueness constraints, `nodeType`, `itemType`,
+   `arraySize`, nil and type-name computation, both directions; removes the 1.1 substitution.
+4. P8-04 - SOAP 1.2 RPC Representation: invocation, response and `rpc:result`, the one-child encoding
+   restriction, RPC headers and faults, and Appendix B name mapping.
+5. P8-05 - attachment reference semantics: SwA `cid:` resolution exactly once, rejection of missing,
+   duplicate, malformed or conflicting identifiers, MTOM/XOP in both directions against live CXF, SOAP 1.2
+   content types, and binary fidelity for empty, large and many parts.
+6. P8-06 - explicit, tested limits on graph depth, references, counts and payload size, plus cancellation
+   and deterministic cleanup for interrupted transfers and invalid graphs.
+7. P8-07 - revalidate the 26 routed ledger rows against the current text and map them to tests; P8
+   acceptance.
+
 **Acceptance:** pinned CXF attachment contracts and an independent encoded-message corpus pass in both
 directions with byte-identical binary content and preserved reference semantics. Negative messages fail
 with descriptive protocol errors; no hangs, leaked resources or unbounded traversal. Profile claims
