@@ -1,0 +1,243 @@
+#!/usr/bin/env qore
+# -*- mode: qore; indent-tabs-mode: nil -*-
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires xml
+%requires HttpServer
+%requires ../qlib/WSDL.qm
+%requires ../qlib/SoapHandler.qm
+%try-module json
+%define NoJson
+%endtry
+%ifdef NoJson
+throw "MISSING-MODULE", "SOAP 1.2 encoding tests require json";
+%else
+%exec-class Soap12EncodingTest
+
+# SOAP 1.2 Encoding (SOAP 1.2 Part 2 section 3): the envelope-wide enc:id/enc:ref graph, enc:nodeType, encoding
+# style selection and faults, with the W3C SOAP 1.2 test collection's messages (wsdl-interop/encoded-corpus).
+public class Soap12EncodingTest inherits QUnit::Test {
+    private {
+        const Envelope = '<env:Envelope xmlns:env="http://www.w3.org/2003/05/soap-envelope" '
+            'xmlns:enc="http://www.w3.org/2003/05/soap-encoding" xmlns:xsd="http://www.w3.org/2001/XMLSchema" '
+            'xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:t="http://example.org/ts-tests" '
+            'xmlns:s="http://example.org/ts-tests/xsd">%s<env:Body><t:%s '
+            'env:encodingStyle="http://www.w3.org/2003/05/soap-encoding">%s</t:%s></env:Body></env:Envelope>';
+        const Struct = '<varString>%s</varString><varInt>%d</varInt><varFloat>1.5</varFloat>';
+
+        hash<string, hash<auto>> tests;
+        string contract;
+        list<WebService> services;
+    }
+
+    constructor() : QUnit::Test("SOAP 1.2 encoding graph", "1.0") {
+        string dir = get_script_dir() + "/wsdl-interop/encoded-corpus/";
+        tests = map {$1.id: $1}, parse_json(ReadOnlyFile::readTextFile(dir + "w3c-soap12.json")).tests;
+        contract = ReadOnlyFile::readTextFile(dir + "w3c-soap12.wsdl");
+        WebService source(contract);
+        services = (source, Serializable::deserialize(source.serialize()));
+        addTestCase("encoded structs match their members by name", \structs());
+        addTestCase("references span the envelope and may be inline", \references());
+        addTestCase("reference errors carry the SOAP 1.2 subcodes", \referenceErrors());
+        addTestCase("enc:nodeType must name the kind of its element's value", \nodeTypes());
+        addTestCase("the binding's encoding style selects the rules and unknown styles fault", \encodingStyles());
+        addTestCase("the handler reports encoding faults with their codes and subcodes", \handler());
+        set_return_value(main());
+    }
+
+    private string message(string id, string from = "Node A") {
+        return (select tests{id}.messages, $1.from == from)[0].xml;
+    }
+
+    private auto collection(WebService ws, string id, string operation) {
+        string binding = message(id) =~ /soapinterop\.org\// ? "SbBinding" : "TsBinding";
+        return ws.getBindingOperation(binding, operation).deserializeRequest(parse_xml(message(id), XPF_PRESERVE_ORDER),
+            binding);
+    }
+
+    private auto request(WebService ws, string operation, string accessors, string header = "") {
+        return ws.getBindingOperation("TsBinding", operation).deserializeRequest(parse_xml(sprintf(Envelope,
+            header ? "<env:Header>" + header + "</env:Header>" : "", operation, accessors, operation),
+            XPF_PRESERVE_ORDER), "TsBinding");
+    }
+
+    private static hash<auto> struct(string text, int number) {
+        return {"varString": text, "varInt": number, "varFloat": 1.5};
+    }
+
+    structs() {
+        hash<auto> hello = {"varString": "hello world", "varInt": 42, "varFloat": 0.004999999888241291};
+        foreach WebService ws in (services) {
+            # the collection sends varInt, varFloat, varString; the schema declares varString first
+            assertEq(hello, collection(ws, "T41", "echoStruct"));
+            assertEq(hello, collection(ws, "SBR1-echoStruct", "echoStruct"));
+            assertEq({"item": (hello, {"varString": "bye world", "varInt": 43, "varFloat": 0.12300000339746475})},
+                collection(ws, "T42", "echoStructArray"));
+            assertEq(hello + {"varStruct": {"varString": "nested struct", "varInt": 99, "varFloat": 4.069899799119536e-12}},
+                collection(ws, "T45", "echoNestedStruct"));
+            assertEq(hello + {"varArray": {"item": ("red", "blue", "green")}}, collection(ws, "T46", "echoNestedArray"));
+            # repeated labels are not a struct and keep their order
+            assertThrows("SOAP-DESERIALIZATION-ERROR", "do not match the complete particle", \request(),
+                (ws, "echoStruct", '<inputStruct><varInt>1</varInt><varInt>2</varInt><varString>x</varString>'
+                    '<varFloat>1</varFloat></inputStruct>'));
+        }
+        # the same applies to SOAP 1.1 encoding; literal content keeps its declared order
+        WebService note(ReadOnlyFile::readTextFile(get_script_dir() + "/wsdl-interop/encoded-corpus/soap11-note.wsdl"));
+        string soap11 = '<e:Envelope xmlns:e="http://schemas.xmlsoap.org/soap/envelope/"><e:Body><ns:book1 '
+            'xmlns:ns="urn:soap11-note" e:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"><Book>'
+            '<intro>i</intro><author>a</author><preface>p</preface></Book></ns:book1></e:Body></e:Envelope>';
+        assertEq({"author": "a", "preface": "p", "intro": "i"},
+            note.getOperation("book1").deserializeRequest(parse_xml(soap11, XPF_PRESERVE_ORDER)));
+        WebService literal(replace(replace(ReadOnlyFile::readTextFile(get_script_dir()
+            + "/wsdl-interop/encoded-corpus/soap11-note.wsdl"), 'use="encoded" namespace="urn:soap11-note" '
+            'encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"', 'use="literal" namespace="urn:soap11-note"'),
+            "soapenv:", "soapenv:"));
+        assertThrows("SOAP-DESERIALIZATION-ERROR", "do not match the complete particle",
+            \literal.getOperation("book1").deserializeRequest(), (parse_xml(replace(soap11,
+            ' e:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"', ""), XPF_PRESERVE_ORDER),));
+    }
+
+    references() {
+        foreach WebService ws in (services) {
+            # T57: an enc:id in a header block is referenced from the Body
+            assertEq("\n        hello world\n      ", collection(ws, "T57", "echoString"));
+            # an inline multi-reference value: the second item refers to the first
+            assertEq({"item": (struct("shared", 7), struct("shared", 7))}, request(ws, "echoStructArray",
+                '<inputStructArray enc:itemType="s:SOAPStruct" enc:arraySize="2"><item enc:id="a">'
+                + sprintf(Struct, "shared", 7) + '</item><item enc:ref="a"/></inputStructArray>'));
+            # a reference may precede its target
+            assertEq({"item": (struct("later", 3), struct("later", 3))}, request(ws, "echoStructArray",
+                '<inputStructArray enc:itemType="s:SOAPStruct" enc:arraySize="2"><item enc:ref="b"/><item enc:id="b">'
+                + sprintf(Struct, "later", 3) + '</item></inputStructArray>'));
+        }
+    }
+
+    private *string subcode(code c) {
+        try {
+            c();
+        } catch (hash<ExceptionInfo> ex) {
+            assertEq("SOAP-DESERIALIZATION-ERROR", ex.err);
+            return ex.arg instanceof hash<SoapFaultOptions> && ex.arg.subcodes
+                ? sprintf("{%s}%s", ex.arg.subcodes[0].getNamespaceUri(), ex.arg.subcodes[0].getLocalName()) : "";
+        }
+        fail("no error");
+    }
+
+    referenceErrors() {
+        foreach WebService ws in (services) {
+            assertEq("{http://www.w3.org/2003/05/soap-encoding}MissingID",
+                subcode(sub () { collection(ws, "T56", "echoString"); }));
+            assertThrows("SOAP-DESERIALIZATION-ERROR", "names no enc:id", \collection(), (ws, "T56", "echoString"));
+            assertEq("{http://www.w3.org/2003/05/soap-encoding}DuplicateID", subcode(sub () {
+                request(ws, "echoStructArray", '<inputStructArray enc:itemType="s:SOAPStruct" enc:arraySize="2">'
+                    '<item enc:id="a">' + sprintf(Struct, "x", 1) + '</item><item enc:id="a">' + sprintf(Struct, "y", 2)
+                    + '</item></inputStructArray>');
+            }));
+            # T59: enc:id and enc:ref on one element
+            assertThrows("SOAP-DESERIALIZATION-ERROR", "carries both enc:id \"data\" and enc:ref \"data\"",
+                \collection(), (ws, "T59", "echoStringArray"));
+            assertThrows("SOAP-DESERIALIZATION-ERROR", "an element with enc:ref \"a\" has content of its own",
+                \request(), (ws, "echoString", '<inputString enc:ref="a">x</inputString>',
+                    '<t:h env:encodingStyle="http://www.w3.org/2003/05/soap-encoding"><v enc:id="a">y</v></t:h>'));
+            assertThrows("SOAP-DESERIALIZATION-ERROR", "SOAP encoding id \"1a\" is not an XML ID", \request(),
+                (ws, "echoString", '<inputString enc:id="1a">x</inputString>'));
+            assertThrows("SOAP-DESERIALIZATION-ERROR", "reference cycle through id \"x\"", \request(),
+                (ws, "echoNestedStruct", '<inputStruct enc:id="x">' + sprintf(Struct, "a", 1)
+                    + '<varStruct enc:ref="x"/></inputStruct>'));
+            # an identifier outside SOAP 1.2 encoding's scope cannot be referenced (section 3.1.1)
+            assertEq("{http://www.w3.org/2003/05/soap-encoding}MissingID", subcode(sub () {
+                request(ws, "echoString", '<inputString enc:ref="a"/>', '<t:h><v enc:id="a">y</v></t:h>');
+            }));
+        }
+    }
+
+    nodeTypes() {
+        foreach WebService ws in (services) {
+            assertEq("x", request(ws, "echoString", '<inputString enc:nodeType="simple">x</inputString>'));
+            assertEq(struct("x", 1), request(ws, "echoStruct", '<inputStruct enc:nodeType="struct">'
+                + sprintf(Struct, "x", 1) + '</inputStruct>'));
+            assertEq({"item": ("a",)}, request(ws, "echoStringArray", '<inputStringArray enc:nodeType="array" '
+                'enc:itemType="xsd:string" enc:arraySize="1"><item>a</item></inputStringArray>'));
+            assertThrows("SOAP-DESERIALIZATION-ERROR", "enc:nodeType \"list\" is not simple, struct or array",
+                \request(), (ws, "echoString", '<inputString enc:nodeType="list">x</inputString>'));
+            assertThrows("SOAP-DESERIALIZATION-ERROR", "enc:nodeType \"simple\" does not describe", \request(),
+                (ws, "echoStruct", '<inputStruct enc:nodeType="simple">' + sprintf(Struct, "x", 1) + '</inputStruct>'));
+            assertThrows("SOAP-DESERIALIZATION-ERROR", "enc:nodeType \"struct\" does not describe", \request(),
+                (ws, "echoStringArray", '<inputStringArray enc:nodeType="struct" enc:itemType="xsd:string" '
+                    'enc:arraySize="2"><item>a</item><item>b</item></inputStringArray>'));
+        }
+    }
+
+    encodingStyles() {
+        foreach WebService ws in (services) {
+            # XMLP-9: a parameter scoped with an unknown encoding
+            try {
+                collection(ws, "XMLP-9", "echoString");
+                fail("no error");
+            } catch (hash<ExceptionInfo> ex) {
+                assertEq("unsupported SOAP encoding style \"unknown\"", ex.desc);
+                assertEq("{http://www.w3.org/2003/05/soap-envelope}DataEncodingUnknown",
+                    sprintf("{%s}%s", ex.arg.code.getNamespaceUri(), ex.arg.code.getLocalName()));
+            }
+            # the "none" style makes no encoding claims; its content is still the part's value
+            assertEq("x", request(ws, "echoString", '<inputString '
+                'env:encodingStyle="http://www.w3.org/2003/05/soap-envelope/encoding/none">x</inputString>'));
+            string body = ws.getBindingOperation("TsBinding", "echoStruct").serializeResponse({"return": struct("x", 1)},
+                NOTHING, NOTHING, NOTHING, True, NOTHING, "TsBinding").body;
+            assertRegex('encodingStyle="http://www.w3.org/2003/05/soap-encoding"', body);
+        }
+        # the first supported URI of the binding's list selects the rules; without one, SOAP 1.1 encoding applies
+        foreach list<auto> row in (("urn:x http://www.w3.org/2003/05/soap-encoding", "http://www.w3.org/2003/05/soap-encoding"),
+                ("http://schemas.xmlsoap.org/soap/encoding/ http://www.w3.org/2003/05/soap-encoding",
+                    "http://schemas.xmlsoap.org/soap/encoding/"),
+                ("urn:x", "http://schemas.xmlsoap.org/soap/encoding/")) {
+            WebService ws(replace(contract, 'encodingStyle="http://www.w3.org/2003/05/soap-encoding"',
+                'encodingStyle="' + row[0] + '"'));
+            string body = ws.getBindingOperation("TsBinding", "echoString").serializeRequest({"inputString": "x"},
+                NOTHING, NOTHING, NOTHING, NOTHING, NOTHING, "TsBinding").body;
+            assertRegex('encodingStyle="' + row[1] + '"', body, row[0]);
+        }
+    }
+
+    handler() {
+        WebService ws = services[0];
+        SoapHandler handler(new PermissiveAuthenticator());
+        foreach string name in ("echoString", "echoStringArray", "echoStruct") {
+            handler.addMethod(ws, ws.getBindingOperation("TsBinding", name), auto sub(hash<auto> cx, auto value) {
+                return {"return": value};
+            }, NOTHING, NOTHING, NOTHING, NOTHING, NOTHING, NOTHING, "TsBinding");
+        }
+        HttpServer server(); on_exit server.stop();
+        server.setDefaultHandler("soap12", handler);
+        int port = server.addListener(<HttpListenerOptionInfo>{"node": "127.0.0.1", "service": 0}).port;
+        HTTPClient client({"url": sprintf("http://127.0.0.1:%d/ts-tests", port), "error_passthru": True});
+        code post = hash<auto> sub (string xml) {
+            hash<auto> info;
+            string reply = client.post("", xml, {"Content-Type": "application/soap+xml;charset=utf-8"}, \info);
+            return {"status": info."response-headers".status_code, "reply": reply};
+        };
+        hash<auto> r = post(message("T56"));
+        assertEq(400, r.status);
+        hash<SoapFaultInfo> fault = WSDLLib::getSOAPFaultInfo(r.reply, True);
+        assertEq("Sender", fault.code.getLocalName());
+        assertEq(("{http://www.w3.org/2003/05/soap-encoding}MissingID",),
+            map sprintf("{%s}%s", $1.getNamespaceUri(), $1.getLocalName()), fault.subcodes);
+        r = post(message("XMLP-9"));
+        assertEq(500, r.status);
+        assertEq("{http://www.w3.org/2003/05/soap-envelope}DataEncodingUnknown",
+            sprintf("{%s}%s", WSDLLib::getSOAPFaultInfo(r.reply, True).code.getNamespaceUri(),
+                WSDLLib::getSOAPFaultInfo(r.reply, True).code.getLocalName()));
+        # pretty-printed requests keep whitespace text between array members
+        r = post(message("T48"));
+        assertEq(200, r.status, r.reply);
+        assertEq({"item": ("hello", "world")}, ws.getBindingOperation("TsBinding", "echoStringArray")
+            .deserializeResponse(parse_xml(r.reply, XPF_PRESERVE_ORDER), "TsBinding"));
+        r = post(message("T41"));
+        assertEq(200, r.status, r.reply);
+        assertRegex('env[a-z]*:encodingStyle="http://www.w3.org/2003/05/soap-encoding"', r.reply);
+    }
+}
+%endif

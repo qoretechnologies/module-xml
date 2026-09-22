@@ -71,6 +71,11 @@ module SoapHandler {
     scope; otherwise the Body element selects it. Registration rejects operations that share both an action
     and a request element, or an action and an empty body, in one route scope.
 
+    @par Encoding faults
+    A request decoding error whose argument is a WSDL::SoapFaultOptions hash selects the SOAP 1.2 fault code and
+    subcodes, as SOAP 1.2 Encoding's \c enc:MissingID and \c enc:DuplicateID subcodes of \c env:Sender (HTTP 400)
+    and \c env:DataEncodingUnknown (HTTP 500) require. SOAP 1.1 has no subcodes and returns a Client fault.
+
     @par Declared header-processing errors
     A body callback or registered header processor can select a WSDL headerfault without placing its value in the body's fault detail:
     @code{.py}
@@ -91,6 +96,8 @@ module SoapHandler {
     @section soaphandler_relnotes SoapHandler Release History
 
     @subsection soaphandler_0_3_4 SoapHandler 0.3.4
+    - request decoding errors that carry WSDL::SoapFaultOptions return their SOAP 1.2 code and subcodes, such as
+      \c env:Sender with \c enc:MissingID or \c env:DataEncodingUnknown; SOAP 1.1 keeps its Client code
     - operations sharing a SOAP action, such as the SOAPBuilders interop contract's 31 operations, register
       on one route and dispatch by Body element; previously registration failed without a route path, and
       with one every request carrying the action reached the first registered operation
@@ -889,6 +896,15 @@ private nothing msglog(hash<auto> cx, hash<auto> msg) {
                 return makeSoapFaultResponseWithCode(cx, errLog, soap12, err, desc, SoapFaultMustUnderstand,
                     fmt, NOTHING, protocol.headers);
             }
+            # Decoding errors can select a SOAP 1.2 code and subcodes, such as enc:MissingID
+            if (protocol instanceof hash<SoapFaultOptions>) {
+                hash<SoapFaultOptions> options = cast<hash<SoapFaultOptions>>(protocol);
+                string code = options.code && options.code.getNamespaceUri() == SOAP_12_ENV
+                    && inlist(options.code.getLocalName(), (SoapFaultSender, SoapFaultReceiver,
+                        SoapFaultDataEncodingUnknown)) ? options.code.getLocalName() : default_code;
+                return makeSoapFaultResponseWithCode(cx, errLog, soap12, err, desc, code, fmt, NOTHING, NOTHING,
+                    options.subcodes);
+            }
             return makeSoapFaultResponseWithCode(cx, errLog, soap12, err, desc, default_code, fmt);
         }
 
@@ -919,6 +935,7 @@ private nothing msglog(hash<auto> cx, hash<auto> msg) {
             @param fmt if True, add XML formatting
             @param supported_soap12 known supported version for a VersionMismatch Upgrade header
             @param not_understood original unknown mandatory headers for SOAP 1.2 NotUnderstood metadata
+            @param subcodes SOAP 1.2 subcodes in outermost-to-innermost order; SOAP 1.1 has none
 
             @return hash with HTTP response info including:
             - \c code: HTTP status code (400 for Sender faults, 500 for Receiver/server faults)
@@ -930,7 +947,7 @@ private nothing msglog(hash<auto> cx, hash<auto> msg) {
         */
         private hash<auto> makeSoapFaultResponseWithCode(hash<auto> cx, string errLog, bool soap12, auto err,
                 auto desc, string faultCode, *bool fmt, *bool supported_soap12,
-                *list<hash<SoapNodeHeader>> not_understood) {
+                *list<hash<SoapNodeHeader>> not_understood, *list<XsdQNameValue> subcodes) {
             string reason = faultDiagnostic(err) + ": " + faultDiagnostic(desc, True);
             # do not use hash<auto> here; types must be stripped
             hash o;
@@ -959,9 +976,22 @@ private nothing msglog(hash<auto> cx, hash<auto> msg) {
                     },
                 };
                 # optional Node, Role, Detail, see https://www.w3.org/TR/soap12/, 5.4 Fault
+                if (subcodes) {
+                    *hash<auto> subcode;
+                    hash<auto> declarations();
+                    for (int i = subcodes.size() - 1; i >= 0; --i) {
+                        string uri = subcodes[i].getNamespaceUri();
+                        string prefix = "sc" + i;
+                        declarations{"xmlns:" + prefix} = uri;
+                        subcode = {"soapenv:Value": prefix + ":" + subcodes[i].getLocalName()}
+                            + (exists subcode ? {"soapenv:Subcode": subcode} : {});
+                    }
+                    o."soapenv:Envelope"."soapenv:Body"."soapenv:Fault"."soapenv:Code"."soapenv:Subcode" = subcode;
+                    o."soapenv:Envelope"."^attributes^" += declarations;
+                }
             } else {
-                # SOAP 1.1 uses Client/Server instead of Sender/Receiver
-                string soap11Code = faultCode == SoapFaultSender ? "Client"
+                # SOAP 1.1 uses Client/Server instead of Sender/Receiver and has no DataEncodingUnknown code
+                string soap11Code = faultCode == SoapFaultSender || faultCode == SoapFaultDataEncodingUnknown ? "Client"
                     : faultCode == SoapFaultReceiver ? "Server" : faultCode;
                 o = ENVELOPE_11_NS;
                 o."soapenv:Envelope"."soapenv:Body" = {
@@ -1072,7 +1102,8 @@ private nothing msglog(hash<auto> cx, hash<auto> msg) {
                     ? get_exception_string(ex)
                     : sprintf("%s: %s: %s", get_ex_pos(ex), ex.err, ex.desc);
                 return makeSoapFaultResponse(cx, str, reqsoap12, ex.err, ex.desc, NOTHING,
-                    inlist(ex.err, ("SOAP-VERSION-MISMATCH", "SOAP-MUST-UNDERSTAND")) ? ex.arg : NOTHING);
+                    inlist(ex.err, ("SOAP-VERSION-MISMATCH", "SOAP-MUST-UNDERSTAND"))
+                        || ex.arg instanceof hash<SoapFaultOptions> ? ex.arg : NOTHING);
             }
 
             if ((method.logopt & HttpServer::LP_LEVELMASK) <= loglevel && exists cx.logfunc) {
@@ -1613,7 +1644,8 @@ private nothing msglog(hash<auto> cx, hash<auto> msg) {
                         ? get_exception_string(ex)
                         : sprintf("%s: %s: %s", get_ex_pos(ex), ex.err, ex.desc);
                     return makeSoapFaultResponse(cx, str, reqsoap12, ex.err, ex.desc, NOTHING,
-                        inlist(ex.err, ("SOAP-VERSION-MISMATCH", "SOAP-MUST-UNDERSTAND")) ? ex.arg : NOTHING,
+                        inlist(ex.err, ("SOAP-VERSION-MISMATCH", "SOAP-MUST-UNDERSTAND"))
+                            || ex.arg instanceof hash<SoapFaultOptions> ? ex.arg : NOTHING,
                         processor_failure ? SoapFaultReceiver : SoapFaultSender);
                 }
 

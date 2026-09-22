@@ -1622,3 +1622,14 @@ are rejected with exact errors: 8 cases, 260 assertions. The examples found nine
 - a crash on unresolvable part types.
 
 See the [design](../../design/soap-encoding.md) and `EXECUTION.md`.
+
+## P8-03a: SOAP 1.2 encoding graph
+
+A binding's `encodingStyle` now selects SOAP 1.2 Encoding; previously every encoded body was written with the
+SOAP 1.1 URI. `enc:id` and `enc:ref` references span the envelope and may appear inline, and `enc:nodeType` is
+validated. Fault codes and subcodes (`enc:MissingID`, `enc:DuplicateID`, `env:DataEncodingUnknown`) reach
+`SoapHandler` faults. Two more fixes affect SOAP 1.1 too: encoded structs are matched by member name, and
+whitespace between array members is no longer taken as members. An authored
+[contract](encoded-corpus/w3c-soap12.wsdl) runs the W3C collection's requests.
+[soap12-encoding](../soap12-encoding.qtest) has 6 cases and 74 assertions. See the
+[design](../../design/soap-encoding.md) and `EXECUTION.md`.

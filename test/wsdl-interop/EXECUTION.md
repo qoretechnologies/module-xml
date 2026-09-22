@@ -10548,3 +10548,42 @@ IEEE gates and `test_axis_interop.py`'s HTTP/1.0 direction. Documentation builds
 
 For P8-05: `WSDLLib::processHref()` rejects every non-`cid:` `href` in a multipart message, including the `#id`
 references of an encoded multipart (SwA) message.
+
+## P8-03a: SOAP 1.2 encoding graph and encoding styles
+
+SOAP 1.2 Encoding's graph model is implemented: envelope-wide `enc:id`/`enc:ref` references, `enc:nodeType`,
+encoding-style selection and the section 3.2 decoding faults. `encoded-corpus/w3c-soap12.wsdl` declares SOAP 1.2
+rpc/encoded operations for the W3C collection's two services (ts-tests and SOAPBuilders), because the collection
+has no WSDL. A probe of all its Node A requests found four defects:
+
+- **The binding's encoding style was ignored.** `serializeRpc()` and `serializeDocument()` wrote the SOAP 1.1
+  encoding URI on every encoded body, which was the known defect. Decoding had no SOAP 1.2 rules at all:
+  `enc:id` and `enc:ref` were not references, and encoded header parts had no reference context. The first
+  supported URI of the binding's list now selects the rules. Output writes it, and decoding builds the SOAP 1.2
+  reference context over the Header and Body before converting either.
+- **Encoded structs required the schema's member order.** SOAP encoding distinguishes struct members by name
+  (SOAP 1.1 section 5.4.1, SOAP 1.2 Part 2 section 2.3). The collection's struct tests (T41 to T46 and the
+  SOAPBuilders structs) send `varInt` first and were rejected. This affects SOAP 1.1 as well: Axis happened to
+  send the WSDL's order. Distinct members of an encoded struct are now matched in declared order. Literal
+  content and repeated names keep their order.
+- **Whitespace between array members became members.** `SoapHandler` parses with whitespace preserved, which
+  numbers the text keys between elements. Array decoding knew only `^value^`, so a pretty-printed array reached
+  the callback as a list of whitespace and values, which the handler spread into arguments.
+- **No SOAP 1.2 subcodes.** Decoding errors can now carry `hash<SoapFaultOptions>`, and `SoapHandler` answers
+  with its code and subcodes: `env:Sender` with `enc:MissingID` or `enc:DuplicateID` (HTTP 400), or
+  `env:DataEncodingUnknown` (HTTP 500, the collection's XMLP-9).
+
+`test/soap12-encoding.qtest` has 6 cases and 74 assertions, over source and saved graphs. It covers:
+- the collection's struct tests;
+- T57's header reference and inline references in either order;
+- T56 (MissingID) and T59 (`id` and `ref` on one element), plus duplicate, invalid, cyclic, content-bearing and
+  out-of-scope identifiers;
+- valid and inconsistent `nodeType` values;
+- XMLP-9 and the `none` style;
+- style selection from URI lists;
+- handler faults, pretty-printed arrays and SOAP 1.2 response styles.
+
+All six cases fail against HEAD's modules. Full suite: 455 targets, 3,612 Qore cases, 173,639 assertions. The
+only failures are the three core-blocked gates: the two IEEE gates and the HTTP/1.0 direction of
+`test_axis_interop.py`. Documentation builds with no warnings. SOAP 1.2 arrays (`enc:itemType`, `enc:arraySize`)
+follow in P8-03b.

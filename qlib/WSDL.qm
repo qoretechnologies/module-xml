@@ -207,6 +207,18 @@ module WSDL {
     @section wsdlrelnotes WSDL Module Release Notes
 
     @subsection wsdl_0_5_8 WSDL v0.5.8
+    - SOAP 1.2 Encoding (SOAP 1.2 Part 2 section 3) is selected by a binding's \c encodingStyle, whose first
+      supported URI now chooses the rules; encoded output previously always wrote the SOAP 1.1 encoding URI:
+      - \c enc:id and \c enc:ref references span the Header and Body, may appear inline in either order, and
+        raise \c SOAP-DESERIALIZATION-ERROR with the \c enc:MissingID or \c enc:DuplicateID subcode in a
+        WSDL::SoapFaultOptions argument; \c enc:id with \c enc:ref on one element, reference cycles and
+        identifiers outside the encoding's scope are rejected;
+      - \c enc:nodeType values are validated against their element's content;
+      - Body data scoped with an unsupported encoding raises the \c env:DataEncodingUnknown code
+    - encoded structs match their distinct members by name, as SOAP 1.1 and 1.2 encoding define, instead of
+      requiring the schema's sequence order; literal content keeps its order
+    - whitespace between encoded array members is ignored under the numbered text keys of a
+      whitespace-preserving parse, instead of becoming array members
     - SOAP 1.1 encoding handles the section 5 examples of the SOAP 1.1 Note:
       - \c SOAP-ENC:string and the other encoding-namespace builtins, \c SOAP-ENC:base64 and the generic
         \c SOAP-ENC:Array can be declared types as well as \c xsi:type values;
@@ -1063,6 +1075,14 @@ public const SoapStyleMap = (
 
 #! soap encoding URI
 public const SOAP_ENCODING = "http://schemas.xmlsoap.org/soap/encoding/";
+
+#! SOAP 1.2 Encoding URI (SOAP 1.2 Part 2 section 3)
+/** @since %WSDL 0.5.8 */
+public const SOAP_12_ENCODING = "http://www.w3.org/2003/05/soap-encoding";
+
+#! SOAP 1.2 RPC Representation URI (SOAP 1.2 Part 2 section 4)
+/** @since %WSDL 0.5.8 */
+public const SOAP_12_RPC = "http://www.w3.org/2003/05/soap-rpc";
 
 #! mapping from Qore types to xsd types for xsd type "anyType"
 public const any_type_map = (
@@ -3861,7 +3881,26 @@ hashdecl SoapEnvelopeElement {
 # Validate protocol containers before native projection discards their qualified names.
 # Protocol containers and SOAP faults are traversed; application payloads retain their own validators.
 # SOAP 1.1 section 5 reference graph support for encoded Body content.
+# Selects the encoding rules for an encoded message part from its binding's encodingStyle URI list, whose
+# most specific URI comes first: the first of the SOAP 1.1 and SOAP 1.2 encodings that the list names. Without a
+# supported URI, including when none is declared, SOAP 1.1 encoding applies as it always has.
+class SoapEncodingStyleHelper {
+    static string rules(*string style) {
+        if (exists style) {
+            foreach string uri in (XsdSimpleType::normalizeWhiteSpace(style, "collapse").split(" ")) {
+                if (uri == SOAP_ENCODING || uri == SOAP_12_ENCODING) {
+                    return uri;
+                }
+            }
+        }
+        return SOAP_ENCODING;
+    }
+}
+
 class SoapEncodedReferenceHelper {
+    # SOAP 1.2 Part 1 section 5.1.1: data under this encodingStyle makes no claims about its serialization
+    const SoapEncodingNone = "http://www.w3.org/2003/05/soap-envelope/encoding/none";
+
     #! consumes an independent element's id and SOAP encoding metadata; returns the id
     /** @param element the independent element; its unqualified id, soapenc:root and SOAP envelope
         encodingStyle attributes are removed, namespace declarations and instance attributes are kept
@@ -3941,6 +3980,148 @@ class SoapEncodedReferenceHelper {
         }
     }
 
+    #! builds the SOAP 1.2 encoding reference context of an envelope (SOAP 1.2 Part 2 section 3.1.5)
+    /** @param envelope the Envelope's content with local \c Header and \c Body keys; SOAP encoding metadata in the
+        scope of an encodingStyle naming SOAP 1.2 encoding is consumed in place
+        @return the reference context for XsdData::getValue()
+        @throw SOAP-DESERIALIZATION-ERROR an invalid, duplicate (subcode enc:DuplicateID) or missing (subcode
+        enc:MissingID) identifier, enc:id and enc:ref on one element, a reference element with content, an invalid
+        enc:nodeType or a reference cycle
+        @note The identifiers of the whole envelope share one space, so a Body accessor can refer to a value in a
+        header block. Each enc:id element is registered where it appears; enc:ref becomes an internal marker that
+        getValue() resolves. SOAP 1.2 encodingStyle attributes are consumed as metadata.
+    */
+    static hash<auto> collect12(reference<hash<auto>> envelope) {
+        hash<auto> ids();
+        list<string> refs();
+        foreach string section in ("Header", "Body") {
+            if (envelope{section}.typeCode() == NT_HASH) {
+                foreach string key in (keys envelope{section}) {
+                    if (!key.equalPartial("^")) {
+                        walk12(\envelope{section}{key}, False, \ids, \refs, section == "Body");
+                    }
+                }
+            }
+        }
+        foreach string ref in (refs) {
+            if (!ids.hasKey(ref)) {
+                throw SOAP_DESERIALIZATION_ERROR, sprintf("SOAP encoding reference %y names no enc:id in the "
+                    "envelope", ref), <SoapFaultOptions>{"subcodes": (new XsdQNameValue(SOAP_12_ENCODING, "MissingID"),)};
+            }
+        }
+        checkGraph({}, ids);
+        return {"mrh": ids};
+    }
+
+    private static walk12(reference<auto> value, bool encoded, reference<hash<auto>> ids, reference<list<string>> refs,
+            bool body) {
+        if (value.typeCode() == NT_LIST) {
+            for (int i = 0; i < value.size(); ++i) {
+                walk12(\value[i], encoded, \ids, \refs, body);
+            }
+            return;
+        }
+        if (value.typeCode() != NT_HASH) {
+            return;
+        }
+        *string id;
+        if (value."^attributes^") {
+            hash<string, string> namespaces = XsdBase::getAttributeNamespaces(value."^attributes^");
+            foreach string key in (keys value."^attributes^") {
+                (*string prefix, *string local) = key =~ x/^([^:]+):([^:]+)$/;
+                if (prefix && namespaces{prefix} == SOAP_12_ENV && local == "encodingStyle") {
+                    auto style = remove value."^attributes^"{key};
+                    list<string> uris = style.typeCode() == NT_STRING
+                        ? XsdSimpleType::normalizeWhiteSpace(style, "collapse").split(" ") : ();
+                    encoded = inlist(SOAP_12_ENCODING, uris);
+                    # SOAP 1.2 Part 1 section 5.4.6: Body data scoped with an encoding this node does not support
+                    if (body && !encoded && !inlist(SOAP_ENCODING, uris) && !inlist(SoapEncodingNone, uris)) {
+                        throw SOAP_DESERIALIZATION_ERROR, sprintf("unsupported SOAP encoding style %y", style),
+                            <SoapFaultOptions>{"code": new XsdQNameValue(SOAP_12_ENV, "DataEncodingUnknown")};
+                    }
+                }
+            }
+            if (encoded) {
+                *string ref;
+                foreach string key in (keys value."^attributes^") {
+                    (*string prefix, *string local) = key =~ x/^([^:]+):([^:]+)$/;
+                    if (!prefix || namespaces{prefix} != SOAP_12_ENCODING) {
+                        continue;
+                    }
+                    switch (local) {
+                        case "id":
+                        case "ref": {
+                            auto identifier = remove value."^attributes^"{key};
+                            if (identifier.typeCode() != NT_STRING
+                                    || !XsdNameLexicalHelper::matches("NCName", identifier)) {
+                                throw SOAP_DESERIALIZATION_ERROR, sprintf("SOAP encoding %s %y is not an XML %s", local,
+                                    identifier, local == "id" ? "ID" : "IDREF");
+                            }
+                            if (local == "id") {
+                                id = identifier;
+                            } else {
+                                ref = identifier;
+                            }
+                            break;
+                        }
+                        case "nodeType":
+                            checkNodeType(remove value."^attributes^"{key}, value);
+                            break;
+                    }
+                }
+                if (exists id && exists ref) {
+                    throw SOAP_DESERIALIZATION_ERROR, sprintf("an element carries both enc:id %y and enc:ref %y "
+                        "(SOAP 1.2 Part 2 section 3.1.5.3)", id, ref);
+                }
+                if (exists ref) {
+                    if ((select keys value, !$1.equalPartial("^") || ($1 == "^value^" && value{$1} !~ /^\s*$/))) {
+                        throw SOAP_DESERIALIZATION_ERROR, sprintf("an element with enc:ref %y has content of its own",
+                            ref);
+                    }
+                    value."^attributes^"."^ref^" = ref;
+                    push refs, ref;
+                }
+            }
+        }
+        foreach string key in (keys value) {
+            if (!key.equalPartial("^")) {
+                walk12(\value{key}, encoded, \ids, \refs, body);
+            }
+        }
+        # registered after its own content, so nested metadata is consumed in the registered element as well
+        if (exists id) {
+            if (ids.hasKey(id)) {
+                throw SOAP_DESERIALIZATION_ERROR, sprintf("SOAP encoding id %y is used more than once", id),
+                    <SoapFaultOptions>{"subcodes": (new XsdQNameValue(SOAP_12_ENCODING, "DuplicateID"),)};
+            }
+            ids{id} = value;
+        }
+    }
+
+    # enc:nodeType names the kind of value the element represents (SOAP 1.2 Part 2 section 3.1.7)
+    private static checkNodeType(auto kind, hash<auto> value) {
+        list<string> labels = map regex_subst($1, "\\^[0-9]+\\^?$", ""), (select keys value, !$1.equalPartial("^"));
+        bool consistent;
+        switch (kind) {
+            case "simple":
+                consistent = !labels;
+                break;
+            case "struct":
+                # a struct's outbound edges are labeled with distinct names (section 2.3)
+                consistent = !(select labels, value{$1}.typeCode() == NT_LIST)
+                    && labels.size() == (map {$1: True}, labels).size();
+                break;
+            case "array":
+                consistent = True;
+                break;
+            default:
+                throw SOAP_DESERIALIZATION_ERROR, sprintf("enc:nodeType %y is not simple, struct or array", kind);
+        }
+        if (!consistent) {
+            throw SOAP_DESERIALIZATION_ERROR, sprintf("enc:nodeType %y does not describe its element's content", kind);
+        }
+    }
+
     #! rejects dangling fragment references and reference cycles among independent elements
     /** @param roots the Body roots
         @param independent independent elements keyed by id
@@ -4007,6 +4188,10 @@ class SoapEncodedReferenceHelper {
                 auto href = current."^attributes^".href;
                 if (href.typeCode() == NT_STRING && href.equalPartial("#")) {
                     push result, href.substr(1);
+                }
+                # a SOAP 1.2 enc:ref, converted by collect12()
+                if (exists current."^attributes^"."^ref^") {
+                    push result, current."^attributes^"."^ref^";
                 }
                 foreach string key in (reverse(keys current)) {
                     if (key != "^attributes^") {
@@ -4501,6 +4686,15 @@ public class XsdData inherits WSDL::XsdBase {
         @throw INVALID-REFERENCE an encoded href does not identify a value in the supplied context
     */
     auto getValue(*hash<auto> mrh, auto val) {
+        # SOAP 1.2 Encoding: an enc:ref, converted to an internal marker by the envelope's reference context
+        if (exists mrh && val.typeCode() == NT_HASH && exists val."^attributes^"."^ref^") {
+            string ref = val."^attributes^"."^ref^";
+            if (!exists mrh.mrh{ref}) {
+                throw SOAP_DESERIALIZATION_ERROR, sprintf("SOAP encoding reference %y names no enc:id in the "
+                    "envelope", ref), <SoapFaultOptions>{"subcodes": (new XsdQNameValue(SOAP_12_ENCODING, "MissingID"),)};
+            }
+            return mrh.mrh{ref};
+        }
         # Only a same-document fragment reference names a value in the message. Multipart messages replace cid:
         # references to their parts before conversion; any other reference is outside the message.
         if (exists mrh && val.typeCode() == NT_HASH && val."^attributes^".href.typeCode() == NT_STRING) {
@@ -13865,6 +14059,13 @@ public class XsdArrayType inherits WSDL::XsdAbstractType {
                     if (val{key}.typeCode() == NT_LIST) {
                         members += map ("value": $1), val{key};
                     } else if (val{key}.typeCode() != NT_STRING || val{key} !~ /^\s*$/) {
+                        throw SOAP_DESERIALIZATION_ERROR, sprintf("array %Y cannot contain text", name);
+                    }
+                    continue;
+                }
+                # further text between members, as a whitespace-preserving parse numbers it
+                if (key =~ /^\^(value|cdata)[0-9]*\^$/) {
+                    if (val{key}.typeCode() != NT_STRING || val{key} !~ /^\s*$/) {
                         throw SOAP_DESERIALIZATION_ERROR, sprintf("array %Y cannot contain text", name);
                     }
                     continue;
@@ -32516,14 +32717,31 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
                 push values, child;
             }
         }
-        *list<XsdParticle> positions;
-        try {
-            positions = particle.attributeElementNames(names);
-        } catch (hash<ExceptionInfo> ex) {
-            if (ex.err != "XSD-PARTICLE-ERROR") {
-                rethrow;
+        code<*list<XsdParticle>(list<string>)> attribute = *list<XsdParticle> sub (list<string> ordered) {
+            try {
+                return particle.attributeElementNames(ordered);
+            } catch (hash<ExceptionInfo> ex) {
+                if (ex.err != "XSD-PARTICLE-ERROR") {
+                    rethrow;
+                }
+                throw SOAP_DESERIALIZATION_ERROR, sprintf("invalid XML child name in type %Y: %s", name, ex.desc);
             }
-            throw SOAP_DESERIALIZATION_ERROR, sprintf("invalid XML child name in type %Y: %s", name, ex.desc);
+        };
+        *list<XsdParticle> positions = attribute(names);
+        # SOAP encoding distinguishes a struct's members by name alone (SOAP 1.1 section 5.4.1, SOAP 1.2 Part 2
+        # section 2.3), so an encoded value (with a reference context) may send distinct members in any order.
+        if (!exists positions && exists mrh && names.size() == (map {$1: True}, names).size()) {
+            hash<string, int> order();
+            foreach string identity in (keys declarations) {
+                order{identity} = $#;
+            }
+            list<int> index = sort((map $1, xrange(names.size())), int sub (int a, int b) {
+                return (order{names[a]} ?? names.size() + a) <=> (order{names[b]} ?? names.size() + b);
+            });
+            names = map names[$1], index;
+            field_names = map field_names[$1], index;
+            values = map values[$1], index;
+            positions = attribute(names);
         }
         if (!exists positions) {
             throw SOAP_DESERIALIZATION_ERROR, sprintf("ordered child elements %Y do not match the complete "
@@ -33601,7 +33819,7 @@ public class WSMessage inherits WSDL::XsdNamedData {
         if (rh || !fault) {
             if (encoded) {
                 rh."^attributes^" += {
-                    "soapenv:encodingStyle": SOAP_ENCODING,
+                    "soapenv:encodingStyle": SoapEncodingStyleHelper::rules(msginfo ? msginfo.body.encodingStyle : NOTHING),
                 };
             }
 
@@ -33777,7 +33995,7 @@ public class WSMessage inherits WSDL::XsdNamedData {
         }
         if (encoded && rh) {
             rh."^attributes^" += {
-                "soapenv:encodingStyle": SOAP_ENCODING,
+                "soapenv:encodingStyle": SoapEncodingStyleHelper::rules(msginfo ? msginfo.body.encodingStyle : NOTHING),
             };
         }
 
@@ -34813,7 +35031,8 @@ public class SoapBinding inherits WSDL::OperationalBinding {
             }
         }
         hash<auto> data = XsdBase::expandElementNamespaces(selected.getXmlDataView());
-        auto value = description.encoded ? prepareEncodedPartValue(data.firstValue(), envelope.uri) : data.firstValue();
+        auto value = description.encoded ? prepareEncodedPartValue(data.firstValue(), envelope.uri,
+            SoapEncodingStyleHelper::rules(description.encodingStyle)) : data.firstValue();
         auto decoded = message.deserializeDocument(NOTHING,
             {description.encoded ? type_qname("", part) : selected.getExpandedName(): value}, part, False, True){part};
         return retain_xml ? selected : decoded;
@@ -34908,7 +35127,8 @@ public class SoapBinding inherits WSDL::OperationalBinding {
         }
         XsdXmlValue selected = headers[int(matches.firstKey())];
         hash<auto> data = XsdBase::expandElementNamespaces(selected.getXmlDataView());
-        auto value = fault.encoded ? prepareEncodedPartValue(data.firstValue(), uri) : data.firstValue();
+        auto value = fault.encoded ? prepareEncodedPartValue(data.firstValue(), uri,
+            SoapEncodingStyleHelper::rules(fault.encodingStyle)) : data.firstValue();
         auto decoded = fault.msg.deserializeDocument(NOTHING,
             {fault.encoded ? type_qname("", part) : selected.getExpandedName(): value}, part, False, True){part};
         return retain_xml ? selected : decoded;
@@ -35405,7 +35625,7 @@ public class SoapBinding inherits WSDL::OperationalBinding {
         return result;
     }
 
-    private static auto prepareEncodedPartValue(auto value, string envelope_uri) {
+    private static auto prepareEncodedPartValue(auto value, string envelope_uri, string rules) {
         if (value.typeCode() != NT_HASH) {
             return value;
         }
@@ -35414,7 +35634,7 @@ public class SoapBinding inherits WSDL::OperationalBinding {
         string identity = type_qname(envelope_uri, "encodingStyle");
         if (expanded.hasKey(identity)) {
             if (expanded{identity}.typeCode() != NT_STRING
-                    || XsdSimpleType::normalizeWhiteSpace(expanded{identity}, "collapse") != SOAP_ENCODING) {
+                    || XsdSimpleType::normalizeWhiteSpace(expanded{identity}, "collapse") != rules) {
                 throw SOAP_DESERIALIZATION_ERROR, sprintf("unsupported SOAP encoding style %Y", expanded{identity});
             }
             hash<string, string> namespaces = XsdBase::getAttributeNamespaces(attributes);
@@ -35491,6 +35711,15 @@ public class SoapBinding inherits WSDL::OperationalBinding {
         *BindingMessageDescription bmd = self{io};
         hash<string, string> header_keys = bmd ? bmd.getHeaderMessageKeys(op{io}) : {};
 
+        # SOAP 1.2 Encoding identifies values across the whole envelope, so the reference context is built from the
+        # Header and Body before either is converted.
+        bool body12 = bmd && bmd.body.encoded && SoapEncodingStyleHelper::rules(bmd.body.encodingStyle) == SOAP_12_ENCODING;
+        *hash<auto> context12;
+        if (body12 || (bmd && (select bmd.getHeaders(),
+                $1.encoded && SoapEncodingStyleHelper::rules($1.encodingStyle) == SOAP_12_ENCODING))) {
+            context12 = SoapEncodedReferenceHelper::collect12(\o.Envelope);
+        }
+
         if (bmd && bmd.hasHeaders()) {
             XsdQNameNamespaceScope header_scope(o.Envelope.Header."^attributes^");
             *hash<auto> header = XsdScalarTextHelper::elementContent(o.Envelope.Header, "SOAP Header");
@@ -35517,8 +35746,10 @@ public class SoapBinding inherits WSDL::OperationalBinding {
                 int index = int(entry.key);
                 BindingMessageHeaderDescription hdr = entry.value;
                 auto value = hdr.encoded ? prepareEncodedPartValue(header_values[index],
-                    isSoap12() ? SOAP_12_ENV : SOAP_11_ENV) : header_values[index];
-                hrv{header_keys{hdr.msg.getExpandedName()}} += hdr.msg.deserializeDocument(NOTHING,
+                    isSoap12() ? SOAP_12_ENV : SOAP_11_ENV, SoapEncodingStyleHelper::rules(hdr.encodingStyle))
+                    : header_values[index];
+                bool rules12 = hdr.encoded && SoapEncodingStyleHelper::rules(hdr.encodingStyle) == SOAP_12_ENCODING;
+                hrv{header_keys{hdr.msg.getExpandedName()}} += hdr.msg.deserializeDocument(rules12 ? context12 : NOTHING,
                     {hdr.encoded ? type_qname("", hdr.part) : header_names[index]: value}, hdr.part, NOTHING, True);
             }
             #printf("DEBUG: Deserialized SOAP headers: %N\n", hrv);
@@ -35580,7 +35811,11 @@ public class SoapBinding inherits WSDL::OperationalBinding {
             *hash<auto> mrh;
             # Literal parts use their concrete schema: id and href can be ordinary attributes.
             # Only an encoded body supplies a SOAP reference context to schema value conversion.
-            if (bmd.body.encoded) {
+            if (body12) {
+                mrh = context12;
+                WSDL::XsdBase::removeNS2(\msgh);
+                remove msgh.".ns";
+            } else if (bmd.body.encoded) {
                 (mrh, msgh) = processMultiRef(msgh);
             } else if (!docstyle) {
                 WSDL::XsdBase::removeNS2(\msgh);
@@ -38184,6 +38419,8 @@ public class Namespaces inherits Serializable {
         const DefaultPrefixes = {
             "http://www.w3.org/XML/1998/namespace": "xml",
             SOAP_ENCODING: "soapenc",
+            SOAP_12_ENCODING: "enc",
+            SOAP_12_RPC: "rpc",
             XSD_NS: "xsd",
             XSI_NS: "xsi",
             SOAP_11_ENV: "soapenv",

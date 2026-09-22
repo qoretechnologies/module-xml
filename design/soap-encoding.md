@@ -2,8 +2,25 @@
 
 Copyright (C) 2026 Qore Technologies, s.r.o.
 
-This document describes how the WSDL module decodes and encodes `use="encoded"` message parts. It covers the
-SOAP 1.1 section 5 rules; SOAP 1.2 Encoding is added by later P8 increments.
+This document describes how the WSDL module decodes and encodes `use="encoded"` message parts: the SOAP 1.1
+section 5 rules and SOAP 1.2 Encoding (SOAP 1.2 Part 2 section 3).
+
+## Encoding style
+
+A part's `soap:body` or `soap:header` `encodingStyle` is a URI list whose most specific URI comes first. The
+first of the SOAP 1.1 encoding (`http://schemas.xmlsoap.org/soap/encoding/`) and SOAP 1.2 Encoding
+(`http://www.w3.org/2003/05/soap-encoding`) that the list names selects the rules. Without either, including
+when no style is declared, SOAP 1.1 encoding applies as it always has. Encoded output writes the selected URI as
+the wrapper's `encodingStyle`. Before P8-03 every encoded body was written with the SOAP 1.1 URI, even where a
+SOAP 1.2 binding declared SOAP 1.2 Encoding.
+
+## Structs
+
+SOAP encoding distinguishes a struct's members by name alone (SOAP 1.1 section 5.4.1, SOAP 1.2 Part 2 section
+2.3). An encoded struct whose distinct members arrive in another order than the schema's sequence is matched
+after putting them in declared order. The W3C SOAP 1.2 test collection sends `varInt`, `varFloat`, `varString`
+against the SOAPBuilders schema's `varString` first. Repeated member names are not a struct and keep their
+order, and literal content keeps its declared order.
 
 ## Reference context
 
@@ -141,6 +158,42 @@ themselves.
 refers outside the message; example 28's `array-1` asserts two members and transmits three; and example 34's
 `arrayType="Order[2]"` has no prefix while no default namespace is in scope. Examples 17 and 37 are not
 well-formed as published.
+
+## SOAP 1.2 Encoding
+
+### Reference graph
+
+SOAP 1.2 has no independent elements. A multi-reference value appears once where it occurs, with `enc:id`, and
+other edges to it are empty elements with `enc:ref` (section 3.1.5). Identifiers are envelope-wide: the W3C
+collection's T57 refers from the Body to a value in a header block. `SoapEncodedReferenceHelper::collect12()`
+therefore walks the Header and Body before either is converted:
+
+- Only elements in the scope of an `encodingStyle` that names SOAP 1.2 Encoding carry encoding metadata. An
+  `enc:id` elsewhere is not an identifier, so a reference to it is missing (section 3.1.1).
+- `enc:id` must be an `NCName` and unique; a repeated id raises `enc:DuplicateID`. Each identified element is
+  registered where it appears. `enc:ref` becomes an internal marker that `XsdData::getValue()` resolves at each
+  conversion site, as SOAP 1.1 `href` references are resolved. A reference to no id raises `enc:MissingID`.
+- An element must not carry both `enc:id` and `enc:ref` (section 3.1.5.3). A reference element with content of
+  its own is rejected, since its edge ends at the referenced node. Reference cycles are rejected as for SOAP 1.1,
+  because plain Qore values cannot represent them.
+- `enc:nodeType` must be `simple`, `struct` or `array` (section 3.1.7) and must fit its element: a simple value
+  has no child elements, and a struct's members have distinct names.
+- SOAP 1.2 `encodingStyle` attributes are consumed as metadata. A Body element scoped with an encoding that is
+  neither SOAP 1.2 or SOAP 1.1 encoding nor `http://www.w3.org/2003/05/soap-envelope/encoding/none` raises
+  `env:DataEncodingUnknown` (SOAP 1.2 Part 1 section 5.4.6, the collection's XMLP-9).
+
+### Faults
+
+These errors are `SOAP-DESERIALIZATION-ERROR` exceptions whose argument is a `hash<SoapFaultOptions>` naming the
+SOAP 1.2 code or subcodes. `SoapHandler` answers with `env:Sender` and the subcode (HTTP 400), or with
+`env:DataEncodingUnknown` (HTTP 500). SOAP 1.1 has no subcodes and keeps its Client code.
+
+## Array text
+
+A whitespace-preserving parse, which `SoapHandler` uses, numbers the text between elements (`^value1^` and so
+on). Whitespace text between array members is ignored under any key; other text is rejected. Before P8-03 the
+numbered text was taken for members, so a pretty-printed array reached callbacks as a list of whitespace and
+values.
 
 ## RPC parts
 
