@@ -1602,3 +1602,23 @@ against the Axis service. Axis's `TestClient` verifies all 31 against a `SoapHan
 check. `SoapHandler` now dispatches operations that share a SOAP action by Body element within that action's
 operations; a new [soap-actions](../soap-actions.qtest) case covers it. See the
 [peer README](axis-peer/README.md) and `EXECUTION.md`.
+
+## P8-02d: SOAP 1.1 Note section 5 examples
+
+The SOAP 1.1 Note's own section 5 examples are an independent fixture source for what Axis never sends:
+generic, partial and sparse arrays, mixed member types, polymorphic accessors and multi-reference strings.
+Only the 34 quoted examples are committed ([corpus](encoded-corpus/soap11-note.json)), because the Note has no
+redistribution terms; its digest is pinned, and the extraction is reproducible. In
+[soap11-note-examples](../soap11-note-examples.qtest), 24 instance examples decode as the Note describes, and 3
+are rejected with exact errors: 8 cases, 260 assertions. The examples found nine defects, all fixed:
+- declared encoding-namespace types, including the generic `SOAP-ENC:Array`;
+- instance `arrayType` item types, previously ignored;
+- embedded ids;
+- element-named members of `anyType` arrays;
+- external references;
+- `xsi:type` of named restrictions, which Qore itself rejected;
+- member-type retention with `preserve_types`;
+- generic array output shapes;
+- a crash on unresolvable part types.
+
+See the [design](../../design/soap-encoding.md) and `EXECUTION.md`.

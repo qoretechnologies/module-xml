@@ -3,11 +3,14 @@
 
 Copyright (C) 2026 Qore Technologies, s.r.o.
 
-Two sources are independent of this module:
+Three sources are independent of this module:
 
 - the W3C "SOAP Version 1.2 Specification Assertions and Test Collection", pinned at
   normative/soap12-testcollection.html; the tests whose messages use the SOAP 1.2 encoding or RPC
   namespaces are extracted verbatim;
+- the section 5 examples of the SOAP 1.1 W3C Note, quoted verbatim from the document whose digest
+  normative/sources.json records; the document itself carries its submitters' copyright without
+  redistribution terms, so only the examples are kept, and --write-note regenerates them from a copy;
 - the SOAPBuilders round 2 interop exchanges produced by Apache Axis 1.4's own client and service
   (axis-peer/), captured on the wire.
 
@@ -38,6 +41,14 @@ SOAP12_RPC = 'http://www.w3.org/2003/05/soap-rpc'
 XSI = 'http://www.w3.org/2001/XMLSchema-instance'
 XSD = 'http://www.w3.org/2001/XMLSchema'
 APACHE_MAP = '{http://xml.apache.org/xml-soap}Map'
+# The examples leave their prefixes undeclared. The Note's own bindings are used to check well-formedness;
+# e, m, n and xyz are the Note's placeholder prefixes and get placeholder namespaces.
+NOTE_NAMESPACES = {
+    'SOAP-ENC': SOAP11_ENC,
+    'xsi': 'http://www.w3.org/1999/XMLSchema-instance',
+    'xsd': 'http://www.w3.org/1999/XMLSchema',
+    'e': 'urn:soap11-note:e', 'm': 'urn:soap11-note:m', 'n': 'urn:soap11-note:n', 'xyz': 'urn:soap11-note:xyz',
+}
 
 
 def collection_bytes():
@@ -87,6 +98,68 @@ def extract_w3c():
                       'description': ' '.join(html.unescape(re.sub(r'<[^>]+>', '', description.group(1))).split()) if description else '',
                       'messages': messages})
     return tests
+
+
+def _render(fragment):
+    """Renders a preformatted HTML paragraph as a browser does: <br> ends a line and &nbsp; indents it."""
+    fragment = re.sub(r'[ \t\r\n]+', ' ', fragment)
+    lines = [html.unescape(re.sub(r'<[^>]+>', '', line)).lstrip(' ').replace('\xa0', ' ').rstrip()
+             for line in re.split(r'<br\s*/?>', fragment, flags=re.I)]
+    return '\n'.join(lines).strip('\n')
+
+
+def _top_elements(text):
+    """Returns the verbatim text of each top-level element of a well-formed fragment, in order."""
+    elements = []
+    depth = 0
+    start = None
+    for tag in re.finditer(r'<!--.*?-->|<(/?)[^\s>/!?]+[^>]*?(/?)>', text, re.S):
+        if tag.group(0).startswith('<!--'):
+            continue
+        if tag.group(1):
+            depth -= 1
+            if not depth:
+                elements.append(text[start:tag.end()])
+        elif tag.group(2):
+            if not depth:
+                elements.append(tag.group(0))
+        else:
+            if not depth:
+                start = tag.start()
+            depth += 1
+    return elements
+
+
+def extract_note(data):
+    """Returns the section 5 examples of the SOAP 1.1 Note in document order; errata are recorded, not corrected."""
+    expected = json.loads(SOURCES.read_text())['soap11_note']['html_sha256']
+    if hashlib.sha256(data).hexdigest() != expected:
+        raise ValueError('SOAP 1.1 Note copy does not match normative/sources.json')
+    text = data.decode('iso-8859-1')
+    declarations = ' '.join('xmlns:%s="%s"' % item for item in NOTE_NAMESPACES.items())
+    section = None
+    number = 0
+    examples = []
+    for match in re.finditer(r'<h[1-4][^>]*>(.*?)</h[1-4]>|<p class=preformatted>(.*?)</p>', text, re.S | re.I):
+        if match.group(1) is not None:
+            section = ' '.join(html.unescape(re.sub(r'<[^>]+>', '', match.group(1))).split())
+            continue
+        number += 1
+        if not section.startswith('5'):
+            continue
+        example = {'number': number, 'section': section, 'text': _render(match.group(2))}
+        try:
+            root = etree.fromstring(('<examples %s>%s</examples>' % (declarations, example['text'])).encode())
+            example['well_formed'] = True
+            # the top-level elements, verbatim, so a test can place accessors and independent elements
+            example['elements'] = _top_elements(example['text'])
+            if len(example['elements']) != len(root):
+                raise ValueError('example %d: top-level element split disagrees with the parser' % number)
+        except etree.XMLSyntaxError as error:
+            example['well_formed'] = False
+            example['parse_error'] = str(error)
+        examples.append(example)
+    return examples
 
 
 def _qname(element, value):
@@ -183,12 +256,27 @@ def axis_corpus(captured):
             'exchanges': dict(sorted(exchanges.items()))}
 
 
+def note_corpus(data):
+    """Returns the SOAP 1.1 Note example corpus document for a verified copy of the Note."""
+    source = json.loads(SOURCES.read_text())['soap11_note']
+    return {'copyright': 'Examples quoted from the SOAP 1.1 W3C Note, Copyright (C) 2000 DevelopMentor, International '
+                         'Business Machines Corporation, Lotus Development Corporation, Microsoft, UserLand Software',
+            'source': source['url'], 'source_sha256': source['html_sha256'], 'namespaces': NOTE_NAMESPACES,
+            'examples': extract_note(data)}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument('--write-w3c', action='store_true', help='regenerate encoded-corpus/w3c-soap12.json')
     parser.add_argument('--write-axis', metavar='CAPTURE', type=Path,
                         help='write encoded-corpus/axis-round2.json from an AxisPeer capture (JSON lines)')
+    parser.add_argument('--write-note', metavar='HTML', type=Path,
+                        help='write encoded-corpus/soap11-note.json from a copy of the SOAP 1.1 Note')
     args = parser.parse_args()
+    if args.write_note:
+        (CORPUS / 'soap11-note.json').write_text(json.dumps(note_corpus(args.write_note.read_bytes()), indent=1,
+                                                            ensure_ascii=False) + '\n')
+        return 0
     if args.write_axis:
         captured = [json.loads(line) for line in args.write_axis.read_text().splitlines()]
         (CORPUS / 'axis-round2.json').write_text(json.dumps(axis_corpus(captured), indent=1, ensure_ascii=False) + '\n')

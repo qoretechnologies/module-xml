@@ -10489,3 +10489,62 @@ Full suite on Qore 21bbf2bb5 with `build-debug` rebuilt against it: 453 targets,
 assertions. Three targets fail, all on Qore core defects: the two IEEE gates (NaN-boxing) and this gate's
 Axis-client direction (HTTP/1.0). Its other three tests pass. `soap-actions.qtest` has 5 cases and 1,948
 assertions. Documentation builds with no warnings.
+
+## P8-02d: SOAP 1.1 Note section 5 examples
+
+The SOAP 1.1 W3C Note's own section 5 examples are now an independent source for the parts of SOAP 1.1 encoding
+that Axis never sends: generic, partially transmitted and sparse arrays, arrays of mixed member types,
+polymorphic accessors and multi-reference strings. `encoded_corpus.py --write-note` extracts the 34 examples
+from a copy of the Note whose SHA-256 `normative/sources.json` records (TLS-verified download, 2026-09-22). The
+Note carries its five submitters' copyright without redistribution terms, so only the quoted examples are
+committed, in `encoded-corpus/soap11-note.json`, not the document. The gate recomputes every recorded property
+from the quoted text offline. Examples 17 and 37 are not well-formed as published.
+
+`test/soap11-note-examples.qtest` embeds the 27 instance examples verbatim in rpc/encoded requests of
+`encoded-corpus/soap11-note.wsdl`, whose XML Schema 1.0 declarations transliterate the Note's 1999-draft
+fragments. 24 decode to the values the Note describes, and three are rejected with exact errors: example 21
+refers outside the message, example 28 asserts two members and sends three, and example 34's arrayType QName has
+no prefix and no default namespace.
+
+The examples found nine defects and gaps, all fixed at their root:
+
+- `Namespaces::doType()` assigned a failed type-map lookup to its typed reference, so an unresolvable message
+  part type crashed with `RUNTIME-TYPE-ERROR` instead of the intended `WSDL-ERROR`.
+- Types of the encoding namespace could not be declared types, although section 5.2.1 declares
+  `type="SOAP-ENC:string"` and Axis-generated WSDLs type parts as `soapenc:string`. The builtins, `SOAP-ENC:base64`
+  and the generic `SOAP-ENC:Array` now resolve. `SOAP-ENC:base64` is also accepted as `xsi:type`.
+- An instance's `SOAP-ENC:arrayType` item type was never resolved or checked; only its rank was compared, and the
+  declared item type was always used. The item QName is now resolved in the instance's scope and must be the
+  declared item type or substitutable for it. The generic array takes type and shape from the instance, and
+  requires the attribute.
+- An `id` on an embedded accessor (section 5.1 rule 8, example 8) raised `INVALID-REFERENCE`. Embedded ids now
+  join the reference context, with the same validation, duplicate and cycle checks.
+- `WSMessage::deserializeRpc()` stripped the prefixes of every part accessor's children. For an array those are
+  its members, so the encoding-namespace member names that give an `xsd:anyType` member its type (rule 3(c),
+  example 26) were lost, and members sharing a local name under different prefixes could be merged out of order.
+  Array parts keep their member names, and rule 3(c) applies to `xsd:anyType` arrays.
+- A reference outside the message failed as an unknown `href` attribute. It now reports that the reference is
+  outside the message; values are never retrieved.
+- A named simple type serialized with its base type's `xsi:type`, such as `xsi:type="xsd:string"` for an
+  enumeration `tns:Color`. An `xsi:type` must name the declared type or one derived from it, so a receiver,
+  including this module, rejected such encoded parts and array members. A named restriction now writes its own
+  name. A union keeps naming its selected member type, which XML Schema 1.0 section 3.14.6 (clause 2.2.4)
+  counts as derived from the union. The first version of the fix also renamed unions, and the full suite caught
+  it in `wsdl-union-schema-graphs.qtest`. Element declarations already wrote their own types.
+- With `preserve_types`, array members whose type the instance selected were not retained, and encoding could not
+  write a retained member type. Both now follow the part-level wrapper rules.
+- The generic array's native values serialize with an inferred shape: rectangular nested lists as rank-n arrays,
+  others as jagged arrays with nil for absent members. Mixed and inconsistent shapes are rejected.
+
+The new suite has 8 cases and 260 assertions. It covers every instance example, each fix's negative cases, a
+`preserve_types` round trip of example 27, and native round trips of examples 24, 30, 31, 35 and 36.
+`soap-encoded-references.qtest` now expects the precise outside-the-message error for its single-part `cid:`
+case. `test_axis_peer.py` gains the corpus consistency test (5 tests). Both Axis interop directions still pass.
+
+Full suite: 454 targets, 3,601 Qore cases, 173,412 assertions. It caught the union over-reach described above
+(`wsdl-union-schema-graphs.qtest`). After the fix, all nine union suites, the nine union gates, the Note suite,
+the SOAP suites and both Axis gates pass again. The only other failures are the three core-blocked gates: the two
+IEEE gates and `test_axis_interop.py`'s HTTP/1.0 direction. Documentation builds with no warnings.
+
+For P8-05: `WSDLLib::processHref()` rejects every non-`cid:` `href` in a multipart message, including the `#id`
+references of an encoded multipart (SwA) message.

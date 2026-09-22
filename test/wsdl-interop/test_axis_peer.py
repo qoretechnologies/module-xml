@@ -147,6 +147,29 @@ class AxisPeerTest(unittest.TestCase):
         self.assertEqual([('SBR1-echoBase64', 'Node A'), ('SBR1-echoDate', 'Node A'), ('T76', 'Node C'), ('T76', 'Node C'),
                           ('XMLP-14', 'Node C'), ('XMLP-15', 'Node A'), ('XMLP-9', 'Node C')], malformed)
 
+    def test_soap11_note_examples_are_consistent(self):
+        # The Note itself is not redistributed; encoded_corpus.py --write-note regenerates this file from a copy
+        # matching the recorded digest. Offline, every recorded property is recomputed from the quoted text.
+        committed = json.loads((ROOT / 'encoded-corpus' / 'soap11-note.json').read_text())
+        source = json.loads(encoded_corpus.SOURCES.read_text())['soap11_note']
+        self.assertEqual((source['url'], source['html_sha256']), (committed['source'], committed['source_sha256']))
+        self.assertEqual(encoded_corpus.NOTE_NAMESPACES, committed['namespaces'])
+        declarations = ' '.join('xmlns:%s="%s"' % item for item in committed['namespaces'].items())
+        numbers = [e['number'] for e in committed['examples']]
+        self.assertEqual((34, sorted(numbers)), (len(set(numbers)), numbers))
+        for example in committed['examples']:
+            with self.subTest(number=example['number']):
+                self.assertTrue(example['section'].startswith('5'))
+                try:
+                    etree.fromstring(('<examples %s>%s</examples>' % (declarations, example['text'])).encode())
+                    well_formed = True
+                except etree.XMLSyntaxError:
+                    well_formed = False
+                self.assertEqual(well_formed, example['well_formed'])
+                if well_formed:
+                    self.assertEqual(encoded_corpus._top_elements(example['text']), example['elements'])
+        self.assertEqual([17, 37], [e['number'] for e in committed['examples'] if not e['well_formed']])
+
 
 if __name__ == '__main__':
     unittest.main()

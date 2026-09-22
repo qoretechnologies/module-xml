@@ -207,6 +207,20 @@ module WSDL {
     @section wsdlrelnotes WSDL Module Release Notes
 
     @subsection wsdl_0_5_8 WSDL v0.5.8
+    - SOAP 1.1 encoding handles the section 5 examples of the SOAP 1.1 Note:
+      - \c SOAP-ENC:string and the other encoding-namespace builtins, \c SOAP-ENC:base64 and the generic
+        \c SOAP-ENC:Array can be declared types as well as \c xsi:type values;
+      - an instance's \c SOAP-ENC:arrayType item type is resolved and must be the declared item type or one that
+        can substitute for it; the generic array takes its members' type and shape from each instance, and its
+        native values serialize as rank-n or jagged arrays inferred from their nested lists;
+      - members of an \c xsd:anyType array named after an encoding type, such as \c SOAP-ENC:int, have that type;
+      - an embedded accessor may carry the \c id of a multi-reference value (section 5.1 rule 8);
+      - a reference outside the message raises a descriptive error instead of an unknown-attribute error;
+      - with \c preserve_types, array member types that the instance selects are retained and re-emitted
+    - a named simple type restricting another writes its own name as \c xsi:type instead of its base type's name,
+      which receivers rejected, including this module: encoded parts and array members of such types now decode;
+      unions keep naming the selected member type
+    - an unresolvable message part type raises \c WSDL-ERROR instead of \c RUNTIME-TYPE-ERROR
     - SOAP 1.1 encoded arrays follow section 5.4.2:
       - rank-n arrays travel as row-major members with asserted lengths (\c "xsd:int[2,3]") instead of nested
         row elements with \c "[,]";
@@ -3887,6 +3901,46 @@ class SoapEncodedReferenceHelper {
         return id;
     }
 
+    #! consumes the SOAP encoding ids that embedded accessors carry and registers their elements (SOAP 1.1 section 5.1)
+    /** @param value an element, a list of repeated elements, or a hash of child elements; ids are removed in place
+        @param ids receives each identified element, without its id, keyed by id
+        @throw SOAP-DESERIALIZATION-ERROR an invalid or duplicate id
+        @note Rule 8 lets an accessor to a string or byte-array value carry the id itself; values of other types
+        that a sender serializes in place are accepted the same way. The graph check covers them like independent
+        elements, including cycles.
+    */
+    static consumeEmbedded(reference<auto> value, reference<hash<auto>> ids) {
+        if (value.typeCode() == NT_LIST) {
+            for (int i = 0; i < value.size(); ++i) {
+                consumeEmbedded(\value[i], \ids);
+            }
+            return;
+        }
+        if (value.typeCode() != NT_HASH) {
+            return;
+        }
+        *string id;
+        if (exists value."^attributes^".id) {
+            auto candidate = remove value."^attributes^".id;
+            if (candidate.typeCode() != NT_STRING || !XsdNameLexicalHelper::matches("NCName", candidate)) {
+                throw SOAP_DESERIALIZATION_ERROR, sprintf("SOAP encoding id %y is not an XML ID", candidate);
+            }
+            if (ids.hasKey(candidate)) {
+                throw SOAP_DESERIALIZATION_ERROR, sprintf("duplicate SOAP encoding id %y", candidate);
+            }
+            id = candidate;
+        }
+        foreach string key in (keys value) {
+            if (!key.equalPartial("^")) {
+                consumeEmbedded(\value{key}, \ids);
+            }
+        }
+        # registered after its own content, so nested ids are consumed in the registered element as well
+        if (exists id) {
+            ids{id} = value;
+        }
+    }
+
     #! rejects dangling fragment references and reference cycles among independent elements
     /** @param roots the Body roots
         @param independent independent elements keyed by id
@@ -4447,10 +4501,13 @@ public class XsdData inherits WSDL::XsdBase {
         @throw INVALID-REFERENCE an encoded href does not identify a value in the supplied context
     */
     auto getValue(*hash<auto> mrh, auto val) {
-        # Only a same-document fragment reference names an independent element; other URIs, such as the
-        # cid: references of SOAP attachments, are left to the value's own conversion.
-        if (exists mrh && val.typeCode() == NT_HASH && val."^attributes^".href.typeCode() == NT_STRING
-                && val."^attributes^".href.equalPartial("#")) {
+        # Only a same-document fragment reference names a value in the message. Multipart messages replace cid:
+        # references to their parts before conversion; any other reference is outside the message.
+        if (exists mrh && val.typeCode() == NT_HASH && val."^attributes^".href.typeCode() == NT_STRING) {
+            if (!val."^attributes^".href.equalPartial("#")) {
+                throw SOAP_DESERIALIZATION_ERROR, sprintf("SOAP encoding reference %y is outside the message; only "
+                    "same-document fragment references are resolved", val."^attributes^".href);
+            }
             string href = val."^attributes^".href.substr(1);
 
             if (!exists mrh.mrh{href}) {
@@ -13526,6 +13583,8 @@ public class XsdArrayType inherits WSDL::XsdAbstractType {
         hash<XsdEncodedArrayShape> shape;
         hash<string, bool> blocked_substitutions();
         bool abstract_type = False;
+        # the generic SOAP-ENC:Array: each instance's SOAP-ENC:arrayType gives its members' type and shape
+        bool generic = False;
     }
 
     public {
@@ -13565,6 +13624,34 @@ public class XsdArrayType inherits WSDL::XsdAbstractType {
         } else {
             finalized = True;
         }
+    }
+
+    #! constructs the generic SOAP-ENC:Array type (SOAP 1.1 section 5.4.2)
+    /** @param nsc the declaration namespace registry
+        @note Each instance names its members' type and its shape in SOAP-ENC:arrayType. Native values
+        serialize as a rank-1 array of xsd:anyType members, each with its own xsi:type.
+        @since %WSDL 0.5.8
+    */
+    constructor(Namespaces nsc) : XsdAbstractType("Array", "", nsc) {
+        generic = True;
+        ons = nsc.getOutputNamespacePrefix(SOAP_ENCODING);
+        shape = <XsdEncodedArrayShape>{"item": "anyType"};
+        elementType = nsc.getBaseType("anyType");
+        finalized = True;
+    }
+
+    #! returns the XML Schema builtin that a type name of the SOAP 1.1 encoding namespace denotes
+    /** @param local a local type name in the SOAP 1.1 encoding namespace
+        @return the builtin's local name, or NOTHING when the name is not a simple type of the encoding schema
+        @note SOAP 1.1 section 5.2 names each builtin simple type in the encoding namespace, adding only the
+        id and href reference attributes; section 5.2.3's base64 restricts base64Binary.
+        @since %WSDL 0.5.8
+    */
+    static *string encodingBuiltin(string local) {
+        if (local == "base64") {
+            return "base64Binary";
+        }
+        return local != "binary" && XsdBaseType::BuiltinTypes{local} ? local : NOTHING;
     }
 
     #! returns True: a native list represents one encoded array value, not repeated element occurrences
@@ -13640,9 +13727,47 @@ public class XsdArrayType inherits WSDL::XsdAbstractType {
                     member = "soapenc:" + val.firstKey();
                     items = val.firstValue();
                 }
-                return encodeArray(nsc, items, omitType, shape, member);
+                return encodeArray(nsc, items, omitType, generic ? inferShape(items) : shape, member);
             }
         }
+    }
+
+    # Infers the SOAP 1.1 section 5.4.2 shape of a native value of the generic array, whose nested lists are arrays:
+    # a rectangular nesting without empty dimensions is a rank-n array; otherwise each list member is an array of
+    # one common shape (a jagged array), and absent members are nil.
+    private static hash<XsdEncodedArrayShape> inferShape(auto items) {
+        hash<XsdEncodedArrayShape> leaf = <XsdEncodedArrayShape>{"item": "anyType"};
+        if (items.typeCode() != NT_LIST || !(select items, $1.typeCode() == NT_LIST)) {
+            return leaf;
+        }
+        if (!(select items, $1.typeCode() != NT_LIST)) {
+            int rank = 1;
+            while (True) {
+                *list<int> lengths = XsdEncodedArrayHelper::rectangular(items, rank + 1);
+                if (!exists lengths || inlist(0, lengths)) {
+                    break;
+                }
+                ++rank;
+            }
+            if (rank > 1 && !(select XsdEncodedArrayHelper::flat(items, rank), $1.typeCode() == NT_LIST)) {
+                return <XsdEncodedArrayShape>{"item": "anyType", "rank": rank};
+            }
+        }
+        *hash<XsdEncodedArrayShape> member;
+        foreach auto item in (items) {
+            if (item.typeCode() != NT_LIST) {
+                if (exists item) {
+                    throw SOAP_SERIALIZATION_ERROR, "a generic SOAP-ENC:Array cannot mix array and non-array members";
+                }
+                continue;
+            }
+            hash<XsdEncodedArrayShape> shape = inferShape(item);
+            if (member && (member.rank != shape.rank || member.nested != shape.nested)) {
+                throw SOAP_SERIALIZATION_ERROR, "the array members of a generic SOAP-ENC:Array must have one shape";
+            }
+            member = shape;
+        }
+        return <XsdEncodedArrayShape>{"item": "anyType", "nested": member.nested + (member.rank,)};
     }
 
     # Encodes one array level (SOAP 1.1 section 5.4.2). A rank-n level is transmitted as its members in row-major
@@ -13674,7 +13799,8 @@ public class XsdArrayType inherits WSDL::XsdAbstractType {
                 }
                 push members, encoded;
             } else {
-                push members, XsdDocumentValueHelper::serializeValue(elementType, nsc, item, omitType);
+                # a retained member type (preserve_types) is written with its xsi:type
+                push members, XsdDocumentValueHelper::serializeSelectedValue(elementType, nsc, item, omitType);
             }
         }
         hash<auto> rv;
@@ -13705,16 +13831,18 @@ public class XsdArrayType inherits WSDL::XsdAbstractType {
             default: {
                 # remove any namespace marker from value
                 remove val.".ns";
-                return decodeArray(en, tmap, mrh, val, shape);
+                return decodeArray(en, tmap, mrh, val, shape, generic ? NOTHING : elementType);
             }
         }
     }
 
     # Decodes one array level (SOAP 1.1 section 5.4.2). Members are placed by SOAP-ENC:offset and
     # SOAP-ENC:position; untransmitted members are NOTHING. Members that all share one element name keep that
-    # name as the result's key (qorelanguage/qore#2899); otherwise the result is a list.
+    # name as the result's key (qorelanguage/qore#2899); otherwise the result is a list. The instance's
+    # SOAP-ENC:arrayType names the members' type, which must be the expected item type or substitutable for it;
+    # without an expected item type (a generic SOAP-ENC:Array) the instance gives both type and shape.
     private auto decodeArray(string en, hash<string, XsdAbstractType> tmap, *hash<auto> mrh, auto val,
-            hash<XsdEncodedArrayShape> declared) {
+            hash<XsdEncodedArrayShape> declared, *XsdAbstractType expected) {
         if (!exists val || (val.typeCode() == NT_STRING && val =~ /^\s*$/)) {
             return ();
         }
@@ -13754,7 +13882,7 @@ public class XsdArrayType inherits WSDL::XsdAbstractType {
                 } else if (shared != element) {
                     shared = NOTHING;
                 }
-                members += map ("value": $1), (val{key}.typeCode() == NT_LIST ? val{key} : (val{key},));
+                members += map ("value": $1, "element": key), (val{key}.typeCode() == NT_LIST ? val{key} : (val{key},));
             }
         }
         if (named && val.firstKey() == "^value^") {
@@ -13773,18 +13901,23 @@ public class XsdArrayType inherits WSDL::XsdAbstractType {
                 }
             }
         }
+        if (!exists type_attribute && !exists expected) {
+            throw SOAP_DESERIALIZATION_ERROR, sprintf("generic array %Y requires SOAP-ENC:arrayType (SOAP 1.1 section "
+                "5.4.2)", name);
+        }
         hash<XsdEncodedArrayShape> instance = exists type_attribute
             ? XsdEncodedArrayHelper::parse(type_attribute, SOAP_DESERIALIZATION_ERROR) : declared;
+        XsdAbstractType item = exists type_attribute ? memberType(instance.item, tmap, expected) : expected;
         list<auto> result;
-        if (instance.rank == declared.rank && instance.nested == declared.nested) {
-            result = decodeMembers(en, tmap, mrh, members, instance, offset_attribute);
+        if (!exists expected || (instance.rank == declared.rank && instance.nested == declared.nested)) {
+            result = decodeMembers(en, tmap, mrh, members, instance, offset_attribute, item);
         } else if (declared.rank > 1 && instance.rank == 1
                 && instance.nested == declared.nested + (map 1, xrange(declared.rank - 1))) {
             # Java peers such as Apache Axis send a rank-n array as a jagged array of arrays; the value must still
             # be rectangular.
             hash<XsdEncodedArrayShape> row = XsdEncodedArrayHelper::derive(declared.item, declared.rank - 1,
                 declared.nested);
-            result = map decodeRow(en, tmap, mrh, $1.value, row), members;
+            result = map decodeRow(en, tmap, mrh, $1.value, row, item), members;
             if (!exists XsdEncodedArrayHelper::rectangular(result, declared.rank)) {
                 throw SOAP_DESERIALIZATION_ERROR, sprintf("jagged instance of rank-%d array %Y is not rectangular",
                     declared.rank, name);
@@ -13798,20 +13931,73 @@ public class XsdArrayType inherits WSDL::XsdAbstractType {
 
     # decodes a member that is itself an array; the member's #2899 name wrapper is not part of the value
     private list<auto> decodeRow(string en, hash<string, XsdAbstractType> tmap, *hash<auto> mrh, auto member,
-            hash<XsdEncodedArrayShape> level) {
-        auto row = decodeArray(en, tmap, mrh, getValue(mrh, member), level);
+            hash<XsdEncodedArrayShape> level, XsdAbstractType item) {
+        auto row = decodeArray(en, tmap, mrh, getValue(mrh, member), level, item);
         return row.typeCode() == NT_HASH ? row.firstValue() : row;
     }
 
+    # Resolves an instance SOAP-ENC:arrayType item QName in the instance's namespace scope. A declared item type
+    # accepts itself or a type that can substitute for it; the generic array accepts any known type.
+    private XsdAbstractType memberType(string item, hash<string, XsdAbstractType> tmap, *XsdAbstractType expected) {
+        XsdQNameValue identity = XsdQNameValueHelper::resolve(item, SOAP_DESERIALIZATION_ERROR, QNameInputNamespaces);
+        string uri = identity.getNamespaceUri();
+        string local = identity.getLocalName();
+        XsdAbstractType selected;
+        *string builtin = uri == XSD_NS ? (local != "binary" && XsdBaseType::BuiltinTypes{local} ? local : NOTHING)
+            : (uri == SOAP_ENCODING ? encodingBuiltin(local) : NOTHING);
+        if (builtin) {
+            # independent state keeps a shared schema's lazy builtin cache unpopulated
+            selected = new XsdBaseType(builtin, new Namespaces({}, nsc));
+        } else if (uri == SOAP_ENCODING && local == "Array") {
+            selected = new XsdArrayType(nsc);
+        } else {
+            *XsdAbstractType resolved = tmap{type_qname(uri, local)};
+            if (!resolved) {
+                throw SOAP_DESERIALIZATION_ERROR, sprintf("unknown member type {%s}%s in SOAP-ENC:arrayType of array "
+                    "%Y", uri, local, name);
+            }
+            selected = resolved;
+        }
+        if (exists expected) {
+            XsdTypeSubstitutionHelper::check(selected, expected, name, SOAP_DESERIALIZATION_ERROR);
+        }
+        return selected;
+    }
+
+    # SOAP 1.1 section 5.1 rule 3(c): without xsi:type, a member of an xsd:anyType array named after a type of
+    # the encoding schema, whose elements are declared for this purpose, has that type (section 5.4.2 example)
+    private XsdAbstractType namedType(XsdAbstractType item, *string element, auto accessor) {
+        if (!exists element || !(item instanceof XsdBaseType) || item.name != "anyType"
+                || (accessor.typeCode() == NT_HASH && accessor."^attributes^"
+                    && (select keys accessor."^attributes^", $1 =~ /(^|:)type$/))) {
+            return item;
+        }
+        element =~ s/\^[0-9]+\^?$//;
+        string uri;
+        string local;
+        if (element =~ /^\{/) {
+            (uri, local) = (element =~ x/^\{([^}]*)\}(.*)$/);
+        } else {
+            XsdQNameNamespaceScope scope(accessor.typeCode() == NT_HASH ? accessor."^attributes^" : NOTHING);
+            XsdQNameValue identity = XsdQNameValueHelper::resolve(element, SOAP_DESERIALIZATION_ERROR,
+                QNameInputNamespaces);
+            uri = identity.getNamespaceUri();
+            local = identity.getLocalName();
+        }
+        *string builtin = uri == SOAP_ENCODING ? encodingBuiltin(local) : NOTHING;
+        return builtin ? new XsdBaseType(builtin, new Namespaces({}, nsc)) : item;
+    }
+
     private list<auto> decodeMembers(string en, hash<string, XsdAbstractType> tmap, *hash<auto> mrh,
-            list<hash<auto>> members, hash<XsdEncodedArrayShape> level, *string offset_attribute) {
+            list<hash<auto>> members, hash<XsdEncodedArrayShape> level, *string offset_attribute,
+            XsdAbstractType item) {
         if (level.rank > 1 && !level.lengths) {
             if (exists offset_attribute) {
                 throw SOAP_DESERIALIZATION_ERROR, sprintf("SOAP-ENC:offset on array %Y needs asserted lengths", name);
             }
             # rows transmitted as nested members, as this module produced them before P8
             hash<XsdEncodedArrayShape> row = XsdEncodedArrayHelper::derive(level.item, level.rank - 1, level.nested);
-            return map decodeRow(en, tmap, mrh, $1.value, row), members;
+            return map decodeRow(en, tmap, mrh, $1.value, row, item), members;
         }
         list<int> offset = exists offset_attribute
             ? XsdEncodedArrayHelper::indices(offset_attribute, level.rank, "offset", SOAP_DESERIALIZATION_ERROR)
@@ -13855,9 +14041,14 @@ public class XsdArrayType inherits WSDL::XsdAbstractType {
                 continue;
             }
             if (level.nested) {
-                flat[index] = decodeRow(en, tmap, mrh, value, XsdEncodedArrayHelper::member(level));
+                flat[index] = decodeRow(en, tmap, mrh, value, XsdEncodedArrayHelper::member(level), item);
             } else {
-                flat[index] = XsdDocumentValueHelper::deserializeValue(elementType, en, tmap, mrh, value);
+                # With preserve_types, a member type that differs from the declared item type is retained like an
+                # xsi:type selection, which deserializeValue() retains itself.
+                XsdAbstractType member = namedType(item, entry.element, accessor);
+                auto converted = XsdDocumentValueHelper::deserializeValue(member, en, tmap, mrh, value, True);
+                flat[index] = XsdNativeTypeValueHelper::isWrapper(converted) ? converted
+                    : XsdNativeTypeValueHelper::retain(elementType, member, converted);
             }
         }
         return level.lengths ? XsdEncodedArrayHelper::reshape(flat, level.lengths) : flat;
@@ -18954,6 +19145,12 @@ class XsdDocumentValueHelper {
     static auto serializePartValue(XsdAbstractType type, Namespaces nsc, auto value, *softbool omitType) {
         XsdIdentityElementScope identity_scope();
         on_success identity_scope.finish(SOAP_SERIALIZATION_ERROR);
+        return serializeSelectedValue(type, nsc, value, omitType);
+    }
+
+    # Serializes a value of a declared type; a portable selected-type wrapper supplies the instance type, which
+    # must be able to substitute for the declared type, and its xsi:type annotation.
+    static auto serializeSelectedValue(XsdAbstractType type, Namespaces nsc, auto value, *softbool omitType) {
         *hash<auto> annotation;
         if (XsdNativeTypeValueHelper::isWrapper(value)) {
             XsdNativeTypeValueHelper::checkWrapper(value);
@@ -24352,6 +24549,21 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
     }
 
     auto serializeValue(Namespaces nsc, auto val, *softbool omitType) {
+        auto rv = serializeSimpleValue(nsc, val, omitType);
+        # The value's type is this named type, not the type it restricts: xsi:type must name the declared type or
+        # one derived from it, so a receiver rejects the base type (SOAP-encoded parts, arrays). A union keeps the
+        # selected member type, which counts as derived from the union (XML Schema 1.0 section 3.14.6, 2.2.4).
+        if (!omitType && hasRealName() && getFacetKind() != "union" && rv.typeCode() == NT_HASH
+                && rv."^attributes^".typeCode() == NT_HASH) {
+            string key = nsc.getOutputNamespacePrefix(XSI_NS) + ":type";
+            if (rv."^attributes^".hasKey(key)) {
+                rv."^attributes^" += XsdDocumentValueHelper::typeAttributes(self, nsc);
+            }
+        }
+        return rv;
+    }
+
+    private auto serializeSimpleValue(Namespaces nsc, auto val, *softbool omitType) {
         *XsdScopedLexicalContext lexical_scope;
         if (val instanceof XsdScopedLexicalValue) {
             lexical_scope = new XsdScopedLexicalContext(val, nsc);
@@ -30142,11 +30354,13 @@ class XsdTypeSubstitutionHelper {
                 SOAP_DESERIALIZATION_ERROR, QNameInputNamespaces);
             string uri = identity.getNamespaceUri();
             string local = identity.getLocalName();
-            if ((uri == XSD_NS || uri == SOAP_ENCODING) && local != "binary" && XsdBaseType::BuiltinTypes{local}) {
+            *string builtin = uri == XSD_NS ? (local != "binary" && XsdBaseType::BuiltinTypes{local} ? local : NOTHING)
+                : (uri == SOAP_ENCODING ? XsdArrayType::encodingBuiltin(local) : NOTHING);
+            if (builtin) {
                 # SOAP 1.1 section 5.2.1 names each builtin simple type in the encoding namespace as well; it
                 # only adds the id and href reference attributes. Independent output state avoids populating a
                 # shared schema's lazy builtin cache.
-                selected = new XsdBaseType(local, new Namespaces({}, declared.nsc));
+                selected = new XsdBaseType(builtin, new Namespaces({}, declared.nsc));
             } else if (uri == SOAP_ENCODING && local == "Array") {
                 # SOAP 1.1 section 5.4.2 lets an encoded array accessor name the generic SOAP-ENC:Array with a
                 # SOAP-ENC:arrayType, even where the schema declares an array type derived from it.
@@ -33599,7 +33813,9 @@ public class WSMessage inherits WSDL::XsdNamedData {
             auto v = remove val{k};
             hash<auto> arg = args{k};
             #printf("DBG WSMessage::deserializeRpc() part: %y, key: %y, val: %y\n", p, k, v);
-            if (v.typeCode() == NT_HASH) {
+            # An encoded array reads its member names itself: they can carry a member's type (SOAP 1.1 section 5.1
+            # rule 3(c)), and members sharing a local name under different prefixes must keep document order.
+            if (v.typeCode() == NT_HASH && !(arg.type instanceof XsdArrayType)) {
                 XsdBase::removeNS2(\v);
             }
             if (arg.element) {
@@ -35477,6 +35693,20 @@ public class SoapBinding inherits WSDL::OperationalBinding {
             if (kept) {
                 roots{entry.key} = repeated ? kept : kept[0];
             }
+        }
+        # SOAP 1.1 section 5.1 rule 8: an accessor to a string or byte-array value may carry the id itself
+        hash<auto> embedded();
+        foreach string key in (keys roots) {
+            SoapEncodedReferenceHelper::consumeEmbedded(\roots{key}, \embedded);
+        }
+        foreach string id in (keys mrh.mrh) {
+            SoapEncodedReferenceHelper::consumeEmbedded(\mrh.mrh{id}, \embedded);
+        }
+        foreach hash<auto> entry in (embedded.pairIterator()) {
+            if (mrh.mrh.hasKey(entry.key)) {
+                throw SOAP_DESERIALIZATION_ERROR, sprintf("duplicate SOAP encoding id %y", entry.key);
+            }
+            mrh.mrh{entry.key} = entry.value;
         }
         SoapEncodedReferenceHelper::checkGraph(roots, mrh.mrh);
 
@@ -38431,10 +38661,23 @@ public class Namespaces inherits Serializable {
             rtype = getBaseType(resolved.val);
             return True;
         }
-        if (tmap) {
-            if ((rtype = tmap_try_get(tmap, type_qname(resolved.uri, resolved.val)))) {
+        if (resolved.uri == SOAP_ENCODING) {
+            # SOAP 1.1 section 5.4.2: the generic array; each instance's SOAP-ENC:arrayType gives its members' type
+            if (resolved.val == "Array") {
+                rtype = new XsdArrayType(self);
                 return True;
             }
+            *string builtin = XsdArrayType::encodingBuiltin(resolved.val);
+            if (builtin) {
+                rtype = getBaseType(builtin);
+                return True;
+            }
+        }
+        # a failed lookup leaves the typed reference unassigned; the caller reports the unresolved type
+        *XsdAbstractType found = tmap ? tmap_try_get(tmap, type_qname(resolved.uri, resolved.val)) : NOTHING;
+        if (found) {
+            rtype = found;
+            return True;
         }
         typeinfo = resolved;
         return False;
