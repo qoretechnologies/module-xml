@@ -207,6 +207,12 @@ module WSDL {
     @section wsdlrelnotes WSDL Module Release Notes
 
     @subsection wsdl_0_5_8 WSDL v0.5.8
+    - MTOM/XOP input follows XOP 1.0 and SOAP 1.2 MTOM, and now works at all: every MTOM message previously
+      failed with \c RUNTIME-TYPE-ERROR; \c xop:Include is recognized in any namespace scope, must be its element's
+      only child, resolves percent-encoded \c cid: URIs, keeps its element's attributes, and rejects missing,
+      malformed and repeated references and undeclared extensions
+    - WSDLLib::packageMtom() writes the package's \c start-info and accepts the SOAP 1.2 XML content type, and
+      multipart input rejects a \c start-info that conflicts with the XOP root; added WSDLLib::contentIdFromUri()
     - SOAP 1.2 RPC Representation (SOAP 1.2 Part 2 section 4) for SOAP 1.2 RPC-style bindings with SOAP 1.2
       Encoding (see SoapBinding::usesSoap12RpcRepresentation()):
       - non-void responses name their return value in \c rpc:result, and decoding takes the edge it names as the
@@ -1841,88 +1847,167 @@ string method = WSDLLib::fromXmlName("Hello_x0020_world"); # "Hello world"
         return normalized;
     }
 
-    #! Checks if an element is an xop:Include element by verifying the namespace
-    /** @param key the element key (may include prefix like "xop:Include")
-        @param node the element node (hash with attributes)
-        @return True if this is a valid xop:Include element
-    */
-    private static bool isXopIncludeElement(string key, auto node) {
-        # Determine local name and optional prefix from the element key
-        string prefix;
-        string local;
-        if (key =~ /^([^:]+):(.*)$/) {
-            prefix = ($1)[0];
-            local = ($1)[1];
-        } else {
-            prefix = "";
-            local = key;
-        }
-
-        if (local != "Include") {
-            return False;
-        }
-
-        if (!node || node.typeCode() != NT_HASH) {
-            return False;
-        }
-
-        *hash<auto> attrs = node."^attributes^";
-        if (!attrs) {
-            return False;
-        }
-
-        # If there is a prefix, require a matching xmlns:<prefix> declaration
-        if (prefix) {
-            string ns_attr = "xmlns:" + prefix;
-            return attrs{ns_attr} == XOP_NS;
-        }
-
-        # No prefix: require default namespace to be the XOP namespace
-        return attrs{"xmlns"} == XOP_NS;
-    }
-
-    #! Resolves xop:Include references in an XML data structure
-    /** @param data reference to the XML data structure to process
-        @param parts hash of MIME parts keyed by content-id
+    #! Reconstructs an XOP infoset: each xop:Include takes the content of the MIME part it references
+    /** @param data the parsed root part of an XOP package, modified in place
+        @param parts the package's other parts, keyed by unbracketed Content-ID
+        @throw SOAP-MESSAGE-ERROR an xop:Include that is not its parent's only child, has undeclared attributes
+        or content, or a malformed \c cid: URI; a reference to a missing part; or a part referenced twice
+        @note XOP 1.0 section 3.2 replaces each xop:Include whose parent has it as the only child. The parent keeps
+        its attributes, and its value becomes the part's content. MTOM (SOAP 1.2 MTOM section 4.3.1) extracts each
+        optimized value into its own part, so a part may be referenced only once. Parts that no xop:Include
+        references are not part of the SOAP message. \c cid: URIs are percent-decoded (RFC 2392).
     */
     static substXopInclude(reference<auto> data, hash<auto> parts) {
-        if (data.typeCode() == NT_HASH) {
-            # Check for xop:Include element
-            foreach string key in (keys data) {
-                if ((key =~ /:Include$/ || key == "Include") && isXopIncludeElement(key, data{key})) {
-                    # This is a verified xop:Include element
-                    *hash<auto> attrs = data{key}."^attributes^";
-                    if (attrs && attrs.href) {
-                        string href = attrs.href;
-                        if (href =~ /^cid:/) {
-                            # Extract content-id from cid: URI
-                            string cid = substr(href, 4);  # Remove "cid:" prefix
-                            if (parts{cid}) {
-                                # Replace the xop:Include with the binary data
-                                data = parts{cid}.body;
-                                return;
-                            }
-                        }
-                    }
-                } else {
-                    # Recursively process nested structures
-                    WSDLLib::substXopInclude(\data{key}, parts);
+        hash<string, bool> used();
+        substXopIncludeIntern(\data, parts, {}, \used);
+    }
+
+    private static substXopIncludeIntern(reference<auto> data, hash<auto> parts, hash<string, string> inherited,
+            reference<hash<string, bool>> used) {
+        if (data.typeCode() == NT_LIST) {
+            for (int i = 0; i < data.size(); ++i) {
+                substXopIncludeIntern(\data[i], parts, inherited, \used);
+            }
+            return;
+        }
+        if (data.typeCode() != NT_HASH) {
+            return;
+        }
+        hash<string, string> scope = inherited + xmlnsDeclarations(data."^attributes^");
+        *string include;
+        foreach string key in (keys data) {
+            if (key.equalPartial("^")) {
+                continue;
+            }
+            foreach auto child in (data{key}.typeCode() == NT_LIST ? data{key} : (data{key},)) {
+                if (expandedName(key, scope + xmlnsDeclarations(child.typeCode() == NT_HASH ? child."^attributes^"
+                        : NOTHING)) == type_qname(XOP_NS, "Include")) {
+                    include = key;
                 }
             }
-        } else if (data.typeCode() == NT_LIST) {
-            for (int i = 0; i < data.size(); ++i) {
-                WSDLLib::substXopInclude(\data[i], parts);
+        }
+        if (!exists include) {
+            foreach string key in (keys data) {
+                if (!key.equalPartial("^")) {
+                    substXopIncludeIntern(\data{key}, parts, scope, \used);
+                }
+            }
+            return;
+        }
+        # XOP 1.0 section 3.2: xop:Include must be the only member of its parent's children
+        if ((select keys data, $1 != "^attributes^").size() != 1 || data{include}.typeCode() == NT_LIST) {
+            throw "SOAP-MESSAGE-ERROR", "an xop:Include must be the only child of its element (XOP 1.0 section 3.2)";
+        }
+        auto element = data{include};
+        hash<string, string> element_scope = scope + xmlnsDeclarations(element.typeCode() == NT_HASH
+            ? element."^attributes^" : NOTHING);
+        *string href;
+        foreach hash<auto> attribute in ((element.typeCode() == NT_HASH ? element."^attributes^" : {}).pairIterator()) {
+            if (attribute.key == "href") {
+                href = attribute.value;
+            } else if (attribute.key != "xmlns" && !attribute.key.equalPartial("xmlns:")) {
+                *string prefix = (attribute.key =~ x/^([^:]+):/)[0];
+                if (!exists prefix || !element_scope{prefix} || element_scope{prefix} == XOP_NS) {
+                    throw "SOAP-MESSAGE-ERROR", sprintf("xop:Include attribute %y must be namespace-qualified outside "
+                        "the XOP namespace (XOP 1.0 section 2.1)", attribute.key);
+                }
             }
         }
+        foreach string key in (keys element) {
+            if (key == "^attributes^" || (key =~ /^\^value[0-9]*\^$/ && element{key} =~ /^\s*$/)) {
+                continue;
+            }
+            *string uri = key.equalPartial("^") ? NOTHING : element_scope{(key =~ x/^([^:]+):/)[0] ?? ""};
+            if (!exists uri || !uri.val() || uri == XOP_NS) {
+                throw "SOAP-MESSAGE-ERROR", sprintf("xop:Include content %y must be namespace-qualified elements "
+                    "outside the XOP namespace (XOP 1.0 section 2.1)", key);
+            }
+        }
+        if (!exists href) {
+            throw "SOAP-MESSAGE-ERROR", "an xop:Include requires an href attribute (XOP 1.0 section 2.2)";
+        }
+        string cid = contentIdFromUri(href);
+        if (!parts.hasKey(cid)) {
+            throw "SOAP-MESSAGE-ERROR", sprintf("xop:Include refers to %y, which names no attachment part", href);
+        }
+        if (used{cid}) {
+            throw "SOAP-MESSAGE-ERROR", sprintf("MIME part %y is referenced by more than one xop:Include (SOAP 1.2 "
+                "MTOM section 4.3.1)", cid);
+        }
+        used{cid} = True;
+        auto body = parts{cid}.body ?? binary();
+        data = data."^attributes^" ? {"^attributes^": data."^attributes^", "^value^": body} : body;
+    }
+
+    # the namespace declarations among an element's attributes, keyed by prefix ("" for the default namespace)
+    private static hash<string, string> xmlnsDeclarations(*hash<auto> attributes) {
+        hash<string, string> result();
+        foreach hash<auto> attribute in (attributes.pairIterator()) {
+            if (attribute.key == "xmlns") {
+                result{""} = attribute.value;
+            } else if (attribute.key.equalPartial("xmlns:")) {
+                result{attribute.key.substr(6)} = attribute.value;
+            }
+        }
+        return result;
+    }
+
+    # the {uri}local name of a parsed element key in a namespace scope
+    private static string expandedName(string key, hash<string, string> scope) {
+        key =~ s/\^[0-9]+\^?$//;
+        (*string prefix, *string local) = (key =~ x/^([^:]+):(.+)$/);
+        return exists local ? type_qname(scope{prefix} ?? ("?" + prefix), local) : type_qname(scope{""}, key);
+    }
+
+    #! returns the Content-ID that a cid: URI names (RFC 2392)
+    /** @param uri a \c cid: URI; the scheme is case-insensitive and the identifier percent-encoded
+        @return the unbracketed Content-ID
+        @throw SOAP-MESSAGE-ERROR a URI that is not a \c cid: URI, an empty identifier or a malformed
+        percent-encoding
+        @since %WSDL 0.5.8
+    */
+    static string contentIdFromUri(string uri) {
+        string value = trim(uri);
+        if (value.size() <= 4 || value.substr(0, 4).lwr() != "cid:" || value =~ /[\s<>"{}|\\^`]/) {
+            throw "SOAP-MESSAGE-ERROR", sprintf("attachment reference %y is not a cid: URI (RFC 2392)", uri);
+        }
+        binary bytes = binary();
+        string rest = value.substr(4);
+        int i = 0;
+        while (i < rest.size()) {
+            string c = rest.substr(i, 1);
+            if (c == "%") {
+                *string hex = (rest.substr(i + 1, 2) =~ x/^([0-9A-Fa-f]{2})$/)[0];
+                if (!exists hex) {
+                    throw "SOAP-MESSAGE-ERROR", sprintf("attachment reference %y has a malformed percent-encoding",
+                        uri);
+                }
+                bytes += parse_hex_string(hex);
+                i += 3;
+            } else {
+                bytes += binary(c);
+                ++i;
+            }
+        }
+        string cid = binary_to_string(bytes, "UTF-8");
+        if (cid =~ /[<>\x00-\x1f\x7f]/) {
+            throw "SOAP-MESSAGE-ERROR", sprintf("attachment reference %y names an invalid Content-ID", uri);
+        }
+        return cid;
     }
 
     #! Creates an MTOM/XOP multipart message from XML and binary attachments
     /** @param xml the XML SOAP message body
         @param attachments list of hashes with keys: 'cid' (content-id), 'content_type', 'data' (binary)
         @param boundary optional multipart boundary string
+        @param xml_type the content type of the XML serialization: \c "text/xml" for SOAP 1.1, or
+        \c "application/soap+xml" with any \c action parameter for SOAP 1.2
         @return hash with 'content_type' and 'body' keys for the multipart message
+        @note The root part is \c application/xop+xml with \c xml_type as its \c type parameter, and the package
+        repeats it in \c start-info (XOP 1.0 section 4.1; SOAP 1.2 MTOM section 3.2).
     */
-    static hash<auto> packageMtom(string xml, list<hash<auto>> attachments, *string boundary) {
+    static hash<auto> packageMtom(string xml, list<hash<auto>> attachments, *string boundary,
+            string xml_type = "text/xml") {
         if (!boundary) {
             boundary = "----=_Part_" + get_random_string(20);
         }
@@ -1935,7 +2020,8 @@ string method = WSDLLib::fromXmlName("Hello_x0020_world"); # "Hello world"
 
         # Root part header and content
         string root_header = "--" + boundary + "\r\n";
-        root_header += "Content-Type: application/xop+xml; charset=utf-8; type=\"text/xml\"\r\n";
+        string quoted_type = "\"" + replace(replace(xml_type, "\\", "\\\\"), "\"", "\\\"") + "\"";
+        root_header += "Content-Type: application/xop+xml; charset=utf-8; type=" + quoted_type + "\r\n";
         root_header += "Content-Transfer-Encoding: 8bit\r\n";
         root_header += "Content-ID: <" + root_cid + ">\r\n";
         root_header += "\r\n";
@@ -1981,8 +2067,8 @@ string method = WSDLLib::fromXmlName("Hello_x0020_world"); # "Hello world"
         }
 
         return {
-            "content_type": sprintf("multipart/related; boundary=\"%s\"; type=\"application/xop+xml\"; start=\"<%s>\"",
-                boundary, root_cid),
+            "content_type": sprintf("multipart/related; boundary=\"%s\"; type=\"application/xop+xml\"; start=\"<%s>\"; "
+                "start-info=%s", boundary, root_cid, quoted_type),
             "body": body,
         };
     }
@@ -2392,6 +2478,18 @@ class WsdlMultipartHelper {
     static hash<auto> read(hash<auto> message, *WsdlMediaType media) {
         hash<auto> multipart = readEntities(message, media);
         hash<Mime::MessageInfo> root = multipart.parts[multipart.root];
+        # XOP 1.0 section 4.1: the package's start-info repeats the XOP root's type parameter
+        if (media && WSDLLib::isMtomMessage({"content-type": root.hdr."content-type"})) {
+            *string start_info = media.parameter("start-info", "SOAP-MESSAGE-ERROR");
+            *string root_type = WSDLLib::getContentTypeParameter(root.hdr."content-type", "type");
+            *WsdlMediaType declared = exists start_info ? WsdlMediaType::read(start_info) : NOTHING;
+            *WsdlMediaType actual = exists root_type ? WsdlMediaType::read(root_type) : NOTHING;
+            if (exists start_info && (!declared || !actual || declared.major != actual.major
+                    || declared.minor != actual.minor)) {
+                throw "SOAP-MESSAGE-ERROR", sprintf("XOP package start-info %y conflicts with its root type %y",
+                    start_info, root_type);
+            }
+        }
         hash<string, hash<Mime::MessageInfo>> parts();
         list<hash<Mime::MessageInfo>> unidentified();
         foreach hash<Mime::MessageInfo> part in (multipart.parts) {

@@ -53,3 +53,29 @@ hash<SoapXmlMessageInfo> request = operation.deserializeXmlRequest(
 
 This interface describes MIME transport normalization. WSDL attachment-part
 binding and SOAP/XOP reference interpretation remain separate consumers.
+
+## MTOM/XOP reconstruction
+
+When the root is an XOP entity, `WSDLLib::substXopInclude()` rebuilds the original infoset before SOAP processing,
+as XOP 1.0 section 3.2 and SOAP 1.2 MTOM section 3.3 describe:
+
+- `xop:Include` is recognized by its expanded name. The namespace may be declared on it, on an ancestor, or as
+  the default namespace.
+- It must be the only child of its element, so text or white space beside it is rejected. The SOAP parser keeps
+  no comments. The element keeps its attributes, and its value becomes the referenced part's bytes.
+- Its `href` must be a `cid:` URI (XOP 1.0 section 2.2). The scheme is case-insensitive, and the identifier is
+  percent-decoded (RFC 2392), as CXF's `cid:...%40cxf.apache.org` references require. The only unqualified
+  attribute is `href`. Other attributes and child elements must be namespace-qualified outside the XOP
+  namespace, and are ignored (section 2.1).
+- The part must exist among the non-root parts, and each part may be referenced once (SOAP 1.2 MTOM section
+  4.3.1). Parts that no `xop:Include` references are not part of the SOAP message.
+
+Errors are `SOAP-MESSAGE-ERROR` exceptions. A package's `start-info` must name the same media type as the XOP
+root's `type` parameter (XOP 1.0 section 4.1); packages without `start-info` are accepted. Before P8-05 every
+MTOM message failed with `RUNTIME-TYPE-ERROR`, because the previous recognizer read regex captures through `$1`.
+
+`WSDLLib::packageMtom()` writes the root as `application/xop+xml` with the XML serialization's content type
+in `type`, and repeats it in the package's `start-info`: `text/xml` for SOAP 1.1, and `application/soap+xml`
+with any `action` parameter for SOAP 1.2 (SOAP 1.2 MTOM section 3.2). The pinned sources are in
+`test/wsdl-interop/normative/`, and `test_attachment_sources.py` checks their digests.
+

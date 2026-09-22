@@ -1,0 +1,165 @@
+#!/usr/bin/env qore
+# -*- mode: qore; indent-tabs-mode: nil -*-
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires xml
+%requires ../qlib/WSDL.qm
+
+%exec-class SoapMtomTest
+
+# MTOM/XOP message reconstruction (XOP 1.0 sections 2-4, SOAP 1.2 MTOM sections 3-4) and packaging.
+public class SoapMtomTest inherits QUnit::Test {
+    private {
+        const Contract = '<definitions xmlns="http://schemas.xmlsoap.org/wsdl/"
+            xmlns:soap="http://schemas.xmlsoap.org/wsdl/%s/" xmlns:xsd="http://www.w3.org/2001/XMLSchema"
+            xmlns:tns="urn:mtom" targetNamespace="urn:mtom">
+          <types><xsd:schema targetNamespace="urn:mtom" elementFormDefault="qualified">
+            <xsd:element name="upload"><xsd:complexType><xsd:sequence>
+              <xsd:element name="name" type="xsd:string"/>
+              <xsd:element name="data" type="xsd:base64Binary" minOccurs="0" maxOccurs="unbounded"/>
+            </xsd:sequence></xsd:complexType></xsd:element>
+          </xsd:schema></types>
+          <message name="uploadMessage"><part name="body" element="tns:upload"/></message>
+          <portType name="P"><operation name="upload"><input message="tns:uploadMessage"/>
+            <output message="tns:uploadMessage"/></operation></portType>
+          <binding name="B" type="tns:P"><soap:binding style="document" transport="http://schemas.xmlsoap.org/soap/http"/>
+            <operation name="upload"><soap:operation soapAction="urn:mtom#upload"/><input><soap:body use="literal"/></input>
+            <output><soap:body use="literal"/></output></operation></binding>
+          <service name="S"><port name="P" binding="tns:B"><soap:address location="http://example.invalid/mtom"/></port></service>
+        </definitions>';
+        const Envelope11 = '<e:Envelope xmlns:e="http://schemas.xmlsoap.org/soap/envelope/"%s><e:Body>'
+            '<m:upload xmlns:m="urn:mtom"><m:name>n</m:name>%s</m:upload></e:Body></e:Envelope>';
+        const Envelope12 = '<e:Envelope xmlns:e="http://www.w3.org/2003/05/soap-envelope"%s><e:Body>'
+            '<m:upload xmlns:m="urn:mtom"><m:name>n</m:name>%s</m:upload></e:Body></e:Envelope>';
+        const Xop = ' xmlns:xop="http://www.w3.org/2004/08/xop/include"';
+    }
+
+    constructor() : QUnit::Test("MTOM/XOP reconstruction and packaging", "1.0") {
+        addTestCase("xop:Include takes the referenced part's content", \references());
+        addTestCase("binary content keeps its exact bytes", \fidelity());
+        addTestCase("invalid XOP infosets and references are rejected", \invalid());
+        addTestCase("packages carry the SOAP version's content types", \contentTypes());
+        set_return_value(main());
+    }
+
+    private static WebService service(bool soap12 = False) {
+        return new WebService(sprintf(Contract, soap12 ? "soap12" : "soap"));
+    }
+
+    private static string data(string content, *string attributes) {
+        return sprintf('<m:data%s>%s</m:data>', attributes ?? "", content);
+    }
+
+    private static string include(string cid, *string extra) {
+        return sprintf('<xop:Include href="cid:%s"%s/>', cid, extra ?? "");
+    }
+
+    # decodes an XOP package built from the given envelope content and parts
+    private auto decode(string content, list<hash<auto>> parts, bool soap12 = False, string declarations = Xop) {
+        string xml = sprintf(soap12 ? Envelope12 : Envelope11, declarations, content);
+        hash<auto> package = WSDLLib::packageMtom(xml, parts, NOTHING, soap12 ? "application/soap+xml" : "text/xml");
+        hash<auto> message = WSDLLib::parseMultiPartSOAPMessage({"content-type": package.content_type,
+            "body": package.body}, False, True);
+        return service(soap12).getOperation("upload").deserializeRequest(WSDLLib::parseSOAPMessage(message, False,
+            True));
+    }
+
+    references() {
+        binary hello = binary("hello");
+        foreach bool soap12 in (False, True) {
+            # the xop prefix declared on the envelope, on the element, and as the default namespace
+            assertEq({"name": "n", "data": hello}, decode(data(include("a")), ({"cid": "a", "data": hello},), soap12));
+            assertEq({"name": "n", "data": hello}, decode(data('<x:Include xmlns:x="http://www.w3.org/2004/08/xop/'
+                'include" href="cid:a"/>'), ({"cid": "a", "data": hello},), soap12, ""));
+            assertEq({"name": "n", "data": hello}, decode(data('<Include xmlns="http://www.w3.org/2004/08/xop/include" '
+                'href="cid:a"/>'), ({"cid": "a", "data": hello},), soap12, ""));
+            # cid: URIs are percent-encoded (RFC 2392), as CXF writes them; the scheme is case-insensitive
+            assertEq({"name": "n", "data": hello}, decode(data(include("part-1%40cxf.apache.org")),
+                ({"cid": "part-1@cxf.apache.org", "data": hello},), soap12));
+            assertEq({"name": "n", "data": hello}, decode(data('<xop:Include href="CID:a"/>'),
+                ({"cid": "a", "data": hello},), soap12));
+            # namespace-qualified extension attributes and children are ignored (XOP 1.0 section 2.1)
+            assertEq({"name": "n", "data": hello}, decode(data(sprintf('<xop:Include href="cid:a" xmlns:q="urn:q" '
+                'q:note="x"><q:extra/></xop:Include>')), ({"cid": "a", "data": hello},), soap12));
+            # parts that no xop:Include references are not part of the message
+            assertEq({"name": "n", "data": hello}, decode(data(include("a")), ({"cid": "a", "data": hello},
+                {"cid": "unused", "data": binary("x")}), soap12));
+        }
+        # the optimized element keeps its attributes
+        hash<auto> xml = parse_xml(sprintf(Envelope11, Xop, data(include("a"), ' xmlns:q="urn:q" q:note="kept"')),
+            XPF_PRESERVE_ORDER);
+        WSDLLib::substXopInclude(\xml, {"a": {"body": binary("z")}});
+        assertEq({"^attributes^": {"xmlns:q": "urn:q", "q:note": "kept"}, "^value^": binary("z")},
+            xml."e:Envelope"."e:Body"."m:upload"."m:data");
+    }
+
+    fidelity() {
+        binary large = get_random_bytes(1024 * 1024);
+        # bytes resembling line breaks and MIME boundaries
+        binary tricky = binary("\r\n--\r\n--=_Part_\r\n\r\n") + get_random_bytes(64) + binary("\r\n--");
+        foreach bool soap12 in (False, True) {
+            assertEq({"name": "n", "data": binary()}, decode(data(include("e")), ({"cid": "e", "data": binary()},),
+                soap12));
+            assertEq({"name": "n", "data": large}, decode(data(include("l")), ({"cid": "l", "data": large},), soap12));
+            assertEq({"name": "n", "data": tricky}, decode(data(include("t")), ({"cid": "t", "data": tricky},), soap12));
+            # many parts in one package, each referenced once
+            list<binary> values();
+            list<hash<auto>> parts();
+            string content = "";
+            for (int i = 0; i < 50; ++i) {
+                push values, get_random_bytes(i * 37);
+                push parts, {"cid": "p" + i, "data": values[i]};
+                content += data(include("p" + i));
+            }
+            assertEq({"name": "n", "data": values}, decode(content, parts, soap12));
+        }
+    }
+
+    invalid() {
+        list<hash<auto>> one = ({"cid": "a", "data": binary("x")},);
+        # xop:Include must be the only child of its element (XOP 1.0 section 3.2); the SOAP parser keeps no comments
+        foreach string content in (data("x" + include("a")), data(include("a") + "<m:y/>"),
+                data(" " + include("a") + " "), include("a")) {
+            assertThrows("SOAP-MESSAGE-ERROR", "must be the only child", \decode(), (content, one), content);
+        }
+        assertThrows("SOAP-MESSAGE-ERROR", "requires an href", \decode(), (data('<xop:Include/>'), one));
+        assertThrows("SOAP-MESSAGE-ERROR", "is not a cid: URI", \decode(), (data('<xop:Include href="http://x/a"/>'), one));
+        assertThrows("SOAP-MESSAGE-ERROR", "malformed percent-encoding", \decode(), (data(include("a%4")), one));
+        assertThrows("SOAP-MESSAGE-ERROR", "names no attachment part", \decode(), (data(include("missing")), one));
+        # the root part is not an attachment
+        assertThrows("SOAP-MESSAGE-ERROR", "names no attachment part", \decode(),
+            (data(include("root.message%40qore.org")), one));
+        # each part is referenced once (SOAP 1.2 MTOM section 4.3.1)
+        assertThrows("SOAP-MESSAGE-ERROR", "referenced by more than one xop:Include", \decode(),
+            (data(include("a")) + data(include("a")), one));
+        # only href is unqualified; extensions are qualified outside the XOP namespace (XOP 1.0 section 2.1)
+        assertThrows("SOAP-MESSAGE-ERROR", "must be namespace-qualified outside", \decode(),
+            (data(include("a", ' note="x"')), one));
+        assertThrows("SOAP-MESSAGE-ERROR", "must be namespace-qualified outside", \decode(),
+            (data(include("a", ' xop:note="x"')), one));
+        assertThrows("SOAP-MESSAGE-ERROR", "content \"\\^value\\^\" must be namespace-qualified", \decode(),
+            (data('<xop:Include href="cid:a">text</xop:Include>'), one));
+        assertThrows("SOAP-MESSAGE-ERROR", "content \"plain\" must be namespace-qualified", \decode(),
+            (data('<xop:Include href="cid:a"><plain/></xop:Include>'), one));
+    }
+
+    contentTypes() {
+        hash<auto> soap11 = WSDLLib::packageMtom("<a/>", (), "b");
+        assertEq('multipart/related; boundary="b"; type="application/xop+xml"; start="<root.message@qore.org>"; '
+            'start-info="text/xml"', soap11.content_type);
+        assertRegex('Content-Type: application/xop\+xml; charset=utf-8; type="text/xml"', soap11.body);
+        hash<auto> soap12 = WSDLLib::packageMtom("<a/>", (), "b", 'application/soap+xml;action="urn:a"');
+        assertEq("application/soap+xml;action=\"urn:a\"", WSDLLib::getContentTypeParameter(soap12.content_type,
+            "start-info"));
+        assertRegex('type="application/soap\+xml;action=\\"urn:a\\""', soap12.body);
+        # start-info must repeat the root's type (XOP 1.0 section 4.1)
+        string conflicting = replace(soap11.content_type, 'start-info="text/xml"', 'start-info="application/soap+xml"');
+        assertThrows("SOAP-MESSAGE-ERROR", "start-info .* conflicts with its root type", \WSDLLib::parseMultiPartSOAPMessage(),
+            ({"content-type": conflicting, "body": soap11.body},));
+        # a SOAP 1.2 package is read by a SOAP 1.2 binding
+        assertEq({"name": "n", "data": binary("x")}, decode(data(include("a")), ({"cid": "a", "data": binary("x")},), True));
+    }
+}

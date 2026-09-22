@@ -1656,3 +1656,16 @@ both read and wrote an empty value. `WSDLLib::toXmlName()` and `fromXmlName()` i
 collection's encoding and RPC tests pass through a `SoapHandler` echo service
 ([soap12-collection](../soap12-collection.qtest)), with 11 out-of-scope tests and the collection's defective
 replies recorded. [soap12-rpc](../soap12-rpc.qtest) adds 7 cases and 79 assertions.
+
+## P8-05a: MTOM/XOP reconstruction and packaging
+
+MTOM input had never worked: the XOP recognizer read regex captures through `$1`, so every MTOM message failed.
+`WSDLLib::substXopInclude()` now follows XOP 1.0 sections 2 and 3.2 and SOAP 1.2 MTOM section 4.3.1:
+- `xop:Include` is recognized by expanded name wherever its namespace is declared;
+- it must be the only child of its element, whose attributes are kept;
+- `cid:` references are percent-decoded (RFC 2392), and must name a part that no other `xop:Include` uses.
+
+`packageMtom()` writes `start-info` and takes the XML content type, including SOAP 1.2's, and multipart input
+rejects a `start-info` that conflicts with the root. XOP 1.0, SOAP 1.2 MTOM and RFC 2392 are pinned in
+`normative/`. [soap-mtom](../soap-mtom.qtest) has 4 cases and 43 assertions. The full suite passes except the two
+core-blocked IEEE gates.

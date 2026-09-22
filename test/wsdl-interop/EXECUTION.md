@@ -10661,3 +10661,42 @@ Both suites fail against the P8-03b modules.
 
 Full suite on Qore `acc8ea401` (runtime unchanged during the run): 457 targets, 3,622 Qore cases, 173,970
 assertions. The only failures are the two core-blocked IEEE gates. Documentation builds with no warnings.
+
+
+## P8-05a: MTOM/XOP reconstruction and packaging
+
+Attachment work starts with XOP (XOP 1.0) and MTOM (SOAP 1.2 MTOM). Both W3C Recommendations and RFC 2392 are
+pinned in `normative/` with their digests, which `test_attachment_sources.py` checks.
+
+The first probe found that **MTOM input had never worked**. `isXopIncludeElement()` read regex captures through
+`$1`, which Qore does not set, so every MTOM message failed with `RUNTIME-TYPE-ERROR: <lvalue> expects type
+'string'`, valid messages included. No suite had exercised it. Reviewing the reconstruction against the
+specifications found five more defects:
+- `xop:Include` was recognized only when its prefix was declared on the element itself, not on an ancestor.
+- `cid:` URIs were not percent-decoded (RFC 2392), although CXF writes `cid:...%40cxf.apache.org`.
+- A missing part was silently left in place.
+- The element was replaced even when `xop:Include` was not its only child, dropping siblings, and its attributes
+  were discarded.
+- A part referenced twice was accepted, although SOAP 1.2 MTOM section 4.3.1 extracts each value into its own
+  part.
+
+`substXopInclude()` is rewritten to XOP 1.0 sections 2 and 3.2 and rejects each of these cases. On the packaging
+side, `packageMtom()` never wrote the `start-info` parameter that XOP 1.0 section 4.1 requires, and always
+declared the SOAP 1.1 XML type. It now takes the XML content type, including SOAP 1.2's `application/soap+xml`
+with its action, and repeats it in `start-info`. Multipart input rejects a `start-info` that conflicts with the XOP
+root. `WSDLLib::contentIdFromUri()` is public.
+
+`test/soap-mtom.qtest` has 4 cases and 43 assertions, in SOAP 1.1 and 1.2. It covers:
+- the three namespace placements;
+- CXF-style percent-encoded references and upper-case schemes;
+- ignored extensions and unreferenced parts;
+- retained element attributes;
+- empty, 1 MiB, boundary-like and 50-part payloads;
+- the nine rejection cases;
+- the content types.
+
+Against the previous module the suite does not load (the SOAP 1.2 packaging signature is new), and a probe
+with the old signature fails every message.
+
+Full suite on Qore `acc8ea401` (runtime unchanged during the run): 459 targets, 3,626 Qore cases, 174,013
+assertions. The only failures are the two core-blocked IEEE gates. Documentation builds with no warnings.
