@@ -5,6 +5,8 @@ Copyright (C) 2026 Qore Technologies, s.r.o.
 """
 import contextlib
 from decimal import Decimal
+import email.parser
+import email.policy
 import hashlib
 import http.client
 import json
@@ -20,6 +22,19 @@ ROOT = Path(__file__).resolve().parent
 PEER = ROOT / "cxf-peer"
 REPO = ROOT.parent.parent
 FLOAT_NAME = "{http://apache.org/hello_world_doc_lit_bare/types}tickerPrice"
+
+
+def root_entity(content_type, body):
+    """Return a response's root entity; a request that is a XOP package is answered with one."""
+    if not (content_type or "").lower().startswith("multipart/"):
+        return body
+    message = email.parser.BytesParser(policy=email.policy.default).parsebytes(
+        ("Content-Type: " + content_type + "\r\n\r\n").encode("ascii") + body)
+    start = message.get_param("start")
+    for part in message.iter_parts():
+        if start is None or str(part["Content-ID"]) == start:
+            return part.get_payload(decode=True)
+    raise AssertionError("multipart response without a root entity")
 
 
 def infoset(xml):

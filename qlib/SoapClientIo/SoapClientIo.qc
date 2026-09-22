@@ -82,6 +82,12 @@ public class SoapClientIo {
         #! response header capabilities for this client
         WSDL::SoapProcessingNode soap_node;
 
+        #! whether requests are sent as MTOM/XOP packages
+        bool mtom = False;
+
+        #! the minimum size in octets of base64Binary content sent as an MTOM part
+        int mtom_threshold = WSDL::MTOM_THRESHOLD;
+
         #! async I/O connection manager used for every request; replaced atomically by close()
         HttpClientIo::HttpClientConnectionManager mgr;
 
@@ -115,6 +121,10 @@ public class SoapClientIo {
         - \c soap_node: optional ultimate-receiver @ref WSDL::SoapProcessingNode "SoapProcessingNode" for
           response headers; the default has no application header capabilities and rejects unknown targeted
           mandatory headers
+        - \c mtom: @ref Qore::True "True" to send SOAP requests as MTOM/XOP packages, with base64Binary content of
+          at least \c mtom_threshold octets in binary parts; see @ref WSDL::SoapMtomScope "SoapMtomScope"
+        - \c mtom_threshold: the minimum MTOM part size in octets (default:
+          @ref WSDL::MTOM_THRESHOLD "MTOM_THRESHOLD"); 0 sends every base64Binary value as a part
         - \c connect_timeout: connection timeout in milliseconds (default: 45000)
         - \c timeout: transfer timeout in milliseconds (default: 45000)
         - \c http_protocol: HTTP protocol to use (\c "auto", \c "h1", \c "h2", \c "h3"; default: \c "auto")
@@ -134,6 +144,19 @@ SoapClientIo client({"wsdl": service, "url": "https://example.org/services/v1"})
     */
     constructor(hash<auto> h) {
         soap_node = getProcessingNode(h.soap_node);
+        if (exists h.mtom) {
+            if (h.mtom.typeCode() != NT_BOOLEAN) {
+                throw "SOAP-CLIENT-IO-ERROR", sprintf("the mtom option must be a bool; got %y", h.mtom.type());
+            }
+            mtom = h.mtom;
+        }
+        if (exists h.mtom_threshold) {
+            if (h.mtom_threshold.typeCode() != NT_INT || h.mtom_threshold < 0) {
+                throw "SOAP-CLIENT-IO-ERROR", sprintf("the mtom_threshold option must be a non-negative int; "
+                    "got %y", h.mtom_threshold);
+            }
+            mtom_threshold = h.mtom_threshold;
+        }
         if (exists h.wsdl_file && exists h.wsdl) {
             throw "SOAP-CLIENT-IO-ERROR", "only one of 'wsdl' or 'wsdl_file' keys can be given; both were "
                 "passed";
@@ -261,8 +284,12 @@ auto result = client.callOperation("echo", {"body": "invoice-71"}, {"xml_values"
             throw "SOAP-CLIENT-IO-ERROR", "xml_values and preserve_types cannot be combined";
         }
         WSDL::WSOperation op = wsdl.getBindingOperation(binding, operation);
-        hash<auto> msg = op.serializeRequest(args, opts.soap_header, "utf-8", NOTHING, opts.xml_opts,
-            opts.soapaction, binding, opts.http_header);
+        hash<auto> msg;
+        {
+            WSDL::SoapMtomScope mtom_scope(mtom, mtom_threshold);
+            msg = op.serializeRequest(args, opts.soap_header, "utf-8", NOTHING, opts.xml_opts,
+                opts.soapaction, binding, opts.http_header);
+        }
 
         string path = msg.path ?? "";
         if (path && path !~ /^[\/\?]/) {
@@ -388,7 +415,8 @@ auto result = client.getSoapResponse("echo", "/resource");
         hash<auto> rh = (resp.headers ?? {}) + {
             "body": resp.body,
             "status_code": resp.status_code,
-            "content-type": resp.content_type ?? resp.headers."content-type",
+            # content_type is the bare media type; multipart framing needs the parameters of the full header
+            "content-type": resp.headers."content-type" ?? resp.content_type,
         };
         info += {
             "response-code": resp.status_code,

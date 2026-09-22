@@ -7,7 +7,7 @@ import queue
 import subprocess
 import unittest
 from lxml import etree
-from test_cxf_peer import endpoint
+from test_cxf_peer import endpoint, root_entity
 from test_http_request_url import origin, contract, PEER as HTTP_PEER
 from test_soap_actions import multipart
 from test_soap_envelope import ENV, URI
@@ -70,7 +70,9 @@ class SoapHttpBindingTests(unittest.TestCase):
                                 response = connection.getresponse(); raw = response.read(); total += 1
                                 self.assertEqual(status,response.status,(version,method,ct,raw))
                                 if status == 200:
-                                    document = etree.fromstring(raw); self.schemas[version].assertValid(document)
+                                    # an MTOM request is answered with an MTOM response
+                                    document = etree.fromstring(root_entity(response.getheader('Content-Type'), raw))
+                                    self.schemas[version].assertValid(document)
                                     self.assertEqual('response',document.find('{'+URI[version]+'}Body/{urn:soap-envelope-test}value').text)
                                 else:
                                     self.assertTrue(response.getheader('Content-Type').startswith('text/plain'),raw)

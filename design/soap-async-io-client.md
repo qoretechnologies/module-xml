@@ -27,6 +27,10 @@ The connection manager reports a response as a `HttpClientResponseInfo` with low
 whereas the shared decoders expect an `HTTPClient`-shaped response hash. `SoapClientIo` adapts
 between them in one place, merging the response headers to the top level alongside `body`,
 `status_code` and `content-type`, so the decoders see the shape they already handle.
+The `content-type` it passes is the complete response header: the manager's `content_type` field is
+the bare media type, and multipart (SwA and MTOM) responses need the header's `boundary`, `type` and
+`start` parameters. Requests are sent as MTOM/XOP packages with the `mtom` option (see
+[soap-mtom-output.md](soap-mtom-output.md)).
 
 A SOAP fault is recognized before any HTTP failure is reported: on status 400 or 5xx the client
 parses the body and looks for an envelope-qualified `Fault` by expanded name, and only raises a

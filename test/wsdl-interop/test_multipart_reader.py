@@ -16,7 +16,7 @@ import threading
 import unittest
 import xml.etree.ElementTree as ET
 
-from test_cxf_peer import endpoint
+from test_cxf_peer import endpoint, root_entity
 
 ROOT = Path(__file__).resolve().parent
 REPO = ROOT.parent.parent
@@ -112,7 +112,9 @@ class MultipartReaderTests(unittest.TestCase):
                             response = conn.getresponse()
                             result = response.read()
                             self.assertEqual(200, response.status, result)
-                            self.assertEqual('hello', ET.fromstring(result).find('.//payload').text)
+                            # an MTOM request is answered with an MTOM response
+                            document = root_entity(response.headers['Content-Type'], result)
+                            self.assertEqual('hello', ET.fromstring(document).find('.//payload').text)
                         finally:
                             conn.close()
                     exchanges += 2

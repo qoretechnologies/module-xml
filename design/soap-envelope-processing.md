@@ -314,6 +314,19 @@ before the body callback. SOAP 1.2 does not depend on the legacy SOAPAction head
 its absence and presence alone do not prevent Body dispatch. HTTP WSDL bindings
 continue to use their registered method/path and MIME selection.
 
+One route can serve an operation in both SOAP versions, through a SOAP 1.1 and a
+SOAP 1.2 binding. Besides the first registration for each request element and
+operation name, the handler keeps the first registration of each SOAP version. The
+route's expected version is then open, envelope validation takes the received
+version, and element, shared-action and empty-Body dispatch prefer a registration of
+that version. The SOAP 1.2 RPC `ProcedureNotPresent` check considers every SOAP 1.2
+registration. `removeService()` removes a service's version registrations with its
+other mappings.
+
+The envelope validator treats an absent `^value^` as empty content, as `make_xml()`
+writes it, so the empty Header that namespace-rewritten output produces is accepted.
+Text in a received Header or Body is still rejected.
+
 SoapProcessingNode implements Serializable for its immutable configuration. Restore
 uses the same role/name checks as construction and reconstructs the transient role
 lookup; missing configuration rejects. Default and role-only nodes can be saved,

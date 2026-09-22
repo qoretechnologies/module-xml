@@ -10700,3 +10700,57 @@ with the old signature fails every message.
 
 Full suite on Qore `acc8ea401` (runtime unchanged during the run): 459 targets, 3,626 Qore cases, 174,013
 assertions. The only failures are the two core-blocked IEEE gates. Documentation builds with no warnings.
+
+## P8-05b: MTOM/XOP output and live CXF exchanges
+
+MTOM output did not exist: `MTOM_THRESHOLD` was declared but unused, and no Qore client or handler could send an
+XOP package. `WSDL::SoapMtomScope` now selects it for the messages its thread serializes (XOP 1.0 section 3.1;
+SOAP 1.2 MTOM sections 3.2 and 4.3.1):
+- Canonical `base64Binary` content moves into a binary part and is replaced by an `xop:Include`. This covers
+  restrictions, simple content with `xmime:contentType`, `anyType` binary data, and typed RPC and document parts,
+  in bodies, headers and declared faults.
+- Values below the threshold (`MTOM_THRESHOLD`, 1024, by default) stay inline, as do list and union values,
+  commented or non-canonical content, and SOAP-encoded content.
+- A valid concrete `xmime:contentType` becomes the part's media type. An invalid one, including one with control
+  characters, keeps the value inline.
+- Only parts that the final root references are packaged, each once and with its transfer encoding. An original
+  infoset containing `xop:Include` is sent as an ordinary SOAP message (SOAP 1.2 MTOM section 4.3.1).
+- The root's `type` and the package's `start-info` carry the SOAP media type, including a SOAP 1.2 action.
+  Multipart boundaries are now random, since binary parts are not transfer-encoded.
+
+`SoapClient` and `SoapClientIo` take `mtom` and `mtom_threshold` options (saved `SoapClient` objects keep them,
+and older saved objects restore without MTOM). `SoapHandler` answers MTOM requests with MTOM responses, and
+`setMtomThreshold()` sets the threshold or turns mirroring off.
+
+Testing found three defects outside MTOM, each root-caused and fixed:
+- **Mixed-version routes.** A route serving one operation in SOAP 1.1 and SOAP 1.2 bindings kept only the first
+  registration for each request element. The route therefore looked single-version, and the other version's
+  requests failed with `VersionMismatch`. The handler now keeps the first registration of each SOAP version and
+  lets the received envelope choose, in element, shared-action and empty-Body dispatch, route version detection
+  and the SOAP 1.2 `ProcedureNotPresent` check.
+- **Envelope validation.** The validator treated an absent `^value^` as text, so a message with unqualified
+  generic content, whose namespace-rewritten output writes an empty Header that way, failed to serialize.
+- **SoapClientIo multipart responses.** The client passed the connection manager's bare `content_type` to the
+  decoders, dropping the `boundary`, `type` and `start` parameters, so every SwA or MTOM response failed.
+
+Mirroring changes what an MTOM request receives, so three transport gates that sent a XOP-rooted request and
+parsed an ordinary XML reply now read the response's root entity through a shared `root_entity()` helper
+(`test_multipart_reader.py`, `test_soap_actions.py`, `test_soap_http_binding.py`). No Qore handler could process
+an MTOM request before P8-05a, so no deployment depended on those replies.
+
+`test/soap-mtom-output.qtest` has 10 cases and 157 assertions over a new contract, `test/mtom-output.wsdl`.
+`test/soap-actions.qtest` gains a mixed-version case over `soap-action-peer/versions.wsdl`: the shared action,
+element-only and empty-Body dispatch, both registration orders, removal and `ProcedureNotPresent`.
+`test/wsdl-interop/test_mtom_xop.py` runs the unmodified CXF `mtom_xop.wsdl` live against Apache CXF 4.1.3, in 12
+runs of seven calls:
+- Qore's `SoapClient` and `SoapClientIo`, with and without MTOM, call CXF's MTOM server.
+- CXF's MTOM and ordinary clients call the Qore handler.
+- Graphs are source and saved, and sizes 0, 1, 1023, 1024 and 70000 octets.
+
+Each side checks the other's package form and part count, so the threshold is verified on the wire. CXF maps
+`testXopString`'s `text/plain` base64Binary element to a `String` holding the base64 lexical form, including for
+an `xop:Include`, and never optimizes it. The peer uses that form. Against the previous modules, the live runner
+fails in both directions, and the new suite does not load (`SoapMtomScope` is new).
+
+Full suite on Qore `acc8ea401` (runtime unchanged during the run): 461 targets, 3,637 Qore cases, 174,344
+assertions. The only failures are the two core-blocked IEEE gates. Documentation builds with no warnings.

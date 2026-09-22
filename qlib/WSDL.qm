@@ -207,6 +207,13 @@ module WSDL {
     @section wsdlrelnotes WSDL Module Release Notes
 
     @subsection wsdl_0_5_8 WSDL v0.5.8
+    - MTOM/XOP output: SoapMtomScope sends SOAP requests, responses and faults as XOP packages whose
+      canonical base64Binary content of at least a threshold (MTOM_THRESHOLD by default) moves into binary parts,
+      with an element's \c xmime:contentType (XMIME_NS) as the part's media type; an original infoset containing
+      \c xop:Include is sent without XOP (SOAP 1.2 MTOM section 4.3.1)
+    - multipart/related output uses random boundaries, which cannot occur by chance in unencoded binary parts
+    - SOAP envelope validation accepts empty Header and Body values written as an absent \c ^value^, which output
+      with unqualified generic content produced and then rejected as text
     - MTOM/XOP input follows XOP 1.0 and SOAP 1.2 MTOM, and now works at all: every MTOM message previously
       failed with \c RUNTIME-TYPE-ERROR; \c xop:Include is recognized in any namespace scope, must be its element's
       only child, resolves percent-encoded \c cid: URIs, keeps its element's attributes, and rejects missing,
@@ -1146,8 +1153,15 @@ public const XOP_NS = "http://www.w3.org/2004/08/xop/include";
 #! MTOM (Message Transmission Optimization Mechanism) content type
 public const MTOM_CONTENT_TYPE = "application/xop+xml";
 
-#! Minimum size in bytes for binary data to be optimized with MTOM
+#! Default minimum size in octets of base64Binary content that MTOM output extracts into a binary part
+/** @see SoapMtomScope
+*/
 public const MTOM_THRESHOLD = 1024;
+
+#! XML media type annotation namespace URI, whose \c contentType attribute names an optimized part's media type
+/** @since %WSDL 0.5.8
+*/
+public const XMIME_NS = "http://www.w3.org/2005/05/xmlmime";
 
 #! range of "byte" values (8 bits, signed)
 public const RANGE_BYTE = (-128, 127);
@@ -2334,6 +2348,11 @@ class WsdlAttachmentHelper {
 
     static string id(string part) {
         return encode_url(convert_encoding(part, "UTF-8")) + "=" + get_random_bytes(16).toHex() + "@qore.org";
+    }
+
+    # Binary parts are sent unencoded, so a predictable boundary could occur inside one and break the framing.
+    static string boundary() {
+        return "=_qore_" + get_random_bytes(16).toHex();
     }
 
     static hash<auto> deserialize(WSMessage msg, BindingMessageDescription description,
@@ -5230,8 +5249,9 @@ class XsdScalarTextHelper {
         }
         foreach string key in (keys data) {
             if (key.startsWith("^value") || key.startsWith("^cdata")) {
-                if (data{key}.typeCode() != NT_STRING
-                        || XsdSimpleType::normalizeWhiteSpace(data{key}, "collapse") != "") {
+                # An absent value writes no text: namespace-rewritten output represents empty elements this way.
+                if (exists data{key} && (data{key}.typeCode() != NT_STRING
+                        || XsdSimpleType::normalizeWhiteSpace(data{key}, "collapse") != "")) {
                     throw error,
                         sprintf("%s cannot contain non-whitespace text", description);
                 }
@@ -15870,21 +15890,22 @@ public class XsdElement inherits WSDL::XsdTypedData {
             captured);
         tuples.value(captured.actual_type ?? selected, captured.identity);
         checkFixedValue(converted, captured.identity, SOAP_SERIALIZATION_ERROR);
+        # MTOM output replaces canonical base64Binary content only after every value constraint is checked.
         if (!type_attributes) {
             tuples.instanceAttributes(converted, SOAP_SERIALIZATION_ERROR, namespaces);
-            return converted;
+            return XopOutput ? XopOutput.optimize(selected, value, converted, namespaces) : converted;
         }
         if (converted.typeCode() != NT_HASH) {
             hash<auto> wire = {"^value^": converted, "^attributes^": type_attributes};
             tuples.instanceAttributes(wire, SOAP_SERIALIZATION_ERROR, namespaces);
-            return wire;
+            return XopOutput ? XopOutput.optimize(selected, value, wire, namespaces) : wire;
         }
         # Restriction/list/union converters may delegate to another type. The
         # element's selected component owns its annotation; retain all other
         # attributes, comments and child content without concatenating metadata.
         converted."^attributes^" += type_attributes;
         tuples.instanceAttributes(converted, SOAP_SERIALIZATION_ERROR, namespaces);
-        return converted;
+        return XopOutput ? XopOutput.optimize(selected, value, converted, namespaces) : converted;
     }
 
     #! decodes an occurrence collection with optional native type retention
@@ -24812,6 +24833,13 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
         }
     }
 
+    #! @cond nodoc
+    # whether values are atomic base64Binary octets, whose canonical content XOP can optimize
+    bool hasBase64Content() {
+        return getFacetKind() == "base64Binary";
+    }
+    #! @endcond
+
     private *string getBinaryBaseName() {
         string kind = getFacetKind();
         return XsdBinaryLexicalHelper::isType(kind) ? kind : NOTHING;
@@ -30496,6 +30524,247 @@ class XsdNativeTypeValueScope {
 
 # The SOAP encoding rules of the message part being converted: SOAP_ENCODING or SOAP_12_ENCODING. NOTHING outside
 # SOAP messages, where encoded array types keep the SOAP 1.1 form.
+# the minimum extracted octet count selected by SoapMtomScope, or NOTHING when MTOM output is not selected
+thread_local *int MtomThreshold;
+# the XOP package writer for literal content of the SOAP message being serialized
+thread_local *XopPackageWriter XopOutput;
+
+#! selects MTOM/XOP output for the SOAP messages serialized by the current thread while the object exists
+/** While the scope exists, SOAP request, response and fault serialization writes each message as an MTOM/XOP
+    package (XOP 1.0 section 3.1; SOAP 1.2 MTOM section 3.2), for SOAP 1.1 and SOAP 1.2 bindings. Literal
+    element and part content of type \c xs:base64Binary, of a restriction of it, or of a complex type with such
+    simple content, moves into its own binary part when it has at least \a threshold octets. The element keeps
+    its attributes and receives an \c xop:Include child instead of the base64 text. An \c xmime:contentType
+    attribute on the element names the part's media type, which is otherwise \c application/octet-stream.
+    A message without optimized content is still sent as a XOP package with a single root part, which tells
+    the receiver that MTOM is in use.
+
+    Scopes nest: destroying one restores the selection of the enclosing scope.
+
+    @par Example
+    Upload a scanned invoice with its PDF bytes in a binary part instead of base64 text:
+    @code{.py}
+{
+    SoapMtomScope mtom(True, 0);
+    hash<auto> msg = op.serializeRequest({"name": "invoice-71.pdf", "attachinfo": pdf});
+    # msg.hdr."Content-Type" is multipart/related with type="application/xop+xml"
+}
+    @endcode
+
+    @note
+    - Only content in the canonical base64 form is optimized, as XOP 1.0 section 3.1 requires; a retained
+      lexical value with white space stays inline. List and union values, content with comments,
+      SOAP-encoded content and retained XML values also stay inline, as does an element whose
+      \c xmime:contentType is not a valid concrete media type.
+    - A message whose original infoset already contains an \c xop:Include element cannot be represented with
+      XOP; it is sent as an ordinary SOAP message (SOAP 1.2 MTOM section 4.3.1).
+    - SoapClient and SoapClientIo select this scope with their \c mtom options, and SoapHandler answers MTOM
+      requests with MTOM responses.
+
+    @since %WSDL 0.5.8
+*/
+public class SoapMtomScope {
+    private:internal {
+        *int previous;
+    }
+
+    #! selects or suspends MTOM/XOP output for the current thread
+    /** @param enabled True to write MTOM/XOP packages; False to write ordinary SOAP messages within this scope
+        @param threshold the minimum number of octets of base64Binary content that is extracted into a part;
+        0 extracts every value, including empty ones
+
+        @throw SOAP-SERIALIZATION-ERROR a negative threshold
+    */
+    constructor(bool enabled = True, int threshold = MTOM_THRESHOLD) {
+        previous = MtomThreshold;
+        if (threshold < 0) {
+            throw SOAP_SERIALIZATION_ERROR, sprintf("the MTOM threshold must not be negative; got %d", threshold);
+        }
+        MtomThreshold = enabled ? threshold : NOTHING;
+    }
+
+    #! restores the enclosing MTOM selection
+    destructor() {
+        MtomThreshold = previous;
+    }
+
+    #! returns the current thread's MTOM threshold
+    /** @return the minimum extracted octet count, or NOTHING when MTOM output is not selected
+    */
+    static *int getThreshold() {
+        return MtomThreshold;
+    }
+}
+
+# one extracted XOP part
+hashdecl XopPartInfo {
+    # the part's Content-ID without angle brackets
+    string id;
+    # the part's media type
+    string content_type;
+    # the decoded octets
+    binary data;
+}
+
+# sets or suspends the XOP writer for the content serialized while the object exists
+class XopOutputScope {
+    private {
+        *XopPackageWriter previous;
+    }
+
+    constructor(*XopPackageWriter writer) {
+        previous = XopOutput;
+        XopOutput = writer;
+    }
+
+    destructor() {
+        XopOutput = previous;
+    }
+}
+
+# collects the binary parts of one MTOM/XOP message while its envelope is serialized (XOP 1.0 section 3.1)
+class XopPackageWriter {
+    private {
+        int threshold;
+        # a random Content-ID stem unique to this message
+        string stem = get_random_bytes(16).toHex();
+        # extracted parts by Content-ID; discarded trial serializations can leave parts the message does not use
+        hash<string, hash<XopPartInfo>> parts();
+    }
+
+    constructor(int threshold) {
+        self.threshold = threshold;
+    }
+
+    # replaces an element's canonical base64Binary content with an xop:Include referencing a new part
+    auto optimize(XsdAbstractType type, auto native, auto wire, Namespaces nsc) {
+        if (!nominated(type, native)) {
+            return wire;
+        }
+        auto text = wire;
+        *hash<auto> attributes;
+        if (wire.typeCode() == NT_HASH) {
+            # comments and child elements are further [children] of the element
+            foreach string key in (keys wire) {
+                if (key != "^attributes^" && key != "^value^") {
+                    return wire;
+                }
+            }
+            text = wire."^value^" ?? "";
+            attributes = wire."^attributes^";
+        }
+        # XOP 1.0 section 3.1: only the canonical base64 form without white space can be optimized
+        if (text.typeCode() != NT_STRING || text =~ /[^A-Za-z0-9+\/=]/) {
+            return wire;
+        }
+        if (text.encoding() != "UTF-8") {
+            text = convert_encoding(text, "UTF-8");
+        }
+        binary data;
+        try {
+            data = parse_base64_string(text);
+        } catch (hash<ExceptionInfo> ex) {
+            if (ex.err == "BASE64-PARSE-ERROR") {
+                return wire;
+            }
+            rethrow;
+        }
+        if (data.size() < threshold || make_base64_string(data) != text) {
+            return wire;
+        }
+        string content_type = "application/octet-stream";
+        auto declared = contentType(attributes, nsc);
+        if (exists declared) {
+            *WsdlMediaType media;
+            if (declared.typeCode() == NT_STRING && declared !~ /[\x{0}-\x{1F}\x{7F}]/) {
+                content_type = trim(declared);
+                media = WsdlMediaType::read(content_type);
+            }
+            if (!media || media.wildcard()) {
+                # XOP 1.0 section 3.1: content that cannot be packaged is sent as if it had not been nominated
+                return wire;
+            }
+        }
+        string id = sprintf("%s-%d@qore.org", stem, parts.size() + 1);
+        parts{id} = <XopPartInfo>{"id": id, "content_type": content_type, "data": data};
+        hash<auto> include();
+        include."^attributes^" = {"xmlns:xop": XOP_NS, "href": "cid:" + id};
+        hash<auto> result();
+        if (attributes) {
+            result."^attributes^" = attributes;
+        }
+        result."xop:Include" = include;
+        return result;
+    }
+
+    # selects the parts that the serialized root references, in document order; returns False when the original
+    # infoset already contained xop:Include elements (XOP 1.0 section 3.1; SOAP 1.2 MTOM section 4.3.1)
+    bool collect(string xml, reference<list<hash<XopPartInfo>>> selected) {
+        selected = ();
+        if (index(xml, "Include") < 0) {
+            return True;
+        }
+        hash<string, bool> used();
+        XmlReader reader(xml);
+        while (reader.read()) {
+            if (reader.nodeType() == XML_NODE_TYPE_ELEMENT && reader.localName() == "Include"
+                    && reader.namespaceUri() == XOP_NS) {
+                *string href = reader.getAttribute("href");
+                string id = href.typeCode() == NT_STRING && href.substr(0, 4) == "cid:" ? href.substr(4) : "";
+                # each extracted part is referenced exactly once (SOAP 1.2 MTOM section 4.3.1)
+                if (!parts{id} || used{id}) {
+                    return False;
+                }
+                used{id} = True;
+                push selected, parts{id};
+            }
+        }
+        return True;
+    }
+
+    # whether an element's type makes its content base64Binary octets
+    private static bool nominated(XsdAbstractType type, auto native) {
+        if (type instanceof XsdBaseType) {
+            # anyType writes binary values as xs:base64Binary with xsi:type
+            return type.name == "base64Binary" || (type.name == "anyType" && native.typeCode() == NT_BINARY);
+        }
+        if (type instanceof XsdSimpleType) {
+            return cast<XsdSimpleType>(type).hasBase64Content();
+        }
+        if (type instanceof XsdComplexType) {
+            XsdComplexType complex = cast<XsdComplexType>(type);
+            return complex.simpleType && !complex.hasMixedContent() && nominated(complex.simpleType, NOTHING);
+        }
+        return False;
+    }
+
+    # returns the element's xmime:contentType attribute value, if any
+    private static auto contentType(*hash<auto> attributes, Namespaces nsc) {
+        if (!attributes) {
+            return;
+        }
+        foreach hash<auto> attribute in (attributes.pairIterator()) {
+            list<string> name = attribute.key.split(":");
+            if (name.size() != 2 || name[1] != "contentType" || name[0] == "xmlns") {
+                continue;
+            }
+            *string uri = attributes{"xmlns:" + name[0]};
+            if (!exists uri) {
+                try {
+                    uri = nsc.getOutputNamespaceUri(name[0]);
+                } catch (hash<ExceptionInfo> ex) {
+                    if (ex.err != "WSDL-NAMESPACE-ERROR") {
+                        rethrow;
+                    }
+                }
+            }
+            if (uri == XMIME_NS) {
+                return attribute.value;
+            }
+        }
+    }
+}
+
 thread_local *string EncodingRules;
 
 class XsdEncodingRulesScope {
@@ -34132,6 +34401,9 @@ public class WSMessage inherits WSDL::XsdNamedData {
             ons = output_namespaces.getOutputNamespacePrefix(args{key}.element.ns);
         } else {
             hv = XsdDocumentValueHelper::serializePartValue(args{key}.type, output_namespaces, v, !encoded);
+            if (XopOutput) {
+                hv = XopOutput.optimize(args{key}.type, v, hv, output_namespaces);
+            }
             ons = args{key}.type.getOutputNamespacePrefix();
         }
         #printf("DEBUG: arg %s got %y from %y (%y)\n", part, hv, v, exists args{key}.element ? args{key}.element : args{key}.type);
@@ -34342,6 +34614,9 @@ public class WSMessage inherits WSDL::XsdNamedData {
                 push emitted_names, selected.getExpandedName();
             } else {
                 auto th = XsdDocumentValueHelper::serializePartValue(arg.type, output_namespaces, val, !encoded);
+                if (XopOutput) {
+                    th = XopOutput.optimize(arg.type, val, th, output_namespaces);
+                }
                 rh{p} = th;
                 push emitted_parts, p;
                 push emitted_names, type_qname("", p);
@@ -35673,6 +35948,7 @@ public class SoapBinding inherits WSDL::OperationalBinding {
             throw SOAP_SERIALIZATION_ERROR, sprintf("no %s message description for message %y", io, name);
         }
 
+        *string requested_action = req_soapaction;
         bool default_action = !exists req_soapaction;
         if (default_action) {
             req_soapaction = soapAction;
@@ -35683,7 +35959,12 @@ public class SoapBinding inherits WSDL::OperationalBinding {
         Namespaces output_namespaces = op.nsc.copy();
         XsdQNameOutputScope output_scope(output_namespaces);
         XsdQNameXmlOutputHelper output();
-        hash<auto> envelope = serializeSoapMessage(op, msg, h, header, nsh, request, soap12, \mpm, faultmsg, bmd, enc);
+        *XopPackageWriter xop = exists MtomThreshold ? new XopPackageWriter(MtomThreshold) : NOTHING;
+        hash<auto> envelope;
+        {
+            XopOutputScope xop_scope(xop);
+            envelope = serializeSoapMessage(op, msg, h, header, nsh, request, soap12, \mpm, faultmsg, bmd, enc);
+        }
         envelope = output.prepare(envelope);
         if (exists fault_options) {
             SoapFaultHelper::apply(\envelope, soap12, faultmsg, fault_options);
@@ -35698,29 +35979,54 @@ public class SoapBinding inherits WSDL::OperationalBinding {
         }
         rv.body = make_xml(envelope, xml_opts, enc);
         XsdSoapXmlHelper::validateDocument(rv.body, SOAP_SERIALIZATION_ERROR);
+        list<hash<XopPartInfo>> xop_parts;
+        if (xop && !xop.collect(rv.body, \xop_parts)) {
+            # An original infoset containing xop:Include is sent without XOP (SOAP 1.2 MTOM section 4.3.1).
+            SoapMtomScope plain(False);
+            return serializeMessageWithDescription(op, msg, request, soap12, h, header, enc, nsh, xml_opts,
+                requested_action, faultmsg, http_headers, bmd, fault_options);
+        }
 
         # The charset and SOAP 1.2 action describe the XML root, not the multipart container.
-        string ct = WSDLLib::getSoapMimeType12(soap12) + ";charset=" + WsdlMediaType::quote(rv.body.encoding());
+        string xml_type = WSDLLib::getSoapMimeType12(soap12);
+        string charset = ";charset=" + WsdlMediaType::quote(rv.body.encoding());
         if (replace(rv.body.encoding().upr(), "-", "") == "UTF16") {
             rv.body = convert_encoding("\uFEFF", "UTF-16") + rv.body;
         }
+        *string action;
         if (request && req_soapaction) {
             SoapActionHelper::validate(req_soapaction, soap12, SOAP_SERIALIZATION_ERROR);
             if (soap12) {
-                ct += ";action=" + WsdlMediaType::quote(req_soapaction);
+                action = ";action=" + WsdlMediaType::quote(req_soapaction);
             } else {
                 rv.hdr.SOAPAction = WsdlMediaType::quote(req_soapaction);
             }
         } else if (request && !soap12 && default_action) {
             rv.hdr.SOAPAction = "\"\"";
         }
+        string ct = xml_type + charset + action;
 
-        if (mpm && mpm.size() > 0) {
+        if (xop) {
+            # The XOP root's type parameter and the package's start-info name the SOAP media type (XOP 1.0
+            # section 4.1; SOAP 1.2 MTOM section 3.2). Each extracted part is binary, with its transfer encoding.
+            xml_type += action;
+            ct = MTOM_CONTENT_TYPE + charset + ";type=" + WsdlMediaType::quote(xml_type);
+            if (!mpm) {
+                mpm = new MultiPartRelatedMessage(WsdlAttachmentHelper::boundary());
+            }
+            foreach hash<XopPartInfo> part in (xop_parts) {
+                mpm.addPart(part.data, "<" + part.id + ">", part.content_type);
+            }
+        }
+        if (xop || (mpm && mpm.size() > 0)) {
             string part_id = "<" + WsdlAttachmentHelper::id("soap-root") + ">";
             mpm.splicePart(rv.body, part_id, ct);
             hash<Mime::MessageInfo> multipart = mpm.getMsgAndHeaders();
             rv.body = multipart.body;
             rv.hdr += multipart.hdr;
+            if (xop) {
+                rv.hdr."Content-Type" += ";start-info=" + WsdlMediaType::quote(xml_type);
+            }
         } else {
             rv.hdr."Content-Type" = ct;
         }
@@ -35765,7 +36071,7 @@ public class SoapBinding inherits WSDL::OperationalBinding {
 
         # Create multipart message container if multipartRelated binding is used
         if (exists bmd.multipart) {
-            mpm = new MultiPartRelatedMessage();
+            mpm = new MultiPartRelatedMessage(WsdlAttachmentHelper::boundary());
         }
 
         bool fault = exists faultmsg;
@@ -35779,6 +36085,8 @@ public class SoapBinding inherits WSDL::OperationalBinding {
                     keep{selected_header.part} = True;
                 }
             }
+            # XOP optimizes the SOAP envelope only, not attachment entities.
+            XopOutputScope attachment_xop(NOTHING);
             foreach string key in (keys bmd.parts) {
                 string part = msg.args{key}.part;
                 @assert(part && msg.pmap{part} == key);
@@ -35807,6 +36115,8 @@ public class SoapBinding inherits WSDL::OperationalBinding {
             # Fault detail belongs to its own message, not the ordinary output body selection.
             *list<string> body_parts = fault ? NOTHING : bmd.body.parts;
             XsdEncodingRulesScope body_rules(encoded ? SoapEncodingStyleHelper::rules(bmd.body.encodingStyle) : NOTHING);
+            # SOAP encoding rewrites the serialized value graph, so its content stays inline.
+            XopOutputScope body_xop(encoded ? NOTHING : XopOutput);
             if (docstyle || fault) {
                 # bmd.body.encoded == False = literal encoding
                 #printf("parts: %y, args: %y\n", bmd.body.parts, msg.args.keys());
@@ -35855,6 +36165,7 @@ public class SoapBinding inherits WSDL::OperationalBinding {
                 *hash<auto> h;
                 string field = header_keys{hdr.msg.getExpandedName()};
                 XsdEncodingRulesScope header_rules(hdr.encoded ? SoapEncodingStyleHelper::rules(hdr.encodingStyle) : NOTHING);
+                XopOutputScope header_xop(hdr.encoded ? NOTHING : XopOutput);
                 if (hdr.encoded && EncodingRules == SOAP_12_ENCODING) {
                     rh{soapenvEnvelope}."^attributes^"."xmlns:enc" = SOAP_12_ENCODING;
                 }
@@ -36522,7 +36833,7 @@ class WsdlMimeTreeCodec {
             }
             int root = node.root ?? 0;
             if (root < 0 || root >= layout.size()) { throw SOAP_SERIALIZATION_ERROR, "invalid MIME root entity index"; }
-            MultiPartRelatedMessage writer();
+            MultiPartRelatedMessage writer(WsdlAttachmentHelper::boundary());
             foreach string key in (keys encoded) {
                 if (int(key) == root) { continue; }
                 writer.addPart(encoded{key}.body, ids{key}, encoded{key}.hdr."Content-Type");

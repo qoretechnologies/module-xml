@@ -76,6 +76,7 @@ MTOM message failed with `RUNTIME-TYPE-ERROR`, because the previous recognizer r
 
 `WSDLLib::packageMtom()` writes the root as `application/xop+xml` with the XML serialization's content type
 in `type`, and repeats it in the package's `start-info`: `text/xml` for SOAP 1.1, and `application/soap+xml`
-with any `action` parameter for SOAP 1.2 (SOAP 1.2 MTOM section 3.2). The pinned sources are in
+with any `action` parameter for SOAP 1.2 (SOAP 1.2 MTOM section 3.2). MTOM output from WSDL serialization is
+described in [soap-mtom-output.md](soap-mtom-output.md). The pinned sources are in
 `test/wsdl-interop/normative/`, and `test_attachment_sources.py` checks their digests.
 

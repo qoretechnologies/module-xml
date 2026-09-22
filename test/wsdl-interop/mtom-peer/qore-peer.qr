@@ -1,0 +1,108 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+# The Qore side of the live MTOM/XOP exchanges with MtomPeer.java over the pinned cxf/mtom_xop.wsdl contract.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../../../qlib"
+%requires ../../../qlib/WSDL.qm
+%requires ../../../qlib/SoapClient.qm
+%requires ../../../qlib/SoapClientIo
+%requires ../../../qlib/SoapHandler.qm
+%requires HttpServer
+
+const Text = "text é ";
+const ReplyText = "TEXT É ";
+# testXop sizes around the default MTOM threshold, and testXopString repetitions below and above it
+const Sizes = (0, 1, MTOM_THRESHOLD - 1, MTOM_THRESHOLD, 70000);
+const Repeats = (1, 300);
+
+sub check(bool condition, string what) {
+    if (!condition) {
+        throw "MTOM-PEER-ERROR", what;
+    }
+}
+
+# (i * 7 + 3) mod 256, as MtomPeer.java writes it; reversed for replies
+binary sub pattern(int size, bool reversed = False) {
+    list<string> hex = ();
+    for (int i = 0; i < size; ++i) {
+        push hex, sprintf("%02x", ((reversed ? size - 1 - i : i) * 7 + 3) % 256);
+    }
+    return parse_hex_string(hex.join(""));
+}
+
+bool sub isXop(*string content_type) {
+    return content_type =~ /^multipart\/related;.*type="?application\/xop\+xml/i;
+}
+
+# a request name is "<xop|inline>:<size>"
+int sub size(string name) {
+    list<string> fields = name.split(":");
+    check(fields.size() == 2 && inlist(fields[0], ("xop", "inline")), sprintf("request name %y", name));
+    return int(fields[1]);
+}
+
+string sub form(bool mtom, int octets) {
+    return mtom && octets >= MTOM_THRESHOLD ? "xop" : "inline";
+}
+
+list<string> args = ARGV ?? ();
+check(args.size() >= 2 && inlist(args[1], ("source", "saved")), "usage: qore-peer.qr <mode> <source|saved> ...");
+WebService ws = WSDLLib::getWebServiceFromUrl(get_script_dir() + "/../cxf/mtom_xop.wsdl");
+if (args[1] == "saved") {
+    ws = Serializable::deserialize(ws.serialize());
+}
+
+if (args[0] == "client") {
+    # client <graph> <url> <SoapClient|SoapClientIo> <mtom|plain>: MtomPeer's server always answers with MTOM
+    check(args.size() == 5, "client <graph> <url> <SoapClient|SoapClientIo> <mtom|plain>");
+    bool mtom = args[4] == "mtom";
+    hash<auto> options = {"wsdl": ws, "service": "TestMtomService", "port": "TestMtomPort", "url": args[2],
+        "mtom": mtom, "connect_timeout": 10000, "timeout": 30000};
+    object client = args[3] == "SoapClient" ? new SoapClient(options) : new SoapClientIo(options);
+    on_exit if (client instanceof SoapClientIo) { cast<SoapClientIo>(client).close(); }
+    foreach int octets in (Sizes) {
+        string name = form(mtom, octets) + ":" + octets;
+        hash<auto> info;
+        auto result = client.callOperation("testXop", {"name": name, "attachinfo": pattern(octets)}, NOTHING, \info);
+        check(isXop(info.headers."Content-Type") == mtom, sprintf("%s request package", name));
+        check(isXop(info."response-headers"."content-type"), sprintf("%s reply package", name));
+        check(result.name == "reply:" + name, sprintf("%s reply name %y", name, result.name));
+        check((result.attachinfo ?? binary()) == pattern(octets, True), sprintf("%s reply octets", name));
+    }
+    foreach int repeat in (Repeats) {
+        binary text = binary(strmul(Text, repeat));
+        string name = form(mtom, text.size()) + ":" + repeat;
+        hash<auto> info;
+        auto result = client.callOperation("testXopString", {"name": name, "attachinfo": text}, NOTHING, \info);
+        check(isXop(info.headers."Content-Type") == mtom, sprintf("%s request package", name));
+        check(result.name == "reply:" + name, sprintf("%s reply name %y", name, result.name));
+        check(result.attachinfo == binary(strmul(ReplyText, repeat)), sprintf("%s reply text", name));
+    }
+    printf("PASS\n");
+} else if (args[0] == "server") {
+    # server <graph>: answers MTOM requests with MTOM responses (SoapHandler's default threshold)
+    HttpServer server();
+    on_exit server.stop();
+    SoapHandler handler(new PermissiveAuthenticator());
+    server.setDefaultHandler("mtom-peer", handler);
+    Queue received();
+    handler.addMethod(ws, ws.getOperation("testXop"), hash<auto> sub (hash<auto> cx, hash<auto> value) {
+        int octets = size(value.name);
+        check((value.attachinfo ?? binary()) == pattern(octets), sprintf("%s octets", value.name));
+        received.push(value.name);
+        return {"name": "reply:" + value.name, "attachinfo": pattern(octets, True)};
+    }, NOTHING, NOTHING, NOTHING, NOTHING, NOTHING, NOTHING, "TestMtomBinding");
+    handler.addMethod(ws, ws.getOperation("testXopString"), hash<auto> sub (hash<auto> cx, hash<auto> value) {
+        int repeat = size(value.name);
+        check(value.attachinfo == binary(strmul(Text, repeat)), sprintf("%s text", value.name));
+        received.push(value.name);
+        return {"name": "reply:" + value.name, "attachinfo": binary(strmul(ReplyText, repeat))};
+    }, NOTHING, NOTHING, NOTHING, NOTHING, NOTHING, NOTHING, "TestMtomBinding");
+    server.addListener(0);
+    printf("READY\t%d\n", server.getListenerInfo(0).port);
+    flush();
+    check(trim(stdin.readLine()) == "STOP", "STOP");
+    check(received.size() == Sizes.size() + Repeats.size(), sprintf("%d calls received", received.size()));
+} else {
+    throw "MTOM-PEER-ERROR", sprintf("unknown mode %y", args[0]);
+}

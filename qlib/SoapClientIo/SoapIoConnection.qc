@@ -77,6 +77,23 @@ public class SoapIoConnection inherits ConnectionProvider::HttpBasedConnection {
                     "type": "string",
                     "desc": "Overrides the URL in the WSDL",
                 },
+                "mtom": <ConnectionOptionInfo>{
+                    "display_name": "MTOM Requests",
+                    "short_desc": "Send requests as MTOM/XOP packages",
+                    "type": "bool",
+                    "default_value": False,
+                    "desc": "Send SOAP requests as MTOM/XOP packages: `base64Binary` content of at least "
+                        "`mtom_threshold` octets travels as binary MIME parts instead of base64 text, which "
+                        "shortens large document and image uploads. MTOM responses are always accepted.",
+                },
+                "mtom_threshold": <ConnectionOptionInfo>{
+                    "display_name": "MTOM Part Threshold",
+                    "short_desc": "The smallest binary value sent as an MTOM part",
+                    "type": "int",
+                    "default_value": WSDL::MTOM_THRESHOLD,
+                    "desc": "The minimum size in octets of `base64Binary` content sent as a binary MTOM part; "
+                        "`0` sends every value as a part. Applies only when `mtom` is `True`.",
+                },
                 "wsdl": <ConnectionOptionInfo>{
                     "display_name": "WSDL URL",
                     "short_desc": "The URL for the WSDL",

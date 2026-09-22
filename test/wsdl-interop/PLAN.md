@@ -1669,3 +1669,21 @@ MTOM input had never worked: the XOP recognizer read regex captures through `$1`
 rejects a `start-info` that conflicts with the root. XOP 1.0, SOAP 1.2 MTOM and RFC 2392 are pinned in
 `normative/`. [soap-mtom](../soap-mtom.qtest) has 4 cases and 43 assertions. The full suite passes except the two
 core-blocked IEEE gates.
+
+## P8-05b: MTOM/XOP output and live CXF exchanges
+
+MTOM output did not exist. `WSDL::SoapMtomScope` now selects it per thread for requests, responses and declared
+faults: canonical `base64Binary` content of at least a threshold moves into a binary part referenced by an
+`xop:Include`, with `xmime:contentType` as the part's media type. Only referenced parts are packaged, each once
+and with its transfer encoding, and an original infoset containing `xop:Include` is sent without XOP (SOAP 1.2
+MTOM section 4.3.1). `SoapClient` and `SoapClientIo` take `mtom` and `mtom_threshold` options, and `SoapHandler`
+answers MTOM requests with MTOM responses.
+
+Three defects outside MTOM were found and fixed: a route serving one operation in both SOAP versions kept only
+the first registration, so the other version's requests failed with `VersionMismatch`; envelope validation read
+an absent value as text; and `SoapClientIo` dropped the media parameters of multipart responses.
+
+[soap-mtom-output](../soap-mtom-output.qtest) has 9 cases and 148 assertions, [soap-actions](../soap-actions.qtest)
+gains a mixed-version dispatch case, and [test_mtom_xop.py](test_mtom_xop.py) exchanges the unmodified CXF
+`mtom_xop.wsdl` contract live with Apache CXF 4.1.3 in both directions, with and without MTOM, each side checking
+the other's package form and part count.

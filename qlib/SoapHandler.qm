@@ -96,6 +96,10 @@ module SoapHandler {
     @section soaphandler_relnotes SoapHandler Release History
 
     @subsection soaphandler_0_3_4 SoapHandler 0.3.4
+    - successful responses to MTOM/XOP requests are MTOM/XOP packages, with base64Binary content in binary parts;
+      see SoapHandler::setMtomThreshold()
+    - a route can serve one operation in SOAP 1.1 and SOAP 1.2 bindings: the received envelope selects the
+      binding of its version, where previously the first registration shadowed the other version's
     - a SOAP 1.2 request for an unknown procedure returns the \c rpc:ProcedureNotPresent subcode when the handler
       serves SOAP 1.2 RPC Representation operations
     - request decoding errors that carry WSDL::SoapFaultOptions return their SOAP 1.2 code and subcodes, such as
@@ -269,6 +273,12 @@ public namespace SoapHandler {
             # reverse mapping: unique_id -> soapaction -> True
             hash<string, hash<string, bool>> rsam;
 
+            # first registration per SOAP version: URI path -> request name -> "11" or "12" -> method
+            hash<string, hash<string, hash<string, hash<auto>>>> uri_version_methods;
+
+            # first registration per SOAP version: request name -> "11" or "12" -> method
+            hash<string, hash<string, hash<auto>>> version_methods;
+
             int loglevel;
 
             # if True then verbose exception info will be logged
@@ -279,6 +289,9 @@ public namespace SoapHandler {
 
             # optional maximum message size in bytes; if set, messages larger than this will be rejected
             *int max_message_size;
+
+            # the MTOM part threshold for responses to MTOM requests, or NOTHING for ordinary SOAP responses
+            *int mtom_threshold = MTOM_THRESHOLD;
 
             # Immutable header capabilities and roles; per-request results live in cx.soap_processing.
             SoapProcessingNode soap_node;
@@ -475,6 +488,43 @@ handler.addSoapResponseResource("/invoices/71", service.getBindingOperation("Soa
             max_message_size = size;
         }
 
+        #! sets how successful responses to MTOM requests are written
+        /** A request that arrives as an MTOM/XOP package shows that its sender accepts MTOM, so by default its
+            successful response is also an MTOM/XOP package, with base64Binary content of at least
+            @ref WSDL::MTOM_THRESHOLD "MTOM_THRESHOLD" octets in binary parts (see
+            @ref WSDL::SoapMtomScope "SoapMtomScope"). Responses to ordinary SOAP requests, and fault responses,
+            are ordinary SOAP messages.
+
+            @param threshold the minimum size in octets of base64Binary content sent as a binary part; 0 sends
+            every value as a part, and @ref nothing answers MTOM requests with ordinary SOAP responses
+
+            @throw SOAP-HANDLER-ERROR a negative threshold
+
+            @par Example
+            Return scanned documents to MTOM clients as binary parts, however small:
+            @code{.py}
+handler.setMtomThreshold(0);
+            @endcode
+
+            @since SoapHandler 0.3.4
+         */
+        setMtomThreshold(*int threshold) {
+            if (threshold < 0) {
+                throw "SOAP-HANDLER-ERROR", sprintf("the MTOM threshold must not be negative; got %d", threshold);
+            }
+            mtom_threshold = threshold;
+        }
+
+        #! returns the MTOM part threshold for responses to MTOM requests
+        /** @return the minimum size in octets of base64Binary content sent as a binary part, or @ref nothing when
+            MTOM requests receive ordinary SOAP responses
+
+            @since SoapHandler 0.3.4
+         */
+        *int getMtomThreshold() {
+            return mtom_threshold;
+        }
+
         #! returns the current maximum message size setting
         /** @return the maximum message size in bytes, or @ref nothing if no limit is set
          */
@@ -528,6 +578,26 @@ handler.addSoapResponseResource("/invoices/71", service.getBindingOperation("Soa
                 }
             }
             remove ruri_sam{unique_id};
+
+            # remove SOAP version mappings for service
+            foreach string rpath in (keys uri_version_methods) {
+                foreach string rn in (keys uri_version_methods{rpath}) {
+                    map remove uri_version_methods{rpath}{rn}{$1}, keys uri_version_methods{rpath}{rn},
+                        uri_version_methods{rpath}{rn}{$1}.unique_id == unique_id;
+                    if (!uri_version_methods{rpath}{rn}) {
+                        remove uri_version_methods{rpath}{rn};
+                    }
+                }
+                if (!uri_version_methods{rpath}) {
+                    remove uri_version_methods{rpath};
+                }
+            }
+            foreach string rn in (keys version_methods) {
+                map remove version_methods{rn}{$1}, keys version_methods{rn}, version_methods{rn}{$1}.unique_id == unique_id;
+                if (!version_methods{rn}) {
+                    remove version_methods{rn};
+                }
+            }
 
             # remove SOAPAction mappings for service
             foreach string sa in (keys rsam{unique_id}) {
@@ -686,6 +756,17 @@ handler.addSoapResponseResource("/invoices/71", service.getBindingOperation("Soa
                 }
 
                 #printf("DEBUG: operation request names: %y\n", method.operation.getTopLevelRequestNames());
+
+                # A route can serve one operation in both SOAP versions; the received envelope selects the binding.
+                string version = sb.isSoap12() ? "12" : "11";
+                foreach string rn in (method.operation.getTopLevelRequestNames() + (method.name,)) {
+                    if (!version_methods{rn}{version}) {
+                        version_methods{rn}{version} = method;
+                    }
+                    if (method.altpath && !uri_version_methods{method.altpath}{rn}{version}) {
+                        uri_version_methods{method.altpath}{rn}{version} = method;
+                    }
+                }
 
                 # add request name mappings
                 foreach string rn in (method.operation.getTopLevelRequestNames()) {
@@ -1064,7 +1145,7 @@ private nothing msglog(hash<auto> cx, hash<auto> msg) {
 
         # don't reimplement this method; fix/enhance it in the module
         final private *hash<auto> callOperation(hash<auto> cx, auto args, hash<auto> method, bool reqsoap12,
-                *string xml_body) {
+                *string xml_body, bool request_mtom = False) {
             @assert(method.name, "method.name is required");
             # NOTE: internal methods have no operation definition and can take no parameters
             hash<auto> h;
@@ -1158,6 +1239,9 @@ private nothing msglog(hash<auto> cx, hash<auto> msg) {
                     auto header = remove rv."^header^";
                     *bool response_soap12 = method.operation.getBinding(method.binding) instanceof SoapBinding
                         ? reqsoap12 : NOTHING;
+                    # An MTOM request shows that the client accepts an MTOM response.
+                    *int threshold = request_mtom ? mtom_threshold : NOTHING;
+                    SoapMtomScope mtom_scope(exists threshold, threshold ?? MTOM_THRESHOLD);
                     h += method.operation.serializeResponse(rv, header, NOTHING, NOTHING, response_soap12, NOTHING,
                         method.binding, NOTHING, method.response_mime_format);
                     msglog(cx, ('reason': 'response', 'code': 200, 'header': h.hdr, 'body': h.body));
@@ -1181,9 +1265,10 @@ private nothing msglog(hash<auto> cx, hash<auto> msg) {
         private bool servesSoap12Rpc() {
             rwl.readLock();
             on_exit rwl.readUnlock();
-            foreach hash<auto> method in (methods.iterator()) {
-                *OperationalBinding binding = method.operation.getBinding(method.binding);
-                if (binding instanceof SoapBinding && cast<SoapBinding>(binding).usesSoap12RpcRepresentation()) {
+            foreach hash<string, hash<auto>> versions in (version_methods.iterator()) {
+                *hash<auto> method = versions."12";
+                if (method && cast<SoapBinding>(method.operation.getBinding(method.binding))
+                        .usesSoap12RpcRepresentation()) {
                     return True;
                 }
             }
@@ -1230,16 +1315,23 @@ private nothing msglog(hash<auto> cx, hash<auto> msg) {
             return path;
         }
 
+        # whether a registration's binding uses the given SOAP version
+        private static bool servesVersion(hash<auto> method, bool soap12) {
+            OperationalBinding binding = method.operation.getBinding(method.binding);
+            return binding instanceof SoapBinding && cast<SoapBinding>(binding).isSoap12() == soap12;
+        }
+
         # Identify the route's version before parsing an unrecognized envelope namespace.
         # This is independent of request actions and never selects an application operation.
         private *bool getSoapVersionForRoute(string path, *string alt_path) {
             rwl.readLock();
             on_exit rwl.readUnlock();
             *bool version;
-            foreach hash<auto> candidate in ((uri_methods{path} ?? uri_methods{alt_path} ?? methods).iterator()) {
-                OperationalBinding binding = candidate.operation.getBinding(candidate.binding);
-                if (binding instanceof SoapBinding) {
-                    bool current = binding.isSoap12();
+            # Every SOAP version registered for a request name counts, not only the first registration.
+            foreach hash<string, hash<auto>> versions in ((uri_version_methods{path} ?? uri_version_methods{alt_path}
+                    ?? version_methods).iterator()) {
+                foreach string key in (keys versions) {
+                    bool current = key == "12";
                     if (exists version && version != current) { return NOTHING; }
                     version = current;
                 }
@@ -1474,6 +1566,7 @@ private nothing msglog(hash<auto> cx, hash<auto> msg) {
                 # now
                 auto args;
                 *string xml_body;
+                bool request_mtom = False;
                 *hash<ExceptionInfo> header_fault;
                 bool processor_failure = False;
                 try {
@@ -1503,6 +1596,7 @@ private nothing msglog(hash<auto> cx, hash<auto> msg) {
                         rethrow;
                     }
                     msglog(cx, ('reason': 'request', 'header': hdr, 'method': hdr.method, 'body': msg.body));
+                    request_mtom = msg.is_mtom ?? False;
                     *bool expected_version = selected_binding instanceof SoapBinding ? selected_binding.isSoap12()
                         : soap_envelope ? getSoapVersionForRoute(path, alt_path) : NOTHING;
                     reqsoap12 = expected_version ?? WSDLLib::isSOAPMessage12(msg);
@@ -1596,16 +1690,21 @@ private nothing msglog(hash<auto> cx, hash<auto> msg) {
                                 #printf("DEBUG: path: %y alt_path: %y element: %y um: %y urm: %y m: %y\n", path,
                                 #   alt_path, element, exists uri_methods{path}{element},
                                 #   exists uri_methods{alt_path}{element}, exists methods{element});
+                                # the first operation for the element, preferring the envelope's SOAP version
                                 foreach hash<auto> candidate in ((shared ?? {}).iterator()) {
-                                    if (candidate.request_names{element}) {
+                                    if (candidate.request_names{element} && (!method
+                                            || (!servesVersion(method, reqsoap12)
+                                                && servesVersion(candidate, reqsoap12)))) {
                                         method = candidate;
-                                        break;
                                     }
                                 }
                                 # issue #2783: respect UTI paths when matching; an element outside the shared
                                 # action's operations selects its own operation for the action check below
                                 if (!method) {
-                                    method = uri_methods{path}{element}
+                                    method = (uri_version_methods{path}{element}
+                                            ?? uri_version_methods{alt_path}{element}
+                                            ?? version_methods{element}){reqsoap12 ? "12" : "11"}
+                                        ?? uri_methods{path}{element}
                                         ?? uri_methods{alt_path}{element}
                                         ?? methods{element};
                                 }
@@ -1615,8 +1714,21 @@ private nothing msglog(hash<auto> cx, hash<auto> msg) {
                                 rwl.readLock();
                                 on_exit rwl.readUnlock();
                                 hash<string, bool> seen();
-                                foreach hash<auto> candidate in ((shared ?? uri_methods{path}
-                                        ?? uri_methods{alt_path} ?? methods).iterator()) {
+                                list<hash<auto>> candidates();
+                                if (shared) {
+                                    candidates = map $1, shared.iterator();
+                                } else {
+                                    # every SOAP version's registration, not only the first one for each name
+                                    foreach hash<string, hash<auto>> versions in ((uri_version_methods{path}
+                                            ?? uri_version_methods{alt_path} ?? version_methods).iterator()) {
+                                        candidates += map $1, versions.iterator();
+                                    }
+                                }
+                                # Registrations of the envelope's SOAP version take precedence on a mixed route.
+                                if ((select candidates, servesVersion($1, reqsoap12))) {
+                                    candidates = select candidates, servesVersion($1, reqsoap12);
+                                }
+                                foreach hash<auto> candidate in (candidates) {
                                     OperationalBinding binding = candidate.operation.getBinding(candidate.binding);
                                     if (!(binding instanceof SoapBinding) || !binding.docstyle
                                             || !binding.input || !candidate.operation.input
@@ -1675,7 +1787,7 @@ private nothing msglog(hash<auto> cx, hash<auto> msg) {
                             WSDLLib::validateSOAPEnvelope(args, method.operation.getBinding(method.binding).isSoap12());
                             return makeDeclaredFaultResponse(cx, method, reqsoap12, header_fault, NOTHING, True);
                         }
-                        return {"code": 200} + callOperation(cx, args, method, reqsoap12, xml_body);
+                        return {"code": 200} + callOperation(cx, args, method, reqsoap12, xml_body, request_mtom);
                     } catch (hash<ExceptionInfo> ex) {
                         if (ex.err == "PROGRAM-INTERRUPTED" || ex.err == "THREAD-CANCELLED") { rethrow; }
                         string str = debug

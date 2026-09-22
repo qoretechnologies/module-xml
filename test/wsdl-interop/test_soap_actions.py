@@ -7,7 +7,7 @@ import queue
 import subprocess
 import unittest
 from lxml import etree
-from test_cxf_peer import endpoint
+from test_cxf_peer import endpoint, root_entity
 from test_http_request_url import origin
 from test_soap_envelope import ENV, URI
 import test_soap_oneway
@@ -110,7 +110,9 @@ class SoapActionTests(unittest.TestCase):
                                 self.assertIsNone(response.getheader('SOAPAction'))
                                 cm = Message(); cm['Content-Type'] = response.getheader('Content-Type')
                                 self.assertIsNone(cm.get_param('action'))
-                                document = etree.fromstring(raw); self.schemas[version].assertValid(document)
+                                # an MTOM request is answered with an MTOM response
+                                document = etree.fromstring(root_entity(response.getheader('Content-Type'), raw))
+                                self.schemas[version].assertValid(document)
                                 root = '{'+URI[version]+'}'
                                 if expected:
                                     self.assertEqual(expected,document.find(root+'Body/{urn:empty-route}value').text)

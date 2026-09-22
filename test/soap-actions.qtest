@@ -17,6 +17,7 @@ class SoapActionTest inherits QUnit::Test {
         addTestCase("HTTP action dispatch uses normalized root metadata and rejects mismatches", \http());
         addTestCase("Saved SOAP node configuration preserves roles and rejects unsavable capabilities", \savedNodes());
         addTestCase("Operations sharing an action dispatch by Body within the action's operations", \shared());
+        addTestCase("A route serving both SOAP versions dispatches each envelope to its version's binding", \versions());
         set_return_value(main());
     }
     private static string source(bool soap12, string name = "contract") {
@@ -225,6 +226,14 @@ class SoapActionTest inherits QUnit::Test {
                             hash<SoapFaultInfo> fault = WSDLLib::getSOAPFaultInfo(reply,soap12);
                             assertEq(soap12 ? "Sender" : "Client",fault.code.getLocalName());
                             assertTrue(fault.reasons[0].text.contains(row.error),fault.reasons[0].text);
+                        } else if (row.xop) {
+                            # an MTOM request receives an MTOM response
+                            string rct = info."response-headers"."content-type";
+                            assertRegex('^multipart/related;.*type="application/xop\+xml"', rct);
+                            assertEq(row.result,ws.getBindingOperation("B",row.result).deserializeResponse(
+                                WSDLLib::parseSOAPMessage(WSDLLib::parseMultiPartSOAPMessage({"content-type":rct,
+                                    "body":reply},False,True),False,True)));
+                            assertEq({"operation":row.result,"action":row.action},received.get(1000));
                         } else {
                             assertEq(row.result,ws.getBindingOperation("B",row.result).deserializeResponse(parse_xml(reply)));
                             assertEq({"operation":row.result,"action":row.action},received.get(1000));
@@ -310,6 +319,85 @@ class SoapActionTest inherits QUnit::Test {
                     handler.removeService("delta");
                     post(element("beta"),"urn:delta",NOTHING,"no operation call found");
                 }
+            }
+        }
+    }
+
+    private versions() {
+        string text = source(False, "versions");
+        string rpc11 = "http://schemas.xmlsoap.org/soap/encoding/";
+        string rpc12 = "http://www.w3.org/2003/05/soap-encoding";
+        foreach WebService ws in (graphs(text)) {
+            foreach list<string> order in (("D11", "D12"), ("D12", "D11"), ("R11", "R12"), ("R12", "R11")) {
+                bool rpc = order[0] =~ /^R/;
+                SoapHandler handler(new PermissiveAuthenticator());
+                code<nothing(string)> register = nothing sub (string binding) {
+                    foreach string op in (rpc ? ("single",) : ("echo", "ping", "idle")) {
+                        handler.addMethod(ws, ws.getBindingOperation(binding, op), auto sub (hash<auto> cx, auto value) {
+                            string result = binding + ":" + cx.operation.name;
+                            return rpc ? {"answer": result} : {"body": result};
+                        }, NOTHING, NOTHING, NOTHING, "v", NOTHING, NOTHING, binding, binding);
+                    }
+                };
+                map register($1), order;
+                HttpServer server(); on_exit server.stop();
+                server.setDefaultHandler("v", handler);
+                server.addListener(<HttpListenerOptionInfo>{"node": "127.0.0.1", "service": 0});
+                HTTPClient client({"url": sprintf("http://127.0.0.1:%d/v", server.getListenerInfo(0).port),
+                    "timeout": 10000, "error_passthru": True});
+                # posts a request and returns the response status and body
+                code<list<auto>(bool, string, *string)> post = list<auto> sub (bool soap12, string content,
+                        *string action) {
+                    string body = sprintf('<e:Envelope xmlns:e="%s" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" '
+                        'xmlns:xsd="http://www.w3.org/2001/XMLSchema"><e:Body>%s</e:Body></e:Envelope>',
+                        soap12 ? SOAP_12_ENV : SOAP_11_ENV, content);
+                    hash<auto> hdr = {"Content-Type": media(soap12, action)."content-type"};
+                    if (!soap12) {
+                        hdr.SOAPAction = '"' + (action ?? "") + '"';
+                    }
+                    hash<auto> info;
+                    string reply = client.post("", body, hdr, \info);
+                    return (info."response-headers".status_code, reply);
+                };
+                code<nothing(string, string, *string)> check = nothing sub (string binding, string op, *string action) {
+                    bool soap12 = binding =~ /12$/;
+                    string content = op == "idle" ? "" : op == "single"
+                        ? sprintf('<t:single xmlns:t="urn:versions" e:encodingStyle="%s"><question%s>q</question></t:single>',
+                            soap12 ? rpc12 : rpc11, soap12 ? "" : ' xsi:type="xsd:string"')
+                        : sprintf('<t:%s xmlns:t="urn:versions">x</t:%s>', op, op);
+                    list<auto> response = post(soap12, content, action);
+                    string label = sprintf("%s %s %y: %s", binding, op, action, response[1]);
+                    assertEq(200, response[0], label);
+                    assertEq(binding + ":" + op, ws.getBindingOperation(binding, op).deserializeResponse(
+                        parse_xml(response[1]), binding), label);
+                };
+                if (rpc) {
+                    check("R11", "single", "urn:versions:single");
+                    check("R12", "single", "urn:versions:single");
+                    check("R12", "single");
+                    # SOAP 1.2 Part 2 section 4.4: the route serves the SOAP 1.2 RPC Representation in either order
+                    list<auto> response = post(True, sprintf('<t:absent xmlns:t="urn:versions" e:encodingStyle="%s"/>',
+                        rpc12));
+                    assertEq(400, response[0]);
+                    hash<SoapFaultInfo> fault = WSDLLib::getSOAPFaultInfo(response[1], True);
+                    assertEq(("{http://www.w3.org/2003/05/soap-rpc}ProcedureNotPresent",),
+                        map sprintf("{%s}%s", $1.getNamespaceUri(), $1.getLocalName()), fault.subcodes);
+                    continue;
+                }
+                foreach string binding in (("D11", "D12")) {
+                    # a shared action, element-only dispatch, and an empty Body without an action
+                    check(binding, "echo", "urn:versions:echo");
+                    check(binding, "ping");
+                    check(binding, "idle");
+                }
+                # removing one version's service leaves the route to the other version
+                handler.removeService(order[0]);
+                check(order[1], "echo", "urn:versions:echo");
+                check(order[1], "ping");
+                check(order[1], "idle");
+                list<auto> response = post(order[0] == "D12", '<t:ping xmlns:t="urn:versions">x</t:ping>');
+                assertNeq(200, response[0]);
+                assertRegex("VersionMismatch", response[1]);
             }
         }
     }

@@ -1,0 +1,525 @@
+#!/usr/bin/env qore
+# -*- mode: qore; indent-tabs-mode: nil -*-
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires xml
+%requires Mime
+%requires HttpServer
+%requires ../qlib/WSDL.qm
+%requires ../qlib/SoapHandler.qm
+%requires ../qlib/SoapClient.qm
+%requires ../qlib/SoapClientIo
+
+%exec-class SoapMtomOutputTest
+
+# MTOM/XOP output (XOP 1.0 section 3.1; SOAP 1.2 MTOM sections 3.2 and 4.3.1) from WSDL serialization,
+# SoapClient, SoapClientIo and SoapHandler.
+public class SoapMtomOutputTest inherits QUnit::Test {
+    private {
+        const Action = "urn:mtom-output:upload";
+
+        HttpServer server;
+    }
+
+    constructor() : QUnit::Test("MTOM/XOP output", "1.0") {
+        addTestCase("literal base64Binary content moves into binary parts", \parts());
+        addTestCase("the threshold selects the extracted values", \thresholds());
+        addTestCase("only canonical, uncommented values with valid media types are optimized", \candidates());
+        addTestCase("SOAP versions, RPC parts, faults and attachments", \bindings());
+        addTestCase("an original infoset with xop:Include is sent without XOP", \fallback());
+        addTestCase("scopes nest, restore and validate their threshold", \scopes());
+        addTestCase("clients send MTOM and the handler mirrors it", \exchanges());
+        addTestCase("client options are validated", \options());
+        addTestCase("connections carry the MTOM options", \connections());
+        addTestCase("envelope validation treats absent values as empty content", \emptyValues());
+        set_return_value(main());
+    }
+
+    globalTearDown() {
+        stop();
+    }
+
+    private static WebService service() {
+        return new WebService(ReadOnlyFile::readTextFile(get_script_dir() + "/mtom-output.wsdl"));
+    }
+
+    private static hash<auto> request(string binding, string operation, auto args) {
+        return service().getBindingOperation(binding, operation).serializeRequest(args, NOTHING, NOTHING, NOTHING,
+            NOTHING, NOTHING, binding);
+    }
+
+    # returns the normalized transport message of a serialized message
+    private static hash<auto> package(hash<auto> msg) {
+        return WSDLLib::parseMultiPartSOAPMessage({"content-type": msg.hdr."Content-Type", "body": msg.body},
+            False, True);
+    }
+
+    private static string root(hash<auto> msg) {
+        return WSDLLib::getXmlMessageText(package(msg));
+    }
+
+    # returns the cid: references of the root in document order
+    private static list<string> includes(string xml) {
+        # the element that serialization writes for each extracted part
+        string pattern = '<xop:Include xmlns:xop="' + replace(XOP_NS, ".", "\\.") + '" href="cid:([^"]+)"/>';
+        return regex_extract(xml, pattern, RE_Global) ?? ();
+    }
+
+    # returns the raw MIME headers of each part, keyed by Content-ID, independently of the WSDL reader
+    private static hash<string, hash<string, string>> headers(hash<auto> msg) {
+        string text = binary_to_string(binary(msg.body), "ISO-8859-1");
+        *string boundary = (msg.hdr."Content-Type" =~ x/boundary="([^"]+)"/)[0];
+        hash<string, hash<string, string>> result();
+        foreach string entity in (text.split("--" + boundary)) {
+            int end = entity.find("\r\n\r\n");
+            if (end < 0) {
+                continue;
+            }
+            hash<string, string> fields();
+            foreach string line in (entity.substr(0, end).split("\r\n")) {
+                int colon = line.find(":");
+                if (colon > 0) {
+                    fields{line.substr(0, colon).lwr()} = trim(line.substr(colon + 1));
+                }
+            }
+            if (fields."content-id") {
+                result{fields."content-id".substr(1, -1)} = fields;
+            }
+        }
+        return result;
+    }
+
+    private static auto decode(string binding, hash<auto> msg) {
+        return service().getBindingOperation(binding, binding == "SwA11" ? "attach"
+            : binding =~ /^(Rpc|Enc)/ ? "blob" : "upload").deserializeRequest(
+                WSDLLib::parseSOAPMessage(package(msg), False, True), binding);
+    }
+
+    private static binary bytes(int size) {
+        binary result = binary();
+        for (int i = 0; i < size; ++i) {
+            result += chr(i % 256).toBinary();
+        }
+        return result;
+    }
+
+    parts() {
+        binary data = bytes(300);
+        binary token = bytes(40);
+        hash<auto> upload = {"name": "invoice", "data": (data, binary()), "digest": binary("abcd"),
+            "typed": {"^value^": data, "^attributes^": {"contentType": "image/png"}},
+            "list": (data, token), "choice": data, "any": token};
+        hash<auto> msg;
+        {
+            SoapMtomScope mtom(True, 0);
+            msg = request("Doc11", "upload", {"body": upload, "token": token});
+        }
+        assertRegex('^multipart/related;.*type="application/xop\+xml".*;start-info="text/xml"$',
+            msg.hdr."Content-Type");
+        assertEq('"' + Action + '"', msg.hdr.SOAPAction);
+        string xml = root(msg);
+        list<string> refs = includes(xml);
+        # header token, both data values, digest, typed and anyType content
+        assertEq(6, refs.size());
+        assertEq(refs.size(), (map {$1: True}, refs).size(), "each part is referenced once");
+        assertRegex("<ns:token><xop:Include ", xml, "header content is optimized");
+        assertRegex('<ns:typed xmlmim:contentType="image/png"><xop:Include ', xml, "attributes stay on the element");
+        assertRegex('<ns:any xsi:type="xsd:base64Binary"><xop:Include ', xml, "anyType binary is base64Binary");
+        assertRegex("<ns:list>[A-Za-z0-9+/=]+ [A-Za-z0-9+/=]+</ns:list>", xml, "list values stay inline");
+        assertRegex("<ns:choice>[A-Za-z0-9+/=]+</ns:choice>", xml, "union values stay inline");
+
+        hash<string, hash<string, string>> fields = headers(msg);
+        hash<auto> transport = package(msg);
+        assertEq(sort(refs), sort(keys transport.parts), "only referenced parts are packaged");
+        foreach string id in (refs) {
+            assertEq("binary", fields{id}."content-transfer-encoding", "MTOM section 4.3.1 transfer encoding");
+            assertRegex('@qore\.org$', id);
+        }
+        list<string> media = map transport.parts{$1}.hdr."content-type", refs;
+        assertEq(1, (select media, $1 == "image/png").size());
+        assertEq(5, (select media, $1 == "application/octet-stream").size());
+        assertEq((token, data, binary(), binary("abcd"), data, token), (map transport.parts{$1}.body, refs),
+            "parts hold the decoded octets in document order");
+
+        auto value = decode("Doc11", msg);
+        assertEq(upload.data, value.data);
+        assertEq(upload.digest, value.digest);
+        assertEq(upload.typed, value.typed);
+        assertEq(upload.list, value.list);
+        assertEq(upload.choice, value.choice);
+        assertEq(upload.any, value.any);
+        assertEq(token, value.TokenHeader.token);
+    }
+
+    thresholds() {
+        assertEq(1024, MTOM_THRESHOLD);
+        hash<auto> args = {"body": {"name": "n", "data": (bytes(MTOM_THRESHOLD - 1), bytes(MTOM_THRESHOLD),
+            binary())}};
+        hash<auto> msg;
+        {
+            SoapMtomScope mtom();
+            msg = request("Doc12", "upload", args);
+        }
+        list<string> refs = includes(root(msg));
+        assertEq(1, refs.size(), "only the value at the default threshold is extracted");
+        assertEq(bytes(MTOM_THRESHOLD), package(msg).parts{refs[0]}.body);
+        assertEq(args.body.data, decode("Doc12", msg).data);
+
+        {
+            SoapMtomScope mtom(True, 1);
+            msg = request("Doc12", "upload", args);
+        }
+        assertEq(2, includes(root(msg)).size(), "empty content stays inline above threshold 0");
+        {
+            SoapMtomScope mtom(True, 0);
+            msg = request("Doc12", "upload", args);
+        }
+        assertEq(3, includes(root(msg)).size(), "threshold 0 extracts empty content");
+        assertEq(args.body.data, decode("Doc12", msg).data);
+
+        # a message without optimized content is still a XOP package with only its root
+        {
+            SoapMtomScope mtom();
+            msg = request("Doc12", "upload", {"body": {"name": "n"}});
+        }
+        assertRegex('type="application/xop\+xml"', msg.hdr."Content-Type");
+        hash<auto> transport = package(msg);
+        assertTrue(transport.is_mtom);
+        assertEq({}, transport.parts ?? {});
+        assertEq("n", decode("Doc12", msg).name);
+    }
+
+    candidates() {
+        binary data = bytes(20);
+        hash<auto> msg;
+        {
+            SoapMtomScope mtom(True, 0);
+            msg = request("Doc11", "upload", {"body": {"name": "n", "data": (
+                new XsdBinaryValue("base64Binary", "AAEC AwQ="),
+                new XsdBinaryValue("base64Binary", "AAECAwQ="),
+                {"^value^": data, "^comment^": "scanned"},
+            )}, "token": data});
+        }
+        string xml = root(msg);
+        assertRegex("<ns:data>AAEC AwQ=</ns:data>", xml, "non-canonical lexical form stays inline");
+        assertRegex("<ns:data><xop:Include ", xml, "canonical retained form is optimized");
+        assertRegex("<ns:data><!--scanned-->[A-Za-z0-9+/=]+</ns:data>", xml, "commented content stays inline");
+        assertEq(2, includes(xml).size());
+        assertEq((binary("\x00\x01\x02\x03\x04"), binary("\x00\x01\x02\x03\x04"), data), decode("Doc11", msg).data);
+
+        foreach string type in ("*/*", "image/*", "text/plain\r\nX-Injected: 1", "text/plain; a=\"x\r\ny\"", "bad",
+                "text/plain; =x") {
+            {
+                SoapMtomScope mtom(True, 0);
+                msg = request("Doc11", "upload", {"body": {"name": "n", "typed": {"^value^": data,
+                    "^attributes^": {"contentType": type}}}, "token": data});
+            }
+            xml = root(msg);
+            assertRegex("<ns:typed [^>]*>[A-Za-z0-9+/=]+</ns:typed>", xml, sprintf("%y stays inline", type));
+            assertEq(1, includes(xml).size(), sprintf("%y leaves only the header part", type));
+            foreach hash<string, string> fields in (headers(msg).iterator()) {
+                assertFalse(fields.hasKey("x-injected"), sprintf("%y cannot add a MIME header", type));
+            }
+        }
+
+        {
+            SoapMtomScope mtom(True, 0);
+            msg = request("Doc11", "upload", {"body": {"name": "n", "typed": {"^value^": data,
+                "^attributes^": {"contentType": " text/plain; charset=utf-8 "}}}, "token": data});
+        }
+        hash<auto> transport = package(msg);
+        list<string> refs = includes(root(msg));
+        assertEq("text/plain; charset=utf-8", transport.parts{refs[1]}.hdr."content-type");
+        assertEq(data, transport.parts{refs[1]}.body, "a text media type keeps the exact octets");
+    }
+
+    bindings() {
+        binary data = bytes(64);
+        # SOAP 1.2: the action belongs to the root type and start-info
+        hash<auto> msg;
+        {
+            SoapMtomScope mtom(True, 0);
+            msg = request("Doc12", "upload", {"body": {"name": "n", "data": data}});
+        }
+        string action = "application/soap+xml;action=\\\"" + Action + "\\\"";
+        assertEq(";start-info=\"" + action + "\"", (msg.hdr."Content-Type" =~ x/(;start-info=.*)$/)[0]);
+        hash<auto> transport = package(msg);
+        assertEq("application/xop+xml;charset=\"UTF-8\";type=\"" + action + "\"", transport."content-type");
+        assertEq(Action, WSDLLib::getSOAPAction(transport, True));
+        assertFalse(msg.hdr.hasKey("SOAPAction"));
+        assertEq(data, decode("Doc12", msg).data);
+
+        # responses and faults carry no action
+        WSOperation op = service().getBindingOperation("Doc12", "upload");
+        {
+            SoapMtomScope mtom(True, 0);
+            msg = op.serializeResponse({"body": {"name": "n", "data": data}}, NOTHING, NOTHING, NOTHING, True,
+                NOTHING, "Doc12");
+        }
+        assertRegex(';start-info="application/soap\+xml"$', msg.hdr."Content-Type");
+        assertEq(1, includes(root(msg)).size());
+        assertEq(data, op.deserializeResponse(WSDLLib::parseSOAPMessage(package(msg), False, True), "Doc12").data);
+        {
+            SoapMtomScope mtom(True, 0);
+            msg = op.serializeFault("Rejected", "rejected", {"token": data}, NOTHING, NOTHING, NOTHING, NOTHING,
+                NOTHING, "Doc12");
+        }
+        string xml = root(msg);
+        assertRegex("<soapenv:Detail><ns:token><xop:Include ", xml, "fault detail is optimized");
+        assertEq(data, package(msg).parts{includes(xml)[0]}.body);
+
+        # an RPC/literal type part; SOAP-encoded content stays inline
+        {
+            SoapMtomScope mtom(True, 0);
+            msg = request("Rpc11", "blob", {"blob": data});
+        }
+        xml = root(msg);
+        assertRegex("<blob><xop:Include ", xml);
+        assertEq(data, decode("Rpc11", msg));
+        {
+            SoapMtomScope mtom(True, 0);
+            msg = request("Enc11", "blob", {"blob": data});
+        }
+        xml = root(msg);
+        assertEq((), includes(xml));
+        assertRegex('<blob xsi:type="xsd:base64Binary">[A-Za-z0-9+/=]+</blob>', xml);
+        assertTrue(package(msg).is_mtom, "encoded content is still sent in a XOP package");
+        assertEq(data, decode("Enc11", msg));
+
+        # SwA attachment parts share the package; an attachment entity is not part of the envelope, so its own
+        # base64Binary content stays inline
+        {
+            SoapMtomScope mtom(True, 0);
+            msg = request("SwA11", "attach", {"body": {"name": "n", "data": data}, "file": bytes(10),
+                "doc": {"name": "attached", "data": data}});
+        }
+        transport = package(msg);
+        list<string> refs = includes(WSDLLib::getXmlMessageText(transport));
+        assertEq(1, refs.size(), "only the envelope's content is optimized");
+        list<string> attachments = select keys transport.parts, $1 =~ /^file=/;
+        assertEq(1, attachments.size());
+        assertEq(bytes(10), transport.parts{attachments[0]}.body);
+        string entity = binary_to_string((select transport.parts.pairIterator(), $1.key =~ /^doc=/)[0].value.body);
+        assertTrue(entity.find("<ns:data>" + make_base64_string(data) + "</ns:data>") >= 0,
+            "the attachment's own content stays inline");
+        assertEq((), includes(entity), "the XML attachment entity has no xop:Include");
+        auto value = decode("SwA11", msg);
+        assertEq(data, value.body.data);
+        assertEq(bytes(10), value.file);
+        assertEq(data, value.doc.data);
+    }
+
+    fallback() {
+        binary data = bytes(64);
+        hash<auto> msg;
+        {
+            SoapMtomScope mtom(True, 0);
+            msg = request("Doc11", "upload", {"body": {"name": "n", "data": data, "any": {"xop:Include":
+                {"^attributes^": {"xmlns:xop": XOP_NS, "href": "cid:original@example.com"}}}}, "token": data});
+        }
+        assertEq('text/xml;charset="UTF-8"', msg.hdr."Content-Type", "SOAP 1.2 MTOM section 4.3.1 fallback");
+        assertEq(NT_STRING, msg.body.typeCode());
+        assertTrue(msg.body.find("<ns:data>" + make_base64_string(data) + "</ns:data>") >= 0);
+        assertRegex('<ns:any><xop:Include xmlns:xop="' + XOP_NS + '" href="cid:original@example.com"/></ns:any>',
+            msg.body);
+        assertEq(-1, msg.body.find("@qore.org"), "no extracted part is referenced");
+
+        # the ordinary message decodes with its original xop:Include element
+        auto value = service().getBindingOperation("Doc11", "upload").deserializeRequest(
+            WSDLLib::parseSOAPMessage({"content-type": msg.hdr."Content-Type", "body": msg.body}, False, True),
+            "Doc11");
+        assertEq(data, value.data);
+        assertEq("cid:original@example.com", value.any{"{" + XOP_NS + "}Include"}."^attributes^".href);
+    }
+
+    scopes() {
+        assertEq(NOTHING, SoapMtomScope::getThreshold());
+        {
+            SoapMtomScope outer(True, 10);
+            assertEq(10, SoapMtomScope::getThreshold());
+            {
+                SoapMtomScope inner(False);
+                assertEq(NOTHING, SoapMtomScope::getThreshold());
+                hash<auto> msg = request("Doc12", "upload", {"body": {"name": "n", "data": bytes(20)}});
+                assertRegex("^application/soap\\+xml", msg.hdr."Content-Type", "a suspended scope sends plain SOAP");
+            }
+            assertEq(10, SoapMtomScope::getThreshold());
+            assertThrows("SOAP-SERIALIZATION-ERROR", "must not be negative", sub () {
+                SoapMtomScope invalid(True, -1);
+            });
+            assertEq(10, SoapMtomScope::getThreshold(), "a rejected scope leaves the selection unchanged");
+            code fail = sub () {
+                SoapMtomScope failing(True, 0);
+                request("Doc12", "upload", {"body": {"data": "missing name"}});
+            };
+            assertThrows("SOAP-SERIALIZATION-ERROR", fail);
+            assertEq(10, SoapMtomScope::getThreshold(), "an exception restores the enclosing selection");
+        }
+        assertEq(NOTHING, SoapMtomScope::getThreshold());
+
+        # the selection belongs to the thread that creates the scope
+        {
+            SoapMtomScope mtom(True, 0);
+            Queue result();
+            background sub () {
+                result.push(SoapMtomScope::getThreshold() ?? -1);
+                SoapMtomScope own(True, 7);
+                result.push(SoapMtomScope::getThreshold() ?? -1);
+            }();
+            assertEq(-1, result.get(), "a new thread starts without MTOM output");
+            assertEq(7, result.get());
+            assertEq(0, SoapMtomScope::getThreshold(), "another thread's scope does not change this thread");
+        }
+    }
+
+    private string listen(SoapHandler handler) {
+        WebService ws = service();
+        foreach string binding in ("Doc11", "Doc12") {
+            handler.addMethod(ws, ws.getBindingOperation(binding, "upload"),
+                auto sub (hash<auto> cx, auto value) {
+                    return value - "TokenHeader";
+                }, NOTHING, NOTHING, NOTHING, "mtom", NOTHING, NOTHING, binding, "mtom-" + binding);
+        }
+        server = new HttpServer();
+        server.setDefaultHandler("soap", handler);
+        return sprintf("http://127.0.0.1:%d/mtom", server.addListener(0).port);
+    }
+
+    private stop() {
+        if (server) {
+            server.stop();
+            delete server;
+        }
+    }
+
+    private static bool isXop(*string content_type) {
+        return content_type =~ /^multipart\/related;.*type="application\/xop\+xml"/;
+    }
+
+    exchanges() {
+        SoapHandler handler(new PermissiveAuthenticator());
+        assertEq(MTOM_THRESHOLD, handler.getMtomThreshold());
+        assertThrows("SOAP-HANDLER-ERROR", \handler.setMtomThreshold(), -1);
+        handler.setMtomThreshold(0);
+        string url = listen(handler);
+        on_exit stop();
+        binary data = bytes(100);
+        hash<auto> upload = {"name": "n", "data": data};
+
+        # SoapClient over SOAP 1.1 with a header part
+        SoapClient client({"wsdl": service(), "port": "Doc11", "url": url, "mtom": True, "mtom_threshold": 0});
+        hash<auto> info;
+        auto result = client.callOperation("upload", {"body": upload, "token": data}, NOTHING, \info);
+        assertTrue(isXop(info.headers."Content-Type"), "SoapClient sends MTOM");
+        assertTrue(isXop(info."response-headers"."content-type"), "the handler mirrors MTOM");
+        assertEq(upload, result{keys upload});
+
+        SoapClient plain({"wsdl": service(), "port": "Doc11", "url": url});
+        info = {};
+        result = plain.callOperation("upload", {"body": upload, "token": data}, NOTHING, \info);
+        assertFalse(isXop(info.headers."Content-Type"));
+        assertRegex("^text/xml", info."response-headers"."content-type", "ordinary requests get ordinary responses");
+        assertEq(upload, result{keys upload});
+
+        # SoapClientIo over SOAP 1.2
+        SoapClientIo io({"wsdl": service(), "port": "Doc12", "url": url, "mtom": True, "mtom_threshold": 0});
+        on_exit io.close();
+        info = {};
+        result = io.callOperation("upload", {"body": upload}, NOTHING, \info);
+        assertTrue(isXop(info.headers."Content-Type"), "SoapClientIo sends MTOM");
+        assertRegex('start-info="application/soap\+xml;action=', info.headers."Content-Type");
+        assertTrue(isXop(info."response-headers"."content-type"), "the handler mirrors SOAP 1.2 MTOM");
+        assertEq(upload, result{keys upload});
+
+        # responses below the handler's threshold stay inline in a XOP package; NOTHING disables mirroring
+        handler.setMtomThreshold(1000);
+        info = {};
+        result = io.callOperation("upload", {"body": upload}, NOTHING, \info);
+        assertTrue(isXop(info."response-headers"."content-type"));
+        assertEq(-1, binary(info."response-body").find(binary("xop:Include")));
+        assertEq(upload, result{keys upload});
+        handler.setMtomThreshold();
+        assertEq(NOTHING, handler.getMtomThreshold());
+        info = {};
+        result = io.callOperation("upload", {"body": upload}, NOTHING, \info);
+        assertTrue(isXop(info.headers."Content-Type"));
+        assertRegex("^application/soap\\+xml", info."response-headers"."content-type");
+        assertEq(upload, result{keys upload});
+    }
+
+    options() {
+        foreach hash<auto> bad in ({"mtom": "yes"}, {"mtom_threshold": -1}, {"mtom_threshold": "10"}) {
+            assertThrows("SOAP-CLIENT-ERROR", "mtom", sub () {
+                new SoapClient({"wsdl": service(), "port": "Doc11"} + bad);
+            });
+            assertThrows("SOAP-CLIENT-IO-ERROR", "mtom", sub () {
+                new SoapClientIo({"wsdl": service(), "port": "Doc11"} + bad);
+            });
+        }
+        # the options select the scope only while a request is serialized
+        SoapClient client({"wsdl": service(), "port": "Doc11", "mtom": True});
+        WSOperation op;
+        hash<auto> msg = client.getMsg("upload", {"body": {"name": "n", "data": bytes(MTOM_THRESHOLD)},
+            "token": bytes(4)}, NOTHING, \op);
+        assertTrue(isXop(msg.hdr."Content-Type"));
+        assertEq(1, includes(root(msg)).size(), "the default client threshold is MTOM_THRESHOLD");
+        assertEq(NOTHING, SoapMtomScope::getThreshold());
+
+        # saved clients keep their options; clients saved before MTOM output send ordinary SOAP messages
+        hash<auto> args = {"body": {"name": "n", "data": bytes(MTOM_THRESHOLD)}, "token": bytes(4)};
+        SoapClient saved = Serializable::deserialize(client.serialize());
+        assertTrue(isXop(saved.getMsg("upload", args, NOTHING, \op).hdr."Content-Type"));
+        hash<SerializationInfo> legacy = client.serializeToData();
+        remove legacy._index{legacy._data._index}._class_data."SoapClient::SoapClient".("mtom", "mtom_threshold");
+        SoapClient old = Serializable::deserialize(legacy);
+        assertRegex("^text/xml", old.getMsg("upload", args, NOTHING, \op).hdr."Content-Type");
+    }
+
+    connections() {
+        SoapHandler handler(new PermissiveAuthenticator());
+        handler.setMtomThreshold(0);
+        string url = listen(handler);
+        on_exit stop();
+        binary data = bytes(100);
+        hash<auto> upload = {"name": "n", "data": data};
+        hash<auto> options = {"wsdl": ReadOnlyFile::readTextFile(get_script_dir() + "/mtom-output.wsdl"),
+            "port": "Doc11", "target_url": url, "mtom": True, "mtom_threshold": 0};
+
+        SoapConnection connection("soap", "MTOM test connection", replace(url, "http:", "soap:"),
+            {"monitor": False}, options);
+        assertTrue(connection.getConnectionSchemeInfo().options.mtom.type == "bool");
+        SoapClient client = connection.get(False);
+        hash<auto> info;
+        assertEq(upload, client.callOperation("upload", {"body": upload, "token": data}, NOTHING, \info){keys upload});
+        assertTrue(isXop(info.headers."Content-Type"), "the connection's client sends MTOM");
+
+        SoapIoConnection io_connection("soapio", "MTOM async test connection", replace(url, "http:", "soapio:"),
+            {"monitor": False}, options + {"port": "Doc12"});
+        assertEq(MTOM_THRESHOLD, io_connection.getConnectionSchemeInfo().options.mtom_threshold.default_value);
+        SoapClientIo io = io_connection.get(False);
+        on_exit io.close();
+        info = {};
+        assertEq(upload, io.callOperation("upload", {"body": upload}, NOTHING, \info){keys upload});
+        assertTrue(isXop(info.headers."Content-Type"), "the async connection's client sends MTOM");
+    }
+
+    emptyValues() {
+        # Unqualified generic content selects namespace-rewritten output, which writes the empty Header as an
+        # absent value; that is not text.
+        hash<auto> msg = request("Doc11", "upload", {"body": {"name": "n", "any": {"note": "unqualified"}}});
+        assertRegex("<soapenv:Header/><soapenv:Body>", msg.body);
+        assertRegex("<ns:any><note>unqualified</note></ns:any>", msg.body);
+
+        # Header text is still rejected in received messages.
+        string xml = '<e:Envelope xmlns:e="http://schemas.xmlsoap.org/soap/envelope/"><e:Header>text'
+            '<h:x xmlns:h="urn:h"/></e:Header><e:Body><m:upload xmlns:m="urn:mtom-output"><m:name>n</m:name>'
+            '</m:upload></e:Body></e:Envelope>';
+        assertThrows("SOAP-DESERIALIZATION-ERROR", "Header cannot contain non-whitespace text", sub () {
+            service().getBindingOperation("Doc11", "upload").deserializeRequest(WSDLLib::parseSOAPMessage(
+                {"content-type": "text/xml", "body": xml}, False, True), "Doc11");
+        });
+    }
+}
