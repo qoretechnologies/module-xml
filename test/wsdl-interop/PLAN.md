@@ -1554,3 +1554,15 @@ CMake-built AOT modules pass 9 suites / 64 cases / 2,650 assertions. Docs, astpa
 clean.
 
 See [P7 acceptance](P7-acceptance.md) and [validation](P7-acceptance-validation.json). P8 is next.
+
+## P8-01: Independent encoding sources
+
+The Apache Axis 1.4 rpc/encoded peer and two independent encoded-message corpora are pinned and run offline.
+`axis-peer/` holds the six-JAR Maven Central closure and the signature-verified Axis 1.4 source release files:
+LICENSE, NOTICE and the SOAPBuilders round 2 interop service. Axis's own client and service complete all 31
+round 2 operations on Java 25 (`--release 17`). `encoded-corpus/` holds those 31 exchanges and the 66 W3C SOAP 1.2
+test-collection tests that use the SOAP 1.2 encoding or RPC namespaces (150 messages, seven published errata
+recorded verbatim). [test_axis_peer.py](test_axis_peer.py) verifies the pins and compares a fresh Axis run with
+the corpus in canonical form. See [evidence](encoded-sources-evidence.md),
+[validation](P8-01-validation.json) and the [peer](axis-peer/README.md) and [corpus](encoded-corpus/README.md)
+READMEs.

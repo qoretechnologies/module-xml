@@ -10328,3 +10328,30 @@ A probe before the decision found the defect this phase must remove. A SOAP 1.2 
 `encodingStyle="http://www.w3.org/2003/05/soap-encoding"` serializes its wrapper with
 `soapenv:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"` and the SOAP 1.1 `soapenc` namespace. The
 declared encoding is silently replaced. The PLAN.md P8 section records the scope and seven increments.
+
+## P8-01: Independent encoding sources
+
+Pinned `axis:axis:1.4` from Maven Central: six JARs, each matching Maven's `.sha1` sidecar, pinned by SHA-256.
+Also pinned from `axis-src-1_4.tar.gz`: LICENSE, NOTICE and the `samples/echo` interop service, verified with
+the release signature and its published MD5. The published `.sha` does not match and is recorded. The W3C test
+collection is pinned at `normative/soap12-testcollection.html`; its digest equals the one recorded for the P7
+ledger.
+
+The TLS trust anchor path `/etc/pki/tls/cert.pem` is absent on this host, so downloads used the system bundle
+`/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem` explicitly, with verification on.
+
+Findings while building the peer:
+
+- `SimpleAxisServer.getAxisServer()` reads the listening port while creating the engine, so the socket is set
+  first.
+- Axis reorders struct members and multiRef blocks between runs, which is legal under SOAP 1.1 section 5. The
+  corpus is therefore compared canonically. A first negative test that assumed a value of 42 was a no-op; the
+  repeated test mutated an actual value (103.0) and the gate failed as required.
+- The collection's test blocks use `T*`, `TH*`, `SBR1-*`, `SBR2-*` and `XMLP-*` ids. An extractor keyed on
+  `T\d+` silently merged later tests into T80, so any id is now accepted, and HTTP-framed examples keep their
+  start line and headers apart from the XML.
+- Seven published messages are not well-formed. They are recorded verbatim as errata.
+
+`test_axis_peer.py`: 4 tests OK in four consecutive runs, then three more after the server adopted the shared
+`endpoint()` protocol with silent output enforced. Both negative tests fail as required. See
+`encoded-sources-evidence.md` and `P8-01-validation.json`.
