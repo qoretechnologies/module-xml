@@ -10355,3 +10355,39 @@ Findings while building the peer:
 `test_axis_peer.py`: 4 tests OK in four consecutive runs, then three more after the server adopted the shared
 `endpoint()` protocol with silent output enforced. Both negative tests fail as required. See
 `encoded-sources-evidence.md` and `P8-01-validation.json`.
+
+## P8-02a: SOAP 1.1 encoded references
+
+A probe decoded the 31 Axis round 2 exchanges with the pinned `InteropTest.wsdl`. The original contract is
+rejected: it uses `xml-soap:Map` without importing or defining it. For live use, P8-02c will derive a contract
+that adds the Apache SOAP Map schema, taken verbatim from the schema Axis's own `Java2WSDL` emits for `HashMap`.
+Against that derivative, 27 of 62 message directions failed to decode or re-encode. Root causes, all fixed here:
+
+- `processMultiRef()` examined `."^attributes^".id` on each Body entry, but `parse_xml()` delivers same-named
+  siblings, such as Axis's several `multiRef` elements, as one list. Their ids were never registered, which gave
+  `INVALID-REFERENCE`.
+- Its eager one-level resolution called `substr(NOTHING, 1)` for members without `href`, a
+  `RUNTIME-OVERLOAD-ERROR` under `%modern`. It also read `root` without its namespace prefix, so the attribute
+  was never processed.
+- `SOAP-ENV:encodingStyle` on an independent element reached type conversion as instance data ("simple type
+  cannot contain attribute").
+- `xsi:type="SOAP-ENC:Array"` and the encoding namespace's builtin names (`SOAP-ENC:int`) were "unknown explicit
+  types"; SOAP 1.1 sections 5.4.2 and 5.2.1 define both.
+- Array members that are references were never resolved.
+- A single type-based RPC part could not re-encode the bare struct that decoding returns. A first fix wrapped any
+  unmatched hash before header serialization and broke `soap.qtest` and `wsdl-header-merge.qtest`, whose hashes
+  carry header containers beside the body value. It was withdrawn. The element-based field extraction was
+  generalized to type-based parts instead.
+
+The reference context is now built by `SoapEncodedReferenceHelper`, which consumes metadata by expanded name
+and checks the graph up front: dangling references, duplicate or non-NCName ids and cycles, the last found by
+iterative DFS. After the fixes, 29 of 31 operations decode and re-encode. `echo2DStringArray` and array
+re-encoding belong to P8-02b's array work. RPC accessors stay matched by part name (WSDL 1.1 section 3.5). A
+WSDL-generated Axis stub names its return accessor `return` too.
+
+`test/soap-encoded-references.qtest` covers all of this with 7 cases and 52 assertions, on source and saved
+services. Negative tests confirm it: dropping sibling lists fails 3 cases, and disabling cycle detection fails
+the graph case. The full suite shows 451 targets, 3,588 cases and 172,729 assertions; all 272 Qore suites pass.
+Besides the two core-blocked IEEE gates, `test_archive_roles.py` timed out at its 600 s worker limit under
+parallel lanes and host load averaging 11-18. An A/B in isolation shows the change is not the cause: 416 s
+without it and 307 s with it. That guard is recalibrated separately. See `design/soap-encoding.md`.

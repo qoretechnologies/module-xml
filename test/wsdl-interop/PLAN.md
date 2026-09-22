@@ -1566,3 +1566,12 @@ recorded verbatim). [test_axis_peer.py](test_axis_peer.py) verifies the pins and
 the corpus in canonical form. See [evidence](encoded-sources-evidence.md),
 [validation](P8-01-validation.json) and the [peer](axis-peer/README.md) and [corpus](encoded-corpus/README.md)
 READMEs.
+
+## P8-02a: SOAP 1.1 encoded references
+
+Independent elements are found regardless of name repetition. Their SOAP encoding metadata is consumed. The
+reference graph is checked up front for dangling, duplicate or invalid ids and cycles. Array members and
+fragment references resolve; `SOAP-ENC:Array` and the encoding namespace's builtin type names are accepted; and
+a single type-based RPC part serializes its bare struct. [soap-encoded-references](../soap-encoded-references.qtest)
+has 7 cases and 52 assertions. 29 of the 31 Axis round 2 operations now decode and re-encode. See the
+[design](../../design/soap-encoding.md) and `EXECUTION.md`.

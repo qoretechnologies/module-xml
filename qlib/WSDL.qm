@@ -207,6 +207,16 @@ module WSDL {
     @section wsdlrelnotes WSDL Module Release Notes
 
     @subsection wsdl_0_5_8 WSDL v0.5.8
+    - SOAP 1.1 encoded decoding follows the section 5 reference model:
+      - independent elements are found however their names repeat;
+      - their \c SOAP-ENC:root and \c SOAP-ENV:encodingStyle metadata is consumed instead of rejected as instance
+        data;
+      - dangling references, duplicate or invalid ids and reference cycles raise descriptive errors before any
+        value is converted, where missing references previously crashed with \c RUNTIME-OVERLOAD-ERROR;
+      - array members may themselves be references;
+      - only \c "#id" references are resolved locally;
+      - \c SOAP-ENC:Array and the encoding namespace's builtin type names are accepted as \c xsi:type;
+      - a single type-based RPC part serializes the bare struct that decoding returns
     - XML name checks (\c Name, \c NCName, \c QName, \c NMTOKEN and namespace prefixes) and the character
       classes of XSD patterns compile their regular expressions once instead of on every value; every SOAP
       element name and QName value is checked this way, so serialization and envelope validation no
@@ -3825,6 +3835,125 @@ hashdecl SoapEnvelopeElement {
 
 # Validate protocol containers before native projection discards their qualified names.
 # Protocol containers and SOAP faults are traversed; application payloads retain their own validators.
+# SOAP 1.1 section 5 reference graph support for encoded Body content.
+class SoapEncodedReferenceHelper {
+    #! consumes an independent element's id and SOAP encoding metadata; returns the id
+    /** @param element the independent element; its unqualified id, soapenc:root and SOAP envelope
+        encodingStyle attributes are removed, namespace declarations and instance attributes are kept
+        @throw SOAP-DESERIALIZATION-ERROR an invalid id or root value, or an encoding style other than SOAP 1.1
+        encoding
+    */
+    static string consumeIndependent(reference<hash<auto>> element) {
+        XsdQNameNamespaceScope scope(element."^attributes^");
+        hash<string, string> namespaces = XsdBase::getAttributeNamespaces(element."^attributes^");
+        auto id = remove element."^attributes^".id;
+        if (id.typeCode() != NT_STRING || !XsdNameLexicalHelper::matches("NCName", id)) {
+            throw SOAP_DESERIALIZATION_ERROR, sprintf("SOAP encoding id %y is not an XML ID", id);
+        }
+        foreach string key in (keys element."^attributes^") {
+            (*string prefix, *string local) = key =~ x/^([^:]+):([^:]+)$/;
+            if (!prefix || prefix == "xmlns") {
+                continue;
+            }
+            *string uri = namespaces{prefix};
+            if (uri == SOAP_ENCODING && local == "root") {
+                auto root = remove element."^attributes^"{key};
+                if (root.typeCode() != NT_STRING
+                        || !inlist(XsdSimpleType::normalizeWhiteSpace(root, "collapse"), ("0", "1"))) {
+                    throw SOAP_DESERIALIZATION_ERROR, sprintf("SOAP encoding root %y of independent element %y "
+                        "must be 0 or 1", root, id);
+                }
+            } else if (uri == SOAP_11_ENV && local == "encodingStyle") {
+                auto style = remove element."^attributes^"{key};
+                list<string> styles = style.typeCode() == NT_STRING
+                    ? XsdSimpleType::normalizeWhiteSpace(style, "collapse").split(" ") : ();
+                if (!inlist(SOAP_ENCODING, styles)) {
+                    throw SOAP_DESERIALIZATION_ERROR, sprintf("independent element %y declares encodingStyle %y "
+                        "instead of SOAP 1.1 encoding", id, style);
+                }
+            }
+        }
+        return id;
+    }
+
+    #! rejects dangling fragment references and reference cycles among independent elements
+    /** @param roots the Body roots
+        @param independent independent elements keyed by id
+        @throw INVALID-REFERENCE a fragment reference that names no independent element
+        @throw SOAP-DESERIALIZATION-ERROR a reference cycle, which plain values cannot represent
+    */
+    static checkGraph(hash<auto> roots, hash<auto> independent) {
+        hash<string, list<string>> edges();
+        foreach string id in (keys independent) {
+            edges{id} = references(independent{id});
+        }
+        list<string> targets = references(roots);
+        foreach string id in (keys edges) {
+            targets += edges{id};
+        }
+        foreach string target in (targets) {
+            if (!independent.hasKey(target)) {
+                throw "INVALID-REFERENCE", sprintf("multiRef id: %y does not exist", target);
+            }
+        }
+        # iterative depth-first search; an id reached again while still on the path closes a cycle
+        hash<string, int> state();
+        foreach string start in (keys edges) {
+            if (state{start}) {
+                continue;
+            }
+            list<hash<auto>> path = ({"id": start, "next": 0},);
+            state{start} = 1;
+            while (path) {
+                hash<auto> top = path[path.size() - 1];
+                if (top.next == edges{top.id}.size()) {
+                    state{top.id} = 2;
+                    pop path;
+                    continue;
+                }
+                string target = edges{top.id}[top.next];
+                path[path.size() - 1].next = top.next + 1;
+                if (state{target} == 1) {
+                    throw SOAP_DESERIALIZATION_ERROR, sprintf("SOAP encoding reference cycle through id %y; "
+                        "plain values cannot represent a cyclic graph", target);
+                }
+                if (!state{target}) {
+                    state{target} = 1;
+                    push path, {"id": target, "next": 0};
+                }
+            }
+        }
+    }
+
+    # the local fragment references in a value, in document order
+    private static list<string> references(auto value) {
+        list<string> result();
+        # Built empty and pushed: a list literal would keep its element's type and reject other members.
+        list<auto> work();
+        push work, value;
+        while (work) {
+            auto current = pop work;
+            # Parsed element lists can be typed; push each member so the work list stays untyped.
+            if (current.typeCode() == NT_LIST) {
+                for (int i = current.size() - 1; i >= 0; --i) {
+                    push work, current[i];
+                }
+            } else if (current.typeCode() == NT_HASH) {
+                auto href = current."^attributes^".href;
+                if (href.typeCode() == NT_STRING && href.equalPartial("#")) {
+                    push result, href.substr(1);
+                }
+                foreach string key in (reverse(keys current)) {
+                    if (key != "^attributes^") {
+                        push work, current{key};
+                    }
+                }
+            }
+        }
+        return result;
+    }
+}
+
 class SoapEnvelopeHelper {
     static list<hash<SoapEnvelopeElement>> children(auto value, hash<string, string> inherited,
             string description) {
@@ -4307,8 +4436,11 @@ public class XsdData inherits WSDL::XsdBase {
         @throw INVALID-REFERENCE an encoded href does not identify a value in the supplied context
     */
     auto getValue(*hash<auto> mrh, auto val) {
-        if (exists mrh && exists val."^attributes^".href) {
-            string href = substr(val."^attributes^".href, 1);
+        # Only a same-document fragment reference names an independent element; other URIs, such as the
+        # cid: references of SOAP attachments, are left to the value's own conversion.
+        if (exists mrh && val.typeCode() == NT_HASH && val."^attributes^".href.typeCode() == NT_STRING
+                && val."^attributes^".href.equalPartial("#")) {
+            string href = val."^attributes^".href.substr(1);
 
             if (!exists mrh.mrh{href}) {
                 throw "INVALID-REFERENCE", sprintf("multiRef id: %y does not exist", href);
@@ -13433,7 +13565,8 @@ public class XsdArrayType inherits WSDL::XsdAbstractType {
             # For multi-dimensional arrays, recursively deserialize nested lists
             return map deserializeElement(en, tmap, mrh, $1, remainingDims - 1), val;
         }
-        return XsdDocumentValueHelper::deserializeValue(elementType, en, tmap, mrh, val);
+        # An array member can itself be an accessor to an independent element (SOAP 1.1 section 5.1 rule 2).
+        return XsdDocumentValueHelper::deserializeValue(elementType, en, tmap, mrh, getValue(mrh, val));
     }
 }
 
@@ -29700,9 +29833,19 @@ class XsdTypeSubstitutionHelper {
                 SOAP_DESERIALIZATION_ERROR, QNameInputNamespaces);
             string uri = identity.getNamespaceUri();
             string local = identity.getLocalName();
-            if (uri == XSD_NS && local != "binary" && XsdBaseType::BuiltinTypes{local}) {
-                # Independent output state avoids populating a shared schema's lazy builtin cache.
+            if ((uri == XSD_NS || uri == SOAP_ENCODING) && local != "binary" && XsdBaseType::BuiltinTypes{local}) {
+                # SOAP 1.1 section 5.2.1 names each builtin simple type in the encoding namespace as well; it
+                # only adds the id and href reference attributes. Independent output state avoids populating a
+                # shared schema's lazy builtin cache.
                 selected = new XsdBaseType(local, new Namespaces({}, declared.nsc));
+            } else if (uri == SOAP_ENCODING && local == "Array") {
+                # SOAP 1.1 section 5.4.2 lets an encoded array accessor name the generic SOAP-ENC:Array with a
+                # SOAP-ENC:arrayType, even where the schema declares an array type derived from it.
+                if (!(declared instanceof XsdArrayType)) {
+                    throw SOAP_DESERIALIZATION_ERROR, sprintf("SOAP-ENC:Array cannot replace declared type %Y "
+                        "for element %Y", declared.name, name);
+                }
+                selected = declared;
             } else {
                 *XsdAbstractType resolved = types{type_qname(uri, local)};
                 if (!resolved) {
@@ -32858,8 +33001,12 @@ public class WSMessage inherits WSDL::XsdNamedData {
         string key = pmap{part};
         auto v = getValueFromHash(key, \h, True);
         if (!exists v) {
-            if (key || args.size() == 1) {
+            if (args{key}.element) {
                 v = getValueFromHash(args{key}.element, \h, True);
+            } else if (args.size() == 1) {
+                # The bare struct that decoding returns for a single type-based part; with several type parts
+                # a flat hash could not say which part a field belongs to.
+                v = getValueFromHash(NOTHING, \h, True) ?? getTypeValueFromHash(args{key}.type, \h, True);
             }
             if (!exists v)
                 return;
@@ -33562,8 +33709,18 @@ public class WSMessage inherits WSDL::XsdNamedData {
         if (!element) {
             return;
         }
-        if (element.type instanceof WSDL::XsdComplexType) {
-            XsdComplexType type = cast<WSDL::XsdComplexType>(element.type);
+        return getTypeValueFromHash(element.type, \v, removeFound, reserved);
+    }
+
+    #! extracts a complex type's fields from a flat hash that can also carry other messages' values
+    /** A single type-based RPC part accepts the same flat form as an element part: the bare struct that
+        decoding returns, possibly beside header message containers that are serialized separately.
+        @return the extracted value, or NOTHING when the type is not complex or no field is present
+    */
+    private:internal auto getTypeValueFromHash(XsdAbstractType declared, reference<auto> v, bool removeFound,
+            *hash<string, bool> reserved) {
+        if (declared instanceof WSDL::XsdComplexType) {
+            XsdComplexType type = cast<WSDL::XsdComplexType>(declared);
             if (type.simpleType) {
                 # A simple-content value uses the existing scalar/^value^ representation, with attributes beside it.
                 if (v.typeCode() != NT_HASH) {
@@ -34985,85 +35142,40 @@ public class SoapBinding inherits WSDL::OperationalBinding {
         return rv;
     }
 
-    #! processes multi-part references and returns a hash of multi-part reference info and the updated message body hash
+    #! returns the SOAP 1.1 section 5 reference context and the remaining Body roots
+    /** Independent elements are the id-bearing Body children; same-named siblings arrive as a list. Their SOAP
+        encoding metadata is consumed here, so type conversion sees only instance data. Dangling references and
+        reference cycles are rejected before any value is converted.
+    */
     private:internal static list<auto> processMultiRef(hash<auto> body) {
-        # setup message info hash and multiRef lookup hash key, if any are present
-        hash<auto> mrh = {
-            # save original msg body hash
-            "body": body,
-        };
-        # remove namespace prefixes from body element keys
-        WSDL::XsdBase::removeNS2(\mrh.body);
-
-        # issue #2902: get all multiref elements with an "id" tag
-        # SOAP 1.1 Section 5.4.1 defines multiref elements with:
-        # - id: unique identifier for the element
-        # - root: "1" = root element, "0" = not a root (referenced only), absent = may be root
-        # - xsi:type: polymorphic type indicator
-        foreach hash<auto> hh in (body.pairIterator()) {
-            if (!exists hh.value."^attributes^".id) {
-                continue;
-            }
-            hash<auto> h = remove body{hh.key};
-            hash<auto> attrs = h."^attributes^";
-            string id = remove h."^attributes^".id;
-
-            # Process root attribute (SOAP 1.1 Section 5.4.1)
-            # root="1" means this is a root element, root="0" means it's only referenced
-            # If absent, the element may be a root
-            *string rootAttr = attrs.root;
-            if (rootAttr == "1") {
-                # This is explicitly marked as a root element - keep track of it
-                mrh.rootIds{id} = True;
-            }
-            remove h."^attributes^".root;
-
-            # Process xsi:type attribute for polymorphic type resolution
-            # Store the type info for use during deserialization
-            *string xsiType = attrs."xsi:type";
-            if (xsiType) {
-                mrh.typeMap{id} = xsiType;
-            }
-
-            mrh.mrh{id} = h;
-        }
-
-        # resolve interior references to multiRefs
-        foreach string id in (keys mrh.mrh) {
-            foreach string key in (keys mrh.mrh{id}) {
-                if (key == "^attributes^")
+        hash<auto> mrh = {"mrh": {}};
+        hash<auto> roots();
+        foreach hash<auto> entry in (body.pairIterator()) {
+            bool repeated = entry.value.typeCode() == NT_LIST;
+            list<auto> kept();
+            foreach auto element in (repeated ? entry.value : (entry.value,)) {
+                if (element.typeCode() != NT_HASH || !exists element."^attributes^".id) {
+                    push kept, element;
                     continue;
-
-                #printf("multiRef id: %y key: %y val: %y\n", id, key, mrh.mrh{id}{key});
-
-                if (mrh.mrh{id}{key}.typeCode() == NT_LIST) {
-                    foreach auto e in (\mrh.mrh{id}{key}) {
-                        auto href = substr(e."^attributes^".href, 1);
-                        if (exists href) {
-                            if (!exists mrh.mrh{href})
-                                throw "INVALID-MULTIREF", sprintf("multiRef id: %y does not exist", href);
-                            e = mrh.mrh{href};
-                        }
-                    }
-                } else if (mrh.mrh{id}{key}.typeCode() == NT_HASH) {
-                    auto href = substr(mrh.mrh{id}{key}."^attributes^".href, 1);
-                    if (exists href) {
-                        if (!exists mrh.mrh{href})
-                            throw "INVALID-MULTIREF", sprintf("multiRef id: %y does not exist", href);
-                        mrh.mrh{id}{key} = mrh.mrh{href};
-                    }
                 }
+                hash<auto> independent = element;
+                string id = SoapEncodedReferenceHelper::consumeIndependent(\independent);
+                if (mrh.mrh.hasKey(id)) {
+                    throw SOAP_DESERIALIZATION_ERROR, sprintf("duplicate SOAP encoding id %y", id);
+                }
+                mrh.mrh{id} = independent;
+            }
+            if (kept) {
+                roots{entry.key} = repeated ? kept : kept[0];
             }
         }
-
-        #printf("mrh: %y\n", mrh.mrh);
-        #printf("operation: %y\n", self);
+        SoapEncodedReferenceHelper::checkGraph(roots, mrh.mrh);
 
         # remove namespace tags from element names
-        WSDL::XsdBase::removeNS2(\body);
-        remove body.".ns";
+        WSDL::XsdBase::removeNS2(\roots);
+        remove roots.".ns";
 
-        return (mrh, body);
+        return (mrh, roots);
     }
 
     hash<auto> deserializeRequestPathImpl(WSOperation op, string path) {
