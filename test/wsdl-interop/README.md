@@ -526,11 +526,11 @@ and a schema-valid changed boolean that the strict value gate rejects.
 
 ```sh
 python3 test/wsdl-interop/archive_roles.py /tmp/wsdl-corpus \
-  --worker-timeout 600 --output /tmp/wsdl-archive.json
+  --worker-timeout 1800 --output /tmp/wsdl-archive.json
 ```
 
 The aggregate-contract worker has a configurable 1–3600-second deadline; the full
-integration check uses 600 seconds for its 18 historical contracts. The CLI/API
+integration check uses 1800 seconds for its 18 historical contracts. The CLI/API
 default is 150 seconds. Timeouts fail the check without omitting any contract.
 
 [archive-report.json](archive-report.json) assigns a role and provenance to all 4,191 original files.

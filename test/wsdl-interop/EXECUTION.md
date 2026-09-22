@@ -10391,3 +10391,11 @@ the graph case. The full suite shows 451 targets, 3,588 cases and 172,729 assert
 Besides the two core-blocked IEEE gates, `test_archive_roles.py` timed out at its 600 s worker limit under
 parallel lanes and host load averaging 11-18. An A/B in isolation shows the change is not the cause: 416 s
 without it and 307 s with it. That guard is recalibrated separately. See `design/soap-encoding.md`.
+
+### Hang-guard recalibration: archive roles
+
+`test_archive_roles.py` passes an explicit 600 s worker deadline for its 18 historical contracts. On 2026-09-22
+the worker took 204 s at low host load and 307-416 s at load averages of 11-18, and it exceeded 600 s under the
+P8-02a parallel full-suite run. Under the recalibration policy, which requires at least 3.5x headroom over the
+measured maximum, the deadline is now 1800 s (4.3x of 416 s). The README example matches. The gate passes in
+271 s.

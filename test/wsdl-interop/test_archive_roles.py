@@ -21,7 +21,9 @@ class ArchiveRolesTest(unittest.TestCase):
             root = Path(temporary) / "corpus"
             corpus.extract(root)
             # This single worker constructs all 18 historical aggregate contracts.
-            report = archive_roles.assess(root, worker_timeout=600)
+            # Hang guard: the aggregate worker took 204-416 s for the 18 historical contracts on 2026-09-22,
+            # depending on host load (PLAN.md P9 tracks performance with a benchmark).
+            report = archive_roles.assess(root, worker_timeout=1800)
             self.assertEqual(4191, len(report["files"]))
             self.assertEqual(4191, sum(report["role_counts"].values()))
             self.assertEqual([], report["unclassified"])
