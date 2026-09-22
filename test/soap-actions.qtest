@@ -16,10 +16,11 @@ class SoapActionTest inherits QUnit::Test {
         addTestCase("Requests quote the version-specific action and responses omit request actions", \serialization());
         addTestCase("HTTP action dispatch uses normalized root metadata and rejects mismatches", \http());
         addTestCase("Saved SOAP node configuration preserves roles and rejects unsavable capabilities", \savedNodes());
+        addTestCase("Operations sharing an action dispatch by Body within the action's operations", \shared());
         set_return_value(main());
     }
-    private static string source(bool soap12) {
-        string text = ReadOnlyFile::readTextFile(get_script_dir() + "/wsdl-interop/soap-action-peer/contract.wsdl");
+    private static string source(bool soap12, string name = "contract") {
+        string text = ReadOnlyFile::readTextFile(get_script_dir() + "/wsdl-interop/soap-action-peer/" + name + ".wsdl");
         return soap12 ? replace(text,SOAP_11_NS,SOAP_12_NS) : text;
     }
     private static list<WebService> graphs(string text) {
@@ -235,6 +236,79 @@ class SoapActionTest inherits QUnit::Test {
                         assertEq("first",retained ? result.body.body.getElementData()."^value^" : result);
                         assertEq({"operation":"first","action":"urn:first"},received.get(1000));
                     }
+                }
+            }
+        }
+    }
+    private shared() {
+        foreach bool soap12 in (False,True) {
+            foreach WebService ws in (graphs(source(soap12,"shared"))) {
+                # without a route path the actions share the handler-wide scope; the service name routes by its port
+                foreach *string path in (NOTHING,"S") {
+                    Queue received();
+                    SoapHandler handler(new PermissiveAuthenticator());
+                    code<nothing(string, string)> register = nothing sub (string name, string unique_id) {
+                        handler.addMethod(ws,ws.getBindingOperation("B",name),auto sub(hash<auto> cx,auto value) {
+                            received.push(cx.operation.name);
+                            return {"body":cx.operation.name};
+                        },NOTHING,NOTHING,NOTHING,path,NOTHING,NOTHING,"B",unique_id);
+                    };
+                    # delta registers the beta element first, so beta is reachable only by its shared action;
+                    # idle shares the empty Body under its own action
+                    register("delta","delta");
+                    register("idle","delta");
+                    map register($1,"shared"), ("alpha","beta","empty");
+                    string prefix = 'cannot register soapAction "urn:shared" for operation ';
+                    string suffix = '; neither the action nor the Body identifies the operation';
+                    assertThrows("SOAPACTION-ERROR",prefix+'"gamma" because operation "alpha" shares it and the '
+                        +'request element "alpha"'+suffix,register,("gamma","gamma"));
+                    assertThrows("SOAPACTION-ERROR",prefix+'"void" because operation "empty" shares it and an '
+                        +'empty Body'+suffix,register,("void","void"));
+                    HttpServer server(); on_exit server.stop();
+                    server.setDefaultHandler("shared",handler);
+                    server.addListener(<HttpListenerOptionInfo>{"node":"127.0.0.1","service":0});
+                    HTTPClient client({"url":sprintf("http://127.0.0.1:%d/shared",server.getListenerInfo(0).port),
+                        "timeout":10000,"error_passthru":True});
+                    string empty = '<e:Envelope xmlns:e="'+(soap12 ? SOAP_12_ENV : SOAP_11_ENV)+'"><e:Body/></e:Envelope>';
+                    code<string(string)> element = string sub (string name) {
+                        return replace(empty,'<e:Body/>','<e:Body><t:'+name+' xmlns:t="urn:shared-action">x</t:'
+                            +name+'></e:Body>');
+                    };
+                    code<nothing(string, string, *string, *string)> post = nothing sub (string body, string action,
+                            *string result, *string error) {
+                        hash<auto> hdr = {"Content-Type":media(soap12,action)."content-type"};
+                        if (!soap12) { hdr.SOAPAction = '"'+action+'"'; }
+                        hash<auto> info;
+                        string reply = client.post("",body,hdr,\info);
+                        string label = sprintf("%y %y %s",action,path,reply);
+                        if (error) {
+                            assertEq(soap12 ? 400 : 500,info."response-headers".status_code,label);
+                            hash<SoapFaultInfo> fault = WSDLLib::getSOAPFaultInfo(reply,soap12);
+                            assertTrue(fault.reasons[0].text.contains(error),fault.reasons[0].text);
+                        } else {
+                            assertEq(200,info."response-headers".status_code,label);
+                            assertEq(result,ws.getBindingOperation("B",result).deserializeResponse(parse_xml(reply)));
+                            assertEq(result,received.get(1000));
+                        }
+                        assertEq(0,received.size());
+                    };
+                    post(element("alpha"),"urn:shared","alpha");
+                    post(element("beta"),"urn:shared","beta");
+                    post(empty,"urn:shared","empty");
+                    post(element("beta"),"urn:delta","delta");
+                    post(empty,"urn:idle","idle");
+                    # a unique action still selects its operation before the Body is examined
+                    post(element("alpha"),"urn:delta",NOTHING,"SOAP-DESERIALIZATION-ERROR");
+                    # an element outside the shared action's operations is checked against its own action
+                    post(element("value"),"urn:shared",NOTHING,"no operation call found");
+                    # removal releases only the removed service's share of an action
+                    handler.removeService("shared");
+                    post(element("beta"),"urn:delta","delta");
+                    post(element("alpha"),"urn:shared",NOTHING,"no operation call found");
+                    register("gamma","gamma");
+                    post(element("alpha"),"urn:shared","gamma");
+                    handler.removeService("delta");
+                    post(element("beta"),"urn:delta",NOTHING,"no operation call found");
                 }
             }
         }

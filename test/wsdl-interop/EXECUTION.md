@@ -10434,3 +10434,58 @@ element. Two mutations (no reshape, positions ignored) fail 4 and 2 cases respec
 `wsdl-array-context.qtest` pinned the non-conformant wire form and the hash-level `^value^` round trip. They now
 assert the section 5.4.2 form, the #2899 key and an explicit error for a flat list passed to a rank-2 type.
 All 273 Qore suites pass. All 31 Axis round 2 operations decode and re-encode.
+
+## P8-02c: Live Axis 1.4 interop
+
+Both directions now run live against Apache Axis 1.4 in [test_axis_interop.py](test_axis_interop.py). The
+published `InteropTest.wsdl` is still rejected with its exact `WSDL-ERROR`: it uses Apache SOAP's `xml-soap:Map`
+without importing or defining it. The derived contract in `axis-peer/derived/` adds the schema that Axis's own
+`Java2WSDL` emits for `java.util.HashMap`, generated from a one-method interface. `axis_interop.py --write`
+reproduces the schema, the contract and `provenance.json`, and the gate requires identical results.
+
+- Qore's async `SoapClientIo` client sends the values of Axis's `TestClient` for all 31 operations to the Axis
+  service, and all 31 echoes verify.
+- Axis's `TestClient` calls a Qore `SoapHandler` echo service with Axis's own comparisons. All 31 verify once
+  installed Qore closes HTTP/1.0 connections; see the core defect below.
+
+Findings:
+
+- **SoapHandler: operations sharing a SOAP action.** All 31 operations share `soapAction="http://soapinterop.org/"`.
+  SOAP 1.1 section 6.1.1 makes the action an intent hint, and WS-I Basic Profile R2710 requires only distinct wire
+  signatures. The handler mapped each action to one method. Without a route path, registering the second operation
+  failed. With one (the #2273/#2871 relaxation), every request carrying the action reached the first registered
+  operation. Each route scope now maps an action to its set of operations. A unique action still selects its
+  operation first. A shared action lets the Body element, or an empty Body, select among that action's operations,
+  using request names computed at registration. An element outside them falls back to ordinary Body dispatch, so the
+  existing action check reports the mismatch. Registration rejects an operation that shares both an action and a
+  request element, or an action and an empty Body, with another operation in the same scope. `removeService()`
+  removes only that service's share. A new `soap-actions.qtest` case covers both route scopes, SOAP 1.1 and 1.2,
+  and source and saved graphs (504 assertions). It fails at HEAD (registration), and again when
+  either the element or the empty-Body selection is not limited to the shared action's operations.
+- **Qore core: HTTP/1.0 connections kept open.** Axis 1.4 sends `POST ... HTTP/1.0` without keep-alive and reads each
+  response until the connection closes. Installed Qore 21bbf2bb5 answers `Connection: Keep-Alive` and keeps the
+  connection, so Axis's first call blocks. `Socket::readHTTPHeader()` sets the request's close flag correctly. But
+  `AbstractHttpRequestHandler::handleRequest()` casts the handler result to `hash<HttpResponseInfo>`, which adds
+  `close: False`, and `HttpServer::sendReply()` lets that explicit value cancel the close the request requires. The
+  inline path has the same `??` combination. The handoff with a reproduction and the two-line fix is
+  `/tmp/qore-http10-keepalive/README.md`. module-xml does not work around it. Before running Axis's client, the gate
+  sends one HTTP/1.0 request as Axis does and requires `Connection: close` and end of stream. On the installed Qore
+  that assertion fails at once instead of the client hanging. With the fix applied to a scratch copy of
+  `HttpServer.qm` (never committed), all four gate tests pass.
+- **anyType types in echoes.** A Map key sent as `soapenc:int` decodes to a native int. That int re-encodes as
+  `xsd:long`, and Axis's Map comparison is type-strict, so `Integer(5)` differs from `Long(5)`. The echo service
+  registers with the documented `preserve_types` option, which retains each instance-selected type as a portable
+  wrapper and re-emits it.
+- `xsd:decimal` `3.14159` decodes as a float, following the documented `XsdDecimalDataType` rule. Axis returns Map
+  items in `java.util.HashMap` order, so the Qore client compares Apache SOAP Map items as a set, as Axis's own
+  `TestClient` does.
+- `Java2WSDL` reflects on erased types, so `MapEcho` uses `HashMap<Object, Object>` to compile under
+  `-Xlint:all -Werror` and still yields the raw `java.util.HashMap` schema.
+
+Each live exchange of 31 operations takes 1.3-2.0 s alone. The whole gate, including the Axis build, takes 8.1 s alone
+and 8.8 s in the eight-lane full suite; the 120 s deadline only bounds a hang.
+
+Full suite on Qore 21bbf2bb5 with `build-debug` rebuilt against it: 453 targets, 3,598 Qore cases, 173,305
+assertions. Three targets fail, all on Qore core defects: the two IEEE gates (NaN-boxing) and this gate's
+Axis-client direction (HTTP/1.0). Its other three tests pass. `soap-actions.qtest` has 5 cases and 1,948
+assertions. Documentation builds with no warnings.

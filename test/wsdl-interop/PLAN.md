@@ -1590,3 +1590,15 @@ Encoded arrays follow SOAP 1.1 section 5.4.2:
 
 [soap-encoded-arrays](../soap-encoded-arrays.qtest) has 9 cases and 68 assertions. All 31 Axis round 2
 operations decode and re-encode. See the [design](../../design/soap-encoding.md) and `EXECUTION.md`.
+
+## P8-02c: Live Axis 1.4 interop
+
+[test_axis_interop.py](test_axis_interop.py) runs both directions live. The published contract stays rejected
+with its exact `WSDL-ERROR`. The derived contract adds the `xml-soap` Map schema that Axis's own `Java2WSDL`
+emits, and it is reproducible, with provenance. Qore's async `SoapClientIo` client verifies all 31 operations
+against the Axis service. Axis's `TestClient` verifies all 31 against a `SoapHandler` echo service, which uses
+`preserve_types`. That second direction needs a Qore core fix: installed Qore keeps HTTP/1.0 connections open
+(handoff `/tmp/qore-http10-keepalive/README.md`). Until the fix is installed, the gate fails at its HTTP/1.0
+check. `SoapHandler` now dispatches operations that share a SOAP action by Body element within that action's
+operations; a new [soap-actions](../soap-actions.qtest) case covers it. See the
+[peer README](axis-peer/README.md) and `EXECUTION.md`.

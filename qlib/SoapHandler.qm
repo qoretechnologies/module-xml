@@ -66,6 +66,10 @@ module SoapHandler {
     Actions retain their URI spelling. Absent or empty SOAP 1.1 actions allow unambiguous Body routing;
     an explicit nonempty action must match the selected binding when that binding declares an action.
     SOAP 1.2 ignores the legacy SOAPAction header.
+    Several operations can share one action (SOAP 1.1 section 6.1.1; WS-I Basic Profile R2710 requires only
+    distinct wire signatures). An action selects the operation when it is unique in the request's route
+    scope; otherwise the Body element selects it. Registration rejects operations that share both an action
+    and a request element, or an action and an empty body, in one route scope.
 
     @par Declared header-processing errors
     A body callback or registered header processor can select a WSDL headerfault without placing its value in the body's fault detail:
@@ -87,6 +91,9 @@ module SoapHandler {
     @section soaphandler_relnotes SoapHandler Release History
 
     @subsection soaphandler_0_3_4 SoapHandler 0.3.4
+    - operations sharing a SOAP action, such as the SOAPBuilders interop contract's 31 operations, register
+      on one route and dispatch by Body element; previously registration failed without a route path, and
+      with one every request carrying the action reached the first registered operation
     - added addSoapResponseResource() for explicitly safe SOAP 1.2 GET resources; exact routes support
       mount paths, queries, service removal and existing output/fault serialization
     - empty root HTTP route registration no longer confuses a missing match with an existing root route
@@ -241,14 +248,14 @@ public namespace SoapHandler {
             # reverse URI path lookups: unique_id -> URI path -> true
             hash<string, hash<string, bool>> rwsph;
 
-            # URI path -> SOAP Action -> method mappings
-            hash<string, hash<string, hash>> uri_sam;
+            # URI path -> SOAP Action -> registration identity -> method mappings
+            hash<string, hash<string, hash<string, hash<auto>>>> uri_sam;
 
             # reverse URI path -> SOAP Action mappings: unique_id -> URI path -> SOAPAction -> true
             hash<string, hash<string, hash<string, bool>>> ruri_sam;
 
-            # soapaction map: action -> binding -> operation
-            hash<string, hash> sam;
+            # soapaction map: action -> registration identity -> method
+            hash<string, hash<string, hash<auto>>> sam;
 
             # reverse mapping: unique_id -> soapaction -> True
             hash<string, hash<string, bool>> rsam;
@@ -498,9 +505,15 @@ handler.addSoapResponseResource("/invoices/71", service.getBindingOperation("Soa
             map remove wsph{$1}, keys rwsph{unique_id};
             remove rwsph{unique_id};
 
-            # remove URI path -> SOAPAction mappings for service
+            # remove URI path -> SOAPAction mappings for service; other services can share an action
             foreach hash<auto> h in (ruri_sam{unique_id}.pairIterator()) {
-                map remove uri_sam{h.key}{$1}, keys h.value;
+                foreach string sa in (keys h.value) {
+                    map remove uri_sam{h.key}{sa}{$1}, keys uri_sam{h.key}{sa},
+                        uri_sam{h.key}{sa}{$1}.unique_id == unique_id;
+                    if (!uri_sam{h.key}{sa}) {
+                        remove uri_sam{h.key}{sa};
+                    }
+                }
                 if (!uri_sam{h.key}) {
                     remove uri_sam{h.key};
                 }
@@ -508,7 +521,12 @@ handler.addSoapResponseResource("/invoices/71", service.getBindingOperation("Soa
             remove ruri_sam{unique_id};
 
             # remove SOAPAction mappings for service
-            map remove sam{$1}, keys rsam{unique_id};
+            foreach string sa in (keys rsam{unique_id}) {
+                map remove sam{sa}{$1}, keys sam{sa}, sam{sa}{$1}.unique_id == unique_id;
+                if (!sam{sa}) {
+                    remove sam{sa};
+                }
+            }
             remove rsam{unique_id};
 
             foreach TreeMap paths in (mapMethodPathToOperation.iterator()) {
@@ -568,10 +586,25 @@ handler.addSoapResponseResource("/invoices/71", service.getBindingOperation("Soa
                 rwl.writeLock();
                 on_exit rwl.writeUnlock();
 
-                # verify if the operation mapping can be added first
-                if (!method.altpath && sa && sam{sa}.operation && sam{sa}.operation != method.operation) {
-                    throw "SOAPACTION-ERROR", sprintf("cannot register soapAction %y for operation %y because it is "
-                        "already registered for operation %y", sa, method.operation.name, sam{sa}.operation.name);
+                # verify if the operation mapping can be added first; operations can share an action when the
+                # Body identifies them (SOAP 1.1 section 6.1.1, WS-I Basic Profile R2710)
+                string identity = method.operation.uniqueHash() + ":" + sb.getName();
+                if (sa) {
+                    # the Body element names that select this operation among others sharing its action
+                    method.request_names = map {$1: True}, method.operation.getTopLevelRequestNames();
+                    *hash<string, hash<auto>> sharing = method.altpath ? uri_sam{method.altpath}{sa} : sam{sa};
+                    foreach hash<auto> other in ((sharing ?? {}).iterator()) {
+                        if (other.operation == method.operation) {
+                            continue;
+                        }
+                        *list<auto> common = select keys method.request_names, other.request_names{$1};
+                        if (common || (!method.request_names && !other.request_names)) {
+                            throw "SOAPACTION-ERROR", sprintf("cannot register soapAction %y for operation %y because "
+                                "operation %y shares it and %s; neither the action nor the Body identifies the "
+                                "operation", sa, method.operation.name, other.operation.name,
+                                common ? sprintf("the request element %y", common[0]) : "an empty Body");
+                        }
+                    }
                 }
                 if (method.altpath && wsph{method.altpath} && wsph{method.altpath} != ws) {
                     # find conflicting ID
@@ -589,9 +622,9 @@ handler.addSoapResponseResource("/invoices/71", service.getBindingOperation("Soa
 
                 # add SOAPAction mapping if possible
                 if (sa) {
-                    if (!sam{sa}) {
+                    if (!sam{sa}{identity}) {
                         # add mapping from SOAPAction to method
-                        sam{sa} = method;
+                        sam{sa}{identity} = method;
 
                         # add path / soapaction mapping for service removal
                         if (method.unique_id) {
@@ -600,8 +633,8 @@ handler.addSoapResponseResource("/invoices/71", service.getBindingOperation("Soa
                     }
 
                     # add URI path -> SOAPAction mappings if possible
-                    if (method.altpath && !uri_sam{method.altpath}{sa}) {
-                        uri_sam{method.altpath}{sa} = method;
+                    if (method.altpath && !uri_sam{method.altpath}{sa}{identity}) {
+                        uri_sam{method.altpath}{sa}{identity} = method;
                         #printf("DEBUG: added SA mapping %y -> %y -> method\n", method.altpath, sa);
 
                         # add reverse mappings for removal
@@ -1403,6 +1436,8 @@ private nothing msglog(hash<auto> cx, hash<auto> msg) {
                     # Body dispatch uses its actual element name, never the last URI segment of an action.
                     *string element;
                     *string soap_action;
+                    # the operations sharing the request's action; the Body selects among them
+                    *hash<string, hash<auto>> shared;
                     *OperationalBinding selected_binding = method ? method.operation.getBinding(method.binding) : NOTHING;
                     bool soap_envelope = !selected_binding || selected_binding instanceof SoapBinding;
                     bool mime_content = False;
@@ -1439,8 +1474,14 @@ private nothing msglog(hash<auto> cx, hash<auto> msg) {
                             {
                                 rwl.readLock();
                                 on_exit rwl.readUnlock();
-                                method = uri_sam{path}{soap_action} ?? uri_sam{alt_path}{soap_action}
-                                    ?? sam{soap_action};
+                                *hash<string, hash<auto>> candidates = uri_sam{path}{soap_action}
+                                    ?? uri_sam{alt_path}{soap_action} ?? sam{soap_action};
+                                # an action shared by several operations leaves the selection to the Body
+                                if (candidates.size() == 1) {
+                                    method = candidates.firstValue();
+                                } else {
+                                    shared = candidates;
+                                }
                             }
                             if (method) {
                                 selected_binding = method.operation.getBinding(method.binding);
@@ -1509,18 +1550,27 @@ private nothing msglog(hash<auto> cx, hash<auto> msg) {
                                 #printf("DEBUG: path: %y alt_path: %y element: %y um: %y urm: %y m: %y\n", path,
                                 #   alt_path, element, exists uri_methods{path}{element},
                                 #   exists uri_methods{alt_path}{element}, exists methods{element});
-                                # issue #2783: respect UTI paths when matching
-                                method = uri_methods{path}{element}
-                                    ?? uri_methods{alt_path}{element}
-                                    ?? methods{element};
+                                foreach hash<auto> candidate in ((shared ?? {}).iterator()) {
+                                    if (candidate.request_names{element}) {
+                                        method = candidate;
+                                        break;
+                                    }
+                                }
+                                # issue #2783: respect UTI paths when matching; an element outside the shared
+                                # action's operations selects its own operation for the action check below
+                                if (!method) {
+                                    method = uri_methods{path}{element}
+                                        ?? uri_methods{alt_path}{element}
+                                        ?? methods{element};
+                                }
                             } else if (routing_args.Envelope.hasKey("Body")) {
                                 # A zero-part document message has no element from which to dispatch.
                                 # Select only a unique registered empty-body operation in this route scope.
                                 rwl.readLock();
                                 on_exit rwl.readUnlock();
                                 hash<string, bool> seen();
-                                foreach hash<auto> candidate in ((uri_methods{path} ?? uri_methods{alt_path}
-                                        ?? methods).iterator()) {
+                                foreach hash<auto> candidate in ((shared ?? uri_methods{path}
+                                        ?? uri_methods{alt_path} ?? methods).iterator()) {
                                     OperationalBinding binding = candidate.operation.getBinding(candidate.binding);
                                     if (!(binding instanceof SoapBinding) || !binding.docstyle
                                             || !binding.input || !candidate.operation.input

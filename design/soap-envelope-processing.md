@@ -299,7 +299,16 @@ media parameters reject; identical duplicates retain the same value.
 SoapHandler dispatches actions after MIME root normalization and envelope version
 validation. The callback and header processors receive the decoded `cx.soap_action`,
 or NOTHING when absent. Bound actions can disambiguate empty Bodies. Otherwise the
-Body or registered route must identify a unique operation. A nonempty action that
+Body or registered route must identify a unique operation. Several operations can
+share one action (SOAP 1.1 section 6.1.1; WS-I Basic Profile R2710 requires only
+distinct wire signatures). Each route scope maps an action to the set of operations
+registered with it. An action that names one operation selects it before the Body is
+read. For a shared action, the Body element, or an empty Body, selects among that
+action's operations. An element outside them falls back to ordinary Body dispatch,
+so the action check below reports the mismatch. Registration rejects an operation
+that shares both an action and a request element, or an action and an empty Body,
+with another operation in the same scope. `removeService()` removes only that
+service's share of an action. A nonempty action that
 disagrees with a nonempty selected binding action produces a Client/Sender fault
 before the body callback. SOAP 1.2 does not depend on the legacy SOAPAction header;
 its absence and presence alone do not prevent Body dispatch. HTTP WSDL bindings

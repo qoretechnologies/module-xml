@@ -51,4 +51,36 @@ allows because struct accessors are distinguished by name. `../encoded_corpus.py
 in a canonical form: references resolved, struct and map members compared by name, array order kept, and
 `xsd:dateTime` text masked because `echoDate` sends the current time.
 
+## Live interop with Qore
+
+`../test_axis_interop.py` runs both directions against the same Axis build:
+
+```sh
+QORE_MODULE_DIR=build-debug:qlib python3 -B test/wsdl-interop/test_axis_interop.py -v
+```
+
+The published `contracts/InteropTest.wsdl` uses `xml-soap:Map`, Apache SOAP's map type, which Axis treats as
+built in, without importing or defining it. Qore rejects it with the exact `WSDL-ERROR`, and the gate asserts
+that rejection. `derived/InteropTest-map.wsdl` adds the schema that Axis 1.4's own `Java2WSDL` emits for
+`java.util.HashMap`: `derived/MapEcho.java` is the one-method interface it is generated from. The emitted
+schema, `derived/apachesoap-map.xsd`, is inserted verbatim except for an `xmlns:apachesoap` declaration on its
+root, and the interop schema imports its namespace. `../axis_interop.py --write` regenerates all three derived
+files and `derived/provenance.json`, which records the hashes, the generator arguments and the two changes.
+The gate regenerates them and requires identical results.
+
+- `qore-client.qr URL` calls all 31 operations through the async `SoapClientIo` client with the values of
+  Axis's `TestClient`, and prints `VERIFIED`/`FAIL` lines like `AxisPeer client`. Floats are the single-precision
+  values Axis sends. An `xsd:decimal` whose text a float reproduces exactly decodes as that float. Apache SOAP
+  Map items are compared as a set, because Axis holds them in a `java.util.HashMap`.
+- `qore-server.qr` serves the derived contract through `SoapHandler` with the echo semantics of Axis's
+  `InteropTestSoapBindingImpl`. All 31 operations share one SOAP action, so the Body selects each operation; the
+  server asserts on exit that each operation was dispatched exactly once. It registers with `preserve_types`, so
+  instance-selected types such as a Map key sent as `soapenc:int` are echoed with their type; a native Qore int
+  would be re-encoded as `xsd:long`, which Axis's type-strict Map comparison rejects.
+
+Axis 1.4 sends HTTP/1.0 without keep-alive and reads each response until the server closes the connection
+(RFC 9112 section 9.3). Before running Axis's client, the gate sends one such request and requires
+`Connection: close` and end of stream, so a server that keeps the connection open fails at once instead of
+hanging the client.
+
 These are test dependencies and are not installed with module-xml.
