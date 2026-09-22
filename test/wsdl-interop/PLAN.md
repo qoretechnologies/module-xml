@@ -409,8 +409,8 @@ must not mistake success on RPC/encoded tests for WS-I literal-profile conforman
   regression beyond a stated tolerance as a finding. Treat subprocess timeouts in gates as hang guards with
   measured headroom, never as performance assertions. On 2026-09-22 the list-values worker took 79.7 s,
   against 25.9 s on 2026-09-09, after P5-P7 validation work; see the performance triage in `EXECUTION.md`.
-  Per-function attribution needs a Qore-level sampling profiler, which is blocked on the core
-  `get_all_thread_call_stacks()` defect (`/tmp/qore-thread-call-stacks-race/README.md`).
+  A Qore-level sampling profiler based on `get_all_thread_call_stacks()` works since Qore `fb66fa989`. Its first
+  profile of the worker is flat: no function has more than about 3.6% self time.
 
 **Final acceptance:** zero unclassified findings or missing corpus dependencies; zero rejected valid
 inputs in supported scope; zero serialization failures or invalid outputs for those inputs; no value,
@@ -1497,3 +1497,34 @@ positive raw-socket control and source-level root cause are handed off at
 whole request before starting response reads; the existing full-duplex branch is
 limited to chunked streaming sends. This remains an open P7 dependency, not an
 accepted result or an XML workaround.
+
+## P7-14: SOAP full-duplex buffered requests and early responses
+
+Qore fixed the core buffered-upload/early-response deadlock, resolving the P7-13 dependency above. This increment
+adds no production code. It supplies executable evidence for the SOAP-level contract:
+[soap-duplex](../soap-duplex.qtest) passes 5 cases / 203 assertions over 40 exchanges of 8 MiB, and
+[test_soap_duplex.py](test_soap_duplex.py) adds 146 independent exchanges. Both gates prove full duplex rather than
+assuming it. `06eef84` adds the `SoapClientIo` async I/O client on `HttpClientIo`. See
+[evidence](soap-duplex-evidence.md), [validation](P7-14-validation.json) and
+[design](../../design/soap-async-io-client.md).
+
+## P7 assertion accounting
+
+[assertion-ledger.json](assertion-ledger.json) accounts for all 140 W3C SOAP 1.2 Second Edition assertions
+(`1205ae7`) and all 353 WS-I Basic Profile 1.2/2.0 requirements (`3a52d68`). 388 rows are covered by 815 verified
+executable mappings; 30 are not applicable with specification-based rationale; 49 are recorded WS-Addressing gaps;
+26 are routed to P8. [verify_ledger.py](verify_ledger.py) enforces the ledger and was negative-tested against
+injected defects. See [evidence](assertion-ledger-evidence.md).
+
+## P7 acceptance
+
+Before acceptance, a full-suite triage fixed or correctly re-scoped every failure outside the P7 sweep. It
+corrected SOAP 1.2 fixture actions, stale NOTATION and multipart expectations and the three P6 part round trips
+(`138c803`), fixed a recompiled-regex performance defect (`8f1f8b2`), and recalibrated thin hang guards (`eefcf5f`).
+On one runtime (Qore `922cd9bb0`), all 271 Qore suites pass **3,581 cases / 172,677 assertions**. 176 of 178
+Python gates pass; the two IEEE gates fail only on the documented core NaN-boxing defect and remain required.
+All 16 corpus commands match their expected outcomes, with reports semantically unchanged from P7-13. The
+CMake-built AOT modules pass 9 suites / 64 cases / 2,650 assertions. Docs, astparser and the ledger verifier are
+clean.
+
+See [P7 acceptance](P7-acceptance.md) and [validation](P7-acceptance-validation.json). P8 is next.

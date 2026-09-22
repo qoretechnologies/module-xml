@@ -10287,3 +10287,32 @@ list-values worker at 79.7 s against 25.9 s on 2026-09-09. `test_survey.py` chec
 deadline reaches the worker subprocess, so it now expects 150; the README documents the new default. All
 nine affected gates pass: list values, regex classes, IEEE facets, corpus, survey, coverage, archive roles,
 and numeric and calendar constraints.
+
+## P7 acceptance
+
+P7 is accepted at `eefcf5f`; see [P7 acceptance](P7-acceptance.md) and
+[validation](P7-acceptance-validation.json).
+
+Two validation runs were discarded because Qore was reinstalled while they ran: `fb66fa989` at 07:49, three
+minutes into the first, and `922cd9bb0` at 10:38, forty-five minutes into the second. `build-debug` was
+clean-rebuilt against `922cd9bb0` (Debug, prefix `/usr`, zero warnings), because the native module is not relinked
+when only the installed libqore changes. All recorded numbers come from one run whose libqore, qore and native
+module hashes are identical before and after it.
+
+That run executed CPU-bound targets in eight lanes, longest first, then 59 network and transport targets
+serially: 27 minutes instead of 99. All 271 Qore suites passed **3,581 cases / 172,677 assertions**, and 176 of 178
+Python gates passed. `test_ieee_conversion.py` and `test_ieee_scalars.py` failed with `RUNTIME-TYPE-ERROR: ...
+expects type 'float', but got no value`, the core NaN-boxing symptom, which is still present in `922cd9bb0`.
+All 16 corpus commands met their expected outcomes, and all six reports are semantically unchanged from P7-13.
+
+The compiled check uses the CMake-built AOT modules (`build-debug/qlib-qmod`, `QORE_BUILD_AOT_MODULES=ON`), and
+the load path of every module is verified. A direct `qcc -m` on the split `SoapClientIo` module is not the
+supported build path: the pre-existing `XmlRpcClientIo` fails the same way, and the build compiles each file with
+`--context` and links the objects. Nine compiled suites passed 64 cases / 2,650 assertions, including
+`soap-client-io`. Docs, astparser on the ten changed files, and the ledger verifier are clean. Valgrind on
+`test/xml.qtest` shows zero leaks and no invalid accesses. Its 134 conditional-jump contexts are in generated code,
+the PCRE2 JIT class of P2-10.
+
+The Qore `get_all_thread_call_stacks()` race handed off during the performance pass is fixed in `fb66fa989`. Its
+reproducer passes 3 of 3 runs with about 16 million samples each. A Qore-level sampling profile of the list-values
+worker is now possible and is flat, with no function above about 3.6% self time.
