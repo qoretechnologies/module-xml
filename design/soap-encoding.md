@@ -209,6 +209,70 @@ These errors are `SOAP-DESERIALIZATION-ERROR` exceptions whose argument is a `ha
 SOAP 1.2 code or subcodes. `SoapHandler` answers with `env:Sender` and the subcode (HTTP 400), or with
 `env:DataEncodingUnknown` (HTTP 500). SOAP 1.1 has no subcodes and keeps its Client code.
 
+## SOAP 1.2 RPC Representation
+
+SOAP 1.2 Part 2 section 4 applies to SOAP 1.2 RPC-style bindings whose parts use SOAP 1.2 Encoding
+(`SoapBinding::usesSoap12RpcRepresentation()`). The representation is defined over the SOAP Data Model, which
+SOAP 1.2 Encoding serializes. SOAP 1.2 rpc/literal bindings are unchanged: peers such as CXF expect only the
+WSDL's parts.
+
+- **Return value.** `WSOperation::getReturnPartName()` names the output part that holds the return value. With
+  WSDL 1.1's `parameterOrder`, which operations now retain, it is the output part the list omits (section
+  2.4.6), and several omitted parts leave it undetermined. Without one, it is the part named `return`, or else a
+  single output part. An operation whose output parts are all out parameters, like the collection's
+  `echoStructAsSimpleTypes`, is void.
+- **`rpc:result`** (section 4.2.2). A non-void response written by this module names the return accessor in
+  `rpc:result`, as its first member. A void response, or one without the return value, has none. When
+  decoding, `rpc:result` names the edge that holds the return value, whatever its name: that edge becomes the
+  return part. A name that is no edge, a void operation, a second `rpc:result`, or a named edge beside the return
+  part's own accessor is an error. A response without `rpc:result` is read by part names.
+- **One child** (section 4.2.3). With SOAP Encoding the RPC struct is the Body's only child.
+- **Faults** (section 4.4). Argument conversion errors carry `env:Sender` with `rpc:BadArguments`, unless a
+  more specific encoding subcode such as `enc:MissingID` applies. `SoapHandler` answers an unknown procedure
+  with `rpc:ProcedureNotPresent` when it serves operations that use the representation.
+
+## Missing parameters
+
+An encoded RPC parameter that is absent, or present with `xsi:nil`, is an edge without a node (SOAP 1.2 Part 2
+section 3.1.3) and decodes as `NOTHING` in either SOAP version. An explicit `NOTHING` is written as a nil
+accessor. Before P8-04 both were read and written as an empty value, so `NOTHING` and `""` could not be told
+apart. The collection's `isNil` test (T77) relies on this.
+
+## Appendix B names
+
+`WSDLLib::toXmlName()` maps an application-defined name to an XML name by the rules of SOAP 1.2 Part 2
+Appendix B.1:
+- `_x` becomes `_x005F_x`;
+- a leading `xml` in any capitalization has its first letter escaped;
+- every character that XML names cannot hold becomes `_xHHHH_`, with six hex digits beyond the Basic
+  Multilingual Plane.
+
+Character classes are those of Namespaces in XML 1.0 (XML 1.0 Second Edition), as the appendix's examples require
+(Tagalog and Cherokee letters are escaped). `WSDLLib::fromXmlName()` reverses the mapping. WSDL-described
+operations and parts already have XML names, so the module applies it nowhere implicitly; applications that
+derive method or parameter names from program identifiers use it.
+
+## W3C SOAP 1.2 test collection
+
+`test/soap12-collection.qtest` sends each Node A request of the collection's encoding and RPC tests to a
+`SoapHandler` echo service for `encoded-corpus/w3c-soap12.wsdl`, and compares the reply with Node C:
+
+- **Faults:** the same code, and the collection's subcodes where it lists any. Where it lists none,
+  `rpc:BadArguments` is also accepted, since section 4.4 requires it for argument errors that the collection's
+  samples show as a bare `env:Sender`.
+- **Values:** equal after decoding, with white space collapsed and decimals compared as numbers, because the
+  samples are pretty-printed.
+
+Eleven tests are outside this scope, and the test names them. Two echo header blocks, one retrieves a resource
+with HTTP GET, one reports received type names, and seven test intermediaries.
+
+The collection publishes several defective Node C messages, which the test asserts as errata:
+- T46's and the SOAPBuilders nested-array reply's `<return>` tag closes before its namespace declaration.
+- The SOAPBuilders 2-D reply's `rpc:result` names an absent edge.
+- T27, T28 and T58 put text in `env:Detail`, and T59 writes `env:detail` in lower case.
+- T76 and XMLP-9 are not well-formed.
+- XMLP-1's fault uses an unbound prefix.
+
 ## Array text
 
 A whitespace-preserving parse, which `SoapHandler` uses, numbers the text between elements (`^value1^` and so

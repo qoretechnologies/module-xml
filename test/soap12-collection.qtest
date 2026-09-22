@@ -1,0 +1,224 @@
+#!/usr/bin/env qore
+# -*- mode: qore; indent-tabs-mode: nil -*-
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires xml
+%requires HttpServer
+%requires ../qlib/WSDL.qm
+%requires ../qlib/SoapHandler.qm
+%try-module json
+%define NoJson
+%endtry
+%ifdef NoJson
+throw "MISSING-MODULE", "W3C SOAP 1.2 collection tests require json";
+%else
+%exec-class Soap12CollectionTest
+
+# The W3C "SOAP Version 1.2 Specification Assertions and Test Collection" tests that use SOAP 1.2 Encoding and the
+# RPC Representation (wsdl-interop/encoded-corpus/w3c-soap12.json): each Node A request goes to a SoapHandler
+# echo service for the collection's contract (encoded-corpus/w3c-soap12.wsdl), and the reply is compared with the
+# collection's Node C message.
+public class Soap12CollectionTest inherits QUnit::Test {
+    private {
+        # tests outside the encoding and RPC scope, and why
+        const Excluded = {
+            "SBR2-echoMeStringRequest": "echoes a header block, which the service would declare as application data",
+            "SBR2-echoMeStructRequest": "echoes a header block, which the service would declare as application data",
+            "XMLP-3": "retrieves a resource with HTTP GET (the SOAP-response message exchange pattern)",
+            "XMLP-10": "reports the xsi:type names it received, which is application behavior",
+            "XMLP-13": "forwarding intermediary", "XMLP-14": "active intermediary", "XMLP-15": "forwarding intermediary",
+            "XMLP-16": "forwarding intermediary", "XMLP-17": "forwarding intermediary", "XMLP-18": "forwarding intermediary",
+            "XMLP-19": "forwarding intermediary",
+        };
+        # Node C messages that the collection publishes with errors: the expected reply instead
+        const Errata = {
+            # the start tag of return closes before its ns1 declaration, which becomes text
+            "T46": {"error": "unbound QName prefix \"ns1\""},
+            "SBR2-echoNestedArray": {"error": "unbound QName prefix \"ns1\""},
+            # rpc:result names "return", but the accessor is named "result"
+            "SBR2-echo2DStringArray": {"error": "rpc:result names {}return, which is not an edge of the response"},
+            # not well-formed XML
+            "T76": {"echo": True},
+            "XMLP-9": {"fault": "{http://www.w3.org/2003/05/soap-envelope}DataEncodingUnknown"},
+            # Detail text other than white space (SOAP 1.2 Part 1 section 5.4.5)
+            "T27": {"fault": "{http://www.w3.org/2003/05/soap-envelope}Sender",
+                "rejects": "SOAP fault Detail requires element content"},
+            "T28": {"fault": "{http://www.w3.org/2003/05/soap-envelope}Sender",
+                "rejects": "SOAP fault Detail requires element content"},
+            "T58": {"fault": "{http://www.w3.org/2003/05/soap-envelope}Sender",
+                "rejects": "SOAP fault Detail requires element content"},
+            # a lower-case env:detail field
+            "T59": {"fault": "{http://www.w3.org/2003/05/soap-envelope}Sender",
+                "subcodes": ("{http://www.w3.org/2003/05/soap-encoding}MissingID",),
+                "rejects": "SOAP 1.2 Fault fields require Code, Reason, Node, Role, Detail order without repetition"},
+            # The test allows a reply without the missing parameter's value or a BadArguments fault. Its samples
+            # return an unrelated value and a fault whose QNames use an unbound prefix; this service echoes a nil edge.
+            "XMLP-1": {"absent": True},
+        };
+        # Node A requests that the collection publishes as malformed XML
+        const MalformedRequests = ("SBR1-echoBase64", "SBR1-echoDate");
+
+        list<hash<auto>> tests;
+        WebService ws;
+        int port;
+        HttpServer server;
+    }
+
+    constructor() : QUnit::Test("W3C SOAP 1.2 test collection: encoding and RPC", "1.0") {
+        string dir = get_script_dir() + "/wsdl-interop/encoded-corpus/";
+        tests = parse_json(ReadOnlyFile::readTextFile(dir + "w3c-soap12.json")).tests;
+        ws = new WebService(ReadOnlyFile::readTextFile(dir + "w3c-soap12.wsdl"));
+        server = new HttpServer();
+        foreach string binding in ("TsBinding", "SbBinding") {
+            SoapHandler handler(new PermissiveAuthenticator());
+            foreach string name in (keys (map {$1.operation.name: True}, ws.listOperations())) {
+                WSOperation operation;
+                try {
+                    operation = ws.getBindingOperation(binding, name);
+                } catch (hash<ExceptionInfo> ex) {
+                    continue;
+                }
+                handler.addMethod(ws, operation, \echo(), NOTHING, NOTHING, NOTHING, NOTHING, NOTHING, NOTHING, binding);
+            }
+            server.setHandler(binding, binding, NOTHING, handler, NOTHING, False);
+        }
+        port = server.addListener(<HttpListenerOptionInfo>{"node": "127.0.0.1", "service": 0}).port;
+        addTestCase("every test is accounted for", \accounting());
+        addTestCase("Node A requests receive the Node C replies", \exchanges());
+        set_return_value(main());
+    }
+
+    destructor() {
+        server.stop();
+    }
+
+    # the collection's echo semantics (SOAPBuilders rounds 1 and 2, and the ts-tests operations)
+    static auto echo(hash<auto> cx, auto value) {
+        switch (cx.operation.name) {
+            case "echoVoid": return;
+            case "echoStructAsSimpleTypes":
+                return {"outputString": value.varString, "outputInt": value.varInt, "outputFloat": value.varFloat};
+            case "echoSimpleTypesAsStruct":
+                return {"return": {"varString": value.inputString, "varInt": value.inputInt,
+                    "varFloat": value.inputFloat}};
+            case "countItems": return {"return": (value.typeCode() == NT_HASH ? value.firstValue() : value).size()};
+            case "isNil": return {"return": !exists value};
+        }
+        return {"return": value};
+    }
+
+    accounting() {
+        foreach hash<auto> test in (tests) {
+            assertTrue(Excluded{test.id} || exists (select test.messages, $1.from == "Node A"), test.id);
+        }
+        assertEq(11, (select tests, Excluded{$1.id}).size());
+        assertEq(66, tests.size());
+    }
+
+    private static string binding(string xml) {
+        return xml =~ /soapinterop\.org\// ? "SbBinding" : "TsBinding";
+    }
+
+    private hash<auto> post(string xml) {
+        HTTPClient client({"url": sprintf("http://127.0.0.1:%d/%s", port, binding(xml)), "error_passthru": True});
+        hash<auto> info;
+        string reply = client.post("", xml, {"Content-Type": "application/soap+xml;charset=utf-8"}, \info);
+        return {"status": info."response-headers".status_code, "reply": reply};
+    }
+
+    # values compared as the collection means them: its samples are pretty-printed and spell decimals freely
+    private static auto normalize(auto value) {
+        switch (value.typeCode()) {
+            case NT_STRING: {
+                string text = trim(regex_subst(value, "\\s+", " ", RE_Global));
+                return text =~ /^-?[0-9]+(\.[0-9]+)?$/ ? number(text) : text;
+            }
+            case NT_LIST: return map normalize($1), value;
+            case NT_HASH: return map {$1.key: normalize($1.value)}, value.pairIterator();
+        }
+        return value;
+    }
+
+    private static *string operationName(string xml) {
+        return (xml =~ x/<env:Body>\s*<[A-Za-z0-9]+:([A-Za-z0-9]+)/)[0];
+    }
+
+    private static string qname(XsdQNameValue name) {
+        return sprintf("{%s}%s", name.getNamespaceUri(), name.getLocalName());
+    }
+
+    exchanges() {
+        foreach hash<auto> test in (tests) {
+            if (Excluded{test.id}) {
+                continue;
+            }
+            for (int i = 0; i < test.messages.size(); i += 2) {
+                hash<auto> request = test.messages[i];
+                hash<auto> expected = test.messages[i + 1];
+                string label = sprintf("%s #%d", test.id, i / 2);
+                hash<auto> reply = post(request.xml);
+                if (inlist(test.id, MalformedRequests)) {
+                    assertEq(400, reply.status, label);
+                    continue;
+                }
+                *hash<auto> erratum = Errata{test.id};
+                if (erratum.absent) {
+                    assertEq(200, reply.status, label);
+                    WSOperation operation = ws.getBindingOperation(binding(request.xml), operationName(request.xml));
+                    assertEq(NOTHING, operation.deserializeResponse(parse_xml(reply.reply, XPF_PRESERVE_ORDER),
+                        binding(request.xml)), label);
+                    # the echoed return edge ends in no node
+                    assertRegex('<return xsi:nil="true"/>', reply.reply, label);
+                    continue;
+                }
+                bool fault = erratum.fault || (!erratum && expected.xml =~ /<env:Fault>/);
+                if (fault) {
+                    assertEq(True, reply.status == 400 || reply.status == 500, label + " status");
+                    hash<SoapFaultInfo> actual = WSDLLib::getSOAPFaultInfo(reply.reply, True);
+                    list<string> subcodes = map qname($1), actual.subcodes;
+                    list<string> listed;
+                    if (erratum.fault) {
+                        if (erratum.rejects) {
+                            assertThrows("SOAP-DESERIALIZATION-ERROR", erratum.rejects, \WSDLLib::getSOAPFaultInfo(),
+                                (expected.xml, True), label);
+                        }
+                        assertEq(erratum.fault, qname(actual.code), label);
+                        listed = erratum.subcodes ?? ();
+                    } else {
+                        hash<SoapFaultInfo> wanted = WSDLLib::getSOAPFaultInfo(expected.xml, True);
+                        assertEq(qname(wanted.code), qname(actual.code), label + " code");
+                        listed = map qname($1), wanted.subcodes;
+                    }
+                    if (listed) {
+                        assertEq(listed, subcodes, label + " subcodes");
+                    } else {
+                        # SOAP 1.2 Part 2 section 4.4 requires rpc:BadArguments for arguments that cannot be parsed
+                        assertTrue(!subcodes || subcodes == ("{http://www.w3.org/2003/05/soap-rpc}BadArguments",),
+                            label + " subcodes " + sprintf("%y", subcodes));
+                    }
+                    continue;
+                }
+                assertEq(200, reply.status, label + ": " + reply.reply);
+                string op = operationName(request.xml);
+                WSOperation operation = ws.getBindingOperation(binding(request.xml), op);
+                auto ours = operation.deserializeResponse(parse_xml(reply.reply, XPF_PRESERVE_ORDER), binding(request.xml));
+                if (erratum.error || erratum.echo) {
+                    if (erratum.error) {
+                        assertThrows("SOAP-DESERIALIZATION-ERROR", erratum.error, \operation.deserializeResponse(),
+                            (parse_xml(expected.xml, XPF_PRESERVE_ORDER), binding(request.xml)), label);
+                    }
+                    # the reply echoes the request's value
+                    auto sent = operation.deserializeRequest(parse_xml(request.xml, XPF_PRESERVE_ORDER), binding(request.xml));
+                    assertEq(normalize(sent), normalize(ours), label);
+                    continue;
+                }
+                auto theirs = operation.deserializeResponse(parse_xml(expected.xml, XPF_PRESERVE_ORDER), binding(request.xml));
+                assertEq(normalize(theirs), normalize(ours), label);
+            }
+        }
+    }
+}
+%endif

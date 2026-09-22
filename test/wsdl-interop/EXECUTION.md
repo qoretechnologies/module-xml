@@ -10617,3 +10617,47 @@ before and after hashes and library times are identical: 455 targets, 3,613 Qore
 only failures are the two IEEE gates, still blocked by core NaN-boxing (`block missing return statement`). Both
 directions of `test_axis_interop.py` now pass, so Axis 1.4's own `TestClient` verifies all 31 operations against
 the Qore `SoapHandler`. Documentation builds with no warnings.
+
+## P8-04: SOAP 1.2 RPC Representation and Appendix B
+
+SOAP 1.2 Part 2 section 4 is implemented for SOAP 1.2 RPC-style bindings with SOAP 1.2 Encoding, the only
+bindings whose messages carry the SOAP Data Model (`SoapBinding::usesSoap12RpcRepresentation()`). What changed:
+
+- **`rpc:result`.** Non-void responses name their return value in `rpc:result`. Decoding takes the edge that
+  `rpc:result` names as the return value. WSDL 1.1's `parameterOrder` was validated but discarded; operations now
+  retain it, and `WSOperation::getReturnPartName()` applies it.
+- **One Body child.** With SOAP Encoding the RPC struct must be the Body's only child (section 4.2.3).
+- **RPC fault subcodes.** Argument conversion errors carry `rpc:BadArguments` unless a more specific encoding
+  subcode applies. `SoapHandler` answers unknown procedures with `rpc:ProcedureNotPresent` when it serves
+  operations using the representation. T59's `enc:id` and `enc:ref` on one element now carries `enc:MissingID`,
+  as the collection expects: the only `id` matching the `ref` is on its own element, which section 3.1.5.3
+  excludes.
+- **Missing parameters (defect).** An encoded parameter that was absent, or present with `xsi:nil`, decoded as an
+  empty value, and an explicit `NOTHING` was written as an empty accessor. `NOTHING` and `""` could not be told
+  apart, which the collection's T77 `isNil` exercises. Both now mean an edge without a node (section 3.1.3):
+  `NOTHING` in, `xsi:nil` out, in either SOAP version.
+- **Appendix B.** `WSDLLib::toXmlName()` and `fromXmlName()` implement Appendix B.1, using Namespaces in XML 1.0
+  character classes, as the appendix's own examples require.
+
+`test/soap12-collection.qtest` runs the collection's encoding and RPC tests through a `SoapHandler` echo service
+(2 cases, 212 assertions). It records 11 tests outside this scope with their reasons, and asserts the collection's
+defective Node C messages as errata:
+- tags that close too early (T46 and the SOAPBuilders nested array);
+- an `rpc:result` naming no edge (the 2-D array);
+- text in `env:Detail` (T27, T28, T58) and a lower-case `env:detail` (T59);
+- non-well-formed replies (T76, XMLP-9);
+- an unbound fault prefix (XMLP-1).
+
+`test/soap12-rpc.qtest` (7 cases, 79 assertions) covers:
+- return-part selection with and without `parameterOrder`, including after serialization;
+- writing and reading `rpc:result`, with each of its errors;
+- the one-child rule;
+- `BadArguments` precedence, rpc/literal without the representation, and `ProcedureNotPresent` only where the
+  representation is served;
+- nil and absent parameters in both SOAP versions;
+- the Appendix B.2 examples and edge cases.
+
+Both suites fail against the P8-03b modules.
+
+Full suite on Qore `acc8ea401` (runtime unchanged during the run): 457 targets, 3,622 Qore cases, 173,970
+assertions. The only failures are the two core-blocked IEEE gates. Documentation builds with no warnings.

@@ -207,6 +207,15 @@ module WSDL {
     @section wsdlrelnotes WSDL Module Release Notes
 
     @subsection wsdl_0_5_8 WSDL v0.5.8
+    - SOAP 1.2 RPC Representation (SOAP 1.2 Part 2 section 4) for SOAP 1.2 RPC-style bindings with SOAP 1.2
+      Encoding (see SoapBinding::usesSoap12RpcRepresentation()):
+      - non-void responses name their return value in \c rpc:result, and decoding takes the edge it names as the
+        return value; WSOperation::getReturnPartName() applies WSDL 1.1's \c parameterOrder, which is now retained;
+      - the RPC struct must be the Body's only child;
+      - argument conversion errors carry the \c rpc:BadArguments subcode unless a more specific one applies
+    - encoded RPC parameters that are absent or \c xsi:nil decode as \c NOTHING, and an explicit \c NOTHING is
+      written as \c xsi:nil, instead of both reading and writing an empty value
+    - added WSDLLib::toXmlName() and WSDLLib::fromXmlName() for SOAP 1.2 Part 2 Appendix B name mapping
     - SOAP 1.2 Encoding (SOAP 1.2 Part 2 section 3) is selected by a binding's \c encodingStyle, whose first
       supported URI now chooses the rules; encoded output previously always wrote the SOAP 1.1 encoding URI:
       - \c enc:id and \c enc:ref references span the Header and Body, may appear inline in either order, and
@@ -1308,6 +1317,71 @@ class WsdlResourceHelper {
 
 #! contains helper methods for retrieving WSDLs from a URL
 public class WSDLLib {
+    #! maps an application-defined name to an XML name (SOAP 1.2 Part 2 Appendix B)
+    /** @param name the application-defined name, such as a method or parameter name of a program
+        @return the name with each character that XML names cannot hold written as \c _xHHHH_ (four hex digits
+        for the Basic Multilingual Plane, six beyond it); \c "_x" becomes \c "_x005F_x", and a leading
+        \c "xml" in any capitalization gets its first letter escaped
+        @note SOAP 1.2's RPC Representation should use this mapping for method and parameter names that are not
+        XML names. WSDL-described operations and parts already have XML names, so the module applies it nowhere
+        implicitly. Character classes follow Namespaces in XML 1.0 (XML 1.0 Second Edition), as the
+        appendix's examples do.
+        @par Example
+        @code{.py}
+string element = WSDLLib::toXmlName("Hello world"); # "Hello_x0020_world"
+        @endcode
+        @since %WSDL 0.5.8
+    */
+    static string toXmlName(string name) {
+        list<char> characters = map $1, name.iterator();
+        int n = characters.size();
+        string result = "";
+        for (int i = 0; i < n; ++i) {
+            string c = characters[i].toString();
+            if (c == "_" && i < n - 1 && characters[i + 1].toString() == "x") {
+                result += "_x005F_";
+            } else if (!i && n >= 3 && (c + characters[1].toString() + characters[2].toString()).lwr() == "xml") {
+                result += c == "x" ? "_x0078_" : "_x0058_";
+            } else if (!XsdNameLexicalHelper::matches("NCName", i ? "a" + c : c)) {
+                int point = characters[i].ord();
+                result += point <= 0xFFFF ? sprintf("_x%04X_", point) : sprintf("_x%06X_", point);
+            } else {
+                result += c;
+            }
+        }
+        return result;
+    }
+
+    #! maps an XML name produced by toXmlName() back to the application-defined name
+    /** @param name an XML name
+        @return the name with each \c _xHHHH_ or \c _xHHHHHH_ escape (upper-case hex digits) replaced by its
+        character; other text is unchanged
+        @par Example
+        @code{.py}
+string method = WSDLLib::fromXmlName("Hello_x0020_world"); # "Hello world"
+        @endcode
+        @since %WSDL 0.5.8
+    */
+    static string fromXmlName(string name) {
+        string result = "";
+        int start = 0;
+        while (True) {
+            int escape = name.find("_x", start);
+            if (escape < 0) {
+                return result + name.substr(start);
+            }
+            result += name.substr(start, escape - start);
+            *string hex = (name.substr(escape) =~ x/^_x([0-9A-F]{4}|[0-9A-F]{6})_/)[0];
+            if (exists hex) {
+                result += hex.toInt(16).toUnicode();
+                start = escape + hex.size() + 3;
+            } else {
+                result += "_x";
+                start = escape + 2;
+            }
+        }
+    }
+
     #! Mime types recognized as SOAP messages
     const SoapMimeTypes = (MimeTypeSoapXml, MimeTypeXml, MimeTypeXmlApp);
 
@@ -4074,8 +4148,10 @@ class SoapEncodedReferenceHelper {
                     }
                 }
                 if (exists id && exists ref) {
+                    # the only id matching this ref is on its own element, which section 3.1.5.3 excludes
                     throw SOAP_DESERIALIZATION_ERROR, sprintf("an element carries both enc:id %y and enc:ref %y "
-                        "(SOAP 1.2 Part 2 section 3.1.5.3)", id, ref);
+                        "(SOAP 1.2 Part 2 section 3.1.5.3)", id, ref),
+                        <SoapFaultOptions>{"subcodes": (new XsdQNameValue(SOAP_12_ENCODING, "MissingID"),)};
                 }
                 if (exists ref) {
                     if ((select keys value, !$1.equalPartial("^") || ($1 == "^value^" && value{$1} !~ /^\s*$/))) {
@@ -14390,8 +14466,12 @@ public class XsdArrayType inherits WSDL::XsdAbstractType {
         return level.lengths ? XsdEncodedArrayHelper::reshape(flat, level.lengths) : flat;
     }
 
-    # an xsi:nil member is an absent value
-    private static bool isNil(auto value) {
+    #! returns True if a parsed element carries xsi:nil with the value true or 1
+    /** @param value a parsed XML element value
+        @return True for a nil element, which SOAP encoding reads as an edge without a node
+        @since %WSDL 0.5.8
+    */
+    static bool isNil(auto value) {
         if (value.typeCode() != NT_HASH || !value."^attributes^") {
             return False;
         }
@@ -33059,6 +33139,8 @@ public class WSOperation inherits WSDL::XsdNamedData {
         # Older standalone graphs did not retain the order of abstract messages.
         *WsdlOperationPattern exchange_pattern;
         *string selection_key;
+        # the WSDL 1.1 parameterOrder part names; NOTHING when the operation declares none
+        *list<string> parameter_order;
     }
 
     #! creates the WSOperation object from the arguments supplied
@@ -33073,6 +33155,9 @@ public class WSOperation inherits WSDL::XsdNamedData {
             bool overloaded = False) : XsdNamedData(\p) {
         self.nsc = nsc;
         NamespacePrefixHelper operation_scope(nsc, p."^attributes^");
+        if (exists p."^attributes^".parameterOrder) {
+            parameter_order = XsdSimpleType::normalizeWhiteSpace(p."^attributes^".parameterOrder, "collapse").split(" ");
+        }
 
         if (p.input) {
             NamespacePrefixHelper message_scope(nsc, p.input."^attributes^");
@@ -33154,7 +33239,9 @@ public class WSOperation inherits WSDL::XsdNamedData {
     private:internal deserializeMembers(hash<auto> members) {
         if (!(members.nsc instanceof Namespaces)
                 || (exists members.input && !(members.input instanceof WSMessage))
-                || (exists members.output && !(members.output instanceof WSMessage))) {
+                || (exists members.output && !(members.output instanceof WSMessage))
+                || (exists members.parameter_order && (members.parameter_order.typeCode() != NT_LIST
+                    || (select members.parameter_order, $1.typeCode() != NT_STRING)))) {
             throw "DESERIALIZATION-ERROR", "a WSDL operation requires its namespace context and valid messages";
         }
         # Explicit assignments promote references from older weak-member serializations.
@@ -33183,6 +33270,32 @@ public class WSOperation inherits WSDL::XsdNamedData {
         foreach OperationalBinding binding in (bindings.iterator()) {
             validateBinding(binding, "DESERIALIZATION-ERROR");
         }
+    }
+
+    #! returns the output part that holds the operation's return value
+    /** @return the part name, or NOTHING when the operation returns no value
+        @note With a WSDL 1.1 \c parameterOrder, the return value is the output part the list omits (WSDL 1.1
+        section 2.4.6), and several omitted parts leave it undetermined. Without one, it is the output part named
+        \c return, or else a single output part. The SOAP 1.2 RPC Representation names this part in
+        \c rpc:result.
+        @par Example
+        An operation whose response has the parts \c return and \c count, with \c parameterOrder="count",
+        returns \c "return".
+        @since %WSDL 0.5.8
+    */
+    *string getReturnPartName() {
+        if (!output || !output.pmap) {
+            return;
+        }
+        list<string> parts = keys output.pmap;
+        if (exists parameter_order) {
+            list<string> omitted = select parts, !inlist($1, parameter_order);
+            return omitted.size() == 1 ? omitted[0] : NOTHING;
+        }
+        if (inlist("return", parts)) {
+            return "return";
+        }
+        return parts.size() == 1 ? parts[0] : NOTHING;
     }
 
     #! returns the retained abstract message exchange order
@@ -33892,6 +34005,12 @@ public class WSMessage inherits WSDL::XsdNamedData {
         Namespaces output_namespaces = QNameOutputNamespaces ?? nsc;
         XsdNativeTypeOutputScope type_scope(tmap);
         string key = pmap{part};
+        # SOAP encoding writes an edge without a node as a nil accessor (SOAP 1.2 Part 2 section 3.1.3), so an
+        # explicit NOTHING stays distinct from an empty value
+        if (encoded && !args{key}.element && h.typeCode() == NT_HASH && h.hasKey(key) && !exists h{key}) {
+            remove h{key};
+            return {"^attributes^": {output_namespaces.getOutputNamespacePrefix(XSI_NS) + ":nil": "true"}};
+        }
         auto v = getValueFromHash(key, \h, True);
         if (!exists v) {
             if (args{key}.element) {
@@ -34183,6 +34302,11 @@ public class WSMessage inherits WSDL::XsdNamedData {
             auto v = remove val{k};
             hash<auto> arg = args{k};
             #printf("DBG WSMessage::deserializeRpc() part: %y, key: %y, val: %y\n", p, k, v);
+            # SOAP encoding: an edge that ends in no node is omitted or nil (SOAP 1.2 Part 2 section 3.1.3)
+            if (exists mrh && !arg.element && (!present || XsdArrayType::isNil(getValue(mrh, v)))) {
+                ro{p} = NOTHING;
+                continue;
+            }
             # An encoded array reads its member names itself: they can carry a member's type (SOAP 1.1 section 5.1
             # rule 3(c)), and members sharing a local name under different prefixes must keep document order.
             if (v.typeCode() == NT_HASH && !(arg.type instanceof XsdArrayType)) {
@@ -35343,6 +35467,90 @@ public class SoapBinding inherits WSDL::OperationalBinding {
         return soap12_version;
     }
 
+    #! returns True if the binding uses the SOAP 1.2 RPC Representation (SOAP 1.2 Part 2 section 4)
+    /** @return True for a SOAP 1.2 RPC-style binding whose request body uses SOAP 1.2 Encoding
+        @note The RPC Representation is defined over the SOAP Data Model, which SOAP 1.2 Encoding serializes.
+        Such bindings write \c rpc:result in non-void responses, read it from responses, require the RPC struct
+        to be the only Body child, and report argument errors with the \c rpc:BadArguments subcode.
+        @par Example
+        A handler serving such bindings answers an unknown procedure with the \c rpc:ProcedureNotPresent
+        subcode.
+        @since %WSDL 0.5.8
+    */
+    bool usesSoap12RpcRepresentation() {
+        return rpcRepresentation(input);
+    }
+
+    private bool rpcRepresentation(*BindingMessageDescription description) {
+        return !docstyle && isSoap12() && description && description.body.encoded
+            && SoapEncodingStyleHelper::rules(description.body.encodingStyle) == SOAP_12_ENCODING;
+    }
+
+    # SOAP 1.2 Part 2 section 4.2.2: a non-void response names the edge of its return value in rpc:result
+    private static addRpcResult(WSOperation op, WSMessage msg, Namespaces output, reference<auto> body) {
+        *string part = op.getReturnPartName();
+        string wrapper = body.firstKey();
+        if (!exists part || body{wrapper}.typeCode() != NT_HASH) {
+            return;
+        }
+        string accessor = msg.args{msg.pmap{part}}.element
+            ? msg.args{msg.pmap{part}}.element.getXmlName(output) : msg.pmap{part};
+        if (!body{wrapper}.hasKey(accessor)) {
+            return;
+        }
+        hash<auto> content = {output.getOutputNamespacePrefix(SOAP_12_RPC) + ":result": accessor};
+        body{wrapper} = content + body{wrapper};
+    }
+
+    # Consumes a response's rpc:result and gives the edge it names the WSDL return part's accessor name
+    private static takeRpcResult(WSOperation op, WSMessage msg, reference<hash<auto>> content,
+            hash<string, string> namespaces) {
+        list<string> results = select keys content, (($1 =~ x/^([^:]+):result(\^[0-9]+)?$/)[0] ?? "") != ""
+            && namespaces{($1 =~ x/^([^:]+):/)[0]} == SOAP_12_RPC;
+        if (!results) {
+            return;
+        }
+        if (results.size() > 1 || content{results[0]}.typeCode() == NT_LIST) {
+            throw SOAP_DESERIALIZATION_ERROR, "a SOAP 1.2 RPC response has more than one rpc:result";
+        }
+        auto result = remove content{results[0]};
+        XsdQNameNamespaceScope result_scope(result.typeCode() == NT_HASH ? result."^attributes^" : NOTHING);
+        auto text = result.typeCode() == NT_HASH ? result."^value^" : result;
+        if (text.typeCode() != NT_STRING) {
+            throw SOAP_DESERIALIZATION_ERROR, "rpc:result requires the QName of the return value's edge";
+        }
+        XsdQNameValue edge = XsdQNameValueHelper::resolve(trim(text), SOAP_DESERIALIZATION_ERROR, QNameInputNamespaces);
+        *string found;
+        foreach string key in (keys content) {
+            if (key.equalPartial("^")) {
+                continue;
+            }
+            (*string prefix, string local) = (key =~ x/^(?:([^:]+):)?([^:^]+)/);
+            string uri = exists prefix ? (namespaces{prefix} ?? "") : (namespaces{""} ?? "");
+            if (local == edge.getLocalName() && uri == edge.getNamespaceUri()) {
+                found = key;
+                break;
+            }
+        }
+        if (!exists found) {
+            throw SOAP_DESERIALIZATION_ERROR, sprintf("rpc:result names {%s}%s, which is not an edge of the response",
+                edge.getNamespaceUri(), edge.getLocalName());
+        }
+        *string part = op.getReturnPartName();
+        if (!exists part) {
+            throw SOAP_DESERIALIZATION_ERROR, sprintf("rpc:result names a return value, but operation %Y returns none",
+                op.name);
+        }
+        string accessor = msg.pmap{part};
+        if (found != accessor) {
+            if (content.hasKey(accessor)) {
+                throw SOAP_DESERIALIZATION_ERROR, sprintf("rpc:result names %y as the return value, but the "
+                    "response also carries the return part %y", found, accessor);
+            }
+            content{accessor} = remove content{found};
+        }
+    }
+
     hash<auto> serializeMessageImpl(WSOperation op, *WSMessage msg, bool request, bool soap12, auto h, *hash<auto> header, string enc, *hash<auto> nsh, *int xml_opts, *string req_soapaction, *string faultmsg, *hash<auto> http_headers) {
         return serializeMessageWithDescription(op, msg, request, soap12, h, header, enc, nsh, xml_opts,
             req_soapaction, faultmsg, http_headers, self{request ? "input" : "output"});
@@ -35508,6 +35716,10 @@ public class SoapBinding inherits WSDL::OperationalBinding {
             } else {
                 string mname = op.name + (request ? "" : "Response");
                 body = msg.serializeRpc(body_parts, bmd, NOTHING, mname, encoded, \val, fault);
+                if (!request && !fault && body && rpcRepresentation(bmd)) {
+                    addRpcResult(op, msg, output_namespaces, \body);
+                    rh{soapenvEnvelope}."^attributes^"."xmlns:rpc" = SOAP_12_RPC;
+                }
             }
             if (fault && encoded && body) {
                 string part = msg.pmap.firstKey();
@@ -36000,12 +36212,35 @@ public class SoapBinding inherits WSDL::OperationalBinding {
                 if (!msgh.hasKey(mname)) {
                     throw SOAP_DESERIALIZATION_ERROR, sprintf("missing %s message name %y as top-level element; got elements: %y", io, mname, keys msgh);
                 }
-                XsdQNameNamespaceScope rpc_scope(msgh{mname}."^attributes^");
+                bool rpc12 = rpcRepresentation(bmd);
+                # SOAP 1.2 Part 2 section 4.2.3: with SOAP Encoding the RPC struct is the Body's only child
+                if (rpc12 && ((select keys body, !$1.equalPartial("^") && $1 != ".ns").size() != 1
+                        || body.firstValue().typeCode() == NT_LIST)) {
+                    throw SOAP_DESERIALIZATION_ERROR, "a SOAP 1.2 RPC message with SOAP Encoding has the RPC struct "
+                        "as its only Body child (SOAP 1.2 Part 2 section 4.2.3)";
+                }
+                *hash<auto> wrapper_attributes = msgh{mname}."^attributes^";
+                XsdQNameNamespaceScope rpc_scope(wrapper_attributes);
                 msgh = XsdScalarTextHelper::elementContent(remove msgh{mname}, "SOAP RPC wrapper") ?? {};
+                if (rpc12 && !request) {
+                    takeRpcResult(op, msg, \msgh, envelope_namespaces
+                        + XsdBase::getElementNamespaces(o.Envelope.Body."^attributes^")
+                        + XsdBase::getElementNamespaces(wrapper_attributes));
+                }
                 XsdBase::removeNS2(\msgh);
                 msgh -= (".ns", "ns");
 
-                rv = msg.deserializeRpc(mrh, msgh, bmd.body.parts, False);
+                try {
+                    rv = msg.deserializeRpc(mrh, msgh, bmd.body.parts, False);
+                } catch (hash<ExceptionInfo> ex) {
+                    # SOAP 1.2 Part 2 section 4.4: arguments that cannot be parsed or do not match
+                    if (rpc12 && request && ex.err == SOAP_DESERIALIZATION_ERROR
+                            && !(ex.arg instanceof hash<SoapFaultOptions>)) {
+                        throw SOAP_DESERIALIZATION_ERROR, ex.desc,
+                            <SoapFaultOptions>{"subcodes": (new XsdQNameValue(SOAP_12_RPC, "BadArguments"),)};
+                    }
+                    rethrow;
+                }
             }
         }
 

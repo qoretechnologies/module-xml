@@ -1642,3 +1642,17 @@ asterisk may stand only for the first extent (T61), omitted trailing members are
 count must match the declared rank. [soap12-encoding](../soap12-encoding.qtest) has 7 cases and 114 assertions.
 The full suite passes on one runtime except the two core-blocked IEEE gates. With the core HTTP/1.0 fix
 installed, the Axis interop gate passes in both directions.
+
+## P8-04: SOAP 1.2 RPC Representation and Appendix B
+
+SOAP 1.2 RPC-style bindings with SOAP 1.2 Encoding now follow SOAP 1.2 Part 2 section 4:
+- `rpc:result` in both directions, with the return part identified through the WSDL 1.1 `parameterOrder`, which
+  operations now retain;
+- a single RPC struct in the Body;
+- `rpc:BadArguments` and `rpc:ProcedureNotPresent` fault subcodes.
+
+Encoded parameters that are absent or nil decode as `NOTHING`, and `NOTHING` is written as `xsi:nil`; previously
+both read and wrote an empty value. `WSDLLib::toXmlName()` and `fromXmlName()` implement Appendix B. The W3C
+collection's encoding and RPC tests pass through a `SoapHandler` echo service
+([soap12-collection](../soap12-collection.qtest)), with 11 out-of-scope tests and the collection's defective
+replies recorded. [soap12-rpc](../soap12-rpc.qtest) adds 7 cases and 79 assertions.

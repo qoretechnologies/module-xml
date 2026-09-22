@@ -1,0 +1,242 @@
+#!/usr/bin/env qore
+# -*- mode: qore; indent-tabs-mode: nil -*-
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires xml
+%requires HttpServer
+%requires ../qlib/WSDL.qm
+%requires ../qlib/SoapHandler.qm
+
+%exec-class Soap12RpcTest
+
+# The SOAP 1.2 RPC Representation (SOAP 1.2 Part 2 section 4) and Appendix B name mapping.
+public class Soap12RpcTest inherits QUnit::Test {
+    private {
+        const Contract = '<definitions xmlns="http://schemas.xmlsoap.org/wsdl/"
+            xmlns:soap12="http://schemas.xmlsoap.org/wsdl/soap12/" xmlns:xsd="http://www.w3.org/2001/XMLSchema"
+            xmlns:tns="urn:rpc" targetNamespace="urn:rpc">
+          <message name="statsRequest"><part name="x" type="xsd:int"/></message>
+          <message name="statsResponse"><part name="count" type="xsd:int"/><part name="value" type="xsd:string"/></message>
+          <message name="pairRequest"/>
+          <message name="pairResponse"><part name="a" type="xsd:int"/><part name="b" type="xsd:int"/></message>
+          <message name="singleRequest"><part name="question" type="xsd:string"/></message>
+          <message name="singleResponse"><part name="answer" type="xsd:string"/></message>
+          <message name="voidRequest"/>
+          <message name="voidResponse"/>
+          <portType name="P">
+            <operation name="stats" parameterOrder="x count"><input message="tns:statsRequest"/>
+              <output message="tns:statsResponse"/></operation>
+            <operation name="pair"><input message="tns:pairRequest"/><output message="tns:pairResponse"/></operation>
+            <operation name="single"><input message="tns:singleRequest"/><output message="tns:singleResponse"/></operation>
+            <operation name="void"><input message="tns:voidRequest"/><output message="tns:voidResponse"/></operation>
+          </portType>
+          <binding name="B" type="tns:P"><soap12:binding style="rpc" transport="http://schemas.xmlsoap.org/soap/http"/>
+            %s
+          </binding>
+          <service name="S"><port name="P" binding="tns:B"><soap12:address location="http://example.invalid/rpc"/></port></service>
+        </definitions>';
+        const Operation = '<operation name="%s"><soap12:operation soapAction="urn:rpc#%s"/><input><soap12:body %s/></input>
+            <output><soap12:body %s/></output></operation>';
+        const Encoded = 'use="encoded" namespace="urn:rpc" encodingStyle="http://www.w3.org/2003/05/soap-encoding"';
+        const Literal = 'use="literal" namespace="urn:rpc"';
+        const Envelope = '<env:Envelope xmlns:env="http://www.w3.org/2003/05/soap-envelope" '
+            'xmlns:rpc="http://www.w3.org/2003/05/soap-rpc" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" '
+            'xmlns:t="urn:rpc"><env:Body><t:%s env:encodingStyle="http://www.w3.org/2003/05/soap-encoding">%s</t:%s>%s'
+            '</env:Body></env:Envelope>';
+    }
+
+    constructor() : QUnit::Test("SOAP 1.2 RPC Representation", "1.0") {
+        addTestCase("the return value is the output part that parameterOrder omits, or return, or a single part",
+            \returnParts());
+        addTestCase("non-void responses name their return value in rpc:result", \results());
+        addTestCase("rpc:result selects the return value's edge when decoding", \decodeResults());
+        addTestCase("with SOAP Encoding the RPC struct is the only Body child", \oneChild());
+        addTestCase("RPC faults carry the rpc subcodes", \faults());
+        addTestCase("encoded parameters without a node are NOTHING in both directions", \nilParameters());
+        addTestCase("Appendix B maps application names to XML names and back", \nameMapping());
+        set_return_value(main());
+    }
+
+    private static WebService service(string use = Encoded) {
+        string operations;
+        foreach string name in ("stats", "pair", "single", "void") {
+            operations += sprintf(Operation, name, name, use, use);
+        }
+        return new WebService(sprintf(Contract, operations));
+    }
+
+    private static string response(string operation, string content, string extra = "") {
+        return sprintf(Envelope, operation + "Response", content, operation + "Response", extra);
+    }
+
+    private static string request(string operation, string content, string extra = "") {
+        return sprintf(Envelope, operation, content, operation, extra);
+    }
+
+    returnParts() {
+        WebService ws = service();
+        assertEq("value", ws.getOperation("stats").getReturnPartName());
+        assertEq(NOTHING, ws.getOperation("pair").getReturnPartName());
+        assertEq("answer", ws.getOperation("single").getReturnPartName());
+        assertEq(NOTHING, ws.getOperation("void").getReturnPartName());
+        # parameterOrder naming every output part leaves no return value; an unnamed "return" part is chosen
+        WebService listed(replace(replace(sprintf(Contract, ""), 'parameterOrder="x count"',
+            'parameterOrder="x count value"'), '<part name="a" type="xsd:int"/>', '<part name="return" type="xsd:int"/>'));
+        assertEq(NOTHING, listed.getOperation("stats").getReturnPartName());
+        assertEq("return", listed.getOperation("pair").getReturnPartName());
+        # the retained order survives serialization
+        WebService saved = Serializable::deserialize(ws.serialize());
+        assertEq("value", saved.getOperation("stats").getReturnPartName());
+    }
+
+    results() {
+        WebService ws = service();
+        string body = ws.getOperation("stats").serializeResponse({"count": 2, "value": "v"}, NOTHING, NOTHING, NOTHING,
+            True).body;
+        assertRegex('<[a-z0-9]+:statsResponse[^>]*><rpc:result>value</rpc:result><count', body);
+        assertRegex('xmlns:rpc="http://www.w3.org/2003/05/soap-rpc"', body);
+        # a void response, and one whose parts are all out parameters, name no return value
+        assertNRegex("rpc:result", ws.getOperation("pair").serializeResponse({"a": 1, "b": 2}, NOTHING, NOTHING,
+            NOTHING, True).body);
+        assertNRegex("rpc:result", ws.getOperation("void").serializeResponse(NOTHING, NOTHING, NOTHING, NOTHING,
+            True).body);
+        # a return value that is not sent is not named
+        assertNRegex("rpc:result", ws.getOperation("stats").serializeResponse({"count": 2}, NOTHING, NOTHING, NOTHING,
+            True).body);
+        # rpc/literal is not the SOAP data model: no rpc:result
+        WebService literal = service(Literal);
+        assertNRegex("rpc:result", literal.getOperation("single").serializeResponse({"answer": "a"}, NOTHING,
+            NOTHING, NOTHING, True).body);
+        assertFalse(cast<SoapBinding>(literal.getOperation("single").getBinding("B")).usesSoap12RpcRepresentation());
+        assertTrue(cast<SoapBinding>(ws.getOperation("single").getBinding("B")).usesSoap12RpcRepresentation());
+        # round trip
+        assertEq({"count": 2, "value": "v"}, ws.getOperation("stats").deserializeResponse(parse_xml(body,
+            XPF_PRESERVE_ORDER)));
+    }
+
+    decodeResults() {
+        WebService ws = service();
+        WSOperation single = ws.getOperation("single");
+        # the edge rpc:result names is the return value, whatever its name
+        assertEq("a", single.deserializeResponse(parse_xml(response("single",
+            '<rpc:result>result</rpc:result><result>a</result>'), XPF_PRESERVE_ORDER)));
+        assertEq("a", single.deserializeResponse(parse_xml(response("single",
+            '<rpc:result>t:ret</rpc:result><t:ret>a</t:ret>'), XPF_PRESERVE_ORDER)));
+        # without rpc:result, the part name identifies the value
+        assertEq("a", single.deserializeResponse(parse_xml(response("single", '<answer>a</answer>'), XPF_PRESERVE_ORDER)));
+        assertThrows("SOAP-DESERIALIZATION-ERROR", "rpc:result names \\{\\}missing, which is not an edge",
+            \single.deserializeResponse(), (parse_xml(response("single", '<rpc:result>missing</rpc:result>'
+                '<answer>a</answer>'), XPF_PRESERVE_ORDER),));
+        assertThrows("SOAP-DESERIALIZATION-ERROR", "more than one rpc:result", \single.deserializeResponse(),
+            (parse_xml(response("single", '<rpc:result>answer</rpc:result><rpc:result>answer</rpc:result>'
+                '<answer>a</answer>'), XPF_PRESERVE_ORDER),));
+        assertThrows("SOAP-DESERIALIZATION-ERROR", "the response also carries the return part",
+            \single.deserializeResponse(), (parse_xml(response("single", '<rpc:result>other</rpc:result>'
+                '<other>a</other><answer>b</answer>'), XPF_PRESERVE_ORDER),));
+        assertThrows("SOAP-DESERIALIZATION-ERROR", "operation \"pair\" returns none",
+            \ws.getOperation("pair").deserializeResponse(), (parse_xml(response("pair", '<rpc:result>a</rpc:result>'
+                '<a>1</a><b>2</b>'), XPF_PRESERVE_ORDER),));
+    }
+
+    oneChild() {
+        WebService ws = service();
+        assertThrows("SOAP-DESERIALIZATION-ERROR", "only Body child", \ws.getOperation("single").deserializeRequest(),
+            (parse_xml(request("single", '<question>q</question>', '<t:extra/>'), XPF_PRESERVE_ORDER),));
+        assertThrows("SOAP-DESERIALIZATION-ERROR", "only Body child", \ws.getOperation("single").deserializeResponse(),
+            (parse_xml(response("single", '<answer>a</answer>', '<t:extra/>'), XPF_PRESERVE_ORDER),));
+        assertEq("q", ws.getOperation("single").deserializeRequest(parse_xml(request("single", '<question>q</question>'),
+            XPF_PRESERVE_ORDER)));
+    }
+
+    private static *list<string> subcodes(code c) {
+        try {
+            c();
+        } catch (hash<ExceptionInfo> ex) {
+            return ex.arg instanceof hash<SoapFaultOptions>
+                ? map sprintf("{%s}%s", $1.getNamespaceUri(), $1.getLocalName()), ex.arg.subcodes : ();
+        }
+    }
+
+    faults() {
+        WebService ws = service();
+        WSOperation stats = ws.getOperation("stats");
+        assertEq(("{http://www.w3.org/2003/05/soap-rpc}BadArguments",), subcodes(sub () {
+            stats.deserializeRequest(parse_xml(request("stats", '<x>abc</x>'), XPF_PRESERVE_ORDER));
+        }));
+        # a more specific encoding subcode is kept
+        assertEq(("{http://www.w3.org/2003/05/soap-encoding}MissingID",), subcodes(sub () {
+            stats.deserializeRequest(parse_xml(request("stats", '<x xmlns:enc="http://www.w3.org/2003/05/soap-encoding" '
+                'enc:ref="none"/>'), XPF_PRESERVE_ORDER));
+        }));
+        # rpc/literal is not the RPC Representation
+        assertEq((), subcodes(sub () {
+            service(Literal).getOperation("stats").deserializeRequest(parse_xml(request("stats", '<x>abc</x>'),
+                XPF_PRESERVE_ORDER));
+        }));
+        # handlers answer an unknown procedure with rpc:ProcedureNotPresent when they serve the RPC Representation
+        foreach list<auto> row in ((Encoded, ("{http://www.w3.org/2003/05/soap-rpc}ProcedureNotPresent",)), (Literal, ())) {
+            WebService definition = service(row[0]);
+            SoapHandler handler(new PermissiveAuthenticator());
+            handler.addMethod(definition, definition.getOperation("single"), auto sub(hash<auto> cx, auto value) {
+                return {"answer": value};
+            });
+            HttpServer server(); on_exit server.stop();
+            server.setDefaultHandler("rpc", handler);
+            int port = server.addListener(<HttpListenerOptionInfo>{"node": "127.0.0.1", "service": 0}).port;
+            HTTPClient client({"url": sprintf("http://127.0.0.1:%d/rpc", port), "error_passthru": True});
+            hash<auto> info;
+            string reply = client.post("", request("absent", ""), {"Content-Type": "application/soap+xml"}, \info);
+            assertEq(400, info."response-headers".status_code);
+            hash<SoapFaultInfo> fault = WSDLLib::getSOAPFaultInfo(reply, True);
+            assertEq("Sender", fault.code.getLocalName());
+            assertEq(row[1], map sprintf("{%s}%s", $1.getNamespaceUri(), $1.getLocalName()), fault.subcodes);
+        }
+    }
+
+    nilParameters() {
+        WebService ws = service();
+        WSOperation single = ws.getOperation("single");
+        assertEq(NOTHING, single.deserializeRequest(parse_xml(request("single", '<question xsi:nil="true"/>'),
+            XPF_PRESERVE_ORDER)));
+        assertEq(NOTHING, single.deserializeRequest(parse_xml(request("single", ''), XPF_PRESERVE_ORDER)));
+        # an empty string stays a value
+        assertEq("", single.deserializeRequest(parse_xml(request("single", '<question/>'), XPF_PRESERVE_ORDER)));
+        string body = single.serializeRequest({"question": NOTHING}).body;
+        assertRegex('<question xsi:nil="true"/>', body);
+        assertEq(NOTHING, single.deserializeRequest(parse_xml(body, XPF_PRESERVE_ORDER)));
+        # SOAP 1.1 encoding reads and writes the same way
+        WebService note(ReadOnlyFile::readTextFile(get_script_dir() + "/wsdl-interop/encoded-corpus/soap11-note.wsdl"));
+        WSOperation cost = note.getOperation("costTyped");
+        body = cost.serializeRequest({"cost": NOTHING}).body;
+        assertRegex('<cost xsi:nil="true"/>', body);
+        assertEq(NOTHING, cost.deserializeRequest(parse_xml(body, XPF_PRESERVE_ORDER)));
+    }
+
+    nameMapping() {
+        # SOAP 1.2 Part 2 Appendix B.2
+        hash<string, string> examples = {
+            "Hello world": "Hello_x0020_world", "Hello_xorld": "Hello_x005F_xorld", "Helloworld_": "Helloworld_",
+            "x": "x", "xml": "_x0078_ml", "-xml": "_x002D_xml", "x-ml": "x-ml", "Ælfred": "Ælfred",
+            "άγνωστος": "άγνωστος", "ᜉᜅᜎᜈ": "_x1709__x1705__x170E__x1708_", "ᏙᏚᎥ": "_x13D9__x13DA__x13A5_",
+        };
+        foreach hash<auto> example in (examples.pairIterator()) {
+            assertEq(example.value, WSDLLib::toXmlName(example.key), example.key);
+            assertEq(example.key, WSDLLib::fromXmlName(example.value), example.value);
+        }
+        # capitalized "xml", characters beyond the Basic Multilingual Plane and a leading digit
+        assertEq("_x0058_ML", WSDLLib::toXmlName("XML"));
+        assertEq("a_x01F600_", WSDLLib::toXmlName("a😀"));
+        assertEq("_x0031_a", WSDLLib::toXmlName("1a"));
+        assertEq("", WSDLLib::toXmlName(""));
+        # only upper-case four- or six-digit escapes are escapes
+        assertEq("_x00e9_", WSDLLib::fromXmlName("_x00e9_"));
+        assertEq("_x12_", WSDLLib::fromXmlName("_x12_"));
+        assertEq("a_x", WSDLLib::fromXmlName("a_x"));
+        foreach string name in ("a b", "_x", "xmlns", "Straße", "a😀b", "中文", "1", "-") {
+            assertEq(name, WSDLLib::fromXmlName(WSDLLib::toXmlName(name)), name);
+        }
+    }
+}
