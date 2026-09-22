@@ -77,6 +77,22 @@ module WSDL {
     - <a href="../../SoapClient/html/index.html">SoapClient user module</a>
     - <a href="../../SoapHandler/html/index.html">SoapHandler user module</a>
 
+    @section wsdl_empty_content_elements Elements With Empty Content
+
+    An element whose type is a \c complexType declaring empty content (ex: \c "<xs:complexType name=\"x\"/>")
+    can have no content at all; only the presence of the element in the message carries information. Such an
+    element is serialized from an empty hash and is deserialized as an empty hash, so that a deserialized message
+    serializes to the same elements again:
+    @code{.py}
+# serializes "<mtas:default-subscription/>" in the message
+hash<auto> h = op.serializeRequest({"Create": {"MOAttributes": {"default-subscription": {}}}});
+    @endcode
+
+    An optional element (i.e. declared with \c minOccurs="0") with no value (@ref nothing "NOTHING") is left out
+    of the message, while a required element is always serialized. Supplying any content for an element of such a
+    type raises a \c SOAP-SERIALIZATION-ERROR exception, as the content cannot be represented in the message. An
+    element with \c xsi:nil="true" is deserialized as @ref nothing "NOTHING", as with any other type.
+
     @section wsdl_soap_header_deserialization SOAP Header and Body Deserialization
 
     An omitted soap:body parts attribute selects all message parts, including parts also bound to headers.
@@ -207,6 +223,14 @@ module WSDL {
     @section wsdlrelnotes WSDL Module Release Notes
 
     @subsection wsdl_0_5_8 WSDL v0.5.8
+    - an \c xs:choice requires a member only when none of its alternatives is emptiable (XSD 1.0 part 1, sections
+      3.8.6 and 3.9.6); a choice with only optional alternatives was reported as requiring one when serializing
+      values carrying explanatory \c ^choices^ keys and when decoding without the complete particle
+      (<a href="https://github.com/qoretechnologies/qore/issues/5464">issue 5464</a>)
+    - an element whose type declares empty content (ex: <tt>&lt;xs:complexType name="x"/&gt;</tt>) is deserialized
+      as an empty hash instead of @ref nothing "NOTHING", so that an element that is present can be told apart
+      from one that is absent, and so that a deserialized message serializes to the same elements again
+      (<a href="https://github.com/qoretechnologies/qore/issues/5465">issue 5465</a>)
     - MTOM/XOP output: SoapMtomScope sends SOAP requests, responses and faults as XOP packages whose
       canonical base64Binary content of at least a threshold (MTOM_THRESHOLD by default) moves into binary parts,
       with an element's \c xmime:contentType (XMIME_NS) as the part's media type; an original infoset containing
@@ -16003,6 +16027,13 @@ public class XsdElement inherits WSDL::XsdTypedData {
             ? new XsdDocumentValueResult(!constraint.fixed) : NOTHING;
         auto converted = XsdDocumentValueHelper::deserializeValue(selected, name, tmap, references, value, False,
             captured);
+        # issue #5465: an element of a type declaring empty content deserializes to an empty hash, so that an
+        # element that is present can be told apart from one that is absent, and serializes to the same element
+        # again. Only a present element reaches this method, and a nil element returned above.
+        if (!exists converted && XsdEmptyElementDefaultHelper::empty(value) && selected instanceof XsdComplexType
+                && cast<XsdComplexType>(selected).declaresEmptyContent()) {
+            converted = {};
+        }
         tuples.value(captured.actual_type ?? selected, captured.identity);
         checkFixedValue(original, captured.identity, SOAP_DESERIALIZATION_ERROR);
         return XsdNativeTypeValueHelper::retain(type, selected,
@@ -28250,6 +28281,65 @@ public final class XsdParticle inherits Qore::Serializable {
         }
     }
 
+    #! returns whether this particle permits no element children
+    /** @return True when the minimum of the particle's effective total range is zero: the minimum of a choice is
+        its own \c minOccurs multiplied by the smallest minimum of its alternatives, so a choice is emptiable as
+        soon as one alternative is (XSD 1.0 part 1, sections 3.8.6 and 3.9.6), while a sequence or all group is
+        emptiable only when every member is
+
+        @note Group references are resolved when their type is finalized; an unresolved or cyclic reference
+        counts as requiring its content.
+
+        @since %WSDL 0.5.8
+    */
+    bool isEmptiable() {
+        hash<string, bool> visiting();
+        return emptiable(\visiting);
+    }
+
+    #! @cond nodoc
+    private bool emptiable(reference<hash<string, bool>> visiting) {
+        if (XsdEmptiabilityHelper::zeroOccurs(minimum) || XsdEmptiabilityHelper::zeroOccurs(maximum)) {
+            return True;
+        }
+        switch (kind) {
+            case XsdParticleKind::Element:
+            case XsdParticleKind::Any:
+                return False;
+
+            case XsdParticleKind::Group: {
+                if (!group_definition || visiting{group}) {
+                    return False;
+                }
+                visiting{group} = True;
+                on_exit remove visiting{group};
+                return group_definition.emptiable(\visiting);
+            }
+
+            case XsdParticleKind::Choice: {
+                foreach XsdParticle child in (children) {
+                    if (child.emptiable(\visiting)) {
+                        return True;
+                    }
+                }
+                # an empty model group (ex: "<xs:choice/>") requires nothing
+                return !children;
+            }
+
+            case XsdParticleKind::Sequence:
+            case XsdParticleKind::All: {
+                foreach XsdParticle child in (children) {
+                    if (!child.emptiable(\visiting)) {
+                        return False;
+                    }
+                }
+                return True;
+            }
+        }
+        return True;
+    }
+    #! @endcond
+
     #! returns the term kind
     /** @return element, any, sequence, choice, all, or group */
     XsdParticleKind getKind() { return kind; }
@@ -31461,6 +31551,9 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
         # multiple choice blocks
         list<hash<ChoiceInfo>> choices();
 
+        # the particle of each choice block in "choices", to derive requiredness once groups are resolved
+        transient list<XsdParticle> choice_particles();
+
         #! the alternatives of a complexType that is itself a choice
         /** each alternative is a hash of the elements belonging to it; alternatives declared as nested model groups
             (ex: an \c xs:sequence inside an \c xs:choice) have more than one element
@@ -31683,6 +31776,14 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
     *XsdParticle getParticle() {
         return particle;
     }
+
+    #! @cond nodoc
+    # whether the type declares empty content, so that an element of this type carries information only by
+    # being present (issue #5465); such an element has no content model, no simple content and no value
+    bool declaresEmptyContent() {
+        return content_empty && cx_type == XET_NONE && !particle && !mixed && !simpleType && !array;
+    }
+    #! @endcond
 
     #! returns whether character fragments and child elements share an ordered content model
     /** @return True for mixed complex content, False for simple or element-only content
@@ -31925,7 +32026,28 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
         return False;
     }
 
+    # Requiredness is derived from the declaration before group references are resolved, so a choice whose
+    # emptiable alternative is a group reference is refined here. Restored graphs keep the flags they were
+    # saved with, and no longer carry the choice particles.
+    private setChoiceRequirements() {
+        if (!particle) {
+            return;
+        }
+        if (cx_type == XET_CHOICE && required && particle.isEmptiable()) {
+            required = requires_value = False;
+        }
+        if (choice_particles.size() != choices.size()) {
+            return;
+        }
+        for (int i = 0; i < choices.size(); ++i) {
+            if (choices[i].required && choice_particles[i].isEmptiable()) {
+                choices[i].required = False;
+            }
+        }
+    }
+
     private finalizeElementFields() {
+        setChoiceRequirements();
         list<hash<string, XsdElement>> maps = (elementmap,);
         foreach hash<ChoiceInfo> choice in (choices) {
             maps += (choice.elementmap,);
@@ -32085,12 +32207,9 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
             # issue #5410: an alternative in a choice can be a nested model group with more than one element
             alternatives = getChoiceAlternatives(particle);
             map elementmap += $1, alternatives;
-            foreach XsdElement elem in (elementmap.iterator()) {
-                if (elem.isRequired()) {
-                    required = True;
-                    break;
-                }
-            }
+            # issue #5464: the type requires a value only when no alternative of the choice is emptiable, not
+            # when any single member is required (XSD 1.0 part 1, sections 3.8.6 and 3.9.6)
+            required = !particle.isEmptiable();
             setGroupFlags();
             # the element declarations only say whether a member requires a value if the choice is serialized at
             # all; whether the choice itself must be present is given by the "minOccurs" attribute of the choice
@@ -32128,8 +32247,12 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
                 hash<string, XsdElement> fields();
                 map fields += $1, alts;
                 if (fields) {
+                    # issue #5464: "minOccurs" defaults to 1, but a choice with an emptiable alternative still
+                    # requires no member (XSD 1.0 part 1, sections 3.8.6 and 3.9.6)
                     choices += <ChoiceInfo>{"elementmap": fields,
-                        "required": !optional && node.getMinOccurs() != "0", "alternatives": alts};
+                        "required": !optional && node.getMinOccurs() != "0" && !node.isEmptiable(),
+                        "alternatives": alts};
+                    choice_particles += node;
                 }
             } else if (kind == "sequence" || kind == "all") {
                 parseModelGroup(node, optional);
@@ -32461,10 +32584,9 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
             }
 
             case XET_NONE:
-                if (attrs || exists attribute_wildcard || NativeTypeProviderContext) {
-                    return addAttributeFields(new HashDataType(name));
-                }
-                return AbstractDataProviderType::get(AbstractDataProviderType::nothingType);
+                # issue #5465: empty content is a present record in every projection; an optional element still
+                # accepts NOTHING through the or-nothing type applied by buildOrdinaryProvider()
+                return addAttributeFields(new HashDataType(name));
         }
 
         # complexTypes with no recognized content model accept any value

@@ -540,3 +540,32 @@ remains outside schema declaration processing. Namespace identity and inherited
 annotation scope determine this boundary; prefix spellings do not. Ordered
 schema grammar checks precede the adapter, preserving existing facet/restriction
 error categories while the adapter checks other declaration text.
+
+## Emptiable particles and elements with empty content
+
+`XsdParticle::isEmptiable()` answers whether a particle permits no element children: the minimum of its
+effective total range is zero (XSD 1.0 part 1, section 3.9.6). A choice's minimum is its own `minOccurs`
+multiplied by the smallest minimum of its alternatives (section 3.8.6), so a choice is emptiable as soon as one
+alternative is, while a sequence or all group is emptiable only when every member is. An empty model group
+requires nothing. A group reference is answered from its resolved definition, and a reference that is not yet
+resolved, or that closes a cycle, counts as requiring its content.
+
+The ordered particle validates message content, so the emptiability of a choice is what decides whether a
+message must carry one of its members. The legacy field view keeps the same answer: a `ChoiceInfo` block and a
+type whose content model is a choice take their requiredness from the particle rather than from the declared
+occurrence attributes alone, which cannot see an emptiable alternative. The flags are derived when the field
+view is built and again once group references are resolved; a restored schema graph keeps the flags it was
+saved with.
+
+A `complexType` declaring empty content has no content model, no simple content and no value:
+`XsdComplexType::declaresEmptyContent()` identifies it. An element of such a type carries information only by
+being present. An empty hash serializes to an empty element, `NOTHING` leaves an optional element out of the
+message, a required element is always serialized, and any supplied content raises `SOAP-SERIALIZATION-ERROR`.
+A present element deserializes to an empty hash, so that it can be told apart from a missing element and
+serializes to the same element again; only the element declaration knows that the element was present, so the
+conversion belongs to `XsdElement`, after nil assessment. An element with `xsi:nil="true"` stays `NOTHING`. An
+element is empty whether it carries nothing at all or only attributes, namespace declarations, comments or empty
+text, which is the same emptiness the element default constraint uses, so the same infoset always yields the
+same value. Empty content is a present record in every projection: the data provider type is an empty record
+type, which an optional element still combines with `NOTHING` for a missing element, as explicit native capture
+already did.
