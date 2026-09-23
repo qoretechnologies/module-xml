@@ -232,6 +232,11 @@ hash<auto> h = op.serializeRequest({"Create": {"MOAttributes": {"default-subscri
       3.8.6 and 3.9.6); a choice with only optional alternatives was reported as requiring one when serializing
       values carrying explanatory \c ^choices^ keys and when decoding without the complete particle
       (<a href="https://github.com/qoretechnologies/qore/issues/5464">issue 5464</a>)
+    - the elements of a named model group (\c xs:group) referenced as an alternative of an \c xs:choice are members
+      of that choice in the native field view as well: they were treated as fields of the enclosing sequence, so
+      the absent members of a decoded message were reported as fields with no value, and generated example
+      messages combined the group's elements with the choice's other alternatives
+      (<a href="https://github.com/qoretechnologies/qore/issues/5464">issue 5464</a>)
     - an element that is present without content is deserialized as its record instead of @ref nothing "NOTHING"
       whenever its type permits empty content: an empty hash for a type declaring empty content (ex:
       <tt>&lt;xs:complexType name="x"/&gt;</tt>), and the record with no members for an emptiable content model
@@ -31591,6 +31596,13 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
         # the particle of each choice block in "choices", to derive requiredness once groups are resolved
         transient list<XsdParticle> choice_particles();
 
+        # particles already projected into the field view: True once projected where required, False while only
+        # projected inside an optional model group; a shared named group is therefore projected at most twice
+        # instead of once per path through the group graph
+        transient hash<string, bool> projected_particles();
+        # the index in "choices" of each projected choice particle
+        transient hash<string, int> projected_choices();
+
         #! the alternatives of a complexType that is itself a choice
         /** each alternative is a hash of the elements belonging to it; alternatives declared as nested model groups
             (ex: an \c xs:sequence inside an \c xs:choice) have more than one element
@@ -31884,6 +31896,28 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
             group.resolveNestedGroups(groupMap);
             XsdElementConsistencyHelper::merge(\declarations, (map $1, group.getElementDeclarations().iterator()));
         }
+        # issue #5464: the type's own group references are resolved before it is combined with its base, so the
+        # elements of each referenced group take the place of the reference in the native field view: a group
+        # alternative of a choice contributes members of that choice, not fields of the enclosing sequence
+        if (particle && element_group_refs) {
+            hash<auto> projection = {"elementmap": elementmap, "choices": choices,
+                "choice_particles": choice_particles, "alternatives": alternatives, "required": required,
+                "requires_value": requires_value, "nillable": nillable, "cx_type": cx_type,
+                "anyAttribute": anyAttribute};
+            on_error {
+                elementmap = projection.elementmap;
+                choices = projection.choices;
+                choice_particles = projection.choice_particles;
+                alternatives = projection.alternatives;
+                required = projection.required;
+                requires_value = projection.requires_value;
+                nillable = projection.nillable;
+                cx_type = projection.cx_type;
+                anyAttribute = projection.anyAttribute;
+            }
+            particle.resolveGroups(groupMap ?? {});
+            projectParticle();
+        }
 
         list<hash<XsdAttributeWildcardInfo>> group_wildcards();
         # Resolve local attribute-group uses before combining the derived declaration with its base.
@@ -32010,20 +32044,6 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
             particle.validateDeterminism();
         }
 
-        # Resolve captured expanded group identities; missing definitions are construction errors.
-        if (unresolved) {
-            *list<hash<GroupRefInfo>> groupRefList = unresolved.getGroupRefs(self);
-            foreach hash<GroupRefInfo> groupRefInfo in (groupRefList) {
-                *XsdGroup grp = groupMap{groupRefInfo.ref};
-                if (!grp) {
-                    throw WSDL_ERROR, sprintf("undefined group reference %Y", groupRefInfo.ref);
-                }
-                grp.resolveNestedGroups(groupMap);
-                # Group occurrences belong to the reference particle. Reusing a
-                # group's declarations must not change their own min/max limits.
-                elementmap += XsdElementFieldHelper::getExpandedMap(grp.getElements());
-            }
-        }
         element_declarations = declarations;
         finalizeElementFields();
         attribute_wildcard = wildcard;
@@ -32236,41 +32256,51 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
                 d.keys());
 
         string k = d.firstKey();
-        if (k == "all" || k == "choice" || k == "sequence" || k == "group") {
-            particle = new XsdParticle(k, d{k}, nsc, unresolved, usedocns);
-            collectParticleDeclarations(particle, unresolved);
-        }
-        if (k == "all") {
-            cx_type = XET_ALL;
-            # issue #5410: model groups can be nested
-            parseModelGroup(particle, False);
-            setGroupFlags();
-        } else if (k == "choice") {
-            cx_type = XET_CHOICE;
-            # issue #5410: an alternative in a choice can be a nested model group with more than one element
-            alternatives = getChoiceAlternatives(particle);
-            map elementmap += $1, alternatives;
-            # issue #5464: the type requires a value only when no alternative of the choice is emptiable, not
-            # when any single member is required (XSD 1.0 part 1, sections 3.8.6 and 3.9.6)
-            required = !particle.isEmptiable();
-            setGroupFlags();
-            # the element declarations only say whether a member requires a value if the choice is serialized at
-            # all; whether the choice itself must be present is given by the "minOccurs" attribute of the choice
-            if (exists d.choice."^attributes^".minOccurs && !d.choice."^attributes^".minOccurs.toInt()) {
-                required = requires_value = False;
-            }
-        } else if (k == "sequence") {
-            cx_type = XET_SEQUENCE;
-            # issue #5410: model groups can be nested
-            parseModelGroup(particle, False);
-            setGroupFlags();
-        } else if (k == "group") {
-            # Handle top-level group reference
-            cx_type = XET_SEQUENCE;  # Groups typically expand to sequences
-
-        } else {
+        if (k != "all" && k != "choice" && k != "sequence" && k != "group") {
             throw "XSD-COMPLEXTYPE-ERROR", sprintf("unknown keys in %y", d);
         }
+        particle = new XsdParticle(k, d{k}, nsc, unresolved, usedocns);
+        collectParticleDeclarations(particle, unresolved);
+        projectParticle();
+    }
+
+    # Projects the native field view (elementmap, choices, alternatives and the required flags) from the particle.
+    # Group references contribute their elements only once they are resolved, so finalize() projects a type that
+    # references groups again (issue #5464).
+    private projectParticle() {
+        elementmap = {};
+        choices = ();
+        choice_particles = ();
+        alternatives = ();
+        projected_particles = {};
+        projected_choices = {};
+        required = requires_value = nillable = False;
+        switch (particle.getKind()) {
+            case XsdParticleKind::All:
+            case XsdParticleKind::Sequence:
+                cx_type = particle.getKind() == XsdParticleKind::All ? XET_ALL : XET_SEQUENCE;
+                # issue #5410: model groups can be nested
+                parseModelGroup(particle, False);
+                break;
+
+            case XsdParticleKind::Choice:
+                cx_type = XET_CHOICE;
+                # issue #5410: an alternative in a choice can be a nested model group with more than one element
+                alternatives = getChoiceAlternatives(particle);
+                map elementmap += $1, alternatives;
+                # issue #5464: the type requires a value only when no alternative of the choice is emptiable, not
+                # when any single member is required (XSD 1.0 part 1, sections 3.8.6 and 3.9.6); a choice declared
+                # with minOccurs="0" need not be present at all
+                required = !particle.isEmptiable() && particle.getMinOccurs() != "0";
+                break;
+
+            case XsdParticleKind::Group:
+                # the referenced group is the content model; its occurrence range applies to the whole group
+                cx_type = XET_SEQUENCE;
+                projectModelGroupMember(particle, False);
+                break;
+        }
+        setGroupFlags();
     }
 
     # Build the legacy field view from the ordered component graph. No second element
@@ -32278,30 +32308,70 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
     private parseModelGroup(XsdParticle model, bool optional) {
         optional = optional || model.getMinOccurs() == "0";
         foreach XsdParticle node in (model.getChildren()) {
-            string kind = node.getKind();
-            if (kind == "element") {
+            projectModelGroupMember(node, optional);
+        }
+    }
+
+    # projects one member of a sequence or all group; "optional" is True when an enclosing group need not appear
+    private projectModelGroupMember(XsdParticle node, bool optional) {
+        # a particle reached again contributes nothing new, unless it was only reached inside optional groups
+        # before and is now required
+        string key = node.uniqueHash();
+        if (projected_particles.hasKey(key) && (projected_particles{key} || optional)) {
+            return;
+        }
+        projected_particles{key} = !optional;
+        switch (node.getKind()) {
+            case XsdParticleKind::Element: {
                 XsdElement elem = node.getElement();
                 elementmap{elem.getExpandedName()} = elem;
                 if (!optional && elem.isRequired()) {
                     required = True;
                 }
-            } else if (kind == "choice") {
+                break;
+            }
+
+            case XsdParticleKind::Choice: {
                 list<hash<string, XsdElement>> alts = getChoiceAlternatives(node);
                 hash<string, XsdElement> fields();
                 map fields += $1, alts;
                 if (fields) {
                     # issue #5464: "minOccurs" defaults to 1, but a choice with an emptiable alternative still
                     # requires no member (XSD 1.0 part 1, sections 3.8.6 and 3.9.6)
-                    choices += <ChoiceInfo>{"elementmap": fields,
-                        "required": !optional && node.getMinOccurs() != "0" && !node.isEmptiable(),
-                        "alternatives": alts};
-                    choice_particles += node;
+                    bool choice_required = !optional && node.getMinOccurs() != "0" && !node.isEmptiable();
+                    if (projected_choices.hasKey(key)) {
+                        # the choice was projected inside an optional group before and is now reached as required
+                        if (choice_required) {
+                            choices[projected_choices{key}].required = True;
+                        }
+                    } else {
+                        projected_choices{key} = choices.size();
+                        choices += <ChoiceInfo>{"elementmap": fields, "required": choice_required,
+                            "alternatives": alts};
+                        choice_particles += node;
+                    }
                 }
-            } else if (kind == "sequence" || kind == "all") {
-                parseModelGroup(node, optional);
-            } else if (kind == "any") {
-                anyAttribute = True;
+                break;
             }
+
+            case XsdParticleKind::Sequence:
+            case XsdParticleKind::All:
+                parseModelGroup(node, optional);
+                break;
+
+            case XsdParticleKind::Group: {
+                # issue #5464: a group reference stands for the model group it references; the reference's
+                # occurrence range applies to that model group
+                *XsdParticle definition = node.getGroupDefinition();
+                if (definition) {
+                    projectModelGroupMember(definition, optional || node.getMinOccurs() == "0");
+                }
+                break;
+            }
+
+            case XsdParticleKind::Any:
+                anyAttribute = True;
+                break;
         }
     }
 
@@ -32319,11 +32389,24 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
     private hash<string, XsdElement> flattenModelGroup(XsdParticle node) {
         hash<string, XsdElement> result();
         list<XsdParticle> pending = (node,);
+        # a named group can be referenced from many places; its elements are collected once
+        hash<string, bool> seen();
         while (pending) {
             XsdParticle current = pop pending;
+            if (seen{current.uniqueHash()}) {
+                continue;
+            }
+            seen{current.uniqueHash()} = True;
             if (current.getKind() == "element") {
                 XsdElement elem = current.getElement();
                 result{elem.getExpandedName()} = elem;
+            } else if (current.getKind() == XsdParticleKind::Group) {
+                # issue #5464: a group alternative contributes the elements of the group it references
+                *XsdParticle definition = current.getGroupDefinition();
+                if (definition) {
+                    push pending, definition;
+                }
+                continue;
             }
             list<XsdParticle> children = current.getChildren();
             for (int index = children.size() - 1; index >= 0; --index) {

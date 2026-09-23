@@ -570,6 +570,7 @@ class SoapTest inherits QUnit::Test {
         addTestCase("soapFaultDetection", \soapFaultDetectionTest());
         addTestCase("SOAP comparison resolves local namespace declarations", \localNamespaces());
         addTestCase("optional choice", \optionalChoiceTest());
+        addTestCase("named model groups", \modelGroupTest());
         addTestCase("empty complexType", \emptyTypeTest());
         set_return_value(main());
     }
@@ -898,6 +899,19 @@ class SoapTest inherits QUnit::Test {
         # a nested sequence declared with minOccurs="0" makes its members optional, so the enclosing element does
         # not have to be supplied at all
         assertEq(NOTHING, op.deserializeRequest(parse_xml(h.body))."optional-group");
+        # a present element with no content leaves the optional group out: it decodes as the type's record, and
+        # "opt1" is not required, since only the absent group requires it (issue #5465)
+        hash<auto> og = op.serializeRequest(req + {"optional-group": {}});
+        assertTrue(og.body =~ /<ns:optional-group\/>/, "optional-group: present with no content");
+        assertEq({"opt1": NOTHING}, op.deserializeRequest(parse_xml(og.body))."optional-group",
+            "optional-group: empty element decoded");
+        # the decoded record serializes to the same message again
+        assertEq(og.body, op.serializeRequest(op.deserializeRequest(parse_xml(og.body))).body,
+            "optional-group: round trip");
+        # with the group present, its required element is serialized and decoded
+        og = op.serializeRequest(req + {"optional-group": {"opt1": "x"}});
+        assertEq({"opt1": "x"}, op.deserializeRequest(parse_xml(og.body))."optional-group",
+            "optional-group: group present");
 
         # data provider types must include the elements declared in nested model groups
         AbstractDataProviderType t = op.input.getDataProviderType().getFields().parameters.getType();
@@ -2202,6 +2216,105 @@ class SoapTest inherits QUnit::Test {
         h = op.serializeRequest({"Req": {"choice": {"c2": "x"}}});
         body = parse_xml(h.body).firstValue()."soapenv:Body"."ns:Req";
         assertEq(("ns:c2",), keys body."ns:choice", "choice-type: one member");
+    }
+
+    #! tests named model groups (xs:group) (issue #5464)
+    /** A group reference is parsed as a model group made up of the content of the referenced group, wherever it
+        appears: as an alternative of a choice, in a sequence, or as the content model of a complexType
+    */
+    modelGroupTest() {
+        WebService ws = WSDLLib::getWebServiceFromUrl(get_script_dir() + "/optional-choice.wsdl");
+        WSOperation op = ws.getOperation("Op");
+
+        # the group alternative of the choice is emptiable, so no member of the choice has to be supplied
+        hash<auto> h = op.serializeRequest({"Req": {"group-alt": {"allow": False}}});
+        hash<auto> body = parse_xml(h.body).firstValue()."soapenv:Body"."ns:Req";
+        assertEq(("ns:allow",), keys body."ns:group-alt", "group-alt: no member");
+        assertEq({"allow": False}, op.deserializeRequest(parse_xml(h.body))."group-alt",
+            "group-alt: no member deserialized");
+        h = op.serializeRequest({"Req": {"group-alt": {"allow": False, "^choices1^": {}}}});
+        body = parse_xml(h.body).firstValue()."soapenv:Body"."ns:Req";
+        assertEq(("ns:allow",), keys body."ns:group-alt", "group-alt: empty ^choices^");
+        # the elements of the group are members of the choice
+        h = op.serializeRequest({"Req": {"group-alt": {"allow": False, "g1": "x"}}});
+        body = parse_xml(h.body).firstValue()."soapenv:Body"."ns:Req";
+        assertEq(("ns:allow", "ns:g1"), keys body."ns:group-alt", "group-alt: group member");
+        assertEq({"allow": False, "g1": "x"}, op.deserializeRequest(parse_xml(h.body))."group-alt",
+            "group-alt: group member deserialized");
+        # the group and the other alternative cannot be combined
+        assertThrows("SOAP-SERIALIZATION-ERROR", "complete particle", \op.serializeRequest(),
+            {"Req": {"group-alt": {"allow": False, "g1": "x", "alt": "y"}}});
+
+        # the elements of a group alternative are members of the choice in the native field view as well, so a
+        # generated example lists them with the other alternative instead of as fields of the enclosing sequence
+        auto example = new WSMessageHelper(ws, {"choices": True}).getMessage(op.input);
+        assertEq(("allow", "^choices1^"), keys example.Req."group-alt", "group-alt: example fields");
+        assertEq(("g1", "alt"), keys example.Req."group-alt"."^choices1^", "group-alt: example alternatives");
+        assertEq(("allow", "^choices1^"), keys example.Req."group-required", "group-required: example fields");
+        assertEq(("r1", "r2", "alt"), keys example.Req."group-required"."^choices1^",
+            "group-required: example alternatives");
+        # every alternative of the choice is optional in the data provider type
+        auto group_fields = op.input.getDataProviderType().getFields().parameters.getType().getFields()
+            ."group-required".getType().getFields();
+        assertEq({"allow": True, "r1": False, "r2": False, "alt": False},
+            map {$1.getName(): $1.isMandatory()}, group_fields.iterator());
+
+        # a group requiring an element is not emptiable, and neither is the other alternative
+        assertThrows("SOAP-SERIALIZATION-ERROR", "complete particle", \op.serializeRequest(),
+            {"Req": {"group-required": {"allow": True}}});
+        # the legacy path for explanatory ^choices^ keys sees the group's elements as members of the choice
+        assertThrows("SOAP-SERIALIZATION-ERROR", "expecting one of", \op.serializeRequest(),
+            {"Req": {"group-required": {"allow": True, "^choices1^": {}}}});
+        h = op.serializeRequest({"Req": {"group-required": {"allow": True, "^choices1^": {"r1": "a"}}}});
+        assertEq({"allow": True, "r1": "a"}, op.deserializeRequest(parse_xml(h.body))."group-required",
+            "group-required: group alternative through ^choices^");
+        string xml = op.serializeRequest({"Req": {"group-required": {"allow": True, "alt": "x"}}}).body;
+        xml =~ s/<ns:alt>x<\/ns:alt>//;
+        assertThrows("SOAP-DESERIALIZATION-ERROR", "complete particle", \op.deserializeRequest(),
+            parse_xml(xml));
+        h = op.serializeRequest({"Req": {"group-required": {"allow": True, "r1": "a", "r2": "b"}}});
+        assertEq({"allow": True, "r1": "a", "r2": "b"}, op.deserializeRequest(parse_xml(h.body))."group-required",
+            "group-required: group alternative");
+
+        # group references in a sequence are serialized in the position where they are declared, including a group
+        # referenced by another group, and a group declared after the type that references it
+        h = op.serializeRequest({"Req": {"group-seq": {"last": "l", "l2": "y", "l1": "x", "r2": "q", "r1": "r",
+            "o1": "o", "first": "f"}}});
+        body = parse_xml(h.body).firstValue()."soapenv:Body"."ns:Req";
+        assertEq(("ns:first", "ns:o1", "ns:r1", "ns:r2", "ns:l1", "ns:l2", "ns:last"), keys body."ns:group-seq",
+            "group-seq: order");
+        assertEq({"first": "f", "o1": "o", "r1": "r", "r2": "q", "l1": "x", "l2": "y", "last": "l"},
+            op.deserializeRequest(parse_xml(h.body))."group-seq", "group-seq: deserialized");
+        assertEq(("first", "o1", "r1", "r2", "l1", "l2", "last"),
+            keys op.input.getDataProviderType().getFields().parameters.getType().getFields()."group-seq".getType()
+                .getFields(), "group-seq: data provider fields");
+
+        # a group referenced with minOccurs="0" can be left out
+        h = op.serializeRequest({"Req": {"group-seq": {"first": "f", "o1": "o", "r1": "r", "last": "l"}}});
+        body = parse_xml(h.body).firstValue()."soapenv:Body"."ns:Req";
+        assertEq(("ns:first", "ns:o1", "ns:r1", "ns:last"), keys body."ns:group-seq", "group-seq: optional group");
+        hash<auto> rt = op.deserializeRequest(parse_xml(h.body))."group-seq";
+        assertEq(NOTHING, rt.l1, "group-seq: optional group deserialized");
+        # but if it is present, all its required elements must be present
+        assertThrows("SOAP-SERIALIZATION-ERROR", "complete particle", \op.serializeRequest(),
+            {"Req": {"group-seq": {"first": "f", "o1": "o", "r1": "r", "l1": "x", "last": "l"}}});
+        xml = op.serializeRequest({"Req": {"group-seq": {"first": "f", "o1": "o", "r1": "r", "l1": "x", "l2": "y",
+            "last": "l"}}}).body;
+        xml =~ s/<ns:l2>y<\/ns:l2>//;
+        assertThrows("SOAP-DESERIALIZATION-ERROR", "complete particle", \op.deserializeRequest(),
+            parse_xml(xml));
+        # a group referenced without minOccurs="0" requires its elements
+        assertThrows("SOAP-SERIALIZATION-ERROR", "missing element \"r1\"", \op.serializeRequest(),
+            {"Req": {"group-seq": {"first": "f", "o1": "o", "last": "l"}}});
+
+        # the content model of a type can be a group reference
+        h = op.serializeRequest({"Req": {"group-content": {"r1": "a"}}});
+        body = parse_xml(h.body).firstValue()."soapenv:Body"."ns:Req";
+        assertEq(("ns:r1",), keys body."ns:group-content", "group-content: serialized");
+        assertEq({"r1": "a", "r2": NOTHING}, op.deserializeRequest(parse_xml(h.body))."group-content",
+            "group-content: deserialized");
+        assertThrows("SOAP-SERIALIZATION-ERROR", "missing element \"r1\"", \op.serializeRequest(),
+            {"Req": {"group-content": {"r2": "a"}}});
     }
 
     #! tests elements whose type is a complexType declaring empty content (issue #5465)

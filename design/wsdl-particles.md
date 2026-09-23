@@ -557,6 +557,14 @@ occurrence attributes alone, which cannot see an emptiable alternative. The flag
 view is built and again once group references are resolved; a restored schema graph keeps the flags it was
 saved with.
 
+A group reference contributes to the field view only once it is resolved. `XsdComplexType::finalize()` resolves
+the type's own group references before combining the type with its base, and then projects the whole field
+view from the particle again. A reference stands for the model group it references, under the reference's
+occurrence range. A group referenced from a sequence or `all` contributes fields of that sequence, and a
+reference with `minOccurs="0"` makes them optional. A group referenced as a choice alternative contributes
+members of that choice, as an inline sequence alternative does. A group referenced as the content model of a
+type is handled like a sequence with one member.
+
 A `complexType` declaring empty content has no content model, no simple content and no value:
 `XsdComplexType::declaresEmptyContent()` identifies it. An element of such a type carries information only by
 being present. An empty hash serializes to an empty element, `NOTHING` leaves an optional element out of the
