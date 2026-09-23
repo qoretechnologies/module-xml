@@ -49,9 +49,11 @@ public class SoapSwaRefTest inherits QUnit::Test {
         addTestCase("invalid native values are rejected", \invalidValues());
         addTestCase("lists, anyURI and XML attachment entities keep URIs", \notReferences());
         addTestCase("swaRef parts and MTOM share one package", \mtom());
-        addTestCase("retained XML keeps the references", \retained());
+        addTestCase("retained XML keeps the references and receives their parts", \retained());
+        addTestCase("explicit MIME parts are sent with retained XML", \explicitParts());
         addTestCase("provider types accept attachment content", \providerTypes());
         addTestCase("SoapHandler and SoapClient exchange swaRef attachments", \http());
+        addTestCase("retained XML handlers and clients exchange swaRef attachments", \httpRetained());
         set_return_value(main());
     }
 
@@ -260,11 +262,93 @@ public class SoapSwaRefTest inherits QUnit::Test {
             "Claim11", result.message.parts);
         string claim = xml.body.claim.getXml();
         assertRegex("ClaimForm[^>]*>cid:swaref-", claim, "the retained XML keeps the reference");
-        # serializing the retained XML again keeps its URIs and adds no parts
+        # every identified part is returned, so a retained consumer can resolve the references itself
+        assertEq(result.message.parts, xml.parts);
+        string uri = (claim =~ x/ClaimForm[^>]*>([^<]+)</)[0];
+        assertEq(binary(convert_encoding("form é", "UTF-8")), xml.parts{WSDLLib::contentIdFromUri(uri)}.body);
+
+        # without ^parts^, the retained XML is sent with its URIs and no parts
         hash<auto> wire = op.serializeRequest({"^body^": xml.body, "^headers^": {}, "^attachments^": {}},
             NOTHING, NOTHING, NOTHING, NOTHING, NOTHING, "Claim11");
         assertRegex("^text/xml", wire.hdr."Content-Type");
         assertTrue(wire.body =~ /ClaimForm[^>]*>cid:swaref-/);
+        # ^parts^ sends the parts again, so the native decoding of the result is the original claim
+        foreach string binding in (Bindings) {
+            wire = op.serializeRequest({"^body^": xml.body, "^headers^": {}, "^parts^": xml.parts}, NOTHING, NOTHING,
+                NOTHING, NOTHING, NOTHING, binding);
+            hash<auto> message = WSDLLib::parseMultiPartSOAPMessage({"body": wire.body,
+                "_qore_orig_content_type": wire.hdr."Content-Type"}, False, True);
+            assertEq(xml.parts.size(), message.parts.size(), binding);
+            foreach string id in (keys xml.parts) {
+                assertEq(xml.parts{id}.body, message.parts{id}.body, binding + ": " + id);
+                assertEq(xml.parts{id}.hdr."content-type", message.parts{id}.hdr."content-type");
+            }
+            assertEq(decoded(Claim - "Labelled"), op.deserializeRequest(WSDLLib::parseSOAPMessage(message, False,
+                True), binding), binding + ": decoded");
+        }
+    }
+
+    explicitParts() {
+        WSOperation op = ws.getOperation("Submit");
+        hash<auto> body = {"claim": new XsdXmlValue('<t:Claim xmlns:t="' + Types + '"><t:Name>n</t:Name>'
+            '<t:ClaimForm>cid:form@example.com</t:ClaimForm></t:Claim>')};
+        code serialize = hash<auto> sub (hash<auto> parts, string binding = "Claim11", *string enc) {
+            return op.serializeRequest({"^body^": body, "^headers^": {}, "^parts^": parts}, NOTHING, enc, NOTHING,
+                NOTHING, NOTHING, binding);
+        };
+        code parts = hash<auto> sub (hash<auto> wire) {
+            return WSDLLib::parseMultiPartSOAPMessage({"body": wire.body,
+                "_qore_orig_content_type": wire.hdr."Content-Type"}, False, True).parts;
+        };
+        # binary data and strings take default media types; a string is sent in the message encoding
+        hash<auto> received = parts(serialize({"form@example.com": binary("\x00\xff")}));
+        assertEq(("form@example.com",), keys received);
+        assertEq("application/octet-stream", received."form@example.com".hdr."content-type");
+        assertEq(binary("\x00\xff"), received."form@example.com".body);
+        received = parts(serialize({"form@example.com": "reçu"}, "Claim12", "ISO-8859-1"));
+        assertEq("text/plain;charset=ISO-8859-1", received."form@example.com".hdr."content-type");
+        assertEq(binary(convert_encoding("reçu", "ISO-8859-1")), received."form@example.com".body);
+        # a declared charset encodes a string; a text type without one takes the message encoding
+        received = parts(serialize({"form@example.com": {"hdr": {"Content-Type": "text/html; charset=utf-16"},
+            "body": "é"}}));
+        assertEq(binary(convert_encoding("é", "UTF-16")), received."form@example.com".body);
+        received = parts(serialize({"form@example.com": {"hdr": {"content-type": "text/html"}, "body": "é"}}));
+        assertEq("text/html;charset=UTF-8", received."form@example.com".hdr."content-type");
+        # other headers pass through, the received transfer encoding does not: the body is the decoded octets
+        received = parts(serialize({"form@example.com": {"hdr": {"content-type": "image/png",
+            "content-location": "form.png", "content-transfer-encoding": "base64", "content-id": "<form@example.com>"},
+            "body": binary("PNG")}}));
+        assertEq("form.png", received."form@example.com".hdr."content-location");
+        assertEq(binary("PNG"), received."form@example.com".body);
+        assertEq("binary", received."form@example.com".hdr."content-transfer-encoding");
+
+        # invalid explicit parts
+        assertThrows("SOAP-SERIALIZATION-ERROR", "explicit MIME parts require", \op.serializeRequest(),
+            {"^body^": body, "^parts^": {}});
+        assertThrows("SOAP-SERIALIZATION-ERROR", "must be a hash of MIME parts", \op.serializeRequest(),
+            {"^body^": body, "^headers^": {}, "^parts^": "x"});
+        foreach string id in ("a b@x", "form", "<form@x>", "a@b@c", "") {
+            assertThrows("SOAP-SERIALIZATION-ERROR", "invalid Content-ID", serialize, {id: binary("x")}, id);
+        }
+        assertThrows("SOAP-SERIALIZATION-ERROR", "requires a body", serialize, {"form@x": {"hdr": {}}});
+        assertThrows("SOAP-SERIALIZATION-ERROR", "must be binary or string data", serialize, {"form@x": 1});
+        assertThrows("SOAP-SERIALIZATION-ERROR", "must be binary or string data", serialize,
+            {"form@x": {"body": {}}});
+        assertThrows("SOAP-SERIALIZATION-ERROR", "headers of MIME part", serialize,
+            {"form@x": {"hdr": "x", "body": "b"}});
+        assertThrows("SOAP-SERIALIZATION-ERROR", "must be a single string", serialize,
+            {"form@x": {"hdr": {"content-location": ("a", "b")}, "body": "b"}});
+        assertThrows("SOAP-SERIALIZATION-ERROR", "has Content-ID", serialize,
+            {"form@x": {"hdr": {"content-id": "<other@x>"}, "body": "b"}});
+        assertThrows("SOAP-SERIALIZATION-ERROR", "invalid Content-Type", serialize,
+            {"form@x": {"hdr": {"content-type": "text"}, "body": "b"}});
+        assertThrows("SOAP-SERIALIZATION-ERROR", "invalid Content-Type", serialize,
+            {"form@x": {"hdr": {"content-type": "*/*"}, "body": binary("b")}});
+        # a Content-ID naming a MIME-bound WSDL part would be read as that part (R2933)
+        assertThrows("SOAP-SERIALIZATION-ERROR", "would identify the MIME-bound part", \ws.getOperation("Upload")
+            .serializeRequest(), ({"^body^": {"note": "n"}, "^headers^": {}, "^attachments^": {"claim":
+                {"Name": "n", "ClaimForm": "cid:x@y"}}, "^parts^": {"claim=1@x": binary("x")}}, NOTHING, NOTHING,
+                NOTHING, NOTHING, NOTHING, "Claim11"));
     }
 
     providerTypes() {
@@ -282,6 +366,50 @@ public class SoapSwaRefTest inherits QUnit::Test {
         assertThrows("RUNTIME-TYPE-ERROR", \claim.getFields().Uri.getType().acceptsValue(), binary("x"));
         assertEq(("cid:a@x",), claim.getFields().Refs.getType().acceptsValue(("cid:a@x",)));
         assertThrows("RUNTIME-TYPE-ERROR", \claim.getFields().Refs.getType().acceptsValue(), (binary("x"),));
+    }
+
+    httpRetained() {
+        SoapHandler handler(new PermissiveAuthenticator());
+        foreach string binding in (Bindings) {
+            # a retained XML handler echoes the claim and the parts its swaRef URIs reference
+            handler.addMethod(ws, ws.getBindingOperation(binding, "Submit"),
+                auto sub (hash<auto> cx, hash<SoapXmlMessageInfo> request) {
+                    received.push(request.parts);
+                    return {"^body^": request.body, "^headers^": {}, "^parts^": request.parts};
+                }, NOTHING, NOTHING, NOTHING, NOTHING, NOTHING, NOTHING, binding, "retained-" + binding, True);
+        }
+        server = new HttpServer();
+        on_exit {
+            server.stop();
+            delete server;
+        }
+        server.setDefaultHandler("soap", handler);
+        string url = sprintf("http://127.0.0.1:%d/swaref", server.addListener(0).port);
+        # the retained request carries its own references and parts
+        hash<auto> parts = {"form@example.com": "form é", "photo@example.com": binary("\x00\x01")};
+        XsdXmlValue claim('<t:Claim xmlns:t="' + Types + '"><t:Name>n</t:Name>'
+            '<t:ClaimForm>cid:form%40example.com</t:ClaimForm><t:Photo>cid:photo@example.com</t:Photo></t:Claim>');
+        foreach string binding in (Bindings) {
+            SoapClient client({"wsdl": ws, "port": binding + "Port", "url": url});
+            hash<auto> info;
+            hash<SoapXmlMessageInfo> result = client.callOperation("Submit", {"^body^": {"claim": claim},
+                "^headers^": {}, "^parts^": parts}, {"xml_values": True}, \info);
+            assertRegex("^multipart/related", info."response-headers"."content-type", binding);
+            # the handler received both parts, and the client receives them back with the claim
+            hash<auto> handled = received.get(0);
+            assertEq(sort(keys parts), sort(keys handled), binding + ": handler parts");
+            assertEq(sort(keys parts), sort(keys result.parts), binding + ": client parts");
+            assertEq(binary(convert_encoding("form é", "UTF-8")), result.parts."form@example.com".body);
+            assertEq(binary("\x00\x01"), result.parts."photo@example.com".body);
+            assertRegex("ClaimForm[^>]*>cid:form%40example.com<", result.body.claim.getXml());
+            # a native client decodes the same reply to the parts' contents
+            SoapClient native({"wsdl": ws, "port": binding + "Port", "url": url});
+            auto value = native.callOperation("Submit", {"claim": {"Name": "n", "ClaimForm": "text",
+                "Photo": (binary("p"),)}});
+            received.get(0);
+            # one occurrence of the repeated element decodes as a single value
+            assertEq(decoded({"Name": "n", "ClaimForm": "text", "Photo": binary("p")}), value, binding + ": native");
+        }
     }
 
     # the handler receives the attachment content, and answers with new content naming its binding

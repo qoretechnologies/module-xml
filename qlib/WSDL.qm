@@ -117,7 +117,8 @@ hash<auto> msg = op.serializeRequest({"ClaimDetail": {"Name": "claim", "ClaimFor
 
     Only values in the SOAP envelope are references: \c swaRef values in an XML attachment bound with
     \c mime:content are URIs, as are list items and union members of type \c swaRef. Retained XML values
-    (\c xml_values) keep the URIs.
+    (\c xml_values) keep the URIs; SoapXmlMessageInfo::parts holds the parts they reference, and \c ^parts^ sends
+    them (see @ref wsdlsoapattachments).
     Data provider types of \c swaRef fields accept binary and string values.
 
     @section wsdl_soap_header_deserialization SOAP Header and Body Deserialization
@@ -247,6 +248,22 @@ hash<auto> msg = op.serializeRequest({"ClaimDetail": {"Name": "claim", "ClaimFor
     Abstract-message provider types and sample helpers continue to describe the XSD message independently
     of a concrete MIME binding's raw type-part representation.
 
+    SoapXmlMessageInfo::parts holds every MIME part of a received message that has a Content-ID, keyed by that
+    Content-ID, as a hash with \c hdr (lower-case header names) and \c body (decoded octets). It gives retained
+    XML consumers the parts that \c swaRef URIs reference (@ref wsdl_swaref). The explicit form also accepts a
+    \c ^parts^ map in the same shape to send such parts with any binding. A value can be a whole received part,
+    binary data (\c application/octet-stream by default), a string (\c text/plain in the message encoding by
+    default), or a hash with \c body and optional \c hdr, whose \c content-type selects the media type. A string
+    body is encoded in its \c charset. Other headers, such as \c content-location, are sent unchanged, while
+    \c content-transfer-encoding and \c content-length are chosen when the package is written. A key must be a
+    valid Content-ID that does not name a MIME-bound part (WS-I Attachments Profile 1.0 R2933).
+    @code{.py}
+    # a retained-XML SoapHandler callback returning the claim with the attachment its swaRef URI references
+    hash<SoapXmlMessageInfo> sub (hash<auto> cx, hash<SoapXmlMessageInfo> request) {
+        return {"^body^": request.body, "^headers^": {}, "^parts^": request.parts};
+    }
+    @endcode
+
     @section wsdlrelnotes WSDL Module Release Notes
 
     @subsection wsdl_0_5_8 WSDL v0.5.8
@@ -271,6 +288,9 @@ hash<auto> msg = op.serializeRequest({"ClaimDetail": {"Name": "claim", "ClaimFor
       part for each value and sends a SOAP with Attachments package, and deserialization resolves the \c cid: or
       Content-Location URI and rejects references to no part of the message (R2928); such values were plain
       \c anyURI strings before, so no part was ever sent or resolved
+    - SoapXmlMessageInfo::parts gives retained XML consumers (\c xml_values) every identified MIME part of a
+      received message, including the parts that \c swaRef URIs reference, and an explicit \c ^parts^ map sends
+      such parts with any binding (@ref wsdlsoapattachments)
     - media-type parameters are sent as a token when the value is one (ex: \c charset=UTF-8) and as a
       quoted-string otherwise (RFC 9110 section 5.6.6); always quoting them made servers whose request parser does
       not unquote parameter values, including Qore's HTTP/1 server on musl-based systems, reject the message
@@ -2593,6 +2613,96 @@ class WsdlAttachmentHelper {
     static list<string> types(auto value) {
         return value.typeCode() == NT_LIST ? value : (value,);
     }
+
+    # checks an explicit MIME part supplied under ^parts^ and returns its body, media type and further headers
+    static hash<auto> explicitPart(string id, auto value, *WSMessage msg, BindingMessageDescription description,
+            string encoding) {
+        # a Content-ID is a msg-id: "<" addr-spec ">" (RFC 2045 section 7; RFC 2392)
+        if (id !~ /^[^@\x00-\x20<>\x7f]+@[^@\x00-\x20<>\x7f]+$/) {
+            throw SOAP_SERIALIZATION_ERROR, sprintf("invalid Content-ID %y in ^parts^; expecting an id-left@id-right "
+                "msg-id without angle brackets", id);
+        }
+        # WS-I AP R2933: the text before '=' names a MIME-bound WSDL part, so an explicit part cannot use one
+        int equal = id.find("=");
+        if (equal > 0 && msg) {
+            string encoded = id.substr(0, equal);
+            *string part = encoded =~ /%(?![0-9A-Fa-f]{2})/ ? NOTHING : decode_url(encoded);
+            if (exists part && msg.pmap.hasKey(part) && description.parts.hasKey(msg.pmap{part})) {
+                throw SOAP_SERIALIZATION_ERROR, sprintf("Content-ID %y in ^parts^ would identify the MIME-bound "
+                    "part %y", id, part);
+            }
+        }
+        auto body = value;
+        hash<auto> headers();
+        if (value.typeCode() == NT_HASH) {
+            if (!value.hasKey("body")) {
+                throw SOAP_SERIALIZATION_ERROR, sprintf("MIME part %y in ^parts^ requires a body", id);
+            }
+            body = value.body;
+            if (exists value.hdr && value.hdr.typeCode() != NT_HASH) {
+                throw SOAP_SERIALIZATION_ERROR, sprintf("the headers of MIME part %y must be a hash", id);
+            }
+            foreach hash<auto> header in (value.hdr.pairIterator()) {
+                if (header.value.typeCode() != NT_STRING) {
+                    throw SOAP_SERIALIZATION_ERROR, sprintf("header %y of MIME part %y must be a single string",
+                        header.key, id);
+                }
+                switch (header.key.lwr()) {
+                    case "content-id": {
+                        *string given;
+                        try {
+                            given = WsdlMultipartHelper::identifier(header.value);
+                        } catch (hash<ExceptionInfo> ex) {
+                            if (ex.err != "SOAP-MESSAGE-ERROR") {
+                                rethrow;
+                            }
+                        }
+                        if (given != id) {
+                            throw SOAP_SERIALIZATION_ERROR, sprintf("MIME part %y has Content-ID %y", id,
+                                header.value);
+                        }
+                        break;
+                    }
+                    # the body is the part's decoded octets; its framing is chosen when the package is written
+                    case "content-transfer-encoding":
+                    case "content-length":
+                        break;
+                    default:
+                        headers{header.key.lwr()} = header.value;
+                        break;
+                }
+            }
+        }
+        *string content_type = remove headers."content-type";
+        if (body.typeCode() == NT_STRING) {
+            WsdlMediaType media = WsdlAttachmentHelper::mediaType(content_type ?? "text/plain", id);
+            *string charset = media.parameter("charset", SOAP_SERIALIZATION_ERROR);
+            body = binary(convert_encoding(body, charset ?? encoding));
+            content_type = content_type ?? "text/plain";
+            if (!exists charset && media.major == "text") {
+                content_type += ";charset=" + WsdlMediaType::parameterValue(charset ?? encoding);
+            }
+        } else if (body.typeCode() == NT_BINARY) {
+            content_type = content_type ?? "application/octet-stream";
+            WsdlAttachmentHelper::mediaType(content_type, id);
+        } else {
+            throw SOAP_SERIALIZATION_ERROR, sprintf("the body of MIME part %y must be binary or string data; got "
+                "type %y", id, body.type());
+        }
+        return {"body": body, "content_type": content_type, "hdr": headers};
+    }
+
+    # parses the media type of an explicit MIME part
+    static WsdlMediaType mediaType(string content_type, string id) {
+        *WsdlMediaType media = WsdlMediaType::read(content_type);
+        if (!media || media.wildcard()) {
+            throw SOAP_SERIALIZATION_ERROR, sprintf("invalid Content-Type %y for MIME part %y", content_type, id);
+        }
+        foreach string parameter in (keys media.parameters) {
+            media.parameter(parameter, SOAP_SERIALIZATION_ERROR);
+        }
+        return media;
+    }
 }
 
 # MIME framing and transfer decoding belong to Qore's Mime module. This helper supplies SOAP root semantics.
@@ -3620,6 +3730,14 @@ public hashdecl SoapXmlMessageInfo {
     /** Type parts are binary unless their MIME charset identifies text. Ambiguous media alternatives keep
         ^attributes^.^content-type^ and ^value^, matching native attachment values. @since %WSDL 0.5.8 */
     hash<auto> attachments = {};
+    #! every MIME part of the message other than its root that has a Content-ID, keyed by that Content-ID
+    /** Each value is a hash with \c hdr (the part's headers with lower-case names) and \c body (its transfer-decoded
+        octets as binary data). The parts include those bound to WSDL parts, which are also in \c attachments, and
+        those that \c swaRef values reference (@ref wsdl_swaref), whose retained XML keeps the \c cid: URIs;
+        WSDLLib::contentIdFromUri() gives the key for such a URI. The same hash can be supplied as \c ^parts^ to send
+        the parts again (@ref wsdlsoapattachments).
+        @since %WSDL 0.5.8 */
+    hash<auto> parts = {};
 }
 
 # Internal structural view shared by explicit body/header fault consumers.
@@ -36664,6 +36782,17 @@ public class SoapBinding inherits WSDL::OperationalBinding {
     private:internal hash<auto> serializeSoapMessage(WSOperation op, *WSMessage msg, auto val, *hash<auto> header,
             *hash<auto> nsh, bool request, bool soap12, reference mpm, *string faultmsg, BindingMessageDescription bmd,
             string encoding) {
+        # explicit MIME parts keyed by Content-ID, for example the parts that retained swaRef URIs reference
+        *hash<auto> part_values;
+        if (val.typeCode() == NT_HASH && val.hasKey("^parts^")) {
+            if (!val.hasKey("^body^") || !val.hasKey("^headers^")) {
+                throw SOAP_SERIALIZATION_ERROR, "explicit MIME parts require ^body^ and ^headers^ maps";
+            }
+            if (val."^parts^".typeCode() != NT_HASH) {
+                throw SOAP_SERIALIZATION_ERROR, "^parts^ must be a hash of MIME parts keyed by Content-ID";
+            }
+            part_values = remove val."^parts^";
+        }
         *hash<auto> attachment_values;
         bool explicit_attachments = val.typeCode() == NT_HASH && val.hasKey("^attachments^");
         if (explicit_attachments) {
@@ -36728,6 +36857,15 @@ public class SoapBinding inherits WSDL::OperationalBinding {
         }
         if (attachment_values) {
             throw SOAP_SERIALIZATION_ERROR, "unbound values in ^attachments^";
+        }
+        if (part_values) {
+            if (!mpm) {
+                mpm = new MultiPartRelatedMessage(WsdlAttachmentHelper::boundary());
+            }
+            foreach hash<auto> entry in (part_values.pairIterator()) {
+                hash<auto> part = WsdlAttachmentHelper::explicitPart(entry.key, entry.value, msg, bmd, encoding);
+                mpm.addPart(part.body, "<" + entry.key + ">", part.content_type, part.hdr);
+            }
         }
 
         #printf("DEBUG: docstyle: %y fault: %y\n", docstyle, fault);
@@ -36975,6 +37113,8 @@ public class SoapBinding inherits WSDL::OperationalBinding {
         parsed."^mime-parts^" = mime_parts;
         deserializeMessage(op, parsed, request);
         result.attachments = WsdlAttachmentHelper::deserialize(message, description, mime_parts, True);
+        # retained XML keeps swaRef URIs, so the parts they reference are returned as they are
+        result.parts = mime_parts ?? {};
         if (message) {
             list<string> parts = description.getBodyPartNames(message) ?? keys message.pmap;
             hash<string, int> assigned = message.matchDocumentParts(parts, map $1.getExpandedName(), body_values);

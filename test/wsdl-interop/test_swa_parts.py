@@ -182,10 +182,10 @@ class SwaPartTests(unittest.TestCase):
         for graph in ("source", "saved"):
             for representation in ("native", "xml"):
                 with self.subTest(graph=graph, representation=representation):
-                    # the native server also answers echoDataRef, whose swaRef values reference parts
-                    extra = ["reference"] if representation == "native" else []
-                    with endpoint([*self.qore, "server", graph, representation, *extra], self.env) as (url, _):
-                        self.assertEqual("PASS\n", checked([*self.java, "client", str(self.wsdl), url, *extra]))
+                    # echoDataRef's swaRef values reference parts: native values are their contents, retained XML
+                    # keeps the URIs and exchanges the parts through SoapXmlMessageInfo::parts and ^parts^
+                    with endpoint([*self.qore, "server", graph, representation, "reference"], self.env) as (url, _):
+                        self.assertEqual("PASS\n", checked([*self.java, "client", str(self.wsdl), url, "reference"]))
 
     def test_handler_rejects_bad_parts_and_recovers(self):
         for graph in ("source", "saved"):

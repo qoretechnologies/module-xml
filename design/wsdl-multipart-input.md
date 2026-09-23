@@ -126,6 +126,17 @@ union, whose items are URIs.
 - **Scope.** R2928 covers the envelope. XML attachment entities bound with `mime:content` suspend both hooks,
   so their `swaRef` values stay URIs. Retained XML validation (`RetainedXmlValidationNamespaces`) does too, and
   retained XML values keep the URIs.
+- **Retained XML.** `SoapXmlMessageInfo::parts` returns every identified non-root part as `{hdr, body}`, keyed by
+  Content-ID, so a retained consumer can resolve its own URIs (`WSDLLib::contentIdFromUri()`). The explicit value
+  form accepts `^parts^` in the same shape, or plain binary/string values, and adds those parts to the package
+  with any binding. `WsdlAttachmentHelper::explicitPart()` checks each one:
+  - the key must be an `id-left@id-right` msg-id that does not name a MIME-bound part (R2933);
+  - the body must be binary or a string, encoded in its `charset` or the message encoding;
+  - the media type must be concrete;
+  - a `content-id` header must match the key.
+
+  Other headers pass through. `content-transfer-encoding` and `content-length` are dropped, because the body is
+  the decoded octets. `SoapHandler`, `SoapClient` and `SoapClientIo` carry both for `xml_values` calls.
 - **Provider types.** A `swaRef` field accepts binary or string data. List items and union members use
   `getLexicalDataProviderType()`.
 

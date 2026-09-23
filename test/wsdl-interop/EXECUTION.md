@@ -10837,5 +10837,23 @@ The SwA peer now implements CXF's `echoDataRef`, and `test_swa_parts.py` exchang
 - CXF's client sends `application/octet-stream` content to the native Qore server and reads its string reply
   as UTF-8.
 
-**Open.** Retained XML consumers (`xml_values`) keep the URIs, and `SoapHandler` and `SoapClient` do not pass
-unbound parts to them. Exposing those parts needs a new API field, which is left to a decision.
+**Retained XML (API fix approved on 2026-09-23).** Retained XML consumers (`xml_values`) keep the URIs. Before
+this change, `SoapHandler` and `SoapClient` gave them no way to reach unbound parts or send them. Now:
+- `SoapXmlMessageInfo::parts` returns every identified non-root part as `{hdr, body}`, keyed by Content-ID.
+- The explicit value form accepts a `^parts^` map in the same shape, or plain binary/string values, with any
+  binding.
+- Explicit parts are checked:
+  - the key must be a msg-id that names no MIME-bound part (R2933);
+  - the body must be binary or a string;
+  - the media type must be concrete;
+  - a `content-id` header must match the key.
+- `content-transfer-encoding` and `content-length` are dropped, because bodies are decoded octets; other headers
+  pass through.
+
+`soap-swaref.qtest` gains three cases, for 12 cases and 140 assertions in total:
+- a retained round trip;
+- explicit parts with their validation errors;
+- a retained `SoapHandler`/`SoapClient` exchange over HTTP in SOAP 1.1 and 1.2.
+
+The retained Qore peer now answers and calls CXF's `echoDataRef` too, so the live exchange runs for native and
+retained values in both directions.

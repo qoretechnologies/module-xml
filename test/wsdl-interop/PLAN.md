@@ -1716,7 +1716,7 @@ were plain `anyURI` strings, so no part was ever sent or resolved.
 - On input, the `cid:` or Content-Location URI resolves to a part of the message; a URI that does not identify
   exactly one part is rejected.
 - Envelope values only: XML attachment entities, list items and union members keep URIs, as do retained XML
-  values.
+  values, whose consumers receive the parts in `SoapXmlMessageInfo::parts` and send them with `^parts^`.
 
 [soap-swaref](../soap-swaref.qtest) has 10 cases, and [test_swa_parts.py](test_swa_parts.py) exchanges CXF's
 `echoDataRef` live with Apache CXF 4.1.3 in both directions.

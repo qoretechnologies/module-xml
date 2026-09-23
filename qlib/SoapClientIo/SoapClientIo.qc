@@ -260,7 +260,8 @@ auto result = client.call("echo", {"body": "invoice-71"});
         - \c soap_node: optional ultimate-receiver @ref WSDL::SoapProcessingNode "SoapProcessingNode"
           overriding the constructor's response header capabilities for this call only
         - \c xml_values: True to return @ref WSDL::SoapXmlMessageInfo "SoapXmlMessageInfo" with retained
-          XML body parts and headers; the default returns native values
+          XML body parts and headers, and the response's MIME parts in \c parts; the default returns native
+          values
         - \c preserve_types: True to retain selected native types as portable \c ^type^ / \c ^val^ wrappers;
           cannot be combined with \c xml_values
         @param info an optional reference returning technical information about the call; the following keys
