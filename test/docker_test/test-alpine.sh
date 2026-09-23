@@ -50,18 +50,24 @@ chown -R qore:qore ${MODULE_SRC_DIR}
 # run the tests
 export QORE_MODULE_DIR=${MODULE_SRC_DIR}/qlib:${QORE_MODULE_DIR}
 cd ${MODULE_SRC_DIR}
+FAILED=
 for test in test/*.qtest; do
     # run with debugging enabled to catch @debug block parse errors
     # capture the status instead of letting it propagate: under "set -e" a failing
-    # test aborts the job immediately, which skips every later test file and makes
-    # the RESULTS check below unreachable
-    gosu qore:qore qore -p enable-debug $test -vv && rc=0 || rc=$?
-    RESULTS="$RESULTS $rc"
-done
-
-# check the results
-for R in $RESULTS; do
-    if [ "$R" != "0" ]; then
-        exit 1 # fail
+    # test aborts the job immediately, which skips every later test file
+    # "-v" reports each test case and every failure in full; "-vv" also lists each passing
+    # assertion, which pushes the job log past GitLab's size limit and hides later failures
+    gosu qore:qore qore -p enable-debug $test -v && rc=0 || rc=$?
+    if [ "$rc" != "0" ]; then
+        FAILED="$FAILED $test"
     fi
 done
+
+# name the failing test files at the end of the log
+if [ -n "$FAILED" ]; then
+    echo "FAILED TEST FILES:"
+    for test in $FAILED; do
+        echo "    $test"
+    done
+    exit 1 # fail
+fi
