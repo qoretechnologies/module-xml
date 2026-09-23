@@ -1704,3 +1704,19 @@ The SwA Note and WS-I Attachments Profile 1.0 cannot be redistributed. The Note 
 section 3 phrases the implementation follows. The profile is pinned as a reproducible requirement extract.
 [soap-swa-references](../soap-swa-references.qtest) has 5 cases and 26 assertions. `swaRef` (R2928) follows as
 P8-05c-2.
+
+## P8-05c-2: swaRef attachment references
+
+WS-I Attachments Profile 1.0 `swaRef` values (section 4.4, R2928) are now attachment references. Before, they
+were plain `anyURI` strings, so no part was ever sent or resolved.
+- An element, attribute or message part of type `swaRef`, or of a restriction of it, has the referenced part's
+  content as its native value.
+- On output, binary data becomes an `application/octet-stream` part and a string a `text/plain` part, and the
+  message becomes a SOAP with Attachments package (also combined with MTOM).
+- On input, the `cid:` or Content-Location URI resolves to a part of the message; a URI that does not identify
+  exactly one part is rejected.
+- Envelope values only: XML attachment entities, list items and union members keep URIs, as do retained XML
+  values.
+
+[soap-swaref](../soap-swaref.qtest) has 10 cases, and [test_swa_parts.py](test_swa_parts.py) exchanges CXF's
+`echoDataRef` live with Apache CXF 4.1.3 in both directions.

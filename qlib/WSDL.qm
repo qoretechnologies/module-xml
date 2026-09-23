@@ -98,6 +98,28 @@ hash<auto> h = op.serializeRequest({"Create": {"MOAttributes": {"default-subscri
     \c {"item": NOTHING}), independently of whether the sender declared namespaces on the element. A missing
     element is still deserialized as @ref nothing "NOTHING", so that the two can be told apart.
 
+    @section wsdl_swaref Attachment References (swaRef)
+
+    An element, attribute or message part whose type is the WS-I Attachments Profile 1.0 \c swaRef type
+    (\c {http://ws-i.org/profiles/basic/1.1/xsd}swaRef, see WSI_SWAREF_NS), or a restriction of it, references a MIME
+    part of the same message (section 4.4, R2928). Its native value is the content of that part, not the URI:
+    - when a SOAP message is serialized, each binary value becomes an \c application/octet-stream part, and each
+      string a \c text/plain part in the message encoding; the message becomes a SOAP with Attachments
+      \c multipart/related package, and the element or attribute carries the part's \c cid: URI
+    - when a message is deserialized, the URI is resolved to a part of the message, by its Content-ID
+      (\c cid:, RFC 2392) or its Content-Location (SOAP with Attachments Note, section 3), and the value is the
+      part's content: a string when its media type has a \c charset parameter, binary data otherwise; a URI that
+      does not identify exactly one part raises a \c SOAP-DESERIALIZATION-ERROR exception
+    @code{.py}
+# sends the scanned form as an attachment referenced from the ClaimForm element
+hash<auto> msg = op.serializeRequest({"ClaimDetail": {"Name": "claim", "ClaimForm": scanned_form}});
+    @endcode
+
+    Only values in the SOAP envelope are references: \c swaRef values in an XML attachment bound with
+    \c mime:content are URIs, as are list items and union members of type \c swaRef. Retained XML values
+    (\c xml_values) keep the URIs.
+    Data provider types of \c swaRef fields accept binary and string values.
+
     @section wsdl_soap_header_deserialization SOAP Header and Body Deserialization
 
     An omitted soap:body parts attribute selects all message parts, including parts also bound to headers.
@@ -244,6 +266,11 @@ hash<auto> h = op.serializeRequest({"Create": {"MOAttributes": {"default-subscri
       deserialized message serializes to the same elements again, and the value no longer depends on whether
       the sender declared namespaces on the element
       (<a href="https://github.com/qoretechnologies/qore/issues/5465">issue 5465</a>)
+    - WS-I Attachments Profile 1.0 \c swaRef values (@ref wsdl_swaref): elements, attributes and message parts of
+      type \c swaRef or a restriction of it are the content of the MIME part they reference; serialization adds a
+      part for each value and sends a SOAP with Attachments package, and deserialization resolves the \c cid: or
+      Content-Location URI and rejects references to no part of the message (R2928); such values were plain
+      \c anyURI strings before, so no part was ever sent or resolved
     - media-type parameters are sent as a token when the value is one (ex: \c charset=UTF-8) and as a
       quoted-string otherwise (RFC 9110 section 5.6.6); always quoting them made servers whose request parser does
       not unquote parameter values, including Qore's HTTP/1 server on musl-based systems, reject the message
@@ -1201,6 +1228,14 @@ const SwaDefaultBase = "thismessage:/";
 
 #! XOP (XML-binary Optimized Packaging) namespace URI
 public const XOP_NS = "http://www.w3.org/2004/08/xop/include";
+
+#! the namespace of the WS-I Attachments Profile 1.0 \c swaRef type (section 4.4)
+/** An element or attribute whose type is \c {http://ws-i.org/profiles/basic/1.1/xsd}swaRef, or a restriction of
+    it, references a MIME part of the same message (R2928); see @ref wsdl_swaref.
+
+    @since %WSDL 0.5.8
+*/
+public const WSI_SWAREF_NS = "http://ws-i.org/profiles/basic/1.1/xsd";
 
 #! MTOM (Message Transmission Optimization Mechanism) content type
 public const MTOM_CONTENT_TYPE = "application/xop+xml";
@@ -2308,8 +2343,13 @@ string method = WSDLLib::fromXmlName("Hello_x0020_world"); # "Hello world"
                 if (msg.is_mtom) {
                     WSDLLib::substXopInclude(\xmldata, msg.parts ?? {});
                 } else {
-                    WSDLLib::substHref(\xmldata, msg.parts, msg.unidentified_parts, msg.package_location,
+                    SwaPackageReferences references(msg.parts, msg.unidentified_parts, msg.package_location,
                         msg.header."content-location");
+                    WSDLLib::substHref(\xmldata, references);
+                    # swaRef values in the envelope are resolved against the same labels when they are decoded
+                    if (xmldata.typeCode() == NT_HASH) {
+                        xmldata."^mime-references^" = references.getInfo();
+                    }
                 }
             }
             if (msg.parts) {
@@ -2356,42 +2396,20 @@ string method = WSDLLib::fromXmlName("Hello_x0020_world"); # "Hello world"
     # attribute (a SOAP 1.1 section 5.4.1 accessor reference) is replaced by the MIME part it identifies. A
     # same-document reference ("#id") keeps its SOAP encoding semantics, and a reference that matches no part is
     # left for normal resolution. References are resolved against their base URI (xml:base, then the closest
-    # Content-Location enclosing the envelope: the root part's, then the package's, then "thismessage:/") and compared
-    # with each part's labels: cid: from its Content-ID (RFC 2392) and its Content-Location, resolved against the
-    # package's. Replaced content is not searched again, so each reference is resolved once.
-    private static substHref(reference<auto> xmldata, *hash<auto> parts, *list<auto> unidentified,
-            *string package_location, *string root_location) {
-        string package_base = exists package_location
-            ? resolve_url(SwaDefaultBase, trim(package_location))
-            : SwaDefaultBase;
-        hash<string, list<hash<auto>>> labels();
-        foreach hash<auto> part in (parts.iterator()) {
-            WSDLLib::addLocationLabel(\labels, part, package_base);
-        }
-        foreach hash<auto> part in (unidentified) {
-            WSDLLib::addLocationLabel(\labels, part, package_base);
-        }
-        string base = exists root_location ? resolve_url(package_base, trim(root_location)) : package_base;
-        *data body = WSDLLib::resolveHrefs(\xmldata, parts ?? {}, labels, base);
+    # Content-Location enclosing the envelope) and compared with each part's labels (SwaPackageReferences).
+    # Replaced content is not searched again, so each reference is resolved once.
+    private static substHref(reference<auto> xmldata, SwaPackageReferences references) {
+        *data body = WSDLLib::resolveHrefs(\xmldata, references, references.base);
         if (exists body) {
             xmldata = body;
         }
     }
 
-    # a part's Content-Location is resolved against the base URI of the package enclosing it (RFC 2557 section 5)
-    private static addLocationLabel(reference<hash<string, list<hash<auto>>>> labels, hash<auto> part,
-            string package_base) {
-        if (exists part.hdr."content-location") {
-            push labels{resolve_url(package_base, trim(part.hdr."content-location"))}, part;
-        }
-    }
-
     # resolves the references of one element and its descendants; returns the part body replacing the element
-    private static *data resolveHrefs(reference<auto> element, hash<auto> parts,
-            hash<string, list<hash<auto>>> labels, string base) {
+    private static *data resolveHrefs(reference<auto> element, SwaPackageReferences references, string base) {
         if (element.typeCode() == NT_LIST) {
             for (int i = 0; i < element.size(); ++i) {
-                *data body = WSDLLib::resolveHrefs(\element[i], parts, labels, base);
+                *data body = WSDLLib::resolveHrefs(\element[i], references, base);
                 if (exists body) {
                     element[i] = body;
                 }
@@ -2407,43 +2425,98 @@ string method = WSDLLib::fromXmlName("Hello_x0020_world"); # "Hello world"
             base = resolve_url(base, trim(attributes."xml:base"));
         }
         if (attributes.href.typeCode() == NT_STRING) {
-            *data body = WSDLLib::attachmentBody(attributes.href, base, parts, labels);
-            if (exists body) {
-                return body;
+            *hash<auto> part = references.entity(attributes.href, base);
+            if (part) {
+                return part.body;
             }
         }
         foreach string key in (keys element) {
             if (key.startsWith("^")) {
                 continue;
             }
-            *data body = WSDLLib::resolveHrefs(\element{key}, parts, labels, base);
+            *data body = WSDLLib::resolveHrefs(\element{key}, references, base);
             if (exists body) {
                 element{key} = body;
             }
         }
     }
+}
 
-    private static *data attachmentBody(string href, string base, hash<auto> parts,
-            hash<string, list<hash<auto>>> labels) {
+# The URI labels of the parts of a SOAP message package and the base URI of its root (SwA Note section 3)
+/** Each part is labelled by \c cid: and its Content-ID (RFC 2392), and by its Content-Location, resolved against
+    the package's own Content-Location or "thismessage:/" (RFC 2557 section 5). The root's base URI is the closest
+    Content-Location enclosing the envelope: the root part's, then the package's, then "thismessage:/".
+*/
+class SwaPackageReferences {
+    public {
+        # identified parts, keyed by Content-ID without angle brackets
+        hash<auto> parts;
+        # parts by absolute Content-Location label
+        hash<string, list<hash<auto>>> labels;
+        # the base URI of the root part
+        string base = SwaDefaultBase;
+    }
+
+    constructor(*hash<auto> parts, *list<auto> unidentified, *string package_location, *string root_location) {
+        self.parts = parts ?? {};
+        string package_base = exists package_location
+            ? resolve_url(SwaDefaultBase, trim(package_location))
+            : SwaDefaultBase;
+        foreach hash<auto> part in (self.parts.iterator()) {
+            addLocationLabel(part, package_base);
+        }
+        foreach hash<auto> part in (unidentified) {
+            addLocationLabel(part, package_base);
+        }
+        base = exists root_location ? resolve_url(package_base, trim(root_location)) : package_base;
+    }
+
+    # restores the references of a parsed message: its identified parts and the labels it carries
+    static SwaPackageReferences restore(*hash<auto> parts, *hash<auto> info) {
+        SwaPackageReferences references(parts);
+        if (info.labels) {
+            references.labels = info.labels;
+        }
+        if (info.base.typeCode() == NT_STRING) {
+            references.base = info.base;
+        }
+        return references;
+    }
+
+    # the labels and base URI in the form a parsed message carries them
+    hash<auto> getInfo() {
+        return {"labels": labels, "base": base};
+    }
+
+    # returns the part an attachment reference identifies, NOTHING for a same-document reference or a URI that
+    # matches no label (left for normal resolution)
+    *hash<auto> entity(string href, string reference_base) {
         string reference = trim(href);
         if (reference.substr(0, 1) == "#") {
             return;
         }
-        string uri = resolve_url(base, reference);
+        string uri = resolve_url(reference_base, reference);
         if (uri =~ /^cid:/i) {
             # a cid: URI identifies a body part of this message (RFC 2392)
             string id = WSDLLib::contentIdFromUri(uri);
             if (!parts{id}) {
                 throw "SOAP-MESSAGE-ERROR", sprintf("attachment reference %y names no part of the message", href);
             }
-            return parts{id}.body;
+            return parts{id};
         }
         *list<hash<auto>> matches = labels{uri};
         if (matches.size() > 1) {
             throw "SOAP-MESSAGE-ERROR", sprintf("attachment reference %y matches the Content-Location of %d parts",
                 href, matches.size());
         }
-        return matches ? matches[0].body : NOTHING;
+        return matches ? matches[0] : NOTHING;
+    }
+
+    # a part's Content-Location is resolved against the base URI of the package enclosing it (RFC 2557 section 5)
+    private addLocationLabel(hash<auto> part, string package_base) {
+        if (exists part.hdr."content-location") {
+            push labels{resolve_url(package_base, trim(part.hdr."content-location"))}, part;
+        }
     }
 }
 
@@ -10042,7 +10115,7 @@ class XsdListValueHelper {
         if (!(base instanceof XsdBaseType) || !supports(base.name)) {
             return;
         }
-        return <XsdListItemInfo>{"builtin": base.name, "provider": item.getDataProviderType(),
+        return <XsdListItemInfo>{"builtin": base.name, "provider": XsdSwaRefHelper::lexicalProviderType(item),
             "white_space": item.getWhiteSpace()};
     }
 
@@ -15037,7 +15110,7 @@ public class XsdAttribute inherits WSDL::XsdTypedData {
             new hash<string, XsdAbstractType>(), NOTHING, val, False, captured, True);
         XsdIdentityTupleScope::attribute(self, captured.identity);
         checkFixedValue(result, SOAP_DESERIALIZATION_ERROR);
-        return result;
+        return XsdSwaRefHelper::input(type, name, result);
     }
 
     private checkFixedValue(auto value, string error) {
@@ -19823,6 +19896,8 @@ class XsdDocumentValueHelper {
         if (type.isAbstract()) {
             throw SOAP_SERIALIZATION_ERROR, sprintf("abstract type %Y cannot validate an instance", type.name);
         }
+        # a swaRef value becomes a MIME part, and the URI referencing it is the value checked and written
+        value = XsdSwaRefHelper::output(type, value);
         *XsdDocumentValueResult caller = GenericDocumentValueResult;
         on_exit GenericDocumentValueResult = caller;
         GenericDocumentValueResult = XsdGenericValueHelper::isGeneric(type) ? captured : NOTHING;
@@ -19923,6 +19998,11 @@ class XsdDocumentValueHelper {
                 XsdIdentitySuspendScope identity_check();
                 serializeValue(type, RetainedXmlValidationNamespaces, converted, True);
             }
+        }
+        # a swaRef URI is replaced by the content of the part it references once the URI has been checked;
+        # attributes check their fixed value first (XsdAttribute::getValue())
+        if (!attribute) {
+            converted = XsdSwaRefHelper::input(type, name, converted);
         }
         return retain_selection ? XsdNativeTypeValueHelper::retain(declared, type, converted) : converted;
     }
@@ -20581,7 +20661,8 @@ public class UnionDataType inherits AbstractDataProviderType {
         if (!unionTypes) {
             throw "XSD-SIMPLETYPE-ERROR", "a union requires at least one member";
         }
-        types = map $1.getDataProviderType(), unionTypes;
+        # a swaRef member is a URI, not an attachment reference
+        types = map XsdSwaRefHelper::lexicalProviderType($1), unionTypes;
         atomic_members = map XsdUnionValueHelper::describeAtomic($1, types[$#]), unionTypes;
         indexAtomicMembers();
         foreach XsdAbstractType member in (unionTypes) {
@@ -24254,6 +24335,8 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
         *hash<XsdListItemInfo> listItemValueInfo;
         *list<list<auto>> listEnumValues;
         *hash<string, bool> listEnumKeys;
+        # whether this type is the WS-I swaRef type or a restriction of it; computed on first use
+        transient *bool attachment_reference;
         const StringKinds = {"string": True, "normalizedString": True, "token": True, "language": True,
             "Name": True, "NCName": True, "NMTOKEN": True, "ID": True, "IDREF": True, "ENTITY": True,
             "anyURI": True};
@@ -24859,13 +24942,41 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
         }
     }
 
+    #! returns whether values of this type reference MIME attachments
+    /** @return True for the WS-I Attachments Profile 1.0 \c swaRef type (WSI_SWAREF_NS) and its restrictions;
+        list and union types are not references, even when their members are
+
+        @since %WSDL 0.5.8
+    */
+    bool isAttachmentReference() {
+        if (!exists attachment_reference) {
+            attachment_reference = XsdSwaRefHelper::derives(self);
+        }
+        return attachment_reference;
+    }
+
     AbstractDataProviderType getDataProviderType() {
+        # a swaRef value is the content of the MIME part it references (WS-I Attachments Profile 1.0 R2928)
+        if (isAttachmentReference()) {
+            return new QoreUnionDataType((AbstractDataProviderTypeMap.binary, AbstractDataProviderTypeMap.string));
+        }
+        return getLexicalDataProviderType();
+    }
+
+    #! returns the data provider type of the lexical values of this type
+    /** @return the same type as getDataProviderType(), except for attachment references
+        (isAttachmentReference()), whose lexical values are URIs; list items and union members use this type,
+        since only the values of a swaRef element, attribute or message part are attachment references
+
+        @since %WSDL 0.5.8
+    */
+    AbstractDataProviderType getLexicalDataProviderType() {
         if (listItemType) {
             *hash<XsdListItemInfo> item = XsdListValueHelper::describe(listItemType);
             if (item && !item.union_item) {
                 return new XsdListDataType(item);
             }
-            return new ListDataType(listItemType.getDataProviderType());
+            return new ListDataType(XsdSwaRefHelper::lexicalProviderType(listItemType));
         }
         if (listItemValueInfo) {
             return new XsdListRestrictionDataType(<XsdListFacetInfo>{"name": name,
@@ -30988,6 +31099,164 @@ class XopPackageWriter {
     }
 }
 
+# the swaRef part writer of the SOAP message being serialized (WS-I Attachments Profile 1.0 section 4.4)
+thread_local *SwaRefPackageWriter SwaRefOutput;
+# the parts that swaRef values of the SOAP message being decoded reference
+thread_local *SwaPackageReferences SwaRefInput;
+
+# collects the MIME parts that swaRef values reference while one SOAP message is serialized
+class SwaRefPackageWriter {
+    private {
+        # the character encoding of text parts: the encoding of the message
+        string encoding;
+        # a random Content-ID stem unique to this message
+        string stem = get_random_bytes(16).toHex();
+        # parts by Content-ID; discarded trial serializations can leave parts the message does not use
+        hash<string, hash<XopPartInfo>> parts();
+    }
+
+    constructor(string encoding) {
+        self.encoding = encoding;
+    }
+
+    # stores a value in a new part and returns the cid: URI that references it
+    string reference(auto value) {
+        string content_type;
+        binary data;
+        switch (value.typeCode()) {
+            case NT_BINARY:
+                content_type = "application/octet-stream";
+                data = value;
+                break;
+
+            case NT_STRING: {
+                string text = convert_encoding(value, encoding);
+                content_type = "text/plain;charset=" + WsdlMediaType::parameterValue(text.encoding());
+                data = binary(text);
+                break;
+            }
+
+            default:
+                throw SOAP_SERIALIZATION_ERROR, sprintf("a swaRef value is the content of the MIME part it "
+                    "references and must be binary or string data; got type %y", value.type());
+        }
+        # no "=" in the identifier: it cannot name a MIME-bound WSDL part (WS-I AP R2933)
+        string id = sprintf("swaref-%s-%d@qore.org", stem, parts.size() + 1);
+        parts{id} = <XopPartInfo>{"id": id, "content_type": content_type, "data": data};
+        return "cid:" + id;
+    }
+
+    # returns the parts that the serialized XML references, in the order they were created
+    list<hash<XopPartInfo>> collect(string xml) {
+        # the random stem makes each cid: URI unique, so a reference is found as a substring
+        list<hash<XopPartInfo>> selected();
+        foreach hash<XopPartInfo> part in (parts.iterator()) {
+            if (index(xml, "cid:" + part.id) >= 0) {
+                push selected, part;
+            }
+        }
+        return selected;
+    }
+}
+
+# sets or suspends the swaRef part writer for the content serialized while the object exists
+class SwaRefOutputScope {
+    private {
+        *SwaRefPackageWriter previous;
+    }
+
+    constructor(*SwaRefPackageWriter writer) {
+        previous = SwaRefOutput;
+        SwaRefOutput = writer;
+    }
+
+    destructor() {
+        SwaRefOutput = previous;
+    }
+}
+
+# sets or suspends the parts that swaRef values reference while a SOAP message is decoded
+class SwaRefInputScope {
+    private {
+        *SwaPackageReferences previous;
+    }
+
+    constructor(*SwaPackageReferences references) {
+        previous = SwaRefInput;
+        SwaRefInput = references;
+    }
+
+    destructor() {
+        SwaRefInput = previous;
+    }
+}
+
+# WS-I Attachments Profile 1.0 swaRef values (section 4.4, R2928): the native value is the content of the MIME
+# part that the URI references
+class XsdSwaRefHelper {
+    # whether a simple type is swaRef or a restriction of it
+    static bool derives(XsdSimpleType type) {
+        *XsdAbstractType current = type;
+        hash<string, bool> seen();
+        while (current instanceof XsdSimpleType) {
+            XsdSimpleType simple = cast<XsdSimpleType>(current);
+            if (simple.listItemType || simple.unionTypes || seen{simple.uniqueHash()}) {
+                return False;
+            }
+            seen{simple.uniqueHash()} = True;
+            if (simple.name == "swaRef" && simple.ons && simple.nsc.getOutputNamespaceUri(simple.ons) == WSI_SWAREF_NS) {
+                return True;
+            }
+            current = simple.type;
+        }
+        return False;
+    }
+
+    # whether a type's values are attachment references in the current output or input
+    # the provider type of a list item or union member: its lexical values, even when it is a swaRef type
+    static AbstractDataProviderType lexicalProviderType(XsdAbstractType type) {
+        return type instanceof XsdSimpleType
+            ? cast<XsdSimpleType>(type).getLexicalDataProviderType()
+            : type.getDataProviderType();
+    }
+
+    private static bool active(XsdAbstractType type) {
+        return !RetainedXmlValidationNamespaces && type instanceof XsdSimpleType
+            && cast<XsdSimpleType>(type).isAttachmentReference();
+    }
+
+    # replaces the content of a swaRef value with the cid: URI of a new part while a SOAP message is serialized
+    static auto output(XsdAbstractType type, auto value) {
+        if (!SwaRefOutput || !active(type)) {
+            return value;
+        }
+        return SwaRefOutput.reference(value);
+    }
+
+    # replaces a decoded swaRef URI with the content of the part it references while a SOAP message is decoded
+    static auto input(XsdAbstractType type, string name, auto value) {
+        if (!SwaRefInput || value.typeCode() != NT_STRING || !active(type)) {
+            return value;
+        }
+        *hash<auto> part;
+        try {
+            part = SwaRefInput.entity(value, SwaRefInput.base);
+        } catch (hash<ExceptionInfo> ex) {
+            if (ex.err == "SOAP-MESSAGE-ERROR") {
+                throw SOAP_DESERIALIZATION_ERROR, sprintf("swaRef value %y of %y does not reference one MIME part "
+                    "of the message (WS-I Attachments Profile 1.0 R2928): %s", value, name, ex.desc);
+            }
+            rethrow;
+        }
+        if (!part) {
+            throw SOAP_DESERIALIZATION_ERROR, sprintf("swaRef value %y of %y references no MIME part of the "
+                "message (WS-I Attachments Profile 1.0 R2928)", value, name);
+        }
+        # a part whose media type carries a charset is text; any other part stays binary
+        return WSDLLib::parseSOAPMessage({"content-type": part.hdr."content-type", "body": part.body}, True).body;
+    }
+}
+
 thread_local *string EncodingRules;
 
 class XsdEncodingRulesScope {
@@ -35321,6 +35590,8 @@ public class WSMessage inherits WSDL::XsdNamedData {
             }
             string xml = WSDLLib::getXmlMessageText({"content-type":content_type,"body":entity.body});
             hash<auto> document = parse_xml(xml, XPF_PRESERVE_ORDER | XPF_PRESERVE_WHITESPACE);
+            # swaRef values in XML attachment entities are not references (WS-I Attachments Profile 1.0 R2928)
+            SwaRefInputScope no_references();
             result = deserializeDocument(NOTHING, XsdBase::expandElementNamespaces(document), (part,), False, True){part};
             if (retain_xml) {
                 result = new XsdXmlValue(xml);
@@ -36299,9 +36570,11 @@ public class SoapBinding inherits WSDL::OperationalBinding {
         XsdQNameOutputScope output_scope(output_namespaces);
         XsdQNameXmlOutputHelper output();
         *XopPackageWriter xop = exists MtomThreshold ? new XopPackageWriter(MtomThreshold) : NOTHING;
+        SwaRefPackageWriter swaref(enc);
         hash<auto> envelope;
         {
             XopOutputScope xop_scope(xop);
+            SwaRefOutputScope swaref_scope(swaref);
             envelope = serializeSoapMessage(op, msg, h, header, nsh, request, soap12, \mpm, faultmsg, bmd, enc);
         }
         envelope = output.prepare(envelope);
@@ -36318,6 +36591,8 @@ public class SoapBinding inherits WSDL::OperationalBinding {
         }
         rv.body = make_xml(envelope, xml_opts, enc);
         XsdSoapXmlHelper::validateDocument(rv.body, SOAP_SERIALIZATION_ERROR);
+        # only the parts that the envelope references belong to the message; trial serializations can leave others
+        list<hash<XopPartInfo>> swaref_parts = swaref.collect(rv.body);
         list<hash<XopPartInfo>> xop_parts;
         if (xop && !xop.collect(rv.body, \xop_parts)) {
             # An original infoset containing xop:Include is sent without XOP (SOAP 1.2 MTOM section 4.3.1).
@@ -36354,6 +36629,15 @@ public class SoapBinding inherits WSDL::OperationalBinding {
                 mpm = new MultiPartRelatedMessage(WsdlAttachmentHelper::boundary());
             }
             foreach hash<XopPartInfo> part in (xop_parts) {
+                mpm.addPart(part.data, "<" + part.id + ">", part.content_type);
+            }
+        }
+        # swaRef values reference parts of a SOAP with Attachments package (WS-I Attachments Profile 1.0 R2928)
+        if (swaref_parts) {
+            if (!mpm) {
+                mpm = new MultiPartRelatedMessage(WsdlAttachmentHelper::boundary());
+            }
+            foreach hash<XopPartInfo> part in (swaref_parts) {
                 mpm.addPart(part.data, "<" + part.id + ">", part.content_type);
             }
         }
@@ -36426,6 +36710,9 @@ public class SoapBinding inherits WSDL::OperationalBinding {
             }
             # XOP optimizes the SOAP envelope only, not attachment entities.
             XopOutputScope attachment_xop(NOTHING);
+            # WS-I Attachments Profile 1.0 R2928 makes swaRef values in the envelope references, not those in
+            # XML attachment entities
+            SwaRefOutputScope attachment_swaref(NOTHING);
             foreach string key in (keys bmd.parts) {
                 string part = msg.args{key}.part;
                 @assert(part && msg.pmap{part} == key);
@@ -36821,6 +37108,10 @@ public class SoapBinding inherits WSDL::OperationalBinding {
         bool message_soap12 = SoapEnvelopeHelper::validate(orig_msg, isSoap12(), !request);
         hash o = orig_msg;
         remove o."^mime-parts^";
+        remove o."^mime-references^";
+        # swaRef values in the envelope reference the parts of the same message (WS-I Attachments Profile 1.0 R2928)
+        SwaRefInputScope swaref_scope(SwaPackageReferences::restore(orig_msg."^mime-parts^",
+            orig_msg."^mime-references^"));
         XsdBase::inheritAttributeNamespaces(\o);
         WSDL::XsdBase::removeNS2(\o);
         WSDL::XsdBase::removeNS2(\o.Envelope);

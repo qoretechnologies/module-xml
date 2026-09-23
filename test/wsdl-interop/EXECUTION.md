@@ -10787,3 +10787,55 @@ The Note and WS-I Attachments Profile 1.0 carry their authors' copyright without
 
 `test/soap-swa-references.qtest` has 5 cases and 26 assertions, including the encoded Axis case, which the
 previous module rejected.
+
+## P8-05c-2: swaRef attachment references
+
+Before this change, `ref:swaRef` (WS-I Attachments Profile 1.0, section 4.4) was an ordinary `xs:anyURI`
+restriction. A value was written as a literal URI, no part was ever added to the message, and a received
+`cid:` URI was returned as a string. That violated R2928 in both directions, and the CXF `echoDataRef` contract
+could not interoperate.
+
+**Values.** A `swaRef` element, attribute or message part (`XsdSimpleType::isAttachmentReference()`: `swaRef`
+or a restriction of it) now has the content of the referenced part as its native value.
+
+**Output.** Each message has a part writer:
+- Binary data becomes an `application/octet-stream` part, and a string becomes a `text/plain` part in the
+  message encoding.
+- The value becomes the part's `cid:` URI, and that URI is what the `anyURI`, fixed-value and identity checks
+  see.
+- Only the parts that the final envelope references are packaged.
+- The message becomes a SOAP with Attachments package whose root type is the SOAP media type, and it can be an
+  MTOM package at the same time.
+
+**Input.** The parsed message carries the package's labels and base URI (`^mime-references^`). A decoded URI
+resolves like an `href`, by `cid:` or Content-Location, to a string (a text part with a charset) or to binary
+data. A URI that does not identify exactly one part raises `SOAP-DESERIALIZATION-ERROR` citing R2928. So does
+a `swaRef` value in a message that is not a package.
+
+**Scope.** R2928 applies to the envelope, so values stay URIs in these places:
+- XML attachment entities;
+- list items and union members of type `swaRef`;
+- retained XML validation and retained XML values.
+
+Provider types of `swaRef` fields accept binary or string data. List items and union members keep their
+lexical `anyURI` provider types; the first version got this wrong, and `soap-swaref.qtest` found it.
+
+**Tests.** `test/soap-swaref.qtest` has 10 cases over `test/swaref.wsdl`, which follows the profile's
+`SendClaim` example in SOAP 1.1 and 1.2:
+- elements, a restriction, repeated occurrences, simple content, an attribute and rpc/literal typed parts,
+  in both directions;
+- media types and encodings;
+- `cid:` and Content-Location references from other senders;
+- R2928 rejections and invalid values;
+- lists, `anyURI` and XML attachment entities that stay URIs;
+- MTOM together with `swaRef`, retained XML and provider types;
+- a `SoapHandler`/`SoapClient` exchange over HTTP.
+
+The SwA peer now implements CXF's `echoDataRef`, and `test_swa_parts.py` exchanges it live with Apache CXF
+4.1.3 in both directions:
+- The Qore client sends binary content and decodes CXF's `text/plain` reply as a string.
+- CXF's client sends `application/octet-stream` content to the native Qore server and reads its string reply
+  as UTF-8.
+
+**Open.** Retained XML consumers (`xml_values`) keep the URIs, and `SoapHandler` and `SoapClient` do not pass
+unbound parts to them. Exposing those parts needs a new API field, which is left to a decision.

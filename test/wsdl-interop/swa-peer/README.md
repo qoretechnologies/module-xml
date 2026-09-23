@@ -18,8 +18,11 @@ The [W3C media-content note](https://www.w3.org/TR/2005/NOTE-xml-media-types-200
 restricts that annotation to binary element content. The original is unchanged;
 a test checks the exact derivative edit, with trailing whitespace removed. Removing this invalid annotation resolves
 the CXF schema warning without changing message parts, bindings or wire types.
-The `echoDataRef` reference protocol belongs to the separate attachment-reference
-acceptance; this suite tests the three explicit `mime:content` operations.
+The captures cover the three explicit `mime:content` operations. `echoDataRef`, whose
+`DataRef` element is a WS-I `swaRef` attachment reference (R2928), is exchanged live only:
+the Qore client sends binary content to the CXF server and receives a `text/plain` reply as
+a string, and the CXF client sends `application/octet-stream` content to the native Qore
+server and receives its string reply as UTF-8 text.
 
 Code generation explicitly enables MIME mappings for those operations with
 `-mimeMethods`; otherwise CXF generates ordinary body parameters for attachments.

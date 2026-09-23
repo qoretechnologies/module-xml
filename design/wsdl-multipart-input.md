@@ -97,9 +97,40 @@ Attachments Note (section 3) defines before any SOAP processing:
   percent-encoding and a `Content-Location` label that several parts share.
 
 WS-I Attachments Profile 1.0 constrains the same packages (R2931, R2932). Its `swaRef` type (R2928) is a typed
-reference that the schema drives, and is separate from this `href` resolution. The SwA Note and the profile cannot
+reference that the schema drives, and is separate from this `href` resolution; see below. The SwA Note and the profile cannot
 be redistributed. `normative/sources.json` pins the Note by digest, with the section 3 phrases above, and pins the
 profile as the reproducible requirement extract `normative/wsiap10-requirements.json`.
+
+## swaRef attachment references
+
+WS-I Attachments Profile 1.0, section 4.4, types a reference to an attachment as `ref:swaRef`, a restriction of
+`xs:anyURI` in the namespace `http://ws-i.org/profiles/basic/1.1/xsd`. R2928 requires the URI of such a value in
+an envelope to resolve to a MIME part of the same message. The native value is therefore the part's content, and
+`XsdSimpleType::isAttachmentReference()` identifies the type: `swaRef` or a restriction of it, but not a list or
+union, whose items are URIs.
+
+- **Output.** `serializeMessageWithDescription()` sets a `SwaRefPackageWriter` for each message. At the start of
+  `XsdDocumentValueHelper::serializeValue()`, a `swaRef` value becomes a new part, and its `cid:` URI is the
+  value that the `anyURI` checks, fixed values and identity constraints see. This covers elements, attributes,
+  simple content and typed message parts. Binary data becomes `application/octet-stream`, and a string becomes
+  `text/plain` in the message encoding. The Content-IDs contain no `=`, so they never name a MIME-bound WSDL
+  part (R2933). Only the parts that the final envelope references are packaged, as discarded trial serializations
+  can create others. A message with parts becomes a SOAP with Attachments package with the SOAP media type as
+  its root type, and it can be an MTOM package at the same time.
+- **Input.** `parseSOAPMessage()` keeps the package's labels and base URI under `^mime-references^`, next to
+  `^mime-parts^`. `deserializeMessageImpl()` sets them as the `SwaPackageReferences` of the message. Once a value
+  has been decoded and checked as a URI, it is resolved like an `href`: `cid:` by Content-ID, anything else by
+  Content-Location against the root's base URI. A text part (with a `charset`) decodes as a string, and any other
+  part as binary. Attributes resolve after their fixed-value check. A URI that identifies no part, or more than
+  one, raises `SOAP-DESERIALIZATION-ERROR`, and so does a `swaRef` value in a message that is not a package.
+- **Scope.** R2928 covers the envelope. XML attachment entities bound with `mime:content` suspend both hooks,
+  so their `swaRef` values stay URIs. Retained XML validation (`RetainedXmlValidationNamespaces`) does too, and
+  retained XML values keep the URIs.
+- **Provider types.** A `swaRef` field accepts binary or string data. List items and union members use
+  `getLexicalDataProviderType()`.
+
+`test/soap-swaref.qtest` covers the WS-I `SendClaim` example shape in SOAP 1.1 and 1.2. The live SwA peer
+exchanges CXF's `echoDataRef` operation with Apache CXF 4.1.3 in both directions.
 
 `WSDLLib::packageMtom()` writes the root as `application/xop+xml` with the XML serialization's content type
 in `type`, and repeats it in the package's `start-info`: `text/xml` for SOAP 1.1, and `application/soap+xml`

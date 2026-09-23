@@ -1,0 +1,320 @@
+#!/usr/bin/env qore
+# -*- mode: qore; indent-tabs-mode: nil -*-
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires xml
+%requires HttpServer
+%requires ../qlib/WSDL.qm
+%requires ../qlib/SoapHandler.qm
+%requires ../qlib/SoapClient.qm
+
+%exec-class SoapSwaRefTest
+
+# WS-I Attachments Profile 1.0 swaRef values (section 4.4, R2928): the native value of an element, attribute or
+# message part typed ref:swaRef is the content of the MIME part that the URI in the message references.
+public class SoapSwaRefTest inherits QUnit::Test {
+    private {
+        WebService ws;
+        *HttpServer server;
+        # the values the SOAP handler received, checked by the test thread
+        Queue received();
+
+        const Types = "urn:qore:test:swaref:types";
+        const Boundary = "b0undary";
+        const Bindings = ("Claim11", "Claim12");
+
+        # a claim using every kind of swaRef value in the contract, and values that are not references
+        const Claim = {
+            "Name": "claim é",
+            "ClaimForm": "form é",
+            "Photo": (binary("\x00\x01"), binary("\xff\xfe\r\n")),
+            "Labelled": {"^value^": binary("label"), "^attributes^": {"label": "front"}},
+            "Refs": ("cid:a@x", "cid:b@x"),
+            "Uri": "cid:not-a-reference@x",
+            "^attributes^": {"receipt": binary("receipt")},
+        };
+        # the fields of a decoded claim; absent optional elements have no value
+        const Fields = ("Name", "ClaimForm", "Photo", "Labelled", "Refs", "Uri", "Raw");
+    }
+
+    constructor() : QUnit::Test("SOAP swaRef attachment references", "1.0") {
+        ws = WSDLLib::getWebServiceFromUrl(get_script_dir() + "/swaref.wsdl");
+        addTestCase("swaRef elements, attributes and parts become MIME parts", \values());
+        addTestCase("part media types follow the native value", \mediaTypes());
+        addTestCase("references from other senders resolve", \references());
+        addTestCase("unresolvable references are rejected (R2928)", \unresolved());
+        addTestCase("invalid native values are rejected", \invalidValues());
+        addTestCase("lists, anyURI and XML attachment entities keep URIs", \notReferences());
+        addTestCase("swaRef parts and MTOM share one package", \mtom());
+        addTestCase("retained XML keeps the references", \retained());
+        addTestCase("provider types accept attachment content", \providerTypes());
+        addTestCase("SoapHandler and SoapClient exchange swaRef attachments", \http());
+        set_return_value(main());
+    }
+
+    # serializes and decodes a message, returning the wire form and the decoded value
+    private hash<auto> roundTrip(string operation, auto value, string binding, bool request = True,
+            *string enc) {
+        WSOperation op = ws.getOperation(operation);
+        hash<auto> wire = request
+            ? op.serializeRequest(value, NOTHING, enc, NOTHING, NOTHING, NOTHING, binding)
+            : op.serializeResponse(value, NOTHING, enc, NOTHING, NOTHING, NOTHING, binding);
+        hash<auto> message = WSDLLib::parseMultiPartSOAPMessage({"body": wire.body,
+            "_qore_orig_content_type": wire.hdr."Content-Type"}, False, True);
+        hash<auto> parsed = WSDLLib::parseSOAPMessage(message, False, True);
+        return {"wire": wire, "message": message, "decoded": request
+            ? op.deserializeRequest(parsed, binding) : op.deserializeResponse(parsed, binding)};
+    }
+
+    # a decoded claim: every field, and the attributes the claim has
+    private static hash<auto> decoded(hash<auto> claim) {
+        hash<auto> result = map {$1: claim{$1}}, Fields;
+        if (claim."^attributes^") {
+            result."^attributes^" = claim."^attributes^";
+        }
+        return result;
+    }
+
+    # the text of every element or attribute in the root that references a swaRef part
+    private static list<string> references(hash<auto> message) {
+        string xml = binary_to_string(message.body, "UTF-8");
+        return (xml =~ x/(cid:swaref-[0-9a-f]+-[0-9]+@qore.org)/g) ?? ();
+    }
+
+    values() {
+        foreach string binding in (Bindings) {
+            hash<auto> result = roundTrip("Submit", {"claim": Claim}, binding);
+            assertEq(decoded(Claim), result.decoded, binding + ": document element");
+            # the root keeps the SOAP media type of the binding in a SOAP with Attachments package
+            assertRegex('^multipart/related;.*type="' + (binding == "Claim11" ? "text/xml" : 'application/soap\+xml'),
+                result.wire.hdr."Content-Type");
+            # ClaimForm, two Photo occurrences, Labelled and the receipt attribute: one part each
+            assertEq(5, result.message.parts.size(), binding + ": parts");
+            list<string> referenced = map $1.substr(4), SoapSwaRefTest::references(result.message);
+            assertEq(5, referenced.size());
+            assertEq(sort(keys result.message.parts), sort(referenced), "each part is referenced once");
+
+            # an rpc/literal message part typed ref:swaRef, in both directions
+            result = roundTrip("SendClaim", {"ClaimDetail": Claim, "Scan": binary("scan")}, binding);
+            assertEq({"ClaimDetail": decoded(Claim), "Scan": binary("scan")}, result.decoded, binding + ": rpc request");
+            assertEq(6, result.message.parts.size());
+            result = roundTrip("SendClaim", {"ClaimRefNo": "42", "Receipt": "done"}, binding, False);
+            assertEq({"ClaimRefNo": "42", "Receipt": "done"}, result.decoded, binding + ": rpc response");
+        }
+        # the required ClaimForm element alone makes the message a package with one part
+        hash<auto> minimal = roundTrip("Submit", {"claim": {"Name": "n", "ClaimForm": binary("x")}}, "Claim11");
+        assertEq(1, minimal.message.parts.size());
+        assertEq(decoded({"Name": "n", "ClaimForm": binary("x")}), minimal.decoded);
+        # a message without swaRef values stays an ordinary SOAP message
+        hash<auto> empty = ws.getOperation("Upload").serializeResponse({"note": "42"}, NOTHING, NOTHING,
+            NOTHING, NOTHING, NOTHING, "Claim11");
+        assertRegex("^text/xml", empty.hdr."Content-Type", "no swaRef value, no package");
+    }
+
+    mediaTypes() {
+        hash<auto> result = roundTrip("SendClaim", {"ClaimRefNo": "1", "Receipt": binary("\x00bin")}, "Claim11",
+            False);
+        assertEq("application/octet-stream", result.message.parts.firstValue().hdr."content-type");
+        assertEq(binary("\x00bin"), result.decoded.Receipt);
+
+        # text is sent in the message encoding and decodes as the same string
+        result = roundTrip("SendClaim", {"ClaimRefNo": "1", "Receipt": "reçu"}, "Claim11", False, "ISO-8859-1");
+        assertEq("text/plain;charset=ISO-8859-1", result.message.parts.firstValue().hdr."content-type");
+        assertEq(binary(convert_encoding("reçu", "ISO-8859-1")), result.message.parts.firstValue().body);
+        assertEq("reçu", result.decoded.Receipt);
+        assertEq("ISO-8859-1", result.decoded.Receipt.encoding());
+
+        # empty content is still a part
+        result = roundTrip("SendClaim", {"ClaimRefNo": "1", "Receipt": binary()}, "Claim12", False);
+        assertEq(1, result.message.parts.size());
+        assertEq(binary(), result.decoded.Receipt);
+        result = roundTrip("SendClaim", {"ClaimRefNo": "1", "Receipt": ""}, "Claim12", False);
+        assertEq("", result.decoded.Receipt);
+    }
+
+    # a SOAP 1.1 package whose root carries a Claim with the given ClaimForm reference
+    private static hash<auto> package(string reference, list<hash<auto>> parts, *string root_location,
+            *string package_location) {
+        string xml = '<e:Envelope xmlns:e="http://schemas.xmlsoap.org/soap/envelope/"><e:Body><t:Claim xmlns:t="'
+            + Types + '"><t:Name>n</t:Name><t:ClaimForm>' + reference + '</t:ClaimForm></t:Claim></e:Body>'
+            '</e:Envelope>';
+        string text = "--" + Boundary + "\r\nContent-Type: text/xml; charset=utf-8\r\nContent-ID: <root@x>\r\n"
+            + (root_location ? "Content-Location: " + root_location + "\r\n" : "") + "\r\n" + xml + "\r\n";
+        foreach hash<auto> part in (parts) {
+            text += "--" + Boundary + "\r\n";
+            map text += $1.key + ": " + $1.value + "\r\n", part.headers.pairIterator();
+            text += "\r\n" + part.body + "\r\n";
+        }
+        text += "--" + Boundary + "--\r\n";
+        hash<auto> message = {"content-type": 'multipart/related; boundary="' + Boundary
+            + '"; type="text/xml"; start="<root@x>"', "body": binary(text)};
+        if (package_location) {
+            message."content-location" = package_location;
+        }
+        return message;
+    }
+
+    private auto claimForm(string reference, list<hash<auto>> parts, *string root_location,
+            *string package_location) {
+        hash<auto> message = WSDLLib::parseMultiPartSOAPMessage(SoapSwaRefTest::package(reference, parts,
+            root_location, package_location), False, True);
+        return ws.getOperation("Submit").deserializeRequest(WSDLLib::parseSOAPMessage(message, False, True),
+            "Claim11").ClaimForm;
+    }
+
+    references() {
+        hash<auto> octets = {"headers": {"Content-Type": "image/png", "Content-ID": "<form@example.com>"},
+            "body": "PNG"};
+        assertEq(binary("PNG"), claimForm("cid:form@example.com", (octets,)));
+        # RFC 2392: the URI is percent-encoded, and the scheme is case-insensitive
+        assertEq(binary("PNG"), claimForm("cid:form%40example.com", (octets,)));
+        assertEq(binary("PNG"), claimForm("CID:form@example.com", (octets,)));
+        # white space around the URI is collapsed like any xs:anyURI value
+        assertEq(binary("PNG"), claimForm("  cid:form@example.com\n", (octets,)));
+        # a text part with a charset decodes as a string
+        hash<auto> text = {"headers": {"Content-Type": "text/plain; charset=utf-8", "Content-ID": "<t@x>"},
+            "body": "texte é"};
+        assertEq("texte é", claimForm("cid:t@x", (text,)));
+
+        # Content-Location labels resolve against the root's base URI (SwA Note section 3)
+        hash<auto> located = {"headers": {"Content-Type": "image/tiff", "Content-Location": "form.tiff"},
+            "body": "TIFF"};
+        assertEq(binary("TIFF"), claimForm("form.tiff", (located,)));
+        assertEq(binary("TIFF"), claimForm("thismessage:/form.tiff", (located,)));
+        assertEq(binary("TIFF"), claimForm("form.tiff", (located,), "claim.xml", "http://claims.example.com/"));
+        assertEq(binary("TIFF"), claimForm("http://claims.example.com/form.tiff", (located,), NOTHING,
+            "http://claims.example.com/"));
+    }
+
+    unresolved() {
+        hash<auto> part = {"headers": {"Content-Type": "image/png", "Content-ID": "<form@x>"}, "body": "PNG"};
+        assertThrows("SOAP-DESERIALIZATION-ERROR", "names no part of the message", \claimForm(),
+            ("cid:missing@x", (part,)));
+        assertThrows("SOAP-DESERIALIZATION-ERROR", "R2928", \claimForm(), ("#form", (part,)));
+        assertThrows("SOAP-DESERIALIZATION-ERROR", "R2928", \claimForm(), ("form.png", (part,)));
+        assertThrows("SOAP-DESERIALIZATION-ERROR", "R2928", \claimForm(), ("http://example.com/form", (part,)));
+        # a malformed percent-encoding is not an anyURI value
+        assertThrows("SOAP-DESERIALIZATION-ERROR", "anyURI", \claimForm(), ("cid:form%4", (part,)));
+        hash<auto> located = {"headers": {"Content-Type": "image/png", "Content-Location": "form.png"},
+            "body": "A"};
+        assertThrows("SOAP-DESERIALIZATION-ERROR", "matches the Content-Location of 2 parts", \claimForm(),
+            ("form.png", (located, located + {"body": "B"})));
+
+        # a message that is not a MIME package has no parts to reference
+        string xml = '<e:Envelope xmlns:e="http://schemas.xmlsoap.org/soap/envelope/"><e:Body><t:Claim xmlns:t="'
+            + Types + '"><t:Name>n</t:Name><t:ClaimForm>cid:form@x</t:ClaimForm></t:Claim></e:Body></e:Envelope>';
+        hash<auto> parsed = WSDLLib::parseSOAPMessage({"content-type": "text/xml; charset=utf-8", "body": xml},
+            False, True);
+        assertThrows("SOAP-DESERIALIZATION-ERROR", "R2928", \ws.getOperation("Submit").deserializeRequest(),
+            (parsed, "Claim11"));
+    }
+
+    invalidValues() {
+        WSOperation op = ws.getOperation("SendClaim");
+        assertThrows("SOAP-SERIALIZATION-ERROR", "must be binary or string data", \op.serializeResponse(),
+            ({"ClaimRefNo": "1", "Receipt": 42}, NOTHING, NOTHING, NOTHING, NOTHING, NOTHING, "Claim11"));
+        assertThrows("SOAP-SERIALIZATION-ERROR", "must be binary or string data", \op.serializeResponse(),
+            ({"ClaimRefNo": "1", "Receipt": {"a": 1}}, NOTHING, NOTHING, NOTHING, NOTHING, NOTHING, "Claim11"));
+        assertThrows("SOAP-SERIALIZATION-ERROR", "must be binary or string data", \op.serializeRequest(),
+            ({"ClaimDetail": Claim + {"^attributes^": {"receipt": 1.5}}, "Scan": "s"}, NOTHING, NOTHING, NOTHING,
+            NOTHING, NOTHING, "Claim12"));
+    }
+
+    notReferences() {
+        # the list of swaRef values and the anyURI element keep their URIs and add no parts (see values())
+        hash<auto> result = roundTrip("Submit", {"claim": Claim}, "Claim11");
+        assertEq(("cid:a@x", "cid:b@x"), result.decoded.Refs);
+        assertEq("cid:not-a-reference@x", result.decoded.Uri);
+
+        # R2928 applies to the envelope: a swaRef value in an XML attachment entity is the URI itself
+        foreach string binding in (Bindings) {
+            hash<auto> claim = {"Name": "n", "ClaimForm": "cid:elsewhere@x"};
+            result = roundTrip("Upload", {"note": "attached", "claim": claim}, binding);
+            assertEq(1, result.message.parts.size(), binding + ": only the XML attachment entity");
+            assertEq({"note": "attached", "claim": decoded(claim)}, result.decoded, binding + ": attachment entity");
+        }
+    }
+
+    mtom() {
+        foreach string binding in (Bindings) {
+            hash<auto> claim = {"Name": "n", "ClaimForm": binary("form"), "Raw": binary("raw octets")};
+            hash<auto> result;
+            {
+                SoapMtomScope mtom(True, 0);
+                result = roundTrip("Submit", {"claim": claim}, binding);
+            }
+            assertRegex('^multipart/related;.*type="application/xop\+xml"', result.wire.hdr."Content-Type");
+            # one part for the extracted base64Binary content and one for the swaRef value
+            assertEq(2, result.message.parts.size());
+            assertEq(decoded(claim), result.decoded, binding);
+        }
+    }
+
+    retained() {
+        WSOperation op = ws.getOperation("Submit");
+        hash<auto> result = roundTrip("Submit", {"claim": Claim - "Labelled"}, "Claim11");
+        hash<SoapXmlMessageInfo> xml = op.deserializeXmlRequest(WSDLLib::getXmlMessageText(result.message),
+            "Claim11", result.message.parts);
+        string claim = xml.body.claim.getXml();
+        assertRegex("ClaimForm[^>]*>cid:swaref-", claim, "the retained XML keeps the reference");
+        # serializing the retained XML again keeps its URIs and adds no parts
+        hash<auto> wire = op.serializeRequest({"^body^": xml.body, "^headers^": {}, "^attachments^": {}},
+            NOTHING, NOTHING, NOTHING, NOTHING, NOTHING, "Claim11");
+        assertRegex("^text/xml", wire.hdr."Content-Type");
+        assertTrue(wire.body =~ /ClaimForm[^>]*>cid:swaref-/);
+    }
+
+    providerTypes() {
+        AbstractDataProviderType claim = ws.getOperation("Submit").input.getDataProviderType().getFields().claim
+            .getType();
+        AbstractDataProviderType form = claim.getFields().ClaimForm.getType();
+        assertEq(binary("x"), form.acceptsValue(binary("x")));
+        assertEq("x", form.acceptsValue("x"));
+        assertThrows("RUNTIME-TYPE-ERROR", \form.acceptsValue(), 1);
+        # the repeated restriction of swaRef takes a list of contents
+        AbstractDataProviderType photos = claim.getFields().Photo.getType();
+        assertEq((binary("x"), "y"), photos.acceptsValue((binary("x"), "y")));
+        assertThrows("RUNTIME-TYPE-ERROR", \photos.acceptsValue(), ((1,),));
+        # anyURI and the list of swaRef URIs keep their string types
+        assertThrows("RUNTIME-TYPE-ERROR", \claim.getFields().Uri.getType().acceptsValue(), binary("x"));
+        assertEq(("cid:a@x",), claim.getFields().Refs.getType().acceptsValue(("cid:a@x",)));
+        assertThrows("RUNTIME-TYPE-ERROR", \claim.getFields().Refs.getType().acceptsValue(), (binary("x"),));
+    }
+
+    # the handler receives the attachment content, and answers with new content naming its binding
+    private code reply(string binding) {
+        return auto sub (hash<auto> cx, auto value) {
+            received.push(value);
+            return {"claim": value + {"ClaimForm": binary("reply " + binding)}};
+        };
+    }
+
+    http() {
+        SoapHandler handler(new PermissiveAuthenticator());
+        foreach string binding in (Bindings) {
+            handler.addMethod(ws, ws.getBindingOperation(binding, "Submit"), reply(binding), NOTHING, NOTHING,
+                NOTHING, NOTHING, NOTHING, NOTHING, binding, "swaref-" + binding);
+        }
+        server = new HttpServer();
+        on_exit {
+            server.stop();
+            delete server;
+        }
+        server.setDefaultHandler("soap", handler);
+        string url = sprintf("http://127.0.0.1:%d/swaref", server.addListener(0).port);
+        foreach string binding in (Bindings) {
+            string port = binding + "Port";
+            SoapClient client({"wsdl": ws, "port": port, "url": url});
+            hash<auto> info;
+            auto result = client.callOperation("Submit", {"claim": Claim}, NOTHING, \info);
+            assertRegex("^multipart/related", info.headers."Content-Type", binding + ": request package");
+            assertRegex("^multipart/related", info."response-headers"."content-type", binding + ": response package");
+            assertEq(decoded(Claim + {"ClaimForm": binary("reply " + binding)}), result, binding);
+            # the call has returned, so the handler has queued what it received
+            assertEq(decoded(Claim), received.get(0), binding + ": handler input");
+        }
+    }
+}

@@ -27,6 +27,9 @@ import org.apache.cxf.swa.types.*;
 
 public final class SwAPeer implements SwAServiceInterface {
     private static final byte[] BYTES = {0, (byte)255, 65, 13, 10};
+    // echoDataRef: the swaRef request content and the text of the reply (WS-I Attachments Profile 1.0 R2928)
+    private static final byte[] REFERENCE = {1, 2, (byte)255, 13, 10, 0};
+    private static final String REFERENCE_REPLY = "reference reply é";
     private static DataHandler data(byte[] bytes) { return data(bytes, "application/octet-stream"); }
     private static DataHandler data(byte[] bytes, String media) {
         return new DataHandler(new DataSource() {
@@ -54,7 +57,12 @@ public final class SwAPeer implements SwAServiceInterface {
         echoData(text, data);
         header.value = "header response";
     }
-    public void echoDataRef(Holder<DataStruct> data) { throw new AssertionError("unexpected reference operation"); }
+    public void echoDataRef(Holder<DataStruct> data) {
+        check(Arrays.equals(REFERENCE, bytes(data.value.getDataRef())));
+        DataStruct reply = new DataStruct();
+        reply.setDataRef(data(REFERENCE_REPLY.getBytes(StandardCharsets.UTF_8), "text/plain;charset=UTF-8"));
+        data.value = reply;
+    }
     public OutputResponseAll echoAllAttachmentTypes(VoidRequest request, Holder<DataHandler> a,
             Holder<DataHandler> b, Holder<javax.xml.transform.Source> c, Holder<java.awt.Image> d,
             Holder<java.awt.Image> e) {
@@ -129,6 +137,15 @@ public final class SwAPeer implements SwAServiceInterface {
                     check(xml(c.value).contains("payload"));
                     check(d.value.getWidth(null) == 2 && d.value.getHeight(null) == 2);
                     check(e.value.getWidth(null) == 2 && e.value.getHeight(null) == 2);
+                    // the reference operation is called when the runner asks for it (argument "reference")
+                    if (args.length > 3 && args[3].equals("reference")) {
+                        DataStruct reference = new DataStruct();
+                        reference.setDataRef(data(REFERENCE));
+                        Holder<DataStruct> echoed = new Holder<>(reference);
+                        client.echoDataRef(echoed);
+                        check(new String(bytes(echoed.value.getDataRef()), StandardCharsets.UTF_8)
+                            .equals(REFERENCE_REPLY));
+                    }
                     System.out.println("PASS");
                 } finally { ClientProxy.getClient(client).destroy(); }
             }
