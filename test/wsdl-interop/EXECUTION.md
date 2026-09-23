@@ -10754,3 +10754,36 @@ fails in both directions, and the new suite does not load (`SoapMtomScope` is ne
 
 Full suite on Qore `acc8ea401` (runtime unchanged during the run): 461 targets, 3,637 Qore cases, 174,344
 assertions. The only failures are the two core-blocked IEEE gates. Documentation builds with no warnings.
+
+## P8-05c-1: SOAP with Attachments references
+
+`WSDLLib::substHref()` replaced each `href` in a multipart SOAP 1.1 message with a MIME part, following the
+SwA Note (section 3) only in part:
+- Any reference that was not a lowercase `cid:` URI raised `SOAP-MESSAGE-ERROR` ("non-local part"). That
+  included the same-document `#id` references of SOAP encoding, so an encoded message carrying both
+  multi-reference values and attachments, as Apache Axis 1.x sends them, could not be read.
+- `cid:` identifiers were not percent-decoded (RFC 2392).
+- `Content-Location` labels were ignored.
+- A child element named `href` was treated as a reference.
+
+The new resolution follows the Note:
+- **Same-document references** (`#id`) are excluded and resolved later by SOAP encoding.
+- **Base URI.** Other references are made absolute against `xml:base` on the element or an ancestor, then the
+  closest enclosing `Content-Location` (the root part's, then the package's), then `thismessage:/` (RFC 2557).
+- **Labels.** A part's labels are `cid:` plus its Content-ID, and its `Content-Location` resolved against the
+  package's. The Note's three examples are all covered: `cid:`, absolute locations, and relative locations with
+  and without a package base.
+- **Matching.** A part may be referenced more than once. A reference that matches no part is left unchanged for
+  normal resolution. An unknown `cid:`, a malformed percent-encoding, a location shared by several parts and a
+  repeated `Content-Location` header raise `SOAP-MESSAGE-ERROR`.
+- **API.** `parseMultiPartSOAPMessage()` returns the package's own `Content-Location` as `package_location`.
+
+The Note and WS-I Attachments Profile 1.0 carry their authors' copyright without redistribution terms:
+- The Note (sha256 `4332ca90...`, reproducible) is pinned in `normative/sources.json` with the section 3
+  phrases above. `test_attachment_sources.py --verify-swa-note <copy>` checks them against a retrieved copy.
+- The profile's raw HTML is not reproducible (its CDN rewrites contributor addresses per response). It is
+  pinned as `normative/wsiap10-requirements.json`, 43 statements extracted by `wsi_requirements.py`, which
+  now reads quoted `class` attributes and iso-8859-1 documents. Two fetches give the same extract digest.
+
+`test/soap-swa-references.qtest` has 5 cases and 26 assertions, including the encoded Axis case, which the
+previous module rejected.

@@ -41,10 +41,11 @@ An encoded Body is decoded against a reference context built by `SoapBinding::pr
   element's and shares the same id space. Values of other types that a sender serializes in place are accepted
   the same way, and the graph checks below cover them too.
 
-Only a same-document fragment reference (`href="#id"`) names a value in the message. A multipart message replaces
-`cid:` references to its MIME parts before conversion. Any other reference, such as the `http:` reference of the
-Note's section 5.4.1 example, is outside the message and raises `SOAP-DESERIALIZATION-ERROR`. External values are
-never retrieved.
+Only a same-document fragment reference (`href="#id"`) names a value in the message. A SOAP with Attachments
+package first replaces references that name its MIME parts, by `cid:` or `Content-Location`, with the parts'
+content ([wsdl-multipart-input.md](wsdl-multipart-input.md)). Any other reference, such as the `http:` reference of
+the Note's section 5.4.1 example, is outside the message and raises `SOAP-DESERIALIZATION-ERROR`. External values
+are never retrieved.
 
 ## Graph checks
 

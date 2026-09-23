@@ -21,7 +21,8 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 PROFILES = HERE / 'normative'
-STATEMENT = re.compile(r'<p class=statement>(.*?)</p>', re.S | re.I)
+# Basic Profile 1.2 and 2.0 leave the class unquoted; Attachments Profile 1.0 quotes it.
+STATEMENT = re.compile(r'<p class="?statement"?\s*>(.*?)</p>', re.S | re.I)
 # The rendered statement always begins with its own identifier. The anchor is not reliable: R4005's
 # anchor sits on the preceding rationale paragraph rather than on the statement itself.
 IDENT = re.compile(r'^(R\d+)\b')
@@ -45,7 +46,12 @@ def normalize(value):
 
 def extract(path):
     """Return {requirement id: statement text} for one profile document."""
-    text = Path(path).read_bytes().decode('utf-8', 'replace')
+    raw = Path(path).read_bytes()
+    try:
+        text = raw.decode('utf-8')
+    except UnicodeDecodeError:
+        # Attachments Profile 1.0 declares iso-8859-1 (its copyright sign is the byte 0xA9)
+        text = raw.decode('iso-8859-1')
     out = {}
     for match in STATEMENT.finditer(text):
         statement = normalize(strip_markup(match.group(1)))

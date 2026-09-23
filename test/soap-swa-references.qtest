@@ -1,0 +1,182 @@
+#!/usr/bin/env qore
+# -*- mode: qore; indent-tabs-mode: nil -*-
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires xml
+%requires ../qlib/WSDL.qm
+
+%exec-class SoapSwaReferencesTest
+
+# SOAP with Attachments references (SwA Note section 3): href attributes resolved against MIME part labels.
+public class SoapSwaReferencesTest inherits QUnit::Test {
+    private {
+        const Contract = '<definitions xmlns="http://schemas.xmlsoap.org/wsdl/"
+            xmlns:soap="http://schemas.xmlsoap.org/wsdl/soap/" xmlns:xsd="http://www.w3.org/2001/XMLSchema"
+            xmlns:tns="urn:swa-refs" xmlns:s="urn:swa-refs:xsd" targetNamespace="urn:swa-refs">
+          <types><schema xmlns="http://www.w3.org/2001/XMLSchema" targetNamespace="urn:swa-refs:xsd">
+            <complexType name="Info"><all><element name="name" type="string"/><element name="size" type="int"/></all>
+            </complexType>
+          </schema></types>
+          <message name="storeRequest"><part name="info" type="s:Info"/><part name="data" type="xsd:base64Binary"/>
+          </message>
+          <message name="storeResponse"><part name="return" type="xsd:int"/></message>
+          <portType name="P"><operation name="store"><input message="tns:storeRequest"/>
+            <output message="tns:storeResponse"/></operation></portType>
+          <binding name="B" type="tns:P"><soap:binding style="rpc" transport="http://schemas.xmlsoap.org/soap/http"/>
+            <operation name="store"><soap:operation soapAction=""/>
+              <input><soap:body use="encoded" namespace="urn:swa-refs"
+                encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"/></input>
+              <output><soap:body use="encoded" namespace="urn:swa-refs"
+                encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"/></output>
+            </operation></binding>
+          <service name="S"><port name="P" binding="tns:B"><soap:address location="http://localhost/x"/></port>
+          </service>
+        </definitions>';
+        const Boundary = "b0undary";
+
+        # an attachment identified by its Content-ID
+        const PartA = {"headers": {"Content-Type": "application/octet-stream", "Content-ID": "<a@x>"},
+            "body": "AAA"};
+        # an attachment labelled by a relative Content-Location, as in the SwA Note's examples
+        const Located = {"headers": {"Content-Type": "image/tiff", "Content-Location": "the_signed_form.tiff"},
+            "body": "TIF"};
+        # an attachment labelled by an absolute Content-Location
+        const Absolute = {"headers": {"Content-Type": "image/tiff", "Content-Location": "http://claims/forms/a.tiff"},
+            "body": "ABS"};
+    }
+
+    constructor() : QUnit::Test("SOAP with Attachments references", "1.0") {
+        addTestCase("cid: references resolve to the part with that Content-ID", \cidReferences());
+        addTestCase("same-document and unmatched references keep their meaning", \otherReferences());
+        addTestCase("Content-Location labels resolve against the reference's base URI", \locations());
+        addTestCase("invalid references are rejected", \invalid());
+        addTestCase("an encoded message mixes multi-reference values and attachments", \encoded());
+        set_return_value(main());
+    }
+
+    # builds a SOAP 1.1 package whose root holds the given body content
+    private static hash<auto> package(string content, list<hash<auto>> parts, *string root_location,
+            *string package_location) {
+        string xml = '<e:Envelope xmlns:e="http://schemas.xmlsoap.org/soap/envelope/"><e:Body>' + content
+            + '</e:Body></e:Envelope>';
+        string text = "--" + Boundary + "\r\nContent-Type: text/xml; charset=utf-8\r\nContent-ID: <root@x>\r\n"
+            + (root_location ? "Content-Location: " + root_location + "\r\n" : "") + "\r\n" + xml + "\r\n";
+        foreach hash<auto> part in (parts) {
+            text += "--" + Boundary + "\r\n";
+            map text += $1.key + ": " + $1.value + "\r\n", part.headers.pairIterator();
+            text += "\r\n" + part.body + "\r\n";
+        }
+        text += "--" + Boundary + "--\r\n";
+        hash<auto> message = {"content-type": 'multipart/related; boundary="' + Boundary
+            + '"; type="text/xml"; start="<root@x>"', "body": binary(text)};
+        if (exists package_location) {
+            message."content-location" = package_location;
+        }
+        return message;
+    }
+
+    # returns the parsed SOAP Body of a package
+    private static auto body(string content, list<hash<auto>> parts, *string root_location,
+            *string package_location) {
+        hash<auto> message = WSDLLib::parseMultiPartSOAPMessage(package(content, parts, root_location,
+            package_location), False, True);
+        return WSDLLib::parseSOAPMessage(message, False, True)."e:Envelope"."e:Body";
+    }
+
+    cidReferences() {
+        assertEq({"v": binary("AAA")}, body('<v href="cid:a@x"/>', (PartA,)));
+        # RFC 2392: the cid: URI is percent-encoded, the Content-ID is not
+        assertEq({"v": binary("AAA")}, body('<v href="cid:a%40x"/>', (PartA,)));
+        assertEq({"v": binary("AAA")}, body('<v href="CID:a@x"/>', (PartA,)), "the scheme is case-insensitive");
+        # a part can be referenced more than once, as SOAP encoding shares values
+        assertEq({"v": (binary("AAA"), binary("AAA"))}, body('<v href="cid:a@x"/><v href="cid:a@x"/>', (PartA,)));
+        # nested references and references in the Header are resolved as well
+        assertEq({"w": {"v": binary("AAA")}}, body('<w><v href="cid:a@x"/></w>', (PartA,)));
+        hash<auto> message = WSDLLib::parseMultiPartSOAPMessage(package('<v/>', (PartA,)), False, True);
+        message.body = binary(replace(binary_to_string(message.body), '<e:Body>',
+            '<e:Header><h href="cid:a@x"/></e:Header><e:Body>'));
+        assertEq(binary("AAA"), WSDLLib::parseSOAPMessage(message, False, True)."e:Envelope"."e:Header".h);
+    }
+
+    otherReferences() {
+        # a same-document reference keeps its SOAP encoding meaning (SwA Note section 3)
+        assertEq({"v": {"^attributes^": {"href": "#id1"}}, "m": {"^attributes^": {"id": "id1"}, "^value^": "1"}},
+            body('<v href="#id1"/><m id="id1">1</m>', (PartA,)));
+        # a reference matching no part is left for normal resolution
+        assertEq({"v": {"^attributes^": {"href": "http://example.com/x"}}},
+            body('<v href="http://example.com/x"/>', (PartA,)));
+        # only href attributes are references; an element named href is ordinary content
+        assertEq({"v": {"href": "cid:a@x"}}, body('<v><href>cid:a@x</href></v>', (PartA,)));
+        # an unreferenced part leaves the envelope unchanged
+        assertEq({"v": "x"}, body('<v>x</v>', (PartA,)));
+    }
+
+    locations() {
+        # relative to the default base "thismessage:/" on both sides (RFC 2557 section 5)
+        assertEq({"v": binary("TIF")}, body('<v href="the_signed_form.tiff"/>', (Located,)));
+        # xml:base applies to the element and its descendants
+        assertEq({"w": {"^attributes^": {"xml:base": "http://claims/forms/"}, "v": binary("ABS")}},
+            body('<w xml:base="http://claims/forms/"><v href="a.tiff"/></w>', (Absolute,)));
+        # the Content-Location of the root part is the base of the envelope
+        assertEq({"v": binary("ABS")}, body('<v href="a.tiff"/>', (Absolute,), "http://claims/forms/root.xml"));
+        assertEq({"v": binary("ABS")}, body('<v href="http://claims/forms/a.tiff"/>', (Absolute,)));
+        # a reference resolved against a different base matches nothing
+        assertEq({"v": {"^attributes^": {"href": "a.tiff"}}}, body('<v href="a.tiff"/>', (Absolute,)));
+
+        # the SwA Note's second section 3 example: the package's Content-Location is the base of the relative
+        # labels of its parts, including the root's, so relative and absolute references name the same part
+        hash<auto> form = {"headers": {"Content-Type": "image/tiff", "Content-Location": "claim061400a.tiff"},
+            "body": "FORM"};
+        assertEq({"v": binary("FORM")}, body('<v href="claim061400a.tiff"/>', (form,), "claim061400a.xml",
+            "http://claiming-it.com/"));
+        assertEq({"v": binary("FORM")}, body('<v href="http://claiming-it.com/claim061400a.tiff"/>', (form,),
+            "claim061400a.xml", "http://claiming-it.com/"));
+        # without a root Content-Location the package's is the envelope's base
+        assertEq({"v": binary("FORM")}, body('<v href="claim061400a.tiff"/>', (form,), NOTHING,
+            "http://claiming-it.com/"));
+        # the labels are absolute, so they differ from the same relative label in a package without a base
+        assertEq({"v": {"^attributes^": {"href": "thismessage:/claim061400a.tiff"}}},
+            body('<v href="thismessage:/claim061400a.tiff"/>', (form,), NOTHING, "http://claiming-it.com/"));
+        # the root part's Content-Location is closer to the envelope than the package's
+        assertEq({"v": binary("ABS")}, body('<v href="a.tiff"/>', (Absolute,), "http://claims/forms/root.xml",
+            "http://claiming-it.com/"));
+    }
+
+    invalid() {
+        assertThrows("SOAP-MESSAGE-ERROR", "names no part of the message", \body(), ('<v href="cid:zzz@x"/>',
+            (PartA,)));
+        assertThrows("SOAP-MESSAGE-ERROR", "malformed percent-encoding", \body(), ('<v href="cid:a%4"/>', (PartA,)));
+        assertThrows("SOAP-MESSAGE-ERROR", "matches the Content-Location of 2 parts", \body(),
+            ('<v href="the_signed_form.tiff"/>', (Located, Located + {"body": "OTHER"})));
+        # Content-Location is a single-valued header, so a repeated one leaves the base or label ambiguous
+        hash<auto> message = package('<v/>', (PartA,));
+        message.body = binary(replace(binary_to_string(message.body), "Content-ID: <a@x>\r\n",
+            "Content-ID: <a@x>\r\nContent-Location: a.bin\r\nContent-Location: b.bin\r\n"));
+        assertThrows("SOAP-MESSAGE-ERROR", "ambiguous or invalid MIME content-location header",
+            \WSDLLib::parseMultiPartSOAPMessage(), (message, False, True));
+        message = package('<v/>', (PartA,)) + {"content-location": ("http://a/", "http://b/")};
+        assertThrows("SOAP-MESSAGE-ERROR", "ambiguous or invalid multipart Content-Location header",
+            \WSDLLib::parseMultiPartSOAPMessage(), (message, False, True));
+    }
+
+    encoded() {
+        WSOperation op = new WebService(Contract).getOperation("store");
+        # Apache Axis 1.x sends a struct as an independent element and the attachment as an href to its part; the
+        # same-document reference was rejected as a "non-local part" before
+        string xml = '<e:Envelope xmlns:e="http://schemas.xmlsoap.org/soap/envelope/" '
+            'xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:s="urn:swa-refs:xsd"><e:Body>'
+            '<ns:store xmlns:ns="urn:swa-refs" e:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">'
+            '<info href="#id0"/><data href="cid:blob%40example.com"/></ns:store>'
+            '<multiRef id="id0" xsi:type="s:Info"><name>scan</name><size>3</size></multiRef></e:Body></e:Envelope>';
+        string text = "--" + Boundary + "\r\nContent-Type: text/xml; charset=utf-8\r\nContent-ID: <root>\r\n\r\n"
+            + xml + "\r\n--" + Boundary + "\r\nContent-Type: application/octet-stream\r\n"
+            "Content-ID: <blob@example.com>\r\n\r\n\x00\x01\x02\r\n--" + Boundary + "--\r\n";
+        hash<auto> message = WSDLLib::parseMultiPartSOAPMessage({"content-type": 'multipart/related; boundary="'
+            + Boundary + '"; type="text/xml"; start="<root>"', "body": binary(text)}, False, True);
+        assertEq({"info": {"name": "scan", "size": 3}, "data": binary("\x00\x01\x02")},
+            op.deserializeRequest(WSDLLib::parseSOAPMessage(message, False, True)));
+    }
+}

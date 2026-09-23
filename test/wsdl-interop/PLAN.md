@@ -1687,3 +1687,20 @@ an absent value as text; and `SoapClientIo` dropped the media parameters of mult
 gains a mixed-version dispatch case, and [test_mtom_xop.py](test_mtom_xop.py) exchanges the unmodified CXF
 `mtom_xop.wsdl` contract live with Apache CXF 4.1.3 in both directions, with and without MTOM, each side checking
 the other's package form and part count.
+
+## P8-05c-1: SOAP with Attachments references
+
+`href` references in SwA packages now follow the SwA Note, section 3. Before, every reference that was not a
+lowercase `cid:` URI raised `SOAP-MESSAGE-ERROR`. That included a same-document `#id`, so encoded messages that
+combine multi-reference values with attachments (as Apache Axis 1.x sends them) could not be read.
+- A same-document reference keeps its SOAP encoding meaning.
+- Any other reference is made absolute against its base URI: `xml:base`, then the root part's `Content-Location`,
+  then the package's, then `thismessage:/`.
+- The absolute reference matches a part's `cid:` label (RFC 2392 percent-decoding, any case of the scheme) or its
+  `Content-Location`, resolved against the package's `Content-Location`.
+- Only `href` attributes are references. A reference that matches no part is left for normal resolution.
+
+The SwA Note and WS-I Attachments Profile 1.0 cannot be redistributed. The Note is pinned by digest, with the
+section 3 phrases the implementation follows. The profile is pinned as a reproducible requirement extract.
+[soap-swa-references](../soap-swa-references.qtest) has 5 cases and 26 assertions. `swaRef` (R2928) follows as
+P8-05c-2.

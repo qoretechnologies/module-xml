@@ -261,6 +261,14 @@ hash<auto> h = op.serializeRequest({"Create": {"MOAttributes": {"default-subscri
       malformed and repeated references and undeclared extensions
     - WSDLLib::packageMtom() writes the package's \c start-info and accepts the SOAP 1.2 XML content type, and
       multipart input rejects a \c start-info that conflicts with the XOP root; added WSDLLib::contentIdFromUri()
+    - SOAP with Attachments references follow the SwA Note section 3: an \c href attribute that names a MIME part
+      of the package is replaced by the part's content, matching the part's \c cid: label (percent-decoded,
+      RFC 2392, with a case-insensitive scheme) or its \c Content-Location resolved against \c xml:base, the root
+      part's \c Content-Location or \c "thismessage:/"; same-document references (\c "#id") keep their SOAP
+      encoding meaning, so encoded messages that combine multi-reference values with attachments (as Apache
+      Axis 1.x sends them) are now accepted, where every non-\c cid: reference previously raised
+      \c SOAP-MESSAGE-ERROR; references that match no part are left for normal resolution, and only attributes are
+      references: a child element named \c href is ordinary content
     - SOAP 1.2 RPC Representation (SOAP 1.2 Part 2 section 4) for SOAP 1.2 RPC-style bindings with SOAP 1.2
       Encoding (see SoapBinding::usesSoap12RpcRepresentation()):
       - non-void responses name their return value in \c rpc:result, and decoding takes the edge it names as the
@@ -1188,6 +1196,9 @@ public const SOAP_TRANSPORT = (
     SOAP_TRANSPORT_HTTP: True,
 );
 
+# the default base URI of a SOAP message package (SwA Note section 3; RFC 2557 section 5)
+const SwaDefaultBase = "thismessage:/";
+
 #! XOP (XML-binary Optimized Packaging) namespace URI
 public const XOP_NS = "http://www.w3.org/2004/08/xop/include";
 
@@ -1866,7 +1877,8 @@ string method = WSDLLib::fromXmlName("Hello_x0020_world"); # "Hello world"
         @param mime_content True for an HTTP mime:content binding whose entire body must remain intact
         @param soap_envelope True to require supported SOAP transport and root media types
         @return normalized message metadata and body; multipart root and attachment bodies are binary,
-        \c parts is keyed by unbracketed Content-ID, and \c unidentified_parts retains parts without identifiers
+        \c parts is keyed by unbracketed Content-ID, \c unidentified_parts retains parts without identifiers, and
+        \c package_location is the multipart entity's own Content-Location, if any
         @throw SOAP-MESSAGE-ERROR malformed MIME, missing root, repeated part identifier or conflicting root media type
         @throw SOAP-MEDIA-TYPE-ERROR unsupported SOAP transport or root media when soap_envelope is True
         @note MIME content may itself be multipart; True prevents interpreting it as SOAP attachments.
@@ -2291,13 +2303,13 @@ string method = WSDLLib::fromXmlName("Hello_x0020_world"); # "Hello world"
                 }
                 xmldata = parse_xml(xml, XPF_PRESERVE_ORDER | XPF_PRESERVE_WHITESPACE);
             }
-            if (msg.parts) {
+            if (msg.parts || msg.unidentified_parts) {
                 # For MTOM messages, resolve xop:Include references
                 if (msg.is_mtom) {
-                    WSDLLib::substXopInclude(\xmldata, msg.parts);
+                    WSDLLib::substXopInclude(\xmldata, msg.parts ?? {});
                 } else {
-                    # For traditional multipart messages, parse entire data structure to find "href"s
-                    WSDLLib::substHref(\xmldata, msg.parts);
+                    WSDLLib::substHref(\xmldata, msg.parts, msg.unidentified_parts, msg.package_location,
+                        msg.header."content-location");
                 }
             }
             if (msg.parts) {
@@ -2340,27 +2352,98 @@ string method = WSDLLib::fromXmlName("Hello_x0020_world"); # "Hello world"
         return SoapEnvelopeHelper::validate(message, soap12, response, !headers_pending);
     }
 
-    private static processHref(reference xmldata, string hr, hash<auto> parts) {
-        if (hr !~ /^cid:/)
-            throw "SOAP-MESSAGE-ERROR", sprintf("messages references non-local part %y; cannot handle non-local parts", hr);
-        hr = substr(hr, 4);
-        if (!exists parts{hr})
-            throw "SOAP-MESSAGE-ERROR", sprintf("message references non-existent part %y", hr);
-        xmldata = parts{hr}.body;
+    # Resolves SOAP with Attachments references in the root of a multipart message (SwA Note section 3): an href
+    # attribute (a SOAP 1.1 section 5.4.1 accessor reference) is replaced by the MIME part it identifies. A
+    # same-document reference ("#id") keeps its SOAP encoding semantics, and a reference that matches no part is
+    # left for normal resolution. References are resolved against their base URI (xml:base, then the closest
+    # Content-Location enclosing the envelope: the root part's, then the package's, then "thismessage:/") and compared
+    # with each part's labels: cid: from its Content-ID (RFC 2392) and its Content-Location, resolved against the
+    # package's. Replaced content is not searched again, so each reference is resolved once.
+    private static substHref(reference<auto> xmldata, *hash<auto> parts, *list<auto> unidentified,
+            *string package_location, *string root_location) {
+        string package_base = exists package_location
+            ? resolve_url(SwaDefaultBase, trim(package_location))
+            : SwaDefaultBase;
+        hash<string, list<hash<auto>>> labels();
+        foreach hash<auto> part in (parts.iterator()) {
+            WSDLLib::addLocationLabel(\labels, part, package_base);
+        }
+        foreach hash<auto> part in (unidentified) {
+            WSDLLib::addLocationLabel(\labels, part, package_base);
+        }
+        string base = exists root_location ? resolve_url(package_base, trim(root_location)) : package_base;
+        *data body = WSDLLib::resolveHrefs(\xmldata, parts ?? {}, labels, base);
+        if (exists body) {
+            xmldata = body;
+        }
     }
 
-    private static substHref(reference xmldata, hash<auto> parts) {
-        foreach string k in (keys xmldata) {
-            if (exists xmldata{k}."^attributes^".href)
-                WSDLLib::processHref(\xmldata{k}, xmldata{k}."^attributes^".href, parts);
-            else if (exists xmldata{k}.href)
-                WSDLLib::processHref(\xmldata{k}, xmldata{k}.href, parts);
-            else if (xmldata{k}.typeCode() == NT_LIST) {
-                foreach auto e in (\xmldata{k})
-                    WSDLLib::substHref(\e, parts);
-            } else if (xmldata{k}.typeCode() == NT_HASH)
-                WSDLLib::substHref(\xmldata{k}, parts);
+    # a part's Content-Location is resolved against the base URI of the package enclosing it (RFC 2557 section 5)
+    private static addLocationLabel(reference<hash<string, list<hash<auto>>>> labels, hash<auto> part,
+            string package_base) {
+        if (exists part.hdr."content-location") {
+            push labels{resolve_url(package_base, trim(part.hdr."content-location"))}, part;
         }
+    }
+
+    # resolves the references of one element and its descendants; returns the part body replacing the element
+    private static *data resolveHrefs(reference<auto> element, hash<auto> parts,
+            hash<string, list<hash<auto>>> labels, string base) {
+        if (element.typeCode() == NT_LIST) {
+            for (int i = 0; i < element.size(); ++i) {
+                *data body = WSDLLib::resolveHrefs(\element[i], parts, labels, base);
+                if (exists body) {
+                    element[i] = body;
+                }
+            }
+            return;
+        }
+        if (element.typeCode() != NT_HASH) {
+            return;
+        }
+        *hash<auto> attributes = element."^attributes^";
+        # XML Base section 4.2: xml:base applies to the element and its descendants
+        if (attributes."xml:base".typeCode() == NT_STRING) {
+            base = resolve_url(base, trim(attributes."xml:base"));
+        }
+        if (attributes.href.typeCode() == NT_STRING) {
+            *data body = WSDLLib::attachmentBody(attributes.href, base, parts, labels);
+            if (exists body) {
+                return body;
+            }
+        }
+        foreach string key in (keys element) {
+            if (key.startsWith("^")) {
+                continue;
+            }
+            *data body = WSDLLib::resolveHrefs(\element{key}, parts, labels, base);
+            if (exists body) {
+                element{key} = body;
+            }
+        }
+    }
+
+    private static *data attachmentBody(string href, string base, hash<auto> parts,
+            hash<string, list<hash<auto>>> labels) {
+        string reference = trim(href);
+        if (reference.substr(0, 1) == "#") {
+            return;
+        }
+        string uri = resolve_url(base, reference);
+        if (uri =~ /^cid:/i) {
+            # a cid: URI identifies a body part of this message (RFC 2392)
+            string id = WSDLLib::contentIdFromUri(uri);
+            if (!parts{id}) {
+                throw "SOAP-MESSAGE-ERROR", sprintf("attachment reference %y names no part of the message", href);
+            }
+            return parts{id}.body;
+        }
+        *list<hash<auto>> matches = labels{uri};
+        if (matches.size() > 1) {
+            throw "SOAP-MESSAGE-ERROR", sprintf("attachment reference %y matches the Content-Location of %d parts",
+                href, matches.size());
+        }
+        return matches ? matches[0].body : NOTHING;
     }
 }
 
@@ -2488,7 +2571,7 @@ class WsdlMultipartHelper {
         int root_index = -1;
         hash<string, bool> seen();
         foreach hash<Mime::MessageInfo> part in (parsed.part) {
-            foreach string header in ("content-id", "content-type", "content-transfer-encoding") {
+            foreach string header in ("content-id", "content-type", "content-transfer-encoding", "content-location") {
                 if (part.hdr.hasKey(header) && part.hdr{header}.typeCode() != NT_STRING) {
                     throw "SOAP-MESSAGE-ERROR", sprintf("ambiguous or invalid MIME %s header", header);
                 }
@@ -2557,9 +2640,17 @@ class WsdlMultipartHelper {
             if (part.hdr.hasKey("content-id")) { parts{identifier(part.hdr."content-id")} = part; }
             else { push unidentified, part; }
         }
-        return {"content-type": root.hdr."content-type", "header": message.header + root.hdr,
+        hash<auto> result = {"content-type": root.hdr."content-type", "header": message.header + root.hdr,
             "body": root.body, "parts": parts, "unidentified_parts": unidentified,
             "is_mtom": WSDLLib::isMtomMessage({"content-type": root.hdr."content-type"})};
+        # the multipart entity's own label is the base URI of its parts (SwA Note section 3, RFC 2557 section 5)
+        if (message.hasKey("content-location")) {
+            if (message."content-location".typeCode() != NT_STRING) {
+                throw "SOAP-MESSAGE-ERROR", "ambiguous or invalid multipart Content-Location header";
+            }
+            result.package_location = message."content-location";
+        }
+        return result;
     }
 
     static string identifier(string value) {

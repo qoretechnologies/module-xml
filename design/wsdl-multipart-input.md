@@ -74,6 +74,33 @@ Errors are `SOAP-MESSAGE-ERROR` exceptions. A package's `start-info` must name t
 root's `type` parameter (XOP 1.0 section 4.1); packages without `start-info` are accepted. Before P8-05 every
 MTOM message failed with `RUNTIME-TYPE-ERROR`, because the previous recognizer read regex captures through `$1`.
 
+## SOAP with Attachments references
+
+When the root is not an XOP entity, `WSDLLib::parseSOAPMessage()` resolves the references the SOAP with
+Attachments Note (section 3) defines before any SOAP processing:
+
+- A reference is the value of an `href` attribute, which is a SOAP 1.1 section 5.4.1 accessor reference, in the
+  Header or the Body. A child element named `href` is ordinary content.
+- A same-document reference (`#id`) is excluded (SwA Note section 3) and keeps its SOAP encoding meaning. SOAP
+  encoding resolves it later, so one encoded message can combine multi-reference values and attachments. Apache
+  Axis 1.x sends messages like this.
+- Any other reference is made absolute against its base URI, in the Note's order: `xml:base` on the element or an
+  ancestor, then the `Content-Location` of the root part, then `thismessage:/` (RFC 2557). The retrieval URI is
+  never a base.
+- The absolute reference is compared with each non-root part's labels. The label is `cid:` plus the Content-ID,
+  which also matches a percent-encoded `cid:` URI and any case of the scheme (RFC 2392). An absolute
+  `Content-Location` is also a label, and a relative one is resolved against `thismessage:/`.
+- A matching reference element's value becomes the part's content, and the element keeps no attributes. A part can
+  be referenced more than once. Replaced content is not searched again.
+- A reference that matches no part is left unchanged for normal resolution. A `cid:` reference is the exception:
+  it can only name a part of this message, so an unmatched one raises `SOAP-MESSAGE-ERROR`. So do a malformed
+  percent-encoding and a `Content-Location` label that several parts share.
+
+WS-I Attachments Profile 1.0 constrains the same packages (R2931, R2932). Its `swaRef` type (R2928) is a typed
+reference that the schema drives, and is separate from this `href` resolution. The SwA Note and the profile cannot
+be redistributed. `normative/sources.json` pins the Note by digest, with the section 3 phrases above, and pins the
+profile as the reproducible requirement extract `normative/wsiap10-requirements.json`.
+
 `WSDLLib::packageMtom()` writes the root as `application/xop+xml` with the XML serialization's content type
 in `type`, and repeats it in the package's `start-info`: `text/xml` for SOAP 1.1, and `application/soap+xml`
 with any `action` parameter for SOAP 1.2 (SOAP 1.2 MTOM section 3.2). MTOM output from WSDL serialization is
