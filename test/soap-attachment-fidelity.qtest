@@ -1,0 +1,254 @@
+#!/usr/bin/env qore
+# -*- mode: qore; indent-tabs-mode: nil -*-
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires xml
+%requires HttpServer
+%requires ../qlib/WSDL.qm
+%requires ../qlib/SoapHandler.qm
+%requires ../qlib/SoapClient.qm
+
+%exec-class SoapAttachmentFidelityTest
+
+# Binary fidelity of SOAP attachments (P8-05d): MIME-bound SwA parts, swaRef references and MTOM/XOP content keep
+# their exact octets for empty, large and many parts, and packages from other senders are parsed at the edges
+# RFC 2046 allows.
+public class SoapAttachmentFidelityTest inherits QUnit::Test {
+    private {
+        WebService ws;
+        *HttpServer server;
+        # payloads by name
+        hash<string, binary> payloads;
+
+        const Bindings = ("Fidelity11", "Fidelity12");
+        const Root = '<e:Envelope xmlns:e="http://schemas.xmlsoap.org/soap/envelope/"><e:Body><x/></e:Body>'
+            '</e:Envelope>';
+    }
+
+    constructor() : QUnit::Test("SOAP attachment binary fidelity", "1.0") {
+        ws = WSDLLib::getWebServiceFromUrl(get_script_dir() + "/attachment-fidelity.wsdl");
+        payloads = SoapAttachmentFidelityTest::makePayloads();
+        addTestCase("every carrier keeps the octets of every payload", \carriers());
+        addTestCase("many parts keep their order and octets", \manyParts());
+        addTestCase("text parts keep their characters in each encoding", \text());
+        addTestCase("packages from other senders are framed as RFC 2046 allows", \framing());
+        addTestCase("invalid framing is rejected", \invalidFraming());
+        addTestCase("large attachments cross HTTP unchanged", \http());
+        set_return_value(main());
+    }
+
+    # every octet value in order
+    private static binary octets() {
+        string text;
+        for (int i = 0; i < 256; ++i) {
+            text += chr(i);
+        }
+        return binary(text);
+    }
+
+    # a deterministic block covering every octet value in varying order, repeated to the requested size
+    private static binary block(int size) {
+        binary unit = binary();
+        for (int i = 0; i < 4096; ++i) {
+            unit += binary(chr((i * 7 + (i >> 8) * 13 + 3) % 256));
+        }
+        binary result = binary();
+        while (result.size() < size) {
+            result += unit;
+        }
+        return result.substr(0, size);
+    }
+
+    private static hash<string, binary> makePayloads() {
+        binary all = octets();
+        return {
+            "empty": binary(),
+            "nul": binary("\x00"),
+            "octets": all,
+            # delimiter lines of this module's and of CXF's packages, and a complete fake part
+            "delimiters": binary("\r\n--=_qore_0123456789abcdef0123456789abcdef\r\nContent-Type: text/xml\r\n"
+                "Content-ID: <fake@x>\r\n\r\n<x/>\r\n--=_qore_0123456789abcdef0123456789abcdef--\r\n"
+                "--uuid:9b1e7c2e-0000-0000-0000-000000000000\r\n--MIMEBoundary--"),
+            "line breaks": binary(strmul("\r", 1000) + strmul("\n", 1000) + strmul("\r\n", 500) + "\n\r"),
+            "trailing CR": binary("abc\r"),
+            "leading CRLF": binary("\r\nabc"),
+            "long line": binary(strmul("A", 1024 * 1024)),
+            "large": block(8 * 1024 * 1024),
+        };
+    }
+
+    # serializes and decodes one Store request
+    private hash<auto> roundTrip(hash<auto> value, string binding, bool mtom = False, *string enc) {
+        WSOperation op = ws.getOperation("Store");
+        hash<auto> wire;
+        {
+            SoapMtomScope scope(mtom, 0);
+            wire = op.serializeRequest(value, NOTHING, enc, NOTHING, NOTHING, NOTHING, binding);
+        }
+        hash<auto> message = WSDLLib::parseMultiPartSOAPMessage({"body": wire.body,
+            "_qore_orig_content_type": wire.hdr."Content-Type"}, False, True);
+        return {"wire": wire, "message": message,
+            "decoded": op.deserializeRequest(WSDLLib::parseSOAPMessage(message, False, True), binding)};
+    }
+
+    carriers() {
+        # the payloads are what they claim to be
+        assertEq(256, payloads.octets.size());
+        assertEq("7e7f8081", payloads.octets.substr(126, 4).toHex());
+        assertEq(8 * 1024 * 1024, payloads.large.size());
+        foreach string binding in (Bindings) {
+            foreach bool mtom in (False, True) {
+                foreach hash<auto> payload in (payloads.pairIterator()) {
+                    string label = sprintf("%s %s %s", binding, mtom ? "MTOM" : "SwA", payload.key);
+                    # the same octets as a MIME-bound part, a swaRef value and base64Binary content
+                    hash<auto> value = {"meta": {"Name": payload.key, "Photo": payload.value, "Raw": payload.value},
+                        "blob": payload.value, "note": "n"};
+                    hash<auto> result = roundTrip(value, binding, mtom);
+                    assertEq(payload.value, result.decoded.blob, label + ": MIME-bound part");
+                    assertEq(payload.value, result.decoded.meta.Photo, label + ": swaRef");
+                    assertEq(payload.value, result.decoded.meta.Raw, label + ": base64Binary");
+                    # binary parts are sent without a transfer encoding: the octets are on the wire unchanged
+                    binary wire = binary(result.wire.body);
+                    if (payload.value) {
+                        assertTrue(wire.find(payload.value) >= 0, label + ": octets on the wire");
+                    }
+                    # blob, note and the swaRef part; MTOM extracts Raw as well
+                    assertEq(mtom ? 4 : 3, result.message.parts.size(), label + ": parts");
+                }
+            }
+        }
+    }
+
+    manyParts() {
+        list<binary> photos = map binary(sprintf("photo %d ", $1)) + octets().substr($1 % 256), xrange(500);
+        foreach string binding in (Bindings) {
+            hash<auto> result = roundTrip({"meta": {"Name": "many", "Photo": photos}, "blob": binary(),
+                "note": ""}, binding);
+            assertEq(502, result.message.parts.size(), binding);
+            assertEq(photos, result.decoded.meta.Photo, binding + ": order and octets");
+            assertEq(binary(), result.decoded.blob);
+            assertEq("", result.decoded.note);
+        }
+    }
+
+    text() {
+        string note = "Grüße, 東京 – \r\nline\ttab";
+        foreach string binding in (Bindings) {
+            foreach string enc in ("UTF-8", "ISO-8859-1", "UTF-16") {
+                string expected = enc == "ISO-8859-1" ? "Grüße, line" : note;
+                hash<auto> result = roundTrip({"meta": {"Name": expected, "Photo": expected}, "blob": binary("b"),
+                    "note": expected}, binding, False, enc);
+                string label = binding + " " + enc;
+                assertEq(expected, result.decoded.note, label + ": MIME-bound text");
+                assertEq(expected, result.decoded.meta.Photo, label + ": swaRef text");
+                assertEq(expected, result.decoded.meta.Name, label + ": element text");
+                # each text part names its charset and holds the string in that encoding
+                foreach hash<auto> part in (result.message.parts.iterator()) {
+                    if (part.hdr."content-type" =~ /^text\/plain/) {
+                        assertRegex("charset=" + enc, part.hdr."content-type", label);
+                        assertEq(binary(convert_encoding(expected, enc)), part.body, label);
+                    }
+                }
+            }
+        }
+    }
+
+    # parses a package with a root and one part identified as <a@x>
+    private static hash<auto> parse(string boundary, string text) {
+        return WSDLLib::parseMultiPartSOAPMessage({"content-type": 'multipart/related; boundary="' + boundary
+            + '"; type="text/xml"; start="<r@x>"', "body": binary(text)}, False, True);
+    }
+
+    private static string rootPart(string boundary) {
+        return "--" + boundary + "\r\nContent-Type: text/xml\r\nContent-ID: <r@x>\r\n\r\n" + Root + "\r\n";
+    }
+
+    private static string part(string boundary, string body, string headers = "") {
+        return "--" + boundary + "\r\nContent-Type: application/octet-stream\r\nContent-ID: <a@x>\r\n" + headers
+            + "\r\n" + body + "\r\n";
+    }
+
+    framing() {
+        # a preamble before the first delimiter and an epilogue after the last are ignored
+        hash<auto> message = parse("B", "preamble\r\n" + rootPart("B") + part("B", "abc") + "--B--\r\nepilogue\r\n");
+        assertEq(binary("abc"), message.parts."a@x".body);
+        # transport padding (white space) may follow a delimiter
+        message = parse("B", rootPart("B") + "--B \t\r\nContent-Type: application/octet-stream\r\n"
+            "Content-ID: <a@x>\r\n\r\nabc\r\n--B-- \r\n");
+        assertEq(binary("abc"), message.parts."a@x".body);
+        # the CRLF before a delimiter belongs to the delimiter, so a body can end with CR or CRLF
+        assertEq(binary("abc\r"), parse("B", rootPart("B") + part("B", "abc\r") + "--B--\r\n").parts."a@x".body);
+        assertEq(binary("abc\r\n"), parse("B", rootPart("B") + part("B", "abc\r\n") + "--B--\r\n").parts."a@x".body);
+        # a boundary that does not start a line is content
+        assertEq(binary("x--B y\r\n--Bz"), parse("B", rootPart("B") + part("B", "x--B y\r\n--Bz") + "--B--\r\n")
+            .parts."a@x".body);
+        # a 70-character boundary using every bchars class, including space (RFC 2046 section 5.1.1)
+        string boundary = strmul("0", 55) + "'()+_,-./:=? az";
+        assertEq(70, boundary.size());
+        assertEq(binary("abc"), parse(boundary, rootPart(boundary) + part(boundary, "abc") + "--" + boundary
+            + "--\r\n").parts."a@x".body);
+        # transfer encodings are decoded
+        assertEq(binary("\x00\x01\x02\xff"), parse("B", rootPart("B") + part("B", "AAEC/w==",
+            "Content-Transfer-Encoding: base64\r\n") + "--B--\r\n").parts."a@x".body);
+        assertEq(binary("a=bc"), parse("B", rootPart("B") + part("B", "a=3Db=\r\nc",
+            "Content-Transfer-Encoding: quoted-printable\r\n") + "--B--\r\n").parts."a@x".body);
+        assertEq(binary("\x00\xff"), parse("B", rootPart("B") + part("B", "\x00\xff",
+            "Content-Transfer-Encoding: binary\r\n") + "--B--\r\n").parts."a@x".body);
+    }
+
+    invalidFraming() {
+        # delimiters are CRLF-terminated lines (RFC 2046 section 5.1.1)
+        assertThrows("SOAP-MESSAGE-ERROR", "cannot find boundary", \SoapAttachmentFidelityTest::parse(),
+            ("B", "--B\nContent-Type: text/xml\nContent-ID: <r@x>\n\n" + Root + "\n--B--\n"));
+        assertThrows("SOAP-MESSAGE-ERROR", "cannot find closing boundary", \SoapAttachmentFidelityTest::parse(),
+            ("B", rootPart("B") + part("B", "abc")));
+        assertThrows("SOAP-MESSAGE-ERROR", "closing delimiter", \SoapAttachmentFidelityTest::parse(),
+            ("B", "--B--\r\n"));
+        assertThrows("SOAP-MESSAGE-ERROR", "invalid MIME multipart boundary", \SoapAttachmentFidelityTest::parse(),
+            (strmul("a", 71), rootPart(strmul("a", 71)) + "--" + strmul("a", 71) + "--\r\n"));
+        assertThrows("SOAP-MESSAGE-ERROR", "is unknown", \SoapAttachmentFidelityTest::parse(),
+            ("B", rootPart("B") + part("B", "abc", "Content-Transfer-Encoding: x-gzip\r\n") + "--B--\r\n"));
+        assertThrows("SOAP-MESSAGE-ERROR", "duplicate MIME Content-ID", \SoapAttachmentFidelityTest::parse(),
+            ("B", rootPart("B") + part("B", "a") + part("B", "b") + "--B--\r\n"));
+    }
+
+    # echoes the request, reporting what it received to the test thread
+    private code echo() {
+        return auto sub (hash<auto> cx, auto value) {
+            return value;
+        };
+    }
+
+    http() {
+        SoapHandler handler(new PermissiveAuthenticator());
+        foreach string binding in (Bindings) {
+            handler.addMethod(ws, ws.getBindingOperation(binding, "Store"), echo(), NOTHING, NOTHING, NOTHING,
+                NOTHING, NOTHING, NOTHING, binding, "fidelity-" + binding);
+        }
+        server = new HttpServer();
+        on_exit {
+            server.stop();
+            delete server;
+        }
+        server.setDefaultHandler("soap", handler);
+        string url = sprintf("http://127.0.0.1:%d/fidelity", server.addListener(0).port);
+        binary large = payloads.large;
+        hash<auto> value = {"meta": {"Name": "large", "Photo": (large, payloads.octets, binary()), "Raw": large},
+            "blob": large, "note": "large"};
+        foreach string binding in (Bindings) {
+            foreach bool mtom in (False, True) {
+                SoapClient client({"wsdl": ws, "port": binding + "Port", "url": url, "mtom": mtom,
+                    "mtom_threshold": 0, "timeout": 120000});
+                hash<auto> info;
+                hash<auto> result = client.callOperation("Store", value, NOTHING, \info);
+                string label = binding + (mtom ? " MTOM" : " SwA");
+                assertEq(value, result, label);
+                # more than three copies of the payload travelled in each direction
+                assertTrue(info."response-body".size() > 3 * large.size(), label + ": response size");
+            }
+        }
+    }
+}

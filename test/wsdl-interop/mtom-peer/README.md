@@ -11,7 +11,7 @@ that its `xop:Include` elements referenced, so each side checks the other's wire
 
 - A request name `xop:<size>` or `inline:<size>` tells the CXF server whether the Qore client must have sent the
   value as a binary part. Qore sends an MTOM request only with its `mtom` option. Values of at least
-  `MTOM_THRESHOLD` (1024) octets are then extracted, so the sizes 0, 1, 1023, 1024 and 70000 cross the boundary.
+  `MTOM_THRESHOLD` (1024) octets are then extracted, so the sizes 0, 1, 1023, 1024, 70000 and 1 MiB cross the boundary and cover a large part.
 - The CXF client checks that the Qore `SoapHandler` answers MTOM requests with MTOM responses, with binary parts
   from 1024 octets, and ordinary requests with ordinary responses.
 

@@ -161,7 +161,7 @@ public final class MtomPeer implements TestMtom {
                     HTTPConduit conduit = (HTTPConduit)ClientProxy.getClient(client).getConduit();
                     conduit.getClient().setConnectionTimeout(10000); conduit.getClient().setReceiveTimeout(30000);
                     String form = mtom ? "xop" : "inline";
-                    for (int size : new int[]{0, 1, 1023, 1024, 70000}) { call(client, form, size, mtom); }
+                    for (int size : new int[]{0, 1, 1023, 1024, 70000, 1024 * 1024}) { call(client, form, size, mtom); }
                     for (int repeat : new int[]{1, 300}) { callString(client, repeat, mtom); }
                     System.out.println("PASS");
                 } finally { ClientProxy.getClient(client).destroy(); }

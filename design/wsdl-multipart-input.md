@@ -143,6 +143,38 @@ union, whose items are URIs.
 `test/soap-swaref.qtest` covers the WS-I `SendClaim` example shape in SOAP 1.1 and 1.2. The live SwA peer
 exchanges CXF's `echoDataRef` operation with Apache CXF 4.1.3 in both directions.
 
+## Binary fidelity
+
+Attachment content crosses a package unchanged. Serialized binary parts carry no transfer encoding, so their
+octets appear verbatim on the wire, and the reader decodes `base64`, `quoted-printable`, `binary`, `8bit` and
+`7bit` entities.
+
+Delimiters follow RFC 2046 section 5.1.1:
+- The CRLF before a delimiter belongs to the delimiter, so content can end with CR or CRLF.
+- A boundary that does not start a line is content.
+- Preambles, epilogues and transport padding are ignored.
+- Boundaries of up to 70 characters are accepted, from the whole `bchars` set, including space.
+- Rejected packages: a delimiter line not ended by CRLF, a package without a closing delimiter or without
+  parts, a boundary of more than 70 characters, and an unknown transfer encoding.
+
+Each package this module writes has a random 128-bit boundary, so content cannot contain its delimiter by
+chance.
+
+`test/soap-attachment-fidelity.qtest` covers each carrier (MIME-bound SwA parts, swaRef values and MTOM/XOP
+content) in SOAP 1.1 and 1.2, with these payloads:
+- empty and single-octet content;
+- every octet value;
+- delimiter lines of this module's and CXF's packages;
+- runs of CR and LF;
+- a 1 MiB line;
+- 8 MiB of content;
+- 500 parts in one message;
+- text in UTF-8, ISO-8859-1 and UTF-16;
+- the same content through `SoapHandler` and `SoapClient`.
+
+The live CXF peers exchange the same kind of payloads in both directions: up to 4 MiB for SwA parts and swaRef,
+and 1 MiB for MTOM.
+
 `WSDLLib::packageMtom()` writes the root as `application/xop+xml` with the XML serialization's content type
 in `type`, and repeats it in the package's `start-info`: `text/xml` for SOAP 1.1, and `application/soap+xml`
 with any `action` parameter for SOAP 1.2 (SOAP 1.2 MTOM section 3.2). MTOM output from WSDL serialization is

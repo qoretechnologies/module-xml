@@ -176,7 +176,7 @@ class SwaPartTests(unittest.TestCase):
                 for representation in ("native", "xml"):
                     with self.subTest(graph=graph, representation=representation):
                         self.assertEqual("PASS\n", checked(
-                            [*self.qore, "client", graph, representation, url], env=self.env))
+                            [*self.qore, "client", graph, representation, url, "fidelity"], env=self.env))
 
     def test_live_cxf_client_and_qore_server(self):
         for graph in ("source", "saved"):
@@ -184,8 +184,10 @@ class SwaPartTests(unittest.TestCase):
                 with self.subTest(graph=graph, representation=representation):
                     # echoDataRef's swaRef values reference parts: native values are their contents, retained XML
                     # keeps the URIs and exchanges the parts through SoapXmlMessageInfo::parts and ^parts^
-                    with endpoint([*self.qore, "server", graph, representation, "reference"], self.env) as (url, _):
-                        self.assertEqual("PASS\n", checked([*self.java, "client", str(self.wsdl), url, "reference"]))
+                    # native values also exchange the binary fidelity payloads (P8-05d)
+                    flags = ["reference"] + (["fidelity"] if representation == "native" else [])
+                    with endpoint([*self.qore, "server", graph, representation, *flags], self.env) as (url, _):
+                        self.assertEqual("PASS\n", checked([*self.java, "client", str(self.wsdl), url, *flags]))
 
     def test_handler_rejects_bad_parts_and_recovers(self):
         for graph in ("source", "saved"):

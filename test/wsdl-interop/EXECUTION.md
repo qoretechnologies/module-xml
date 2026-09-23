@@ -10857,3 +10857,51 @@ this change, `SoapHandler` and `SoapClient` gave them no way to reach unbound pa
 
 The retained Qore peer now answers and calls CXF's `echoDataRef` too, so the live exchange runs for native and
 retained values in both directions.
+
+## P8-05d: Attachment binary fidelity
+
+P8-05 requires binary fidelity for empty, large and many parts. Before this increment, MTOM/XOP was exchanged
+live with CXF up to 70000 octets, and SwA only with CXF's fixed 5-octet captures. No local test combined large,
+many or boundary-like payloads.
+
+`test/soap-attachment-fidelity.qtest` runs over `test/attachment-fidelity.wsdl`. That contract has one
+operation with three carriers: a root element with repeated swaRef values and a base64Binary element (extracted
+under MTOM), a MIME-bound binary part, and a MIME-bound text part. The bindings are SOAP 1.1 and 1.2.
+- **Payloads, per carrier, with and without MTOM:**
+  - empty and a single NUL;
+  - every octet value;
+  - delimiter lines of this module's and CXF's packages, including a complete fake part;
+  - runs of CR and LF;
+  - content ending with CR and content starting with CRLF;
+  - a 1 MiB line;
+  - 8 MiB of content.
+
+  The octets must decode identically and must appear verbatim on the wire; binary parts carry no transfer
+  encoding.
+- **Many parts:** 500 swaRef parts in one message keep their order and octets.
+- **Text:** in UTF-8, ISO-8859-1 and UTF-16, each part names its charset and holds the string in that encoding.
+- **Framing from other senders** (RFC 2046 section 5.1.1) is accepted:
+  - preamble and epilogue;
+  - transport padding;
+  - content ending with CR or CRLF before a delimiter;
+  - a boundary that does not start a line;
+  - a 70-character boundary covering every `bchars` class;
+  - `base64`, `quoted-printable` and `binary` transfer encodings.
+- **Invalid framing** is rejected:
+  - LF-only delimiter lines;
+  - a missing closing delimiter;
+  - no parts;
+  - a 71-character boundary;
+  - an unknown transfer encoding;
+  - a repeated Content-ID.
+- **HTTP:** 8 MiB carriers and a mixed list cross `SoapHandler`/`SoapClient` unchanged in SOAP 1.1 and 1.2,
+  with and without MTOM.
+
+The live peers now exchange deterministic payloads in both directions: 0, 1, 256, 70000 and 4 MiB octets
+through CXF's `echoData` (MIME-bound) and `echoDataRef` (swaRef), and 1 MiB is added to the MTOM sizes. The two
+Java/Qore payload generators first disagreed beyond 4096 octets; that was a test defect, and the Java peer now
+builds the same 4096-octet unit. The MTOM Qore peer builds its payloads from a 256-octet unit, which equals the
+previous per-octet form at every size checked.
+
+No module change was needed: every payload was already preserved, and every framing edge case was already
+handled as RFC 2046 requires.

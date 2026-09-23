@@ -30,6 +30,19 @@ public final class SwAPeer implements SwAServiceInterface {
     // echoDataRef: the swaRef request content and the text of the reply (WS-I Attachments Profile 1.0 R2928)
     private static final byte[] REFERENCE = {1, 2, (byte)255, 13, 10, 0};
     private static final String REFERENCE_REPLY = "reference reply é";
+    // binary fidelity (P8-05d): payload sizes exchanged by echoData and echoDataRef, with deterministic octets
+    private static final int[] SIZES = {0, 1, 256, 70000, 4 * 1024 * 1024};
+    private static byte[] pattern(int size) {
+        byte[] result = new byte[size];
+        // a 4096-octet unit covering every octet value, repeated (as qore-peer.qr builds it)
+        for (int i = 0; i < size; ++i) { int j = i % 4096; result[i] = (byte)(j * 7 + (j >> 8) * 13 + 3); }
+        return result;
+    }
+    private static byte[] reversed(byte[] value) {
+        byte[] result = new byte[value.length];
+        for (int i = 0; i < value.length; ++i) { result[i] = value[value.length - 1 - i]; }
+        return result;
+    }
     private static DataHandler data(byte[] bytes) { return data(bytes, "application/octet-stream"); }
     private static DataHandler data(byte[] bytes, String media) {
         return new DataHandler(new DataSource() {
@@ -48,6 +61,13 @@ public final class SwAPeer implements SwAServiceInterface {
         if (!condition) { throw new AssertionError("unexpected attachment or SOAP value"); }
     }
     public void echoData(Holder<String> text, Holder<DataHandler> data) {
+        if (text.value.startsWith("fidelity:")) {
+            int size = Integer.parseInt(text.value.substring(9));
+            check(Arrays.equals(pattern(size), bytes(data.value)));
+            text.value = "reply:" + size;
+            data.value = data(reversed(pattern(size)));
+            return;
+        }
         check(text.value.equals("hello é") && Arrays.equals(BYTES, bytes(data.value)));
         text.value = "response é";
         data.value = data(BYTES);
@@ -58,7 +78,15 @@ public final class SwAPeer implements SwAServiceInterface {
         header.value = "header response";
     }
     public void echoDataRef(Holder<DataStruct> data) {
-        check(Arrays.equals(REFERENCE, bytes(data.value.getDataRef())));
+        byte[] received = bytes(data.value.getDataRef());
+        if (!Arrays.equals(REFERENCE, received)) {
+            // a fidelity payload: its size selects the expected octets
+            check(Arrays.equals(pattern(received.length), received));
+            DataStruct reply = new DataStruct();
+            reply.setDataRef(data(reversed(received)));
+            data.value = reply;
+            return;
+        }
         DataStruct reply = new DataStruct();
         reply.setDataRef(data(REFERENCE_REPLY.getBytes(StandardCharsets.UTF_8), "text/plain;charset=UTF-8"));
         data.value = reply;
@@ -137,8 +165,23 @@ public final class SwAPeer implements SwAServiceInterface {
                     check(xml(c.value).contains("payload"));
                     check(d.value.getWidth(null) == 2 && d.value.getHeight(null) == 2);
                     check(e.value.getWidth(null) == 2 && e.value.getHeight(null) == 2);
+                    java.util.List<String> flags = Arrays.asList(args).subList(Math.min(3, args.length), args.length);
+                    if (flags.contains("fidelity")) {
+                        for (int size : SIZES) {
+                            Holder<String> text = new Holder<>("fidelity:" + size);
+                            Holder<DataHandler> attachment = new Holder<>(data(pattern(size)));
+                            client.echoData(text, attachment);
+                            check(text.value.equals("reply:" + size));
+                            check(Arrays.equals(reversed(pattern(size)), bytes(attachment.value)));
+                            DataStruct payload = new DataStruct();
+                            payload.setDataRef(data(pattern(size)));
+                            Holder<DataStruct> echoed = new Holder<>(payload);
+                            client.echoDataRef(echoed);
+                            check(Arrays.equals(reversed(pattern(size)), bytes(echoed.value.getDataRef())));
+                        }
+                    }
                     // the reference operation is called when the runner asks for it (argument "reference")
-                    if (args.length > 3 && args[3].equals("reference")) {
+                    if (flags.contains("reference")) {
                         DataStruct reference = new DataStruct();
                         reference.setDataRef(data(REFERENCE));
                         Holder<DataStruct> echoed = new Holder<>(reference);

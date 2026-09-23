@@ -29,8 +29,28 @@ auto sub nativeXml(WSOperation operation, hash<SoapXmlMessageInfo> value, bool r
     hash<auto> parsed = WSDLLib::parseSOAPMessage(normalized(wire));
     return request ? operation.deserializeRequest(parsed) : operation.deserializeResponse(parsed);
 }
+# binary fidelity (P8-05d): the payload sizes exchanged by echoData and echoDataRef, with deterministic octets
+const Sizes = (0, 1, 256, 70000, 4 * 1024 * 1024);
+binary sub pattern(int size) {
+    binary unit = binary();
+    for (int i = 0; i < 4096; ++i) { unit += binary(chr((i * 7 + (i >> 8) * 13 + 3) % 256)); }
+    binary result = binary();
+    while (result.size() < size) { result += unit; }
+    return result.substr(0, size);
+}
+binary sub reversed(binary value) {
+    list<string> hex = ();
+    for (int i = value.size() - 1; i >= 0; --i) { push hex, value.substr(i, 1).toHex(); }
+    return parse_hex_string(hex.join(""));
+}
 code<auto(hash<auto>, auto)> sub callback(WSOperation op, hash<auto> row, Queue received, bool retained) {
     return auto sub(hash<auto> cx, auto input) {
+            if (!retained && row.operation == "echoData" && input.text.typeCode() == NT_STRING
+                    && input.text.substr(0, 9) == "fidelity:") {
+                int size = input.text.substr(9).toInt();
+                @assert(input.data == pattern(size), sprintf("echoData fidelity %d", size));
+                return {"text": "reply:" + size, "data": reversed(pattern(size))};
+            }
             if (retained) { input = nativeXml(op, input, True); }
             @assert(input == native(row.request_value), sprintf("%s input: %Y", row.operation, input));
             received.push(row.operation);
@@ -80,7 +100,8 @@ if (mode == "encode") {
     }
     printf("%s\n", make_json(output));
 } else if (mode == "client" || mode == "client-invalid") {
-    @assert(ARGV.size() == 4);
+    @assert(ARGV.size() >= 4);
+    list<string> flags = ARGV.size() > 4 ? ARGV[4..] : ();
     SoapClient client({"wsdl":ws,"service":"SwAService","port":"SwAServiceHttpPort","url":ARGV[3],
         "timeout":30000,"connect_timeout":10000});
     foreach hash<auto> row in (golden.cases) {
@@ -97,6 +118,15 @@ if (mode == "encode") {
         auto result = client.callOperation(row.operation, native(row.request_value), {"xml_values":retained});
         if (retained) { result = nativeXml(ws.getOperation(row.operation), result, False); }
         @assert(result == native(row.response_value), sprintf("%s response: %Y", row.operation, result));
+    }
+    if (mode == "client" && !retained && inlist("fidelity", flags)) {
+        foreach int size in (Sizes) {
+            auto result = client.callOperation("echoData", {"text": "fidelity:" + size, "data": pattern(size)});
+            @assert(result == {"text": "reply:" + size, "data": reversed(pattern(size))},
+                sprintf("echoData fidelity %d", size));
+            result = client.callOperation("echoDataRef", {"DataRef": pattern(size)});
+            @assert(result == {"DataRef": reversed(pattern(size))}, sprintf("echoDataRef fidelity %d", size));
+        }
     }
     if (mode == "client" && !retained) {
         # the reply is a text part, so it decodes as a string
@@ -122,6 +152,11 @@ if (mode == "encode") {
     WSOperation reference = ws.getOperation("echoDataRef");
     if (!retained) {
         handler.addMethod(ws, reference, auto sub (hash<auto> cx, auto input) {
+                # a fidelity payload: its size selects the expected octets
+                if (input.DataRef != Reference) {
+                    @assert(input.DataRef == pattern(input.DataRef.size()), "echoDataRef fidelity");
+                    return {"DataRef": reversed(input.DataRef)};
+                }
                 @assert(input == {"DataRef": Reference}, sprintf("echoDataRef input: %Y", input));
                 received.push("echoDataRef");
                 return {"DataRef": ReferenceReply};
@@ -140,6 +175,6 @@ if (mode == "encode") {
     @assert(trim(stdin.readLine()) == "STOP");
     foreach hash<auto> row in (golden.cases) { @assert(received.get(1000) == row.operation); }
     # the runner passes "reference" when its client calls echoDataRef too
-    if (ARGV[3] == "reference") { @assert(received.get(1000) == "echoDataRef"); }
+    if (inlist("reference", ARGV.size() > 3 ? ARGV[3..] : ())) { @assert(received.get(1000) == "echoDataRef"); }
 } else { throw "SWA-PEER-ERROR", sprintf("unknown mode %Y", mode); }
 %endif

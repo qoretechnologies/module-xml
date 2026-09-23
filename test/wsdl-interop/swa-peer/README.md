@@ -24,6 +24,12 @@ the Qore client sends binary content to the CXF server and receives a `text/plai
 a string, and the CXF client sends `application/octet-stream` content to the native Qore
 server and receives its string reply as UTF-8 text.
 
+Binary fidelity (P8-05d): with native values, `echoData` (a MIME-bound part) and
+`echoDataRef` (a swaRef reference) also exchange deterministic payloads of 0, 1, 256, 70000
+and 4 MiB octets, generated identically by both peers from a 4096-octet unit covering every
+octet value. Each side checks the octets it receives and replies with them reversed, in
+both directions.
+
 Code generation explicitly enables MIME mappings for those operations with
 `-mimeMethods`; otherwise CXF generates ordinary body parameters for attachments.
 The generated `DataStruct` contains a non-serializable `DataHandler`, so this peer

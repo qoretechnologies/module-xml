@@ -1720,3 +1720,20 @@ were plain `anyURI` strings, so no part was ever sent or resolved.
 
 [soap-swaref](../soap-swaref.qtest) has 10 cases, and [test_swa_parts.py](test_swa_parts.py) exchanges CXF's
 `echoDataRef` live with Apache CXF 4.1.3 in both directions.
+
+## P8-05d: Attachment binary fidelity
+
+Attachment content crosses packages unchanged in both directions. Covered carriers: MIME-bound SwA parts,
+swaRef values and MTOM/XOP content, in SOAP 1.1 and 1.2. Payloads:
+- empty and single-octet content;
+- every octet value;
+- delimiter lines;
+- runs of CR and LF;
+- a 1 MiB line;
+- 8 MiB of content;
+- 500 parts in one message;
+- text in three encodings.
+
+Packages from other senders are framed as RFC 2046 allows, and invalid framing is rejected.
+[soap-attachment-fidelity](../soap-attachment-fidelity.qtest) has 6 cases. The live CXF peers exchange
+deterministic payloads in both directions: up to 4 MiB for SwA parts and swaRef, and 1 MiB for MTOM.
