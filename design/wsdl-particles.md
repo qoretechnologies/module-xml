@@ -562,10 +562,13 @@ A `complexType` declaring empty content has no content model, no simple content 
 being present. An empty hash serializes to an empty element, `NOTHING` leaves an optional element out of the
 message, a required element is always serialized, and any supplied content raises `SOAP-SERIALIZATION-ERROR`.
 A present element deserializes to an empty hash, so that it can be told apart from a missing element and
-serializes to the same element again; only the element declaration knows that the element was present, so the
-conversion belongs to `XsdElement`, after nil assessment. An element with `xsi:nil="true"` stays `NOTHING`. An
-element is empty whether it carries nothing at all or only attributes, namespace declarations, comments or empty
-text, which is the same emptiness the element default constraint uses, so the same infoset always yields the
-same value. Empty content is a present record in every projection: the data provider type is an empty record
+serializes to the same element again. More generally, `XsdComplexType::permitsEmptyContent()` identifies every
+type whose element can be present without content: it declares empty content or its content model is
+emptiable. Only the element declaration knows that the element was present, so `XsdElement` converts such an
+element from an empty record, after nil assessment and before the type conversion. The type then yields its own
+record shape, such as `{"item": NOTHING}` for a list wrapper, whether the parser produced `NOTHING`, an empty
+hash or a hash carrying only namespace declarations; a type declaring empty content has no fields and yields
+the empty hash itself. An element with `xsi:nil="true"` stays `NOTHING`. Emptiness is the one the element
+default constraint uses: nothing at all, or only attributes, namespace declarations, comments or empty text. Empty content is a present record in every projection: the data provider type is an empty record
 type, which an optional element still combines with `NOTHING` for a missing element, as explicit native capture
 already did.
