@@ -26,12 +26,17 @@ public class Soap12RpcTest inherits QUnit::Test {
           <message name="singleResponse"><part name="answer" type="xsd:string"/></message>
           <message name="voidRequest"/>
           <message name="voidResponse"/>
+          <message name="adjustRequest"><part name="n" type="xsd:int"/></message>
+          <message name="adjustResponse"><part name="n" type="xsd:int"/><part name="note" type="xsd:string"/></message>
           <portType name="P">
             <operation name="stats" parameterOrder="x count"><input message="tns:statsRequest"/>
               <output message="tns:statsResponse"/></operation>
             <operation name="pair"><input message="tns:pairRequest"/><output message="tns:pairResponse"/></operation>
             <operation name="single"><input message="tns:singleRequest"/><output message="tns:singleResponse"/></operation>
             <operation name="void"><input message="tns:voidRequest"/><output message="tns:voidResponse"/></operation>
+            <!-- n is an [in/out] parameter: it is a part of both messages -->
+            <operation name="adjust" parameterOrder="n"><input message="tns:adjustRequest"/>
+              <output message="tns:adjustResponse"/></operation>
           </portType>
           <binding name="B" type="tns:P"><soap12:binding style="rpc" transport="http://schemas.xmlsoap.org/soap/http"/>
             %s
@@ -55,6 +60,10 @@ public class Soap12RpcTest inherits QUnit::Test {
         addTestCase("rpc:result selects the return value's edge when decoding", \decodeResults());
         addTestCase("with SOAP Encoding the RPC struct is the only Body child", \oneChild());
         addTestCase("RPC faults carry the rpc subcodes", \faults());
+        addTestCase("the name of the response struct is not significant", \responseStructName());
+        addTestCase("argument count and type mismatches fault with rpc:BadArguments", \argumentMismatches());
+        addTestCase("header blocks accompany an RPC invocation and response", \headerBlocks());
+        addTestCase("an [in/out] parameter is an edge of both the invocation and the response", \inOutParameters());
         addTestCase("encoded parameters without a node are NOTHING in both directions", \nilParameters());
         addTestCase("Appendix B maps application names to XML names and back", \nameMapping());
         set_return_value(main());
@@ -62,7 +71,7 @@ public class Soap12RpcTest inherits QUnit::Test {
 
     private static WebService service(string use = Encoded) {
         string operations;
-        foreach string name in ("stats", "pair", "single", "void") {
+        foreach string name in ("stats", "pair", "single", "void", "adjust") {
             operations += sprintf(Operation, name, name, use, use);
         }
         return new WebService(sprintf(Contract, operations));
@@ -194,6 +203,97 @@ public class Soap12RpcTest inherits QUnit::Test {
             assertEq("Sender", fault.code.getLocalName());
             assertEq(row[1], map sprintf("{%s}%s", $1.getNamespaceUri(), $1.getLocalName()), fault.subcodes);
         }
+    }
+
+    # SOAP 1.2 Part 2 section 4.2.2: the response struct's name is not significant; section 4.2.1 names the
+    # invocation struct after the procedure
+    responseStructName() {
+        WebService ws = service();
+        WSOperation single = ws.getOperation("single");
+        WSOperation stats = ws.getOperation("stats");
+        foreach string name in ("singleResponse", "reply") {
+            string xml = sprintf(Envelope, name, '<rpc:result>answer</rpc:result><answer>a</answer>', name, "");
+            assertEq("a", single.deserializeResponse(parse_xml(xml, XPF_PRESERVE_ORDER)), name);
+            # in another namespace as well
+            xml = replace(replace(xml, '<t:' + name, '<o:' + name + ' xmlns:o="urn:elsewhere"'), '</t:' + name,
+                '</o:' + name);
+            assertEq("a", single.deserializeResponse(parse_xml(xml, XPF_PRESERVE_ORDER)), name);
+        }
+        assertEq({"count": 2, "value": "v"}, stats.deserializeResponse(parse_xml(sprintf(Envelope, "result",
+            '<rpc:result>value</rpc:result><count>2</count><value>v</value>', "result", ""), XPF_PRESERVE_ORDER)));
+        # the invocation struct is named after the procedure
+        assertThrows("SOAP-DESERIALIZATION-ERROR", "expected SOAP RPC wrapper", \single.deserializeRequest(),
+            (parse_xml(sprintf(Envelope, "reply", '<question>q</question>', "reply", ""), XPF_PRESERVE_ORDER),));
+    }
+
+    # SOAP 1.2 Part 2 section 4.4: an invocation whose arguments do not match the procedure in number or type faults
+    # with env:Sender and rpc:BadArguments
+    argumentMismatches() {
+        WebService ws = service();
+        WSOperation stats = ws.getOperation("stats");
+        list<string> bad = ("{http://www.w3.org/2003/05/soap-rpc}BadArguments",);
+        # an argument the procedure does not have
+        assertEq(bad, subcodes(sub () {
+            stats.deserializeRequest(parse_xml(request("stats", '<x>1</x><y>2</y>'), XPF_PRESERVE_ORDER));
+        }));
+        # an argument supplied twice
+        assertEq(bad, subcodes(sub () {
+            stats.deserializeRequest(parse_xml(request("stats", '<x>1</x><x>2</x>'), XPF_PRESERVE_ORDER));
+        }));
+        # an argument of another type
+        assertEq(bad, subcodes(sub () {
+            stats.deserializeRequest(parse_xml(request("stats", '<x xmlns:xsd="http://www.w3.org/2001/XMLSchema" '
+                'xsi:type="xsd:boolean">true</x>'), XPF_PRESERVE_ORDER));
+        }));
+        # the matching invocation is accepted
+        assertEq(1, stats.deserializeRequest(parse_xml(request("stats", '<x>1</x>'), XPF_PRESERVE_ORDER)));
+    }
+
+    # SOAP 1.2 Part 2 section 4.3: additional information travels as header blocks, beside the RPC struct
+    headerBlocks() {
+        string contract = sprintf(Contract, sprintf(Operation, "single", "single", Encoded, Encoded));
+        contract = replace(contract, '<message name="voidRequest"/>', '<message name="voidRequest"/>'
+            '<message name="Audit"><part name="token" type="xsd:string"/></message>');
+        string header = '<soap12:header message="tns:Audit" part="token" use="encoded" namespace="urn:audit" '
+            'encodingStyle="http://www.w3.org/2003/05/soap-encoding"/>';
+        contract = replace(contract, '<input><soap12:body', '<input>' + header + '<soap12:body');
+        contract = replace(contract, '<output><soap12:body', '<output>' + header + '<soap12:body');
+        # the contract binds only "single"; the other operations stay unbound
+        WebService ws(contract);
+        WSOperation single = ws.getOperation("single");
+        assertTrue(cast<SoapBinding>(single.getBinding()).usesSoap12RpcRepresentation());
+        foreach bool request in (True, False) {
+            hash<auto> wire = request
+                ? single.serializeRequest({"question": "q"}, {"Audit": {"token": "t-1"}})
+                : single.serializeResponse({"answer": "a"}, {"Audit": {"token": "t-2"}});
+            hash<auto> envelope = XsdBase::expandElementNamespaces(parse_xml(wire.body))
+                ."{http://www.w3.org/2003/05/soap-envelope}Envelope";
+            # the Body holds only the RPC struct, and the header block is in the Header
+            assertEq(1, (select keys envelope."{http://www.w3.org/2003/05/soap-envelope}Body", $1 !~ /^\^/).size());
+            assertEq(request ? "t-1" : "t-2", envelope."{http://www.w3.org/2003/05/soap-envelope}Header"
+                ."{urn:audit}token"."^value^");
+            auto value = request ? single.deserializeRequest(parse_xml(wire.body, XPF_PRESERVE_ORDER))
+                : single.deserializeResponse(parse_xml(wire.body, XPF_PRESERVE_ORDER));
+            assertEq(request ? {"question": "q", "Audit": {"token": "t-1"}} : {"answer": "a", "Audit":
+                {"token": "t-2"}}, value);
+        }
+    }
+
+    # SOAP 1.2 Part 2 sections 4.2.1 and 4.2.2: the invocation has an edge for each [in] and [in/out] parameter, the
+    # response one for the return value and each [out] and [in/out] parameter, each labeled with the parameter's name
+    inOutParameters() {
+        WebService ws = service();
+        WSOperation adjust = ws.getOperation("adjust");
+        hash<auto> request = parse_xml(adjust.serializeRequest({"n": 1}).body, XPF_PRESERVE_ORDER);
+        hash<auto> body = request.firstValue()."env:Body" ?? request.firstValue()."soapenv:Body";
+        assertEq(("n",), select keys body.firstValue(), $1 !~ /^\^/);
+        assertEq(1, adjust.deserializeRequest(request));
+        # "note" is the return value: it is the output part that parameterOrder omits
+        string response_xml = adjust.serializeResponse({"n": 2, "note": "done"}).body;
+        assertRegex("<rpc:result[^>]*>note</rpc:result>", response_xml);
+        assertEq({"n": 2, "note": "done"}, adjust.deserializeResponse(parse_xml(response_xml, XPF_PRESERVE_ORDER)));
+        assertEq({"n": 3, "note": "x"}, adjust.deserializeResponse(parse_xml(response("adjust",
+            '<rpc:result>note</rpc:result><n>3</n><note>x</note>'), XPF_PRESERVE_ORDER)));
     }
 
     nilParameters() {

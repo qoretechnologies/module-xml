@@ -67,7 +67,8 @@ SOAP versions, document/RPC bindings, native/retained values and local consumers
 
 Concrete header descriptions retain their own `ns` and `encodingStyle` alongside
 message, part and use. Encoded parts must reference types. The supported explicit
-encoding style is `SOAP_ENCODING`; absent encoding style uses the same codec.
+encoding styles are `SOAP_ENCODING` and `SOAP_12_ENCODING`, each a single URI; absent
+encoding style uses SOAP 1.1 encoding.
 Unsupported explicit encodings reject at construction and saved-graph loading.
 The encoded accessor uses the supplied binding namespace and part name,
 independently of the body and operation style. Each encoded header block carries

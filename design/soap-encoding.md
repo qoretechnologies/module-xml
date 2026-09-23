@@ -7,9 +7,10 @@ section 5 rules and SOAP 1.2 Encoding (SOAP 1.2 Part 2 section 3).
 
 ## Encoding style
 
-A part's `soap:body` or `soap:header` `encodingStyle` is a URI list whose most specific URI comes first. The
-first of the SOAP 1.1 encoding (`http://schemas.xmlsoap.org/soap/encoding/`) and SOAP 1.2 Encoding
-(`http://www.w3.org/2003/05/soap-encoding`) that the list names selects the rules. Without either, including
+A `soap:body` `encodingStyle` is a URI list whose most specific URI comes first. The first of the SOAP 1.1
+encoding (`http://schemas.xmlsoap.org/soap/encoding/`) and SOAP 1.2 Encoding
+(`http://www.w3.org/2003/05/soap-encoding`) that the list names selects the rules. An encoded `soap:header`
+names exactly one of the two, which its blocks carry. Without either, including
 when no style is declared, SOAP 1.1 encoding applies as it always has. Encoded output writes the selected URI as
 the wrapper's `encodingStyle`. Before P8-03 every encoded body was written with the SOAP 1.1 URI, even where a
 SOAP 1.2 binding declared SOAP 1.2 Encoding.
@@ -200,6 +201,14 @@ an encoded array type, the SOAP 1.1 form is kept. Array types are still declared
   - Members are in row-major order. SOAP 1.2 has no partial or sparse arrays, so omitted trailing members are
     `NOTHING`, and more members than the extents allow is an error. `xsi:nil` members are `NOTHING`.
   - A jagged level's members are arrays with their own attributes.
+  - Array edges are not labeled (sections 2.3 and 3.1.3): members' local and namespace names do not affect the
+    ordered values. A uniform member name is kept as the #2899 record key that re-serializes it; differently named
+    members decode to a bare list.
+  - A struct member's label is its local name and namespace name together (section 3.1.3). The member's namespace
+    name is resolved from its own declarations, the part's, and the scopes of the Envelope, Header, Body, RPC
+    wrapper and enclosing elements. A member whose namespace name differs from the declared member's is rejected,
+    at the part level before prefixes are removed (`WSMessage::deserializeRpc()`) and inside nested and
+    referenced structs (`XsdComplexType`). A prefix bound outside those scopes keeps the local-name match.
 - **Encoding**: `enc:arraySize` lists every extent, such as `"2 3"`, and `enc:itemType` names the declared item
   type; a jagged level names none. Member names are unqualified: `item`, or the #2899 key. The envelope
   declares the `enc` prefix.
@@ -228,6 +237,11 @@ WSDL's parts.
   return part. A name that is no edge, a void operation, a second `rpc:result`, or a named edge beside the return
   part's own accessor is an error. A response without `rpc:result` is read by part names.
 - **One child** (section 4.2.3). With SOAP Encoding the RPC struct is the Body's only child.
+- **Struct names** (sections 4.2.1 and 4.2.2). The invocation struct is named after the procedure. The name of the
+  response struct is not significant: a response whose Body has one child is read from it whatever its local or
+  namespace name.
+- **Header blocks** (section 4.3). Additional information travels as header blocks. An encoded header part may
+  name SOAP 1.2 Encoding as its `encodingStyle`.
 - **Faults** (section 4.4). Argument conversion errors carry `env:Sender` with `rpc:BadArguments`, unless a
   more specific encoding subcode such as `enc:MissingID` applies. `SoapHandler` answers an unknown procedure
   with `rpc:ProcedureNotPresent` when it serves operations that use the representation.

@@ -320,6 +320,11 @@ SoapClient client({"wsdl": ws, "url": url, "message_limits": <SoapMessageLimits>
       deserialized message serializes to the same elements again, and the value no longer depends on whether
       the sender declared namespaces on the element
       (<a href="https://github.com/qoretechnologies/qore/issues/5465">issue 5465</a>)
+    - SOAP 1.2 Encoding and the SOAP 1.2 RPC Representation follow the current specification text (SOAP 1.2 Part 2
+      Second Edition): a struct member's namespace name is part of its label, so a member in another namespace is
+      rejected instead of being taken for the unqualified member (section 3.1.3); the name of an RPC response
+      struct is not significant (section 4.2.2), where any other name was rejected; and an encoded SOAP header part
+      may name SOAP 1.2 Encoding as its \c encodingStyle, which a WSDL could previously not declare
     - SOAP messages are decoded within explicit limits (@ref wsdl_limits): decoded SOAP-encoded values, counting
       each decoding of a shared reference, resolved references, allocated array members, array rank, element depth
       and MIME parts; WSDL and schema loading is bounded by document count and import depth. A reference graph of
@@ -34221,6 +34226,11 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
         *hash<auto> attr = remove val."^attributes^";
         *hash<auto> ah = deserializeAttributeValues(attr);
         if (val.typeCode() == NT_HASH) {
+            # SOAP 1.2 Part 2 section 3.1.3: the namespace name is part of a struct member's label, so it is checked
+            # before the prefixes are removed below
+            if (EncodingRules == SOAP_12_ENCODING) {
+                checkMemberNamespaces(val, attr);
+            }
             WSDL::XsdBase::removeNS2(\val);
 
             #any ns = val.".ns";
@@ -34442,6 +34452,52 @@ public class XsdComplexType inherits WSDL::XsdAbstractType {
         }
         return result;
     }
+
+    #! @cond nodoc
+    # rejects a SOAP 1.2 encoded member whose namespace name differs from that of the declared member with its local
+    # name; a prefix bound outside the scopes known while decoding keeps the member's local-name match
+    checkMemberNamespaces(hash<auto> value, *hash<auto> parent_attributes) {
+        # the declared members' namespace names by local name; NOTHING where two declarations share a local name
+        hash<string, *string> declared();
+        list<hash<string, XsdElement>> maps = (elementmap,);
+        map maps += ($1.elementmap,), choices;
+        foreach hash<string, XsdElement> map_value in (maps) {
+            foreach XsdElement element in (map_value.iterator()) {
+                string expanded = element.getExpandedName();
+                (*string uri, string local) = (expanded =~ x/^\{([^}]*)\}(.*)$/) ?? (NOTHING, expanded);
+                if (!exists local) {
+                    local = expanded;
+                }
+                if (declared.hasKey(element.name) && declared{element.name} != (uri ?? "")) {
+                    declared{element.name} = NOTHING;
+                } else if (!declared.hasKey(element.name)) {
+                    declared{element.name} = uri ?? "";
+                }
+            }
+        }
+        foreach hash<auto> member in (value.pairIterator()) {
+            if (member.key =~ /^[\^.{]/) {
+                continue;
+            }
+            (*string prefix, *string local) = member.key =~ x/^(?:([^:]+):)?([^:]+)$/;
+            if (!exists local || !exists declared{local}) {
+                continue;
+            }
+            list<auto> occurrences = member.value.typeCode() == NT_LIST ? member.value : (member.value,);
+            foreach auto occurrence in (occurrences) {
+                *hash<auto> own = occurrence.typeCode() == NT_HASH ? occurrence."^attributes^" : NOTHING;
+                *string uri = exists prefix
+                    ? own{"xmlns:" + prefix} ?? parent_attributes{"xmlns:" + prefix} ?? QNameInputNamespaces{prefix}
+                    : own.xmlns ?? parent_attributes.xmlns ?? QNameInputNamespaces{""} ?? "";
+                if (exists uri && uri != declared{local}) {
+                    throw SOAP_DESERIALIZATION_ERROR, sprintf("member %Y of type %Y has the namespace name %Y; the "
+                        "declared member %Y has %Y, and the namespace name is part of a member's label (SOAP 1.2 "
+                        "Part 2 section 3.1.3)", member.key, name, uri, local, declared{local});
+                }
+            }
+        }
+    }
+    #! @endcond
 
     #! matches namespace-resolved wire names to the existing public record fields
     private *hash<auto> mapExpandedElementNames(*hash<auto> value) {
@@ -35756,6 +35812,11 @@ public class WSMessage inherits WSDL::XsdNamedData {
             # An encoded array reads its member names itself: they can carry a member's type (SOAP 1.1 section 5.1
             # rule 3(c)), and members sharing a local name under different prefixes must keep document order.
             if (v.typeCode() == NT_HASH && !(arg.type instanceof XsdArrayType)) {
+                # SOAP 1.2 Part 2 section 3.1.3: a struct member's namespace name is checked before its prefix is
+                # removed
+                if (EncodingRules == SOAP_12_ENCODING && arg.type instanceof XsdComplexType) {
+                    cast<XsdComplexType>(arg.type).checkMemberNamespaces(v, v."^attributes^");
+                }
                 XsdBase::removeNS2(\v);
             }
             if (arg.element) {
@@ -37736,14 +37797,23 @@ public class SoapBinding inherits WSDL::OperationalBinding {
             } else {
                 string mname = op.name + (request ? "" : "Response");
                 string wrapper_identity = type_qname(bmd.body.ns ?? op.nsc.getTargetNamespaceUri() ?? "", mname);
-                if (!expanded_body.hasKey(wrapper_identity)) {
-                    throw SOAP_DESERIALIZATION_ERROR, sprintf("expected SOAP RPC wrapper %Y for %s operation %Y",
-                        wrapper_identity, io, op.name);
-                }
-                if (!msgh.hasKey(mname)) {
-                    throw SOAP_DESERIALIZATION_ERROR, sprintf("missing %s message name %y as top-level element; got elements: %y", io, mname, keys msgh);
-                }
                 bool rpc12 = rpcRepresentation(bmd);
+                # SOAP 1.2 Part 2 section 4.2.2: the name of the response struct is not significant; section 4.2.3
+                # below requires it to be the Body's only child
+                list<string> children = select keys msgh, !$1.equalPartial("^") && $1 != ".ns" && $1 != "ns";
+                if (rpc12 && !request && children.size() == 1) {
+                    if (children[0] != mname) {
+                        msgh{mname} = remove msgh{children[0]};
+                    }
+                } else {
+                    if (!expanded_body.hasKey(wrapper_identity)) {
+                        throw SOAP_DESERIALIZATION_ERROR, sprintf("expected SOAP RPC wrapper %Y for %s operation %Y",
+                            wrapper_identity, io, op.name);
+                    }
+                    if (!msgh.hasKey(mname)) {
+                        throw SOAP_DESERIALIZATION_ERROR, sprintf("missing %s message name %y as top-level element; got elements: %y", io, mname, keys msgh);
+                    }
+                }
                 # SOAP 1.2 Part 2 section 4.2.3: with SOAP Encoding the RPC struct is the Body's only child
                 if (rpc12 && ((select keys body, !$1.equalPartial("^") && $1 != ".ns").size() != 1
                         || body.firstValue().typeCode() == NT_LIST)) {
@@ -38678,8 +38748,10 @@ public class BindingMessageHeaderDescription inherits Serializable {
         if (encoded && !message.args{message.pmap{part}}.type) {
             throw error, sprintf("encoded SOAP header part %Y must reference a type", part);
         }
+        # an encoded header names SOAP 1.1 encoding or SOAP 1.2 Encoding; its blocks carry that single URI
         if (encoded && exists encoding_style
-                && XsdSimpleType::normalizeWhiteSpace(encoding_style, "collapse") != SOAP_ENCODING) {
+                && !inlist(XsdSimpleType::normalizeWhiteSpace(encoding_style, "collapse"),
+                    (SOAP_ENCODING, SOAP_12_ENCODING))) {
             throw error, sprintf("SOAP header part %Y selects unsupported encoding style %Y", part, encoding_style);
         }
     }

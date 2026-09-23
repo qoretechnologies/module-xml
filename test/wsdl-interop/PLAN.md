@@ -1756,3 +1756,33 @@ in `/tmp/qore-http-bounded-decompression.md`, and module-xml documents the gap i
 
 `max_documents` and `max_document_depth` bound WSDL and schema loading. Interrupted decoding, multipart
 parsing and loading leave no state behind. [soap-message-limits](../soap-message-limits.qtest) has 13 cases.
+
+## P8-07: Routed ledger rows and P8 acceptance
+
+All 26 W3C SOAP 1.2 Part 2 assertions routed to P8 are now covered by executable cases, each checked against the
+Second Edition text. The three rows that quoted First Edition wording now carry the current sentences, and
+`verify_ledger.py` rejects any row still routed to P8. Mapping them found four defects, all fixed:
+- struct member labels ignored the namespace name (section 3.1.3);
+- the RPC response struct's name was required (section 4.2.2);
+- SOAP 1.2-encoded header parts were rejected when the WSDL was loaded;
+- coverage for array member names, `xsi:type` precedence, header blocks, `[in/out]` parameters and
+  `rpc:BadArguments` for argument count and type was missing, and was added.
+
+**P8 accepted** (2026-09-23), against the phase's acceptance:
+- **Pinned CXF contracts, both directions, byte-identical:**
+  - `test_swa_parts.py` covers SwA parts and swaRef, up to 4 MiB;
+  - `test_mtom_xop.py` covers MTOM/XOP, up to 1 MiB;
+  - the local fidelity suite covers the same payloads and boundary edges.
+- **Independent encoded-message sources:**
+  - live Apache Axis 1.4 exchanges (P8-02c);
+  - the SOAP 1.1 Note examples;
+  - the W3C SOAP 1.2 test collection gate.
+- **Reference semantics:** SwA `href` and swaRef references, the SOAP 1.1 and 1.2 reference graphs and the RPC
+  Representation are preserved, with descriptive faults and subcodes for negative messages.
+- **Bounded resources:** P8-06 bounds decoding and loading, and interruption leaves no state behind.
+- **Literal conformance** stays separate: the WS-I Basic Profile rows are accounted for independently.
+
+Open, outside P8:
+- bounded decompression in Qore core (`/tmp/qore-http-bounded-decompression.md`);
+- the per-call particle program rebuild (a P9 performance item);
+- the 49 WS-I profile gaps recorded in P7 (P9).

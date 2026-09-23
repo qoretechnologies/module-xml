@@ -136,7 +136,7 @@ def main():
             if not row.get('normative_quotes'):
                 fail(problems, f'{rid}: quotes no part of its requirement statement')
         if (not row.get('normative_quotes') and row.get('applicability') == 'applicable'
-                and row.get('phase') == 'P7'):
+                and row.get('phase') in ('P7', 'P8')):
             # A later phase revalidates its own rows against the current text when it covers them;
             # this phase only claims the rows it is accounting for now.
             fail(problems, f'{rid}: applicable P7 assertion quotes no requirement')
@@ -172,8 +172,9 @@ def main():
                 fail(problems, f'{rid}: {path} has no case {case!r}')
         if coverage == 'covered' and not tests:
             fail(problems, f'{rid}: recorded as covered but names no executable case')
-        if coverage == 'routed' and phase == 'P7':
-            fail(problems, f'{rid}: routed to a later phase but still recorded against P7')
+        if coverage == 'routed' and phase in ('P7', 'P8'):
+            # P8 is accepted: its rows are covered, or recorded as gaps, against the current text
+            fail(problems, f'{rid}: routed to a later phase but still recorded against {phase}')
         if coverage == 'gap' and not (row.get('gap') or '').strip():
             fail(problems, f'{rid}: recorded as a gap without saying what is missing')
         if coverage != 'gap' and row.get('gap'):

@@ -10977,3 +10977,85 @@ same program show that no limits or budget leaked.
   `getElementOccurrenceRanges()` and `attributeElementNames()` call). That costs about 20 ms per recursive
   struct and multiplies every limit's cost. Safe caching needs invalidation across schema construction, because
   substitution groups are resolved after type finalization. It is recorded for P9 performance work.
+
+## P8-07: Routed ledger rows and P8 acceptance
+
+The 26 W3C SOAP 1.2 Part 2 assertions routed to P8 (sections 2.3, 3.1-3.1.7, 4-4.4 and B.1) were checked
+against the pinned Second Edition text, and each was mapped to the test cases that demonstrate it. The mapping
+reads the test bodies, not the case names. It first found 19 rows covered and 7 not demonstrated. Probing those
+seven found three defects:
+
+- **Struct member labels** (section 3.1.3): `<o:varString xmlns:o="urn:other">` decoded as the unqualified
+  `varString`. `WSMessage::deserializeRpc()` removed part-level prefixes before any comparison, and so did
+  `XsdComplexType` for nested structs.
+  - Under SOAP 1.2 Encoding, a member's namespace name is now resolved before the prefixes are removed. It is
+    resolved from the member's own declarations, the part's, and the QName namespace scopes of the Envelope,
+    Header, Body, RPC wrapper and enclosing elements.
+  - A member whose namespace name differs from the declared member's is rejected. A prefix bound outside those
+    scopes keeps the local-name match, rather than risk a false rejection.
+  - A first attempt that rewrote every element key below the blocks into expanded names broke `rpc:result`
+    handling and other name checks. It was withdrawn in favor of this check.
+- **RPC response struct name** (section 4.2.2): a response whose struct was not named
+  `{namespace}<operation>Response` was rejected. Under the SOAP 1.2 RPC Representation, a response whose Body has
+  one child (section 4.2.3) is now read from that child whatever its local or namespace name. The invocation
+  struct is still named after the procedure (section 4.2.1).
+- **SOAP 1.2-encoded header parts** (section 4.3): `BindingMessageHeaderDescription::validate()` accepted only
+  the SOAP 1.1 encoding URI, although message decoding already handled SOAP 1.2-encoded headers. An encoded
+  header may now name either supported URI.
+  - Style lists stay rejected for headers. A first version accepted them, as bodies do, but
+    `wsdl-header-metadata.qtest` showed that header blocks carry the declared style verbatim and are decoded by
+    that exact URI.
+  - `design/wsdl-soap-header-values.md` and `design/soap-encoding.md`, which disagreed about header styles, now
+    state the same rule.
+
+New cases:
+- `soap12-encoding.qtest`:
+  - "array members are distinguished by position alone";
+  - "a struct member's label includes its namespace name" (part level, default namespace, undeclaring,
+    referenced node);
+  - "xsi:type gives a value's type name by its expanded name" (conflict, alternative prefix, precedence over
+    `enc:itemType`).
+- `soap12-rpc.qtest`:
+  - "the name of the response struct is not significant";
+  - "argument count and type mismatches fault with rpc:BadArguments" (unknown, repeated and mistyped
+    arguments);
+  - "header blocks accompany an RPC invocation and response";
+  - "an [in/out] parameter is an edge of both the invocation and the response".
+
+Against the previous module, the new struct-name, header and label cases fail.
+
+Array member names were kept as they are. The ordered values do not depend on the names, which is what
+section 3.1.3 constrains. A uniform member name remains the qore#2899 record key that re-serializes it, so a
+differently named array decodes to a bare list; both shapes carry the same edges.
+
+**Ledger:**
+- all 26 rows are covered, each with a specific rationale;
+- the three rows that quoted First Edition wording carry the current Second Edition sentences, checked verbatim;
+- `verify_ledger.py` now rejects a row still routed to P8, and an applicable P8 row that quotes no requirement;
+- totals: 493 rows, of which 414 covered, 49 gaps (all WS-I profile rows recorded in P7) and 30 not
+  applicable; 880 executable mappings.
+
+**P8 acceptance.** Each criterion is met by the evidence recorded in P8-01 to P8-07:
+- **Pinned CXF contracts, both directions, byte-identical:**
+  - `test_swa_parts.py`: SwA parts, swaRef and fidelity payloads up to 4 MiB;
+  - `test_mtom_xop.py`: MTOM/XOP up to 1 MiB;
+  - `soap-attachment-fidelity.qtest`: the same payloads and boundary edges locally.
+- **An independent encoded-message corpus in both directions:**
+  - live Axis 1.4 SOAP 1.1 rpc/encoded exchanges;
+  - the SOAP 1.1 Note examples;
+  - the W3C SOAP 1.2 test collection's Node A to Node C replay.
+- **Preserved reference semantics:**
+  - SwA `href` and `cid:`/Content-Location resolution, and swaRef (R2928);
+  - the SOAP 1.1 multi-ref and SOAP 1.2 `enc:id`/`enc:ref` graphs, with shared references and cycles;
+  - the RPC Representation.
+- **Negative messages** fail with descriptive protocol errors, carrying SOAP 1.2 subcodes (`enc:*`, `rpc:*`)
+  where the specification defines them.
+- **No hangs, leaks or unbounded traversal:** P8-06 limits bound every decode and load, and interruption
+  leaves no state behind.
+- **Literal conformance separate:** the WS-I profile rows are accounted for separately, and encoded results are
+  not claimed for them.
+
+Open, outside P8:
+- bounded HTTP decompression in Qore core (handoff);
+- the particle program rebuilt for each decode call (P9 performance);
+- the 49 WS-I gaps recorded in P7 (P9).
