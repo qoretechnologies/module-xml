@@ -1737,3 +1737,22 @@ swaRef values and MTOM/XOP content, in SOAP 1.1 and 1.2. Payloads:
 Packages from other senders are framed as RFC 2046 allows, and invalid framing is rejected.
 [soap-attachment-fidelity](../soap-attachment-fidelity.qtest) has 6 cases. The live CXF peers exchange
 deterministic payloads in both directions: up to 4 MiB for SwA parts and swaRef, and 1 MiB for MTOM.
+
+## P8-06: Message and document limits
+
+**Approved 2026-09-23:** limits are on by default, with these defaults: decoded SOAP-encoded values 10M, resolved
+references 100k, array slots per message 16M, array rank 32, XML depth 256, MIME parts 1000, and WSDL/XSD
+documents 1000 with import depth 64. They are configurable per WebService, WSOperation, thread
+(`SoapMessageLimitsScope`), SoapClient, SoapClientIo and SoapHandler.
+
+The decompression bomb is a core defect: HttpServer and HTTPClient decompress without a limit. It is handed off
+in `/tmp/qore-http-bounded-decompression.md`, and module-xml documents the gap in `max_message_size`.
+
+`SoapMessageLimits` bounds each decoded message:
+- **Encoded content:** every decoding of a shared reference is counted, so a reference DAG cannot expand
+  exponentially. References, array members (including those behind a zero extent), array rank and nested levels
+  are bounded, and lengths are bounded before they are converted.
+- **Structure:** element depth is checked on every parsing path before recursive walks. MIME parts are counted.
+
+`max_documents` and `max_document_depth` bound WSDL and schema loading. Interrupted decoding, multipart
+parsing and loading leave no state behind. [soap-message-limits](../soap-message-limits.qtest) has 13 cases.

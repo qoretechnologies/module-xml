@@ -10905,3 +10905,75 @@ previous per-octet form at every size checked.
 
 No module change was needed: every payload was already preserved, and every framing edge case was already
 handled as RFC 2046 requires.
+
+## P8-06: Message and document limits
+
+A survey of every decode and load path found no explicit bound on the work or memory that a received message
+or a loaded WSDL can demand. Two cases were measured:
+- a zero-extent array of about 70 bytes (`xsd:int[1048576,0]`) took 9.5 s;
+- 16 references to one `int[1048576]` row (about 600 bytes) took 23 s and 460 MB.
+
+Nested shared references expand exponentially, because each reference is decoded again for every referrer.
+
+The user approved limits that are on by default, and a core fix with a handoff for decompression bombs.
+
+**Limits** (`SoapMessageLimits`, public, defaults as approved):
+- **`max_encoded_nodes`:** every value decoded from SOAP-encoded content counts in `XsdData::getValue()`, where
+  every accessor resolves. Each decoding of a shared reference counts again.
+- **`max_references`:** resolved `href` and `enc:ref` references.
+- **`max_array_slots`:** members and nested lists allocated per message.
+  - `XsdEncodedArrayHelper::slots()` bounds every prefix product, so a zero extent no longer skips the per-level
+    limit: `reshape()` builds one row per prefix entry.
+  - Asserted lengths, offsets, positions and SOAP 1.2 extents are bounded to seven digits and `MaxSlots` before
+    conversion. The SOAP 1.2 inner-extent product is bounded as it is computed.
+- **`max_array_rank`:** rank and nested levels. This check runs before the parse, which makes parsing a long
+  `[][]...` type linear rather than quadratic.
+- **`max_xml_depth`:** checked iteratively on the parsed data in `parseSOAPMessage()`, before its reference and
+  XOP walks, and in `deserializeMessageImpl()`. Retained XML is checked with an `XmlReader` pass.
+- **`max_mime_parts`:** checked after the package is split.
+
+Each message decodes with its own budget (`SoapDecodeScope`).
+
+**Loading:** the `max_documents` (1000) and `max_document_depth` (64) options apply to `XsdSchema` and
+`WebService`.
+- WSDL imports are counted in the breadth-first catalog, with each document's import depth.
+- XSD imports and includes are counted in `parseExternalSchema()`, and its recursion depth is bounded.
+- Each distinct document counts once, and loading raises `WSDL-ERROR`.
+
+**Configuration**, in precedence order:
+1. `SoapClient` and `SoapClientIo` (`message_limits` option, `setMessageLimits()`) and `SoapHandler`
+   (`setMessageLimits()`);
+2. `SoapMessageLimitsScope` for a thread;
+3. `WSOperation::setMessageLimits()`;
+4. `WebService` (`message_limits` option, `setMessageLimits()`).
+
+The WebService's limits are saved with it and re-applied to rebuilt operations.
+
+**Performance:** padding and empty rows are built by doubling, so allocating within the limits is cheap. The
+16-reference case now takes 3.5 s before it is rejected at the slot limit, and the zero-extent case 2 s.
+
+**Decompression:** HttpServer decompresses request bodies before `SoapHandler`'s `max_message_size` sees them,
+and HTTPClient decompresses without a limit. The handoff is `/tmp/qore-http-bounded-decompression.md`, and the
+gap is documented.
+
+**Tests:** `test/soap-message-limits.qtest` has 13 cases:
+- defaults and scopes;
+- each limit, at and beyond its value, with exact counts (a chain of n shared-node levels decodes
+  4 * 2^n - 4 values);
+- zero extents, overlong types and oversized lengths;
+- depth on every parsing path;
+- MIME parts;
+- in-memory WSDL and schema import chains;
+- precedence across WSDL, operation, thread, client and handler, including saved objects;
+- interruption.
+
+`SandboxManager` interrupts decoding, multipart parsing and loading deterministically, and later calls in the
+same program show that no limits or budget leaked.
+
+**Found:**
+- A saved standalone `WSOperation` whose graph contains SOAP-encoded array types could not be restored outside
+  the module (`XsdEncodedArrayShape` was not public). This was fixed separately.
+- Decoding each struct rebuilds its particle program (`XsdParticle` builds an `XsdParticleProgram` for every
+  `getElementOccurrenceRanges()` and `attributeElementNames()` call). That costs about 20 ms per recursive
+  struct and multiplies every limit's cost. Safe caching needs invalidation across schema construction, because
+  substitution groups are resolved after type finalization. It is recorded for P9 performance work.

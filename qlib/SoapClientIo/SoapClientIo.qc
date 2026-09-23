@@ -88,6 +88,9 @@ public class SoapClientIo {
         #! the minimum size in octets of base64Binary content sent as an MTOM part
         int mtom_threshold = WSDL::MTOM_THRESHOLD;
 
+        #! the limits for the responses this client decodes; NOTHING for the thread's or the WSDL's limits
+        *hash<WSDL::SoapMessageLimits> message_limits;
+
         #! async I/O connection manager used for every request; replaced atomically by close()
         HttpClientIo::HttpClientConnectionManager mgr;
 
@@ -125,6 +128,8 @@ public class SoapClientIo {
           at least \c mtom_threshold octets in binary parts; see @ref WSDL::SoapMtomScope "SoapMtomScope"
         - \c mtom_threshold: the minimum MTOM part size in octets (default:
           @ref WSDL::MTOM_THRESHOLD "MTOM_THRESHOLD"); 0 sends every base64Binary value as a part
+        - \c message_limits: a @ref WSDL::SoapMessageLimits "SoapMessageLimits" hash for the responses this
+          client decodes; see setMessageLimits()
         - \c connect_timeout: connection timeout in milliseconds (default: 45000)
         - \c timeout: transfer timeout in milliseconds (default: 45000)
         - \c http_protocol: HTTP protocol to use (\c "auto", \c "h1", \c "h2", \c "h3"; default: \c "auto")
@@ -156,6 +161,9 @@ SoapClientIo client({"wsdl": service, "url": "https://example.org/services/v1"})
                     "got %y", h.mtom_threshold);
             }
             mtom_threshold = h.mtom_threshold;
+        }
+        if (exists h.message_limits) {
+            setMessageLimits(h.message_limits);
         }
         if (exists h.wsdl_file && exists h.wsdl) {
             throw "SOAP-CLIENT-IO-ERROR", "only one of 'wsdl' or 'wsdl_file' keys can be given; both were "
@@ -396,11 +404,37 @@ auto result = client.getSoapResponse("echo", "/resource");
         old.closeAll();
     }
 
+    #! returns the limits for the SOAP responses that this client decodes
+    /** @return the limits set with the \c message_limits option or setMessageLimits(), or NOTHING when the
+        limits selected by the calling thread or configured for the WSDL apply
+    */
+    *hash<WSDL::SoapMessageLimits> getMessageLimits() {
+        return message_limits;
+    }
+
+    #! sets the limits for the SOAP responses that this client decodes
+    /** @param limits the limits (see @ref WSDL::SoapMessageLimits "SoapMessageLimits"), which take precedence over
+        those selected by the calling thread and those configured for the WSDL; NOTHING removes them
+        @throw SOAP-LIMIT-ERROR a limit is not positive
+    */
+    setMessageLimits(*hash<auto> limits) {
+        if (limits) {
+            hash<WSDL::SoapMessageLimits> checked = cast<hash<WSDL::SoapMessageLimits>>(limits);
+            WSDL::SoapMessageLimitsScope check(checked);
+            message_limits = checked;
+        } else {
+            remove message_limits;
+        }
+    }
+
     #! @cond nodoc
     #! performs one SOAP exchange and decodes the response with the operation's declarations
     private auto doRequest(WSDL::WSOperation op, string method, string path, hash<auto> hdr, *data body,
             *hash<auto> opts, *reference<hash<auto>> info, *hash<auto> extra_info) {
         WSDL::OperationalBinding selected = op.getBinding(binding);
+        # the response is parsed and decoded within the limits of this client, the thread or the WSDL (P8-06)
+        WSDL::SoapMessageLimitsScope limits_scope(message_limits ?? WSDL::SoapMessageLimitsScope::getSelected()
+            ?? op.getMessageLimits());
         WSDL::SoapProcessingNode response_node = exists opts.soap_node
             ? getProcessingNode(opts.soap_node) : soap_node;
         info = (info ?? {}) + (extra_info ?? {}) + {

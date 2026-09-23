@@ -1,0 +1,460 @@
+#!/usr/bin/env qore
+# -*- mode: qore; indent-tabs-mode: nil -*-
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires xml
+%requires HttpServer
+%requires ../qlib/WSDL.qm
+%requires ../qlib/SoapHandler.qm
+%requires ../qlib/SoapClient.qm
+
+%exec-class SoapMessageLimitsTest
+
+# P8-06: the resources that decoding one SOAP message may use are bounded by SoapMessageLimits, independently of
+# the message's size on the wire.
+public class SoapMessageLimitsTest inherits QUnit::Test {
+    private {
+        WebService ws11;
+        WebService ws12;
+
+        const Contract = '<definitions xmlns="http://schemas.xmlsoap.org/wsdl/"
+            xmlns:soap="http://schemas.xmlsoap.org/wsdl/soap/" xmlns:xsd="http://www.w3.org/2001/XMLSchema"
+            xmlns:SOAP-ENC="http://schemas.xmlsoap.org/soap/encoding/" xmlns:wsdl="http://schemas.xmlsoap.org/wsdl/"
+            xmlns:tns="urn:limits" xmlns:s="urn:limits:xsd" targetNamespace="urn:limits">
+          <types><schema xmlns="http://www.w3.org/2001/XMLSchema" targetNamespace="urn:limits:xsd">
+            <import namespace="http://schemas.xmlsoap.org/soap/encoding/"/>
+            <complexType name="Ints"><complexContent><restriction base="SOAP-ENC:Array">
+              <attribute ref="SOAP-ENC:arrayType" wsdl:arrayType="xsd:int[]"/></restriction></complexContent></complexType>
+            <complexType name="Matrix"><complexContent><restriction base="SOAP-ENC:Array">
+              <attribute ref="SOAP-ENC:arrayType" wsdl:arrayType="xsd:int[,]"/></restriction></complexContent></complexType>
+            <complexType name="Jagged"><complexContent><restriction base="SOAP-ENC:Array">
+              <attribute ref="SOAP-ENC:arrayType" wsdl:arrayType="xsd:int[][]"/></restriction></complexContent></complexType>
+            <!-- a node whose children may share one referenced node: a DAG expands exponentially -->
+            <complexType name="Node"><sequence><element name="value" type="xsd:int"/>
+              <element name="left" type="s:Node" minOccurs="0"/><element name="right" type="s:Node" minOccurs="0"/>
+            </sequence></complexType>
+          </schema></types>
+          <message name="IntsIn"><part name="input" type="s:Ints"/></message>
+          <message name="MatrixIn"><part name="input" type="s:Matrix"/></message>
+          <message name="JaggedIn"><part name="input" type="s:Jagged"/></message>
+          <message name="NodeIn"><part name="input" type="s:Node"/></message>
+          <message name="Out"><part name="return" type="xsd:int"/></message>
+          <portType name="P">
+            <operation name="ints"><input message="tns:IntsIn"/><output message="tns:Out"/></operation>
+            <operation name="matrix"><input message="tns:MatrixIn"/><output message="tns:Out"/></operation>
+            <operation name="jagged"><input message="tns:JaggedIn"/><output message="tns:Out"/></operation>
+            <operation name="node"><input message="tns:NodeIn"/><output message="tns:Out"/></operation>
+          </portType>
+          <binding name="B" type="tns:P"><soap:binding style="rpc" transport="http://schemas.xmlsoap.org/soap/http"/>
+            %s
+          </binding>
+          <service name="S"><port name="P" binding="tns:B"><soap:address location="http://localhost/x"/></port></service>
+        </definitions>';
+        const Operation = '<operation name="%s"><soap:operation soapAction=""/>
+            <input><soap:body use="encoded" namespace="urn:limits" encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"/></input>
+            <output><soap:body use="encoded" namespace="urn:limits" encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"/></output></operation>';
+        const Envelope11 = '<e:Envelope xmlns:e="http://schemas.xmlsoap.org/soap/envelope/"
+            xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+            xmlns:soapenc="http://schemas.xmlsoap.org/soap/encoding/"><e:Body><ns:%s xmlns:ns="urn:limits"
+            e:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">%s</ns:%s>%s</e:Body></e:Envelope>';
+        const Envelope12 = '<env:Envelope xmlns:env="http://www.w3.org/2003/05/soap-envelope" '
+            'xmlns:enc="http://www.w3.org/2003/05/soap-encoding" xmlns:xsd="http://www.w3.org/2001/XMLSchema" '
+            'xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:t="http://example.org/ts-tests" '
+            'xmlns:s="http://example.org/ts-tests/xsd"><env:Body><t:%s '
+            'env:encodingStyle="http://www.w3.org/2003/05/soap-encoding">%s</t:%s></env:Body></env:Envelope>';
+    }
+
+    constructor() : QUnit::Test("SOAP message limits", "1.0") {
+        ws11 = new WebService(sprintf(Contract, foldl $1 + $2, (map sprintf(Operation, $1),
+            ("ints", "matrix", "jagged", "node"))));
+        ws12 = new WebService(ReadOnlyFile::readTextFile(get_script_dir()
+            + "/wsdl-interop/encoded-corpus/w3c-soap12.wsdl"));
+        addTestCase("the defaults and the scope that selects limits", \scope());
+        addTestCase("every decoding of a shared reference counts as decoded values", \encodedNodes());
+        addTestCase("resolved references are bounded", \references());
+        addTestCase("array members are bounded per message", \arraySlots());
+        addTestCase("array ranks and nested levels are bounded", \arrayRanks());
+        addTestCase("asserted lengths and indices are bounded before conversion", \arrayLengths());
+        addTestCase("SOAP 1.2 array sizes are bounded", \soap12Arrays());
+        addTestCase("the element depth of a message is bounded on every decoding path", \xmlDepth());
+        addTestCase("the MIME parts of a package are bounded", \mimeParts());
+        addTestCase("the documents that a schema graph loads are bounded", \schemaDocuments());
+        addTestCase("the documents that a WSDL loads are bounded", \wsdlDocuments());
+        addTestCase("limits are configured per WSDL, operation, thread, client and handler", \precedence());
+        addTestCase("interrupted decoding, parsing and loading leave no state behind", \interruption());
+        set_return_value(main());
+    }
+
+    private auto decode11(string operation, string accessor, string independent = "") {
+        return ws11.getOperation(operation).deserializeRequest(parse_xml(sprintf(Envelope11, operation, accessor,
+            operation, independent), XPF_PRESERVE_ORDER));
+    }
+
+    private auto decode12(string operation, string accessor, string binding = "TsBinding") {
+        string xml = sprintf(Envelope12, operation, accessor, operation);
+        if (binding == "SbBinding") {
+            xml = replace(xml, 'xmlns:t="http://example.org/ts-tests"', 'xmlns:t="http://soapinterop.org/"');
+        }
+        return ws12.getBindingOperation(binding, operation).deserializeRequest(parse_xml(xml, XPF_PRESERVE_ORDER),
+            binding);
+    }
+
+    # a chain of nodes whose left and right children reference the same next node: 2^depth leaves
+    private static list<string> dag(int depth) {
+        string independent;
+        for (int i = 1; i <= depth; ++i) {
+            independent += sprintf('<n%d id="n%d"><value>%d</value>%s</n%d>', i, i, i, i < depth
+                ? sprintf('<left href="#n%d"/><right href="#n%d"/>', i + 1, i + 1) : "", i);
+        }
+        return ('<input><value>0</value><left href="#n1"/><right href="#n1"/></input>', independent);
+    }
+
+    scope() {
+        hash<SoapMessageLimits> defaults();
+        assertEq(10000000, defaults.max_encoded_nodes);
+        assertEq(100000, defaults.max_references);
+        assertEq(16777216, defaults.max_array_slots);
+        assertEq(32, defaults.max_array_rank);
+        assertEq(256, defaults.max_xml_depth);
+        assertEq(1000, defaults.max_mime_parts);
+        foreach string limit in (keys defaults) {
+            assertThrows("SOAP-LIMIT-ERROR", "must be positive", sub () {
+                SoapMessageLimitsScope invalid(<SoapMessageLimits>{limit: 0});
+            });
+        }
+        # a scope applies while it exists, and nested scopes restore the previous limits
+        {
+            SoapMessageLimitsScope outer(<SoapMessageLimits>{"max_references": 3});
+            (string accessor, string independent) = SoapMessageLimitsTest::dag(2);
+            assertThrows("SOAP-DESERIALIZATION-ERROR", "max_references", \decode11(), ("node", accessor,
+                independent));
+            {
+                SoapMessageLimitsScope inner(<SoapMessageLimits>{"max_references": 100});
+                assertEq(4, SoapMessageLimitsTest::leaves(decode11("node", accessor, independent)));
+            }
+            assertThrows("SOAP-DESERIALIZATION-ERROR", "max_references", \decode11(), ("node", accessor,
+                independent));
+        }
+        (string accessor, string independent) = SoapMessageLimitsTest::dag(2);
+        assertEq(4, SoapMessageLimitsTest::leaves(decode11("node", accessor, independent)));
+    }
+
+    # the number of leaves of a decoded node tree
+    private static int leaves(hash<auto> node) {
+        if (!node.left && !node.right) {
+            return 1;
+        }
+        return (node.left ? leaves(node.left) : 0) + (node.right ? leaves(node.right) : 0);
+    }
+
+    encodedNodes() {
+        # each level doubles the tree; every node decodes its value and its two child references, so a chain of
+        # n levels decodes 4 * 2^n - 4 values: 124 for 4 levels, 252 for 5
+        (string accessor, string independent) = SoapMessageLimitsTest::dag(5);
+        assertEq(32, leaves(decode11("node", accessor, independent)));
+        SoapMessageLimitsScope limits(<SoapMessageLimits>{"max_encoded_nodes": 200});
+        assertThrows("SOAP-DESERIALIZATION-ERROR", "the limit of 200 decoded SOAP-encoded values", \decode11(),
+            ("node", accessor, independent));
+        # the same message with one level less fits
+        (accessor, independent) = SoapMessageLimitsTest::dag(4);
+        assertEq(16, leaves(decode11("node", accessor, independent)));
+        # the budget is per message: decoding it again succeeds
+        assertEq(16, leaves(decode11("node", accessor, independent)));
+    }
+
+    references() {
+        SoapMessageLimitsScope limits(<SoapMessageLimits>{"max_references": 10});
+        string row = '<row id="r" soapenc:arrayType="xsd:int[1]"><i>1</i></row>';
+        assertEq({"r": map (1,), xrange(10)}, decode11("jagged", '<input soapenc:arrayType="xsd:int[][10]">'
+            + strmul('<r href="#r"/>', 10) + '</input>', row));
+        assertThrows("SOAP-DESERIALIZATION-ERROR", "the limit of 10 SOAP encoding references", \decode11(),
+            ("jagged", '<input soapenc:arrayType="xsd:int[][11]">' + strmul('<r href="#r"/>', 11) + '</input>', row));
+    }
+
+    arraySlots() {
+        SoapMessageLimitsScope limits(<SoapMessageLimits>{"max_array_slots": 1000});
+        # an array without transmitted members decodes to its absent members
+        assertEq(1000, decode11("ints", '<input soapenc:arrayType="xsd:int[1000]"/>').size());
+        assertThrows("SOAP-DESERIALIZATION-ERROR", "max_array_slots", \decode11(), ("ints",
+            '<input soapenc:arrayType="xsd:int[1001]"/>'));
+        # a zero length does not reduce the rows allocated before it
+        assertThrows("SOAP-DESERIALIZATION-ERROR", "max_array_slots", \decode11(), ("matrix",
+            '<input soapenc:arrayType="xsd:int[1001,0]"/>'));
+        assertEq(10, decode11("matrix", '<input soapenc:arrayType="xsd:int[10,0]"/>').size());
+        # every decoding of a shared array allocates its members again
+        string row = '<row id="r" soapenc:arrayType="xsd:int[300]"/>';
+        assertEq(3, decode11("jagged", '<input soapenc:arrayType="xsd:int[][3]">' + strmul('<r href="#r"/>', 3)
+            + '</input>', row).r.size());
+        assertThrows("SOAP-DESERIALIZATION-ERROR", "max_array_slots", \decode11(), ("jagged",
+            '<input soapenc:arrayType="xsd:int[][4]">' + strmul('<r href="#r"/>', 4) + '</input>', row));
+        # partially transmitted arrays count their asserted size
+        assertThrows("SOAP-DESERIALIZATION-ERROR", "max_array_slots", \decode11(), ("ints",
+            '<input soapenc:arrayType="xsd:int[2000]" soapenc:offset="[1500]"><i>1</i></input>'));
+    }
+
+    arrayRanks() {
+        SoapMessageLimitsScope limits(<SoapMessageLimits>{"max_array_rank": 4});
+        assertThrows("SOAP-DESERIALIZATION-ERROR", "max_array_rank", \decode11(), ("matrix",
+            '<input soapenc:arrayType="xsd:int[1,1,1,1,1]"/>'));
+        assertThrows("SOAP-DESERIALIZATION-ERROR", "max_array_rank", \decode11(), ("jagged",
+            '<input soapenc:arrayType="xsd:int[][][][][][]"/>'));
+        # a very long type is rejected without parsing each level
+        assertThrows("SOAP-DESERIALIZATION-ERROR", "max_array_rank", \decode11(), ("jagged",
+            '<input soapenc:arrayType="xsd:int' + strmul("[]", 100000) + '"/>'));
+        assertThrows("SOAP-DESERIALIZATION-ERROR", "max_array_rank", \decode11(), ("matrix",
+            '<input soapenc:arrayType="xsd:int[' + strmul("1,", 100000) + '1]"/>'));
+    }
+
+    arrayLengths() {
+        foreach string size in ("99999999999999999999", "18446744073709551617", "1048577", "00000000001048577") {
+            assertThrows("SOAP-DESERIALIZATION-ERROR", "exceeding the limit", \decode11(), ("ints",
+                '<input soapenc:arrayType="xsd:int[' + size + ']"/>'), size);
+        }
+        assertThrows("SOAP-DESERIALIZATION-ERROR", "exceeding the limit", \decode11(), ("ints",
+            '<input soapenc:arrayType="xsd:int[]" soapenc:offset="[99999999999]"><i>1</i></input>'));
+        assertThrows("SOAP-DESERIALIZATION-ERROR", "exceeding the limit", \decode11(), ("ints",
+            '<input soapenc:arrayType="xsd:int[2]"><i soapenc:position="[18446744073709551617]">1</i></input>'));
+        # leading zeros are not counted as digits
+        assertEq({"i": (1, 2)}, decode11("ints", '<input soapenc:arrayType="xsd:int[0002]"><i>1</i><i>2</i>'
+            '</input>'));
+    }
+
+    # a Node nested to the given depth, below the rpc wrapper
+    private static string nested(int depth) {
+        return "<input><value>0</value>" + strmul("<left><value>1</value>", depth - 1) + strmul("</left>", depth - 1)
+            + "</input>";
+    }
+
+    xmlDepth() {
+        # Envelope, Body and the rpc wrapper take three levels, and the innermost node's value element one more:
+        # 252 nested nodes fit the default limit of 256
+        hash<auto> value = decode11("node", nested(252));
+        int depth = 1;
+        while (value.left) {
+            value = value.left;
+            ++depth;
+        }
+        assertEq(252, depth);
+        string deep = sprintf(Envelope11, "node", nested(253), "node", "");
+        # a pre-parsed message
+        assertThrows("SOAP-DESERIALIZATION-ERROR", "the limit of 256 levels of nested elements",
+            \ws11.getOperation("node").deserializeRequest(), parse_xml(deep, XPF_PRESERVE_ORDER));
+        # a message parsed by the module, before its reference walks
+        assertThrows("SOAP-DESERIALIZATION-ERROR", "max_xml_depth", \WSDLLib::parseSOAPMessage(),
+            ({"content-type": "text/xml", "body": deep}, False, True));
+        # retained XML
+        WebService literal = WSDLLib::getWebServiceFromUrl(get_script_dir() + "/attachment-fidelity.wsdl");
+        string xml = '<e:Envelope xmlns:e="http://schemas.xmlsoap.org/soap/envelope/"><e:Body>'
+            '<t:Meta xmlns:t="urn:qore:test:fidelity:types"><t:Name>' + strmul("<x>", 300) + strmul("</x>", 300)
+            + '</t:Name></t:Meta></e:Body></e:Envelope>';
+        assertThrows("SOAP-DESERIALIZATION-ERROR", "max_xml_depth", \literal.getOperation("Store")
+            .deserializeXmlRequest(), (xml, "Fidelity11"));
+        # a scope selects another depth
+        SoapMessageLimitsScope limits(<SoapMessageLimits>{"max_xml_depth": 10});
+        assertEq(0, decode11("node", nested(6)).value);
+        assertThrows("SOAP-DESERIALIZATION-ERROR", "the limit of 10 levels", \decode11(), ("node", nested(7)));
+    }
+
+    # a SOAP 1.1 package with a root and the given number of further parts
+    private static hash<auto> package(int parts) {
+        string text = "--B\r\nContent-Type: text/xml\r\nContent-ID: <r@x>\r\n\r\n"
+            + '<e:Envelope xmlns:e="http://schemas.xmlsoap.org/soap/envelope/"><e:Body><x/></e:Body></e:Envelope>'
+            + "\r\n";
+        for (int i = 0; i < parts; ++i) {
+            text += sprintf("--B\r\nContent-Type: application/octet-stream\r\nContent-ID: <p%d@x>\r\n\r\n%d\r\n", i, i);
+        }
+        return {"content-type": 'multipart/related; boundary="B"; type="text/xml"; start="<r@x>"',
+            "body": binary(text + "--B--\r\n")};
+    }
+
+    mimeParts() {
+        # the root and 999 attachments are 1000 parts
+        assertEq(999, WSDLLib::parseMultiPartSOAPMessage(package(999), False, True).parts.size());
+        assertThrows("SOAP-MESSAGE-ERROR", "the MIME package has 1001 parts, exceeding the limit of 1000",
+            \WSDLLib::parseMultiPartSOAPMessage(), (package(1000), False, True));
+        SoapMessageLimitsScope limits(<SoapMessageLimits>{"max_mime_parts": 3});
+        assertEq(2, WSDLLib::parseMultiPartSOAPMessage(package(2), False, True).parts.size());
+        assertThrows("SOAP-MESSAGE-ERROR", "max_mime_parts", \WSDLLib::parseMultiPartSOAPMessage(),
+            (package(3), False, True));
+    }
+
+    # an in-memory chain of schemas: dN imports d(N + 1), up to the given length
+    private static hash<auto> schemaOptions(int length, *hash<auto> limits) {
+        return {"def_path": "/nonexistent-qore-test/", "try_import": string sub (string name) {
+            int n = (name =~ x/^d([0-9]+)\.xsd$/)[0].toInt();
+            return sprintf('<schema xmlns="http://www.w3.org/2001/XMLSchema" targetNamespace="urn:d%d">%s'
+                '<element name="e%d" type="string"/></schema>', n, n + 1 < length
+                ? sprintf('<import namespace="urn:d%d" schemaLocation="d%d.xsd"/>', n + 1, n + 1) : "", n);
+        }} + limits;
+    }
+
+    private static XsdSchema schemaChain(int length, *hash<auto> limits) {
+        return new XsdSchema('<schema xmlns="http://www.w3.org/2001/XMLSchema" targetNamespace="urn:root">'
+            '<import namespace="urn:d0" schemaLocation="d0.xsd"/></schema>', schemaOptions(length, limits));
+    }
+
+    schemaDocuments() {
+        # the default depth of 64 admits a chain of 64 imported schemas below the root
+        assertTrue(schemaChain(64).emap.hasKey("urn:d63"));
+        assertThrows("WSDL-ERROR", "the limit of 64 nested documents", \SoapMessageLimitsTest::schemaChain(), 65);
+        assertThrows("WSDL-ERROR", "max_document_depth", \SoapMessageLimitsTest::schemaChain(),
+            (6, {"max_document_depth": 5}));
+        # every distinct document counts once
+        assertThrows("WSDL-ERROR", "the limit of 5 documents", \SoapMessageLimitsTest::schemaChain(),
+            (6, {"max_documents": 5}));
+        assertTrue(schemaChain(5, {"max_documents": 5}).emap.hasKey("urn:d4"));
+        foreach auto invalid in (0, -1, "10", 1.5) {
+            assertThrows("WSDL-ERROR", "must be a positive integer", \SoapMessageLimitsTest::schemaChain(),
+                (1, {"max_documents": invalid}));
+            assertThrows("WSDL-ERROR", "must be a positive integer", \SoapMessageLimitsTest::schemaChain(),
+                (1, {"max_document_depth": invalid}));
+        }
+    }
+
+    # an in-memory chain of WSDL documents: wN imports w(N + 1), up to the given length
+    private static WebService wsdlChain(int length, *hash<auto> limits) {
+        code document = string sub (int n) {
+            return sprintf('<definitions xmlns="http://schemas.xmlsoap.org/wsdl/" targetNamespace="urn:w%d">%s'
+                '</definitions>', n, n + 1 < length
+                ? sprintf('<import namespace="urn:w%d" location="w%d.wsdl"/>', n + 1, n + 1) : "");
+        };
+        return new WebService(document(0), {"def_path": "/nonexistent-qore-test/",
+            "try_import": string sub (string name) {
+                return document((name =~ x/^w([0-9]+)\.wsdl$/)[0].toInt());
+            }} + limits);
+    }
+
+    wsdlDocuments() {
+        wsdlChain(65);
+        assertThrows("WSDL-ERROR", "the limit of 64 nested documents", \SoapMessageLimitsTest::wsdlChain(), 66);
+        assertThrows("WSDL-ERROR", "the limit of 4 documents", \SoapMessageLimitsTest::wsdlChain(),
+            (5, {"max_documents": 4}));
+        wsdlChain(4, {"max_documents": 4});
+        assertThrows("WSDL-ERROR", "max_document_depth", \SoapMessageLimitsTest::wsdlChain(),
+            (4, {"max_document_depth": 2}));
+    }
+
+    precedence() {
+        (string accessor, string independent) = SoapMessageLimitsTest::dag(2);
+        string contract = sprintf(Contract, foldl $1 + $2, (map sprintf(Operation, $1), ("ints", "matrix", "jagged",
+            "node")));
+        string xml = sprintf(Envelope11, "node", accessor, "node", independent);
+        # dag(2) resolves six references: two from the root to n1, and two from each decoding of n1 to n2
+        WebService ws(contract, {"message_limits": {"max_references": 3}});
+        assertEq(3, ws.getMessageLimits().max_references);
+        assertThrows("SOAP-DESERIALIZATION-ERROR", "max_references", \ws.getOperation("node").deserializeRequest(),
+            parse_xml(xml, XPF_PRESERVE_ORDER));
+        # the limits are saved with the WSDL and its operations
+        foreach WSOperation op in (Serializable::deserialize(ws.serialize()).getOperation("node"),
+                Serializable::deserialize(ws.getOperation("node").serialize())) {
+            assertEq(3, op.getMessageLimits().max_references);
+            assertThrows("SOAP-DESERIALIZATION-ERROR", "max_references", \op.deserializeRequest(),
+                parse_xml(xml, XPF_PRESERVE_ORDER));
+        }
+        # a thread's scope takes precedence over the WSDL
+        {
+            SoapMessageLimitsScope scope(<SoapMessageLimits>{"max_references": 6});
+            assertEq(4, leaves(ws.getOperation("node").deserializeRequest(parse_xml(xml, XPF_PRESERVE_ORDER))));
+        }
+        # an operation can have its own limits
+        ws.getOperation("node").setMessageLimits(<SoapMessageLimits>{"max_references": 10});
+        assertEq(4, leaves(ws.getOperation("node").deserializeRequest(parse_xml(xml, XPF_PRESERVE_ORDER))));
+        # the WSDL's limits apply to all of its operations again
+        ws.setMessageLimits(<SoapMessageLimits>{"max_references": 3});
+        assertEq(3, ws.getOperation("node").getMessageLimits().max_references);
+        ws.setMessageLimits();
+        assertEq(NOTHING, ws.getOperation("node").getMessageLimits());
+        assertEq(4, leaves(ws.getOperation("node").deserializeRequest(parse_xml(xml, XPF_PRESERVE_ORDER))));
+        # invalid limits
+        assertThrows("SOAP-LIMIT-ERROR", "max_xml_depth must be positive", \ws.setMessageLimits(),
+            <SoapMessageLimits>{"max_xml_depth": -1});
+        assertThrows("SOAP-LIMIT-ERROR", "must be positive", sub () {
+            new WebService(contract, {"message_limits": {"max_mime_parts": 0}});
+        });
+        assertThrows("HASHDECL-INIT-ERROR", "bogus", sub () {
+            new WebService(contract, {"message_limits": {"bogus": 1}});
+        });
+
+        # a handler and a client with their own limits: the handler rejects a request its WSDL accepts, and the
+        # client rejects a response
+        WebService service(contract);
+        SoapHandler handler(new PermissiveAuthenticator());
+        handler.addMethod(service, service.getOperation("node"), int sub (hash<auto> cx, hash<auto> value) {
+            return leaves(value);
+        });
+        HttpServer server();
+        on_exit server.stop();
+        server.setDefaultHandler("soap", handler);
+        string url = sprintf("http://127.0.0.1:%d/limits", server.addListener(0).port);
+        SoapClient client({"wsdl": service, "url": url});
+        hash<auto> value = {"value": 0, "left": {"value": 1}, "right": {"value": 2}};
+        assertEq(2, client.callOperation("node", value));
+        handler.setMessageLimits(<SoapMessageLimits>{"max_xml_depth": 4});
+        assertEq(4, handler.getMessageLimits().max_xml_depth);
+        assertThrows("SOAP-SERVER-FAULT-RESPONSE", "max_xml_depth", \client.callOperation(), ("node", value));
+        handler.setMessageLimits();
+        assertEq(2, client.callOperation("node", value));
+        # the response (a single int) is four levels deep
+        SoapClient strict({"wsdl": service, "url": url, "message_limits": {"max_xml_depth": 3}});
+        assertEq(3, strict.getMessageLimits().max_xml_depth);
+        assertThrows("SOAP-DESERIALIZATION-ERROR", "max_xml_depth", \strict.callOperation(), ("node", value));
+        strict.setMessageLimits();
+        assertEq(2, strict.callOperation("node", value));
+        assertThrows("SOAP-LIMIT-ERROR", "must be positive", sub () {
+            new SoapClient({"wsdl": service, "url": url, "message_limits": {"max_references": 0}});
+        });
+    }
+
+    interruption() {
+        SandboxManager manager();
+        on_exit manager.clearInterrupt();
+        Program program(PO_NEW_STYLE | PO_STRICT_ARGS | PO_REQUIRE_TYPES);
+        program.setSandboxManager(manager);
+        string source = get_script_dir() + "/soap-message-limits-interrupt.qr";
+        program.parse(ReadOnlyFile::readTextFile(source), source);
+        (string accessor, string independent) = SoapMessageLimitsTest::dag(2);
+        string xml = sprintf(Envelope11, "node", accessor, "node", independent);
+        WSOperation op = ws11.getOperation("node");
+        hash<string, list<auto>> calls = {
+            "decode": (manager, True, op, xml, <SoapMessageLimits>{"max_references": 3}),
+            "multipart": (manager, True, package(10)),
+            "load": (manager, 3),
+        };
+        foreach hash<auto> call in (calls.pairIterator()) {
+            *hash<ExceptionInfo> error;
+            try {
+                program.callFunctionArgs(call.key, call.value);
+            } catch (hash<ExceptionInfo> ex) {
+                error = ex;
+            }
+            manager.clearInterrupt();
+            assertEq("PROGRAM-INTERRUPTED", error.err, call.key);
+        }
+        # the interrupted decoding restored its thread's limits and budget: the same program now decodes a message
+        # needing six references, which the interrupted call's limits would have rejected
+        assertEq(4, leaves(program.callFunction("decode", manager, False, op, xml)));
+        assertEq(10, program.callFunction("multipart", manager, False, package(10)).parts.size());
+        # an interrupted load leaves no state in the next one
+        assertTrue(cast<XsdSchema>(program.callFunction("load", manager, 99)).emap.hasKey("urn:d5"));
+    }
+
+    soap12Arrays() {
+        assertEq({"item": ("a",)}, decode12("echoStringArray", '<inputStringArray enc:itemType="xsd:string" '
+            'enc:arraySize="1"><item>a</item></inputStringArray>'));
+        assertThrows("SOAP-DESERIALIZATION-ERROR", "exceeding the limit", \decode12(), ("echoStringArray",
+            '<inputStringArray enc:itemType="xsd:string" enc:arraySize="99999999999"/>'));
+        # a row of the largest length is accepted without members
+        assertEq((), decode12("echo2DStringArray", '<input2DStringArray enc:itemType="xsd:string" '
+            'enc:arraySize="* 1048576"/>', "SbBinding"));
+        {
+            SoapMessageLimitsScope limits(<SoapMessageLimits>{"max_array_rank": 2, "max_array_slots": 100});
+            assertThrows("SOAP-DESERIALIZATION-ERROR", "max_array_rank", \decode12(), ("echo2DStringArray",
+                '<input2DStringArray enc:itemType="xsd:string" enc:arraySize="1 1 1"/>', "SbBinding"));
+            assertThrows("SOAP-DESERIALIZATION-ERROR", "max_array_slots", \decode12(), ("echoStringArray",
+                '<inputStringArray enc:itemType="xsd:string" enc:arraySize="101"/>'));
+        }
+    }
+}
