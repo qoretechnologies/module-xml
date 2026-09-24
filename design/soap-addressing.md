@@ -241,3 +241,51 @@ them by `unique_id`.
   HTTP response.
 - **MustUnderstand faults:** they relate to the request through the `all_headers` list that the
   `SOAP-MUST-UNDERSTAND` exception carries.
+
+## Non-anonymous response endpoints
+
+**Server side.** `SoapHandler::setResponseEndpointAuthorizer()` enables non-anonymous response endpoints. This is
+the approved opt-in, following SOAP Binding section 7. `checkAddressing()` accepts such an endpoint only when all
+of these hold:
+- the policy allows non-anonymous responses;
+- the address is an `http` or `https` URL;
+- the authorizer returns true.
+
+Otherwise the request is rejected with `wsa:OnlyAnonymousAddressSupported` before the callback. An accepted request
+records the delivery timeout in `cx.addressing_delivery_timeout`.
+
+**Delivery.** Replies, and faults when the request has an accepted fault or reply endpoint, then go to the
+endpoint's address, with its reference parameters. `SoapHandler::deliver()` handles this:
+- It sends the serialized message as an HTTP POST (R1152).
+- The SOAP action is the message's action (R1144): the SOAP 1.1 `SOAPAction` header, or the SOAP 1.2 `action`
+  parameter of an `application/soap+xml` content type.
+- It returns an empty 202 on the back channel.
+- Delivery is synchronous and happens before the 202, so a client receives the reply no later than the
+  acknowledgment.
+- A delivery failure is logged, because the request has already been processed.
+
+Faults that are never delivered to an endpoint:
+- WS-Addressing faults about the request's headers or endpoints always go on the HTTP response.
+- So do MustUnderstand and VersionMismatch faults (R1036).
+
+**Client side.** `WsaReplyReceiver` (in WSDL) correlates received messages with requests by their reply
+relationship.
+- `expect()` registers a message ID.
+- `deliver()` stores the first reply for an expected ID, which may arrive before the caller waits. A duplicate or
+  an unexpected message is refused.
+- `wait()` blocks on a queue with a timeout (`WSA-REPLY-TIMEOUT`) and always stops expecting the ID.
+
+`SoapReplyHandler` (in SoapHandler) is the HTTP side:
+- It parses the message and processes its headers with an addressing node.
+- It passes the message to the receiver and answers 202.
+- A message without WS-Addressing headers gets `wsa:MessageAddressingHeaderRequired`, and one that relates to no
+  expected request gets `wsa:InvalidAddressingHeader`.
+
+**Clients using a receiver.** With a `reply_receiver`, `SoapClient` and `SoapClientIo` use the receiver's endpoint
+reference as `wsa:ReplyTo` and `wsa:FaultTo` of request-response calls.
+- They expect the message ID before sending, when either endpoint is the receiver, and cancel the expectation on
+  every exit.
+- On an empty 202, they wait for the reply for the client's timeout and process it like a back-channel response,
+  including the WS-Addressing response checks and fault reporting.
+- A server that answers on the back channel anyway is accepted.
+- The receiver is not saved with a SoapClient.

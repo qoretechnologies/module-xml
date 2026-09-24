@@ -205,6 +205,8 @@ SoapClient client({"wsdl": ws, "url": url, "message_limits": <SoapMessageLimits>
       WsAddressingHelper::checkSoapAction() checks a received SOAP action against \c wsa:Action; and
       WsAddressingHelper::serializeFault() builds WS-Addressing fault messages for SOAP 1.1 (with the
       \c wsa:FaultDetail header) and SOAP 1.2 (with subcodes)
+    - WsaReplyReceiver correlates replies received at a non-anonymous reply endpoint with the requests that expect
+      them; the \c SoapClient and \c SoapClientIo modules use it for their \c reply_receiver option
 
     @par Example
     @code{.py}
@@ -371,6 +373,7 @@ if (policy.required) {
       WS-Policy 1.5 or 2004/09 to ports, bindings and binding operations, and endpoint references extending ports;
       invalid WS-Addressing descriptions are rejected (WS-I R1156-R1158, R2901); policy references and endpoint
       references may carry \c wsdl:required="true", which was rejected as an unsupported required extension
+    - WsaReplyReceiver receives WS-Addressing replies sent to a non-anonymous reply endpoint
     - SoapProcessingNode can process WS-Addressing headers with the new SoapNodeOptions \c addressing option, and
       SoapProcessingNode::getOptions() returns a node's configuration
     - WS-Addressing message addressing properties in SOAP messages (@ref wsdl_addressing): WsaOutputScope adds them
@@ -28442,16 +28445,19 @@ public class WsAddressingHelper {
         policy: they are sent when it supports WS-Addressing
         @param overrides properties that replace the computed ones, as WsaMessageAddressing keys; they enable
         WS-Addressing
+        @param receiver the client's receiver for replies sent to a non-anonymous address; a request-response
+        operation then uses its endpoint reference as \c wsa:ReplyTo and \c wsa:FaultTo (since %WSDL 0.5.8)
         @return the properties: \c wsa:To and reference parameters from the port's endpoint reference (WS-I R1154)
         or else the URL (R1155), the input action, a new message ID, and for a request-response operation an
         anonymous \c wsa:ReplyTo (WS-Addressing Metadata section 5.1, WS-I R1142); NOTHING when WS-Addressing is
         not used
         @throw WSA-CLIENT-ERROR WS-Addressing is disabled although the policy requires it (WS-I R1040), an
-        unknown override, or a request-response call with a non-anonymous response endpoint
+        unknown override, or a request-response call with a response endpoint other than the anonymous address or
+        the receiver's address
         @throw WSA-SERIALIZATION-ERROR invalid properties
     */
     static *hash<WsaMessageAddressing> clientRequest(WebService ws, WSOperation op, string binding, string service,
-            string port, string url, *bool enabled, *hash<auto> overrides) {
+            string port, string url, *bool enabled, *hash<auto> overrides, *WsaReplyReceiver receiver) {
         hash<WsAddressingPolicy> policy = ws.getAddressingPolicy(op, binding, service, port);
         if (enabled === False && policy.required) {
             throw "WSA-CLIENT-ERROR", sprintf("operation %Y requires WS-Addressing (WS-I R1040), but the client "
@@ -28468,7 +28474,11 @@ public class WsAddressingHelper {
             "reference_parameters": endpoint.reference_parameters ?? (),
         };
         if (op.output) {
-            maps.reply_to = <WsaEndpointReference>{"address": WSA_ANONYMOUS};
+            maps.reply_to = receiver ? receiver.getEndpointReference()
+                : <WsaEndpointReference>{"address": WSA_ANONYMOUS};
+            if (receiver) {
+                maps.fault_to = receiver.getEndpointReference();
+            }
         }
         foreach hash<auto> item in (overrides.pairIterator()) {
             if (!inlist(item.key, Fields)) {
@@ -28478,10 +28488,12 @@ public class WsAddressingHelper {
             maps{item.key} = item.value;
         }
         if (op.output) {
+            *string received = receiver ? receiver.getEndpointReference().address : NOTHING;
             foreach string field in ("reply_to", "fault_to") {
-                if (maps{field} && maps{field}.address != WSA_ANONYMOUS) {
+                if (maps{field} && maps{field}.address != WSA_ANONYMOUS && maps{field}.address != received) {
                     throw "WSA-CLIENT-ERROR", sprintf("a request-response call receives its response on the HTTP "
-                        "connection, so its %s address must be anonymous; got %Y", field, maps{field}.address);
+                        "connection or at its reply receiver, so its %s address must be anonymous or the "
+                        "receiver's; got %Y", field, maps{field}.address);
                 }
             }
         }
@@ -28525,8 +28537,10 @@ public class WsAddressingHelper {
         }
         list<string> expected;
         if (fault) {
-            expected = (WSA_FAULT_ACTION, WSA_SOAP_FAULT_ACTION) + (map op.getFaultAction($1),
-                keys op.getFaultMessages());
+            expected = (WSA_FAULT_ACTION, WSA_SOAP_FAULT_ACTION);
+            foreach string fault_name in (keys op.getFaultMessages()) {
+                push expected, op.getFaultAction(fault_name);
+            }
         } else if (op.output) {
             expected = (op.getOutputAction(),);
         }
@@ -28704,6 +28718,128 @@ public class WsAddressingHelper {
             "soapenv:Body": body,
         }};
         return make_xml(envelope);
+    }
+}
+
+#! a message received at a non-anonymous reply endpoint
+/** @since %WSDL 0.5.8 */
+public hashdecl WsaReceivedMessage {
+    #! the HTTP headers of the message, with lower-case names
+    hash<auto> headers;
+    #! the HTTP entity body
+    *data body;
+    #! the message's WS-Addressing properties
+    hash<WsaMessageAddressing> addressing;
+}
+
+#! correlates replies received at a non-anonymous reply endpoint with the requests that expect them
+/** A client that sends requests with a \c wsa:ReplyTo or \c wsa:FaultTo address of this receiver registers each
+    request's message ID with expect() before sending and waits for the reply with wait(). A transport handler,
+    such as \c SoapReplyHandler in the \c SoapHandler module, receives the messages sent to the address and passes
+    them to deliver(), which matches them by their reply relationship (WS-Addressing 1.0 Core section 3.4).
+    @see @ref wsdl_addressing
+    @since %WSDL 0.5.8
+*/
+public class WsaReplyReceiver {
+    private {
+        # the endpoint reference that requests name as their reply and fault endpoint
+        hash<WsaEndpointReference> endpoint;
+        # message ID -> the queue receiving the related reply
+        hash<string, Queue> pending();
+        # the message IDs whose reply has been delivered and not yet collected
+        hash<string, bool> delivered();
+        Mutex lock();
+    }
+
+    #! creates the receiver for the given endpoint reference
+    /** @param endpoint the reference, whose address is where the transport handler receives messages
+        @throw WSA-SERIALIZATION-ERROR the address is not an absolute IRI or is the anonymous or none address
+    */
+    constructor(hash<WsaEndpointReference> endpoint) {
+        WsAddressingHelper::validate(<WsaMessageAddressing>{"action": WSA_REPLY, "reply_to": endpoint});
+        if (endpoint.address == WSA_ANONYMOUS || endpoint.address == WSA_NONE) {
+            throw "WSA-SERIALIZATION-ERROR", sprintf("a reply receiver requires a non-anonymous address; got %Y",
+                endpoint.address);
+        }
+        self.endpoint = endpoint;
+    }
+
+    #! returns the endpoint reference of the receiver
+    hash<WsaEndpointReference> getEndpointReference() {
+        return endpoint;
+    }
+
+    #! registers a request whose reply is expected
+    /** @param message_id the request's message ID
+        @throw WSA-RECEIVER-ERROR the message ID is already expected
+    */
+    expect(string message_id) {
+        AutoLock al(lock);
+        if (pending{message_id}) {
+            throw "WSA-RECEIVER-ERROR", sprintf("a reply to message %Y is already expected", message_id);
+        }
+        pending{message_id} = new Queue();
+    }
+
+    #! stops expecting a reply
+    /** @param message_id the request's message ID; unknown IDs are ignored
+    */
+    cancel(string message_id) {
+        AutoLock al(lock);
+        remove pending{message_id};
+        remove delivered{message_id};
+    }
+
+    #! returns True if a reply to the message is expected
+    bool isExpected(string message_id) {
+        AutoLock al(lock);
+        return exists pending{message_id};
+    }
+
+    #! waits for the reply to a request and stops expecting it
+    /** @param message_id the request's message ID, registered with expect()
+        @param timeout_ms the maximum time to wait in milliseconds
+        @return the received reply
+        @throw WSA-RECEIVER-ERROR no reply is expected for the message ID
+        @throw WSA-REPLY-TIMEOUT no reply arrived in time
+    */
+    hash<WsaReceivedMessage> wait(string message_id, timeout timeout_ms) {
+        Queue queue;
+        {
+            AutoLock al(lock);
+            if (!pending{message_id}) {
+                throw "WSA-RECEIVER-ERROR", sprintf("no reply to message %Y is expected", message_id);
+            }
+            queue = pending{message_id};
+        }
+        on_exit cancel(message_id);
+        try {
+            return queue.get(timeout_ms);
+        } catch (hash<ExceptionInfo> ex) {
+            if (ex.err != "QUEUE-TIMEOUT") {
+                rethrow;
+            }
+            throw "WSA-REPLY-TIMEOUT", sprintf("no reply to message %Y arrived within %d ms", message_id,
+                timeout_ms);
+        }
+    }
+
+    #! delivers a received message to the request it replies to
+    /** @param message the message; it can arrive before the request's sender waits for it
+        @return True if it replies to an expected request; False if it relates to no expected request or to one
+        whose reply has already been delivered
+    */
+    bool deliver(hash<WsaReceivedMessage> message) {
+        AutoLock al(lock);
+        foreach hash<WsaRelationship> relationship in (message.addressing.relates_to) {
+            if (relationship.type == WSA_REPLY && pending{relationship.message_id}
+                    && !delivered{relationship.message_id}) {
+                delivered{relationship.message_id} = True;
+                pending{relationship.message_id}.push(message);
+                return True;
+            }
+        }
+        return False;
     }
 }
 

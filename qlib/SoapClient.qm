@@ -121,8 +121,15 @@ auto result = sc.call("SubmitDocument", msg);
     call fails with \c WSA-RESPONSE-ERROR. A SOAP fault is still reported as the fault, with such a problem in the
     \c error key of the info hash's \c addressing value. A response without WS-Addressing headers is accepted
     unless the policy requires WS-Addressing (WS-I R1040). The \c addressing key of the call's info hash returns
-    both sets of properties. A request-response call receives its response on the HTTP connection, so its
-    \c reply_to and \c fault_to addresses must be anonymous.
+    both sets of properties.
+
+    A request-response call receives its response on the HTTP connection, unless the client has a
+    \c reply_receiver (a @ref WSDL::WsaReplyReceiver "WsaReplyReceiver"): its address is then the call's
+    \c wsa:ReplyTo and \c wsa:FaultTo, the server answers the request with an empty HTTP 202 response and sends
+    the reply or fault as a separate HTTP request to that address (WS-Addressing SOAP Binding section 5.2), where a
+    \c SoapHandler::SoapReplyHandler delivers it to the waiting call; the \c reply-headers info key returns its
+    HTTP headers. A reply that does not arrive within the client's timeout raises \c WSA-REPLY-TIMEOUT. The
+    \c reply_to and \c fault_to addresses of a request-response call must be anonymous or the receiver's.
 
     @code{.py}
 SoapClient client({"wsdl": wsdl, "addressing": True});
@@ -137,8 +144,8 @@ printf("message ID: %s\n", info.addressing.request.message_id);
 
     @subsection soapclient_1_0_4 SoapClient v1.0.4
     - WS-Addressing 1.0 (@ref soapclient_addressing): requests carry message addressing properties when the WSDL
-      policy supports WS-Addressing or the \c addressing options select it, and responses are checked against the
-      request
+      policy supports WS-Addressing or the \c addressing options select it, responses are checked against the
+      request, and the \c reply_receiver option receives replies sent to a non-anonymous reply endpoint
     - responses are parsed and decoded within @ref WSDL::SoapMessageLimits "SoapMessageLimits": the \c message_limits
       option and setMessageLimits() select them for a client, which otherwise uses those of the calling thread or
       the WSDL
@@ -281,6 +288,8 @@ public class SoapClient inherits HTTPClient {
         *bool addressing;
         # mark the WS-Addressing request headers mustUnderstand
         bool addressing_must_understand = False;
+        # the receiver of replies sent to a non-anonymous address; not saved with the client
+        transient *WsaReplyReceiver reply_receiver;
 
         *code logc;
         *code dbglogc;
@@ -342,6 +351,10 @@ public class SoapClient inherits HTTPClient {
           WSDL supports WS-Addressing; see @ref soapclient_addressing
         - \c addressing_must_understand: @ref Qore::True "True" to mark the WS-Addressing request headers
           \c mustUnderstand
+        - \c reply_receiver: a @ref WSDL::WsaReplyReceiver "WsaReplyReceiver" whose address request-response
+          calls use as \c wsa:ReplyTo and \c wsa:FaultTo: the server then sends the reply as a separate HTTP
+          request to that address, where a handler such as \c SoapHandler::SoapReplyHandler delivers it to the
+          receiver; see @ref soapclient_addressing
         - \c wsdl_file: a path to use to load the %WSDL and create the @ref WSDL::WebService "WebService" object
         - \c url: override the target URL given in the %WSDL; HTTP binding operation references resolve against
           this complete base URI, including its path and query
@@ -387,6 +400,12 @@ auto result = client.callOperation("submit", {"id": "invoice-71"});
         }
         addressing = h.addressing;
         addressing_must_understand = h.addressing_must_understand ?? False;
+        if (exists h.reply_receiver) {
+            if (!(h.reply_receiver instanceof WsaReplyReceiver)) {
+                throw "SOAP-CLIENT-ERROR", "the reply_receiver option must be a WsaReplyReceiver";
+            }
+            reply_receiver = h.reply_receiver;
+        }
         if (exists h.wsdl_file && exists h.wsdl)
             throw "SOAP-CLIENT-ERROR", "only one of 'wsdl' or 'wsdl_file' keys can be given; both were passed";
 
@@ -792,7 +811,7 @@ auto invoice = client.getSoapResponse("GetInvoice", "/invoices/71", {"preserve_t
             WSOperation request_op = wsdl.getBindingOperation(binding, operation);
             if (request_op.getBinding(binding) instanceof SoapBinding) {
                 request_maps = WsAddressingHelper::clientRequest(wsdl, request_op, binding, svc, port, url, addressing,
-                    opts.addressing);
+                    opts.addressing, reply_receiver);
             } else if (exists opts.addressing) {
                 throw "SOAP-CLIENT-ERROR", "WS-Addressing requires a SOAP binding";
             }
@@ -847,6 +866,17 @@ auto invoice = client.getSoapResponse("GetInvoice", "/invoices/71", {"preserve_t
         # we have to write the request key after the HTTPClient::post() call but before the log message above
         # (on_exit statements are executed in reverse order when the block is exited)
         on_exit info += ("request-body": msg.body, "request-soap-headers": soap_headers);
+        # WS-Addressing SOAP Binding section 5.2: a response endpoint at the reply receiver receives the response as
+        # a separate HTTP request
+        bool decoupled = request_maps && reply_receiver && exists op.output
+            && inlist(reply_receiver.getEndpointReference().address, (request_maps.reply_to.address,
+                request_maps.fault_to.address));
+        if (decoupled) {
+            reply_receiver.expect(request_maps.message_id);
+        }
+        on_exit if (decoupled) {
+            reply_receiver.cancel(request_maps.message_id);
+        }
         if (request_maps) {
             # the response's WS-Addressing headers are honored, including mandatory ones (WS-I R1143)
             if (!response_node.getOptions().addressing) {
@@ -930,6 +960,14 @@ auto invoice = client.getSoapResponse("GetInvoice", "/invoices/71", {"preserve_t
                 }
                 rethrow;
             }
+        }
+        if (decoupled && http_status_code == 202 && !rh.body) {
+            # the back channel acknowledges the request; the response arrives at the reply receiver
+            hash<WsaReceivedMessage> received = reply_receiver.wait(request_maps.message_id,
+                getTimeout() > 0 ? getTimeout() : 30000);
+            rh = received.headers + {"body": received.body};
+            info."response-body" = received.body;
+            info."reply-headers" = received.headers;
         }
         # HTTPClient::send() replaces the info hash
         if (request_maps) {

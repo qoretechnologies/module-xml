@@ -105,11 +105,16 @@ module SoapHandler {
       \c wsa:Action is the operation's input action (WS-I R2900, \c wsa:ActionNotSupported); when the SOAP action
       selects no operation, \c wsa:Action does
     - that a request-response message has a \c wsa:MessageID (WS-I R1163)
-    - the response endpoints: the handler sends replies and faults on the HTTP response, so a non-anonymous
-      \c wsa:ReplyTo or \c wsa:FaultTo address is rejected with \c wsa:OnlyAnonymousAddressSupported (WS-I
-      R1146), and an anonymous one with \c wsa:OnlyNonAnonymousAddressSupported when the policy requires
-      non-anonymous responses; the \c none address is accepted, and a reply or fault to it is discarded with an
-      empty HTTP 202 response
+    - the response endpoints: a non-anonymous \c wsa:ReplyTo or \c wsa:FaultTo address is used only when the
+      operation's policy allows non-anonymous responses, the address is an \c http or \c https URL and the
+      authorizer set with setResponseEndpointAuthorizer() approves it; otherwise the request is rejected with
+      \c wsa:OnlyAnonymousAddressSupported (WS-I R1146). An anonymous one is rejected with
+      \c wsa:OnlyNonAnonymousAddressSupported when the policy requires non-anonymous responses. The \c none
+      address is accepted, and a reply or fault to it is discarded with an empty HTTP 202 response
+
+    A reply or fault for an approved non-anonymous endpoint is sent as a separate HTTP request to its address, with
+    the reply's action as the SOAP action (WS-I R1144 and R1152), and the request is answered with an empty HTTP
+    202 response; a failed delivery is logged. The SoapReplyHandler class receives such messages for clients.
 
     A reply carries the operation's output action and relates to the request; a fault carries its declared fault
     action or, for SOAP faults, the WS-Addressing SOAP fault action (WS-I R1035). Invalid WS-Addressing headers are
@@ -137,6 +142,8 @@ hash<auto> sub get_quote(hash<auto> cx, string symbol) {
       checked against the operation and its WSDL policy, replies and faults carry related message addressing
       properties, and invalid headers are answered with WS-Addressing faults; mandatory WS-Addressing headers,
       which previously caused a MustUnderstand fault, are now understood unless setAddressing() disables them
+    - non-anonymous WS-Addressing response endpoints approved by setResponseEndpointAuthorizer() receive replies
+      and faults as separate HTTP requests; the new SoapReplyHandler class receives them for clients
     - requests are parsed and decoded within @ref WSDL::SoapMessageLimits "SoapMessageLimits": setMessageLimits()
       selects them for a handler, which otherwise uses those of the calling thread or of each operation's WSDL;
       a request exceeding one is rejected with a SOAP fault. \c max_message_size limits a request body only after
@@ -351,6 +358,10 @@ public namespace SoapHandler {
             hash<string, hash<string, hash<auto>>> aam;
             # URI path -> WS-Addressing input action -> registration identity -> method
             hash<string, hash<string, hash<string, hash<auto>>>> uri_aam;
+            # approves non-anonymous response endpoints; NOTHING rejects them all
+            *code<bool(hash<auto>, hash<WsaEndpointReference>)> response_authorizer;
+            # the timeout for sending replies and faults to non-anonymous response endpoints
+            int delivery_timeout = 30000;
 
             # for atomicity when adding / removing methods
             RWLock rwl();
@@ -428,6 +439,33 @@ public namespace SoapHandler {
             rwl.readLock();
             on_exit rwl.readUnlock();
             return addressing;
+        }
+
+        #! approves the non-anonymous response endpoints that the handler sends replies and faults to
+        /** Without an authorizer, a request whose \c wsa:ReplyTo or \c wsa:FaultTo has a non-anonymous address is
+            rejected with \c wsa:OnlyAnonymousAddressSupported, because a sender could otherwise direct the handler's
+            messages to any endpoint (WS-Addressing 1.0 SOAP Binding section 7). With one, such an endpoint is used
+            when the operation's WSDL policy allows non-anonymous responses, its address is an \c http or \c https
+            URL and the authorizer returns @ref Qore::True "True". The reply or fault is then sent as a separate HTTP
+            request to the address (WS-I R1152), and the request is answered with an empty HTTP 202 response.
+            @param authorizer called with the request context and the endpoint reference; NOTHING rejects every
+            non-anonymous response endpoint
+            @param delivery_timeout the connection and response timeout for sending replies and faults
+            @par Example
+            @code{.py}
+handler.setResponseEndpointAuthorizer(bool sub (hash<auto> cx, hash<WsaEndpointReference> endpoint) {
+    return endpoint.address =~ /^https:\/\/partner\.example\.com\//;
+});
+            @endcode
+            @see @ref soaphandler_addressing
+            @since %SoapHandler 0.3.4
+        */
+        setResponseEndpointAuthorizer(*code<bool(hash<auto>, hash<WsaEndpointReference>)> authorizer,
+                timeout delivery_timeout = 30s) {
+            rwl.writeLock();
+            on_exit rwl.writeUnlock();
+            response_authorizer = authorizer;
+            self.delivery_timeout = delivery_timeout;
         }
 
         #! adds a method to the handler dynamically
@@ -1280,14 +1318,17 @@ private nothing msglog(hash<auto> cx, hash<auto> msg) {
                 o."soapenv:Envelope"."soapenv:Body" = fault_body;
             }
 
+            *hash<WsaMessageAddressing> fault_maps;
             if (cx.addressing) {
                 # WS-I R1036: MustUnderstand and VersionMismatch faults are always sent on the HTTP response
-                if (faultCode != SoapFaultMustUnderstand && faultCode != SoapFaultVersionMismatch
-                        && discardsFaults(cx.addressing)) {
+                bool protocol_fault = faultCode == SoapFaultMustUnderstand || faultCode == SoapFaultVersionMismatch;
+                if (!protocol_fault && discardsFaults(cx.addressing)) {
                     return discarded(cx);
                 }
                 # WS-I R1035 and WS-Addressing SOAP Binding section 6: SOAP-defined faults
-                addAddressingHeaders(\o, soap12, faultAddressing(cx.addressing, WSA_SOAP_FAULT_ACTION));
+                fault_maps = faultAddressing(cx.addressing, WSA_SOAP_FAULT_ACTION,
+                    !protocol_fault && exists cx.addressing_delivery_timeout);
+                addAddressingHeaders(\o, soap12, fault_maps);
             }
 
             hash<auto> msg = {
@@ -1298,6 +1339,9 @@ private nothing msglog(hash<auto> cx, hash<auto> msg) {
                     "Content-Type": WSDLLib::getSoapMimeType12(soap12),
                 },
             };
+            if (fault_maps && fault_maps.to != WSA_ANONYMOUS) {
+                return deliver(cx, msg, fault_maps, soap12);
+            }
             msglog(cx, {'reason': 'error', 'code': httpCode, 'header': msg.hdr, 'body': msg.body});
             return msg;
         }
@@ -1316,7 +1360,7 @@ private nothing msglog(hash<auto> cx, hash<auto> msg) {
                     }
                     fault_maps = faultAddressing(cx.addressing, !from_header_processor
                         && method.operation.hasFault(error.err) ? method.operation.getFaultAction(error.err)
-                        : WSA_SOAP_FAULT_ACTION);
+                        : WSA_SOAP_FAULT_ACTION, exists cx.addressing_delivery_timeout);
                 }
                 WsaOutputScope addressing_scope(fault_maps);
                 hash<auto> response = from_header_processor || !method.operation.hasFault(error.err)
@@ -1324,6 +1368,9 @@ private nothing msglog(hash<auto> cx, hash<auto> msg) {
                     : method.operation.serializeFault(error.err, error.desc ?? "no description provided", error.arg,
                         header, NOTHING, NOTHING, NOTHING, NOTHING, method.binding);
                 response.code = soap12 ? 400 : 500;
+                if (fault_maps && fault_maps.to != WSA_ANONYMOUS) {
+                    return deliver(cx, response, fault_maps, soap12);
+                }
                 msglog(cx, {"reason":"error","code":response.code,"header":response.hdr,"body":response.body});
                 return response;
             } catch (hash<ExceptionInfo> ex) {
@@ -1444,6 +1491,9 @@ private nothing msglog(hash<auto> cx, hash<auto> msg) {
                     SoapMtomScope mtom_scope(exists threshold, threshold ?? MTOM_THRESHOLD);
                     h += method.operation.serializeResponse(rv, header, NOTHING, NOTHING, response_soap12, NOTHING,
                         method.binding, NOTHING, method.response_mime_format);
+                    if (reply_maps && reply_maps.to != WSA_ANONYMOUS) {
+                        return deliver(cx, h, reply_maps, reqsoap12);
+                    }
                     msglog(cx, ('reason': 'response', 'code': 200, 'header': h.hdr, 'body': h.body));
                 } catch (hash<ExceptionInfo> ex) {
                     if (ex.err == "PROGRAM-INTERRUPTED" || ex.err == "THREAD-CANCELLED") { rethrow; }
@@ -1776,11 +1826,15 @@ private nothing msglog(hash<auto> cx, hash<auto> msg) {
                 # the request node and WS-Addressing setting in force for this request
                 SoapProcessingNode node;
                 bool process_addressing;
+                *code<bool(hash<auto>, hash<WsaEndpointReference>)> authorizer;
+                int delivery;
                 {
                     rwl.readLock();
                     on_exit rwl.readUnlock();
                     node = request_node;
                     process_addressing = addressing;
+                    authorizer = response_authorizer;
+                    delivery = delivery_timeout;
                 }
                 try {
                     *string ct = hdr."_qore_orig_content_type";
@@ -1999,7 +2053,10 @@ private nothing msglog(hash<auto> cx, hash<auto> msg) {
                                 soap_action, method.operation.name, method.soap_action);
                         }
                         if (process_addressing && method.addressing_policy) {
-                            checkAddressing(cx, method, soap_action, reqsoap12);
+                            if (checkAddressing(cx, method, soap_action, reqsoap12, authorizer)) {
+                                # replies and faults go to the accepted non-anonymous response endpoints
+                                cx.addressing_delivery_timeout = delivery;
+                            }
                         }
                         if (method.xml_values && !exists xml_body) {
                             xml_body = WSDLLib::getXmlMessageText(msg);
@@ -2073,15 +2130,17 @@ private nothing msglog(hash<auto> cx, hash<auto> msg) {
         }
 
         # checks a request's WS-Addressing properties against the selected operation
-        private checkAddressing(hash<auto> cx, hash<auto> method, *string soap_action, bool soap12) {
+        private bool checkAddressing(hash<auto> cx, hash<auto> method, *string soap_action, bool soap12,
+                *code<bool(hash<auto>, hash<WsaEndpointReference>)> authorizer) {
             hash<WsAddressingPolicy> policy = method.addressing_policy;
             *hash<WsaMessageAddressing> maps = cx.addressing;
+            bool accepted = False;
             if (!maps) {
                 if (policy.required) {
                     throw "WSA-FAULT", sprintf("operation %Y requires WS-Addressing", method.operation.name),
                         WsAddressingHelper::headerRequired("Action");
                 }
-                return;
+                return False;
             }
             # WS-I R1144 and WS-Addressing SOAP Binding sections 2.4 and 4
             WsAddressingHelper::checkSoapAction(maps, soap_action, soap12);
@@ -2114,25 +2173,67 @@ private nothing msglog(hash<auto> cx, hash<auto> msg) {
                             method.operation.name, field.name),
                             WsAddressingHelper::onlyAddressSupported(False, field.name);
                     }
+                } else if (policy.non_anonymous && authorizer && deliverable(endpoint.address)
+                        && authorizer(cx, endpoint)) {
+                    accepted = True;
                 } else {
-                    # WS-I R1146: the handler sends responses on the HTTP response, so it faults instead
-                    throw "WSA-FAULT", sprintf("the handler only sends responses on the HTTP response; wsa:%s "
-                        "address %Y is not supported", field.name, endpoint.address),
-                        WsAddressingHelper::onlyAddressSupported(True, field.name);
+                    # WS-I R1146: a response endpoint that the handler cannot use is faulted instead
+                    throw "WSA-FAULT", sprintf("wsa:%s address %Y is not an approved response endpoint", field.name,
+                        endpoint.address), WsAddressingHelper::onlyAddressSupported(True, field.name);
                 }
             }
+            return accepted;
+        }
+
+        # the handler sends messages to http and https addresses
+        private static bool deliverable(string address) {
+            *string scheme = parse_url(address).protocol;
+            return exists scheme && inlist(scheme.lwr(), ("http", "https"));
+        }
+
+        # sends a reply or fault to a non-anonymous response endpoint as a separate HTTP request (WS-Addressing
+        # SOAP Binding section 5.2, WS-I R1152) and acknowledges the request with an empty HTTP 202 response
+        private hash<auto> deliver(hash<auto> cx, hash<auto> message, hash<WsaMessageAddressing> maps, bool soap12) {
+            hash<auto> headers = message.hdr ?? {};
+            # WS-I R1144: an HTTP request with wsa:Action carries the same SOAP action
+            if (soap12) {
+                if (headers."Content-Type" =~ /^application\/soap\+xml/i && headers."Content-Type" !~ /;\s*action=/i) {
+                    headers."Content-Type" += sprintf(";action=\"%s\"", maps.action);
+                }
+            } else {
+                headers.SOAPAction = sprintf("\"%s\"", maps.action);
+            }
+            hash<auto> url = parse_url(maps.to);
+            string path = (url.path ?? "/") + (exists url.query ? "?" + url.query : "");
+            try {
+                HTTPClient client({"url": maps.to, "timeout": cx.addressing_delivery_timeout,
+                    "connect_timeout": cx.addressing_delivery_timeout});
+                hash<auto> info;
+                client.send(message.body, "POST", path, headers, False, \info);
+                msglog(cx, {"reason": "response", "code": 202, "header": headers, "body": message.body,
+                    "destination": maps.to});
+            } catch (hash<ExceptionInfo> ex) {
+                if (ex.err == "PROGRAM-INTERRUPTED" || ex.err == "THREAD-CANCELLED") { rethrow; }
+                # the request was processed; the undeliverable message can only be logged
+                SoapHandler::log(cx, "WS-Addressing: sending a message to %s failed: %s: %s", maps.to, ex.err,
+                    ex.desc);
+            }
+            return {"code": 202};
         }
 
         # the addressing properties of a fault sent on the HTTP response (WS-Addressing Core section 3.4)
         private static hash<WsaMessageAddressing> faultAddressing(*hash<WsaMessageAddressing> request,
-                string action) {
+                string action, bool deliverable = False) {
             hash<WsaMessageAddressing> result({"to": WSA_ANONYMOUS, "action": action});
             if (request.message_id) {
                 result.relates_to = (<WsaRelationship>{"message_id": request.message_id},);
             }
             if (request) {
                 hash<WsaEndpointReference> endpoint = WsAddressingHelper::responseEndpoint(request, True);
-                if (endpoint.address == WSA_ANONYMOUS) {
+                if (endpoint.address == WSA_ANONYMOUS
+                        || (deliverable && endpoint.address != WSA_NONE)) {
+                    # a fault goes to an accepted fault endpoint, or else on the HTTP response
+                    result.to = endpoint.address;
                     result.reference_parameters = endpoint.reference_parameters;
                 }
             }
@@ -2188,5 +2289,88 @@ private nothing msglog(hash<auto> cx, hash<auto> msg) {
             return wsph{path} ?? owsh{path} ?? wsh{path};
         }
         #! @endcond
+    }
+
+    #! receives WS-Addressing replies and faults sent to a client's non-anonymous response endpoint
+    /** Mounted on an HttpServer at the address of a @ref WSDL::WsaReplyReceiver "WsaReplyReceiver", it delivers
+        each SOAP message it receives to the receiver, which passes it to the client call waiting for the reply
+        (WS-Addressing 1.0 SOAP Binding section 5.2). A delivered message is acknowledged with an empty HTTP 202
+        response. A message without WS-Addressing headers, or one that relates to no expected request, is answered
+        with the WS-Addressing fault \c wsa:MessageAddressingHeaderRequired or \c wsa:InvalidAddressingHeader.
+
+        @par Example
+        @code{.py}
+WsaReplyReceiver receiver(<WsaEndpointReference>{"address": "http://client.example:8081/replies"});
+HttpServer server();
+server.setHandler("replies", "replies", NOTHING, new SoapReplyHandler(receiver));
+server.addListener(8081);
+SoapClient client({"wsdl": wsdl, "addressing": True, "reply_receiver": receiver});
+auto result = client.callOperation("getQuote", {"Symbol": "QORE"});
+        @endcode
+        @since %SoapHandler 0.3.4
+    */
+    public class SoapReplyHandler inherits AbstractHttpRequestHandler {
+        private {
+            WsaReplyReceiver receiver;
+            SoapProcessingNode node;
+        }
+
+        #! creates the handler
+        /** @param receiver the receiver to deliver messages to
+            @param auth an optional authenticator for the incoming requests
+            @param node an optional ultimate-receiver node with header capabilities for the received messages; it
+            is used with WS-Addressing processing enabled
+            @throw SOAP-HANDLER-ERROR an intermediary node was supplied
+        */
+        constructor(WsaReplyReceiver receiver, *AbstractAuthenticator auth, *SoapProcessingNode node)
+                : AbstractHttpRequestHandler(auth) {
+            if (node && !node.isUltimateReceiver()) {
+                throw "SOAP-HANDLER-ERROR", "SoapReplyHandler requires an ultimate-receiver SoapProcessingNode";
+            }
+            self.receiver = receiver;
+            hash<SoapNodeOptions> options = node ? node.getOptions() : <SoapNodeOptions>{};
+            options.addressing = True;
+            self.node = new SoapProcessingNode(options);
+        }
+
+        #! delivers a received SOAP message to the receiver
+        hash<HttpResponseInfo> handleRequest(hash<auto> cx, hash<auto> hdr, *data body) {
+            if (hdr.method != "POST") {
+                return <HttpResponseInfo>{"code": 405, "hdr": {"Allow": "POST",
+                    "Content-Type": "text/plain;charset=UTF-8"}, "body": "replies are received with POST"};
+            }
+            bool soap12 = False;
+            *hash<WsaMessageAddressing> maps;
+            try {
+                hash<auto> msg = WSDLLib::parseMultiPartSOAPMessage(hdr + {"body": body}, False, True);
+                soap12 = WSDLLib::isSOAPMessage12(msg);
+                hash<SoapNodeResult> processed = node.processMessage(WSDLLib::getXmlMessageText(msg), cx, NOTHING,
+                    NOTHING, True);
+                maps = WsAddressingHelper::parse(map $1.header, processed.headers);
+                if (!maps) {
+                    throw "WSA-FAULT", "a reply requires WS-Addressing headers",
+                        WsAddressingHelper::headerRequired("Action");
+                }
+                # WS-Addressing SOAP Binding section 6.4.1: a relationship to a message that was never issued
+                if (!receiver.deliver(<WsaReceivedMessage>{"headers": hdr, "body": body, "addressing": maps})) {
+                    throw "WSA-FAULT", "the message relates to no expected request",
+                        WsAddressingHelper::invalidHeader("RelatesTo");
+                }
+                return <HttpResponseInfo>{"code": 202};
+            } catch (hash<ExceptionInfo> ex) {
+                if (ex.err == "PROGRAM-INTERRUPTED" || ex.err == "THREAD-CANCELLED") { rethrow; }
+                if (ex.err == "WSA-FAULT" && ex.arg instanceof hash<WsaFault>) {
+                    hash<WsaMessageAddressing> fault_maps({"to": WSA_ANONYMOUS, "action": WSA_FAULT_ACTION});
+                    if (maps.message_id) {
+                        fault_maps.relates_to = (<WsaRelationship>{"message_id": maps.message_id},);
+                    }
+                    return <HttpResponseInfo>{"code": soap12 ? 400 : 500,
+                        "hdr": {"Content-Type": WSDLLib::getSoapMimeType12(soap12) + ";charset=UTF-8"},
+                        "body": WsAddressingHelper::serializeFault(ex.arg, soap12, fault_maps)};
+                }
+                return <HttpResponseInfo>{"code": 400, "hdr": {"Content-Type": "text/plain;charset=UTF-8"},
+                    "body": sprintf("%s: %s", ex.err, ex.desc)};
+            }
+        }
     }
 }

@@ -11280,3 +11280,48 @@ P9a-06.
 **Found:** `WSOperation::getInputAction()` without a binding deliberately ignores SOAP actions. A handler
 registration that names no binding must therefore pass the resolved binding, or the SOAP action that supplies the
 input action is missed. The WCF case exposed this.
+
+## P9a-06: Non-anonymous response endpoints
+
+**Implemented:**
+- **Server side:** `SoapHandler::setResponseEndpointAuthorizer()` is the approved opt-in. A non-anonymous
+  `wsa:ReplyTo` or `wsa:FaultTo` is used when:
+  - the policy allows non-anonymous responses;
+  - the address is `http` or `https`;
+  - the authorizer approves it.
+
+  Otherwise `wsa:OnlyAnonymousAddressSupported` is returned, which is how R1146 allows a receiver to refuse.
+  Replies and faults for accepted endpoints are sent synchronously as separate HTTP requests, with the message's
+  action as the SOAP action (R1144, R1152, SOAP Binding section 5.2). The request is answered with an empty 202,
+  and failed deliveries are logged.
+- **Correlation:** `WsaReplyReceiver` (WSDL) correlates replies by their reply relationship. A reply may arrive
+  before the caller waits.
+- **Reply handler:** `SoapReplyHandler` (SoapHandler) receives replies for clients. It answers 202, or the
+  WS-Addressing faults for messages without WS-Addressing headers or relating to no expected request (SOAP
+  Binding section 6.4.1).
+- **Clients:** SoapClient and SoapClientIo gain the `reply_receiver` option. Request-response calls then name the
+  receiver as `wsa:ReplyTo` and `wsa:FaultTo`, wait for the reply after a 202 (`WSA-REPLY-TIMEOUT`), and accept a
+  server that replies on the back channel anyway. `clientRequest()` accepts the receiver's address for
+  request-response calls.
+
+**Tests.** `test/soap-addressing-decoupled.qtest` has 6 cases and 101 assertions. It runs a SOAP server and a
+separate reply server over SOAP 1.1 and 1.2, and covers:
+- decoupled replies, with the delivered SOAP action and reference parameters;
+- NonAnonymousResponses policies;
+- declared and application faults to the fault endpoint, and an anonymous reply endpoint with a non-anonymous
+  fault endpoint;
+- a one-way message's fault;
+- every authorization refusal: no authorizer, a refusal, an AnonymousResponses policy and a non-HTTP address;
+- the authorizer's arguments;
+- the reply handler's faults and 405, and the receiver API;
+- a missing reply, a back-channel answer, and an unreachable approved endpoint;
+- SoapClientIo parity.
+
+Repeated runs pass.
+
+**Found:**
+- The first receiver design removed an expectation on delivery. Because the server delivers before its 202, the
+  waiting call then found no expectation. Delivery now marks the reply and keeps the expectation until the call
+  collects it or cancels.
+- An operation without declared faults has no fault list to fold into the accepted fault actions, so the list is
+  now built explicitly.

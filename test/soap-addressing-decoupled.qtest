@@ -1,0 +1,427 @@
+#!/usr/bin/env qore
+# -*- mode: qore; indent-tabs-mode: nil -*-
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires xml
+%requires HttpServer
+%requires ../qlib/WSDL.qm
+%requires ../qlib/SoapHandler.qm
+%requires ../qlib/SoapClient.qm
+%requires ../qlib/SoapClientIo
+
+%exec-class SoapAddressingDecoupledTest
+
+# answers each request with the reply that a queued function computes from it
+class DecoupledRawHandler inherits AbstractHttpRequestHandler {
+    private {
+        Queue replies;
+    }
+
+    constructor(Queue replies) {
+        self.replies = replies;
+    }
+
+    hash<HttpResponseInfo> handleRequest(hash<auto> cx, hash<auto> hdr, *data body) {
+        code reply = replies.get(10000);
+        return reply(hdr, body.typeCode() == NT_BINARY ? body.toString("UTF-8") : body ?? "");
+    }
+}
+
+# P9a-06: non-anonymous response endpoints. A SoapHandler sends replies and faults as separate HTTP requests to the
+# response endpoints that its authorizer approves (WS-Addressing SOAP Binding section 5.2, WS-I R1146 and R1152),
+# and SoapClient and SoapClientIo receive them with a WsaReplyReceiver and a SoapReplyHandler.
+public class SoapAddressingDecoupledTest inherits QUnit::Test {
+    private {
+        const Template = '<definitions xmlns="http://schemas.xmlsoap.org/wsdl/"
+            xmlns:soap="http://schemas.xmlsoap.org/wsdl/soap/" xmlns:soap12="http://schemas.xmlsoap.org/wsdl/soap12/"
+            xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:wsp="http://www.w3.org/ns/ws-policy"
+            xmlns:wsam="http://www.w3.org/2007/05/addressing/metadata"
+            xmlns:x="urn:quotes:xsd" xmlns:tns="urn:quotes" targetNamespace="urn:quotes">
+          <types><xsd:schema targetNamespace="urn:quotes:xsd" elementFormDefault="qualified">
+            <xsd:element name="Symbol" type="xsd:string"/><xsd:element name="Price" type="xsd:double"/>
+            <xsd:element name="Error" type="xsd:string"/><xsd:element name="Note" type="xsd:string"/>
+          </xsd:schema></types>
+          <message name="In"><part name="body" element="x:Symbol"/></message>
+          <message name="Out"><part name="body" element="x:Price"/></message>
+          <message name="Invalid"><part name="body" element="x:Error"/></message>
+          <message name="NotifyIn"><part name="body" element="x:Note"/></message>
+          <portType name="Quotes">
+            <operation name="ask"><input message="tns:In"/><output message="tns:Out"/>
+              <fault name="Invalid" message="tns:Invalid"/></operation>
+            <operation name="notify"><input message="tns:NotifyIn"/></operation>
+          </portType>
+          <binding name="B11" type="tns:Quotes"><soap:binding style="document"
+              transport="http://schemas.xmlsoap.org/soap/http"/>
+            <operation name="ask"><soap:operation soapAction=""/>
+              <input><soap:body use="literal"/></input><output><soap:body use="literal"/></output>
+              <fault name="Invalid"><soap:fault name="Invalid" use="literal"/></fault></operation>
+            <operation name="notify"><soap:operation soapAction=""/><input><soap:body use="literal"/></input>
+            </operation>
+          </binding>
+          <binding name="B12" type="tns:Quotes"><soap12:binding style="document"
+              transport="http://schemas.xmlsoap.org/soap/http"/>
+            <operation name="ask"><soap12:operation/>
+              <input><soap12:body use="literal"/></input><output><soap12:body use="literal"/></output>
+              <fault name="Invalid"><soap12:fault name="Invalid" use="literal"/></fault></operation>
+            <operation name="notify"><soap12:operation/><input><soap12:body use="literal"/></input></operation>
+          </binding>
+          <service name="S">
+            <port name="P11" binding="tns:B11">{P}<soap:address location="http://localhost/q11"/></port>
+            <port name="P12" binding="tns:B12">{P}<soap12:address location="http://localhost/q12"/></port>
+          </service></definitions>';
+
+        const Required = '<wsp:Policy><wsam:Addressing><wsp:Policy/></wsam:Addressing></wsp:Policy>';
+        const Anonymous = '<wsp:Policy><wsam:Addressing><wsp:Policy><wsam:AnonymousResponses/></wsp:Policy>'
+            '</wsam:Addressing></wsp:Policy>';
+        const NonAnonymous = '<wsp:Policy><wsam:Addressing><wsp:Policy><wsam:NonAnonymousResponses/></wsp:Policy>'
+            '</wsam:Addressing></wsp:Policy>';
+    }
+
+    public {
+        # the operations the callbacks ran
+        Queue calls();
+    }
+
+    constructor() : Test("SoapAddressingDecoupledTest", "1.0") {
+        addTestCase("replies to a non-anonymous reply endpoint", \replies());
+        addTestCase("faults to a non-anonymous fault endpoint", \faults());
+        addTestCase("response endpoints need approval", \authorization());
+        addTestCase("the reply handler and the receiver", \receiver());
+        addTestCase("undelivered and back-channel replies", \delivery());
+        addTestCase("SoapClientIo", \asyncClient());
+        set_return_value(main());
+    }
+
+    static WebService service(string policy = "") {
+        return new WebService(replace(Template, "{P}", policy));
+    }
+
+    # a SOAP server; returns its base URL
+    string server(reference<HttpServer> http, reference<SoapHandler> handler, WebService ws, *code authorizer) {
+        handler = new SoapHandler(new AbstractAuthenticator());
+        if (authorizer) {
+            handler.setResponseEndpointAuthorizer(authorizer, 10s);
+        }
+        foreach string binding in ("B11", "B12") {
+            string path = binding == "B11" ? "q11" : "q12";
+            handler.addMethod(ws, ws.getOperation("ask"), \ask(), NOTHING, NOTHING, NOTHING, NOTHING, NOTHING,
+                path, binding, "q");
+            handler.addMethod(ws, ws.getOperation("notify"), \notify(), NOTHING, NOTHING, NOTHING, NOTHING, NOTHING,
+                path, binding, "q");
+        }
+        http = new HttpServer();
+        http.setDefaultHandler("soap", handler);
+        http.addListener(0);
+        return sprintf("http://127.0.0.1:%d", http.getListenerInfo(0).port);
+    }
+
+    # a reply receiver with its HTTP server
+    static WsaReplyReceiver replyServer(reference<HttpServer> http, *list<string> parameters) {
+        http = new HttpServer();
+        http.addListener(0);
+        WsaReplyReceiver receiver(<WsaEndpointReference>{"address": sprintf("http://127.0.0.1:%d/replies",
+            http.getListenerInfo(0).port), "reference_parameters": parameters ?? ()});
+        http.setDefaultHandler("replies", new SoapReplyHandler(receiver));
+        return receiver;
+    }
+
+    static bool local(hash<auto> cx, hash<WsaEndpointReference> endpoint) {
+        return endpoint.address =~ /^http:\/\/127\.0\.0\.1:/;
+    }
+
+    auto ask(hash<auto> cx, auto symbol) {
+        calls.push("ask");
+        if (symbol == "ERR") {
+            throw "Invalid", "invalid symbol", "no such symbol";
+        }
+        if (symbol == "BOOM") {
+            throw "APP-ERROR", "the quote service failed";
+        }
+        return 1.5;
+    }
+
+    nothing notify(hash<auto> cx, auto note) {
+        calls.push("notify");
+        if (note == "ERR") {
+            throw "APP-ERROR", "the notification failed";
+        }
+    }
+
+    static SoapClient newClient(WebService ws, string url, bool soap12, *WsaReplyReceiver receiver, int timeout = 10000) {
+        return new SoapClient({"wsdl": ws, "port": soap12 ? "P12" : "P11", "url": url + (soap12 ? "/q12" : "/q11"),
+            "timeout": timeout, "addressing": True, "reply_receiver": receiver});
+    }
+
+    replies() {
+        HttpServer http;
+        SoapHandler handler;
+        WebService ws = service(Required);
+        string url = server(\http, \handler, ws, \SoapAddressingDecoupledTest::local());
+        on_exit http.stop();
+        HttpServer reply_http;
+        WsaReplyReceiver receiver = replyServer(\reply_http, ('<c:Ticket xmlns:c="urn:c">t-9</c:Ticket>',));
+        on_exit reply_http.stop();
+        foreach bool soap12 in (False, True) {
+            SoapClient client = newClient(ws, url, soap12, receiver);
+            hash<auto> info;
+            assertEq(1.5, client.callOperation("ask", "QORE", NOTHING, \info));
+            assertEq("ask", calls.get(10000));
+            # WS-Addressing SOAP Binding section 5.2: the back channel only acknowledges the request
+            assertEq(202, info."response-headers".status_code);
+            # the reply arrived as an HTTP request whose SOAP action is the reply's action (WS-I R1144, R1152)
+            if (soap12) {
+                assertRegex(";action=\"urn:quotes:Quotes:askResponse\"", info."reply-headers"."content-type"
+                    ?? info."reply-headers"."_qore_orig_content_type");
+            } else {
+                assertEq("\"urn:quotes:Quotes:askResponse\"", info."reply-headers".soapaction);
+            }
+            assertEq(receiver.getEndpointReference().address, info.addressing.request.reply_to.address);
+            assertEq(receiver.getEndpointReference().address, info.addressing.response.to);
+            assertEq(info.addressing.request.message_id, info.addressing.response.relates_to[0].message_id);
+            # the receiver's reference parameters come back as header blocks (Core section 3.3)
+            assertEq("t-9", parse_xml(info.addressing.response.reference_parameters[0])."c:Ticket"."^value^");
+            assertFalse(receiver.isExpected(info.addressing.request.message_id));
+        }
+        # NonAnonymousResponses: the policy requires such endpoints
+        HttpServer nonanonymous_http;
+        SoapHandler nonanonymous_handler;
+        WebService nonanonymous = service(NonAnonymous);
+        string nonanonymous_url = server(\nonanonymous_http, \nonanonymous_handler, nonanonymous,
+            \SoapAddressingDecoupledTest::local());
+        on_exit nonanonymous_http.stop();
+        assertEq(1.5, newClient(nonanonymous, nonanonymous_url, True, receiver).callOperation("ask", "QORE"));
+        calls.get(10000);
+    }
+
+    faults() {
+        HttpServer http;
+        SoapHandler handler;
+        WebService ws = service(Required);
+        string url = server(\http, \handler, ws, \SoapAddressingDecoupledTest::local());
+        on_exit http.stop();
+        HttpServer reply_http;
+        WsaReplyReceiver receiver = replyServer(\reply_http);
+        on_exit reply_http.stop();
+        foreach bool soap12 in (False, True) {
+            SoapClient client = newClient(ws, url, soap12, receiver);
+            # declared and application faults go to the fault endpoint
+            foreach hash<auto> row in ({"symbol": "ERR", "action": "urn:quotes:Quotes:ask:Fault:Invalid"},
+                    {"symbol": "BOOM", "action": WSA_SOAP_FAULT_ACTION}) {
+                hash<auto> info;
+                assertThrows("SOAP-SERVER-FAULT-RESPONSE", \client.callOperation(), ("ask", row.symbol, NOTHING,
+                    \info));
+                calls.get(10000);
+                assertEq(202, info."response-headers".status_code);
+                assertEq(row.action, info.addressing.response.action);
+            }
+            # an anonymous reply endpoint with a non-anonymous fault endpoint: replies come back on the HTTP
+            # response, faults go to the fault endpoint
+            hash<auto> overrides = {"reply_to": <WsaEndpointReference>{"address": WSA_ANONYMOUS}};
+            hash<auto> info;
+            assertEq(1.5, client.callOperation("ask", "Q", {"addressing": overrides}, \info));
+            calls.get(10000);
+            assertEq(200, info."response-headers".status_code);
+            assertFalse(receiver.isExpected(info.addressing.request.message_id));
+            info = {};
+            assertThrows("SOAP-SERVER-FAULT-RESPONSE", \client.callOperation(), ("ask", "ERR",
+                {"addressing": overrides}, \info));
+            calls.get(10000);
+            assertEq(202, info."response-headers".status_code);
+            # a one-way message's fault goes to its fault endpoint
+            string message_id = WsAddressingHelper::messageId();
+            receiver.expect(message_id);
+            client.callOperation("notify", {"Note": "ERR"}, {"addressing": {"message_id": message_id,
+                "fault_to": receiver.getEndpointReference()}});
+            calls.get(10000);
+            hash<WsaReceivedMessage> fault = receiver.wait(message_id, 10000);
+            assertEq(WSA_SOAP_FAULT_ACTION, fault.addressing.action);
+            assertRegex("notification failed", fault.body.typeCode() == NT_BINARY ? fault.body.toString("UTF-8")
+                : fault.body);
+        }
+    }
+
+    authorization() {
+        HttpServer reply_http;
+        WsaReplyReceiver receiver = replyServer(\reply_http);
+        on_exit reply_http.stop();
+        # no authorizer, a refusing authorizer, and a policy requiring anonymous responses
+        foreach hash<auto> row in ({"policy": Required}, {"policy": Required, "authorizer": bool sub (hash<auto> cx,
+                hash<WsaEndpointReference> endpoint) { return False; }},
+                {"policy": Anonymous, "authorizer": \SoapAddressingDecoupledTest::local()}) {
+            HttpServer http;
+            SoapHandler handler;
+            WebService ws = service(row.policy);
+            string url = server(\http, \handler, ws, row.authorizer);
+            on_exit http.stop();
+            foreach bool soap12 in (False, True) {
+                hash<auto> info;
+                SoapClient client = newClient(ws, url, soap12, receiver);
+                assertThrows("SOAP-SERVER-FAULT-RESPONSE", "OnlyAnonymousAddressSupported|not an approved",
+                    \client.callOperation(), ("ask", "Q", NOTHING, \info));
+                assertEq(WSA_FAULT_ACTION, info.addressing.response.action);
+                assertEq(0, calls.size());
+            }
+        }
+        # only http and https addresses are used, whatever the authorizer says
+        HttpServer http;
+        SoapHandler handler;
+        WebService ws = service();
+        string url = server(\http, \handler, ws, bool sub (hash<auto> cx, hash<WsaEndpointReference> endpoint) {
+            return True;
+        });
+        on_exit http.stop();
+        hash<auto> info;
+        SoapClient mail_client = newClient(ws, url, False);
+        assertThrows("SOAP-SERVER-FAULT-RESPONSE", \mail_client.callOperation(), ("notify", {"Note": "n"},
+            {"addressing": {"fault_to": <WsaEndpointReference>{"address": "mailto:faults@client.example"}}}, \info));
+        assertEq(0, calls.size());
+        # the authorizer sees the request context and the endpoint
+        HttpServer seen_http;
+        SoapHandler seen_handler;
+        Queue approvals();
+        string seen_url = server(\seen_http, \seen_handler, ws, bool sub (hash<auto> cx,
+                hash<WsaEndpointReference> endpoint) {
+            approvals.push({"action": cx.addressing.action, "address": endpoint.address});
+            return True;
+        });
+        on_exit seen_http.stop();
+        assertEq(1.5, newClient(ws, seen_url, False, receiver).callOperation("ask", "Q"));
+        calls.get(10000);
+        # both the reply and the fault endpoint are approved
+        list<hash<auto>> approved = (approvals.get(10000), approvals.get(10000));
+        assertEq((receiver.getEndpointReference().address, receiver.getEndpointReference().address),
+            map $1.address, approved);
+        assertEq("urn:quotes:Quotes:askRequest", approved[0].action);
+    }
+
+    receiver() {
+        assertThrows("WSA-SERIALIZATION-ERROR", "non-anonymous address", sub () {
+            new WsaReplyReceiver(<WsaEndpointReference>{"address": WSA_ANONYMOUS});
+        });
+        assertThrows("WSA-SERIALIZATION-ERROR", "absolute", sub () {
+            new WsaReplyReceiver(<WsaEndpointReference>{"address": "replies"});
+        });
+        HttpServer reply_http;
+        WsaReplyReceiver receiver = replyServer(\reply_http);
+        on_exit reply_http.stop();
+        receiver.expect("urn:uuid:r1");
+        assertThrows("WSA-RECEIVER-ERROR", "already expected", \receiver.expect(), "urn:uuid:r1");
+        assertThrows("WSA-RECEIVER-ERROR", "no reply", \receiver.wait(), ("urn:uuid:r2", 10));
+        assertThrows("WSA-REPLY-TIMEOUT", \receiver.wait(), ("urn:uuid:r1", 10));
+        assertFalse(receiver.isExpected("urn:uuid:r1"));
+        HTTPClient client({"url": receiver.getEndpointReference().address, "error_passthru": True, "timeout": 10000});
+        foreach bool soap12 in (False, True) {
+            string envelope_uri = soap12 ? SOAP_12_ENV : SOAP_11_ENV;
+            hash<auto> headers = {"Content-Type": (soap12 ? "application/soap+xml" : "text/xml") + ";charset=UTF-8"};
+            # a message that relates to no expected request (SOAP Binding section 6.4.1)
+            hash<auto> info;
+            string response = client.post("replies", sprintf('<s:Envelope xmlns:s="%s" '
+                'xmlns:wsa="http://www.w3.org/2005/08/addressing"><s:Header><wsa:Action>urn:a</wsa:Action>'
+                '<wsa:MessageID>urn:uuid:m</wsa:MessageID><wsa:RelatesTo>urn:uuid:unknown</wsa:RelatesTo>'
+                '</s:Header><s:Body/></s:Envelope>', envelope_uri), headers, \info);
+            assertEq(soap12 ? 400 : 500, info."response-headers".status_code);
+            hash<SoapFaultInfo> fault = WSDLLib::getSOAPFaultInfo(response);
+            XsdQNameValue code = fault.subcodes ? fault.subcodes[0] : fault.code;
+            assertEq("InvalidAddressingHeader", code.getLocalName());
+            # a message without WS-Addressing headers
+            info = {};
+            response = client.post("replies", sprintf('<s:Envelope xmlns:s="%s"><s:Body/></s:Envelope>',
+                envelope_uri), headers, \info);
+            fault = WSDLLib::getSOAPFaultInfo(response);
+            code = fault.subcodes ? fault.subcodes[0] : fault.code;
+            assertEq("MessageAddressingHeaderRequired", code.getLocalName());
+            # a delivered message is acknowledged
+            receiver.expect("urn:uuid:r3");
+            info = {};
+            client.post("replies", sprintf('<s:Envelope xmlns:s="%s" xmlns:wsa="http://www.w3.org/2005/08/addressing">'
+                '<s:Header><wsa:Action>urn:a</wsa:Action><wsa:RelatesTo>urn:uuid:r3</wsa:RelatesTo></s:Header>'
+                '<s:Body/></s:Envelope>', envelope_uri), headers, \info);
+            assertEq(202, info."response-headers".status_code);
+            assertEq("urn:a", receiver.wait("urn:uuid:r3", 10000).addressing.action);
+        }
+        hash<auto> info;
+        client.get("replies", NOTHING, \info);
+        assertEq(405, info."response-headers".status_code);
+    }
+
+    delivery() {
+        HttpServer reply_http;
+        WsaReplyReceiver receiver = replyServer(\reply_http);
+        on_exit reply_http.stop();
+        # a server that acknowledges the request but never sends the reply
+        Queue replies();
+        HttpServer raw();
+        raw.setDefaultHandler("raw", new DecoupledRawHandler(replies));
+        raw.addListener(0);
+        on_exit raw.stop();
+        string raw_url = sprintf("http://127.0.0.1:%d", raw.getListenerInfo(0).port);
+        WebService ws = service(Required);
+        replies.push(hash<HttpResponseInfo> sub (hash<auto> hdr, string body) {
+            return <HttpResponseInfo>{"code": 202};
+        });
+        SoapClient client = newClient(ws, raw_url, False, receiver, 500);
+        assertThrows("WSA-REPLY-TIMEOUT", \client.callOperation(), ("ask", "Q"));
+        # a server that answers on the back channel anyway: the response is used
+        replies.push(hash<HttpResponseInfo> sub (hash<auto> hdr, string body) {
+            SoapProcessingNode node(<SoapNodeOptions>{"addressing": True});
+            hash<WsaMessageAddressing> request = WsAddressingHelper::parse(map $1.header,
+                node.processMessage(body).headers);
+            return <HttpResponseInfo>{"code": 200, "hdr": {"Content-Type": "text/xml;charset=UTF-8"},
+                "body": sprintf('<s:Envelope xmlns:s="%s" xmlns:wsa="%s"><s:Header><wsa:Action>'
+                    'urn:quotes:Quotes:askResponse</wsa:Action><wsa:RelatesTo>%s</wsa:RelatesTo></s:Header><s:Body>'
+                    '<x:Price xmlns:x="urn:quotes:xsd">3.5</x:Price></s:Body></s:Envelope>', SOAP_11_ENV, WSA_NS,
+                    request.message_id)};
+        });
+        client = newClient(ws, raw_url, False, receiver);
+        hash<auto> info;
+        assertEq(3.5, client.callOperation("ask", "Q", NOTHING, \info));
+        assertFalse(receiver.isExpected(info.addressing.request.message_id));
+        # an approved endpoint that cannot be reached: the request is still acknowledged
+        HttpServer http;
+        SoapHandler handler;
+        string url = server(\http, \handler, ws, \SoapAddressingDecoupledTest::local());
+        on_exit http.stop();
+        HttpServer closed();
+        closed.addListener(0);
+        int closed_port = closed.getListenerInfo(0).port;
+        closed.stop();
+        WsaReplyReceiver unreachable(<WsaEndpointReference>{"address": sprintf("http://127.0.0.1:%d/replies",
+            closed_port)});
+        info = {};
+        SoapClient unreachable_client = newClient(ws, url, True, unreachable, 500);
+        assertThrows("WSA-REPLY-TIMEOUT", \unreachable_client.callOperation(),
+            ("ask", "Q", NOTHING, \info));
+        assertEq("ask", calls.get(10000));
+    }
+
+    asyncClient() {
+        HttpServer http;
+        SoapHandler handler;
+        WebService ws = service(Required);
+        string url = server(\http, \handler, ws, \SoapAddressingDecoupledTest::local());
+        on_exit http.stop();
+        HttpServer reply_http;
+        WsaReplyReceiver receiver = replyServer(\reply_http);
+        on_exit reply_http.stop();
+        foreach bool soap12 in (False, True) {
+            SoapClientIo client({"wsdl": ws, "port": soap12 ? "P12" : "P11", "url": url + (soap12 ? "/q12" : "/q11"),
+                "timeout": 10000, "reply_receiver": receiver});
+            on_exit client.close();
+            hash<auto> info;
+            assertEq(1.5, client.callOperation("ask", "QORE", NOTHING, \info));
+            calls.get(10000);
+            assertEq(202, info."response-code");
+            assertEq(info.addressing.request.message_id, info.addressing.response.relates_to[0].message_id);
+            info = {};
+            assertThrows("SOAP-SERVER-FAULT-RESPONSE", \client.callOperation(), ("ask", "ERR", NOTHING, \info));
+            calls.get(10000);
+            assertEq("urn:quotes:Quotes:ask:Fault:Invalid", info.addressing.response.action);
+        }
+        assertThrows("SOAP-CLIENT-IO-ERROR", "WsaReplyReceiver", sub () {
+            new SoapClientIo({"wsdl": ws, "reply_receiver": "x"});
+        });
+    }
+}

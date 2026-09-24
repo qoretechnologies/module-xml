@@ -97,6 +97,9 @@ public class SoapClientIo {
         #! whether the WS-Addressing request headers are marked mustUnderstand
         bool addressing_must_understand = False;
 
+        #! the receiver of replies sent to a non-anonymous address
+        *WSDL::WsaReplyReceiver reply_receiver;
+
         #! async I/O connection manager used for every request; replaced atomically by close()
         HttpClientIo::HttpClientConnectionManager mgr;
 
@@ -141,6 +144,9 @@ public class SoapClientIo {
           WSDL supports WS-Addressing; see <a href="../../WSDL/html/index.html#wsdl_addressing">WS-Addressing</a> in the WSDL module
         - \c addressing_must_understand: @ref Qore::True "True" to mark the WS-Addressing request headers
           \c mustUnderstand
+        - \c reply_receiver: a @ref WSDL::WsaReplyReceiver "WsaReplyReceiver" whose address request-response
+          calls use as \c wsa:ReplyTo and \c wsa:FaultTo; the reply then arrives as a separate HTTP request at a
+          handler such as \c SoapHandler::SoapReplyHandler, which delivers it to the receiver
         - \c connect_timeout: connection timeout in milliseconds (default: 45000)
         - \c timeout: transfer timeout in milliseconds (default: 45000)
         - \c http_protocol: HTTP protocol to use (\c "auto", \c "h1", \c "h2", \c "h3"; default: \c "auto")
@@ -184,6 +190,12 @@ SoapClientIo client({"wsdl": service, "url": "https://example.org/services/v1"})
         }
         addressing = h.addressing;
         addressing_must_understand = h.addressing_must_understand ?? False;
+        if (exists h.reply_receiver) {
+            if (!(h.reply_receiver instanceof WSDL::WsaReplyReceiver)) {
+                throw "SOAP-CLIENT-IO-ERROR", "the reply_receiver option must be a WsaReplyReceiver";
+            }
+            reply_receiver = h.reply_receiver;
+        }
         if (exists h.wsdl_file && exists h.wsdl) {
             throw "SOAP-CLIENT-IO-ERROR", "only one of 'wsdl' or 'wsdl_file' keys can be given; both were "
                 "passed";
@@ -322,7 +334,7 @@ auto result = client.callOperation("echo", {"body": "invoice-71"}, {"xml_values"
         *hash<WSDL::WsaMessageAddressing> request_maps;
         if (op.getBinding(binding) instanceof WSDL::SoapBinding) {
             request_maps = WSDL::WsAddressingHelper::clientRequest(wsdl, op, binding, svc, port, url, addressing,
-                opts.addressing);
+                opts.addressing, reply_receiver);
         } else if (exists opts.addressing) {
             throw "SOAP-CLIENT-IO-ERROR", "WS-Addressing requires a SOAP binding";
         }
@@ -490,7 +502,25 @@ auto result = client.getSoapResponse("echo", "/resource");
         if (logger) {
             logger.info("SoapClientIo: %s %s%s", method, url, path);
         }
+        # WS-Addressing SOAP Binding section 5.2: a response endpoint at the reply receiver receives the response as
+        # a separate HTTP request
+        bool decoupled = request_maps && reply_receiver && exists op.output
+            && inlist(reply_receiver.getEndpointReference().address, (request_maps.reply_to.address,
+                request_maps.fault_to.address));
+        if (decoupled) {
+            reply_receiver.expect(request_maps.message_id);
+        }
+        on_exit if (decoupled) {
+            reply_receiver.cancel(request_maps.message_id);
+        }
         hash<auto> resp = getManager().request(url, method, path, hdr, body, io_timeout);
+        if (decoupled && resp.status_code == 202 && !resp.body) {
+            # the back channel acknowledges the request; the response arrives at the reply receiver
+            hash<WSDL::WsaReceivedMessage> received = reply_receiver.wait(request_maps.message_id, io_timeout);
+            info."reply-headers" = received.headers;
+            resp = {"status_code": resp.status_code, "headers": received.headers, "body": received.body,
+                "content_type": received.headers."content-type"};
+        }
         # Present the async response in the shape the shared WSDL message decoders expect.
         hash<auto> rh = (resp.headers ?? {}) + {
             "body": resp.body,
