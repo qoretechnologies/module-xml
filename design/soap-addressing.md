@@ -105,3 +105,55 @@ A port may be extended by one `wsa:EndpointReference` (Metadata section 4.1).
   its `soap:address`, so a published WSDL remains valid.
 
 Port metadata is transient in `WebService` (`port_addressing`) and is rebuilt when the WSDL is parsed again.
+
+## Message addressing properties
+
+`WsaMessageAddressing` holds the properties of WS-Addressing 1.0 Core section 3.1. An absent `to` stands for the
+anonymous destination, and an absent `reply_to` for an anonymous reply endpoint, as the absent headers do
+(section 3.2).
+
+**Output.** `WsaOutputScope` selects the properties for the messages that the current thread serializes. It is
+thread-local, like `SoapMessageLimitsScope`, and validates them first: an action is required, and every IRI must
+be absolute.
+- **Headers:** `SoapBinding::serializeMessageWithDescription()` adds the header blocks after QName preparation and
+  before envelope validation. WSDL-declared headers are therefore unaffected, and `compat_allow_any_header` is
+  not involved.
+- **Prefix:** the WS-Addressing prefix is `wsa`, or `wsaN` when the message binds `wsa` to another namespace.
+- **Header placement:** the Header is created before the Body when the message has none. Repeated names use
+  numeric `^N` keys, which `make_xml()` drops.
+- **Reference parameters:** each becomes a header block with `wsa:IsReferenceParameter="true"`, replacing an
+  existing one (SOAP Binding section 3.4). The marker's prefix is chosen so that it cannot capture a prefix that
+  the parameter binds to another namespace.
+- **mustUnderstand:** when selected, it marks the property headers, not the reference parameters.
+- **SOAP action (WS-I R1144, SOAP Binding sections 2.4 and 4):** a request's SOAP action defaults to the
+  `wsa:Action` value. An explicit different action is a `SOAP-SERIALIZATION-ERROR`. An explicit empty action
+  sends `SOAPAction: ""` for SOAP 1.1 and the action parameter for SOAP 1.2.
+
+**Input.** `WsAddressingHelper::parse()` works on the `SoapNodeHeader` list of `SoapProcessingNode`, so SOAP roles
+decide targeting in one place. Only targeted headers are read.
+- **Cardinality:** more than one `wsa:To`, `wsa:ReplyTo`, `wsa:FaultTo`, `wsa:Action` or `wsa:MessageID` raises
+  `WSA-FAULT` with `wsa:InvalidAddressingHeader`/`wsa:InvalidCardinality` (SOAP Binding section 3.2.2).
+- **Action:** a missing `wsa:Action` is `wsa:MessageAddressingHeaderRequired`.
+- **IRIs:** values are whitespace-collapsed and must be absolute. `wsa:To` and addresses fail with
+  `wsa:InvalidAddress`.
+- **Endpoint references:** they need exactly one address (`wsa:MissingAddressInEPR`, `wsa:InvalidEPR`) and
+  qualified reference parameters.
+- **Reference parameters:** header blocks with `wsa:IsReferenceParameter` true are returned as they were received,
+  with their in-scope namespaces.
+- **Result:** a message without targeted property headers has no properties (NOTHING).
+
+**Faults.** `WsaFault` carries [Code], [Subcode], [Subsubcode], [Reason] and [Details] of SOAP Binding section 6.
+`serializeFault()` builds the complete envelope:
+- **SOAP 1.2:** the code, then the subcode and subsubcode as nested `Subcode` elements, and the details in
+  `Detail`.
+- **SOAP 1.1:** the most specific subcode is the `faultcode`, and the details go in a `wsa:FaultDetail` header.
+
+`reply()` formulates Core section 3.4:
+- It selects the fault endpoint for faults, then the reply endpoint, then the anonymous address.
+- The destination and reference parameters come from the selected endpoint reference, and the relationship is a
+  reply to the request's message ID.
+- A destination of `WSA_NONE` means that the reply must be discarded.
+- A request without a message ID raises `wsa:MessageAddressingHeaderRequired` (WS-I R1163).
+
+`checkSoapAction()` accepts an absent or empty SOAP action, or the `wsa:Action` value. Any other value is
+`wsa:ActionMismatch`, with a `wsa:ProblemAction` detail.

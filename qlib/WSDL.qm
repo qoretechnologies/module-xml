@@ -187,13 +187,35 @@ SoapClient client({"wsdl": ws, "url": url, "message_limits": <SoapMessageLimits>
     a non-empty SOAP action (R2901), and a relative SOAP action supplying the action of an operation that uses
     WS-Addressing (Metadata section 4.4.1). Policies may carry \c wsdl:required="true".
 
+    SOAP messages carry message addressing properties (WS-Addressing 1.0 Core and SOAP Binding):
+    - WsaOutputScope adds the properties of a WsaMessageAddressing hash as header blocks to the messages that the
+      thread serializes: \c wsa:To, \c wsa:From, \c wsa:ReplyTo, \c wsa:FaultTo, \c wsa:Action,
+      \c wsa:MessageID, \c wsa:RelatesTo, and each reference parameter as a header block marked
+      \c wsa:IsReferenceParameter; optionally \c mustUnderstand. A request's SOAP action then equals the
+      \c wsa:Action value (WS-I R1144): SOAP 1.1 sends it or an explicitly empty \c SOAPAction, SOAP 1.2 sends
+      it as the \c action parameter
+    - WsAddressingHelper::parse() reads the properties of a received message from the header blocks targeted at
+      the node, and raises a \c WSA-FAULT exception with a WsaFault argument for invalid headers: more than one
+      \c wsa:To, \c wsa:ReplyTo, \c wsa:FaultTo, \c wsa:Action or \c wsa:MessageID
+      (\c wsa:InvalidCardinality), a missing \c wsa:Action (\c wsa:MessageAddressingHeaderRequired), IRIs that
+      are not absolute, and invalid endpoint references
+    - WsAddressingHelper::reply() formulates a reply's properties (Core section 3.4), including the
+      \c wsa:MessageAddressingHeaderRequired fault when the request has no message ID (WS-I R1163);
+      WsAddressingHelper::checkSoapAction() checks a received SOAP action against \c wsa:Action; and
+      WsAddressingHelper::serializeFault() builds WS-Addressing fault messages for SOAP 1.1 (with the
+      \c wsa:FaultDetail header) and SOAP 1.2 (with subcodes)
+
     @par Example
     @code{.py}
 WebService ws(wsdl);
 WSOperation op = ws.getOperation("getQuote");
 hash<WsAddressingPolicy> policy = ws.getAddressingPolicy(op, NOTHING, "QuoteService", "QuotePort");
 if (policy.required) {
-    printf("send wsa:Action %s\n", op.getInputAction("QuotesSoap"));
+    WsaOutputScope addressing(<WsaMessageAddressing>{
+        "action": op.getInputAction("QuotesSoap"),
+        "message_id": WsAddressingHelper::messageId(),
+    });
+    hash<auto> request = op.serializeRequest({"Symbol": "QORE"});
 }
     @endcode
 
@@ -348,6 +370,9 @@ if (policy.required) {
       WS-Policy 1.5 or 2004/09 to ports, bindings and binding operations, and endpoint references extending ports;
       invalid WS-Addressing descriptions are rejected (WS-I R1156-R1158, R2901); policy references and endpoint
       references may carry \c wsdl:required="true", which was rejected as an unsupported required extension
+    - WS-Addressing message addressing properties in SOAP messages (@ref wsdl_addressing): WsaOutputScope adds them
+      as header blocks with the SOAP action rules of WS-I R1144, WsAddressingHelper parses them with the
+      cardinality and validity rules, formulates replies and builds the predefined WS-Addressing faults
     - an \c xs:choice requires a member only when none of its alternatives is emptiable (XSD 1.0 part 1, sections
       3.8.6 and 3.9.6); a choice with only optional alternatives was reported as requiring one when serializing
       values carrying explanatory \c ^choices^ keys and when decoding without the complete particle
@@ -27924,6 +27949,593 @@ class WsdlAddressingMetadata {
     }
 }
 
+#! one [relationship] of a message (WS-Addressing 1.0 Core section 3.1)
+/** @since %WSDL 0.5.8 */
+public hashdecl WsaRelationship {
+    #! the [message id] of the related message
+    string message_id;
+    #! the relationship type
+    string type = WSA_REPLY;
+}
+
+#! the message addressing properties of a SOAP message (WS-Addressing 1.0 Core section 3)
+/** @see @ref wsdl_addressing
+    @since %WSDL 0.5.8
+*/
+public hashdecl WsaMessageAddressing {
+    #! [destination]; NOTHING means the anonymous address, which an absent wsa:To header represents
+    *string to;
+    #! [source endpoint]
+    *hash<WsaEndpointReference> from;
+    #! [reply endpoint]; NOTHING means an endpoint reference with the anonymous address
+    *hash<WsaEndpointReference> reply_to;
+    #! [fault endpoint]; NOTHING means none, so faults go to the reply endpoint
+    *hash<WsaEndpointReference> fault_to;
+    #! [action]; required in every message using WS-Addressing
+    *string action;
+    #! [message id]
+    *string message_id;
+    #! [relationship]
+    list<hash<WsaRelationship>> relates_to = ();
+    #! [reference parameters]: each element serialized as XML with its in-scope namespaces
+    list<string> reference_parameters = ();
+}
+
+#! a WS-Addressing fault (WS-Addressing 1.0 SOAP Binding section 6)
+/** Thrown as the argument of a \c WSA-FAULT exception.
+    @since %WSDL 0.5.8
+*/
+public hashdecl WsaFault {
+    #! [Code]: \c Sender or \c Receiver
+    string code = "Sender";
+    #! [Subcode]: a local name in the WS-Addressing namespace
+    string subcode;
+    #! [Subsubcode]: an optional local name in the WS-Addressing namespace
+    *string subsubcode;
+    #! [Reason]
+    string reason;
+    #! [Details]: each element serialized as XML with its namespace declarations
+    list<string> details = ();
+}
+
+# the message addressing properties selected by WsaOutputScope
+hashdecl WsaOutput {
+    hash<WsaMessageAddressing> maps;
+    bool must_understand;
+}
+
+# the message addressing properties that the current thread adds to the messages it serializes
+thread_local *hash<WsaOutput> WsaOutputSelected;
+
+#! adds WS-Addressing headers to the SOAP messages that the current thread serializes while the object exists
+/** The message addressing properties are serialized as SOAP header blocks (WS-Addressing 1.0 SOAP Binding section
+    3), in addition to the headers of the message. A request's SOAP action follows the \c wsa:Action value (WS-I
+    R1144): the \c SOAPAction header of SOAP 1.1 and the \c action parameter of SOAP 1.2 carry it unless the
+    caller selects an empty SOAP 1.1 action.
+    @par Example
+    @code{.py}
+{
+    WsaOutputScope addressing(<WsaMessageAddressing>{
+        "to": "http://example.com/quotes",
+        "action": op.getInputAction("QuotesSoap"),
+        "message_id": WsAddressingHelper::messageId(),
+    });
+    hash<auto> msg = op.serializeRequest({"Symbol": "QORE"});
+}
+    @endcode
+    @see @ref wsdl_addressing
+    @since %WSDL 0.5.8
+*/
+public class WsaOutputScope {
+    private {
+        *hash<WsaOutput> previous;
+    }
+
+    #! selects the message addressing properties to add
+    /** @param maps the properties; NOTHING adds no WS-Addressing headers
+        @param must_understand True to mark the WS-Addressing headers \c mustUnderstand
+        @throw WSA-SERIALIZATION-ERROR the properties are invalid, for example without an action or with an IRI
+        that is not absolute
+    */
+    constructor(*hash<WsaMessageAddressing> maps, bool must_understand = False) {
+        if (maps) {
+            WsAddressingHelper::validate(maps);
+        }
+        previous = WsaOutputSelected;
+        WsaOutputSelected = maps ? <WsaOutput>{"maps": maps, "must_understand": must_understand} : NOTHING;
+    }
+
+    #! restores the properties selected before the object was created
+    destructor() {
+        WsaOutputSelected = previous;
+    }
+
+    #! returns the message addressing properties selected for the current thread
+    /** @return the properties of the innermost WsaOutputScope, or NOTHING
+    */
+    static *hash<WsaMessageAddressing> getSelected() {
+        return WsaOutputSelected.maps;
+    }
+}
+
+#! WS-Addressing message addressing properties in SOAP messages
+/** @see @ref wsdl_addressing
+    @since %WSDL 0.5.8
+*/
+public class WsAddressingHelper {
+    #! the local names of the message addressing property headers (WS-Addressing 1.0 Core section 3.2)
+    const Properties = ("To", "From", "ReplyTo", "FaultTo", "Action", "MessageID", "RelatesTo");
+    #! properties with a cardinality of at most one (WS-Addressing 1.0 SOAP Binding section 3.2.2)
+    const Single = {"To": True, "ReplyTo": True, "FaultTo": True, "Action": True, "MessageID": True};
+
+    # a key for an element that make_xml() writes with the given name; repeated names use a numeric suffix
+    static string elementKey(hash<auto> container, string name) {
+        string key = name;
+        for (int i = 1; container.hasKey(key); ++i) {
+            key = name + "^" + i;
+        }
+        return key;
+    }
+
+    #! returns a new, unique message ID
+    /** @return a \c urn:uuid: URI with a random (version 4) UUID
+    */
+    static string messageId() {
+        binary bytes = get_random_bytes(16);
+        string hex = bytes.toHex();
+        # RFC 9562 section 5.4: version 4 and the RFC variant
+        hex = substr(hex, 0, 12) + "4" + substr(hex, 13, 3)
+            + sprintf("%x", (("0x" + substr(hex, 16, 1)).toInt(16) & 0x3) | 0x8) + substr(hex, 17);
+        return sprintf("urn:uuid:%s-%s-%s-%s-%s", substr(hex, 0, 8), substr(hex, 8, 4), substr(hex, 12, 4),
+            substr(hex, 16, 4), substr(hex, 20));
+    }
+
+    #! checks message addressing properties before they are sent
+    /** @param maps the properties
+        @throw WSA-SERIALIZATION-ERROR no action, an IRI that is not absolute, or a reference parameter or
+        endpoint reference that is not valid
+    */
+    static validate(hash<WsaMessageAddressing> maps) {
+        if (!maps.action) {
+            throw "WSA-SERIALIZATION-ERROR", "a message using WS-Addressing requires an action";
+        }
+        checkIri(maps.action, "action");
+        foreach string field in ("to", "message_id") {
+            if (exists maps{field}) {
+                checkIri(maps{field}, field);
+            }
+        }
+        foreach hash<WsaRelationship> relationship in (maps.relates_to) {
+            checkIri(relationship.message_id, "related message ID");
+            checkIri(relationship.type, "relationship type");
+        }
+        foreach string field in ("from", "reply_to", "fault_to") {
+            if (maps{field}) {
+                checkIri(maps{field}.address, field + " address");
+                map checkElement($1, field + " reference parameter"), maps{field}.reference_parameters;
+            }
+        }
+        map checkElement($1, "reference parameter"), maps.reference_parameters;
+    }
+
+    private static checkIri(string value, string label) {
+        bool absolute;
+        try {
+            absolute = WsdlUriComponents::isAbsoluteValue(value);
+        } catch (hash<ExceptionInfo> ex) {
+            if (ex.err != WSDL_ERROR) {
+                rethrow;
+            }
+        }
+        if (!absolute) {
+            throw "WSA-SERIALIZATION-ERROR", sprintf("the WS-Addressing %s %Y must be an absolute IRI", label, value);
+        }
+    }
+
+    # a reference parameter must be one namespace-qualified element
+    private static hash<auto> checkElement(string xml, string label) {
+        XsdXmlValue value;
+        try {
+            value = new XsdXmlValue(xml);
+        } catch (hash<ExceptionInfo> ex) {
+            throw "WSA-SERIALIZATION-ERROR", sprintf("invalid %s: %s", label, ex.desc);
+        }
+        if (!value.getNamespaceUri()) {
+            throw "WSA-SERIALIZATION-ERROR", sprintf("the %s %Y must be namespace-qualified", label,
+                value.getLocalName());
+        }
+        return value.getXmlDataView();
+    }
+
+    # the SOAP header blocks of the given properties, with the given prefix bound to the WS-Addressing namespace
+    static hash<auto> headers(hash<WsaMessageAddressing> maps, bool soap12, bool must_understand, string prefix) {
+        hash<auto> result = {};
+        # literal hashes are strictly typed; header values need untyped hashes
+        code block = hash<auto> sub () {
+            hash<auto> value = {};
+            if (must_understand) {
+                value."^attributes^"."soapenv:mustUnderstand" = soap12 ? "true" : "1";
+            }
+            return value;
+        };
+        code text = hash<auto> sub (string value) {
+            hash<auto> element = block();
+            element."^value^" = value;
+            return element;
+        };
+        if (exists maps.to) {
+            result{prefix + ":To"} = text(maps.to);
+        }
+        foreach hash<auto> field in ({"key": "from", "name": "From"}, {"key": "reply_to", "name": "ReplyTo"},
+                {"key": "fault_to", "name": "FaultTo"}) {
+            if (maps{field.key}) {
+                hash<auto> element = block();
+                map element{$1.key} = $1.value, endpointReference(maps{field.key}, prefix).pairIterator();
+                result{prefix + ":" + field.name} = element;
+            }
+        }
+        result{prefix + ":Action"} = text(maps.action);
+        if (exists maps.message_id) {
+            result{prefix + ":MessageID"} = text(maps.message_id);
+        }
+        foreach hash<WsaRelationship> relationship in (maps.relates_to) {
+            hash<auto> value = text(relationship.message_id);
+            if (relationship.type != WSA_REPLY) {
+                value."^attributes^".RelationshipType = relationship.type;
+            }
+            result{elementKey(result, prefix + ":RelatesTo")} = value;
+        }
+        # SOAP Binding section 3.4: each reference parameter is a header block marked as one
+        foreach string parameter in (maps.reference_parameters) {
+            hash<auto> element = checkElement(parameter, "reference parameter");
+            string key = element.firstKey();
+            hash<auto> value = {};
+            if (element{key}.typeCode() == NT_HASH) {
+                map value{$1.key} = $1.value, element{key}.pairIterator();
+            } else if (exists element{key}) {
+                value."^value^" = element{key};
+            }
+            # an existing wsa:IsReferenceParameter is replaced
+            foreach string attribute in (keys value."^attributes^") {
+                int colon = attribute.find(":");
+                if (colon > 0 && substr(attribute, colon + 1) == "IsReferenceParameter"
+                        && value."^attributes^"{"xmlns:" + substr(attribute, 0, colon)} == WSA_NS) {
+                    remove value."^attributes^"{attribute};
+                }
+            }
+            string marker = prefix;
+            for (int i = 1; exists value."^attributes^"{"xmlns:" + marker}
+                    && value."^attributes^"{"xmlns:" + marker} != WSA_NS; ++i) {
+                marker = prefix + i;
+            }
+            value."^attributes^"{"xmlns:" + marker} = WSA_NS;
+            value."^attributes^"{marker + ":IsReferenceParameter"} = "true";
+            result{elementKey(result, key)} = value;
+        }
+        return result;
+    }
+
+    private static hash<auto> endpointReference(hash<WsaEndpointReference> reference, string prefix) {
+        hash<auto> result = {};
+        result{prefix + ":Address"} = reference.address;
+        if (reference.reference_parameters) {
+            hash<auto> parameters = {};
+            foreach string parameter in (reference.reference_parameters) {
+                hash<auto> element = checkElement(parameter, "reference parameter");
+                parameters{elementKey(parameters, element.firstKey())} = element.firstValue();
+            }
+            result{prefix + ":ReferenceParameters"} = parameters;
+        }
+        return result;
+    }
+
+    #! returns the message addressing properties of a received message
+    /** @param headers the header blocks of the message, as SoapProcessingNode::processMessage() returns them; only
+        headers targeted at the node are used
+        @return the properties, or NOTHING when the message has no targeted WS-Addressing header
+        @throw WSA-FAULT the headers are invalid; the argument is a WsaFault describing the WS-Addressing fault to
+        send (WS-Addressing 1.0 SOAP Binding sections 3.2.2 and 6.4)
+    */
+    static *hash<WsaMessageAddressing> parse(list<hash<SoapNodeHeader>> headers) {
+        hash<string, list<hash<SoapNodeHeader>>> found();
+        list<string> parameters();
+        foreach hash<SoapNodeHeader> header in (headers) {
+            if (!header.targeted) {
+                continue;
+            }
+            if (header.xml.getNamespaceUri() == WSA_NS && inlist(header.xml.getLocalName(), Properties)) {
+                push found{header.xml.getLocalName()}, header;
+            } else if (isReferenceParameter(header.xml)) {
+                push parameters, header.xml.getXml();
+            }
+        }
+        if (!found) {
+            return;
+        }
+        foreach string name in (keys found) {
+            if (Single{name} && found{name}.size() > 1) {
+                throw "WSA-FAULT", sprintf("more than one wsa:%s header", name),
+                    invalidHeader(name, "InvalidCardinality");
+            }
+        }
+        if (!found.Action) {
+            throw "WSA-FAULT", "a message using WS-Addressing requires a wsa:Action header",
+                headerRequired("Action");
+        }
+        hash<WsaMessageAddressing> result({"reference_parameters": parameters});
+        result.action = iri(found.Action[0], "Action", NOTHING);
+        if (found.To) {
+            result.to = iri(found.To[0], "To", "InvalidAddress");
+        }
+        if (found.MessageID) {
+            result.message_id = iri(found.MessageID[0], "MessageID", NOTHING);
+        }
+        foreach hash<auto> field in ({"key": "from", "name": "From"}, {"key": "reply_to", "name": "ReplyTo"},
+                {"key": "fault_to", "name": "FaultTo"}) {
+            if (found{field.name}) {
+                result{field.key} = parseEndpointReference(found{field.name}[0], field.name);
+            }
+        }
+        foreach hash<SoapNodeHeader> header in (found.RelatesTo) {
+            string message_id = iri(header, "RelatesTo", NOTHING);
+            hash<auto> element = header.xml.getElementData().typeCode() == NT_HASH ? header.xml.getElementData() : {};
+            *string type = element."^attributes^".RelationshipType;
+            push result.relates_to, <WsaRelationship>{"message_id": message_id, "type": exists type
+                ? checkedIri(XsdSimpleType::normalizeWhiteSpace(type, "collapse"), "RelatesTo", NOTHING)
+                : WSA_REPLY};
+        }
+        return result;
+    }
+
+    #! returns True if a header block is marked as a reference parameter
+    /** @param header a header block
+        @return True if it carries \c wsa:IsReferenceParameter with the value \c true or \c 1
+    */
+    static bool isReferenceParameter(XsdXmlValue header) {
+        auto data = header.getElementData();
+        if (data.typeCode() != NT_HASH) {
+            return False;
+        }
+        hash<string, string> namespaces = WsdlXmlNames::scope({}, data);
+        *string value = WsdlXmlNames::attribute(data, WSA_NS, "IsReferenceParameter", namespaces);
+        return exists value && inlist(XsdSimpleType::normalizeWhiteSpace(value, "collapse"), ("true", "1"));
+    }
+
+    # the text of a header containing an IRI
+    private static string iri(hash<SoapNodeHeader> header, string name, *string subsubcode) {
+        return checkedIri(text(header.xml.getElementData(), name), name, subsubcode);
+    }
+
+    private static string checkedIri(string value, string name, *string subsubcode) {
+        bool absolute;
+        try {
+            absolute = WsdlUriComponents::isAbsoluteValue(value);
+        } catch (hash<ExceptionInfo> ex) {
+            if (ex.err != WSDL_ERROR) {
+                rethrow;
+            }
+        }
+        if (!absolute) {
+            throw "WSA-FAULT", sprintf("the wsa:%s value %Y is not an absolute IRI", name, value),
+                invalidHeader(name, subsubcode);
+        }
+        return value;
+    }
+
+    # the whitespace-collapsed text of an element without element children
+    private static string text(auto data, string name) {
+        if (data.typeCode() != NT_HASH) {
+            return XsdSimpleType::normalizeWhiteSpace(data ?? "", "collapse");
+        }
+        string result;
+        foreach string key in (keys data) {
+            if (key =~ /^\^value[0-9]*\^$/) {
+                result += data{key};
+            } else if (!key.startsWith("^")) {
+                throw "WSA-FAULT", sprintf("the wsa:%s header cannot contain elements", name),
+                    invalidHeader(name, NOTHING);
+            }
+        }
+        return XsdSimpleType::normalizeWhiteSpace(result ?? "", "collapse");
+    }
+
+    private static hash<WsaEndpointReference> parseEndpointReference(hash<SoapNodeHeader> header, string name) {
+        auto data = header.xml.getElementData();
+        hash<string, string> namespaces = WsdlXmlNames::scope({}, data);
+        *string address;
+        list<string> parameters();
+        foreach hash<auto> child in (WsdlXmlNames::children(data, namespaces)) {
+            if (child.name.uri != WSA_NS) {
+                continue;
+            }
+            if (child.name.local == "Address") {
+                if (exists address) {
+                    throw "WSA-FAULT", sprintf("the wsa:%s endpoint reference has more than one address", name),
+                        invalidHeader(name, "InvalidEPR");
+                }
+                address = checkedIri(text(child.value, name), name, "InvalidAddress");
+            } else if (child.name.local == "ReferenceParameters") {
+                foreach hash<auto> parameter in (WsdlXmlNames::children(child.value, child.name.namespaces)) {
+                    if (!parameter.name.uri) {
+                        throw "WSA-FAULT", sprintf("the wsa:%s endpoint reference has an unqualified reference "
+                            "parameter", name), invalidHeader(name, "InvalidEPR");
+                    }
+                    push parameters, WsdlXmlNames::serialize(parameter.key, parameter.value,
+                        parameter.name.namespaces);
+                }
+            }
+        }
+        if (!exists address) {
+            throw "WSA-FAULT", sprintf("the wsa:%s endpoint reference has no address", name),
+                invalidHeader(name, "MissingAddressInEPR");
+        }
+        return <WsaEndpointReference>{"address": address, "reference_parameters": parameters};
+    }
+
+    #! returns the message addressing properties of a reply (WS-Addressing 1.0 Core section 3.4)
+    /** @param request the properties of the related message
+        @param action the reply's action
+        @param fault True for a fault reply, which goes to the [fault endpoint] when the request has one
+        @return the reply's properties: its [destination] and [reference parameters] from the selected endpoint
+        reference, and a reply [relationship] to the request's [message id]; a destination of
+        @ref WSA_NONE means that the reply must be discarded
+        @throw WSA-FAULT the request has no [message id] (WS-I R1163: \c wsa:MessageAddressingHeaderRequired)
+    */
+    static hash<WsaMessageAddressing> reply(hash<WsaMessageAddressing> request, string action, bool fault = False) {
+        if (!exists request.message_id) {
+            throw "WSA-FAULT", "a reply requires the related message's wsa:MessageID", headerRequired("MessageID");
+        }
+        hash<WsaEndpointReference> endpoint = (fault ? request.fault_to : NOTHING) ?? request.reply_to
+            ?? <WsaEndpointReference>{"address": WSA_ANONYMOUS};
+        return <WsaMessageAddressing>{
+            "to": endpoint.address,
+            "action": action,
+            "relates_to": (<WsaRelationship>{"message_id": request.message_id},),
+            "reference_parameters": endpoint.reference_parameters,
+        };
+    }
+
+    #! returns the endpoint reference that a reply to the message uses (WS-Addressing 1.0 Core section 3.4)
+    /** @param request the properties of the related message
+        @param fault True for a fault reply
+        @return the [fault endpoint] of a fault reply if present, or else the [reply endpoint], which defaults to
+        the anonymous address
+    */
+    static hash<WsaEndpointReference> responseEndpoint(hash<WsaMessageAddressing> request, bool fault = False) {
+        return (fault ? request.fault_to : NOTHING) ?? request.reply_to
+            ?? <WsaEndpointReference>{"address": WSA_ANONYMOUS};
+    }
+
+    #! checks the SOAP action of a received request against its \c wsa:Action (WS-Addressing 1.0 SOAP Binding
+    #! sections 2.4 and 4, WS-I R1144)
+    /** @param maps the request's properties
+        @param soap_action the unquoted SOAP 1.1 \c SOAPAction value or SOAP 1.2 \c action parameter; NOTHING when
+        absent
+        @param soap12 True for SOAP 1.2
+        @throw WSA-FAULT the SOAP action is neither empty nor the \c wsa:Action value
+        (\c wsa:InvalidAddressingHeader with \c wsa:ActionMismatch)
+    */
+    static checkSoapAction(hash<WsaMessageAddressing> maps, *string soap_action, bool soap12) {
+        if (!soap_action || soap_action == maps.action) {
+            return;
+        }
+        hash<WsaFault> fault = invalidHeader("Action", "ActionMismatch");
+        fault.details += makeElement("ProblemAction", {"wsa:Action": maps.action, "wsa:SoapAction": soap_action});
+        throw "WSA-FAULT", sprintf("the SOAP %s %Y differs from the wsa:Action %Y", soap12 ? "action parameter"
+            : "SOAPAction", soap_action, maps.action), fault;
+    }
+
+    #! returns a \c wsa:InvalidAddressingHeader fault (WS-Addressing 1.0 SOAP Binding section 6.4.1)
+    /** @param name the local name of the invalid WS-Addressing header
+        @param subsubcode an optional narrower subsubcode, such as \c InvalidCardinality
+        @return the fault, with the header's QName as \c wsa:ProblemHeaderQName
+    */
+    static hash<WsaFault> invalidHeader(string name, *string subsubcode) {
+        return <WsaFault>{
+            "subcode": "InvalidAddressingHeader",
+            "subsubcode": subsubcode,
+            "reason": "A header representing a Message Addressing Property is not valid and the message cannot be "
+                "processed",
+            "details": (makeElement("ProblemHeaderQName", "wsa:" + name),),
+        };
+    }
+
+    #! returns a \c wsa:MessageAddressingHeaderRequired fault (WS-Addressing 1.0 SOAP Binding section 6.4.2)
+    /** @param name the local name of the missing WS-Addressing header
+        @return the fault, with the header's QName as \c wsa:ProblemHeaderQName
+    */
+    static hash<WsaFault> headerRequired(string name) {
+        return <WsaFault>{
+            "subcode": "MessageAddressingHeaderRequired",
+            "reason": "A required header representing a Message Addressing Property is not present",
+            "details": (makeElement("ProblemHeaderQName", "wsa:" + name),),
+        };
+    }
+
+    #! returns a \c wsa:ActionNotSupported fault (WS-Addressing 1.0 SOAP Binding section 6.4.4)
+    /** @param action the unsupported action
+        @return the fault, with a \c wsa:ProblemAction detail
+    */
+    static hash<WsaFault> actionNotSupported(string action) {
+        return <WsaFault>{
+            "subcode": "ActionNotSupported",
+            "reason": sprintf("The [action] cannot be processed at the receiver"),
+            "details": (makeElement("ProblemAction", {"wsa:Action": action}),),
+        };
+    }
+
+    #! returns a fault stating that the endpoint supports only anonymous or only non-anonymous response endpoints
+    /** @param anonymous True for \c wsa:OnlyAnonymousAddressSupported, False for
+        \c wsa:OnlyNonAnonymousAddressSupported (WS-Addressing 1.0 SOAP Binding sections 6.4.1.7 and 6.4.1.8)
+        @param name the local name of the header with the rejected address: \c ReplyTo or \c FaultTo
+        @return the fault
+    */
+    static hash<WsaFault> onlyAddressSupported(bool anonymous, string name) {
+        return invalidHeader(name, anonymous ? "OnlyAnonymousAddressSupported" : "OnlyNonAnonymousAddressSupported");
+    }
+
+    # a detail element in the WS-Addressing namespace
+    private static string makeElement(string local, auto value) {
+        hash<auto> element = {};
+        if (value.typeCode() == NT_HASH) {
+            map element{$1.key} = $1.value, value.pairIterator();
+        } else {
+            element."^value^" = value;
+        }
+        element."^attributes^"."xmlns:wsa" = WSA_NS;
+        string xml = make_xml({"wsa:" + local: element});
+        return xml =~ s/^<\?xml[^>]*\?>\s*//;
+    }
+
+    #! returns a complete SOAP fault message for a WS-Addressing fault (WS-Addressing 1.0 SOAP Binding sections 6.1
+    #! and 6.2)
+    /** @param fault the fault
+        @param soap12 True for SOAP 1.2, False for SOAP 1.1
+        @param maps the fault message's addressing properties, usually from reply() with the action
+        @ref WSA_FAULT_ACTION
+        @param must_understand True to mark the WS-Addressing headers \c mustUnderstand
+        @return the XML of the fault envelope; SOAP 1.1 carries the details in a \c wsa:FaultDetail header
+        @throw WSA-SERIALIZATION-ERROR invalid addressing properties
+    */
+    static string serializeFault(hash<WsaFault> fault, bool soap12, hash<WsaMessageAddressing> maps,
+            bool must_understand = False) {
+        validate(maps);
+        hash<auto> header = headers(maps, soap12, must_understand, "wsa");
+        hash<auto> details = {};
+        foreach string detail in (fault.details) {
+            hash<auto> element = checkElement(detail, "fault detail");
+            details{elementKey(details, element.firstKey())} = element.firstValue();
+        }
+        hash<auto> body;
+        if (soap12) {
+            hash<auto> subcode = {};
+            subcode."soapenv:Value" = "wsa:" + fault.subcode;
+            if (fault.subsubcode) {
+                subcode."soapenv:Subcode" = {"soapenv:Value": "wsa:" + fault.subsubcode};
+            }
+            hash<auto> code = {};
+            code."soapenv:Value" = "soapenv:" + fault.code;
+            code."soapenv:Subcode" = subcode;
+            body = {"soapenv:Fault": {"soapenv:Code": code, "soapenv:Reason": {"soapenv:Text":
+                {"^attributes^": {"xml:lang": "en"}, "^value^": fault.reason}}}
+                + (details ? {"soapenv:Detail": details} : {})};
+        } else {
+            body = {"soapenv:Fault": {"faultcode": "wsa:" + (fault.subsubcode ?? fault.subcode),
+                "faultstring": {"^attributes^": {"xml:lang": "en"}, "^value^": fault.reason}}};
+            if (details) {
+                # SOAP Binding section 6.2: SOAP 1.1 carries the details in a header
+                header."wsa:FaultDetail" = details;
+            }
+        }
+        hash<auto> envelope = {"soapenv:Envelope": {
+            "^attributes^": {"xmlns:soapenv": soap12 ? SOAP_12_ENV : SOAP_11_ENV, "xmlns:wsa": WSA_NS},
+            "soapenv:Header": header,
+            "soapenv:Body": body,
+        }};
+        return make_xml(envelope);
+    }
+}
+
 #! Keep foreign extension payloads out of the core component name space.
 class WsdlSourceProjection {
     private {
@@ -37917,6 +38529,24 @@ public class SoapBinding inherits WSDL::OperationalBinding {
         if (default_action) {
             req_soapaction = soapAction;
         }
+        # WS-I R1144 and WS-Addressing SOAP Binding sections 2.4 and 4: with wsa:Action, the SOAP action is the
+        # same value, or an empty SOAP 1.1 SOAPAction
+        bool addressing_empty_action = False;
+        if (request && WsaOutputSelected) {
+            string addressing_action = WsaOutputSelected.maps.action;
+            if (default_action) {
+                req_soapaction = addressing_action;
+            } else if (req_soapaction && req_soapaction != addressing_action) {
+                throw SOAP_SERIALIZATION_ERROR, sprintf("the SOAP action %Y differs from the wsa:Action %Y (WS-I "
+                    "R1144)", req_soapaction, addressing_action);
+            } else if (!req_soapaction) {
+                if (soap12) {
+                    req_soapaction = addressing_action;
+                } else {
+                    addressing_empty_action = True;
+                }
+            }
+        }
 
         MultiPartRelatedMessage mpm;
 
@@ -37932,6 +38562,9 @@ public class SoapBinding inherits WSDL::OperationalBinding {
             envelope = serializeSoapMessage(op, msg, h, header, nsh, request, soap12, \mpm, faultmsg, bmd, enc);
         }
         envelope = output.prepare(envelope);
+        if (WsaOutputSelected) {
+            addAddressingHeaders(\envelope, soap12, WsaOutputSelected);
+        }
         if (exists fault_options) {
             SoapFaultHelper::apply(\envelope, soap12, faultmsg, fault_options);
         }
@@ -37969,7 +38602,7 @@ public class SoapBinding inherits WSDL::OperationalBinding {
             } else {
                 rv.hdr.SOAPAction = WsdlMediaType::quote(req_soapaction);
             }
-        } else if (request && !soap12 && default_action) {
+        } else if (request && !soap12 && (default_action || addressing_empty_action)) {
             rv.hdr.SOAPAction = "\"\"";
         }
         string ct = xml_type + charset + action;
@@ -38013,6 +38646,32 @@ public class SoapBinding inherits WSDL::OperationalBinding {
         rv.hdr += http_headers;
 
         return rv;
+    }
+
+    # adds the WS-Addressing header blocks selected by WsaOutputScope (WS-Addressing 1.0 SOAP Binding section 3)
+    private:internal static addAddressingHeaders(reference<hash<auto>> envelope, bool soap12, hash<WsaOutput> selected) {
+        string root = envelope.firstKey();
+        hash<auto> content = envelope{root};
+        string prefix = "wsa";
+        for (int i = 1; exists content."^attributes^"{"xmlns:" + prefix}
+                && content."^attributes^"{"xmlns:" + prefix} != WSA_NS; ++i) {
+            prefix = "wsa" + i;
+        }
+        content."^attributes^"{"xmlns:" + prefix} = WSA_NS;
+        hash<auto> header = content."soapenv:Header" ?? {};
+        foreach hash<auto> block in (WsAddressingHelper::headers(selected.maps, soap12, selected.must_understand,
+                prefix).pairIterator()) {
+            # a header of the message with the same name keeps its key; make_xml() ignores "^" suffixes
+            header{WsAddressingHelper::elementKey(header, (block.key =~ x/^([^^]+)/)[0])} = block.value;
+        }
+        # the Header precedes the Body
+        hash<auto> result = {"^attributes^": content."^attributes^", "soapenv:Header": header};
+        foreach hash<auto> item in (content.pairIterator()) {
+            if (item.key != "^attributes^" && item.key != "soapenv:Header") {
+                result{item.key} = item.value;
+            }
+        }
+        envelope{root} = result;
     }
 
     private:internal hash<auto> serializeSoapMessage(WSOperation op, *WSMessage msg, auto val, *hash<auto> header,

@@ -11163,3 +11163,33 @@ namespaces, elements and fault codes, and the phrases of the rules that the impl
 - **Not evaluated:** policies attached with `wsp:PolicyAttachment` and domain expressions, and policies nested
   elsewhere than under `wsdl:definitions` as reference targets. A `wsp:PolicyAttachment` marked
   `wsdl:required="true"` is still rejected as an unsupported required extension.
+
+## P9a-03: Message addressing properties in SOAP
+
+**Implemented** (`qlib/WSDL.qm`, `design/soap-addressing.md`):
+- **Types:** `WsaMessageAddressing`, `WsaRelationship` and `WsaFault`.
+- **`WsaOutputScope`:** adds the message addressing properties to the messages that the thread serializes, as SOAP
+  header blocks. Reference parameters are marked `wsa:IsReferenceParameter`, and the headers are optionally
+  `mustUnderstand`. A request's SOAP action follows `wsa:Action` (WS-I R1144, SOAP Binding sections 2.4 and 4).
+- **`WsAddressingHelper::parse()`:** reads the properties from the targeted header blocks of a `SoapNodeResult`.
+  It raises `WSA-FAULT` with the predefined faults for cardinality, a missing action, IRIs that are not absolute
+  and invalid endpoint references.
+- **`reply()`:** follows Core section 3.4 and raises the R1163 fault for a missing message ID.
+- **Other helpers:** `checkSoapAction()` detects `wsa:ActionMismatch`. `invalidHeader()`, `headerRequired()`,
+  `actionNotSupported()` and `onlyAddressSupported()` build the predefined faults, and `serializeFault()` builds
+  the fault envelopes (SOAP 1.2 subcodes; SOAP 1.1 `wsa:FaultDetail` header). `messageId()` returns version 4
+  `urn:uuid:` IDs from `get_random_bytes()`.
+
+**Tests.** `test/soap-addressing-messages.qtest` has 9 cases and 330 assertions:
+- serialization for SOAP 1.1 and 1.2, with and without mustUnderstand;
+- prefix conflicts, and replaced `wsa:IsReferenceParameter` markers;
+- WSDL header parts alongside the WS-Addressing headers, and responses;
+- every SOAP action combination;
+- round trips through `SoapProcessingNode`, including a header for another role;
+- every parse fault, and replies to all endpoint kinds, including `none`;
+- fault envelopes read back with `WSDLLib::getSOAPFaultInfo()`.
+
+**Found:** Qore types literal hashes strictly, for example `{"^attributes^": {...}}` is
+`hash<string, hash<string, string>>`, so adding XML generator keys to such a value, or to a parsed value, fails
+at runtime. Header, detail and parameter construction therefore copies into untyped hashes. Envelope validation
+accepts only numeric `^N` key suffixes, so repeated header names use them.

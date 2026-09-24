@@ -1,0 +1,469 @@
+#!/usr/bin/env qore
+# -*- mode: qore; indent-tabs-mode: nil -*-
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires xml
+%requires ../qlib/WSDL.qm
+
+%exec-class SoapAddressingMessagesTest
+
+# P9a-03: WS-Addressing 1.0 message addressing properties in SOAP messages: serialization as header blocks (SOAP
+# Binding section 3), parsing with the cardinality and validity rules (section 3.2.2), reply formulation (Core
+# section 3.4), the SOAP action relationship (sections 2.4 and 4, WS-I R1144) and the predefined faults (section 6).
+public class SoapAddressingMessagesTest inherits QUnit::Test {
+    private {
+        const Contract = '<definitions xmlns="http://schemas.xmlsoap.org/wsdl/" xmlns:soap="{SOAPNS}"
+            xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:x="urn:quotes:xsd" xmlns:tns="urn:quotes"
+            targetNamespace="urn:quotes">
+          <types><xsd:schema targetNamespace="urn:quotes:xsd" elementFormDefault="qualified">
+            <xsd:element name="Symbol" type="xsd:string"/><xsd:element name="Price" type="xsd:double"/>
+            <xsd:element name="Session" type="xsd:string"/>
+          </xsd:schema></types>
+          <message name="In"><part name="body" element="x:Symbol"/></message>
+          <message name="Out"><part name="body" element="x:Price"/></message>
+          <message name="Hdr"><part name="session" element="x:Session"/></message>
+          <portType name="Quotes"><operation name="get"><input message="tns:In"/><output message="tns:Out"/>
+            </operation><operation name="getWithHeader"><input message="tns:In"/><output message="tns:Out"/>
+            </operation></portType>
+          <binding name="B" type="tns:Quotes"><soap:binding style="document"
+              transport="http://schemas.xmlsoap.org/soap/http"/>
+            <operation name="get"><soap:operation soapAction="{SA}"/>
+              <input><soap:body use="literal"/></input><output><soap:body use="literal"/></output></operation>
+            <operation name="getWithHeader"><soap:operation soapAction="urn:quotes:getWithHeader"/>
+              <input><soap:body use="literal"/><soap:header message="tns:Hdr" part="session" use="literal"/></input>
+              <output><soap:body use="literal"/></output></operation>
+          </binding>
+          <service name="S"><port name="P" binding="tns:B"><soap:address location="http://localhost/q"/></port>
+          </service></definitions>';
+
+        const Soap11 = "http://schemas.xmlsoap.org/wsdl/soap/";
+        const Soap12 = "http://schemas.xmlsoap.org/wsdl/soap12/";
+
+        const Maps = <WsaMessageAddressing>{
+            "to": "http://example.com/quotes",
+            "action": "urn:quotes:get",
+            "message_id": "urn:uuid:6b29fc40-ca47-1067-b31d-00dd010662da",
+            "reply_to": <WsaEndpointReference>{"address": "http://client.example/replies",
+                "reference_parameters": ('<c:Ticket xmlns:c="urn:c">7</c:Ticket>',)},
+            "fault_to": <WsaEndpointReference>{"address": WSA_ANONYMOUS},
+            "from": <WsaEndpointReference>{"address": "http://client.example/"},
+            "relates_to": (<WsaRelationship>{"message_id": "urn:uuid:1"},
+                <WsaRelationship>{"message_id": "urn:uuid:2", "type": "urn:related:previous"}),
+            "reference_parameters": ('<k:Key xmlns:k="urn:k" k:scope="all">123</k:Key>',
+                '<k:Cart xmlns:k="urn:k"><k:Id>A</k:Id></k:Cart>'),
+        };
+    }
+
+    constructor() : Test("SoapAddressingMessagesTest", "1.0") {
+        addTestCase("message IDs", \messageIds());
+        addTestCase("properties are validated before sending", \validation());
+        addTestCase("header blocks of the message addressing properties", \serialization());
+        addTestCase("the SOAP action follows wsa:Action", \soapActions());
+        addTestCase("received properties round trip", \roundTrip());
+        addTestCase("invalid received properties are addressing faults", \parseFaults());
+        addTestCase("replies and response endpoints", \replies());
+        addTestCase("SOAP action checks on receipt", \receivedActions());
+        addTestCase("WS-Addressing fault messages", \faultMessages());
+        set_return_value(main());
+    }
+
+    static WSOperation operation(bool soap12 = False, string name = "get", string soap_action = "") {
+        WebService ws(replace(replace(Contract, "{SOAPNS}", soap12 ? Soap12 : Soap11), "{SA}", soap_action));
+        return ws.getOperation(name);
+    }
+
+    static hash<auto> request(WSOperation op, *hash<WsaMessageAddressing> maps, bool must_understand = False,
+            *string soap_action, auto value = {"Symbol": "QORE"}, *hash<auto> nsh) {
+        WsaOutputScope addressing(maps, must_understand);
+        return op.serializeRequest(value, NOTHING, "UTF-8", nsh, NOTHING, soap_action);
+    }
+
+    # the header blocks of a serialized message, as a SOAP node sees them
+    static list<hash<SoapNodeHeader>> headers(string xml) {
+        hash<string, SoapHeaderProcessor> processors();
+        foreach string name in (WsAddressingHelper::Properties) {
+            processors{"{" + WSA_NS + "}" + name} = auto sub (hash<auto> cx, hash<SoapNodeHeader> header) {};
+        }
+        SoapProcessingNode node(<SoapNodeOptions>{"processors": processors});
+        return map $1.header, node.processMessage(xml).headers;
+    }
+
+    static *hash<WsaMessageAddressing> parse(string xml) {
+        return WsAddressingHelper::parse(headers(xml));
+    }
+
+    static string envelope(string headers, bool soap12 = True) {
+        return sprintf('<e:Envelope xmlns:e="%s" xmlns:wsa="http://www.w3.org/2005/08/addressing"><e:Header>%s'
+            '</e:Header><e:Body><x:Symbol xmlns:x="urn:quotes:xsd">QORE</x:Symbol></e:Body></e:Envelope>',
+            soap12 ? SOAP_12_ENV : SOAP_11_ENV, headers);
+    }
+
+    # reference parameters are received with their in-scope namespaces and the reference parameter marker
+    static auto content(auto value) {
+        if (value.typeCode() == NT_LIST) {
+            return map content($1), value;
+        }
+        if (value.typeCode() != NT_HASH) {
+            return value;
+        }
+        hash<auto> result = {};
+        foreach hash<auto> item in (value.pairIterator()) {
+            if (item.key == "^attributes^") {
+                hash<auto> kept = {};
+                foreach hash<auto> attribute in (item.value.pairIterator()) {
+                    if (!attribute.key.startsWith("xmlns") && !attribute.key.endsWith(":IsReferenceParameter")) {
+                        kept{attribute.key} = attribute.value;
+                    }
+                }
+                if (kept) {
+                    result."^attributes^" = kept;
+                }
+            } else {
+                result{item.key} = content(item.value);
+            }
+        }
+        return result.size() == 1 && result.hasKey("^value^") ? result."^value^" : result;
+    }
+
+    static hash<auto> comparable(hash<WsaMessageAddressing> maps) {
+        hash<auto> result = {};
+        map result{$1.key} = $1.value, maps.pairIterator();
+        result.reference_parameters = map content(parse_xml($1)), maps.reference_parameters;
+        foreach string field in ("from", "reply_to", "fault_to") {
+            if (maps{field}) {
+                result{field} = {"address": maps{field}.address, "reference_parameters":
+                    map content(parse_xml($1)), maps{field}.reference_parameters};
+            }
+        }
+        return result;
+    }
+
+    static string qname(XsdQNameValue value) {
+        return sprintf("{%s}%s", value.getNamespaceUri(), value.getLocalName());
+    }
+
+    static hash<WsaFault> faultOf(string xml) {
+        try {
+            parse(xml);
+        } catch (hash<ExceptionInfo> ex) {
+            if (ex.err == "WSA-FAULT") {
+                return ex.arg;
+            }
+            rethrow;
+        }
+        throw "TEST-ERROR", "no WS-Addressing fault";
+    }
+
+    messageIds() {
+        hash<string, bool> seen();
+        for (int i = 0; i < 64; ++i) {
+            string id = WsAddressingHelper::messageId();
+            assertRegex("^urn:uuid:[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$", id);
+            assertFalse(seen.hasKey(id));
+            seen{id} = True;
+        }
+    }
+
+    validation() {
+        assertThrows("WSA-SERIALIZATION-ERROR", "requires an action", sub () {
+            WsaOutputScope scope(<WsaMessageAddressing>{"to": "http://example.com/"});
+        });
+        foreach hash<auto> invalid in ({"action": "relative"}, {"to": "quotes"}, {"message_id": "1"},
+                {"reply_to": <WsaEndpointReference>{"address": "replies"}},
+                {"relates_to": (<WsaRelationship>{"message_id": "2"},)},
+                {"relates_to": (<WsaRelationship>{"message_id": "urn:x", "type": "previous"},)}) {
+            assertThrows("WSA-SERIALIZATION-ERROR", "must be an absolute IRI", \WsAddressingHelper::validate(),
+                cast<hash<WsaMessageAddressing>>({"action": "urn:a"} + invalid));
+        }
+        assertThrows("WSA-SERIALIZATION-ERROR", "must be namespace-qualified", \WsAddressingHelper::validate(),
+            <WsaMessageAddressing>{"action": "urn:a", "reference_parameters": ("<Plain/>",)});
+        assertThrows("WSA-SERIALIZATION-ERROR", "invalid reference parameter", \WsAddressingHelper::validate(),
+            <WsaMessageAddressing>{"action": "urn:a", "reference_parameters": ("<x:Broken",)});
+        assertThrows("WSA-SERIALIZATION-ERROR", "reply_to reference parameter", \WsAddressingHelper::validate(),
+            <WsaMessageAddressing>{"action": "urn:a", "reply_to": <WsaEndpointReference>{"address": "urn:r",
+                "reference_parameters": ("<Plain/>",)}});
+        # scopes nest and restore
+        assertEq(NOTHING, WsaOutputScope::getSelected());
+        {
+            WsaOutputScope outer(<WsaMessageAddressing>{"action": "urn:outer"});
+            {
+                WsaOutputScope inner(<WsaMessageAddressing>{"action": "urn:inner"});
+                assertEq("urn:inner", WsaOutputScope::getSelected().action);
+                WsaOutputScope none();
+                assertEq(NOTHING, WsaOutputScope::getSelected());
+            }
+            assertEq("urn:outer", WsaOutputScope::getSelected().action);
+        }
+        assertEq(NOTHING, WsaOutputScope::getSelected());
+    }
+
+    serialization() {
+        foreach bool soap12 in (False, True) {
+            WSOperation op = operation(soap12);
+            foreach bool must_understand in (False, True) {
+                string xml = request(op, Maps, must_understand).body;
+                hash<auto> data = parse_xml(xml, XPF_PRESERVE_ORDER);
+                hash<auto> header = data."soapenv:Envelope"."soapenv:Header";
+                # the Header precedes the Body
+                assertEq(("^attributes^", "soapenv:Header", "soapenv:Body"), keys data."soapenv:Envelope");
+                assertEq(WSA_NS, data."soapenv:Envelope"."^attributes^"."xmlns:wsa");
+                assertEq("http://example.com/quotes", header."wsa:To"."^value^" ?? header."wsa:To");
+                string flag = soap12 ? "true" : "1";
+                foreach string name in ("To", "From", "ReplyTo", "FaultTo", "Action", "MessageID", "RelatesTo") {
+                    auto block = header{"wsa:" + name};
+                    if (block.typeCode() == NT_LIST) {
+                        block = block[0];
+                    }
+                    assertEq(must_understand ? flag : NOTHING,
+                        block.typeCode() == NT_HASH ? block."^attributes^"."soapenv:mustUnderstand" : NOTHING,
+                        name);
+                }
+                # reference parameters are header blocks marked as such, keeping their own attributes
+                assertEq("true", header."k:Key"."^attributes^"."wsa:IsReferenceParameter");
+                assertEq("all", header."k:Key"."^attributes^"."k:scope");
+                assertEq("123", header."k:Key"."^value^");
+                assertEq("A", header."k:Cart"."k:Id");
+                assertEq(NOTHING, header."k:Key"."^attributes^"."soapenv:mustUnderstand");
+                # the reply endpoint's parameters stay inside it
+                assertEq("7", header."wsa:ReplyTo"."wsa:ReferenceParameters"."c:Ticket"."^value^");
+                assertEq("http://client.example/replies", header."wsa:ReplyTo"."wsa:Address");
+                # RelationshipType is omitted for its default
+                list<auto> relates = header."wsa:RelatesTo";
+                assertEq(2, relates.size());
+                assertEq(NOTHING, relates[0]."^attributes^".RelationshipType);
+                assertEq("urn:related:previous", relates[1]."^attributes^".RelationshipType);
+                assertEq(comparable(Maps), comparable(parse(xml)));
+            }
+        }
+        WSOperation op = operation();
+        # an existing wsa:IsReferenceParameter is replaced, and a conflicting "wsa" prefix is not reused
+        string xml = request(op, <WsaMessageAddressing>{"action": "urn:quotes:get", "reference_parameters":
+            ('<k:Key xmlns:k="urn:k" xmlns:w="http://www.w3.org/2005/08/addressing" w:IsReferenceParameter="false"'
+                '>1</k:Key>', '<k:Other xmlns:k="urn:k" xmlns:wsa="urn:not-addressing" wsa:note="n">2</k:Other>')})
+            .body;
+        hash<auto> header = parse_xml(xml, XPF_PRESERVE_ORDER)."soapenv:Envelope"."soapenv:Header";
+        assertEq(NOTHING, header."k:Key"."^attributes^"."w:IsReferenceParameter");
+        assertEq("true", header."k:Key"."^attributes^"."wsa:IsReferenceParameter");
+        assertEq("urn:not-addressing", header."k:Other"."^attributes^"."xmlns:wsa");
+        assertEq(WSA_NS, header."k:Other"."^attributes^"."xmlns:wsa1");
+        assertEq("true", header."k:Other"."^attributes^"."wsa1:IsReferenceParameter");
+        assertEq(2, parse(xml).reference_parameters.size());
+        # a message prefix bound elsewhere
+        xml = request(op, <WsaMessageAddressing>{"action": "urn:quotes:get"}, False, NOTHING, {"Symbol": "Q"},
+            {"wsa": "urn:other"}).body;
+        hash<auto> data = parse_xml(xml, XPF_PRESERVE_ORDER);
+        assertEq("urn:other", data."soapenv:Envelope"."^attributes^"."xmlns:wsa");
+        assertEq(WSA_NS, data."soapenv:Envelope"."^attributes^"."xmlns:wsa1");
+        assertEq("urn:quotes:get", data."soapenv:Envelope"."soapenv:Header"."wsa1:Action");
+        # a WSDL header part and WS-Addressing headers together
+        op = operation(False, "getWithHeader");
+        xml = request(op, <WsaMessageAddressing>{"action": "urn:quotes:getWithHeader"}, False, NOTHING,
+            {"Symbol": "Q", "session": "s1"}).body;
+        header = parse_xml(xml, XPF_PRESERVE_ORDER)."soapenv:Envelope"."soapenv:Header";
+        assertEq("urn:quotes:getWithHeader", header."wsa:Action");
+        assertEq(1, (select keys header, $1 =~ /Session/).size());
+        # without a scope, no WS-Addressing headers
+        xml = request(operation(), NOTHING).body;
+        assertFalse(xml.find(WSA_NS) >= 0);
+        assertEq(NOTHING, parse(xml));
+        # a response
+        {
+            WsaOutputScope addressing(<WsaMessageAddressing>{"action": "urn:quotes:getResponse", "to": WSA_ANONYMOUS,
+                "relates_to": (<WsaRelationship>{"message_id": "urn:uuid:1"},)});
+            xml = operation().serializeResponse({"Price": 1.5}).body;
+        }
+        assertEq(<WsaMessageAddressing>{"action": "urn:quotes:getResponse", "to": WSA_ANONYMOUS,
+            "relates_to": (<WsaRelationship>{"message_id": "urn:uuid:1"},)}, parse(xml));
+    }
+
+    soapActions() {
+        hash<WsaMessageAddressing> maps({"action": "urn:quotes:get"});
+        WSOperation op = operation();
+        # SOAP 1.1: the SOAPAction header carries the action, including over the binding's empty action
+        assertEq("\"urn:quotes:get\"", request(op, maps).hdr.SOAPAction);
+        assertEq("\"urn:quotes:get\"", request(op, maps, False, "urn:quotes:get").hdr.SOAPAction);
+        # an empty SOAPAction is allowed and still sent
+        assertEq("\"\"", request(op, maps, False, "").hdr.SOAPAction);
+        assertThrows("SOAP-SERIALIZATION-ERROR", "R1144", \SoapAddressingMessagesTest::request(),
+            (op, maps, False, "urn:other"));
+        # a binding's SOAP action is replaced by the addressing action
+        op = operation(False, "get", "urn:binding:action");
+        assertEq("\"urn:quotes:get\"", request(op, maps).hdr.SOAPAction);
+        assertEq("\"urn:binding:action\"", request(op, NOTHING).hdr.SOAPAction);
+        # SOAP 1.2: the action parameter carries it; an empty override still sends it
+        op = operation(True);
+        foreach *string override in (NOTHING, "", "urn:quotes:get") {
+            assertRegex(";action=\"?urn:quotes:get\"?", request(op, maps, False, override).hdr."Content-Type");
+        }
+        assertThrows("SOAP-SERIALIZATION-ERROR", "R1144", \SoapAddressingMessagesTest::request(),
+            (op, maps, False, "urn:other"));
+    }
+
+    roundTrip() {
+        string xml = envelope('<wsa:To> http://example.com/quotes </wsa:To><wsa:Action>urn:a</wsa:Action>'
+            '<wsa:MessageID>urn:uuid:1</wsa:MessageID><wsa:ReplyTo><wsa:Address>http://c/r</wsa:Address>'
+            '<wsa:ReferenceParameters xmlns:c="urn:c"><c:T>1</c:T></wsa:ReferenceParameters><wsa:Metadata/>'
+            '</wsa:ReplyTo><wsa:RelatesTo RelationshipType="urn:r">urn:uuid:0</wsa:RelatesTo>'
+            '<p:Param xmlns:p="urn:p" wsa:IsReferenceParameter="1">v</p:Param>'
+            '<p:Other xmlns:p="urn:p" wsa:IsReferenceParameter="false">v</p:Other>'
+            # a header for another role is not processed here
+            '<wsa:To e:role="urn:other-node">http://elsewhere/</wsa:To>');
+        hash<WsaMessageAddressing> maps = parse(xml);
+        assertEq("http://example.com/quotes", maps.to);
+        assertEq("urn:a", maps.action);
+        assertEq("urn:uuid:1", maps.message_id);
+        assertEq("http://c/r", maps.reply_to.address);
+        assertEq("1", parse_xml(maps.reply_to.reference_parameters[0])."c:T"."^value^");
+        assertEq(NOTHING, maps.fault_to);
+        assertEq((<WsaRelationship>{"message_id": "urn:uuid:0", "type": "urn:r"},), maps.relates_to);
+        assertEq(1, maps.reference_parameters.size());
+        assertEq("v", parse_xml(maps.reference_parameters[0])."p:Param"."^value^");
+        # no WS-Addressing headers, or only headers for other nodes
+        assertEq(NOTHING, parse(envelope('')));
+        assertEq(NOTHING, parse(envelope('<wsa:Action e:role="urn:other-node">urn:a</wsa:Action>')));
+        # SOAP 1.1
+        assertEq(<WsaMessageAddressing>{"action": "urn:a"}, parse(envelope('<wsa:Action>urn:a</wsa:Action>',
+            False)));
+    }
+
+    parseFaults() {
+        # SOAP Binding section 3.2.2: cardinality
+        foreach string name in ("To", "Action", "MessageID") {
+            string header = sprintf('<wsa:%s>urn:v</wsa:%s>', name, name);
+            hash<WsaFault> fault = faultOf(envelope('<wsa:Action>urn:a</wsa:Action>' + header + header));
+            assertEq("InvalidAddressingHeader", fault.subcode);
+            assertEq("InvalidCardinality", fault.subsubcode);
+            assertEq("Sender", fault.code);
+            assertEq("wsa:" + name, parse_xml(fault.details[0])."wsa:ProblemHeaderQName"."^value^");
+        }
+        foreach string name in ("ReplyTo", "FaultTo") {
+            string header = sprintf('<wsa:%s><wsa:Address>urn:v</wsa:Address></wsa:%s>', name, name);
+            assertEq("InvalidCardinality", faultOf(envelope('<wsa:Action>urn:a</wsa:Action>' + header + header))
+                .subsubcode);
+        }
+        # several RelatesTo and From headers are allowed; several From headers use the first
+        assertEq(2, parse(envelope('<wsa:Action>urn:a</wsa:Action><wsa:RelatesTo>urn:1</wsa:RelatesTo>'
+            '<wsa:RelatesTo>urn:2</wsa:RelatesTo>')).relates_to.size());
+        # section 3.1: the action is required
+        hash<WsaFault> fault = faultOf(envelope('<wsa:To>urn:v</wsa:To>'));
+        assertEq("MessageAddressingHeaderRequired", fault.subcode);
+        assertEq("wsa:Action", parse_xml(fault.details[0])."wsa:ProblemHeaderQName"."^value^");
+        # IRIs must be absolute
+        fault = faultOf(envelope('<wsa:Action>relative</wsa:Action>'));
+        assertEq(("InvalidAddressingHeader", NOTHING), (fault.subcode, fault.subsubcode));
+        assertEq("InvalidAddress", faultOf(envelope('<wsa:Action>urn:a</wsa:Action><wsa:To>q</wsa:To>')).subsubcode);
+        assertEq("InvalidAddressingHeader", faultOf(envelope('<wsa:Action>urn:a</wsa:Action><wsa:MessageID>1'
+            '</wsa:MessageID>')).subcode);
+        assertEq("InvalidAddressingHeader", faultOf(envelope('<wsa:Action>urn:a</wsa:Action><wsa:RelatesTo '
+            'RelationshipType="r">urn:1</wsa:RelatesTo>')).subcode);
+        # endpoint references
+        assertEq("MissingAddressInEPR", faultOf(envelope('<wsa:Action>urn:a</wsa:Action><wsa:ReplyTo/>'))
+            .subsubcode);
+        assertEq("InvalidEPR", faultOf(envelope('<wsa:Action>urn:a</wsa:Action><wsa:FaultTo><wsa:Address>urn:1'
+            '</wsa:Address><wsa:Address>urn:2</wsa:Address></wsa:FaultTo>')).subsubcode);
+        assertEq("InvalidEPR", faultOf(envelope('<wsa:Action>urn:a</wsa:Action><wsa:From><wsa:Address>urn:1'
+            '</wsa:Address><wsa:ReferenceParameters><Plain/></wsa:ReferenceParameters></wsa:From>')).subsubcode);
+        assertEq("InvalidAddress", faultOf(envelope('<wsa:Action>urn:a</wsa:Action><wsa:ReplyTo><wsa:Address>r'
+            '</wsa:Address></wsa:ReplyTo>')).subsubcode);
+        # element content where a text value is required
+        assertEq("InvalidAddressingHeader", faultOf(envelope('<wsa:Action>urn:a<x:y xmlns:x="urn:x"/>'
+            '</wsa:Action>')).subcode);
+        # the fault is raised as WSA-FAULT with the reason as description
+        assertThrows("WSA-FAULT", "more than one wsa:To", \SoapAddressingMessagesTest::parse(),
+            envelope('<wsa:Action>urn:a</wsa:Action><wsa:To>urn:1</wsa:To><wsa:To>urn:2</wsa:To>'));
+    }
+
+    replies() {
+        # Core section 3.4: the reply endpoint, or the anonymous address
+        hash<WsaMessageAddressing> reply = WsAddressingHelper::reply(Maps, "urn:quotes:getResponse");
+        assertEq("http://client.example/replies", reply.to);
+        assertEq("urn:quotes:getResponse", reply.action);
+        assertEq((<WsaRelationship>{"message_id": Maps.message_id},), reply.relates_to);
+        assertEq(Maps.reply_to.reference_parameters, reply.reference_parameters);
+        # faults go to the fault endpoint when present
+        reply = WsAddressingHelper::reply(Maps, WSA_FAULT_ACTION, True);
+        assertEq(WSA_ANONYMOUS, reply.to);
+        assertEq((), reply.reference_parameters);
+        hash<WsaMessageAddressing> minimal({"action": "urn:a", "message_id": "urn:uuid:9"});
+        assertEq(WSA_ANONYMOUS, WsAddressingHelper::reply(minimal, "urn:r").to);
+        assertEq(WSA_ANONYMOUS, WsAddressingHelper::reply(minimal, "urn:r", True).to);
+        minimal.reply_to = <WsaEndpointReference>{"address": WSA_NONE};
+        assertEq(WSA_NONE, WsAddressingHelper::reply(minimal, "urn:r").to);
+        assertEq(WSA_NONE, WsAddressingHelper::responseEndpoint(minimal, True).address);
+        assertEq("http://client.example/replies", WsAddressingHelper::responseEndpoint(Maps).address);
+        assertEq(WSA_ANONYMOUS, WsAddressingHelper::responseEndpoint(Maps, True).address);
+        # WS-I R1163: a reply requires the related message's ID
+        try {
+            WsAddressingHelper::reply(<WsaMessageAddressing>{"action": "urn:a"}, "urn:r");
+            assertTrue(False, "no fault");
+        } catch (hash<ExceptionInfo> ex) {
+            assertEq("WSA-FAULT", ex.err);
+            assertEq("MessageAddressingHeaderRequired", ex.arg.subcode);
+            assertEq("wsa:MessageID", parse_xml(ex.arg.details[0])."wsa:ProblemHeaderQName"."^value^");
+        }
+    }
+
+    receivedActions() {
+        hash<WsaMessageAddressing> maps({"action": "urn:a"});
+        foreach bool soap12 in (False, True) {
+            WsAddressingHelper::checkSoapAction(maps, NOTHING, soap12);
+            WsAddressingHelper::checkSoapAction(maps, "", soap12);
+            WsAddressingHelper::checkSoapAction(maps, "urn:a", soap12);
+            try {
+                WsAddressingHelper::checkSoapAction(maps, "urn:b", soap12);
+                assertTrue(False, "no fault");
+            } catch (hash<ExceptionInfo> ex) {
+                assertEq("WSA-FAULT", ex.err);
+                assertEq(("InvalidAddressingHeader", "ActionMismatch"), (ex.arg.subcode, ex.arg.subsubcode));
+                hash<auto> detail = parse_xml(ex.arg.details[1])."wsa:ProblemAction";
+                assertEq(("urn:a", "urn:b"), (detail."wsa:Action", detail."wsa:SoapAction"));
+            }
+        }
+    }
+
+    faultMessages() {
+        hash<WsaMessageAddressing> request({"action": "urn:a", "message_id": "urn:uuid:5"});
+        hash<WsaMessageAddressing> maps = WsAddressingHelper::reply(request, WSA_FAULT_ACTION, True);
+        hash<WsaFault> fault = WsAddressingHelper::invalidHeader("To", "InvalidCardinality");
+        # SOAP 1.2 section 6.1: code, subcode, subsubcode, reason and Detail
+        string xml = WsAddressingHelper::serializeFault(fault, True, maps);
+        hash<SoapFaultInfo> info = WSDLLib::getSOAPFaultInfo(xml);
+        assertEq("{http://www.w3.org/2003/05/soap-envelope}Sender", qname(info.code));
+        assertEq(("{" + WSA_NS + "}InvalidAddressingHeader", "{" + WSA_NS + "}InvalidCardinality"),
+            map qname($1), info.subcodes);
+        assertEq(fault.reason, info.reasons[0].text);
+        assertEq("wsa:To", info.detail.getChildValues()[0].getElementData()."^value^");
+        hash<WsaMessageAddressing> received = parse(xml);
+        assertEq(WSA_FAULT_ACTION, received.action);
+        assertEq((<WsaRelationship>{"message_id": "urn:uuid:5"},), received.relates_to);
+        assertEq(WSA_ANONYMOUS, received.to);
+        # SOAP 1.1 section 6.2: the most specific subcode is the fault code; details go in wsa:FaultDetail
+        xml = WsAddressingHelper::serializeFault(fault, False, maps, True);
+        info = WSDLLib::getSOAPFaultInfo(xml);
+        assertEq("{" + WSA_NS + "}InvalidCardinality", qname(info.code));
+        assertEq(NOTHING, info.detail);
+        list<XsdXmlValue> headers = select info.headers, $1.getLocalName() == "FaultDetail";
+        assertEq(1, headers.size());
+        assertEq("wsa:To", headers[0].getChildValues()[0].getElementData()."^value^");
+        hash<auto> data = parse_xml(xml, XPF_PRESERVE_ORDER);
+        assertEq("1", data."soapenv:Envelope"."soapenv:Header"."wsa:Action"."^attributes^"."soapenv:mustUnderstand");
+        # a fault without a subsubcode
+        fault = WsAddressingHelper::headerRequired("MessageID");
+        info = WSDLLib::getSOAPFaultInfo(WsAddressingHelper::serializeFault(fault, False, maps));
+        assertEq("{" + WSA_NS + "}MessageAddressingHeaderRequired", qname(info.code));
+        info = WSDLLib::getSOAPFaultInfo(WsAddressingHelper::serializeFault(fault, True, maps));
+        assertEq(1, info.subcodes.size());
+        # other predefined faults
+        fault = WsAddressingHelper::actionNotSupported("urn:unknown");
+        assertEq("ActionNotSupported", fault.subcode);
+        assertEq("urn:unknown", parse_xml(fault.details[0])."wsa:ProblemAction"."wsa:Action");
+        assertEq("OnlyAnonymousAddressSupported", WsAddressingHelper::onlyAddressSupported(True, "ReplyTo").subsubcode);
+        assertEq("OnlyNonAnonymousAddressSupported",
+            WsAddressingHelper::onlyAddressSupported(False, "FaultTo").subsubcode);
+        assertThrows("WSA-SERIALIZATION-ERROR", \WsAddressingHelper::serializeFault(),
+            (fault, True, <WsaMessageAddressing>{}));
+    }
+}
