@@ -157,3 +157,42 @@ decide targeting in one place. Only targeted headers are read.
 
 `checkSoapAction()` accepts an absent or empty SOAP action, or the `wsa:Action` value. Any other value is
 `wsa:ActionMismatch`, with a `wsa:ProblemAction` detail.
+
+## SOAP nodes
+
+`SoapNodeOptions.addressing` makes a `SoapProcessingNode` understand the targeted WS-Addressing property headers:
+`wsa:To`, `From`, `ReplyTo`, `FaultTo`, `Action`, `MessageID` and `RelatesTo`.
+- They are reported as processed, so mandatory ones never cause a MustUnderstand fault, and all of them are
+  honored (WS-I R1143).
+- A processor registered for one of these names takes precedence.
+- Other headers in the WS-Addressing namespace, such as `wsa:FaultDetail`, are not properties and are not
+  understood by it.
+- The flag is plain configuration, so a node that has it can be saved. Nodes saved before it existed restore it
+  as false.
+
+## Clients
+
+`WsAddressingHelper::clientRequest()` decides and builds a call's properties for `SoapClient` and `SoapClientIo`.
+- **When to send:** the client's `addressing` option is `True` (always), `False` (never; an error when the policy
+  requires WS-Addressing, WS-I R1040), or unset, which follows the port's effective policy (`supported`). A
+  per-call `addressing` override hash always enables WS-Addressing.
+- **`wsa:To` and reference parameters:** from the port's endpoint reference (R1154), or else the client URL
+  (R1155).
+- **Other properties:** the binding's input action, a new message ID, and an explicit anonymous `wsa:ReplyTo` for
+  request-response operations, which Metadata section 5.1 (WS-I R1142) makes mandatory.
+- **Overrides:** they replace fields and are validated. A request-response call needs anonymous `reply_to` and
+  `fault_to`, because its response arrives on the HTTP connection.
+
+The request is serialized in a `WsaOutputScope`, optionally with `mustUnderstand`. The response is processed by
+the client's node, derived with `addressing` enabled when it lacks it.
+
+`clientResponse()` checks the response:
+- The properties must parse.
+- They must be present when the policy requires WS-Addressing.
+- They must relate to the request's message ID as a reply (Core section 3.4).
+- The action must be the output action, or for a fault the WS-Addressing fault, SOAP fault or a declared fault
+  action.
+
+Violations raise `WSA-RESPONSE-ERROR`, except that a SOAP fault is still reported as the fault, with the problem
+in `info.addressing.error`. The request and response properties are returned in `info.addressing`. They are
+recorded after sending, because `HTTPClient::send()` replaces the info hash.

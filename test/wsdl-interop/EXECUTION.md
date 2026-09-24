@@ -11193,3 +11193,46 @@ namespaces, elements and fault codes, and the phrases of the rules that the impl
 `hash<string, hash<string, string>>`, so adding XML generator keys to such a value, or to a parsed value, fails
 at runtime. Header, detail and parameter construction therefore copies into untyped hashes. Envelope validation
 accepts only numeric `^N` key suffixes, so repeated header names use them.
+
+## P9a-04: WS-Addressing clients
+
+**Implemented:**
+- **SOAP nodes:** `SoapNodeOptions.addressing` makes a SOAP node understand and process the targeted
+  WS-Addressing property headers, including mandatory ones (WS-I R1143). `SoapProcessingNode::getOptions()`
+  returns a node's configuration.
+- **`WsAddressingHelper::clientRequest()`:** builds a request's properties from the policy and the port:
+  - `wsa:To` and the reference parameters come from the endpoint reference (R1154), or else from the URL
+    (R1155);
+  - the input action, a new message ID, and an anonymous `wsa:ReplyTo` for request-response operations
+    (Metadata section 5.1, R1142);
+  - validated overrides;
+  - disabling WS-Addressing when the policy requires it is rejected (R1040).
+- **`WsAddressingHelper::clientResponse()`:** checks the response's properties (relationship, action, presence
+  when required).
+- **SoapClient and SoapClientIo:** the `addressing` and `addressing_must_understand` options and a per-call
+  `addressing` override. They send the properties with the SOAP action rules of R1144, process the response's
+  WS-Addressing headers with an addressing node, and return both sets of properties in `info.addressing`. A SOAP
+  fault is still reported when its WS-Addressing headers are wrong, with the problem in `info.addressing.error`.
+  Saved SoapClient objects keep the options.
+
+**Tests:**
+- `test/soap-addressing-client.qtest`: 7 cases and 131 assertions against a recording HTTP peer, covering:
+  - the selection matrix of policy and option, and the R1040 rejection;
+  - endpoint reference and URL destinations, the SOAPAction and SOAP 1.2 action parameter, unique message IDs,
+    mustUnderstand, and one-way 202 acknowledgments;
+  - overrides and their rejections;
+  - response checks for SOAP 1.1 and 1.2, including mandatory response headers and a client without WS-Addressing;
+  - fault responses with each accepted fault action and with wrong properties;
+  - SoapClientIo parity, and saved clients.
+- `test/soap-addressing-messages.qtest` gains a node capability case (10 cases, 340 assertions).
+
+**Found:**
+- `HTTPClient::send()` replaces the caller's info hash, so the request's properties are recorded after the
+  exchange.
+- A hashdecl's unset optional members are absent keys, so overrides are checked against an explicit list of
+  property names.
+- Cross-module Doxygen section references do not resolve through the tag files, so the clients link the WSDL
+  section with an HTML anchor, as the existing module links do.
+
+**Scope within P9a:** request-response calls require anonymous response endpoints until the decoupled responses of
+P9a-06.

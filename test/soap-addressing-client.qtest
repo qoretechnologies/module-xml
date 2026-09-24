@@ -1,0 +1,440 @@
+#!/usr/bin/env qore
+# -*- mode: qore; indent-tabs-mode: nil -*-
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires xml
+%requires HttpServer
+%requires ../qlib/WSDL.qm
+%requires ../qlib/SoapClient.qm
+%requires ../qlib/SoapClientIo
+
+%exec-class SoapAddressingClientTest
+
+# answers each request with the reply that a queued function computes from it, and records the requests
+class AddressingReplyHandler inherits AbstractHttpRequestHandler {
+    private {
+        Queue replies;
+        Queue requests;
+    }
+
+    constructor(Queue replies, Queue requests) {
+        self.replies = replies;
+        self.requests = requests;
+    }
+
+    hash<HttpResponseInfo> handleRequest(hash<auto> cx, hash<auto> hdr, *data body) {
+        string xml = body.typeCode() == NT_BINARY ? body.toString("UTF-8") : body ?? "";
+        requests.push({"hdr": hdr, "body": xml});
+        code reply = replies.get(10000);
+        return reply(hdr, xml);
+    }
+}
+
+# P9a-04: SoapClient and SoapClientIo send WS-Addressing message addressing properties when the WSDL policy supports
+# them or the caller selects them, and check the response's properties against the request.
+public class SoapAddressingClientTest inherits QUnit::Test {
+    private {
+        const Template = '<definitions xmlns="http://schemas.xmlsoap.org/wsdl/"
+            xmlns:soap="http://schemas.xmlsoap.org/wsdl/soap/" xmlns:soap12="http://schemas.xmlsoap.org/wsdl/soap12/"
+            xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:wsp="http://www.w3.org/ns/ws-policy"
+            xmlns:wsam="http://www.w3.org/2007/05/addressing/metadata" xmlns:wsa="http://www.w3.org/2005/08/addressing"
+            xmlns:x="urn:quotes:xsd" xmlns:tns="urn:quotes" targetNamespace="urn:quotes">
+          <types><xsd:schema targetNamespace="urn:quotes:xsd" elementFormDefault="qualified">
+            <xsd:element name="Symbol" type="xsd:string"/><xsd:element name="Price" type="xsd:double"/>
+            <xsd:element name="Error" type="xsd:string"/><xsd:element name="Note" type="xsd:string"/>
+          </xsd:schema></types>
+          <message name="In"><part name="body" element="x:Symbol"/></message>
+          <message name="Out"><part name="body" element="x:Price"/></message>
+          <message name="Invalid"><part name="body" element="x:Error"/></message>
+          <message name="NotifyIn"><part name="body" element="x:Note"/></message>
+          <portType name="Quotes">
+            <operation name="getQuote"><input message="tns:In"/><output message="tns:Out"/>
+              <fault name="Invalid" message="tns:Invalid"/></operation>
+            <operation name="notify"><input message="tns:NotifyIn"/></operation>
+          </portType>
+          <binding name="B11" type="tns:Quotes"><soap:binding style="document"
+              transport="http://schemas.xmlsoap.org/soap/http"/>
+            <operation name="getQuote"><soap:operation soapAction=""/>
+              <input><soap:body use="literal"/></input><output><soap:body use="literal"/></output>
+              <fault name="Invalid"><soap:fault name="Invalid" use="literal"/></fault></operation>
+            <operation name="notify"><soap:operation soapAction=""/><input><soap:body use="literal"/></input>
+            </operation>
+          </binding>
+          <binding name="B12" type="tns:Quotes"><soap12:binding style="document"
+              transport="http://schemas.xmlsoap.org/soap/http"/>
+            <operation name="getQuote"><soap12:operation/>
+              <input><soap12:body use="literal"/></input><output><soap12:body use="literal"/></output>
+              <fault name="Invalid"><soap12:fault name="Invalid" use="literal"/></fault></operation>
+            <operation name="notify"><soap12:operation/><input><soap12:body use="literal"/></input></operation>
+          </binding>
+          <service name="S">
+            <port name="Port11" binding="tns:B11">{P}<soap:address location="http://quotes.example/q11"/>{EPR}</port>
+            <port name="Port12" binding="tns:B12">{P}<soap12:address location="http://quotes.example/q12"/></port>
+          </service></definitions>';
+
+        const Required = '<wsp:Policy><wsam:Addressing><wsp:Policy/></wsam:Addressing></wsp:Policy>';
+        const Optional = '<wsp:Policy><wsam:Addressing wsp:Optional="true"><wsp:Policy/></wsam:Addressing>'
+            '</wsp:Policy>';
+        const Epr = '<wsa:EndpointReference><wsa:Address>http://quotes.example/q11</wsa:Address>'
+            '<wsa:ReferenceParameters><c:Account xmlns:c="urn:accounts">A-7</c:Account></wsa:ReferenceParameters>'
+            '</wsa:EndpointReference>';
+
+        const InputAction = "urn:quotes:Quotes:getQuoteRequest";
+        const OutputAction = "urn:quotes:Quotes:getQuoteResponse";
+    }
+
+    constructor() : Test("SoapAddressingClientTest", "1.0") {
+        addTestCase("the WSDL policy and the client options select WS-Addressing", \selection());
+        addTestCase("request headers", \requestHeaders());
+        addTestCase("call overrides", \overrides());
+        addTestCase("response checks", \responses());
+        addTestCase("fault responses", \faults());
+        addTestCase("SoapClientIo", \asyncClient());
+        addTestCase("saved clients keep their addressing options", \savedClient());
+        set_return_value(main());
+    }
+
+    static WebService service(string policy = "", string epr = "") {
+        return new WebService(replace(replace(Template, "{P}", policy), "{EPR}", epr));
+    }
+
+    # a server whose replies are computed by queued functions; returns the URL
+    static string server(reference<HttpServer> http, Queue replies, Queue requests) {
+        http = new HttpServer();
+        http.setDefaultHandler("quotes", new AddressingReplyHandler(replies, requests));
+        http.addListener(0);
+        return sprintf("http://127.0.0.1:%d/q", http.getListenerInfo(0).port);
+    }
+
+    # the request's WS-Addressing properties
+    static *hash<WsaMessageAddressing> requestMaps(string xml) {
+        SoapProcessingNode node(<SoapNodeOptions>{"addressing": True});
+        return WsAddressingHelper::parse(map $1.header, node.processMessage(xml).headers);
+    }
+
+    static string envelope(bool soap12, string header, string body) {
+        return sprintf('<s:Envelope xmlns:s="%s" xmlns:wsa="http://www.w3.org/2005/08/addressing">'
+            '<s:Header>%s</s:Header><s:Body>%s</s:Body></s:Envelope>', soap12 ? SOAP_12_ENV : SOAP_11_ENV,
+            header, body);
+    }
+
+    static hash<HttpResponseInfo> reply(bool soap12, string xml, int code = 200) {
+        return <HttpResponseInfo>{"code": code, "hdr": {"Content-Type": (soap12 ? "application/soap+xml"
+            : "text/xml") + ";charset=UTF-8"}, "body": xml};
+    }
+
+    # a reply function answering with a price, relating to the request unless told otherwise
+    static code priceReply(bool soap12, *string action, bool relate = True, bool addressing = True,
+            string extra = "", bool must_understand = True) {
+        return hash<HttpResponseInfo> sub (hash<auto> hdr, string body) {
+            string header;
+            if (addressing) {
+                *hash<WsaMessageAddressing> maps = requestMaps(body);
+                string mu = must_understand ? sprintf(' s:mustUnderstand="%s"', soap12 ? "true" : "1") : "";
+                header = sprintf('<wsa:Action%s>%s</wsa:Action><wsa:To>%s</wsa:To>', mu, action ?? OutputAction,
+                    WSA_ANONYMOUS) + (relate ? sprintf('<wsa:RelatesTo%s>%s</wsa:RelatesTo>', mu,
+                    maps.message_id ?? "urn:none") : "") + extra;
+            }
+            return reply(soap12, envelope(soap12, header ?? "", '<x:Price xmlns:x="urn:quotes:xsd">1.5</x:Price>'));
+        };
+    }
+
+    static code accepted() {
+        return hash<HttpResponseInfo> sub (hash<auto> hdr, string body) {
+            return <HttpResponseInfo>{"code": 202, "body": ""};
+        };
+    }
+
+    selection() {
+        Queue replies();
+        Queue requests();
+        HttpServer http;
+        string url = server(\http, replies, requests);
+        on_exit http.stop();
+        # policy, client option -> WS-Addressing sent
+        foreach hash<auto> row in ({"policy": "", "option": NOTHING, "sent": False},
+                {"policy": Optional, "option": NOTHING, "sent": True},
+                {"policy": Required, "option": NOTHING, "sent": True},
+                {"policy": "", "option": True, "sent": True},
+                {"policy": Optional, "option": False, "sent": False}) {
+            SoapClient client({"wsdl": service(row.policy), "port": "Port11", "url": url, "timeout": 10000}
+                + (exists row.option ? {"addressing": row.option} : {}));
+            replies.push(priceReply(False, NOTHING, True, row.sent));
+            hash<auto> info;
+            assertEq(1.5, client.callOperation("getQuote", {"Symbol": "QORE"}, NOTHING, \info));
+            string body = requests.get(10000).body;
+            assertEq(row.sent, body.find(WSA_NS) >= 0, sprintf("%y", row - "policy"));
+            assertEq(row.sent, exists info.addressing);
+            if (row.sent) {
+                assertEq(requestMaps(body).message_id, info.addressing.request.message_id);
+                assertEq(requestMaps(body).message_id, info.addressing.response.relates_to[0].message_id);
+            }
+        }
+        # WS-I R1040: a required policy cannot be disabled
+        SoapClient client({"wsdl": service(Required), "port": "Port11", "url": url, "addressing": False});
+        assertThrows("WSA-CLIENT-ERROR", "R1040", \client.callOperation(), ("getQuote", {"Symbol": "Q"}));
+        assertThrows("SOAP-CLIENT-ERROR", "must be a bool", sub () {
+            new SoapClient({"wsdl": service(), "addressing": "yes"});
+        });
+        assertThrows("SOAP-CLIENT-ERROR", "must be a bool", sub () {
+            new SoapClient({"wsdl": service(), "addressing_must_understand": 1});
+        });
+        assertEq(0, requests.size());
+    }
+
+    requestHeaders() {
+        Queue replies();
+        Queue requests();
+        HttpServer http;
+        string url = server(\http, replies, requests);
+        on_exit http.stop();
+        # WS-I R1154: the port's endpoint reference supplies wsa:To and the reference parameters
+        SoapClient client({"wsdl": service(Required, Epr), "port": "Port11", "url": url, "timeout": 10000});
+        replies.push(priceReply(False));
+        client.callOperation("getQuote", {"Symbol": "QORE"});
+        hash<auto> request = requests.get(10000);
+        hash<WsaMessageAddressing> maps = requestMaps(request.body);
+        assertEq("http://quotes.example/q11", maps.to);
+        assertEq(InputAction, maps.action);
+        assertRegex("^urn:uuid:", maps.message_id);
+        assertEq(WSA_ANONYMOUS, maps.reply_to.address);
+        assertEq(1, maps.reference_parameters.size());
+        assertEq("A-7", parse_xml(maps.reference_parameters[0])."c:Account"."^value^");
+        # WS-I R1144: the SOAPAction header equals wsa:Action
+        assertEq("\"" + InputAction + "\"", request.hdr.soapaction);
+        # Metadata section 5.1: message IDs are unique per request
+        replies.push(priceReply(False));
+        client.callOperation("getQuote", {"Symbol": "QORE"});
+        assertNeq(maps.message_id, requestMaps(requests.get(10000).body).message_id);
+
+        # WS-I R1155: without an endpoint reference, the target URL
+        client = new SoapClient({"wsdl": service(Required), "port": "Port11", "url": url, "timeout": 10000,
+            "addressing_must_understand": True});
+        replies.push(priceReply(False));
+        client.callOperation("getQuote", {"Symbol": "QORE"});
+        request = requests.get(10000);
+        maps = requestMaps(request.body);
+        assertEq(url, maps.to);
+        assertEq((), maps.reference_parameters);
+        hash<auto> header = parse_xml(request.body)."soapenv:Envelope"."soapenv:Header";
+        assertEq("1", header."wsa:Action"."^attributes^"."soapenv:mustUnderstand");
+        assertEq("1", header."wsa:MessageID"."^attributes^"."soapenv:mustUnderstand");
+
+        # a one-way operation: no reply endpoint, an HTTP 202 acknowledgment
+        replies.push(accepted());
+        hash<auto> info;
+        assertEq(NOTHING, client.callOperation("notify", {"Note": "n"}, NOTHING, \info));
+        maps = requestMaps(requests.get(10000).body);
+        assertEq("urn:quotes:Quotes:notify", maps.action);
+        assertEq(NOTHING, maps.reply_to);
+        assertEq(maps, info.addressing.request);
+        assertEq(NOTHING, info.addressing.response);
+
+        # SOAP 1.2: the action parameter carries the action
+        client = new SoapClient({"wsdl": service(Required), "port": "Port12", "url": url, "timeout": 10000});
+        replies.push(priceReply(True));
+        assertEq(1.5, client.callOperation("getQuote", {"Symbol": "QORE"}));
+        request = requests.get(10000);
+        assertRegex(";action=\"?" + InputAction, request.hdr."content-type");
+        assertEq(InputAction, requestMaps(request.body).action);
+    }
+
+    overrides() {
+        Queue replies();
+        Queue requests();
+        HttpServer http;
+        string url = server(\http, replies, requests);
+        on_exit http.stop();
+        SoapClient client({"wsdl": service(), "port": "Port11", "url": url, "timeout": 10000});
+        # a call override enables WS-Addressing
+        replies.push(priceReply(False));
+        hash<auto> info;
+        client.callOperation("getQuote", {"Symbol": "QORE"}, {"addressing": {"message_id": "urn:uuid:fixed",
+            "reference_parameters": ('<c:Session xmlns:c="urn:c">s</c:Session>',)}}, \info);
+        hash<WsaMessageAddressing> maps = requestMaps(requests.get(10000).body);
+        assertEq("urn:uuid:fixed", maps.message_id);
+        assertEq(1, maps.reference_parameters.size());
+        assertEq("urn:uuid:fixed", info.addressing.response.relates_to[0].message_id);
+        # a one-way message may name any reply endpoint
+        replies.push(accepted());
+        client.callOperation("notify", {"Note": "n"}, {"addressing": {"reply_to":
+            <WsaEndpointReference>{"address": "http://client.example/replies"}}});
+        assertEq("http://client.example/replies", requestMaps(requests.get(10000).body).reply_to.address);
+        # invalid overrides are rejected before sending
+        assertThrows("WSA-CLIENT-ERROR", "unknown WS-Addressing property", \client.callOperation(),
+            ("getQuote", {"Symbol": "Q"}, {"addressing": {"reply": 1}}));
+        assertThrows("WSA-CLIENT-ERROR", "must be anonymous", \client.callOperation(),
+            ("getQuote", {"Symbol": "Q"}, {"addressing": {"reply_to":
+                <WsaEndpointReference>{"address": "http://client.example/replies"}}}));
+        assertThrows("WSA-CLIENT-ERROR", "fault_to address must be anonymous", \client.callOperation(),
+            ("getQuote", {"Symbol": "Q"}, {"addressing": {"fault_to":
+                <WsaEndpointReference>{"address": "http://client.example/faults"}}}));
+        assertThrows("WSA-SERIALIZATION-ERROR", "absolute", \client.callOperation(),
+            ("getQuote", {"Symbol": "Q"}, {"addressing": {"message_id": "1"}}));
+        assertThrows("SOAP-CLIENT-ERROR", "must be a hash", \client.callOperation(),
+            ("getQuote", {"Symbol": "Q"}, {"addressing": True}));
+        # WS-I R1144: an explicit SOAP action must agree with wsa:Action
+        assertThrows("SOAP-SERIALIZATION-ERROR", "R1144", \client.callOperation(),
+            ("getQuote", {"Symbol": "Q"}, {"addressing": {}, "soapaction": "urn:other"}));
+        assertEq(0, requests.size());
+    }
+
+    responses() {
+        Queue replies();
+        Queue requests();
+        HttpServer http;
+        string url = server(\http, replies, requests);
+        on_exit http.stop();
+        foreach bool soap12 in (False, True) {
+            string port = soap12 ? "Port12" : "Port11";
+            SoapClient optional({"wsdl": service(Optional), "port": port, "url": url, "timeout": 10000});
+            SoapClient required({"wsdl": service(Required), "port": port, "url": url, "timeout": 10000});
+            # mustUnderstand WS-Addressing response headers are honored (WS-I R1143)
+            replies.push(priceReply(soap12));
+            hash<auto> info;
+            assertEq(1.5, required.callOperation("getQuote", {"Symbol": "Q"}, NOTHING, \info));
+            assertEq(OutputAction, info.addressing.response.action);
+            assertEq(WSA_REPLY, info.addressing.response.relates_to[0].type);
+            assertTrue(info."soap-processing".headers[0].processed);
+            # a response without WS-Addressing headers: accepted unless the policy requires them
+            replies.push(priceReply(soap12, NOTHING, True, False));
+            info = {};
+            assertEq(1.5, optional.callOperation("getQuote", {"Symbol": "Q"}, NOTHING, \info));
+            assertEq(NOTHING, info.addressing.response);
+            replies.push(priceReply(soap12, NOTHING, True, False));
+            assertThrows("WSA-RESPONSE-ERROR", "has no WS-Addressing headers", \required.callOperation(),
+                ("getQuote", {"Symbol": "Q"}));
+            # Core section 3.4: the response relates to the request
+            replies.push(priceReply(soap12, NOTHING, False));
+            assertThrows("WSA-RESPONSE-ERROR", "does not relate", \required.callOperation(),
+                ("getQuote", {"Symbol": "Q"}));
+            replies.push(priceReply(soap12, NOTHING, False, True, '<wsa:RelatesTo>urn:uuid:other</wsa:RelatesTo>'));
+            assertThrows("WSA-RESPONSE-ERROR", "does not relate", \required.callOperation(),
+                ("getQuote", {"Symbol": "Q"}));
+            # the output action
+            replies.push(priceReply(soap12, "urn:quotes:wrong"));
+            assertThrows("WSA-RESPONSE-ERROR", "is not the expected", \required.callOperation(),
+                ("getQuote", {"Symbol": "Q"}));
+            # invalid WS-Addressing headers
+            replies.push(priceReply(soap12, NOTHING, True, True, '<wsa:To>urn:a</wsa:To>'));
+            assertThrows("WSA-RESPONSE-ERROR", "more than one wsa:To", \required.callOperation(),
+                ("getQuote", {"Symbol": "Q"}));
+            # without WS-Addressing in the request, mandatory WS-Addressing response headers are not understood
+            SoapClient plain({"wsdl": service(), "port": port, "url": url, "timeout": 10000});
+            replies.push(priceReply(soap12));
+            assertThrows("SOAP-MUST-UNDERSTAND", \plain.callOperation(), ("getQuote", {"Symbol": "Q"}));
+        }
+        assertEq(0, replies.size());
+    }
+
+    static code faultReply(bool soap12, string action, bool relate = True) {
+        return hash<HttpResponseInfo> sub (hash<auto> hdr, string body) {
+            *hash<WsaMessageAddressing> maps = requestMaps(body);
+            string header = sprintf('<wsa:Action>%s</wsa:Action>', action) + (relate
+                ? sprintf('<wsa:RelatesTo>%s</wsa:RelatesTo>', maps.message_id) : "");
+            string fault = soap12
+                ? '<s:Fault><s:Code><s:Value>s:Receiver</s:Value></s:Code><s:Reason><s:Text xml:lang="en">quote '
+                    'unavailable</s:Text></s:Reason></s:Fault>'
+                : '<s:Fault><faultcode>s:Server</faultcode><faultstring>quote unavailable</faultstring></s:Fault>';
+            return reply(soap12, envelope(soap12, header, fault), 500);
+        };
+    }
+
+    faults() {
+        Queue replies();
+        Queue requests();
+        HttpServer http;
+        string url = server(\http, replies, requests);
+        on_exit http.stop();
+        foreach bool soap12 in (False, True) {
+            SoapClient client({"wsdl": service(Required), "port": soap12 ? "Port12" : "Port11", "url": url,
+                "timeout": 10000});
+            # the fault actions of WS-Addressing, SOAP and the declared fault
+            foreach string action in (WSA_FAULT_ACTION, WSA_SOAP_FAULT_ACTION,
+                    "urn:quotes:Quotes:getQuote:Fault:Invalid") {
+                replies.push(faultReply(soap12, action));
+                hash<auto> info;
+                assertThrows("SOAP-SERVER-FAULT-RESPONSE", \client.callOperation(),
+                    ("getQuote", {"Symbol": "Q"}, NOTHING, \info));
+                assertEq(action, info.addressing.response.action);
+                assertEq(NOTHING, info.addressing.error);
+            }
+            # a fault with unexpected addressing properties is still reported as the fault
+            replies.push(faultReply(soap12, OutputAction));
+            hash<auto> info;
+            assertThrows("SOAP-SERVER-FAULT-RESPONSE", \client.callOperation(),
+                ("getQuote", {"Symbol": "Q"}, NOTHING, \info));
+            assertRegex("is not the expected", info.addressing.error);
+            replies.push(faultReply(soap12, WSA_FAULT_ACTION, False));
+            info = {};
+            assertThrows("SOAP-SERVER-FAULT-RESPONSE", \client.callOperation(),
+                ("getQuote", {"Symbol": "Q"}, NOTHING, \info));
+            assertRegex("does not relate", info.addressing.error);
+        }
+    }
+
+    asyncClient() {
+        Queue replies();
+        Queue requests();
+        HttpServer http;
+        string url = server(\http, replies, requests);
+        on_exit http.stop();
+        foreach bool soap12 in (False, True) {
+            SoapClientIo client({"wsdl": service(Required, Epr), "port": soap12 ? "Port12" : "Port11", "url": url,
+                "timeout": 10000, "addressing_must_understand": True});
+            on_exit client.close();
+            replies.push(priceReply(soap12));
+            hash<auto> info;
+            assertEq(1.5, client.callOperation("getQuote", {"Symbol": "QORE"}, NOTHING, \info));
+            hash<auto> request = requests.get(10000);
+            hash<WsaMessageAddressing> maps = requestMaps(request.body);
+            assertEq(soap12 ? url : "http://quotes.example/q11", maps.to);
+            assertEq(soap12 ? 0 : 1, maps.reference_parameters.size());
+            assertEq(InputAction, maps.action);
+            assertEq(maps.message_id, info.addressing.response.relates_to[0].message_id);
+            replies.push(priceReply(soap12, "urn:quotes:wrong"));
+            assertThrows("WSA-RESPONSE-ERROR", \client.callOperation(), ("getQuote", {"Symbol": "Q"}));
+            replies.push(faultReply(soap12, OutputAction));
+            info = {};
+            assertThrows("SOAP-SERVER-FAULT-RESPONSE", \client.callOperation(),
+                ("getQuote", {"Symbol": "Q"}, NOTHING, \info));
+            assertRegex("is not the expected", info.addressing.error);
+            requests.clear();
+            replies.push(accepted());
+            client.callOperation("notify", {"Note": "n"}, {"addressing": {"message_id": "urn:uuid:n"}});
+            assertEq("urn:uuid:n", requestMaps(requests.get(10000).body).message_id);
+            assertThrows("SOAP-CLIENT-IO-ERROR", "must be a hash", \client.callOperation(),
+                ("getQuote", {"Symbol": "Q"}, {"addressing": 1}));
+            requests.clear();
+        }
+        SoapClientIo disabled({"wsdl": service(Required), "port": "Port11", "url": url, "addressing": False});
+        on_exit disabled.close();
+        assertThrows("WSA-CLIENT-ERROR", "R1040", \disabled.callOperation(), ("getQuote", {"Symbol": "Q"}));
+        assertThrows("SOAP-CLIENT-IO-ERROR", "must be a bool", sub () {
+            new SoapClientIo({"wsdl": service(), "addressing": 1});
+        });
+        SoapClientIo response_client({"wsdl": service(Required), "port": "Port12", "url": url});
+        on_exit response_client.close();
+        assertThrows("SOAP-CLIENT-IO-ERROR", "request-only option", \response_client.getSoapResponse(),
+            ("getQuote", "/r", {"addressing": {}}));
+    }
+
+    savedClient() {
+        Queue replies();
+        Queue requests();
+        HttpServer http;
+        string url = server(\http, replies, requests);
+        on_exit http.stop();
+        SoapClient original({"wsdl": service(), "port": "Port11", "url": url, "timeout": 10000, "addressing": True,
+            "addressing_must_understand": True});
+        SoapClient client = Serializable::deserialize(original.serialize());
+        replies.push(priceReply(False));
+        client.callOperation("getQuote", {"Symbol": "Q"});
+        string body = requests.get(10000).body;
+        assertEq("1", parse_xml(body)."soapenv:Envelope"."soapenv:Header"."wsa:Action"."^attributes^"
+            ."soapenv:mustUnderstand");
+    }
+}

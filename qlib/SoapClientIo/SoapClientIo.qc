@@ -91,6 +91,12 @@ public class SoapClientIo {
         #! the limits for the responses this client decodes; NOTHING for the thread's or the WSDL's limits
         *hash<WSDL::SoapMessageLimits> message_limits;
 
+        #! WS-Addressing: True or False to always or never send it, NOTHING to follow the WSDL policy
+        *bool addressing;
+
+        #! whether the WS-Addressing request headers are marked mustUnderstand
+        bool addressing_must_understand = False;
+
         #! async I/O connection manager used for every request; replaced atomically by close()
         HttpClientIo::HttpClientConnectionManager mgr;
 
@@ -130,6 +136,11 @@ public class SoapClientIo {
           @ref WSDL::MTOM_THRESHOLD "MTOM_THRESHOLD"); 0 sends every base64Binary value as a part
         - \c message_limits: a @ref WSDL::SoapMessageLimits "SoapMessageLimits" hash for the responses this
           client decodes; see setMessageLimits()
+        - \c addressing: @ref Qore::True "True" to send WS-Addressing headers with every request,
+          @ref Qore::False "False" to send none; by default they are sent when the effective policy of the
+          WSDL supports WS-Addressing; see <a href="../../WSDL/html/index.html#wsdl_addressing">WS-Addressing</a> in the WSDL module
+        - \c addressing_must_understand: @ref Qore::True "True" to mark the WS-Addressing request headers
+          \c mustUnderstand
         - \c connect_timeout: connection timeout in milliseconds (default: 45000)
         - \c timeout: transfer timeout in milliseconds (default: 45000)
         - \c http_protocol: HTTP protocol to use (\c "auto", \c "h1", \c "h2", \c "h3"; default: \c "auto")
@@ -165,6 +176,14 @@ SoapClientIo client({"wsdl": service, "url": "https://example.org/services/v1"})
         if (exists h.message_limits) {
             setMessageLimits(h.message_limits);
         }
+        foreach string option in (("addressing", "addressing_must_understand")) {
+            if (exists h{option} && h{option}.typeCode() != NT_BOOLEAN) {
+                throw "SOAP-CLIENT-IO-ERROR", sprintf("the %s option must be a bool; got %y", option,
+                    h{option}.type());
+            }
+        }
+        addressing = h.addressing;
+        addressing_must_understand = h.addressing_must_understand ?? False;
         if (exists h.wsdl_file && exists h.wsdl) {
             throw "SOAP-CLIENT-IO-ERROR", "only one of 'wsdl' or 'wsdl_file' keys can be given; both were "
                 "passed";
@@ -272,10 +291,13 @@ auto result = client.call("echo", {"body": "invoice-71"});
           values
         - \c preserve_types: True to retain selected native types as portable \c ^type^ / \c ^val^ wrappers;
           cannot be combined with \c xml_values
+        - \c addressing: a hash of @ref WSDL::WsaMessageAddressing "WsaMessageAddressing" properties replacing
+          the computed WS-Addressing properties of this request; it sends WS-Addressing headers with the request
         @param info an optional reference returning technical information about the call; the following keys
         are present: \c "request-uri", \c "request-body", \c "request-soap-headers", \c "response-code",
         \c "response-headers", \c "response-body", \c "effective-url" and, for SOAP responses,
-        \c "soap-processing"
+        \c "soap-processing"; when the request uses WS-Addressing, \c "addressing" holds the \c request and,
+        if the response has any, the \c response message addressing properties
 
         @return the deserialized result of the SOAP call; one-way operations return @ref nothing
 
@@ -292,9 +314,21 @@ auto result = client.callOperation("echo", {"body": "invoice-71"}, {"xml_values"
         if (opts.xml_values && opts.preserve_types) {
             throw "SOAP-CLIENT-IO-ERROR", "xml_values and preserve_types cannot be combined";
         }
+        if (exists opts.addressing && opts.addressing.typeCode() != NT_HASH) {
+            throw "SOAP-CLIENT-IO-ERROR", "the addressing call option must be a hash of WS-Addressing properties";
+        }
         WSDL::WSOperation op = wsdl.getBindingOperation(binding, operation);
+        # the WS-Addressing properties of the request (P9a-04)
+        *hash<WSDL::WsaMessageAddressing> request_maps;
+        if (op.getBinding(binding) instanceof WSDL::SoapBinding) {
+            request_maps = WSDL::WsAddressingHelper::clientRequest(wsdl, op, binding, svc, port, url, addressing,
+                opts.addressing);
+        } else if (exists opts.addressing) {
+            throw "SOAP-CLIENT-IO-ERROR", "WS-Addressing requires a SOAP binding";
+        }
         hash<auto> msg;
         {
+            WSDL::WsaOutputScope addressing_scope(request_maps, addressing_must_understand);
             WSDL::SoapMtomScope mtom_scope(mtom, mtom_threshold);
             msg = op.serializeRequest(args, opts.soap_header, "utf-8", NOTHING, opts.xml_opts,
                 opts.soapaction, binding, opts.http_header);
@@ -311,7 +345,7 @@ auto result = client.callOperation("echo", {"body": "invoice-71"}, {"xml_values"
             path = "/";
         }
         return doRequest(op, msg.method ?? "POST", path, headers + (msg.hdr ?? {}), msg.body,
-            opts, \info, {"request-soap-headers": opts.soap_header});
+            opts, \info, {"request-soap-headers": opts.soap_header}, request_maps);
     }
 
     #! retrieves a SOAP 1.2 response with an envelope-free GET request
@@ -337,7 +371,7 @@ auto result = client.getSoapResponse("echo", "/resource");
     */
     auto getSoapResponse(string operation, string resource_url, *hash<auto> opts,
             *reference<hash<auto>> info) {
-        foreach string key in (("soap_header", "soapaction", "xml_opts")) {
+        foreach string key in (("soap_header", "soapaction", "xml_opts", "addressing")) {
             if (exists opts{key}) {
                 throw "SOAP-CLIENT-IO-ERROR", sprintf("%y is a request-only option and cannot be used with "
                     "SOAP response retrieval", key);
@@ -430,14 +464,25 @@ auto result = client.getSoapResponse("echo", "/resource");
     #! @cond nodoc
     #! performs one SOAP exchange and decodes the response with the operation's declarations
     private auto doRequest(WSDL::WSOperation op, string method, string path, hash<auto> hdr, *data body,
-            *hash<auto> opts, *reference<hash<auto>> info, *hash<auto> extra_info) {
+            *hash<auto> opts, *reference<hash<auto>> info, *hash<auto> extra_info,
+            *hash<WSDL::WsaMessageAddressing> request_maps) {
         WSDL::OperationalBinding selected = op.getBinding(binding);
         # the response is parsed and decoded within the limits of this client, the thread or the WSDL (P8-06)
         WSDL::SoapMessageLimitsScope limits_scope(message_limits ?? WSDL::SoapMessageLimitsScope::getSelected()
             ?? op.getMessageLimits());
         WSDL::SoapProcessingNode response_node = exists opts.soap_node
             ? getProcessingNode(opts.soap_node) : soap_node;
-        info = (info ?? {}) + (extra_info ?? {}) + {
+        if (request_maps && !response_node.getOptions().addressing) {
+            # the response's WS-Addressing headers are honored, including mandatory ones (WS-I R1143)
+            hash<WSDL::SoapNodeOptions> node_options = response_node.getOptions();
+            node_options.addressing = True;
+            response_node = new WSDL::SoapProcessingNode(node_options);
+        }
+        hash<auto> addressing_info = {};
+        if (request_maps) {
+            addressing_info.request = request_maps;
+        }
+        info = (info ?? {}) + (extra_info ?? {}) + (addressing_info ? {"addressing": addressing_info} : {}) + {
             "request-uri": sprintf("%s %s", method, path),
             "request-body": body,
             "headers": hdr,
@@ -507,6 +552,19 @@ auto result = client.getSoapResponse("echo", "/resource");
             hash<auto> typed_info();
             typed_info += info;
             typed_info."soap-processing" = processed;
+            if (request_maps) {
+                bool response_fault = hasSoapFault(pdata);
+                try {
+                    typed_info.addressing.response = WSDL::WsAddressingHelper::clientResponse(request_maps, processed,
+                        op, wsdl.getAddressingPolicy(op, binding, svc, port).required, response_fault);
+                } catch (hash<ExceptionInfo> ex) {
+                    # a SOAP fault is reported to the caller even when its WS-Addressing headers are wrong
+                    if (!response_fault || ex.err != "WSA-RESPONSE-ERROR") {
+                        rethrow;
+                    }
+                    typed_info.addressing.error = ex.desc;
+                }
+            }
             info = typed_info;
             response_xml = processed.application_message.getXml();
             pdata = WSDL::WSDLLib::parseSOAPMessage(rmsg + {

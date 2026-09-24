@@ -194,8 +194,9 @@ SoapClient client({"wsdl": ws, "url": url, "message_limits": <SoapMessageLimits>
       \c wsa:IsReferenceParameter; optionally \c mustUnderstand. A request's SOAP action then equals the
       \c wsa:Action value (WS-I R1144): SOAP 1.1 sends it or an explicitly empty \c SOAPAction, SOAP 1.2 sends
       it as the \c action parameter
-    - WsAddressingHelper::parse() reads the properties of a received message from the header blocks targeted at
-      the node, and raises a \c WSA-FAULT exception with a WsaFault argument for invalid headers: more than one
+    - a SoapProcessingNode with the \c addressing option (SoapNodeOptions) understands the WS-Addressing property
+      headers, including those marked \c mustUnderstand (WS-I R1143); WsAddressingHelper::parse() reads the
+      properties of a received message from the header blocks targeted at the node, and raises a \c WSA-FAULT exception with a WsaFault argument for invalid headers: more than one
       \c wsa:To, \c wsa:ReplyTo, \c wsa:FaultTo, \c wsa:Action or \c wsa:MessageID
       (\c wsa:InvalidCardinality), a missing \c wsa:Action (\c wsa:MessageAddressingHeaderRequired), IRIs that
       are not absolute, and invalid endpoint references
@@ -370,6 +371,8 @@ if (policy.required) {
       WS-Policy 1.5 or 2004/09 to ports, bindings and binding operations, and endpoint references extending ports;
       invalid WS-Addressing descriptions are rejected (WS-I R1156-R1158, R2901); policy references and endpoint
       references may carry \c wsdl:required="true", which was rejected as an unsupported required extension
+    - SoapProcessingNode can process WS-Addressing headers with the new SoapNodeOptions \c addressing option, and
+      SoapProcessingNode::getOptions() returns a node's configuration
     - WS-Addressing message addressing properties in SOAP messages (@ref wsdl_addressing): WsaOutputScope adds them
       as header blocks with the SOAP action rules of WS-I R1144, WsAddressingHelper parses them with the
       cardinality and validity rules, formulates replies and builds the predefined WS-Addressing faults
@@ -4330,6 +4333,14 @@ public hashdecl SoapNodeOptions {
     list<string> roles = ();
     #! Header processors keyed by expanded header name; a WSDL declaration alone is not a capability
     hash<string, SoapHeaderProcessor> processors = {};
+    #! The node processes the WS-Addressing message addressing property headers
+    /** Targeted \c wsa:To, \c wsa:From, \c wsa:ReplyTo, \c wsa:FaultTo, \c wsa:Action, \c wsa:MessageID and
+        \c wsa:RelatesTo headers are then understood and reported as processed, so all of them are honored,
+        including those marked \c mustUnderstand (WS-I R1143); WsAddressingHelper::parse() reads their values.
+        A processor for one of these names takes precedence.
+        @since %WSDL 0.5.8
+    */
+    bool addressing = False;
 }
 
 #! The outcome for one header block
@@ -4446,6 +4457,27 @@ public final class SoapProcessingNode inherits Serializable {
         return options.ultimate_receiver;
     }
 
+    #! Returns the node configuration
+    /** @return the options the node was configured with
+        @par Example
+        Derive a node that also processes WS-Addressing headers:
+        @code{.py}
+hash<SoapNodeOptions> options = node.getOptions();
+options.addressing = True;
+SoapProcessingNode addressing_node(options);
+        @endcode
+        @since %WSDL 0.5.8
+    */
+    hash<SoapNodeOptions> getOptions() {
+        return options;
+    }
+
+    # WS-Addressing message addressing property headers are understood by an addressing node
+    private bool understands(string name) {
+        return options.processors.hasKey(name) || (options.addressing && name.startsWith("{" + WSA_NS + "}")
+            && inlist(substr(name, WSA_NS.length() + 2), WsAddressingHelper::Properties));
+    }
+
     #! Validates an envelope and processes its targeted headers
     /** @param xml complete SOAP XML; DTDs and processing instructions are forbidden
         @param cx application context passed to each processor, using Qore copy-on-write value semantics
@@ -4497,7 +4529,7 @@ public final class SoapProcessingNode inherits Serializable {
                     "role":role,"targeted":targeted,"must_understand":booleanValue(mu),
                     "relay":booleanValue(relay),"index":headers.size(),"soap12":soap12};
                 headers += header;
-                if (targeted && header.must_understand && !options.processors.hasKey(header.name)) {
+                if (targeted && header.must_understand && !understands(header.name)) {
                     unknown += header;
                 }
             }
@@ -4510,9 +4542,9 @@ public final class SoapProcessingNode inherits Serializable {
         SoapEnvelopeHelper::validate(message.getXmlDataView(), expected_soap12, response);
         list<hash<SoapNodeHeaderResult>> results();
         foreach hash<SoapNodeHeader> header in (headers) {
-            bool processed = header.targeted && options.processors.hasKey(header.name);
+            bool processed = header.targeted && understands(header.name);
             auto value;
-            if (processed) {
+            if (processed && options.processors.hasKey(header.name)) {
                 SoapHeaderProcessor processor = options.processors{header.name};
                 value = processor(cx, header);
             }
@@ -28065,6 +28097,9 @@ public class WsaOutputScope {
 public class WsAddressingHelper {
     #! the local names of the message addressing property headers (WS-Addressing 1.0 Core section 3.2)
     const Properties = ("To", "From", "ReplyTo", "FaultTo", "Action", "MessageID", "RelatesTo");
+    #! the keys of WsaMessageAddressing
+    const Fields = ("to", "from", "reply_to", "fault_to", "action", "message_id", "relates_to",
+        "reference_parameters");
     #! properties with a cardinality of at most one (WS-Addressing 1.0 SOAP Binding section 3.2.2)
     const Single = {"To": True, "ReplyTo": True, "FaultTo": True, "Action": True, "MessageID": True};
 
@@ -28393,6 +28428,112 @@ public class WsAddressingHelper {
             "relates_to": (<WsaRelationship>{"message_id": request.message_id},),
             "reference_parameters": endpoint.reference_parameters,
         };
+    }
+
+    #! returns the message addressing properties of a client request, or NOTHING when the request uses none
+    /** @param ws the WSDL
+        @param op the operation
+        @param binding the binding
+        @param service the service of the port that the client uses
+        @param port the port that the client uses
+        @param url the URL that the client sends the request to
+        @param enabled True to send WS-Addressing headers, False to send none, NOTHING to follow the effective
+        policy: they are sent when it supports WS-Addressing
+        @param overrides properties that replace the computed ones, as WsaMessageAddressing keys; they enable
+        WS-Addressing
+        @return the properties: \c wsa:To and reference parameters from the port's endpoint reference (WS-I R1154)
+        or else the URL (R1155), the input action, a new message ID, and for a request-response operation an
+        anonymous \c wsa:ReplyTo (WS-Addressing Metadata section 5.1, WS-I R1142); NOTHING when WS-Addressing is
+        not used
+        @throw WSA-CLIENT-ERROR WS-Addressing is disabled although the policy requires it (WS-I R1040), an
+        unknown override, or a request-response call with a non-anonymous response endpoint
+        @throw WSA-SERIALIZATION-ERROR invalid properties
+    */
+    static *hash<WsaMessageAddressing> clientRequest(WebService ws, WSOperation op, string binding, string service,
+            string port, string url, *bool enabled, *hash<auto> overrides) {
+        hash<WsAddressingPolicy> policy = ws.getAddressingPolicy(op, binding, service, port);
+        if (enabled === False && policy.required) {
+            throw "WSA-CLIENT-ERROR", sprintf("operation %Y requires WS-Addressing (WS-I R1040), but the client "
+                "disables it", op.name);
+        }
+        if (!(exists overrides || enabled || (!exists enabled && policy.supported))) {
+            return;
+        }
+        *hash<WsaEndpointReference> endpoint = ws.getPortAddressing(service, port).endpoint_reference;
+        hash<WsaMessageAddressing> maps = <WsaMessageAddressing>{
+            "to": endpoint.address ?? url,
+            "action": op.getInputAction(binding),
+            "message_id": messageId(),
+            "reference_parameters": endpoint.reference_parameters ?? (),
+        };
+        if (op.output) {
+            maps.reply_to = <WsaEndpointReference>{"address": WSA_ANONYMOUS};
+        }
+        foreach hash<auto> item in (overrides.pairIterator()) {
+            if (!inlist(item.key, Fields)) {
+                throw "WSA-CLIENT-ERROR", sprintf("unknown WS-Addressing property %Y; expected one of: %y", item.key,
+                    Fields);
+            }
+            maps{item.key} = item.value;
+        }
+        if (op.output) {
+            foreach string field in ("reply_to", "fault_to") {
+                if (maps{field} && maps{field}.address != WSA_ANONYMOUS) {
+                    throw "WSA-CLIENT-ERROR", sprintf("a request-response call receives its response on the HTTP "
+                        "connection, so its %s address must be anonymous; got %Y", field, maps{field}.address);
+                }
+            }
+        }
+        validate(maps);
+        return maps;
+    }
+
+    #! checks the message addressing properties of a response to a client request
+    /** @param request the properties of the request
+        @param processed the response's header processing result
+        @param op the operation
+        @param required True if the policy requires WS-Addressing, so the response must use it
+        @param fault True if the response is a SOAP fault
+        @return the response's properties, or NOTHING when the response has none
+        @throw WSA-RESPONSE-ERROR the response has invalid WS-Addressing headers, lacks them although WS-Addressing
+        is required, does not relate to the request's message ID, or has an unexpected action
+    */
+    static *hash<WsaMessageAddressing> clientResponse(hash<WsaMessageAddressing> request, hash<SoapNodeResult> processed,
+            WSOperation op, bool required, bool fault) {
+        *hash<WsaMessageAddressing> maps;
+        try {
+            maps = parse(map $1.header, processed.headers);
+        } catch (hash<ExceptionInfo> ex) {
+            if (ex.err != "WSA-FAULT") {
+                rethrow;
+            }
+            throw "WSA-RESPONSE-ERROR", sprintf("invalid WS-Addressing headers in the response: %s", ex.desc), ex.arg;
+        }
+        if (!maps) {
+            if (required) {
+                throw "WSA-RESPONSE-ERROR", sprintf("the response of operation %Y has no WS-Addressing headers "
+                    "although the operation requires WS-Addressing", op.name);
+            }
+            return;
+        }
+        # WS-Addressing Core section 3.4 and Metadata section 5.1: a reply relates to the request
+        if (exists request.message_id
+                && !(select maps.relates_to, $1.message_id == request.message_id && $1.type == WSA_REPLY)) {
+            throw "WSA-RESPONSE-ERROR", sprintf("the response does not relate to the request's message ID %Y",
+                request.message_id), maps;
+        }
+        list<string> expected;
+        if (fault) {
+            expected = (WSA_FAULT_ACTION, WSA_SOAP_FAULT_ACTION) + (map op.getFaultAction($1),
+                keys op.getFaultMessages());
+        } else if (op.output) {
+            expected = (op.getOutputAction(),);
+        }
+        if (expected && !inlist(maps.action, expected)) {
+            throw "WSA-RESPONSE-ERROR", sprintf("the response's action %Y is not the expected %s", maps.action,
+                expected.size() == 1 ? sprintf("%Y", expected[0]) : sprintf("one of %y", expected)), maps;
+        }
+        return maps;
     }
 
     #! returns the endpoint reference that a reply to the message uses (WS-Addressing 1.0 Core section 3.4)
