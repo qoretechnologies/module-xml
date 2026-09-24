@@ -11080,3 +11080,39 @@ Open, outside P8:
 - bounded HTTP decompression in Qore core (handoff);
 - the particle program rebuilt for each decode call (P9 performance);
 - the 49 WS-I gaps recorded in P7 (P9).
+
+## P9a-01: WS-Addressing sources and scope
+
+**Scope.** The user approved full WS-Addressing 1.0 (Core, SOAP Binding and Metadata, with the WS-Policy 1.5
+attachment of `wsam:Addressing`) to close the 49 WS-I gap rows. The rows cover 25 requirements: R1035, R1036,
+R1040, R1041, R1142-R1146, R1152-R1158, R1161-R1163, R1202-R1204, R2900 and R2901 in Basic Profile 1.2 and 2.0,
+and R2745 in 1.2 only. On 2026-09-24 the user also chose the defaults:
+- a handler processes WS-Addressing headers whenever a request carries them, and an option disables that;
+- non-anonymous response endpoints are used only when a configured callback approves the address.
+
+`PLAN.md` records the increments P9a-01 to P9a-08.
+
+**Sources.** Retrieved on 2026-09-24 over verified TLS and kept verbatim in `normative/`, with SHA-256 digests
+and sizes in `sources.json` (`addressing`):
+- WS-Addressing 1.0 Core and SOAP Binding (REC 9 May 2006), and Metadata (REC 4 September 2007);
+- WS-Policy 1.5 Framework and Attachment (REC 4 September 2007);
+- `ws-addr.xsd` and `ws-addr-metadata.xsd`, under the W3C Software License.
+
+`.gitattributes` keeps the files byte-exact. `test_addressing_sources.py` checks the digests, the schema
+namespaces, elements and fault codes, and the phrases of the rules that the implementation cites.
+
+**Found in the current code** (the baseline for P9a-02 to P9a-06):
+- **WSDL:** `wsam:Action`, policies and a port's `wsa:EndpointReference` are dropped during WSDL projection. A
+  policy reference marked `wsdl:required="true"` is rejected as an unrecognized required extension.
+- **Undeclared headers:** they are serialized only under `compat_allow_any_header`, so WS-Addressing needs its
+  own header path.
+- **mustUnderstand:** a header counts as understood only when a node processor is registered for it.
+  `SoapHandler.qtest` asserts a MustUnderstand fault for WCF's mustUnderstand `wsa:Action`/`wsa:To` headers,
+  and the approved default changes that.
+- **Replies:** SoapHandler answers synchronously, and a request-response operation cannot yet return 202.
+  SoapClient cannot yet receive an empty 202 for a request-response operation.
+- **Example erratum:** Metadata example 4-8 declares `name="Availability"` on the output. Its explanation lists
+  the output name as `CheckAvailabilityResponse`, but it computes the action from `Availability`. The
+  normative rule in section 4.4.4 uses the declared name, and the implementation follows the rule.
+- **CI:** it runs only `test/*.qtest`, so the Python source tests run in the local full suite until P9 adds
+  them to CI.

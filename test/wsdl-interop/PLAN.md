@@ -445,6 +445,77 @@ applicable advertised protocol/binding requirements pass in both directions. All
 without warnings/errors, with no regression skips added to hide a gap. Deliberately unsupported optional
 capabilities must be explicit, tested as such and approved as scope decisions, not silently treated as fixed.
 
+### P9a — WS-Addressing and the WS-I gap register
+
+**Approved scope (2026-09-23, defaults 2026-09-24):** implement WS-Addressing 1.0 in full: Core, SOAP Binding and
+Metadata, including the WS-Policy 1.5 attachment of `wsam:Addressing`. This closes the 49 ledger rows recorded as
+WS-Addressing gaps (25 WS-I requirements, in Basic Profile 1.2 and 2.0). The approved defaults are:
+- **Incoming headers:** a SoapHandler endpoint processes WS-Addressing headers whenever a request carries them,
+  as if every endpoint supported WS-Addressing optionally. A `wsam:Addressing` policy makes them required. A
+  handler option disables addressing, which restores the previous MustUnderstand fault for such headers.
+- **Response endpoints:** a handler sends replies or faults to a non-anonymous `wsa:ReplyTo` / `wsa:FaultTo` only
+  when it is configured with a callback that approves each address, and when the effective policy allows
+  non-anonymous responses. Otherwise it answers with `wsa:OnlyAnonymousAddressSupported`, as R1146 allows. The
+  `none` address is always accepted. This follows the SOAP Binding section 7 warning that a sender can direct
+  a receiver's messages to arbitrary endpoints.
+
+The independent peer is CXF 4.1.3 with `WSAddressingFeature` and WS-Policy. Its `cxf-rt-ws-addr`,
+`cxf-rt-ws-policy` and `neethi` JARs are already pinned in `cxf-peer/manifest.json`.
+
+Increments:
+
+1. P9a-01 - pin the WS-Addressing 1.0 Recommendations, WS-Policy 1.5 Framework and Attachment, and the two
+   schemas in `normative/`, with a source test for the rules the implementation cites. Record this scope.
+2. P9a-02 - WSDL addressing metadata:
+   - actions: explicit `wsam:Action`, plus the legacy `wsaw:Action` of the 2006/05 WSDL binding; the
+     non-empty SOAPAction for inputs; and the WSDL 1.1 default action pattern for inputs, outputs and faults;
+   - `wsa:EndpointReference` on `wsdl:port`, with its address matching the SOAP address, and its reference
+     parameters;
+   - WS-Policy 1.5 and 2004/09: inline `wsp:Policy`, `wsp:PolicyReference` and `wsp:PolicyURIs`,
+     normalization (`wsp:Optional`, `ExactlyOne`, `All`, nested policies), and effective endpoint and
+     operation policies;
+   - `wsam:Addressing` (required or optional) with `AnonymousResponses` and `NonAnonymousResponses`;
+   - description rules R1156-R1158 and R2901, Metadata 3.1 and 4.4.1;
+   - `wsdl:required` policy references accepted;
+   - saved objects keep the metadata.
+3. P9a-03 - message addressing properties in SOAP:
+   - endpoint reference and MAP types;
+   - header serialization, with `wsa:IsReferenceParameter` and absolute IRIs;
+   - parsing with the cardinality and validity rules;
+   - the predefined faults, with SOAP 1.2 subcodes and the SOAP 1.1 `wsa:FaultDetail` header;
+   - the SOAPAction relationship (R1144, R2745, SOAP Binding section 4).
+4. P9a-04 - clients: SoapClient and SoapClientIo send MAPs when the policy requires them or the caller asks.
+   - `wsa:To` comes from the endpoint reference or the address (R1154, R1155).
+   - Message IDs are generated; ReplyTo, FaultTo and mustUnderstand are configurable.
+   - Responses are checked: `wsa:RelatesTo` must match the request's MessageID, and `wsa:Action` must match
+     the output or fault action.
+   - Received MAPs are returned to the caller.
+5. P9a-05 - handler, anonymous responses:
+   - MAPs are processed all or none (R1143), and WS-Addressing headers are never reported as NotUnderstood
+     (R1041).
+   - Headers the policy requires are enforced, including a missing message ID when a reply is expected
+     (R1163).
+   - Actions are checked (R2900, `wsa:ActionNotSupported`), and a missing `wsa:To` is never faulted (R1153).
+   - Replies carry reply MAPs, and faults carry fault actions (R1035). Faults go on the HTTP response (R1036,
+     R1145, R1161).
+   - The disable option is added.
+6. P9a-06 - non-anonymous responses:
+   - **Handler:** approves addresses through the authorizer, enforces the response policy, and discards replies
+     to `none`. Replies and faults are sent as separate HTTP requests, with faults going to FaultTo before
+     ReplyTo (R1146, R1152, R1162), and the back-channel answer is 202.
+   - **Clients:** a decoupled reply endpoint receives responses and correlates them by `wsa:RelatesTo`, with
+     limits, timeouts and cancellation. Messages to non-anonymous destinations are HTTP requests (R1202-R1204).
+7. P9a-07 - live CXF interop with `WSAddressingFeature` and policy-annotated WSDL: anonymous and decoupled
+   responses, SOAP 1.1 and 1.2, in both directions.
+8. P9a-08 - revalidate the 49 rows against the pinned text and map them to tests; update the documentation,
+   release notes and a durable design document; P9a acceptance. A row may be reclassified only with
+   specification-based evidence.
+
+**Acceptance:** every applicable WS-Addressing row is covered by tests that exercise both directions where the
+requirement has two sides. CXF exchanges pass for anonymous and decoupled responses. Invalid MAPs fail with the
+predefined WS-Addressing faults. No request can make a handler contact an address that its configuration did
+not approve.
+
 ## Commands at implementation phase boundaries
 
 Run these from the repository root, plus the tests and independent fixtures specific to the phase:
