@@ -11116,3 +11116,50 @@ namespaces, elements and fault codes, and the phrases of the rules that the impl
   normative rule in section 4.4.4 uses the declared name, and the implementation follows the rule.
 - **CI:** it runs only `test/*.qtest`, so the Python source tests run in the local full suite until P9 adds
   them to CI.
+
+## P9a-02: WSDL addressing metadata
+
+**Implemented** (`qlib/WSDL.qm`, `design/soap-addressing.md`):
+- **Actions:** `WSOperation::getInputAction()`, `getOutputAction()` and `getFaultAction()` follow WS-Addressing
+  Metadata section 4.4. The order is the explicit `wsam:Action` (or the 2006 `wsaw:Action`), then, for inputs,
+  the binding's non-empty SOAP action, then the WSDL 1.1 default pattern. The operation keeps its port type's
+  name and namespace for the default pattern.
+- **Policies:** WS-Policy 1.5 and 2004/09 policies attached to ports, bindings and binding operations. They can
+  be inline, referenced by `wsu:Id`, `xml:id` or `Name` (also across imported WSDL documents), or given by
+  `wsp:PolicyURIs`. They are normalized and projected onto `wsam:Addressing` with its nested response
+  assertions, with `wsp:Optional` and `wsaw:UsingAddressing` included.
+- **Queries:** `OperationalBinding::getAddressingAlternatives()`, `WebService::getPortAddressing()` and
+  `WebService::getAddressingPolicy()` expose the result.
+- **Endpoint references:** a port's `wsa:EndpointReference` has its address checked against the port's address,
+  and its reference parameters are kept as namespace-complete XML. `getWSDL(base_url)` rewrites its address
+  with the port's.
+- **Description checks:**
+  - `wsam:Addressing` on services, messages, port types and binding messages is rejected (R1156);
+  - partial operation-level attachment is rejected (R1157);
+  - both response assertions in one alternative are rejected (R1158);
+  - an explicit input action must equal a non-empty SOAP action (R2901, SOAP 1.1 and 1.2);
+  - a SOAP action that supplies the action of an operation using WS-Addressing must be absolute (section 4.4.1).
+- **Required extensions:** `wsdl:required="true"` is accepted on the processed policy and addressing
+  extensions.
+
+**Tests.** `test/soap-addressing-metadata.qtest` has 9 cases and 146 assertions:
+- the spec's default-action examples 4-8 and 4-9, URN and trailing-slash namespaces, SOAP 1.1 and 1.2;
+- every policy form and attachment point, and every rejection;
+- cross-document references;
+- endpoint references, including a republished WSDL;
+- saved `WebService` and standalone `WSOperation` graphs, and invalid saved members.
+
+**Decisions and findings:**
+- **Empty SOAP actions:** an empty SOAP action counts as absent for R2901. The BP 2.0 text says "if present",
+  but an empty action supplies no action.
+- **Undeclared prefixes:** namespace-aware parsing already rejects undeclared element prefixes in extensions, so
+  the name resolver asserts this instead of checking it.
+- **Default names:** `WSOperation::getInputName()` gives a solicit-response input the `Solicit` suffix. That
+  matches WSDL 1.1 section 2.4.5 read literally ("Request"/"Solicit" or "Response" appended, respectively), and
+  Basic Profile forbids solicit-response anyway (R2303).
+- **Oracle gap:** the WSDL4J operation oracle (`oracle/WsdlOperationOracle.java`) computes the default names in
+  its own code instead of asking WSDL4J. It therefore does not verify them independently. This is recorded for
+  P9 coverage enforcement.
+- **Not evaluated:** policies attached with `wsp:PolicyAttachment` and domain expressions, and policies nested
+  elsewhere than under `wsdl:definitions` as reference targets. A `wsp:PolicyAttachment` marked
+  `wsdl:required="true"` is still rejected as an unsupported required extension.
