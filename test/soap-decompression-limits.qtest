@@ -1,0 +1,148 @@
+#!/usr/bin/env qore
+# -*- mode: qore; indent-tabs-mode: nil -*-
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires xml
+%requires HttpServer
+%requires ../qlib/WSDL.qm
+%requires ../qlib/SoapHandler.qm
+%requires ../qlib/SoapClient.qm
+%requires ../qlib/SoapClientIo
+
+%exec-class SoapDecompressionLimitsTest
+
+# answers every request with a fixed response
+class FixedResponseHandler inherits AbstractHttpRequestHandler {
+    private {
+        hash<HttpResponseInfo> response;
+    }
+
+    constructor(hash<HttpResponseInfo> response) {
+        self.response = response;
+    }
+
+    hash<HttpResponseInfo> handleRequest(hash<auto> cx, hash<auto> hdr, *data body) {
+        return response;
+    }
+}
+
+# P8-06 follow-up: compressed HTTP bodies are limited while they are decompressed. SoapHandler's max_message_size is
+# its HttpServer decoded body limit, and SoapClient and SoapClientIo limit response bodies with
+# max_response_body_size, so a small compressed "decompression bomb" cannot expand to an unbounded size in memory.
+public class SoapDecompressionLimitsTest inherits QUnit::Test {
+    private {
+        const Contract = '<definitions xmlns="http://schemas.xmlsoap.org/wsdl/"
+            xmlns:soap="http://schemas.xmlsoap.org/wsdl/soap/" xmlns:xsd="http://www.w3.org/2001/XMLSchema"
+            xmlns:x="urn:limits:xsd" xmlns:tns="urn:limits" targetNamespace="urn:limits">
+          <types><xsd:schema targetNamespace="urn:limits:xsd" elementFormDefault="qualified">
+            <xsd:element name="Text" type="xsd:string"/><xsd:element name="Length" type="xsd:int"/>
+          </xsd:schema></types>
+          <message name="In"><part name="body" element="x:Text"/></message>
+          <message name="Out"><part name="body" element="x:Length"/></message>
+          <portType name="P"><operation name="measure"><input message="tns:In"/><output message="tns:Out"/>
+            </operation></portType>
+          <binding name="B" type="tns:P"><soap:binding style="document"
+              transport="http://schemas.xmlsoap.org/soap/http"/>
+            <operation name="measure"><soap:operation soapAction="urn:limits:measure"/>
+              <input><soap:body use="literal"/></input><output><soap:body use="literal"/></output></operation>
+          </binding>
+          <service name="S"><port name="P" binding="tns:B"><soap:address location="http://localhost/limits"/></port>
+          </service></definitions>';
+
+        const Limit = 65536;
+    }
+
+    constructor() : Test("SoapDecompressionLimitsTest", "1.0") {
+        addTestCase("the handler limits decompressed requests", \requests());
+        addTestCase("the clients limit decompressed responses", \responses());
+        set_return_value(main());
+    }
+
+    static string request(int length) {
+        return sprintf('<s:Envelope xmlns:s="%s"><s:Body><x:Text xmlns:x="urn:limits:xsd">%s</x:Text></s:Body>'
+            '</s:Envelope>', SOAP_11_ENV, strmul("a", length));
+    }
+
+    static string response(int length) {
+        return sprintf('<s:Envelope xmlns:s="%s"><s:Body><x:Length xmlns:x="urn:limits:xsd">%d</x:Length>'
+            '<!--%s--></s:Body></s:Envelope>', SOAP_11_ENV, length, strmul(" ", length));
+    }
+
+    requests() {
+        WebService ws(Contract);
+        SoapHandler handler(new AbstractAuthenticator(), NOTHING, False, Limit);
+        # max_message_size is the handler's decoded body limit
+        assertEq(Limit, handler.max_decoded_body_size);
+        handler.addMethod(ws, ws.getOperation("measure"), int sub (hash<auto> cx, string text) {
+            return text.size();
+        });
+        HttpServer http();
+        http.setDefaultHandler("soap", handler);
+        http.addListener(0);
+        on_exit http.stop();
+        string url = sprintf("http://127.0.0.1:%d/limits", http.getListenerInfo(0).port);
+        hash<auto> headers = {"Content-Type": "text/xml;charset=UTF-8", "SOAPAction": "\"urn:limits:measure\"",
+            "Content-Encoding": "gzip"};
+        # each request uses its own connection: HttpServer closes the connection after a 413 without announcing it
+        # (handed off to Qore in /tmp/qore-http-413-connection-close.md)
+        code post = string sub (binary body, reference<hash<auto>> info) {
+            HTTPClient client({"url": url, "error_passthru": True, "timeout": 10000});
+            return client.post("limits", body, headers, \info) ?? "";
+        };
+        # a compressed request within the limit is decompressed and processed
+        hash<auto> info;
+        string body = post(gzip(request(1000)), \info);
+        assertEq(200, info."response-headers".status_code);
+        assertRegex(">1000<", body);
+        # a small compressed body expanding beyond the limit is rejected while it is decompressed
+        binary bomb = gzip(request(16 * 1024 * 1024));
+        # the compressed body itself is far below the limit
+        assertLt(Limit, bomb.size());
+        info = {};
+        post(bomb, \info);
+        assertEq(413, info."response-headers".status_code);
+        # setMaxMessageSize() updates the decoded body limit; NOTHING restores the listener's limit
+        handler.setMaxMessageSize(32 * 1024 * 1024);
+        assertEq(32 * 1024 * 1024, handler.max_decoded_body_size);
+        info = {};
+        body = post(bomb, \info);
+        assertEq(200, info."response-headers".status_code);
+        assertRegex(">16777216<", body);
+        handler.setMaxMessageSize();
+        assertEq(0, handler.max_decoded_body_size);
+        assertEq(DefaultMaxDecodedBodySize, handler.getMaxDecodedBodySize());
+    }
+
+    responses() {
+        WebService ws(Contract);
+        # a response whose body expands to 16 MiB after gzip decoding
+        binary bomb = gzip(response(16 * 1024 * 1024));
+        assertLt(Limit, bomb.size());
+        HttpServer http();
+        http.setDefaultHandler("bomb", new FixedResponseHandler(<HttpResponseInfo>{"code": 200,
+            "hdr": {"Content-Type": "text/xml;charset=UTF-8", "Content-Encoding": "gzip"}, "body": bomb}));
+        http.addListener(0);
+        on_exit http.stop();
+        string url = sprintf("http://127.0.0.1:%d/limits", http.getListenerInfo(0).port);
+        # without a limit the response is decoded
+        SoapClient unlimited({"wsdl": ws, "url": url, "timeout": 30000});
+        assertEq(16 * 1024 * 1024, unlimited.callOperation("measure", "x"));
+        # with a limit the call fails as soon as the decoded body exceeds it
+        SoapClient limited({"wsdl": ws, "url": url, "timeout": 30000, "max_response_body_size": Limit});
+        assertThrows("HTTP-CLIENT-RESPONSE-BODY-TOO-LARGE", \limited.callOperation(), ("measure", "x"));
+        SoapClientIo unlimited_io({"wsdl": ws, "url": url, "timeout": 30000});
+        on_exit unlimited_io.close();
+        assertEq(16 * 1024 * 1024, unlimited_io.callOperation("measure", "x"));
+        SoapClientIo limited_io({"wsdl": ws, "url": url, "timeout": 30000, "max_response_body_size": Limit});
+        on_exit limited_io.close();
+        assertThrows("HTTP-CLIENT-RESPONSE-BODY-TOO-LARGE", \limited_io.callOperation(), ("measure", "x"));
+        foreach auto invalid in (-1, "1", 1.5) {
+            assertThrows("SOAP-CLIENT-IO-ERROR", "max_response_body_size", sub () {
+                new SoapClientIo({"wsdl": ws, "url": url, "max_response_body_size": invalid});
+            });
+        }
+    }
+}

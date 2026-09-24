@@ -115,6 +115,9 @@ public class SoapClientIo {
         #! HTTP protocol selector for the connection manager
         string http_protocol;
 
+        #! the maximum response body size in bytes, as received and decoded; 0 for no limit
+        int max_response_body_size = 0;
+
         #! default headers sent with every request
         hash<auto> headers = Headers;
 
@@ -150,6 +153,10 @@ public class SoapClientIo {
         - \c connect_timeout: connection timeout in milliseconds (default: 45000)
         - \c timeout: transfer timeout in milliseconds (default: 45000)
         - \c http_protocol: HTTP protocol to use (\c "auto", \c "h1", \c "h2", \c "h3"; default: \c "auto")
+        - \c max_response_body_size: the maximum size in bytes of a response body, as received and after its
+          content encoding is decoded; a larger body, such as a small compressed body that expands to a huge size,
+          fails the call with \c HTTP-CLIENT-RESPONSE-BODY-TOO-LARGE as soon as the limit is exceeded (default: 0,
+          no limit)
         - \c headers: extra default headers as a hash
         - \c logger: a \c LoggerInterface object for logging
 
@@ -253,6 +260,13 @@ SoapClientIo client({"wsdl": service, "url": "https://example.org/services/v1"})
         connect_timeout = h.connect_timeout ?? DefaultConnectTimeout;
         io_timeout = h.timeout ?? DefaultTimeout;
         http_protocol = h.http_protocol ?? "auto";
+        if (exists h.max_response_body_size) {
+            if (h.max_response_body_size.typeCode() != NT_INT || h.max_response_body_size < 0) {
+                throw "SOAP-CLIENT-IO-ERROR", sprintf("the max_response_body_size option must be a non-negative int; "
+                    "got %y", h.max_response_body_size);
+            }
+            max_response_body_size = h.max_response_body_size;
+        }
         logger = h.logger;
         if (h.headers.typeCode() == NT_HASH) {
             headers += h.headers;
@@ -658,6 +672,7 @@ auto result = client.getSoapResponse("echo", "/resource");
                 "connect_timeout": connect_timeout,
                 "request_timeout": io_timeout,
                 "protocol": http_protocol,
+                "max_response_body_size": max_response_body_size,
             });
     }
     #! @endcond

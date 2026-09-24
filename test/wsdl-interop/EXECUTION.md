@@ -11325,3 +11325,33 @@ Repeated runs pass.
   collects it or cancels.
 - An operation without declared faults has no fault list to fold into the accepted fault actions, so the list is
   now built explicitly.
+
+## P8-06 follow-up: bounded decompression
+
+Qore `1c0eafdd2` (2026-09-24) resolves the handoff in `/tmp/qore-http-bounded-decompression.md`:
+- decompression functions take a `max_size`;
+- HttpServer limits decoded request bodies (`max_decoded_body_size`, 128 MiB by default, HTTP 413);
+- `HTTPClient` and HttpClientIo gain `max_response_body_size`, applied as received and after decoding.
+
+**Implemented:**
+- `SoapHandler`'s `max_message_size` (constructor and `setMaxMessageSize()`) now also sets its
+  `max_decoded_body_size`. A compressed request expanding beyond it is rejected while it is decompressed, before
+  the handler runs.
+- `SoapClient` documents `max_response_body_size`, which is an `HTTPClient` option it already passes through.
+- `SoapClientIo` gains a `max_response_body_size` option for its connection manager.
+- The documentation of the former gap (WSDL `wsdl_limits` note, SoapHandler release notes) now describes the
+  limits.
+
+**Tests.** `test/soap-decompression-limits.qtest` has 2 cases and 18 assertions:
+- a gzip request within the limit, and a 16 MiB gzip request bomb (413), including after `setMaxMessageSize()`
+  raises the limit or restores the default;
+- a gzip response bomb, decoded without a limit and rejected with `HTTP-CLIENT-RESPONSE-BODY-TOO-LARGE` by both
+  clients with one;
+- invalid option values.
+
+**Found (Qore):** HttpServer closes an HTTP/1.x connection after an error response, such as this 413, without a
+`Connection: close` header. A client reusing the persistent connection then races the close: 6 of 20 reused
+requests failed with `HTTP1-CONNECTION-CLOSED`. This is handed off in `/tmp/qore-http-413-connection-close.md`. The
+module test uses one connection per request. The Qore develop pipeline for `1c0eafdd2` (57488) failed in
+`dgc-scan-avoidance.qtest` (`registry-cycle-unregister-walked` 5151 against 5050, in the IR and AOT modes), so the
+module-xml CI image may not yet contain the new HttpServerUtil. This commit needs it.
