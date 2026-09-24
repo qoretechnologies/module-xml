@@ -93,9 +93,50 @@ module SoapHandler {
     deserializeHeaderFault() or deserializeXmlHeaderFault() with the retained response XML for typed
     or lexical header error data.
 
+    @section soaphandler_addressing WS-Addressing
+
+    The handler processes the WS-Addressing 1.0 headers of a request that carries them (see
+    <a href="../../WSDL/html/index.html#wsdl_addressing">WS-Addressing</a> in the WSDL module), including those
+    marked \c mustUnderstand, and callbacks receive the request's properties in \c cx.addressing as a
+    @ref WSDL::WsaMessageAddressing "WsaMessageAddressing" hash. For the selected operation it checks:
+    - that a request carries WS-Addressing headers when the operation's WSDL policy requires them
+      (\c wsa:MessageAddressingHeaderRequired)
+    - that the SOAP action is empty or equals \c wsa:Action (WS-I R1144, \c wsa:ActionMismatch) and that
+      \c wsa:Action is the operation's input action (WS-I R2900, \c wsa:ActionNotSupported); when the SOAP action
+      selects no operation, \c wsa:Action does
+    - that a request-response message has a \c wsa:MessageID (WS-I R1163)
+    - the response endpoints: the handler sends replies and faults on the HTTP response, so a non-anonymous
+      \c wsa:ReplyTo or \c wsa:FaultTo address is rejected with \c wsa:OnlyAnonymousAddressSupported (WS-I
+      R1146), and an anonymous one with \c wsa:OnlyNonAnonymousAddressSupported when the policy requires
+      non-anonymous responses; the \c none address is accepted, and a reply or fault to it is discarded with an
+      empty HTTP 202 response
+
+    A reply carries the operation's output action and relates to the request; a fault carries its declared fault
+    action or, for SOAP faults, the WS-Addressing SOAP fault action (WS-I R1035). Invalid WS-Addressing headers are
+    answered with the WS-Addressing faults of the SOAP Binding, such as \c wsa:InvalidCardinality. MustUnderstand
+    faults are always sent on the HTTP response (WS-I R1036) and never report WS-Addressing headers as not
+    understood (WS-I R1041). A request without WS-Addressing headers is processed as before (WS-I R1145).
+
+    setAddressing() with @ref Qore::False "False" makes the handler treat WS-Addressing headers as unknown headers;
+    this is refused for operations whose WSDL policy supports WS-Addressing.
+
+    @code{.py}
+hash<auto> sub get_quote(hash<auto> cx, string symbol) {
+    if (cx.addressing) {
+        SoapHandler::log(cx, "request %s from %s", cx.addressing.message_id ?? "without ID",
+            cx.addressing.from.address ?? "an unknown source");
+    }
+    return {"Price": lookup(symbol)};
+}
+    @endcode
+
     @section soaphandler_relnotes SoapHandler Release History
 
     @subsection soaphandler_0_3_4 SoapHandler 0.3.4
+    - WS-Addressing 1.0 (@ref soaphandler_addressing): requests carrying WS-Addressing headers are processed and
+      checked against the operation and its WSDL policy, replies and faults carry related message addressing
+      properties, and invalid headers are answered with WS-Addressing faults; mandatory WS-Addressing headers,
+      which previously caused a MustUnderstand fault, are now understood unless setAddressing() disables them
     - requests are parsed and decoded within @ref WSDL::SoapMessageLimits "SoapMessageLimits": setMessageLimits()
       selects them for a handler, which otherwise uses those of the calling thread or of each operation's WSDL;
       a request exceeding one is rejected with a SOAP fault. \c max_message_size limits a request body only after
@@ -302,6 +343,15 @@ public namespace SoapHandler {
             # Immutable header capabilities and roles; per-request results live in cx.soap_processing.
             SoapProcessingNode soap_node;
 
+            # WS-Addressing headers are processed when a request carries them; see setAddressing()
+            bool addressing = True;
+            # the node processing requests: soap_node, understanding WS-Addressing headers when enabled
+            SoapProcessingNode request_node;
+            # WS-Addressing input action -> registration identity -> method
+            hash<string, hash<string, hash<auto>>> aam;
+            # URI path -> WS-Addressing input action -> registration identity -> method
+            hash<string, hash<string, hash<string, hash<auto>>>> uri_aam;
+
             # for atomicity when adding / removing methods
             RWLock rwl();
 
@@ -340,9 +390,44 @@ public namespace SoapHandler {
             if (!soap_node.isUltimateReceiver()) {
                 throw "SOAP-HANDLER-ERROR", "SoapHandler requires an ultimate-receiver SoapProcessingNode";
             }
+            request_node = addressingNode(soap_node, addressing);
             getLogMessage = n_getLogMessage;
             debug = dbg;
             max_message_size = n_max_message_size;
+        }
+
+        #! enables or disables the processing of WS-Addressing headers
+        /** @param enable @ref Qore::True "True" (the default) to process the WS-Addressing headers of requests
+            that carry them; @ref Qore::False "False" to treat them as unknown headers, so a mandatory one causes a
+            MustUnderstand fault and optional ones are ignored
+            @throw SOAP-HANDLER-ERROR a registered operation's WSDL policy supports WS-Addressing, which the
+            handler must then process
+            @see @ref soaphandler_addressing
+            @since %SoapHandler 0.3.4
+        */
+        setAddressing(bool enable) {
+            rwl.writeLock();
+            on_exit rwl.writeUnlock();
+            if (!enable) {
+                foreach hash<string, hash<auto>> methods_for_action in (aam.iterator()) {
+                    foreach hash<auto> method in (methods_for_action.iterator()) {
+                        if (method.addressing_policy.supported) {
+                            throw "SOAP-HANDLER-ERROR", sprintf("operation %Y has a WSDL policy supporting "
+                                "WS-Addressing, which cannot be disabled", method.operation.name);
+                        }
+                    }
+                }
+            }
+            addressing = enable;
+            request_node = addressingNode(soap_node, enable);
+        }
+
+        #! returns True if the handler processes WS-Addressing headers
+        /** @since %SoapHandler 0.3.4 */
+        bool getAddressing() {
+            rwl.readLock();
+            on_exit rwl.readUnlock();
+            return addressing;
         }
 
         #! adds a method to the handler dynamically
@@ -635,6 +720,26 @@ handler.setMtomThreshold(0);
                 }
             }
 
+            # remove WS-Addressing action mappings for service
+            foreach string action in (keys aam) {
+                map remove aam{action}{$1}, keys aam{action}, aam{action}{$1}.unique_id == unique_id;
+                if (!aam{action}) {
+                    remove aam{action};
+                }
+            }
+            foreach string rpath in (keys uri_aam) {
+                foreach string action in (keys uri_aam{rpath}) {
+                    map remove uri_aam{rpath}{action}{$1}, keys uri_aam{rpath}{action},
+                        uri_aam{rpath}{action}{$1}.unique_id == unique_id;
+                    if (!uri_aam{rpath}{action}) {
+                        remove uri_aam{rpath}{action};
+                    }
+                }
+                if (!uri_aam{rpath}) {
+                    remove uri_aam{rpath};
+                }
+            }
+
             # remove SOAPAction mappings for service
             foreach string sa in (keys rsam{unique_id}) {
                 map remove sam{sa}{$1}, keys sam{sa}, sam{sa}{$1}.unique_id == unique_id;
@@ -698,8 +803,27 @@ handler.setMtomThreshold(0);
                     method.soap_action = sa;
                 }
 
+                # WS-Addressing: the operation's effective policy and input action
+                method.addressing_policy = WsAddressingHelper::endpointPolicy(ws, method.operation, method.binding);
+                if (method.operation.input) {
+                    try {
+                        # the resolved binding supplies its SOAP action even when the registration names none
+                        method.addressing_action = method.operation.getInputAction(sb.getName());
+                    } catch (hash<ExceptionInfo> ex) {
+                        # a standalone operation saved without its port type has no default action
+                        if (ex.err != "WSDL-OPERATION-ERROR") {
+                            rethrow;
+                        }
+                    }
+                }
+
                 rwl.writeLock();
                 on_exit rwl.writeUnlock();
+
+                if (!addressing && method.addressing_policy.supported) {
+                    throw "SOAP-HANDLER-ERROR", sprintf("operation %Y has a WSDL policy supporting WS-Addressing, "
+                        "which the handler does not process; see setAddressing()", method.operation.name);
+                }
 
                 # verify if the operation mapping can be added first; operations can share an action when the
                 # Body identifies them (SOAP 1.1 section 6.1.1, WS-I Basic Profile R2710)
@@ -756,6 +880,16 @@ handler.setMtomThreshold(0);
                         if (method.unique_id) {
                             ruri_sam{method.unique_id}{method.altpath}{sa} = True;
                         }
+                    }
+                }
+
+                # WS-Addressing dispatch by input action
+                if (method.addressing_action) {
+                    if (!aam{method.addressing_action}{identity}) {
+                        aam{method.addressing_action}{identity} = method;
+                    }
+                    if (method.altpath && !uri_aam{method.altpath}{method.addressing_action}{identity}) {
+                        uri_aam{method.altpath}{method.addressing_action}{identity} = method;
                     }
                 }
 
@@ -1146,6 +1280,16 @@ private nothing msglog(hash<auto> cx, hash<auto> msg) {
                 o."soapenv:Envelope"."soapenv:Body" = fault_body;
             }
 
+            if (cx.addressing) {
+                # WS-I R1036: MustUnderstand and VersionMismatch faults are always sent on the HTTP response
+                if (faultCode != SoapFaultMustUnderstand && faultCode != SoapFaultVersionMismatch
+                        && discardsFaults(cx.addressing)) {
+                    return discarded(cx);
+                }
+                # WS-I R1035 and WS-Addressing SOAP Binding section 6: SOAP-defined faults
+                addAddressingHeaders(\o, soap12, faultAddressing(cx.addressing, WSA_SOAP_FAULT_ACTION));
+            }
+
             hash<auto> msg = {
                 "code": httpCode,
                 "errlog": errLog,
@@ -1165,6 +1309,16 @@ private nothing msglog(hash<auto> cx, hash<auto> msg) {
             cx.function = method.function;
             cx.operation = method.operation;
             try {
+                *hash<WsaMessageAddressing> fault_maps;
+                if (cx.addressing) {
+                    if (discardsFaults(cx.addressing)) {
+                        return discarded(cx);
+                    }
+                    fault_maps = faultAddressing(cx.addressing, !from_header_processor
+                        && method.operation.hasFault(error.err) ? method.operation.getFaultAction(error.err)
+                        : WSA_SOAP_FAULT_ACTION);
+                }
+                WsaOutputScope addressing_scope(fault_maps);
                 hash<auto> response = from_header_processor || !method.operation.hasFault(error.err)
                     ? method.operation.serializeHeaderFault(error.arg, error.desc ?? "no description provided", method.binding)
                     : method.operation.serializeFault(error.err, error.desc ?? "no description provided", error.arg,
@@ -1275,6 +1429,16 @@ private nothing msglog(hash<auto> cx, hash<auto> msg) {
                     auto header = remove rv."^header^";
                     *bool response_soap12 = method.operation.getBinding(method.binding) instanceof SoapBinding
                         ? reqsoap12 : NOTHING;
+                    # WS-Addressing Core section 3.4: the reply relates to the request
+                    *hash<WsaMessageAddressing> reply_maps;
+                    if (cx.addressing) {
+                        reply_maps = WsAddressingHelper::reply(cx.addressing, method.operation.getOutputAction());
+                        if (reply_maps.to == WSA_NONE) {
+                            # a reply to the none address is discarded
+                            return discarded(cx);
+                        }
+                    }
+                    WsaOutputScope addressing_scope(reply_maps);
                     # An MTOM request shows that the client accepts an MTOM response.
                     *int threshold = request_mtom ? mtom_threshold : NOTHING;
                     SoapMtomScope mtom_scope(exists threshold, threshold ?? MTOM_THRESHOLD);
@@ -1609,6 +1773,15 @@ private nothing msglog(hash<auto> cx, hash<auto> msg) {
                 bool request_mtom = False;
                 *hash<ExceptionInfo> header_fault;
                 bool processor_failure = False;
+                # the request node and WS-Addressing setting in force for this request
+                SoapProcessingNode node;
+                bool process_addressing;
+                {
+                    rwl.readLock();
+                    on_exit rwl.readUnlock();
+                    node = request_node;
+                    process_addressing = addressing;
+                }
                 try {
                     *string ct = hdr."_qore_orig_content_type";
                     # Action dispatch uses normalized root metadata and the validated envelope version.
@@ -1678,8 +1851,12 @@ private nothing msglog(hash<auto> cx, hash<auto> msg) {
                         cx = typed_cx;
                         cx.soap_action = soap_action;
                         try {
-                            cx.soap_processing = soap_node.processMessage(WSDLLib::getXmlMessageText(msg), cx,
+                            cx.soap_processing = node.processMessage(WSDLLib::getXmlMessageText(msg), cx,
                                 base_uri, expected_version);
+                            if (process_addressing) {
+                                cx.addressing = WsAddressingHelper::parse(map $1.header,
+                                    cx.soap_processing.headers);
+                            }
                             xml_body = cx.soap_processing.application_message.getXml();
                             # Node output is UTF-8 XML, independent of the original HTTP/MIME root charset.
                             args = WSDLLib::parseSOAPMessage(msg + {"body":xml_body,
@@ -1693,8 +1870,28 @@ private nothing msglog(hash<auto> cx, hash<auto> msg) {
                             } else {
                                 processor_failure = !inlist(ex.err, ("SOAP-DESERIALIZATION-ERROR",
                                     "SOAP-VERSION-MISMATCH", "SOAP-MUST-UNDERSTAND", "PARSE-XML-EXCEPTION",
-                                    "XML-CONTEXT-ERROR", "WSDL-NAMESPACE-ERROR", "XML-READER-ERROR"));
+                                    "XML-CONTEXT-ERROR", "WSDL-NAMESPACE-ERROR", "XML-READER-ERROR", "WSA-FAULT"));
                                 rethrow;
+                            }
+                        }
+                        # WS-Addressing: when the SOAP action selects no operation, wsa:Action does; a different
+                        # SOAP action is faulted by checkAddressing() (WS-I R1144)
+                        if (!method && !shared && cx.addressing) {
+                            {
+                                rwl.readLock();
+                                on_exit rwl.readUnlock();
+                                *hash<string, hash<auto>> candidates = uri_aam{path}{cx.addressing.action}
+                                    ?? uri_aam{alt_path}{cx.addressing.action} ?? aam{cx.addressing.action};
+                                if (candidates.size() == 1) {
+                                    method = candidates.firstValue();
+                                } else {
+                                    shared = candidates;
+                                }
+                            }
+                            if (method) {
+                                selected_binding = method.operation.getBinding(method.binding);
+                                expected_version = selected_binding.isSoap12();
+                                WSDLLib::validateSOAPEnvelope(args, expected_version, False, True);
                             }
                         }
                     }
@@ -1801,6 +1998,9 @@ private nothing msglog(hash<auto> cx, hash<auto> msg) {
                             throw "SOAP-CALL-ERROR", sprintf("action %Y does not match operation %Y action %Y",
                                 soap_action, method.operation.name, method.soap_action);
                         }
+                        if (process_addressing && method.addressing_policy) {
+                            checkAddressing(cx, method, soap_action, reqsoap12);
+                        }
                         if (method.xml_values && !exists xml_body) {
                             xml_body = WSDLLib::getXmlMessageText(msg);
                         }
@@ -1813,6 +2013,19 @@ private nothing msglog(hash<auto> cx, hash<auto> msg) {
                     string str = debug
                         ? get_exception_string(ex)
                         : sprintf("%s: %s: %s", get_ex_pos(ex), ex.err, ex.desc);
+                    if (ex.err == "WSA-FAULT" && ex.arg instanceof hash<WsaFault>) {
+                        return makeAddressingFaultResponse(cx, str, reqsoap12, ex.arg);
+                    }
+                    if (ex.err == "SOAP-MUST-UNDERSTAND" && process_addressing && ex.arg.all_headers) {
+                        # the fault relates to the request when its WS-Addressing headers are valid
+                        try {
+                            cx.addressing = WsAddressingHelper::parse(ex.arg.all_headers);
+                        } catch (hash<ExceptionInfo> addressing_error) {
+                            if (addressing_error.err != "WSA-FAULT") {
+                                rethrow;
+                            }
+                        }
+                    }
                     return makeSoapFaultResponse(cx, str, reqsoap12, ex.err, ex.desc, NOTHING,
                         inlist(ex.err, ("SOAP-VERSION-MISMATCH", "SOAP-MUST-UNDERSTAND"))
                             || ex.arg instanceof hash<SoapFaultOptions> ? ex.arg : NOTHING,
@@ -1833,6 +2046,9 @@ private nothing msglog(hash<auto> cx, hash<auto> msg) {
                         string str = debug
                             ? get_exception_string(ex)
                             : sprintf("exception in %s: %s: %s", get_ex_pos(ex), ex.err, ex.desc);
+                        if (ex.err == "WSA-FAULT" && ex.arg instanceof hash<WsaFault>) {
+                            return makeAddressingFaultResponse(cx, str, reqsoap12, ex.arg);
+                        }
                         return makeSoapFaultResponse(cx, str, reqsoap12, ex.err, ex.desc, NOTHING,
                             inlist(ex.err, ("SOAP-VERSION-MISMATCH", "SOAP-MUST-UNDERSTAND")) ? ex.arg : NOTHING,
                             SoapFaultReceiver);
@@ -1844,6 +2060,127 @@ private nothing msglog(hash<auto> cx, hash<auto> msg) {
                 "code" : 501,
                 "body" : sprintf("don't know how to handle request with method %y", hdr.method),
             };
+        }
+
+        # a node that processes WS-Addressing headers when enabled
+        private static SoapProcessingNode addressingNode(SoapProcessingNode node, bool enable) {
+            if (!enable || node.getOptions().addressing) {
+                return node;
+            }
+            hash<SoapNodeOptions> options = node.getOptions();
+            options.addressing = True;
+            return new SoapProcessingNode(options);
+        }
+
+        # checks a request's WS-Addressing properties against the selected operation
+        private checkAddressing(hash<auto> cx, hash<auto> method, *string soap_action, bool soap12) {
+            hash<WsAddressingPolicy> policy = method.addressing_policy;
+            *hash<WsaMessageAddressing> maps = cx.addressing;
+            if (!maps) {
+                if (policy.required) {
+                    throw "WSA-FAULT", sprintf("operation %Y requires WS-Addressing", method.operation.name),
+                        WsAddressingHelper::headerRequired("Action");
+                }
+                return;
+            }
+            # WS-I R1144 and WS-Addressing SOAP Binding sections 2.4 and 4
+            WsAddressingHelper::checkSoapAction(maps, soap_action, soap12);
+            # WS-I R2900: the action is the operation's input action
+            if (method.addressing_action && maps.action != method.addressing_action) {
+                throw "WSA-FAULT", sprintf("the action %Y is not operation %Y's action %Y", maps.action,
+                    method.operation.name, method.addressing_action),
+                    WsAddressingHelper::actionNotSupported(maps.action);
+            }
+            bool reply = exists method.operation.output;
+            # WS-I R1163: a reply requires the request's message ID
+            if (reply && !exists maps.message_id) {
+                throw "WSA-FAULT", "a request-response message requires a wsa:MessageID",
+                    WsAddressingHelper::headerRequired("MessageID");
+            }
+            foreach hash<auto> field in ({"key": "reply_to", "name": "ReplyTo"},
+                    {"key": "fault_to", "name": "FaultTo"}) {
+                if (field.key == "reply_to" && !reply) {
+                    continue;
+                }
+                *hash<WsaEndpointReference> endpoint = field.key == "reply_to"
+                    ? maps.reply_to ?? <WsaEndpointReference>{"address": WSA_ANONYMOUS} : maps.fault_to;
+                if (!endpoint || endpoint.address == WSA_NONE) {
+                    continue;
+                }
+                if (endpoint.address == WSA_ANONYMOUS) {
+                    # WS-Addressing Metadata section 3.1.3: the policy requires non-anonymous responses
+                    if (!policy.anonymous) {
+                        throw "WSA-FAULT", sprintf("operation %Y requires a non-anonymous wsa:%s address",
+                            method.operation.name, field.name),
+                            WsAddressingHelper::onlyAddressSupported(False, field.name);
+                    }
+                } else {
+                    # WS-I R1146: the handler sends responses on the HTTP response, so it faults instead
+                    throw "WSA-FAULT", sprintf("the handler only sends responses on the HTTP response; wsa:%s "
+                        "address %Y is not supported", field.name, endpoint.address),
+                        WsAddressingHelper::onlyAddressSupported(True, field.name);
+                }
+            }
+        }
+
+        # the addressing properties of a fault sent on the HTTP response (WS-Addressing Core section 3.4)
+        private static hash<WsaMessageAddressing> faultAddressing(*hash<WsaMessageAddressing> request,
+                string action) {
+            hash<WsaMessageAddressing> result({"to": WSA_ANONYMOUS, "action": action});
+            if (request.message_id) {
+                result.relates_to = (<WsaRelationship>{"message_id": request.message_id},);
+            }
+            if (request) {
+                hash<WsaEndpointReference> endpoint = WsAddressingHelper::responseEndpoint(request, True);
+                if (endpoint.address == WSA_ANONYMOUS) {
+                    result.reference_parameters = endpoint.reference_parameters;
+                }
+            }
+            return result;
+        }
+
+        # True if faults are to be discarded: the fault endpoint has the none address
+        private static bool discardsFaults(hash<WsaMessageAddressing> request) {
+            return WsAddressingHelper::responseEndpoint(request, True).address == WSA_NONE;
+        }
+
+        # an empty acknowledgment for a message that is discarded (WS-Addressing Core section 3.3)
+        private hash<auto> discarded(hash<auto> cx) {
+            hash<auto> response = {"code": 202};
+            msglog(cx, {"reason": "response", "code": 202});
+            return response;
+        }
+
+        # adds WS-Addressing headers to an envelope built by the handler
+        private static addAddressingHeaders(reference<hash> o, bool soap12, hash<WsaMessageAddressing> maps) {
+            hash<auto> envelope = o."soapenv:Envelope";
+            envelope."^attributes^"."xmlns:wsa" = WSA_NS;
+            hash<auto> header = envelope."soapenv:Header" ?? {};
+            foreach hash<auto> block in (WsAddressingHelper::headers(maps, soap12, False, "wsa").pairIterator()) {
+                header{WsAddressingHelper::elementKey(header, (block.key =~ x/^([^^]+)/)[0])} = block.value;
+            }
+            hash<auto> result = {"^attributes^": envelope."^attributes^", "soapenv:Header": header};
+            foreach hash<auto> item in (envelope.pairIterator()) {
+                if (item.key != "^attributes^" && item.key != "soapenv:Header") {
+                    result{item.key} = item.value;
+                }
+            }
+            o."soapenv:Envelope" = result;
+        }
+
+        # a WS-Addressing fault message (WS-Addressing SOAP Binding section 6), sent on the HTTP response
+        private hash<auto> makeAddressingFaultResponse(hash<auto> cx, string errlog, bool soap12,
+                hash<WsaFault> fault) {
+            int code = soap12 && fault.code == "Sender" ? 400 : 500;
+            hash<auto> msg = {
+                "code": code,
+                "errlog": errlog,
+                "body": WsAddressingHelper::serializeFault(fault, soap12, faultAddressing(cx.addressing,
+                    WSA_FAULT_ACTION)),
+                "hdr": {"Content-Type": WSDLLib::getSoapMimeType12(soap12)},
+            };
+            msglog(cx, {"reason": "error", "code": code, "header": msg.hdr, "body": msg.body});
+            return msg;
         }
 
         private *WebService tryMatch(string path) {

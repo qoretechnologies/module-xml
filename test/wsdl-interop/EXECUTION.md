@@ -11236,3 +11236,47 @@ accepts only numeric `^N` key suffixes, so repeated header names use them.
 
 **Scope within P9a:** request-response calls require anonymous response endpoints until the decoupled responses of
 P9a-06.
+
+## P9a-05: WS-Addressing handler with anonymous responses
+
+**Implemented:**
+- **Processing:** SoapHandler processes the WS-Addressing headers of requests that carry them by default. Its
+  request node is derived with `SoapNodeOptions.addressing` (R1143), and callbacks receive `cx.addressing`.
+  `setAddressing()` and `getAddressing()` control this; disabling is refused for operations whose policy
+  supports WS-Addressing (R1041).
+- **Registration:** records each operation's effective policy (`WsAddressingHelper::endpointPolicy()`: the binding,
+  merged with the unique port using it) and its input action. The action is indexed for dispatch when the SOAP
+  action selects no operation.
+- **Checks before the callback:**
+  - required headers;
+  - the SOAP action (R1144);
+  - the input action (R2900, `wsa:ActionNotSupported`);
+  - the message ID of a request-response message (R1163);
+  - the response endpoints: non-anonymous ones are rejected with `wsa:OnlyAnonymousAddressSupported` (R1146), an
+    anonymous one is rejected when the policy requires non-anonymous responses, and `none` is accepted.
+  A missing `wsa:To` is not checked (R1153).
+- **Replies:** they carry the output action and relate to the request. Replies to `none` are discarded with an
+  empty 202 (Core section 3.3).
+- **Fault actions:** declared faults carry their fault action, and SOAP-defined faults carry
+  `.../soap/fault` (R1035). Invalid headers are answered with the WS-Addressing faults.
+- **Fault delivery:** all faults go on the HTTP response (R1161), and MustUnderstand faults do so regardless of
+  endpoints (R1036). A MustUnderstand fault relates to the request through the new `all_headers` member of the
+  `SOAP-MUST-UNDERSTAND` exception argument. Requests without WS-Addressing are unchanged (R1145).
+
+**Tests:**
+- `test/soap-addressing-handler.qtest`: 7 cases and 144 assertions, for SOAP 1.1 and 1.2 through SoapClient and
+  raw HTTP. They cover:
+  - replies with reference parameters, and one-way acknowledgments;
+  - plain requests, a missing `wsa:To`, and required policies;
+  - action dispatch between operations sharing a body element, and the action and SOAP action faults;
+  - message IDs, non-anonymous endpoints, `none` replies and faults, and NonAnonymousResponses;
+  - cardinality and address faults with their SOAP 1.1 and 1.2 detail placement;
+  - declared, application and MustUnderstand faults;
+  - disabling, the registration refusals, and removal.
+- `test/SoapHandler.qtest`: the WCF case now asserts the approved default. A mandatory `wsa:Action`/`wsa:To`
+  without a message ID gets the R1163 fault, and with `wsa:MessageID` and `wsa:ReplyTo` a related reply. The
+  previous MustUnderstand fault is kept for a handler with WS-Addressing disabled.
+
+**Found:** `WSOperation::getInputAction()` without a binding deliberately ignores SOAP actions. A handler
+registration that names no binding must therefore pass the resolved binding, or the SOAP action that supplies the
+input action is missed. The WCF case exposed this.

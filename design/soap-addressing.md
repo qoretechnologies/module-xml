@@ -196,3 +196,48 @@ the client's node, derived with `addressing` enabled when it lacks it.
 Violations raise `WSA-RESPONSE-ERROR`, except that a SOAP fault is still reported as the fault, with the problem
 in `info.addressing.error`. The request and response properties are returned in `info.addressing`. They are
 recorded after sending, because `HTTPClient::send()` replaces the info hash.
+
+## Handler
+
+`SoapHandler` processes WS-Addressing headers by default (`setAddressing()`).
+
+**Setup.** Its request node is the configured node, derived with `addressing` when it lacks it. Disabling
+addressing is refused for operations whose policy supports WS-Addressing, at registration or in the setter,
+because such endpoints must understand the headers (WS-I R1041, R1143).
+
+**Registration.** Each SOAP method records:
+- `addressing_policy`: `WsAddressingHelper::endpointPolicy()`, which is the binding's policy, merged with the
+  port's when exactly one supported port uses the binding;
+- `addressing_action`: the input action for the resolved binding.
+
+Methods are indexed by input action, globally and per route (`aam`, `uri_aam`), and `removeService()` removes
+them by `unique_id`.
+
+**Requests.**
+- The node processes the headers, and `WsAddressingHelper::parse()` fills `cx.addressing`.
+- When the SOAP action selects no operation, `wsa:Action` does. A different non-empty SOAP action is then
+  faulted.
+- After the operation is selected, `checkAddressing()` checks, in order:
+  1. required headers;
+  2. the SOAP action (R1144);
+  3. the input action (R2900);
+  4. the message ID of a request-response message (R1163);
+  5. the response endpoints: `none` is accepted, an anonymous one is rejected when the policy requires
+     non-anonymous responses, and a non-anonymous one is rejected with `wsa:OnlyAnonymousAddressSupported`,
+     because the handler answers on the HTTP response (R1146).
+- These checks run before the callback, so a rejected request has no application side effects.
+
+**Responses.**
+- A reply is serialized in a `WsaOutputScope` with `WsAddressingHelper::reply()` and the output action. A reply to
+  `none` is dropped after the callback, with an empty 202.
+- **Fault actions:**
+  - declared faults carry the fault action (`getFaultAction()`);
+  - header faults and generic SOAP faults carry `WSA_SOAP_FAULT_ACTION` (R1035);
+  - WS-Addressing faults carry `WSA_FAULT_ACTION`, and are built by `WsAddressingHelper::serializeFault()` with
+    HTTP 400 for SOAP 1.2 Sender faults and 500 otherwise.
+- **Destination of faults:** they relate to the request's message ID when it is known, and go to the anonymous
+  address on the HTTP response, with the reference parameters of an anonymous fault endpoint. A fault endpoint of
+  `none` discards faults with a 202, except MustUnderstand and VersionMismatch faults, which R1036 sends on the
+  HTTP response.
+- **MustUnderstand faults:** they relate to the request through the `all_headers` list that the
+  `SOAP-MUST-UNDERSTAND` exception carries.
