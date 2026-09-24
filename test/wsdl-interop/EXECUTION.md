@@ -10978,6 +10978,27 @@ same program show that no limits or budget leaked.
   struct and multiplies every limit's cost. Safe caching needs invalidation across schema construction, because
   substitution groups are resolved after type finalization. It is recorded for P9 performance work.
 
+**Correction 2026-09-24 (default XML depth).** develop CI pipeline 57475 failed on Alpine. In
+`soap-message-limits`, the depth case decoded 252 nested levels with `STACK-LIMIT-EXCEEDED`, because decoding
+recurses per element level and each level uses several Qore call frames. With an 8 MB thread stack, the
+measured limits for the RPC decode of `limits.wsdl` were:
+- musl (Alpine image `qore-test-base:develop-alpine`): 220 levels pass, and 240 or more fail;
+- glibc (Fedora): about 350 levels pass.
+
+The user approved 128 as the default, which leaves room for the frames that callers and handlers add. The
+documentation states the stack bound, and the examples no longer raise `max_xml_depth`. The test decodes 124
+levels and rejects 125, where the envelope, body and operation add levels 126 to 128. It passes on Fedora and in
+the Alpine image.
+
+With the limit raised to 1400 or more levels, Qore crashes natively (SIGSEGV) instead of raising
+`STACK-LIMIT-EXCEEDED`. `XsdBase::inheritAttributeNamespacesIntern()` passes `\value{key}` down each level, so the
+reference at depth n chains through n references. Reading it evaluates the chain recursively in native code
+(`ClosureVarValue::eval` → `VarRefNode` → `QoreHashObjectDereferenceOperatorNode`) with no stack check. A
+pure-Qore reproducer crashes at 5000 levels. This is a core defect, handed off in
+`/tmp/qore-deep-reference-chain-segfault.md`. Under the defaults, the depth check in `deserializeMessageImpl()`
+and `parseSOAPMessage()` rejects such messages before this walk. The O(depth) cost per access in that walk is
+recorded for P9b.
+
 ## P8-07: Routed ledger rows and P8 acceptance
 
 The 26 W3C SOAP 1.2 Part 2 assertions routed to P8 (sections 2.3, 3.1-3.1.7, 4-4.4 and B.1) were checked

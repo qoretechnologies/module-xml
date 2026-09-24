@@ -1741,9 +1741,12 @@ deterministic payloads in both directions: up to 4 MiB for SwA parts and swaRef,
 ## P8-06: Message and document limits
 
 **Approved 2026-09-23:** limits are on by default, with these defaults: decoded SOAP-encoded values 10M, resolved
-references 100k, array slots per message 16M, array rank 32, XML depth 256, MIME parts 1000, and WSDL/XSD
+references 100k, array slots per message 16M, array rank 32, XML depth 128, MIME parts 1000, and WSDL/XSD
 documents 1000 with import depth 64. They are configurable per WebService, WSOperation, thread
 (`SoapMessageLimitsScope`), SoapClient, SoapClientIo and SoapHandler.
+
+**Corrected 2026-09-24:** the XML depth default was first 256. Alpine CI (pipeline 57475) showed that decoding
+252 nested levels exceeds an 8 MB thread stack on musl, so the approved default is now 128.
 
 The decompression bomb is a core defect: HttpServer and HTTPClient decompress without a limit. It is handed off
 in `/tmp/qore-http-bounded-decompression.md`, and module-xml documents the gap in `max_message_size`.
