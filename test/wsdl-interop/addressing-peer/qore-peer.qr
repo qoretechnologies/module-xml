@@ -1,0 +1,126 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+# The Qore side of the live WS-Addressing exchanges with AddressingPeer.java over CXF's pinned add_numbers.wsdl and
+# add_numbers_soap12.wsdl contracts.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../../../qlib"
+%requires ../../../qlib/WSDL.qm
+%requires ../../../qlib/SoapClient.qm
+%requires ../../../qlib/SoapClientIo
+%requires ../../../qlib/SoapHandler.qm
+%requires HttpServer
+
+const Namespace = "http://apache.org/cxf/systest/ws/addr_feature/";
+const PortType = Namespace + "AddNumbersPortType/";
+# the binding of each port of the contract
+const Bindings = {
+    "AddNumbersPort": "AddNumbersBinding",
+    "AddNumbersOnlyAnonPort": "AddNumbersBindingOnlyAnon",
+    "AddNumbersNonAnonPort": "AddNumbersBindingNonAnon",
+};
+
+sub check(bool condition, string what) {
+    if (!condition) {
+        throw "ADDRESSING-PEER-ERROR", what;
+    }
+}
+
+# approves response endpoints on the loopback interface
+bool sub local(hash<auto> cx, hash<WsaEndpointReference> endpoint) {
+    return endpoint.address =~ /^http:\/\/127\.0\.0\.1:[0-9]+\//;
+}
+
+list<string> args = ARGV ?? ();
+check(args.size() >= 3, "usage: qore-peer.qr <server|client> <wsdl> <port> ...");
+WebService ws(ReadOnlyFile::readTextFile(args[1]));
+string port = args[2];
+check(Bindings.hasKey(port), sprintf("unknown port %y", port));
+
+if (args[0] == "server") {
+    # server <wsdl> <port>: serves the port's binding at /add
+    HttpServer server();
+    on_exit server.stop();
+    SoapHandler handler(new PermissiveAuthenticator());
+    handler.setResponseEndpointAuthorizer(\local(), 10s);
+    server.setDefaultHandler("addressing-peer", handler);
+    Queue received();
+    code add = auto sub (string operation, string action) {
+        return hash<auto> sub (hash<auto> cx, hash<auto> value) {
+            check(cx.addressing.action == action, sprintf("%s request action %y", operation, cx.addressing.action));
+            check(exists cx.addressing.message_id, operation + " request without a message ID");
+            if (value.number1 < 0) {
+                throw "addNumbersFault", "negative number", {"detail": sprintf("negative number %d", value.number1),
+                    "message": "negative numbers cannot be added"};
+            }
+            received.push(operation);
+            return {"return": value.number1 + value.number2};
+        };
+    };
+    foreach hash<auto> operation in ({"name": "addNumbers", "action": PortType + "addNumbersRequest"},
+            {"name": "addNumbers2", "action": PortType + "add2In"}, {"name": "addNumbers3", "action": "3in"}) {
+        handler.addMethod(ws, ws.getOperation(operation.name), add(operation.name, operation.action), NOTHING,
+            NOTHING, NOTHING, NOTHING, NOTHING, "add", Bindings{port});
+    }
+    server.addListener(0);
+    printf("READY\t%d\n", server.getListenerInfo(0).port);
+    flush();
+    check(trim(stdin.readLine()) == "STOP", "STOP");
+    check(received.size() == 2, sprintf("%d successful calls received", received.size()));
+} else if (args[0] == "client") {
+    # client <wsdl> <port> <url> <SoapClient|SoapClientIo>: a non-anonymous-responses port receives replies at a
+    # decoupled reply endpoint
+    check(args.size() == 5, "client <wsdl> <port> <url> <SoapClient|SoapClientIo>");
+    *HttpServer reply_server;
+    *WsaReplyReceiver receiver;
+    if (port == "AddNumbersNonAnonPort") {
+        reply_server = new HttpServer();
+        reply_server.addListener(0);
+        receiver = new WsaReplyReceiver(<WsaEndpointReference>{"address": sprintf("http://127.0.0.1:%d/replies",
+            reply_server.getListenerInfo(0).port)});
+        reply_server.setDefaultHandler("replies", new SoapReplyHandler(receiver));
+    }
+    on_exit if (reply_server) {
+        reply_server.stop();
+    }
+    hash<auto> options = {"wsdl": ws, "service": "AddNumbersService", "port": port, "url": args[3],
+        "connect_timeout": 10000, "timeout": 30000, "reply_receiver": receiver};
+    object client = args[4] == "SoapClient" ? new SoapClient(options) : new SoapClientIo(options);
+    on_exit if (client instanceof SoapClientIo) {
+        cast<SoapClientIo>(client).close();
+    }
+    code call = hash<auto> sub (string operation, int number1, int number2, reference<hash<auto>> info) {
+        return client.callOperation(operation, {"number1": number1, "number2": number2}, NOTHING, \info);
+    };
+    foreach hash<auto> row in ({"operation": "addNumbers", "output": PortType + "addNumbersResponse"},
+            {"operation": "addNumbers2", "output": PortType + "add2Out"}) {
+        hash<auto> info;
+        hash<auto> result = call(row.operation, 3, 4, \info);
+        check(result."return" == 7, sprintf("%s result %y", row.operation, result));
+        check(info.addressing.response.action == row.output, sprintf("%s response action %y", row.operation,
+            info.addressing.response.action));
+        check(info.addressing.response.relates_to[0].message_id == info.addressing.request.message_id,
+            row.operation + " response relationship");
+        check(!receiver || info.addressing.request.reply_to.address == receiver.getEndpointReference().address,
+            row.operation + " reply endpoint");
+    }
+    # a declared fault with its fault action
+    hash<auto> info;
+    try {
+        call("addNumbers", -1, 2, \info);
+        check(False, "addNumbers fault");
+    } catch (hash<ExceptionInfo> ex) {
+        check(ex.err == "SOAP-SERVER-FAULT-RESPONSE", sprintf("fault %s: %s", ex.err, ex.desc));
+        check(info.addressing.response.action == PortType + "addNumbers/Fault/addNumbersFault",
+            sprintf("fault action %y", info.addressing.response.action));
+    }
+    # addNumbers3's relative action is not an [action] (WS-Addressing Core section 3.1)
+    try {
+        call("addNumbers3", 1, 2, \info);
+        check(False, "addNumbers3 with a relative action");
+    } catch (hash<ExceptionInfo> ex) {
+        check(ex.err == "WSA-SERIALIZATION-ERROR", sprintf("addNumbers3 %s: %s", ex.err, ex.desc));
+    }
+    printf("PASS\n");
+} else {
+    throw "ADDRESSING-PEER-ERROR", sprintf("unknown mode %y", args[0]);
+}

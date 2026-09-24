@@ -10,7 +10,10 @@ state (WS-Addressing 1.0 Metadata), and its WS-Policy 1.5 attachment. The pinned
 
 `WSOperation` keeps the explicit actions of its input, output and faults, and the name and target namespace of
 its port type. Explicit actions come from `wsam:Action`, and from the `wsaw:Action` attribute of the 2006
-WS-Addressing WSDL Binding. Both must be absolute IRIs, and when both are present they must agree. The action
+WS-Addressing WSDL Binding; when both are present they must agree. They are `xs:anyURI` values, so a relative
+value, such as CXF's `add_numbers.wsdl` uses, is kept. The `[action]` property is an absolute IRI (Core section
+3.1), so WS-Addressing messages with a relative action are rejected when they are sent
+(`WSA-SERIALIZATION-ERROR`) and received (`wsa:InvalidAddressingHeader`). The action
 of a message is:
 
 1. its explicit action;
@@ -241,6 +244,12 @@ them by `unique_id`.
   HTTP response.
 - **MustUnderstand faults:** they relate to the request through the `all_headers` list that the
   `SOAP-MUST-UNDERSTAND` exception carries.
+- **Faults about unreadable headers:** when `parse()` rejects the headers, `WsAddressingHelper::relatedMessageId()`
+  reads the request's message ID on its own. The fault then relates to it when it is a single absolute IRI
+  (`cx.addressing_related`).
+- **Invalid SOAP actions:** a SOAP 1.2 `action` parameter that is not an absolute URI is reported only after the
+  WS-Addressing headers have been read, so its Sender fault relates to the request. Apache CXF clients warn
+  about fault responses without WS-Addressing properties.
 
 ## Non-anonymous response endpoints
 
@@ -252,7 +261,9 @@ of these hold:
 - the authorizer returns true.
 
 Otherwise the request is rejected with `wsa:OnlyAnonymousAddressSupported` before the callback. An accepted request
-records the delivery timeout in `cx.addressing_delivery_timeout`.
+records the delivery timeout in `cx.addressing_delivery_timeout`, and the setter's optional `HTTPClient` options in
+`cx.addressing_delivery_options`. These options are used for delivery, for example `http_version` "2.0" or "3.0" or
+TLS options. The handler always sets `url`, `timeout` and `connect_timeout`, so the setter refuses them.
 
 **Delivery.** Replies, and faults when the request has an accepted fault or reply endpoint, then go to the
 endpoint's address, with its reference parameters. `SoapHandler::deliver()` handles this:
@@ -289,3 +300,31 @@ reference as `wsa:ReplyTo` and `wsa:FaultTo` of request-response calls.
   including the WS-Addressing response checks and fault reporting.
 - A server that answers on the back channel anyway is accepted.
 - The receiver is not saved with a SoapClient.
+
+## Transports
+
+WS-Addressing is independent of the HTTP version. `test/soap-addressing-transports.qtest` runs the exchanges over
+HTTP/1.1, HTTP/2 and HTTP/3, on TLS listeners that offer all three:
+- `SoapClient` (`http_version`) and `SoapClientIo` (`http_protocol`) call a `SoapHandler`.
+- Anonymous replies and faults come back on the HTTP response.
+- Replies and faults also go to a non-anonymous `SoapReplyHandler` endpoint, delivered with the same protocol
+  through the authorizer's `http_version` option.
+- A non-anonymous endpoint without an authorizer is refused.
+
+Each side checks the protocol that it received. `SoapClientIo`'s `accept_all_certs` and `ssl_verify_mode` options
+pass through to the HttpClientIo connection manager.
+
+## Interoperability
+
+`test/wsdl-interop/test_ws_addressing.py` exchanges messages with Apache CXF 4.1.3 over CXF's unmodified
+`add_numbers.wsdl` and `add_numbers_soap12.wsdl`. These are pinned in `test/wsdl-interop/cxf/catalog.json`, with the
+peer in `test/wsdl-interop/addressing-peer/`:
+- **Qore clients to CXF servers:** `SoapClient` and `SoapClientIo` call every port (required WS-Addressing,
+  anonymous responses only, and non-anonymous responses through a `SoapReplyHandler`) with SOAP 1.1 and 1.2.
+- **CXF clients to the Qore handler:** CXF calls the two anonymous ports with SOAP 1.1 and 1.2.
+- **In both directions:** each side checks the other's actions, message IDs and reply relationships. `addNumbers3`'s
+  relative `3in` action is rejected: Qore refuses to send it, and CXF's calls are faulted.
+
+CXF clients with a decoupled endpoint drop a reply that arrives before the 202 acknowledgment. Because
+`SoapHandler` delivers before it returns the 202, the non-anonymous port is not yet exchanged with CXF clients.
+This waits for a Qore HttpServer callback that runs after a response has been sent.

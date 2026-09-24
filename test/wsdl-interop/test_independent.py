@@ -172,8 +172,8 @@ class IndependentTest(unittest.TestCase):
         metadata = corpus.read_manifest(path)
         catalog = corpus.Catalog(path)
         self.assertEqual("5b660b5f9d26ae1e606c6291e8beb61ef0d7fcc8", metadata["commit"])
-        self.assertEqual(8, len(metadata["contracts"]))
-        self.assertEqual(9, len(catalog.resources))
+        self.assertEqual(10, len(metadata["contracts"]))
+        self.assertEqual(11, len(catalog.resources))
         for item in metadata["resources"]:
             doc = etree.fromstring(catalog.resources[item["uri"]])
             actual = []

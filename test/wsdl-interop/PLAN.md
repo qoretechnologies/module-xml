@@ -507,6 +507,11 @@ Increments:
      limits, timeouts and cancellation. Messages to non-anonymous destinations are HTTP requests (R1202-R1204).
 7. P9a-07 - live CXF interop with `WSAddressingFeature` and policy-annotated WSDL: anonymous and decoupled
    responses, SOAP 1.1 and 1.2, in both directions.
+   - The same exchanges also run over HTTP/1.1, HTTP/2 and HTTP/3 between the module's own clients and handlers.
+     CXF 4.1.3 has no HTTP/3 transport, and its HTTP/2 transport needs Jetty artifacts that are not pinned.
+   - Done except CXF clients with decoupled responses. CXF drops a reply that arrives before the 202, so that
+     direction waits for a Qore HttpServer callback that runs after the response has been sent
+     (`/tmp/qore-http-after-send-hook.md`, approved 2026-09-24).
 8. P9a-08 - revalidate the 49 rows against the pinned text and map them to tests; update the documentation,
    release notes and a durable design document; P9a acceptance. A row may be reclassified only with
    specification-based evidence.

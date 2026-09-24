@@ -1,0 +1,234 @@
+#!/usr/bin/env qore
+# -*- mode: qore; indent-tabs-mode: nil -*-
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires xml
+%requires HttpServer
+%requires ../qlib/WSDL.qm
+%requires ../qlib/SoapHandler.qm
+%requires ../qlib/SoapClient.qm
+%requires ../qlib/SoapClientIo
+
+%exec-class SoapAddressingTransportsTest
+
+# the HTTP protocol of a request
+string sub protocol(hash<auto> cx) {
+    return cx."header-info".http3 ? "h3" : cx."header-info".http2 ? "h2" : "h1";
+}
+
+# a reply handler recording the protocol each reply arrives with
+class RecordingReplyHandler inherits SoapReplyHandler {
+    private {
+        Queue protocols;
+    }
+
+    constructor(WsaReplyReceiver receiver, Queue protocols) : SoapReplyHandler(receiver) {
+        self.protocols = protocols;
+    }
+
+    hash<HttpResponseInfo> handleRequest(hash<auto> cx, hash<auto> hdr, *data body) {
+        protocols.push(protocol(cx));
+        return SoapReplyHandler::handleRequest(cx, hdr, body);
+    }
+}
+
+# WS-Addressing over HTTP/1.1, HTTP/2 and HTTP/3: anonymous replies and faults on the HTTP response, and replies and
+# faults sent to a non-anonymous response endpoint, with SoapClient, SoapClientIo, SoapHandler and SoapReplyHandler on
+# TLS listeners that offer all three protocols. The contract is CXF's pinned add_numbers.wsdl.
+public class SoapAddressingTransportsTest inherits QUnit::Test {
+    private {
+        const PortType = "http://apache.org/cxf/systest/ws/addr_feature/AddNumbersPortType/";
+        # SoapClient http_version and SoapClientIo http_protocol values for each protocol
+        const Protocols = (
+            {"name": "h1", "http_version": "1.1"},
+            {"name": "h2", "http_version": "2.0"},
+            {"name": "h3", "http_version": "3.0"},
+        );
+
+        WebService ws;
+        HttpServer http;
+        SoapHandler handler;
+        int port;
+        # the protocols of the requests that the operation callbacks received
+        Queue calls();
+    }
+
+    constructor() : Test("SoapAddressingTransportsTest", "1.0") {
+        ws = new WebService(ReadOnlyFile::readTextFile(get_script_dir() + "/wsdl-interop/cxf/add_numbers.wsdl"));
+        handler = new SoapHandler(new PermissiveAuthenticator());
+        foreach hash<auto> row in ({"binding": "AddNumbersBinding", "path": "add"},
+                {"binding": "AddNumbersBindingNonAnon", "path": "addNonAnon"}) {
+            handler.addMethod(ws, ws.getOperation("addNumbers"), \addNumbers(), NOTHING, NOTHING, NOTHING, NOTHING,
+                NOTHING, row.path, row.binding);
+        }
+        http = server(\port);
+        http.setDefaultHandler("soap", handler);
+        on_exit http.stop();
+
+        addTestCase("anonymous replies and faults", \anonymous());
+        addTestCase("replies and faults to a non-anonymous endpoint", \decoupled());
+        addTestCase("WS-Addressing faults", \addressingFaults());
+        addTestCase("TLS and delivery options", \options());
+        set_return_value(main());
+    }
+
+    # a TLS listener offering HTTP/1.1, HTTP/2 and HTTP/3
+    static HttpServer server(reference<int> port) {
+        HttpServer server();
+        server.waitForAsyncIo();
+        string dir = get_script_dir() + "/certs/";
+        port = server.addListener(<HttpListenerOptionInfo>{
+            "service": 0,
+            "cert": new SSLCertificate(ReadOnlyFile::readTextFile(dir + "localhost-cert.pem")),
+            "key": new SSLPrivateKey(ReadOnlyFile::readTextFile(dir + "localhost-key.pem")),
+            "enable_h3": True,
+        }).port;
+        server.waitForAsyncIo();
+        return server;
+    }
+
+    hash<auto> addNumbers(hash<auto> cx, hash<auto> value) {
+        calls.push(protocol(cx));
+        if (value.number1 < 0) {
+            throw "addNumbersFault", "negative number", {"detail": "negative", "message": "negative numbers"};
+        }
+        return {"return": value.number1 + value.number2};
+    }
+
+    static bool local(hash<auto> cx, hash<WsaEndpointReference> endpoint) {
+        return endpoint.address =~ /^https:\/\/127\.0\.0\.1:/;
+    }
+
+    # a client for the given protocol
+    object newClient(string kind, hash<auto> protocol, string port_name, *WsaReplyReceiver receiver) {
+        string url = sprintf("https://127.0.0.1:%d/%s", port, port_name == "AddNumbersPort" ? "add" : "addNonAnon");
+        hash<auto> options = {"wsdl": ws, "service": "AddNumbersService", "port": port_name, "url": url,
+            "timeout": 20000, "connect_timeout": 15000, "addressing": True, "reply_receiver": receiver};
+        return kind == "SoapClient"
+            ? new SoapClient(options + {"http_version": protocol.http_version})
+            : new SoapClientIo(options + {"http_protocol": protocol.name, "accept_all_certs": True});
+    }
+
+    # a SoapClientIo client for the given protocol with the given TLS options
+    SoapClientIo tlsClient(hash<auto> protocol, hash<auto> tls) {
+        return new SoapClientIo({"wsdl": ws, "service": "AddNumbersService", "port": "AddNumbersPort",
+            "url": sprintf("https://127.0.0.1:%d/add", port), "timeout": 20000, "connect_timeout": 15000,
+            "addressing": True, "http_protocol": protocol.name} + tls);
+    }
+
+    static close(object client) {
+        if (client instanceof SoapClientIo) {
+            cast<SoapClientIo>(client).close();
+        }
+    }
+
+    anonymous() {
+        foreach hash<auto> protocol in (Protocols) {
+            foreach string kind in ("SoapClient", "SoapClientIo") {
+                object client = newClient(kind, protocol, "AddNumbersPort");
+                on_exit close(client);
+                hash<auto> info;
+                assertEq({"return": 3}, client.callOperation("addNumbers", {"number1": 1, "number2": 2}, NOTHING,
+                    \info), kind + " " + protocol.name);
+                assertEq(protocol.name, calls.get(10000));
+                assertEq(PortType + "addNumbersResponse", info.addressing.response.action);
+                assertEq(info.addressing.request.message_id, info.addressing.response.relates_to[0].message_id);
+                info = {};
+                assertThrows("SOAP-SERVER-FAULT-RESPONSE", \client.callOperation(), ("addNumbers",
+                    {"number1": -1, "number2": 2}, NOTHING, \info));
+                assertEq(protocol.name, calls.get(10000));
+                assertEq(PortType + "addNumbers/Fault/addNumbersFault", info.addressing.response.action);
+            }
+        }
+    }
+
+    decoupled() {
+        Queue deliveries();
+        int reply_port;
+        HttpServer reply_http = server(\reply_port);
+        on_exit reply_http.stop();
+        WsaReplyReceiver receiver(<WsaEndpointReference>{"address": sprintf("https://127.0.0.1:%d/replies",
+            reply_port)});
+        reply_http.setDefaultHandler("replies", new RecordingReplyHandler(receiver, deliveries));
+        foreach hash<auto> protocol in (Protocols) {
+            # replies and faults are delivered with the protocol under test
+            handler.setResponseEndpointAuthorizer(\SoapAddressingTransportsTest::local(), 15s,
+                {"http_version": protocol.http_version, "ssl_verify_cert": False});
+            foreach string kind in ("SoapClient", "SoapClientIo") {
+                object client = newClient(kind, protocol, "AddNumbersNonAnonPort", receiver);
+                on_exit close(client);
+                hash<auto> info;
+                assertEq({"return": 7}, client.callOperation("addNumbers", {"number1": 3, "number2": 4}, NOTHING,
+                    \info), kind + " " + protocol.name);
+                assertEq(protocol.name, calls.get(10000));
+                assertEq(protocol.name, deliveries.get(10000));
+                # the back channel only acknowledges the request
+                assertEq(202, kind == "SoapClient" ? info."response-headers".status_code : info."response-code");
+                assertEq(receiver.getEndpointReference().address, info.addressing.response.to);
+                info = {};
+                assertThrows("SOAP-SERVER-FAULT-RESPONSE", \client.callOperation(), ("addNumbers",
+                    {"number1": -1, "number2": 2}, NOTHING, \info));
+                assertEq(protocol.name, calls.get(10000));
+                assertEq(protocol.name, deliveries.get(10000));
+                assertEq(PortType + "addNumbers/Fault/addNumbersFault", info.addressing.response.action);
+            }
+        }
+        handler.setResponseEndpointAuthorizer();
+    }
+
+    addressingFaults() {
+        # without an authorizer, a non-anonymous reply endpoint is refused with a WS-Addressing fault
+        Queue deliveries();
+        int reply_port;
+        HttpServer reply_http = server(\reply_port);
+        on_exit reply_http.stop();
+        WsaReplyReceiver receiver(<WsaEndpointReference>{"address": sprintf("https://127.0.0.1:%d/replies",
+            reply_port)});
+        reply_http.setDefaultHandler("replies", new RecordingReplyHandler(receiver, deliveries));
+        handler.setResponseEndpointAuthorizer();
+        foreach hash<auto> protocol in (Protocols) {
+            foreach string kind in ("SoapClient", "SoapClientIo") {
+                object client = newClient(kind, protocol, "AddNumbersNonAnonPort", receiver);
+                on_exit close(client);
+                hash<auto> info;
+                assertThrows("SOAP-SERVER-FAULT-RESPONSE", "OnlyAnonymousAddressSupported|not an approved",
+                    \client.callOperation(), ("addNumbers", {"number1": 1, "number2": 2}, NOTHING, \info),
+                    kind + " " + protocol.name);
+                assertEq(WSA_FAULT_ACTION, info.addressing.response.action);
+            }
+        }
+        assertEq(0, calls.size());
+        assertEq(0, deliveries.size());
+    }
+
+    options() {
+        foreach hash<auto> protocol in (Protocols) {
+            # the listener's self-signed certificate fails verification
+            SoapClientIo client = tlsClient(protocol, {"ssl_verify_mode": SSL_VERIFY_PEER});
+            on_exit client.close();
+            assertThrows("HTTPCLIENT-CONNECT-ERROR", "certificate verify failed", \client.callOperation(),
+                ("addNumbers", {"number1": 1, "number2": 2}), protocol.name);
+            # accept_all_certs takes precedence over the verification mode
+            SoapClientIo accepting = tlsClient(protocol, {"ssl_verify_mode": SSL_VERIFY_PEER,
+                "accept_all_certs": True});
+            on_exit accepting.close();
+            assertEq({"return": 3}, accepting.callOperation("addNumbers", {"number1": 1, "number2": 2}),
+                protocol.name);
+            assertEq(protocol.name, calls.get(10000));
+        }
+        assertEq(0, calls.size());
+        # invalid option types
+        assertThrows("SOAP-CLIENT-IO-ERROR", "accept_all_certs option must be a bool", \tlsClient(),
+            (Protocols[0], {"accept_all_certs": "true"}));
+        assertThrows("SOAP-CLIENT-IO-ERROR", "ssl_verify_mode option must be an int", \tlsClient(),
+            (Protocols[0], {"ssl_verify_mode": "1"}));
+        # the handler sets the delivery URL and timeouts itself
+        foreach string option in ("url", "timeout", "connect_timeout") {
+            assertThrows("SOAP-HANDLER-ERROR", option + " option of a delivery",
+                \handler.setResponseEndpointAuthorizer(), (\SoapAddressingTransportsTest::local(), 15s, {option: 1}));
+        }
+    }
+}

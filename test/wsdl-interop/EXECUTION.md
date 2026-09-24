@@ -11355,3 +11355,75 @@ requests failed with `HTTP1-CONNECTION-CLOSED`. This is handed off in `/tmp/qore
 module test uses one connection per request. The Qore develop pipeline for `1c0eafdd2` (57488) failed in
 `dgc-scan-avoidance.qtest` (`registry-cycle-unregister-walked` 5151 against 5050, in the IR and AOT modes), so the
 module-xml CI image may not yet contain the new HttpServerUtil. This commit needs it.
+
+## P9a-07: Live WS-Addressing interop and HTTP/2 and HTTP/3
+
+**Contracts.** CXF's unmodified `add_numbers.wsdl` and `add_numbers_soap12.wsdl` are pinned from CXF commit
+`5b660b5f` (`systests/ws-specs`) in `cxf/catalog.json` as resources and contracts, and `test_independent.py`
+counts them. Each has three ports:
+- `AddNumbersPort` requires WS-Addressing.
+- `AddNumbersOnlyAnonPort` allows only anonymous responses.
+- `AddNumbersNonAnonPort` allows only non-anonymous responses.
+
+`addNumbers3` declares the relative actions `3in`, `3out` and `3fault`.
+
+**Relative explicit actions.** `wsam:Action` is an `xs:anyURI` (Metadata section 4.4.1), so a relative value is a
+valid description. The `[action]` it supplies must be an absolute IRI (Core section 3.1). The WSDL module now
+keeps such actions and rejects WS-Addressing messages that use them:
+- `WSA-SERIALIZATION-ERROR` when sending;
+- `wsa:InvalidAddressingHeader` when receiving.
+
+It no longer rejects the description itself.
+
+**Peer.** `addressing-peer/` holds `AddressingPeer.java` (CXF `WSAddressingFeature`) and `qore-peer.qr`.
+`test_ws_addressing.py`:
+- verifies the pinned contracts and jars;
+- generates and compiles one peer for each contract;
+- runs 12 Qore-client exchanges against CXF servers (3 ports × `SoapClient`/`SoapClientIo` × SOAP 1.1/1.2), with
+  replies for the non-anonymous port delivered to a `SoapReplyHandler`;
+- runs 4 CXF-client exchanges against `SoapHandler` (2 anonymous ports × SOAP 1.1/1.2).
+
+Each side checks actions, message IDs, reply relationships and declared fault actions. Every run must finish
+without diagnostics.
+
+**Found:**
+- CXF replaces a message ID supplied by the application, so the CXF client records the properties it sent with an
+  outbound interceptor.
+- CXF reports SOAP 1.2 Sender faults with HTTP 400 as transport errors unless
+  `org.apache.cxf.transport.process_fault_on_http_400` is set. The 400 is correct per the SOAP 1.2 HTTP binding.
+- For `addNumbers3` over SOAP 1.2, CXF sends the relative action as the `action` parameter. SoapHandler rejected
+  it before reading the WS-Addressing headers, so the fault had no relationship and CXF logged a warning. The
+  handler now:
+  - defers an invalid SOAP action until the headers have been parsed;
+  - relates WS-Addressing faults about unreadable headers to a message ID that can still be read, using the new
+    `WsAddressingHelper::relatedMessageId()`.
+- CXF clients with a decoupled endpoint drop a reply that arrives before the 202. This was confirmed by delaying
+  delivery in an experiment, which was then reverted. SoapHandler delivers before returning the 202 and cannot
+  order work after its response. The user chose a core HttpServer after-send callback
+  (`/tmp/qore-http-after-send-hook.md`). Until it lands, CXF clients do not call `AddNumbersNonAnonPort`.
+
+**HTTP/2 and HTTP/3.** `test/soap-addressing-transports.qtest` has 4 cases and 125 assertions. It runs on TLS
+listeners that offer HTTP/1.1, HTTP/2 and HTTP/3 (a self-signed localhost certificate in `test/certs/`, valid
+until 2126), and covers:
+- anonymous replies and faults, with `SoapClient` (`http_version`) and `SoapClientIo` (`http_protocol`);
+- replies and faults delivered to a `SoapReplyHandler` with the protocol under test, with both sides checking the
+  protocol they received;
+- refused non-anonymous endpoints over each protocol;
+- TLS verification.
+
+For this, `SoapClientIo` gains `accept_all_certs` and `ssl_verify_mode`, and
+`SoapHandler::setResponseEndpointAuthorizer()` gains `http_options` for deliveries. The handler refuses `url`,
+`timeout` and `connect_timeout` there, because it sets them. CXF interop stays on HTTP/1.1: CXF 4.1.3 has no
+HTTP/3 transport, and its HTTP/2 transport needs Jetty artifacts that are not pinned.
+
+**Tests:**
+- `soap-addressing-handler.qtest` gains related faults for invalid headers and for an invalid SOAP 1.2 action
+  (7 cases, 155 assertions).
+- `soap-addressing-messages.qtest` gains the `relatedMessageId()` cases (10 cases, 347 assertions).
+- `soap-addressing-metadata.qtest` covers relative explicit actions.
+
+**Full suite:** all 290 qtests pass. The Python suite has 498 tests with 4 failures in `test_ieee_conversion.py`
+and `test_ieee_scalars.py`. They come from a libqore regression in the installed build: NaN-boxed finite doubles
+from about -2.18e307 to -8.71e307 collide with the short-string and opaque-reference tags, so `-2^1022` decodes as
+NOTHING, even in plain Qore. The module is not at fault. The regression is handed off in
+`/tmp/qore-nanbox-double-tag-collision.md`.

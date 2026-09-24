@@ -118,6 +118,12 @@ public class SoapClientIo {
         #! the maximum response body size in bytes, as received and decoded; 0 for no limit
         int max_response_body_size = 0;
 
+        #! accept any server certificate; for test and development servers only
+        bool accept_all_certs = False;
+
+        #! the TLS certificate verification mode, or NOTHING for the connection manager's default
+        *int ssl_verify_mode;
+
         #! default headers sent with every request
         hash<auto> headers = Headers;
 
@@ -153,6 +159,10 @@ public class SoapClientIo {
         - \c connect_timeout: connection timeout in milliseconds (default: 45000)
         - \c timeout: transfer timeout in milliseconds (default: 45000)
         - \c http_protocol: HTTP protocol to use (\c "auto", \c "h1", \c "h2", \c "h3"; default: \c "auto")
+        - \c accept_all_certs: @ref Qore::True "True" to accept any TLS server certificate, for test and
+          development servers only (default: @ref Qore::False "False")
+        - \c ssl_verify_mode: a TLS certificate verification mode, such as @ref Qore::SSL_VERIFY_PEER
+          "SSL_VERIFY_PEER"; by default the connection manager's
         - \c max_response_body_size: the maximum size in bytes of a response body, as received and after its
           content encoding is decoded; a larger body, such as a small compressed body that expands to a huge size,
           fails the call with \c HTTP-CLIENT-RESPONSE-BODY-TOO-LARGE as soon as the limit is exceeded (default: 0,
@@ -260,6 +270,20 @@ SoapClientIo client({"wsdl": service, "url": "https://example.org/services/v1"})
         connect_timeout = h.connect_timeout ?? DefaultConnectTimeout;
         io_timeout = h.timeout ?? DefaultTimeout;
         http_protocol = h.http_protocol ?? "auto";
+        if (exists h.accept_all_certs) {
+            if (h.accept_all_certs.typeCode() != NT_BOOLEAN) {
+                throw "SOAP-CLIENT-IO-ERROR", sprintf("the accept_all_certs option must be a bool; got %y",
+                    h.accept_all_certs.type());
+            }
+            accept_all_certs = h.accept_all_certs;
+        }
+        if (exists h.ssl_verify_mode) {
+            if (h.ssl_verify_mode.typeCode() != NT_INT) {
+                throw "SOAP-CLIENT-IO-ERROR", sprintf("the ssl_verify_mode option must be an int; got %y",
+                    h.ssl_verify_mode.type());
+            }
+            ssl_verify_mode = h.ssl_verify_mode;
+        }
         if (exists h.max_response_body_size) {
             if (h.max_response_body_size.typeCode() != NT_INT || h.max_response_body_size < 0) {
                 throw "SOAP-CLIENT-IO-ERROR", sprintf("the max_response_body_size option must be a non-negative int; "
@@ -673,6 +697,8 @@ auto result = client.getSoapResponse("echo", "/resource");
                 "request_timeout": io_timeout,
                 "protocol": http_protocol,
                 "max_response_body_size": max_response_body_size,
+                "accept_all_certs": accept_all_certs,
+                "ssl_verify_mode": ssl_verify_mode,
             });
     }
     #! @endcond
