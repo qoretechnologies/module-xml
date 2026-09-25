@@ -11774,3 +11774,36 @@ text split differently between prefix and URI), more bindings than the memo keep
 attributes of elements without attributes. The same test passes against the P9b-01 module.
 
 Audit: `audits/P9b-02-decoding.md`.
+
+## P9c-02: findings of the first Python CI run on Ubuntu and Alpine (2026-09-25)
+
+The first pipeline running the Python suite (57579) failed on both distributions, although the same commit passes
+all 523 tests locally. The CI images were reproduced locally with podman.
+
+**musl rounds negative subnormal ties incorrectly (module fix).** `convert_xsd_float()` converts decimal text
+with `strtof`/`strtod` through `std::istringstream`. Run over all 1,248 lexicals of
+`test_ieee_conversion.py` and compared bit for bit with its exact reference, glibc has no mismatch, but musl has
+six, all negative values at or next to a subnormal rounding tie: it returns +0 for -2^-150 (binary32) and
+-2^-1075 (binary64), and rounds the adjacent ties toward zero, while it converts the same magnitudes correctly.
+Round-to-nearest-even is symmetric, so `src/XsdFloat.cpp` now converts the magnitude and applies the lexical sign;
+this also gives -0 for a negative value that rounds to zero. `test/xsd-float.qtest` checks the six values with
+their exactly derived results, and their magnitudes, on every platform. In the Alpine image, `xsd-float.qtest`,
+`test_ieee_conversion.py` and `test_ieee_scalars.py` then pass. Valgrind reports no definite leak; its one error
+is Qore's known uninitialised-read report, which a QUnit test that does not load this module reproduces
+(`/tmp/qore-valgrind-uninit-string-tail.md`).
+
+**The duplex test peer lost pipelined requests (test fix).** On Alpine, `test_soap_duplex.py` failed with
+"unexpected extra request bytes". The bytes were the client's next `POST` on the keep-alive connection: a client
+that has received the whole response may send its next request as soon as it has finished the current body, so
+one read can return both. The peer now keeps the bytes after `Content-Length` as the start of the next request.
+It also joined no handler threads (daemon threads), so a handler still draining the last request could record its
+exchange after the test had read the records; closing the server now joins every handler.
+
+**libxml2 oracle versions (open).** `lxml` is the suite's second independent validator. Its adjudicated
+disagreements belong to libxml2 2.12.10, but the distributions' `python3-lxml` 6.0.2 uses libxml2 2.13.9
+(Alpine) and 2.15.2 (Ubuntu), which differ: they validate 100-digit integers correctly
+(`test_integer_range.py`, the strict coverage gate), accept `-0` as `xs:unsignedInt` (`test_survey.py`), and
+2.15.2 accepts `xs:Name` and QName local-name documents that the pinned Xerces and the XML 1.0 Second Edition
+character tables reject (`test_builtin_list_values.py`, `test_qname_lexical.py`; cause not yet adjudicated). Unlike Xerces, this oracle is not pinned.
+
+Audit: `audits/P9c-02-ci-portability.md`.

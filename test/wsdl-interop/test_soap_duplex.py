@@ -98,8 +98,8 @@ HELD = [exchange.step for connection in script() for exchange in connection
         if exchange.behavior == 'hold']
 
 
-def read_headers(sock):
-    data = b''
+def read_headers(sock, data=b''):
+    """Reads a request's headers, starting with bytes already received after the previous request."""
     while b'\r\n\r\n' not in data:
         chunk = sock.recv(65536)
         if not chunk:
@@ -116,14 +116,17 @@ def read_headers(sock):
 
 
 def drain(sock, length, body):
+    """Returns the request body and the bytes received after it.
+
+    A client that has received the whole response may send its next request on a persistent connection as soon as
+    it has finished this one, so a read can return the end of this body together with the start of the next request.
+    """
     while len(body) < length:
         chunk = sock.recv(262144)
         if not chunk:
             raise EOFError('incomplete request body')
         body += chunk
-    if len(body) != length:
-        raise ValueError('unexpected extra request bytes')
-    return body
+    return body[:length], body[length:]
 
 
 @contextlib.contextmanager
@@ -175,8 +178,11 @@ def duplex_peer(version, connections, observed, requests, errors, releases, capt
             try:
                 self.request.settimeout(120)
                 index, connection_script = assignments.pop(self.request)
+                # bytes of the next request received while draining the previous one
+                following = b''
                 for position, exchange in enumerate(connection_script):
-                    length, body = read_headers(self.request)
+                    length, body = read_headers(self.request, following)
+                    following = b''
                     # Records are queued when a handler finishes, and a draining handler can outlive
                     # the client call it answered, so each record carries its accept order.
                     record = {'step': exchange.step, 'length': length, 'behavior': exchange.behavior,
@@ -201,7 +207,7 @@ def duplex_peer(version, connections, observed, requests, errors, releases, capt
                     record['before'] = len(body)
                     record['sent'] = len(reply)
                     if exchange.behavior in DRAINING:
-                        body = drain(self.request, length, body)
+                        body, following = drain(self.request, length, body)
                         record['drained'] = len(body)
                         if capture:
                             requests.put(body)
@@ -216,7 +222,11 @@ def duplex_peer(version, connections, observed, requests, errors, releases, capt
                 errors.put(error)
 
     class Server(socketserver.ThreadingTCPServer):
-        daemon_threads = True
+        # A handler records its exchange after draining the request, which can finish after the client call it
+        # answered; closing the server joins every handler, so all records exist before they are read. Handlers
+        # are bounded by their socket timeout and the release deadline.
+        daemon_threads = False
+        block_on_close = True
         allow_reuse_address = True
 
         def server_bind(self):

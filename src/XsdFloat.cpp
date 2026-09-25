@@ -117,12 +117,9 @@ bool validateLexical(const QoreString& text, size_t& start, size_t& end, Excepti
         || state == State::ExponentDigits || state == State::Trailing);
 }
 
+// Converts an unsigned decimal lexical in the caller's IEEE environment.
 template<typename Float>
-double parseFinite(const QoreString& text, size_t start, size_t end, ExceptionSink* xsink) {
-    XsdFloatEnvironment environment(xsink);
-    if (*xsink) {
-        return 0.0;
-    }
+double parseMagnitude(const QoreString& text, size_t start, size_t end, ExceptionSink* xsink) {
     std::istringstream input(std::string(text.c_str() + start, end - start));
     input.imbue(std::locale::classic());
     Float result = 0;
@@ -139,7 +136,7 @@ double parseFinite(const QoreString& text, size_t start, size_t end, ExceptionSi
         // XSD's nearest-value mapping includes infinities. Underflow results
         // (zero or subnormal) already have their correctly rounded value.
         if (std::isinf(result) || std::fabs(result) == std::numeric_limits<Float>::max()) {
-            return std::copysign(std::numeric_limits<double>::infinity(), result);
+            return std::numeric_limits<double>::infinity();
         }
         if (result != 0 && std::fpclassify(result) != FP_SUBNORMAL) {
             xsink->raiseException("XSD-FLOAT-CONVERSION-ERROR", "IEEE decimal conversion failed");
@@ -147,6 +144,28 @@ double parseFinite(const QoreString& text, size_t start, size_t end, ExceptionSi
         }
     }
     return result;
+}
+
+// Round-to-nearest-even is symmetric, so the magnitude is converted and the lexical sign applied afterwards. Some C
+// libraries round negative values near subnormal ties incorrectly: musl returns +0 for -2^-150 and -2^-149 for
+// -1.5 * 2^-149 in binary32, and similar results in binary64, while converting the same magnitudes correctly.
+template<typename Float>
+double parseFinite(const QoreString& text, size_t start, size_t end, ExceptionSink* xsink) {
+    XsdFloatEnvironment environment(xsink);
+    if (*xsink) {
+        return 0.0;
+    }
+    assert(start < end);
+    const bool negative = text.c_str()[start] == '-';
+    if (negative || text.c_str()[start] == '+') {
+        ++start;
+    }
+    double magnitude = parseMagnitude<Float>(text, start, end, xsink);
+    if (*xsink) {
+        return 0.0;
+    }
+    // negation also gives -0 for a negative value that rounds to zero
+    return negative ? -magnitude : magnitude;
 }
 
 // Interpret an ordered positive binary32 index exactly in binary64. At the
