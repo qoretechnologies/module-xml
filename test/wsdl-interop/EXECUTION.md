@@ -11607,3 +11607,47 @@ complex-typed or element parts first. The check still rejects members in a forei
 
 The SOAP 1.2 encoding, RPC, collection and fault suites pass, as do the SOAP 1.1 Note examples and the encoded
 array and reference suites.
+
+## P9b: deterministic performance benchmark (2026-09-25)
+
+`test/wsdl-interop/benchmark/` tracks performance with pinned workloads and a recorded reference instead of test
+timeouts:
+- **Workloads:**
+  - the 384-row list-values manifest captured during the 2026-09-21 triage, with its 193 WSDLs, as a
+    reproducible 8.7 KB archive;
+  - `binding-styles.wsdl`: a 50-item order for document/literal, RPC/literal and RPC/encoded, each for SOAP 1.1
+    and 1.2.
+- **`bench.qr`:** times the plan's phases and digests every output.
+  - list-values: WSDL construction, Serializable copy, provider construction, value conversion, serialization,
+    sample generation;
+  - binding styles: client and server envelope processing, serialization and decoding.
+- **`benchmark.py`:** runs the Release build five times and compares the median of each phase with
+  `reference.json`. A phase more than 25% slower is a regression finding, and changed output is a failure. It
+  records the environment and the load average, and refuses to record a reference on a busy machine.
+- **`test_benchmark.py`:** the suite gate, with no timing assertions. It checks:
+  - the pinned inputs;
+  - byte-identical outputs for every binding style and 12 representative list-values items;
+  - the comparison rules;
+  - the Release requirement.
+
+**Reference:** recorded at `96d861e` on an AMD Ryzen 9 5950X with a Release build. `module_xml_dirty` is set only
+because PLAN.md had an uncommitted status note. The machine is shared: the load average was 6.6 for binding styles
+and 13.4 by the end of list-values, and it is recorded with each workload.
+
+| Workload | Median total | Largest phases |
+| --- | --- | --- |
+| list-values (13,760 outputs) | 92.2 s | sample 25.0 s, serialization 22.8 s, conversion 12.9 s, copy 10.5 s |
+| binding-styles (20 iterations × 6 styles) | 76.8 s | request-decode 40.1 s, request 30.2 s |
+
+**Findings:**
+- **SOAP order messages are expensive:** serializing one 50-item order takes about 250 ms and decoding it about
+  335 ms, 5 to 7 ms per line item, in every binding style. That dominates the binding-style workload and is the
+  first P9b optimization target.
+- **The build type matters little:** Release and Debug differ by under 10% on these workloads, because the time is
+  spent in WSDL.qm's Qore code, not in the xml module's C++.
+- **Comparable history:** the list-values times of 25.9 s (2026-09-09) and 79.7 s (2026-09-22) were measured with
+  the Debug worker under `--enable-debug`, so they are not comparable with this reference.
+
+**Also:** three module-xml test processes from a 2026-09-23 suite run had been spinning for two days in a replaced
+libqore (Qore reinstalled mid-run) and distorted the first recording. They were stopped, and the reference was
+recorded again.

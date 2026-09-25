@@ -1,0 +1,185 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+# P9b benchmark driver: runs a pinned workload once and prints one JSON line with the time of each phase in
+# nanoseconds and SHA-256 digests of every output, so a run can be compared with a recorded reference both for cost
+# and for byte-identical output.
+#
+# usage: bench.qr list-values DIR [ITEM...]
+#        bench.qr binding-styles WSDL [ITERATIONS]
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../../../qlib"
+%requires xml
+%requires ../../../qlib/WSDL.qm
+%try-module json
+%define NoJson
+%endtry
+
+%ifdef NoJson
+throw "MISSING-MODULE", "the benchmark requires the json module";
+%else
+# the accumulated time of each phase in nanoseconds
+hash<string, int> phases;
+
+# runs a phase and adds its time
+auto sub timed(string phase, code body) {
+    int start = clock_getnanos();
+    on_exit phases{phase} += clock_getnanos() - start;
+    return body();
+}
+
+# the list-values worker's phases over its pinned manifest (see test_list_values.py and sized-facet-consumers.qr)
+hash<auto> sub list_values(string dir, *list<string> selected) {
+    list<auto> manifest = parse_json(ReadOnlyFile::readTextFile(dir + DirSep + "manifest.json"));
+    if (selected) {
+        hash<string, bool> wanted = map {$1: True}, selected;
+        manifest = select manifest, wanted{$1.name};
+    }
+    hash<string, string> digests();
+    int rows = 0;
+    foreach hash<auto> item in (manifest) {
+        string wsdl = ReadOnlyFile::readTextFile(dir + DirSep + item.wsdl);
+        list<string> output();
+        WebService original = timed("construction", auto sub () {
+            return new WebService(wsdl, {"async_only": True});
+        });
+        WebService copy_ws = timed("copy", auto sub () {
+            return Serializable::deserialize(original.serialize());
+        });
+        int copy = 0;
+        foreach WebService ws in (original, copy_ws) {
+            WSOperation op = ws.getBindingOperation(item.binding, "submit");
+            foreach bool response in (False, True) {
+                WSMessage message = response ? op.output : op.input;
+                hash<ArgInfo> part = message.args.firstValue();
+                XsdElement element = part.element;
+                AbstractDataProviderType provider = timed("provider", auto sub () {
+                    return Serializable::deserialize((item.message_provider ? message.getDataProviderType()
+                        : element.getDataProviderType()).serialize());
+                });
+                int index = 0;
+                foreach hash<auto> variant in (item.values) {
+                    auto value = variant.native == "hex" ? parse_hex_string(variant.value) : variant.value;
+                    if (item.model == "record") {
+                        value = {"^value^": value, "^attributes^": {"choice": value}};
+                    } else if (item.model == "repeated") {
+                        list<auto> occurrences();
+                        for (int i = 0; i < variant.count; ++i) {
+                            push occurrences, value;
+                        }
+                        value = {"item": occurrences};
+                    }
+                    hash<auto> row = {"name": item.name, "copy": copy, "direction": response ? "response" : "request",
+                        "index": index};
+                    try {
+                        auto converted = timed("conversion", auto sub () {
+                            return provider.acceptsValue(item.message_provider ? {part.name: value} : value);
+                        });
+                        hash<auto> argument = {element.name: item.message_provider ? converted{part.name} : converted};
+                        hash<auto> wire = timed("serialization", auto sub () {
+                            return response
+                                ? op.serializeResponse(argument, NOTHING, NOTHING, NOTHING, NOTHING, NOTHING,
+                                    item.binding)
+                                : op.serializeRequest(argument, NOTHING, NOTHING, NOTHING, NOTHING, NOTHING,
+                                    item.binding);
+                        });
+                        row.body = wire.body;
+                    } catch (hash<ExceptionInfo> ex) {
+                        row.err = ex.err;
+                        row.desc = ex.desc;
+                    }
+                    push output, make_json(row);
+                    ++index;
+                }
+                hash<auto> row = {"name": item.name, "copy": copy, "direction": response ? "response" : "request",
+                    "index": "example"};
+                try {
+                    hash<auto> example = timed("sample", auto sub () {
+                        hash<auto> sample = new WSMessageHelper(ws).getMessage(message);
+                        return response
+                            ? op.serializeResponse(sample, NOTHING, NOTHING, NOTHING, NOTHING, NOTHING, item.binding)
+                            : op.serializeRequest(sample, NOTHING, NOTHING, NOTHING, NOTHING, NOTHING, item.binding);
+                    });
+                    row.body = example.body;
+                } catch (hash<ExceptionInfo> ex) {
+                    row.err = ex.err;
+                    row.desc = ex.desc;
+                }
+                push output, make_json(row);
+            }
+            ++copy;
+        }
+        rows += output.size();
+        digests{item.name} = SHA256(output.join("\n"));
+    }
+    return {"items": digests, "rows": rows};
+}
+
+# one order message per binding style, round-tripped through client and server processing
+hash<auto> sub binding_styles(string path, int iterations) {
+    string wsdl = ReadOnlyFile::readTextFile(path);
+    list<hash<auto>> items();
+    for (int i = 1; i <= 50; ++i) {
+        push items, {"sku": sprintf("SKU-%04d", i), "quantity": i % 7 + 1, "price": i * 1.25n};
+    }
+    hash<auto> order = {"id": 4711, "customer": "ACME Industrial", "placed": 2026-09-25T10:00:00Z, "item": items,
+        "notes": "deliver to the loading dock"};
+    hash<auto> receipt = {"id": 4711, "total": 1593.75n, "accepted": True};
+    hash<string, string> digests();
+    int rows = 0;
+    for (int iteration = 0; iteration < iterations; ++iteration) {
+        WebService original = timed("construction", auto sub () { return new WebService(wsdl); });
+        WebService ws = timed("copy", auto sub () { return Serializable::deserialize(original.serialize()); });
+        SoapProcessingNode node();
+        foreach string binding in ("DocLiteral11", "DocLiteral12", "RpcLiteral11", "RpcLiteral12", "RpcEncoded11",
+                "RpcEncoded12") {
+            WSOperation op = ws.getBindingOperation(binding, "submit");
+            bool doc = binding =~ /^Doc/;
+            hash<auto> request = timed("request", auto sub () {
+                return op.serializeRequest(doc ? {"body": order} : {"order": order}, NOTHING, NOTHING, NOTHING,
+                    NOTHING, NOTHING, binding);
+            });
+            timed("envelope", auto sub () { return node.processMessage(request.body); });
+            auto decoded = timed("request-decode", auto sub () {
+                hash<auto> msg = WSDLLib::parseMultiPartSOAPMessage({"content-type": request.hdr."Content-Type",
+                    "body": request.body}, False, True);
+                return op.deserializeRequest(WSDLLib::parseSOAPMessage(msg, False, True), binding);
+            });
+            hash<auto> response = timed("response", auto sub () {
+                return op.serializeResponse(doc ? {"body": receipt} : {"receipt": receipt}, NOTHING, NOTHING,
+                    NOTHING, NOTHING, NOTHING, binding);
+            });
+            auto result = timed("response-decode", auto sub () {
+                hash<auto> msg = WSDLLib::parseMultiPartSOAPMessage({"content-type": response.hdr."Content-Type",
+                    "body": response.body}, False, True);
+                return op.deserializeResponse(WSDLLib::parseSOAPMessage(msg, False, True), binding);
+            });
+            if (!iteration) {
+                # every iteration produces the same output; the first one is recorded
+                digests{binding} = SHA256(sprintf("%s\n%y\n%s\n%y", request.body, decoded, response.body, result));
+                rows += 2;
+            }
+        }
+    }
+    return {"items": digests, "rows": rows};
+}
+
+if (ARGV.size() < 2) {
+    throw "USAGE", "bench.qr list-values DIR [ITEM...] | bench.qr binding-styles WSDL [ITERATIONS]";
+}
+hash<auto> result;
+int start = clock_getnanos();
+switch (ARGV[0]) {
+    case "list-values":
+        result = list_values(ARGV[1], ARGV.size() > 2 ? ARGV[2..] : NOTHING);
+        break;
+    case "binding-styles":
+        result = binding_styles(ARGV[1], ARGV.size() > 2 ? int(ARGV[2]) : 1);
+        break;
+    default:
+        throw "USAGE", sprintf("unknown workload %y", ARGV[0]);
+}
+result.total = clock_getnanos() - start;
+result.phases = phases;
+result.digest = SHA256((map sprintf("%s=%s", $1.key, $1.value), result.items.pairIterator()).join("\n"));
+printf("%s\n", make_json(result));
+%endif

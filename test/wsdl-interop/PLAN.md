@@ -437,6 +437,10 @@ must not mistake success on RPC/encoded tests for WS-I literal-profile conforman
   against 25.9 s on 2026-09-09, after P5-P7 validation work; see the performance triage in `EXECUTION.md`.
   A Qore-level sampling profiler based on `get_all_thread_call_stacks()` works since Qore `fb66fa989`. Its first
   profile of the worker is flat: no function has more than about 3.6% self time.
+  - **Implemented (P9b, 2026-09-25):** `benchmark/` holds the pinned workloads (the captured 384-row list-values
+    manifest and a binding-style order workload), the `bench.qr` driver, `benchmark.py`, and a Release reference,
+    `reference.json`. `test_benchmark.py` checks the pinned inputs, byte-identical outputs and the comparison
+    rules, without timing assertions. See [the benchmark README](benchmark/README.md).
 
 **Final acceptance:** zero unclassified findings or missing corpus dependencies; zero rejected valid
 inputs in supported scope; zero serialization failures or invalid outputs for those inputs; no value,
