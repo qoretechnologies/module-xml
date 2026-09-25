@@ -12076,3 +12076,31 @@ The two newly reported cases are not regressions: the Sep 12 report predates the
 0a6b919), which P5 acceptance introduced together with these documented losses.
 
 Audit: `audits/P9f-01-current-results.md`.
+
+## P9g-01: root cause of the deep QName AOT stack failure (2026-09-25)
+
+The 128-level case of `test/wsdl-qname-schema-output.qtest` still fails with `STACK-LIMIT-EXCEEDED` against the
+AOT-compiled `WSDL.qmod` (qore `c2bed7917`), at about level 84 of the 8 MB thread stack. Source-mode runs pass.
+Each level recurses through seven compiled methods whose native frames total ~88.6 KB.
+
+**Root cause (Qore AOT compiler):** `QoreIRToLLVM::estimateInvokeCleanupArrayCapacity()` sizes each large
+function's entry-block `cleanup_slots` array from a rough upper bound (`max_value_id + 2 * instructions + 8 *
+locals + 16`), 8-11 times the slots actually registered. The array's address escapes to the runtime cleanup
+call, so LLVM cannot shrink it. In the recursion's methods it takes 71,760 of the ~88.6 KB per level, of which
+7,464 bytes are used.
+
+Other causes were ruled out:
+
+- **Optimization:** qcc builds modules at -O3. Its `optnone` threshold for large functions is not the cause:
+  compiling every function at full O3 shrinks the frames by only 2-4%.
+- **Lifetime markers:** they are emitted.
+- **Allocas:** all are in the entry block, and there are no large by-value temporaries.
+
+A small recursive function has a 312-byte frame and recurses deeper compiled than interpreted.
+
+Sizing the array to its use would cut each level to ~24 KB (estimated), so 128 levels would need ~3.1 MB. The fix
+belongs in the Qore compiler; the handoff with the measurements and reproduction steps is
+`/tmp/qore-aot-cleanup-slots-stack.md`. The module's recursion, the test depth and the stack limit are unchanged.
+The failure remains open for P9 runtime acceptance until a Qore build with the fix is verified.
+
+Audit: `audits/P9g-01-aot-stack-root-cause.md`.
