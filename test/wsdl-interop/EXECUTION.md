@@ -11807,3 +11807,15 @@ disagreements belong to libxml2 2.12.10, but the distributions' `python3-lxml` 6
 character tables reject (`test_builtin_list_values.py`, `test_qname_lexical.py`; cause not yet adjudicated). Unlike Xerces, this oracle is not pinned.
 
 Audit: `audits/P9c-02-ci-portability.md`.
+
+## P9d-01: the assertion ledger in every suite run (2026-09-25)
+
+`verify_ledger.py` checks the 493-row SOAP assertion ledger against the pinned specification texts and the actual
+test suite, but it ran only by hand, so neither CI nor the suite noticed if the ledger drifted. `test_ledger.py`
+runs it on the real ledger, and on mutated copies to show that each check fails for its fault: duplicate, missing
+and unknown rows; test files and cases that do not exist; covered rows without cases; paraphrased quotes;
+exclusions based on the old collection instead of the specification; inconsistent gaps and routes; and a changed
+specification text. Combined with `ci_suite.py verify`, which requires every test to pass, a covered requirement
+now names cases that exist and pass in CI.
+
+Audit: `audits/P9d-01-ledger.md`.
