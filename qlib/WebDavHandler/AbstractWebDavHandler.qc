@@ -130,10 +130,19 @@ public class AbstractWebDavHandler inherits public HttpServer::AbstractHttpReque
         async-I/O reader so callers don't touch protocol-specific APIs:
 
         - <b>HTTP/3</b>: loops @ref Qore::Socket::readQuicStreamDataBlock() until it
-          returns @ref NOTHING (end-of-stream)
-        - <b>HTTP/2</b>: registers a @ref Qore::Thread::Queue "Queue" via
-          \c cx."header-info".register_body_queue(stream_id, q) and drains it until a
-          \c NOTHING sentinel
+          returns @ref NOTHING (end-of-stream); a body exceeding the server's maximum request
+          body size fails with \c HTTP-BODY-TOO-LARGE after the data buffered until then
+        - <b>HTTP/2</b>: registers an unlimited @ref Qore::Thread::Queue "Queue" with
+          \c cx."header-info".register_body_queue(q) and drains it: each binary value is a
+          chunk of the body, @ref NOTHING ends it, and a hash with \c err and \c desc keys
+          (\c HTTP-BODY-TOO-LARGE) ends a body exceeding the server's maximum request body
+          size and is raised as an exception; if the drain stops early, the body read is
+          cancelled with @ref Qore::Thread::Queue::setError() "Queue::setError()", so the
+          server discards the rest of the body
+        - <b>Size limit</b>: a streaming handler enforces the total body size itself; when
+          \c cx."header-info".max_request_body_size is a positive limit (the server's effective
+          maximum request body size), a body exceeding it fails with \c HTTP-BODY-TOO-LARGE
+          after the data up to the limit has been written, and the rest of the body is not read
         - <b>HTTP/1.1</b>: the framework buffers HTTP/1.1 bodies before invoking the
           handler regardless of @ref wantsBodyStreaming(), so streaming is effectively a
           no-op here; callers will not normally reach this branch with HTTP/1.1
@@ -145,11 +154,18 @@ public class AbstractWebDavHandler inherits public HttpServer::AbstractHttpReque
 
         @throw WEBDAV-STREAMING-ERROR the streaming context could not be resolved (e.g.
         \c stream_id missing from \c cx."header-info" on a request the framework chose to
-        stream)
+        stream), or the HTTP/2 body queue delivered an unexpected value
+        @throw HTTP-BODY-TOO-LARGE the body exceeds the server's maximum request body size;
+        the data before the limit has been written to \a out
+        @throw QUEUE-TIMEOUT no HTTP/2 body data arrived within \a io_timeout
+        @throw QUIC-STREAM-TIMEOUT no HTTP/3 body data arrived within \a io_timeout
     */
     static streamBodyToOutputStream(hash<auto> cx, hash<auto> hdr, Qore::OutputStream out,
             timeout io_timeout = DefaultStreamingTimeout) {
         *hash<auto> hi = cx."header-info";
+        # the total size limit that a streaming handler enforces itself; 0 for no limit
+        int limit = hi.max_request_body_size.typeCode() == NT_INT ? hi.max_request_body_size : 0;
+        int total = 0;
         if (hi.http3 && hi.sock instanceof Qore::Socket && exists hi.session_id && exists hi.stream_id) {
             Qore::Socket sock = hi.sock;
             int sid = hi.session_id;
@@ -159,25 +175,69 @@ public class AbstractWebDavHandler inherits public HttpServer::AbstractHttpReque
                 if (!exists chunk) {
                     break;
                 }
+                checkBodySize(\total, chunk.size(), limit);
                 out.write(chunk);
             }
             return;
         }
-        if (hi.http2 && exists hi.stream_id && hi.register_body_queue.callp()) {
+        if (hi.http2 && hi.register_body_queue.callp()) {
+            # the I/O thread pushes the body into an unlimited queue
             Qore::Thread::Queue q();
-            call_function_args(hi.register_body_queue, (hi.stream_id, q));
+            hi.register_body_queue(q);
+            # an abandoned read discards the rest of the body instead of buffering it
+            on_error q.setError("WEBDAV-STREAMING-CANCELLED", "the request body read was abandoned");
             while (True) {
-                *binary chunk = q.get(io_timeout);
-                if (!exists chunk) {
-                    break;
+                auto chunk = q.get(io_timeout);
+                switch (chunk.typeCode()) {
+                    case NT_BINARY:
+                        checkBodySize(\total, chunk.size(), limit);
+                        out.write(chunk);
+                        break;
+                    case NT_NOTHING:
+                        return;
+                    case NT_HASH:
+                        # the server stopped buffering a body that exceeds its maximum request body size
+                        if (chunk.err.typeCode() == NT_STRING) {
+                            throw chunk.err, chunk.desc ?? "the request body could not be read";
+                        }
+                        # fall through: not an error record
+                    default:
+                        throw "WEBDAV-STREAMING-ERROR", sprintf("the HTTP/2 request body queue delivered an "
+                            "unexpected %s value", chunk.type());
                 }
-                out.write(chunk);
             }
-            return;
         }
         throw "WEBDAV-STREAMING-ERROR", sprintf("could not resolve a streaming-body context "
             "in cx.\"header-info\" for method %y on a request the framework chose to stream; "
             "header-info keys: %y", hdr.method, keys hi);
+    }
+
+    # adds a chunk to the size of a streamed body; throws HTTP-BODY-TOO-LARGE when it exceeds the limit
+    private static checkBodySize(reference<int> total, int size, int limit) {
+        total += size;
+        if (limit > 0 && total > limit) {
+            throw "HTTP-BODY-TOO-LARGE", sprintf("the request body exceeds the maximum request body size of %d "
+                "bytes", limit);
+        }
+    }
+
+    #! Returns the response for a request body that could not be read, or NOTHING for other errors
+    /** @param ex an exception raised by @ref streamBodyToOutputStream()
+        @return a <tt>413 Content Too Large</tt> response for a body exceeding the server's maximum
+        request body size (\c HTTP-BODY-TOO-LARGE), a <tt>408 Request Timeout</tt> response when
+        the body stopped arriving (\c QUEUE-TIMEOUT, \c QUIC-STREAM-TIMEOUT), otherwise
+        @ref NOTHING
+
+        @since WebDavHandler 1.3
+    */
+    static *hash<HttpResponseInfo> getBodyReadErrorResponse(hash<ExceptionInfo> ex) {
+        switch (ex.err) {
+            case "HTTP-BODY-TOO-LARGE":
+                return <HttpResponseInfo>{"code": 413, "body": ex.desc};
+            case "QUEUE-TIMEOUT":
+            case "QUIC-STREAM-TIMEOUT":
+                return <HttpResponseInfo>{"code": 408, "body": ex.desc};
+        }
     }
 
     #! Sets the body-streaming threshold for this handler instance

@@ -11473,3 +11473,42 @@ NaN-boxing regression, all 292 qtests and 498 Python tests pass. Two more change
   `RUNTIME-TYPE-ERROR`. A missing mandatory repeated element therefore stopped raising the module's
   `MISSING-VALUE-ERROR` (`wsdl-particle-occurrences.qtest`). The user chose to keep `MISSING-VALUE-ERROR`: the
   new `XsdRepeatedElementDataType` raises it for an absent mandatory value and otherwise keeps the core behavior.
+
+## Request body limits in HTTP handlers (user request, 2026-09-24)
+
+Qore now ends an oversized HTTP/2 request body with an `HTTP-BODY-TOO-LARGE` error record in the handler's body
+queue (Qore `4f9eed32f`, `89515d9dc`). The user asked for WebDavHandler to handle it, and for SoapHandler and the
+other handlers to be checked.
+
+**Found and fixed:**
+- **WebDavHandler's HTTP/2 path never worked.** `AbstractWebDavHandler::streamBodyToOutputStream()` called
+  `register_body_queue` as `(stream_id, q)`, but HttpServer's closure takes only the Queue, so every streamed
+  HTTP/2 PUT or POST failed. The unit test had mocked the same wrong signature, and it waited by polling. Now the
+  helper:
+  - registers the queue correctly;
+  - writes binary chunks and stops at NOTHING;
+  - raises the error record;
+  - rejects unexpected values;
+  - cancels an abandoned read with `Queue::setError()`.
+- **FsWebDavHandler's error statuses.** Its PUT and POST answered every streaming failure with 500 or 400. The
+  new `getBodyReadErrorResponse()` maps `HTTP-BODY-TOO-LARGE` to 413 and read timeouts to 408. The partial
+  upload is removed.
+- **Streamed WebDAV uploads ignored the server's `max_request_body_size`.** A 192 KiB HTTP/2 PUT against a
+  64 KiB limit succeeded. HttpServer leaves the total size to streaming handlers but does not tell them the
+  limit. The user chose a core change: the handler receives `cx."header-info".max_request_body_size`
+  (`/tmp/qore-http-streaming-body-limit.md`). `streamBodyToOutputStream()` already enforces that key on HTTP/2
+  and HTTP/3. The live oversized cases wait for the core change.
+- **XmlRpcHandler compared the whole `Content-Type`.** HTTP/2 and HTTP/3 clients send
+  `text/xml;charset=utf-8`, so every such XML-RPC call got 501. It now compares the media type without
+  parameters, case-insensitively (XmlRpcHandler 1.1.1).
+
+**Not affected:** SoapHandler, SoapReplyHandler and XmlRpcHandler buffer their bodies, so HttpServer enforces the
+limit itself. `test/http-body-limits.qtest` proves that over HTTP/1.1, HTTP/2 and HTTP/3: a body over the limit
+gets 413 and the handler never runs (2 cases, 22 assertions).
+
+**Tests:**
+- `webdav_streaming.qtest` (8 cases, 54 assertions):
+  - deterministic HTTP/2 queue tests: data, the error record, unexpected values, a timeout and the total limit;
+  - the error-response mapping;
+  - live streamed PUT and POST uploads over HTTP/2 and HTTP/3, each confirmed as streamed.
+- `XmlRpcHandler.qtest`: content types with parameters, and rejected types.

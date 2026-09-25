@@ -1,0 +1,111 @@
+#!/usr/bin/env qore
+# -*- mode: qore; indent-tabs-mode: nil -*-
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires xml
+%requires HttpServer
+%requires ../qlib/WSDL.qm
+%requires ../qlib/SoapHandler.qm
+%requires ../qlib/XmlRpcHandler.qm
+
+%exec-class HttpBodyLimitsTest
+
+# The server's maximum request body size applies to the handlers that receive buffered bodies: SoapHandler,
+# SoapReplyHandler and XmlRpcHandler. A larger body is answered with 413 over HTTP/1.1, HTTP/2 and HTTP/3 before the
+# handler runs; the server enforces it while buffering, including the HTTP/2 body queue's HTTP-BODY-TOO-LARGE end.
+public class HttpBodyLimitsTest inherits QUnit::Test {
+    private {
+        const Limit = 4096;
+        const Protocols = (
+            {"name": "h1", "http_version": "1.1"},
+            {"name": "h2", "http_version": "2.0"},
+            {"name": "h3", "http_version": "3.0"},
+        );
+        const SoapRequest = '<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/">'
+            '<soapenv:Body><addNumbers xmlns="http://apache.org/cxf/systest/ws/addr_feature/"><number1>1</number1>'
+            '<number2>2</number2></addNumbers>%s</soapenv:Body></soapenv:Envelope>';
+        const XmlRpcRequest = '<?xml version="1.0"?><methodCall><methodName>example</methodName><params><param>'
+            '<value><string>%s</string></value></param></params></methodCall>';
+
+        HttpServer http;
+        int port;
+        # the calls that the handlers received
+        Queue calls();
+    }
+
+    constructor() : Test("HttpBodyLimitsTest", "1.0") {
+        WebService ws(ReadOnlyFile::readTextFile(get_script_dir() + "/wsdl-interop/cxf/add_numbers.wsdl"));
+        SoapHandler soap(new PermissiveAuthenticator());
+        soap.addMethod(ws, ws.getOperation("addNumbers"), \addNumbers(), NOTHING, NOTHING, NOTHING, NOTHING,
+            NOTHING, "add", "AddNumbersBinding");
+        XmlRpcHandler xmlrpc(new PermissiveAuthenticator(), ({
+            "name": "^example\$",
+            "text": "example",
+            "function": string sub (*string arg) { calls.push("xmlrpc"); return arg ?? ""; },
+            "help": "example call",
+        },));
+        WsaReplyReceiver receiver(<WsaEndpointReference>{"address": "https://127.0.0.1/replies"});
+
+        http = new HttpServer();
+        http.waitForAsyncIo();
+        http.setMaxRequestBodySize(Limit);
+        http.setHandler("soap", "add", NOTHING, soap);
+        http.setHandler("xmlrpc", "RPC2", NOTHING, xmlrpc);
+        http.setHandler("replies", "replies", NOTHING, new SoapReplyHandler(receiver));
+        string dir = get_script_dir() + "/certs/";
+        port = http.addListener(<HttpListenerOptionInfo>{
+            "service": 0,
+            "cert": new SSLCertificate(ReadOnlyFile::readTextFile(dir + "localhost-cert.pem")),
+            "key": new SSLPrivateKey(ReadOnlyFile::readTextFile(dir + "localhost-key.pem")),
+            "enable_h3": True,
+        }).port;
+        http.waitForAsyncIo();
+        on_exit http.stop();
+
+        addTestCase("requests within the limit", \withinLimit());
+        addTestCase("requests exceeding the limit", \exceedingLimit());
+        set_return_value(main());
+    }
+
+    hash<auto> addNumbers(hash<auto> cx, hash<auto> value) {
+        calls.push("soap");
+        return {"return": value.number1 + value.number2};
+    }
+
+    # posts a request with a new connection; returns the response status
+    int post(hash<auto> protocol, string path, string content_type, string body) {
+        HTTPClient client({"url": sprintf("https://127.0.0.1:%d", port), "http_version": protocol.http_version,
+            "error_passthru": True, "timeout": 30000, "connect_timeout": 15000});
+        on_exit client.disconnect();
+        hash<auto> info;
+        client.send(body, "POST", path, {"Content-Type": content_type, "SOAPAction": '""'}, False, \info);
+        return info."response-headers".status_code;
+    }
+
+    withinLimit() {
+        foreach hash<auto> protocol in (Protocols) {
+            assertEq(200, post(protocol, "/add", "text/xml", sprintf(SoapRequest, "")), protocol.name);
+            assertEq("soap", calls.get(10000), protocol.name);
+            assertEq(200, post(protocol, "/RPC2", "text/xml", sprintf(XmlRpcRequest, "x")), protocol.name);
+            assertEq("xmlrpc", calls.get(10000), protocol.name);
+        }
+    }
+
+    exceedingLimit() {
+        # well-formed messages whose bodies exceed the limit
+        string padding = strmul("x", 2 * Limit);
+        foreach hash<auto> protocol in (Protocols) {
+            assertEq(413, post(protocol, "/add", "text/xml", sprintf(SoapRequest, "<!--" + padding + "-->")),
+                protocol.name + " SoapHandler");
+            assertEq(413, post(protocol, "/RPC2", "text/xml", sprintf(XmlRpcRequest, padding)),
+                protocol.name + " XmlRpcHandler");
+            assertEq(413, post(protocol, "/replies", "text/xml", sprintf(SoapRequest, "<!--" + padding + "-->")),
+                protocol.name + " SoapReplyHandler");
+        }
+        # no handler ran
+        assertEq(0, calls.size());
+    }
+}

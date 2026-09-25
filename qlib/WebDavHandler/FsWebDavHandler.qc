@@ -411,6 +411,11 @@ public class FsWebDavHandler inherits AbstractWebDavHandler {
                 rename(tmp_path, path);
             }
         } catch (hash<ExceptionInfo> ex) {
+            # a streamed body that is too large or stopped arriving
+            *hash<HttpResponseInfo> body_error = AbstractWebDavHandler::getBodyReadErrorResponse(ex);
+            if (body_error) {
+                return body_error;
+            }
             return response(400, "Destination path is not a regular file");
         }
 
@@ -500,6 +505,11 @@ public class FsWebDavHandler inherits AbstractWebDavHandler {
                 rename(tmp_path, path);
             }
         } catch (hash<ExceptionInfo> ex) {
+            # a streamed body that is too large or stopped arriving
+            *hash<HttpResponseInfo> body_error = AbstractWebDavHandler::getBodyReadErrorResponse(ex);
+            if (body_error) {
+                return body_error;
+            }
             return response(500, "Error writing file: %s", ex.desc);
         }
 
