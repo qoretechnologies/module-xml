@@ -426,7 +426,8 @@ must not mistake success on RPC/encoded tests for WS-I literal-profile conforman
     temporal, duration and IEEE lexicals), particle groups (complete finite languages and Xerces), namespace
     scopes (P9d-02, expat, `test_namespace_scopes.py`), SOAP faults (P9d-03, the pinned W3C envelope schemas
     and lxml, `test_soap_fault_generation.py`) and multipart attachments (P9d-04, Python's `email` parser,
-    `test_mime_generation.py`). Bindings remain.
+    `test_mime_generation.py`) and SOAP bindings (P9d-05, WSDL 1.1 section 3.5 and the SOAP encodings,
+    `test_binding_generation.py`).
 - Track requirement identifiers, fixture hashes, expected behavior, actual result, fix commit and test
   location. Include response processing, typed-value/infoset comparisons, HTTP behavior and error codes
   in reported coverage. Add assertions that prevent missing/skipped/duplicate cases from improving counts.

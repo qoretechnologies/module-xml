@@ -103,3 +103,20 @@ single RPC parameter instead of failing with `RUNTIME-TYPE-ERROR` inside part
 conversion. `serializeRpc()` rejects a bare value when more than one part is selected,
 since it cannot know which part the value belongs to. Together these make a decoded
 message re-encodable through the operation that produced it.
+
+## RPC part accessors
+
+A received RPC message has one accessor per selected part inside its operation wrapper:
+
+- **Qualification:** the accessor of a type part in a literal message has no namespace (WS-I Basic Profile R2735);
+  one qualified by a prefix or by a default namespace declaration raises `SOAP-DESERIALIZATION-ERROR`. An element
+  part's accessor is its element, with the element's own namespace. The SOAP encodings leave the qualification of
+  accessors open (SOAP 1.1 section 7.1; the SOAP 1.2 Primer qualifies them), so encoded accessors may be qualified.
+- **Omitted accessors:** an omitted type-part accessor is an absent value (`NOTHING`) whatever its type. SOAP 1.1 section
+  5.1 and SOAP 1.2 Part 2 section 3.1.3 define this for encoded messages; literal messages follow the same rule
+  (decided 2026-09-25), which accepts services that leave out optional parameters.
+- **Empty accessors:** an empty accessor is an empty value, so `<name/>` is an empty string and an empty `xsd:int`
+  accessor is rejected.
+
+The qualification check uses the expanded names of the wrapper's children, before prefixes are removed for part
+matching.

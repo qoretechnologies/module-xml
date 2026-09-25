@@ -11986,3 +11986,38 @@ text line breaks; `binascii.b2a_qp(istext=False)` encodes CR and LF as octets. T
 reads the generated payloads caught this before any comparison with the module.
 
 Audit: `audits/P9d-04-multipart-messages.md`.
+
+## P9d-05: generated bindings, and RPC accessor checks (2026-09-25)
+
+`test_binding_generation.py` generates 120 WSDL descriptions (seed 20260928, case digest pinned; the same digest on
+CPython 3.12 and 3.14) with SOAP 1.1 and 1.2 bindings in the document/literal, RPC/literal and RPC/encoded styles, the
+style on the binding or the operation, soap:body namespaces, body part selection, header parts, SOAP actions, and
+simple and complex parts. For each, `binding-messages.qr` serializes a request and a response, and decodes a request
+built independently in Python, with other prefixes, and its mutations.
+
+The expected message structure comes from WSDL 1.1 section 3.5, WS-I BP and the SOAP encodings: document parts as the
+Body's children in part order; an RPC wrapper named after the operation, and with "Response", in the soap:body
+namespace; one unqualified accessor per part; encoded messages with the encodingStyle, each accessor's `xsi:type`,
+and, with SOAP 1.2, `rpc:result` naming a single return part (SOAP 1.2 Part 2 section 4.2.3;
+`WSOperation::getReturnPartName()`); header parts in the Header; the content type and action of each version. All
+serialized messages have this structure, and every independently built request decodes to the generated values.
+
+**Defect found and fixed (decided 2026-09-25):** a received RPC/literal message missing a part's accessor was
+decoded inconsistently: an `xsd:string` part became an empty string, and other types were rejected. An omitted
+literal accessor is now an absent value (`NOTHING`) for every type, as an omitted encoded accessor already was (SOAP
+1.1 section 5.1, SOAP 1.2 Part 2 section 3.1.3); an empty accessor remains an empty value. Rejecting omitted
+accessors was considered, but broke the SoapUI fixture in `soap.qtest`, whose request leaves out a part; that
+expectation now asserts `NOTHING`, as does the RPC branch of `wsdl-body-parts.qtest`'s missing-part case (a missing document part element is still rejected). The generated test asserts the absent value for every omitted accessor.
+
+**Defect found and fixed (decided 2026-09-25):** received accessors were matched after their prefixes were removed,
+so namespace-qualified accessors were accepted in every RPC style, although the assertion ledger recorded R2735 as
+covered (only sent messages were checked). A qualified accessor of a type part in an RPC/literal message, qualified
+by a prefix or a default namespace, is now rejected (WS-I BP R2735). Element parts keep their element's namespace,
+and encoded accessors may be qualified: SOAP 1.1 section 7.1 does not constrain them, and the SOAP 1.2 Primer
+qualifies them (an earlier draft that rejected them broke 11 existing suites with such messages).
+`test/wsdl-rpc-accessors.qtest` checks each rule; its strict and absent-value cases fail against the previous
+module. The R2735 ledger rows now name it.
+
+Full suite: every qtest passes, and all 556 Python tests pass in 6 shards with the pinned lxml 6.1.0.
+
+Audit: `audits/P9d-05-bindings.md`.
