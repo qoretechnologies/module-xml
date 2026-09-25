@@ -1,0 +1,52 @@
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+# Pass the schema validation context to xmlSchemaSAXHandleReference (upstream libxml2 91586dc6, after 2.15.4).
+#
+# xmlSchemaSAXPlug() interposes referenceSplit() in the SAX pipeline, which xmlTextReaderSetSchema() uses for
+# streaming validation. referenceSplit() passed the application's SAX user data to xmlSchemaSAXHandleReference(),
+# which reads it as an xmlSchemaValidCtxt: an unsubstituted entity reference in a document validated while it is
+# read (the module's parser options do not substitute entities) read unrelated memory as the validation depth.
+function(qore_xml_fix_libxml2_sax_reference source_dir binary_dir)
+    get_target_property(_sources LibXml2 SOURCES)
+    set(_input "")
+    foreach(_entry IN LISTS _sources)
+        get_filename_component(_name "${_entry}" NAME)
+        if(_name STREQUAL "xmlschemas.c")
+            if(_input)
+                message(FATAL_ERROR "Duplicate libxml2 xmlschemas.c target source")
+            endif()
+            set(_input "${_entry}")
+        endif()
+    endforeach()
+    if(NOT _input)
+        message(FATAL_ERROR "Cannot locate libxml2 xmlschemas.c for the SAX reference context fix")
+    endif()
+    if(IS_ABSOLUTE "${_input}")
+        set(_path "${_input}")
+    else()
+        set(_path "${source_dir}/${_input}")
+    endif()
+    file(SHA256 "${_path}" _hash)
+    if(_hash STREQUAL "e04a1d236f1879c41c18d154db436d32e7bd21dcccd3eae0b4c1ed816ec3a0d9")
+        return()
+    endif()
+    if(NOT _hash STREQUAL "d87f077caf371594f5f1ad8fa4fc327190c6e31acba04cd328f789540e8c1a1e")
+        message(FATAL_ERROR "Unexpected libxml2 xmlschemas.c; cannot apply the SAX reference context fix")
+    endif()
+    file(READ "${_path}" _source)
+    string(REPLACE [==[xmlSchemaSAXHandleReference(void *ctx ATTRIBUTE_UNUSED,]==]
+        [==[xmlSchemaSAXHandleReference(void *ctx,]==] _source "${_source}")
+    string(REPLACE [==[        xmlSchemaSAXHandleReference(ctxt->user_data, name);]==]
+        [==[        xmlSchemaSAXHandleReference(ctxt->ctxt, name);]==] _source "${_source}")
+    string(SHA256 _hash "${_source}")
+    if(NOT _hash STREQUAL "e04a1d236f1879c41c18d154db436d32e7bd21dcccd3eae0b4c1ed816ec3a0d9")
+        message(FATAL_ERROR "Pinned libxml2 SAX reference context fix did not match")
+    endif()
+    file(MAKE_DIRECTORY "${binary_dir}/qore-sax-reference-fix")
+    set(_replacement "${binary_dir}/qore-sax-reference-fix/xmlschemas.c")
+    file(WRITE "${_replacement}.tmp" "${_source}")
+    configure_file("${_replacement}.tmp" "${_replacement}" COPYONLY)
+    list(REMOVE_ITEM _sources "${_input}")
+    list(APPEND _sources "${_replacement}")
+    set_property(TARGET LibXml2 PROPERTY SOURCES "${_sources}")
+    message(STATUS "XML module: applied the libxml2 SAX reference context fix in the build tree")
+endfunction()

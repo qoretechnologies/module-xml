@@ -30,6 +30,7 @@
 #endif
 
 #include <libxml/parser.h>
+#include <memory>
 #include <libxml/HTMLparser.h>
 
 #define XML_PARSE_NOBLANKS 0
@@ -42,10 +43,27 @@
 #define QORE_XML_PARSER_OPTIONS_ADDONS
 #endif
 
-#ifdef DEBUG
-#define QORE_XML_PARSER_OPTIONS XML_PARSE_NOBLANKS QORE_XML_PARSER_OPTIONS_ADDONS
+// XML 1.0 section 4.4.3: the replacement text of internal parsed entities is included, and libxml2's entity
+// amplification limit, which XML_PARSE_HUGE does not lift, bounds the expansion. Document parsers and readers use
+// qore_xml_document_resource_loader(), which refuses external entities with a fatal error instead of loading them
+// (no XXE) or silently dropping them. libxml2 before 2.14 has no per-parser resource loader, so entity references
+// are not expanded there.
+#if LIBXML_VERSION >= 21400
+#define QORE_XML_ENTITY_OPTIONS | XML_PARSE_NOENT
+//! Refuses external general and parameter entities; loads other resources as libxml2 does by default
+/** @param data the parser context (libxml2 passes it when the loader is set without user data)
+*/
+DLLLOCAL xmlParserErrors qore_xml_document_resource_loader(void* data, const char* url, const char* public_id,
+        xmlResourceType type, xmlParserInputFlags flags, xmlParserInput** out);
 #else
-#define QORE_XML_PARSER_OPTIONS XML_PARSE_NOERROR | XML_PARSE_NOWARNING | XML_PARSE_NOBLANKS QORE_XML_PARSER_OPTIONS_ADDONS
+#define QORE_XML_ENTITY_OPTIONS
+#endif
+
+#ifdef DEBUG
+#define QORE_XML_PARSER_OPTIONS XML_PARSE_NOBLANKS QORE_XML_PARSER_OPTIONS_ADDONS QORE_XML_ENTITY_OPTIONS
+#else
+#define QORE_XML_PARSER_OPTIONS XML_PARSE_NOERROR | XML_PARSE_NOWARNING | XML_PARSE_NOBLANKS QORE_XML_PARSER_OPTIONS_ADDONS \
+    QORE_XML_ENTITY_OPTIONS
 #endif
 
 // HTML parser options for lenient real-world HTML parsing.
@@ -73,7 +91,18 @@ constexpr QoreXmlDocHtmlTag QoreXmlDocHtml{};
 class QoreXmlDoc {
 private:
    DLLLOCAL void init(const char *buf, int size, const char *encoding = 0) {
+#if LIBXML_VERSION >= 21400
+      // a context of our own carries the resource loader that refuses external entities
+      ptr = nullptr;
+      std::unique_ptr<xmlParserCtxt, void (*)(xmlParserCtxt*)> ctxt(xmlNewParserCtxt(), xmlFreeParserCtxt);
+      if (!ctxt) {
+         return;
+      }
+      xmlCtxtSetResourceLoader(ctxt.get(), qore_xml_document_resource_loader, nullptr);
+      ptr = xmlCtxtReadMemory(ctxt.get(), buf, size, 0, encoding, QORE_XML_PARSER_OPTIONS);
+#else
       ptr = xmlReadMemory(buf, size, 0, encoding, QORE_XML_PARSER_OPTIONS);
+#endif
    }
 
    // Lenient HTML parser path (libxml2 htmlReadMemory).  Tolerates

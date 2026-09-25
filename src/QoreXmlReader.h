@@ -128,6 +128,10 @@ protected:
         }
 
         xmlTextReaderSetErrorHandler(reader, (xmlTextReaderErrorFunc)qore_xml_error_func, this);
+#if LIBXML_VERSION >= 21400
+        // refuse external entities instead of loading or dropping them
+        xmlTextReaderSetResourceLoader(reader, qore_xml_document_resource_loader, nullptr);
+#endif
 
         if (opts)
             processOpts(opts, xsink);
@@ -154,6 +158,10 @@ protected:
         }
 
         xmlTextReaderSetErrorHandler(reader, (xmlTextReaderErrorFunc)qore_xml_error_func, this);
+#if LIBXML_VERSION >= 21400
+        // refuse external entities instead of loading or dropping them
+        xmlTextReaderSetResourceLoader(reader, qore_xml_document_resource_loader, nullptr);
+#endif
         //printd(5, "QoreXmlReader::init() xml size: %d opts: %p reader: %p set error handler; options: %d\n", (int)xml->size(), opts, reader, options);
 
         if (opts)
@@ -202,6 +210,10 @@ protected:
         }
 
         xmlTextReaderSetErrorHandler(reader, (xmlTextReaderErrorFunc)qore_xml_error_func, this);
+#if LIBXML_VERSION >= 21400
+        // refuse external entities instead of loading or dropping them
+        xmlTextReaderSetResourceLoader(reader, qore_xml_document_resource_loader, nullptr);
+#endif
         //printd(5, "QoreXmlReader::init() opts: %p reader: %p set error handler\n", opts, reader);
 
         if (opts)

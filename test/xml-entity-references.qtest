@@ -1,0 +1,121 @@
+#!/usr/bin/env qore
+# -*- mode: qore; indent-tabs-mode: nil -*-
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+
+%modern
+%requires QUnit
+%requires xml
+%requires Util
+
+%exec-class XmlEntityReferencesTest
+
+# XML 1.0 section 4.4.3: the replacement text of internal parsed entities is included. External entities are never
+# loaded and fail the parse instead of being dropped, and libxml2's amplification limit bounds entity expansion.
+public class XmlEntityReferencesTest inherits QUnit::Test {
+    private {
+        const Schema = '<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"><xs:element name="note">'
+            '<xs:complexType mixed="true"><xs:sequence><xs:any processContents="skip" minOccurs="0" '
+            'maxOccurs="unbounded"/></xs:sequence><xs:attribute name="a" type="xs:string"/></xs:complexType>'
+            '</xs:element></xs:schema>';
+
+        # every parser: parse_xml(), XmlDoc, XmlReader and the schema-validating reader
+        const Parsers = ("parse_xml", "XmlDoc", "XmlReader", "schema");
+    }
+
+    constructor() : Test("XmlEntityReferencesTest", "1.0") {
+        addTestCase("internal entities are included", \internalEntities());
+        addTestCase("external entities are refused", \externalEntities());
+        addTestCase("invalid and amplifying entities are rejected", \rejectedEntities());
+        addTestCase("internal parameter entities are expanded", \parameterEntities());
+        set_return_value(main());
+    }
+
+    static auto parse(string parser, string xml) {
+        switch (parser) {
+            case "parse_xml": return parse_xml(xml);
+            case "XmlDoc": return (new XmlDoc(xml)).toQore();
+            case "XmlReader": return (new XmlReader(xml)).toQore();
+            case "schema": return parse_xml_with_schema(xml, Schema);
+        }
+        throw "TEST-ERROR", parser;
+    }
+
+    static string document(string subset, string body) {
+        return sprintf('<?xml version="1.0"?><!DOCTYPE note [%s]>%s', subset, body);
+    }
+
+    internalEntities() {
+        foreach string parser in (Parsers) {
+            # in content and attribute values
+            assertEq({"note": {"^attributes^": {"a": "xworld"}, "^value^": "hello world"}}, parse(parser,
+                document('<!ENTITY who "world">', '<note a="x&who;">hello &who;</note>')), parser);
+            # entities referencing entities
+            assertEq({"note": "hello world"}, parse(parser, document('<!ENTITY w "wor"><!ENTITY who "&w;ld">',
+                '<note>hello &who;</note>')), parser);
+            # replacement text with markup
+            assertEq({"note": {"b": "bold"}}, parse(parser, document('<!ENTITY b "<b>bold</b>">', '<note>&b;</note>')),
+                parser);
+            # predefined and character references are unaffected
+            assertEq({"note": "<&>A"}, parse(parser, '<note>&lt;&amp;&gt;&#65;</note>'), parser);
+        }
+    }
+
+    externalEntities() {
+        string file = tmp_location() + DirSep + sprintf("xml-entity-references-%d.txt", getpid());
+        on_exit unlink(file);
+        {
+            File f();
+            f.open2(file, O_CREAT | O_TRUNC | O_WRONLY);
+            f.write("secret");
+        }
+        string url = "file://" + file;
+        foreach string parser in (Parsers) {
+            # an external general entity is never read: the parse fails instead of dropping the reference
+            string expected = parser == "XmlDoc" ? "XMLDOC-CONSTRUCTOR-ERROR" : "PARSE-XML-EXCEPTION";
+            assertThrows(expected, \XmlEntityReferencesTest::parse(), (parser, document(sprintf('<!ENTITY ext SYSTEM '
+                '"%s">', url), '<note>x&ext;y</note>')), parser);
+            # an external parameter entity is not loaded either
+            assertThrows(expected, \XmlEntityReferencesTest::parse(), (parser, document(sprintf('<!ENTITY %% ext '
+                'SYSTEM "%s">%%ext;', url), '<note>x</note>')), parser);
+            if (parser != "XmlDoc") {
+                try {
+                    parse(parser, document(sprintf('<!ENTITY ext SYSTEM "%s">', url), '<note>x&ext;y</note>'));
+                } catch (hash<ExceptionInfo> ex) {
+                    assertRegex("failed to load", ex.desc, parser);
+                    assertFalse(ex.desc =~ /secret/, parser);
+                }
+            }
+            # an unreferenced external entity declaration is harmless
+            assertEq({"note": "x"}, parse(parser, document(sprintf('<!ENTITY ext SYSTEM "%s">', url),
+                '<note>x</note>')), parser);
+        }
+    }
+
+    rejectedEntities() {
+        string laughs = '<!ENTITY a "aaaaaaaaaa">';
+        string previous = "a";
+        foreach string name in ("b", "c", "d", "e", "f", "g", "h") {
+            laughs += sprintf('<!ENTITY %s "%s">', name, strmul("&" + previous + ";", 10));
+            previous = name;
+        }
+        foreach string parser in (Parsers) {
+            string expected = parser == "XmlDoc" ? "XMLDOC-CONSTRUCTOR-ERROR" : "PARSE-XML-EXCEPTION";
+            assertThrows(expected, \XmlEntityReferencesTest::parse(), (parser, '<note>&nope;</note>'), parser);
+            # "billion laughs": libxml2's amplification limit stops the expansion
+            assertThrows(expected, \XmlEntityReferencesTest::parse(), (parser, document(laughs, '<note>&h;</note>')),
+                parser);
+            if (parser != "XmlDoc") {
+                assertThrows(expected, "amplification", \XmlEntityReferencesTest::parse(), (parser,
+                    document(laughs, '<note>&h;</note>')), parser);
+            }
+        }
+    }
+
+    # internal parameter entities in the internal subset are expanded; only external entities are refused
+    parameterEntities() {
+        foreach string parser in (Parsers) {
+            assertEq({"note": "hello world"}, parse(parser, document("<!ENTITY % decl \"<!ENTITY who 'world'>\">%decl;",
+                '<note>hello &who;</note>')), parser);
+        }
+    }
+}

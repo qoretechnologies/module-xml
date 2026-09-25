@@ -360,6 +360,20 @@ static xmlParserInput* qoreXmlSchemaEntityLoader(const char* url, const char* pu
 #endif
 #endif
 
+#if LIBXML_VERSION >= 21400
+xmlParserErrors qore_xml_document_resource_loader(void* data, const char* url, const char* public_id,
+        xmlResourceType type, xmlParserInputFlags flags, xmlParserInput** out) {
+    *out = nullptr;
+    if (type == XML_RESOURCE_GENERAL_ENTITY || type == XML_RESOURCE_PARAMETER_ENTITY) {
+        // an external entity is never loaded; the fatal error stops the parse instead of dropping the content
+        return XML_IO_EACCES;
+    }
+    // other resources load as without a resource loader; a failure reports its own error
+    *out = xmlLoadExternalEntity(url, public_id, static_cast<xmlParserCtxt*>(data));
+    return XML_ERR_OK;
+}
+#endif
+
 static void xml_module_init(QoreModuleInitContext& ctx, ExceptionSink& xsink) {
     QoreString err;
 

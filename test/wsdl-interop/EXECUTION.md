@@ -11543,3 +11543,45 @@ the full suites run in the developer's normal environment, including the Qorus m
 load again.
 
 P9a is accepted; see [P9a acceptance](P9a-acceptance.md).
+
+## libxml2 review and entity references (2026-09-25)
+
+The P9b Release rebuild against the new libqore reported three warnings in the patched bundled libxml2 2.15.4:
+- A `-Wstringop-overflow` in the year decrement of the module's exact calendar patch (`libxml2-calendar.inc`). It
+  cannot trigger: validated XSD 1.0 year labels are nonzero, and decrementing year 0001 changes the sign instead.
+  A new chained patch, `QoreXmlLibXml2CalendarYearGuardFix.cmake`, makes the invariant explicit. It runs after the
+  anyURI patch, so no pinned hash changes.
+- `-Wmaybe-uninitialized` for `min` and `max` in upstream `xmlSchemaParseElement`: a false positive in unmodified
+  upstream code, still present on upstream master.
+
+2.15.4 is the latest libxml2 release (2026-09-01). The user asked whether a newer release fixes these; none does.
+Upstream master has one relevant unreleased fix, `91586dc6`: `referenceSplit()` passed the application's SAX
+user data to `xmlSchemaSAXHandleReference()` instead of the validation context. That handler is reachable through
+`xmlTextReaderSetSchema()`, which module-xml uses. The user approved backporting it, as
+`QoreXmlLibXml2SaxReferenceFix.cmake`.
+
+**Found while testing it:** every parser (`parse_xml()`, `XmlDoc`, `XmlReader`, and the schema-validating parsers)
+silently dropped the replacement text of internal entities. `<!ENTITY who "world">` with `<note>hello &who;</note>`
+parsed as `{note: "hello "}`, although XML 1.0 section 4.4.3 requires internal parsed entities to be included. The
+user chose to expand internal entities only:
+- Parsers use `XML_PARSE_NOENT`.
+- The new `qore_xml_document_resource_loader()`, set on `XmlDoc`'s own parser context and on every reader,
+  refuses external general and parameter entities with a fatal error, so they are neither loaded (XXE) nor
+  dropped. It passes other resources to libxml2's default loading.
+- libxml2's amplification limit, which `XML_PARSE_HUGE` does not lift, stops "billion laughs".
+- With libxml2 before 2.14, entities stay unexpanded.
+
+With entities substituted, the SAX reference path fixed by `91586dc6` is no longer reached by module parsers; the
+backport remains as a defensive fix.
+
+**Tests:** `test/xml-entity-references.qtest` (4 cases, 49 assertions) covers all four parsers:
+- internal, nested and markup entities in content and attribute values;
+- internal parameter entities;
+- refused external general and parameter entities, whose file content is never read;
+- undeclared entities and billion laughs.
+
+The calendar, entity, schema-reader and XML suites pass.
+
+**Valgrind:** no definite leaks. Every reported error has the same origin: generated code reads the uninitialised
+tail of a correctly built `QoreString`. A trivial QUnit test without module-xml reproduces it, so it is a Qore
+core issue in the new build, handed off in `/tmp/qore-valgrind-uninit-string-tail.md`.
