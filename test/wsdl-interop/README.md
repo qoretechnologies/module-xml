@@ -475,7 +475,7 @@ Extra source files, altered originals, duplicate cases, undocumented decisions a
 three retained historical unassessed outputs. The source assessment finds 14 invalid generated WSDLs,
 88 invalid messages, and 1,048 valid payloads. All three historical unassessed outputs validate.
 These counts do not establish preserved typed values or production rejection of invalid messages.
-[current-report.json](current-report.json) retains the separate Qore diagnostic results.
+[current-report.json](current-report.json) retains the separate Qore diagnostic results; see [Current results](#current-results-2026-09-25).
 
 The adjudication explicitly distinguishes:
 
@@ -553,13 +553,13 @@ values and Xerces checks every document. The already adjudicated old-libxml2
 decimals. Qore 3.0 supplies shortest round-trip native float/number formatting,
 while XML decimal text retains its precision and noncanonical spellings.
 
-[coverage-report.json](coverage-report.json) preserves the complete current ledger, including 92 failed
-requirements assigned to remaining phases. Its stage accounting includes unreachable, missing, skipped and
-unassessed work. In this run 904 value/infoset assessments remain unimplemented, explicitly counted as
-unassessed. Successful schema validation is insufficient to close them. Exact numeric checks now pass
-all eight formerly failing decimal output cases. Decimal attributes, elements and retained decimal
-patterns belong to the strict gate, alongside all thirteen integer builtin families, including original
-invalid inputs and exact values in both directions. Signed bounded types use the independent integer
+[coverage-report.json](coverage-report.json) preserves the complete current ledger for the default decoding
+projection, and [coverage-preserve-types-report.json](coverage-preserve-types-report.json) the same run with
+`--preserve-types`. Their stage accounting includes unreachable, missing, skipped and unassessed work; see
+[Current results](#current-results-2026-09-25) for the counts. Successful schema validation is insufficient to
+close a requirement: every valid direction also has an exact typed-value comparison. Decimal attributes, elements
+and retained decimal patterns belong to the strict gate, alongside all thirteen integer builtin families, including
+original invalid inputs and exact values in both directions. Signed bounded types use the independent integer
 value comparator; their builtin range rejection is also covered by the authored boundary matrix.
 Valid large integer values that preserve their exact number override only the documented libxml2
 precision limitation; new oracle disagreements remain failures.
@@ -605,6 +605,61 @@ ordered schema grammar check, which is credited independently of namespace/impor
 The full WSDL grammar matrix remains assigned to P6. The 16 output-oracle
 disagreements for unchanged invalid IDREF/IDREFS content are separately adjudicated using expanded
 names and token values, preserving their existing P5 rejection failures.
+
+## Current results, 2026-09-25
+
+This is the current result set; the 2026-09-07 results and findings below are the original baseline and are
+kept unchanged. The runs use the pinned archive and import catalog, Qore 3.0.0 (`c2bed7917`), the WSDL module at
+P9d-05 (`qlib/WSDL.qm` SHA-256 `f4b23306…`), lxml 6.1.0 with libxml2 2.14.6, and Xerces-J 2.12.2.
+
+```sh
+python3 test/wsdl-interop/survey.py /tmp/wsdl-corpus/databinding/examples/6/09 --soap-version both \
+  --catalog test/wsdl-interop/corpus/catalog.json --output current-report.json
+python3 test/wsdl-interop/coverage.py /tmp/wsdl-corpus/databinding/examples/6/09 --strict \
+  --output coverage-report.json
+python3 test/wsdl-interop/coverage.py /tmp/wsdl-corpus/databinding/examples/6/09 --strict --preserve-types \
+  --output coverage-preserve-types-report.json
+```
+
+[current-report.json](current-report.json), the survey of all 1,136 supplied messages decoded as requests:
+
+| Check | Result |
+| --- | --- |
+| WSDL 1.1 descriptions parsed / failed | 279 / 14 (the 14 adjudicated invalid descriptions) |
+| Supplied payloads valid / invalid by the libxml2 oracle | 1,088 / 48 |
+| Messages decoded / failed | 1,048 / 68; every failure is a message the adjudication classifies as invalid |
+| Decoded values serialized / failed | 1,046 / 2 (`TypeSubstitutionUsingXsiType`, see below) |
+| Serialized payloads rejected by the oracle | 0 |
+
+The coverage reports run both directions of every message (2,272 directions) and compare typed values with the
+independent observer:
+
+| Check | Default projection | `preserve_types` |
+| --- | --- | --- |
+| Valid directions preserved exactly | 2,084 of 2,096 | 2,096 of 2,096 |
+| Invalid-source directions rejected for the intended reason | 176 of 176 | 176 of 176 |
+| Strict selection (144 WSDLs, 1,388 directions) | passes | passes |
+| Serialized outputs rejected by libxml2 or Xerces | 0 | 0 |
+
+The 12 default-projection failures are the documented projection losses of the approved default (see
+[P5 acceptance](P5-acceptance.md)): the derived `xsi:type` of `TypeSubstitutionUsingXsiType` is not retained
+for serialization (4), an untyped `GlobalElementAbstract` substitute is written with an inferred `xsi:type`
+(4), and an optional nil `middleName` in `NillableOptionalElement03` is omitted (4). `preserve_types=True`
+retains all of them.
+
+Status of the 2026-09-07 findings (valid directions preserved exactly, default / `preserve_types`):
+
+| Reproducers | Status |
+| --- | --- |
+| `SequenceChoice`, `SequenceMinOccurs0`, `SequenceMaxOccursUnbounded`, `ChoiceMaxOccursUnbounded` | fixed: all pass in both modes (P4) |
+| `ElementFormUnqualified`, `ElementTypeDefaultNamespace`, `GlobalComplexTypeEmptyExtension` | fixed: all pass in both modes (P2) |
+| `QNameElement`, `QNameAttribute` | fixed: all pass in both modes (P5) |
+| `ExtendedSequenceLax`, `…Skip`, `…Strict` and the `Other`/`Any` variants | fixed: all valid directions pass; `ExtendedSequenceStrictOther` is invalid and rejected (P5) |
+| `Int`/`Date`/`Decimal`/`Float`/`DoubleSimpleTypePattern`, `Float`/`DoubleEnumerationType` | fixed: all pass in both modes (P3) |
+| `ExtendedSimpleContent`, `LocalAttributeSimpleType` | fixed: all pass in both modes (P2) |
+| `DateElement`, `DateTimeElement` and the attribute variants | fixed: all pass in both modes (P3) |
+| `AnyTypeElement`, `AnySimpleTypeElement`/`Attribute`, `MixedContentType`, `SubstitutionGroup` | fixed: all pass in both modes (P5) |
+| `TypeSubstitutionUsingXsiType` | passes with `preserve_types`; the default projection keeps its documented loss |
 
 ## Results, 2026-09-07
 

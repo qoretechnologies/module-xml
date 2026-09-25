@@ -12050,3 +12050,29 @@ Qore's `lib/ql_debug.cpp` has three unit tests with stack-allocated clients; thi
 (`/tmp/qore-stack-http-client.md`).
 
 Audit: `audits/P9c-07-http-client-lifetime.md`.
+
+## P9f-01: current result set (2026-09-25)
+
+The published `current-report.json` and `coverage-report.json` were from 2026-09-12 (716e5b5), before P5-16 to
+P9, and the README described only the 2026-09-07 baseline. Both are regenerated at P9d-05 (WSDL.qm SHA-256
+`f4b23306…`, Qore `c2bed7917`, lxml 6.1.0 / libxml2 2.14.6, Xerces-J 2.12.2) from a fresh, hash-verified corpus
+extraction. `coverage-preserve-types-report.json` adds the same coverage run with `--preserve-types`. The README's
+new "Current results, 2026-09-25" section records the counts and the status of every 2026-09-07 finding. The
+baseline files (`findings.json`, `adjudication-report.json`, `archive-report.json`) and the baseline README
+sections are unchanged.
+
+- Survey: 279 of 293 WSDLs parse (the 14 failures are the adjudicated invalid descriptions). 1,048 of 1,136
+  messages decode. All 68 decode failures are messages the adjudication classifies as invalid; the libxml2-only
+  survey oracle rejects 48 of them. 1,046 values serialize, and no output is rejected.
+- Coverage, default projection: 2,084 of 2,096 valid directions are preserved exactly, and all 176 invalid-source
+  directions are rejected. The strict selection passes. The 12 failures are exactly the documented projection
+  losses of P5 acceptance: `TypeSubstitutionUsingXsiType` (4), `GlobalElementAbstract` (4) and
+  `NillableOptionalElement03` (4).
+- Coverage, `preserve_types`: all 2,096 valid directions are preserved exactly, with 0 failures.
+- Every reproducer in the 2026-09-07 "Remaining findings" table now passes in both modes, except
+  `TypeSubstitutionUsingXsiType`, which passes only with `preserve_types`.
+
+The two newly reported cases are not regressions: the Sep 12 report predates the typed-value comparison (1f70115,
+0a6b919), which P5 acceptance introduced together with these documented losses.
+
+Audit: `audits/P9f-01-current-results.md`.

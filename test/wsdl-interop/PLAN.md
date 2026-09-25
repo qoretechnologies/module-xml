@@ -2,7 +2,7 @@
 
 Copyright (C) 2026 Qore Technologies, s.r.o.
 
-Status: P1–P5 acceptance is complete under the approved explicit native-capture and retained-XML contracts. P5-22b adds complete typed corpus accounting and an exact-order P5 selection; see [P5 acceptance](P5-acceptance.md). The ordinary decoding default and its documented projection losses remain unchanged and separately reported. P6 binding/component acceptance is complete; see [P6 acceptance](P6-acceptance.md). P7 SOAP processing is in progress, followed by P8–P9; the recorded QName AOT stack issue remains assigned to P9 runtime acceptance.
+Status: P1–P5 acceptance is complete under the approved explicit native-capture and retained-XML contracts. P5-22b adds complete typed corpus accounting and an exact-order P5 selection; see [P5 acceptance](P5-acceptance.md). The ordinary decoding default and its documented projection losses remain unchanged and separately reported. P6 binding/component acceptance is complete; see [P6 acceptance](P6-acceptance.md). P7 SOAP processing is accepted (see [P7 acceptance](P7-acceptance.md)), P8 attachments are accepted (P8-07 in `EXECUTION.md`) and P9a WS-Addressing is accepted (see [P9a acceptance](P9a-acceptance.md)); the remaining P9 coverage and completion work is in progress. The recorded QName AOT stack issue remains assigned to P9 runtime acceptance.
 See [EXECUTION.md](EXECUTION.md) for acceptance evidence and remaining implementation criteria.
 Prepared 2026-09-07 after `cc13171` on `develop`.
 Keep proposals here; put durable implementation details in `design/` only after implementation.
@@ -434,6 +434,10 @@ must not mistake success on RPC/encoded tests for WS-I literal-profile conforman
 - Audit all changes before each commit and publish implemented capabilities/limits, examples, release
   notes and durable design details. Preserve the original findings as evidence and publish a separate
   current result set; do not rewrite the old baseline to conceal failures.
+  - **Implemented (P9f-01, 2026-09-25):** `current-report.json`, `coverage-report.json` and the new
+    `coverage-preserve-types-report.json` are regenerated at P9d-05, and the README's "Current results" section
+    records them beside the unchanged 2026-09-07 baseline. All 2,096 valid corpus directions are preserved exactly
+    with `preserve_types`; the default projection keeps its 12 documented losses.
 - Track performance with a deterministic benchmark rather than with test timeouts. Use pinned workloads,
   starting with the captured list-values worker manifest and one SOAP message per binding style. Record
   per-phase costs (WSDL construction, `Serializable` copy, provider construction, value conversion,
