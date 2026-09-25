@@ -11730,3 +11730,47 @@ the same hashes. The README's JDK requirement is corrected to 17+ (peers compile
 Python requirement to 3.12+ (`tarfile` extraction filters).
 
 Audit: `audits/P9c-01-python-ci.md`.
+
+## P9b-02: SOAP message decoding (2026-09-25)
+
+After P9b-01, decoding cost 2-3 times as much as serialization. A 200-item order decoded in about 0.85 s
+(document/literal) and 1.5 s (RPC/encoded). The Qore process, `WSDL.qm` loading (about 0.5 s) and the Java oracles
+are not the cause: in the slowest Python module, 94% of the time is module work inside the Qore worker.
+
+**Profile:** a sampling profile with caller edges showed each element's namespace information being derived again
+by several consumers: the body expansion, the QName scope, `xsi:nil` assessment, type substitution and simple
+attribute validation. Each derivation re-validated the constant `xml` binding and every declared binding with an
+NCName regex, and the body expansion re-validated the same element names for every occurrence.
+
+**Changes:**
+- **Constant binding:** the implicit `xml` binding is not re-validated, including when a caller passes it in.
+- **Validated bindings:** a binding found valid is remembered in a bounded (256), copy-on-write map keyed by the
+  prefix length, the prefix and the URI. Invalid bindings are never remembered.
+- **Element names:** `expandElementNamespaces()` checks each distinct element key once per document; prefixes are
+  still resolved in each occurrence's scope. Repeated-name detection compares keys before using a regex.
+- **Elements without attributes:** no declaration or attribute pass in the expansion, no namespace derivation in
+  `XsdQNameNamespaceScope`, and `getExpandedAttributes()` returns an empty hash at once.
+
+A first version iterated inherited bindings with `pairIterator()`; that made RPC/encoded decoding about 5% slower,
+and was replaced by a key loop.
+
+**Result:** decoding a 50-item order, old and new module alternated to cancel out machine load.
+
+| Binding | P9b-01 | P9b-02 |
+| --- | --- | --- |
+| document/literal | 305-339 ms | 238-242 ms |
+| RPC/literal | 313-439 ms | 255-262 ms |
+| RPC/encoded | 566-812 ms | 561-827 ms (no measurable change) |
+
+Outputs are byte-identical to the P9b reference. RPC/encoded decoding remains the most expensive path: each
+element's `xsi:type` is resolved, a separate built-in type object is constructed, and its attributes are expanded
+by several consumers. Removing that repetition means deriving each element's attribute and namespace information once
+and passing it to those consumers.
+
+**Tests:** `test/wsdl-namespace-expansion-cache.qtest` (7 cases, 60 assertions) covers a repeated prefixed name in
+three scopes, occurrence keys of interleaved repeated names, invalid and unbound names after cached valid ones,
+bindings inherited by elements without attributes, invalid bindings after remembered valid ones (including the same
+text split differently between prefix and URI), more bindings than the memo keeps from four threads, and expanded
+attributes of elements without attributes. The same test passes against the P9b-01 module.
+
+Audit: `audits/P9b-02-decoding.md`.

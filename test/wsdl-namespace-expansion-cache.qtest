@@ -1,0 +1,170 @@
+#!/usr/bin/env qore
+# -*- mode: qore; indent-tabs-mode: nil -*-
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires xml
+%requires ../qlib/WSDL.qm
+
+%exec-class NamespaceExpansionCacheTest
+
+# Element names are validated once per document and namespace bindings once per distinct binding. These tests check
+# that the cached checks give the same results as checking every occurrence: names resolve in their own scopes,
+# invalid names and bindings are always rejected, and repeated names keep their order and occurrence keys.
+public class NamespaceExpansionCacheTest inherits QUnit::Test {
+    private {
+        const XML_NS = "http://www.w3.org/XML/1998/namespace";
+        const Order = XPF_PRESERVE_ORDER | XPF_PRESERVE_WHITESPACE;
+    }
+
+    constructor() : Test("NamespaceExpansionCacheTest", "1.0") {
+        addTestCase("a repeated prefixed name resolves in each scope", \scopes());
+        addTestCase("repeated names keep their order and occurrence keys", \occurrences());
+        addTestCase("invalid element names are rejected wherever they occur", \invalidNames());
+        addTestCase("elements without attributes inherit their bindings", \inherited());
+        addTestCase("valid bindings are remembered, invalid ones always rejected", \bindings());
+        addTestCase("binding checks are consistent beyond the memo limit and between threads", \bindingLimit());
+        addTestCase("elements without attributes have no expanded attributes", \noAttributes());
+        set_return_value(main());
+    }
+
+    scopes() {
+        # the same lexical name p:v binds to three namespaces in three sibling scopes, one of them repeated
+        string xml = "<r><a xmlns:p='urn:one'><p:v>1</p:v></a><b xmlns:p='urn:two'><p:v>2</p:v><p:v>3</p:v></b>"
+            "<c xmlns:p='urn:one'><p:v>4</p:v></c></r>";
+        hash<auto> expanded = XsdBase::expandElementNamespaces(parse_xml(xml, Order));
+        hash<auto> root = expanded."{}r";
+        assertEq("1", root."{}a"."{urn:one}v");
+        assertEq(("2", "3"), root."{}b"."{urn:two}v");
+        assertEq("4", root."{}c"."{urn:one}v");
+        # the same name in another document resolves again
+        expanded = XsdBase::expandElementNamespaces(parse_xml("<p:v xmlns:p='urn:three'>5</p:v>"));
+        assertEq("5", expanded."{urn:three}v"."^value^");
+    }
+
+    occurrences() {
+        hash<auto> expanded = XsdBase::expandElementNamespaces(parse_xml(
+            "<r xmlns:p='urn:x'><p:a>1</p:a><p:a>2</p:a><b>3</b><p:a>4</p:a><b>5</b><b>6</b></r>", Order));
+        hash<auto> root = expanded."{}r";
+        list<string> names = select keys root, $1 !~ /^\^/;
+        assertEq(("{urn:x}a", "{}b", "{urn:x}a^1", "{}b^1"), names);
+        assertEq(("1", "2"), root."{urn:x}a");
+        assertEq("3", root."{}b");
+        assertEq("4", root."{urn:x}a^1");
+        assertEq(("5", "6"), root."{}b^1");
+        # an unprefixed name and a prefixed name with the same local part are distinct identities
+        expanded = XsdBase::expandElementNamespaces(parse_xml(
+            "<r xmlns:p='urn:x'><a>1</a><p:a>2</p:a><a>3</a></r>", Order));
+        assertEq(("{}a", "{urn:x}a", "{}a^1"), (select keys expanded."{}r", $1 !~ /^\^/));
+    }
+
+    invalidNames() {
+        # a repeated valid name is cached; an invalid name after it is still rejected
+        hash<auto> parsed = {"r": {"a": ("1", "2"), "b:c:d": "3"}};
+        for (int i = 0; i < 2; ++i) {
+            assertThrows("SOAP-DESERIALIZATION-ERROR", "invalid XML element name", \XsdBase::expandElementNamespaces(),
+                (parsed,));
+        }
+        foreach string name in (":a", "a:", "1a", "a b") {
+            assertThrows("SOAP-DESERIALIZATION-ERROR", "invalid XML element name", \XsdBase::expandElementNamespaces(),
+                ({"r": {"a": "1", name: "2"}},), name);
+        }
+        # an unbound prefix is rejected in the scope where it is used, although the name was valid elsewhere
+        assertThrows("SOAP-DESERIALIZATION-ERROR", "unbound XML element prefix", \XsdBase::expandElementNamespaces(),
+            ({"r": {"a": {"^attributes^": {"xmlns:p": "urn:x"}, "p:v": "1"}, "b": {"p:v": "2"}}},));
+    }
+
+    inherited() {
+        hash<auto> expanded = XsdBase::expandElementNamespaces(parse_xml(
+            "<r xmlns='urn:d' xmlns:p='urn:p'><a><b><p:c>1</p:c><d>2</d></b></a></r>"));
+        assertEq("1", expanded."{urn:d}r"."{urn:d}a"."{urn:d}b"."{urn:p}c");
+        assertEq("2", expanded."{urn:d}r"."{urn:d}a"."{urn:d}b"."{urn:d}d");
+        # bindings passed by the caller apply to elements without attributes
+        expanded = XsdBase::expandElementNamespaces({"q:e": {"f": "1"}}, {"q": "urn:q", "": "urn:default"});
+        assertEq("1", expanded."{urn:q}e"."{urn:default}f");
+        # an element that declares nothing does not remove its parent's bindings for later siblings
+        expanded = XsdBase::expandElementNamespaces(parse_xml(
+            "<r xmlns:p='urn:p'><a/><p:b>1</p:b></r>", Order));
+        assertEq("1", expanded."{}r"."{urn:p}b");
+    }
+
+    bindings() {
+        hash<string, string> namespaces = XsdBase::getAttributeNamespaces({"xmlns:ab": "urn:x"});
+        assertEq({"xml": XML_NS, "ab": "urn:x"}, namespaces);
+        # remembered valid bindings do not admit invalid ones with similar spellings
+        list<hash<auto>> invalid = (
+            {"xmlns:a": ""},
+            {"xmlns:xmlns": "urn:x"},
+            {"xmlns:xml": "urn:x"},
+            {"xmlns:other": XML_NS},
+            {"xmlns:a": "http://www.w3.org/2000/xmlns/"},
+            {"xmlns:1a": "urn:x"},
+            {"xmlns:a": 1},
+        );
+        for (int i = 0; i < 2; ++i) {
+            foreach hash<auto> attributes in (invalid) {
+                assertThrows("SOAP-DESERIALIZATION-ERROR", \XsdBase::getAttributeNamespaces(), (attributes,),
+                    sprintf("%y", attributes));
+                # inherited bindings are typed strings
+                if (attributes.firstValue().typeCode() == NT_STRING) {
+                    assertThrows("SOAP-DESERIALIZATION-ERROR", \XsdBase::getAttributeNamespaces(),
+                        (NOTHING, cast<hash<string, string>>(map {substr($1.key, 6): $1.value},
+                        attributes.pairIterator())), sprintf("inherited %y", attributes));
+                }
+            }
+        }
+        # the same text split differently between prefix and URI is a different binding
+        assertEq({"xml": XML_NS, "a": "burn:x"}, XsdBase::getAttributeNamespaces({"xmlns:a": "burn:x"}));
+        assertThrows("SOAP-DESERIALIZATION-ERROR", \XsdBase::getAttributeNamespaces(), ({"xmlns:a:": "burn:x"},));
+        # inherited bindings, including the canonical xml binding, are accepted
+        assertEq({"xml": XML_NS, "p": "urn:p", "q": "urn:q"}, XsdBase::getAttributeNamespaces({"xmlns:q": "urn:q"},
+            {"xml": XML_NS, "p": "urn:p"}));
+        assertEq({"xml": XML_NS, "": "urn:d"}, XsdBase::getElementNamespaces({"xmlns": "urn:d"}));
+    }
+
+    bindingLimit() {
+        # more distinct valid bindings than the memo keeps, checked from several threads
+        Queue results();
+        Counter done();
+        for (int thread = 0; thread < 4; ++thread) {
+            done.inc();
+            background sub () {
+                on_exit done.dec();
+                try {
+                    for (int i = 0; i < 300; ++i) {
+                        string prefix = sprintf("p%d", (i + thread * 300));
+                        hash<string, string> namespaces = XsdBase::getAttributeNamespaces({"xmlns:" + prefix:
+                            "urn:" + prefix});
+                        results.push(namespaces{prefix} == "urn:" + prefix);
+                    }
+                    results.push(True);
+                } catch (hash<ExceptionInfo> ex) {
+                    results.push(sprintf("%s: %s", ex.err, ex.desc));
+                }
+            }();
+        }
+        done.waitForZero();
+        assertEq(4 * 301, results.size());
+        int passed = 0;
+        while (results.size()) {
+            if (results.get() === True) {
+                ++passed;
+            }
+        }
+        assertEq(4 * 301, passed);
+        # after the memo is reset, invalid bindings are still rejected
+        assertThrows("SOAP-DESERIALIZATION-ERROR", \XsdBase::getAttributeNamespaces(), ({"xmlns:p0": ""},));
+        assertThrows("SOAP-DESERIALIZATION-ERROR", \XsdBase::getAttributeNamespaces(), ({"xmlns:xml": "urn:p0"},));
+    }
+
+    noAttributes() {
+        assertEq({}, XsdBase::getExpandedAttributes());
+        assertEq({}, XsdBase::getExpandedAttributes({}));
+        assertEq({"{urn:x}a": "1", "{}b": "2"}, XsdBase::getExpandedAttributes({"xmlns:p": "urn:x", "p:a": "1",
+            "b": "2"}));
+        assertThrows("SOAP-DESERIALIZATION-ERROR", "unbound XML attribute prefix",
+            \XsdBase::getExpandedAttributes(), ({"q:a": "1"},));
+    }
+}

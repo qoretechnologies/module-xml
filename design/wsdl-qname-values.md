@@ -120,6 +120,17 @@ only the declarations changed at each node, avoiding full inherited-map copies a
 every depth. Prefix filtering inspects each node's own declarations. Low-level `serializeValue()` results are XML fragments
 whose structural namespace context belongs to their caller.
 
+Decoding resolves parsed element keys to expanded names once per message body
+(`XsdBase::expandElementNamespaces()`). Each distinct element key is checked as
+an XML name once per document; its prefix is still resolved in the scope of
+every occurrence. An element without attributes declares no prefixes, so its
+scope is the parent's, and only the implicit `xml` binding is in scope for a
+QName scope without attributes. Namespace binding checks depend only on the
+prefix and URI: a binding found valid is remembered in a bounded map, keyed
+unambiguously by the prefix length, prefix and URI, and replaced as a whole on
+update so that concurrent readers see a consistent map. Invalid bindings are
+never remembered and are rejected on every use.
+
 `XsdSchema::serializeXmlValue(namespace_uri, local_name, value)` returns a complete
 `XsdXmlValue` for a global element. It uses a private copy of the schema's namespace
 registry, handles QName attributes and simple content, and leaves the original
