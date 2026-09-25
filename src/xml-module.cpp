@@ -129,16 +129,19 @@ public:
                     return true;
                 }
                 resolved_location = target->c_str();
-                QoreHttpClientObject client;
-                client.setSslVerifyMode(SSL_VERIFY_PEER);
+                // The client is reference-counted private data: its I/O operations, such as a socket setup that a
+                // sandbox policy abandons, keep their own reference and release it later on an I/O thread, so it
+                // must not live on the stack.
+                ReferenceHolder<QoreHttpClientObject> client(new QoreHttpClientObject, xsink);
+                client->setSslVerifyMode(SSL_VERIFY_PEER);
                 // libxml2 supplies URI references with existing percent escapes.
-                client.setPreEncodedUrls(true);
-                client.setEncodingPassthru(true);
-                if (client.setURL(resolved_location.c_str(), xsink)) {
+                client->setPreEncodedUrls(true);
+                client->setEncodingPassthru(true);
+                if (client->setURL(resolved_location.c_str(), xsink)) {
                     return true;
                 }
                 ReferenceHolder<QoreHashNode> info(new QoreHashNode(autoTypeInfo), xsink);
-                body = client.get(nullptr, nullptr, *info, xsink);
+                body = client->get(nullptr, nullptr, *info, xsink);
                 if (*xsink) {
                     return true;
                 }

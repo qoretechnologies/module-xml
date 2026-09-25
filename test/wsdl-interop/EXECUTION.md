@@ -12021,3 +12021,32 @@ module. The R2735 ledger rows now name it.
 Full suite: every qtest passes, and all 556 Python tests pass in 6 shards with the pinned lxml 6.1.0.
 
 Audit: `audits/P9d-05-bindings.md`.
+
+## P9c-07: heap-allocated schema resource HTTP client (2026-09-25)
+
+Pipeline 57629 failed on Alpine only: `test_schema_resources` crashed with SIGSEGV in its denied-network fixture.
+Locally, in the Alpine test image, 4 of 100 full-test runs crashed. Under gdb, a loop of the fixture alone
+(`XML_CATALOG_FILES` empty, with a live HTTP server) crashed at run 217:
+`QoreCallDispatcher::workerLoop -> AsyncIoDeferredRelease::release -> SocketSetupPollOperation::deref ->
+sock->deref`.
+
+**Root cause:** the XSD resource loader in `src/xml-module.cpp` (added in 7a5ef5d, so never released) allocated its
+`QoreHttpClientObject` on the stack. The client is itself the socket, which is reference-counted private data. When
+a sandbox policy abandons a connection setup, the pending `SocketSetupPollOperation` keeps a reference and releases
+it later on an I/O thread. By then the loader's frame had returned, so `deref()` ran on freed stack memory. The
+timing depended on the I/O thread, so the crash appeared on musl's scheduling and not in glibc runs.
+
+**Fix:** the client is heap-allocated in a `ReferenceHolder`, so the last reference, wherever it is released, frees
+it.
+
+**Verification:**
+
+- On Alpine: 0 crashes in 1000 fixture runs (both denied-network policies), and 0 failures in 200 full
+  `test_schema_resources` runs.
+- valgrind (`qore -b`) is clean for both denied paths and for a successful HTTP schema load: 0 errors and nothing
+  definitely lost.
+
+Qore's `lib/ql_debug.cpp` has three unit tests with stack-allocated clients; this is reported to the Qore session
+(`/tmp/qore-stack-http-client.md`).
+
+Audit: `audits/P9c-07-http-client-lifetime.md`.
