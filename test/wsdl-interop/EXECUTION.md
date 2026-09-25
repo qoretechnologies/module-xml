@@ -11585,3 +11585,25 @@ The calendar, entity, schema-reader and XML suites pass.
 **Valgrind:** no definite leaks. Every reported error has the same origin: generated code reads the uninitialised
 tail of a correctly built `QoreString`. A trivial QUnit test without module-xml reproduces it, so it is a Qore
 core issue in the new build, handed off in `/tmp/qore-valgrind-uninit-string-tail.md`.
+
+## SOAP 1.2 encoded members of qualified schemas (2026-09-25)
+
+**Found:** building the P9b binding-style workload, whose schema has `elementFormDefault="qualified"`, showed that
+RPC/encoded over SOAP 1.2 could not decode even the module's own request: "member id of type Order has the
+namespace name ''". P8-07 checks struct member namespace names (SOAP 1.2 Part 2 section 3.1.3) in two places:
+1. `WSMessage` checks a type-based RPC part's members, then removes their prefixes.
+2. The part's type then decodes the same member hash and checks it again.
+
+By the second check the prefixes are gone, so each member appears to be in the default namespace. That is
+correct only for unqualified schemas, which is all the W3C collection uses.
+
+**Fixed:** the part's type, or its element, checks and removes the prefixes itself. `WSMessage` no longer checks
+complex-typed or element parts first. The check still rejects members in a foreign namespace.
+
+**Tests:** `soap12-encoding.qtest` gains "qualified struct members decode with their namespace names":
+- the serializer's own message, with the prefix declared on the envelope;
+- a prefix on the struct, and a default namespace;
+- an unqualified member and a foreign-namespace member, both rejected.
+
+The SOAP 1.2 encoding, RPC, collection and fault suites pass, as do the SOAP 1.1 Note examples and the encoded
+array and reference suites.
