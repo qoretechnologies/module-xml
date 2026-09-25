@@ -11697,3 +11697,36 @@ Outputs are byte-identical to the P9b reference: every binding style and the 12 
 `PROGRAM-INTERRUPTED`. A memo hit returned the remembered result without running any loop, so no cancellation check
 point was reached. The memoized methods now validate their names before the memo lookup, in a loop that is a check
 point, as the uncached methods did.
+
+## P9c-01: the Python suite in CI (2026-09-25)
+
+CI ran only the `test/*.qtest` loop; the Python suite in this directory (523 tests in 187 modules) never ran there.
+It takes about 81 minutes in one process, longer than the 60-minute job limit.
+
+**Runner:** `ci_suite.py` splits the suite by test module into shards and checks the combined result:
+- `run --shard I/N` runs the modules assigned to shard I and records every test's outcome and duration;
+- `verify --shards N` discovers the suite independently and fails unless every test ran exactly once, in its
+  assigned shard, and passed. A missing shard, a missing, duplicate, unknown, skipped or failed test, or a module
+  that cannot be imported fails the job instead of changing the counts;
+- the assignment is deterministic, longest first on the least loaded shard, using the measured module durations in
+  `ci-timings.json` (5,121 s in total; about 854 s per shard with six shards).
+
+**CI:** `.gitlab-ci.yml` adds `python-ubuntu` and `python-alpine` (six parallel shards each, warnings as errors, as
+the unprivileged `qore` user) and `python-verify-ubuntu` and `python-verify-alpine`, which report the GitHub
+statuses `module-xml-python-ubuntu` and `module-xml-python-alpine`. Shard results and `summary.json` are archived.
+The CI scripts now build in `build-debug` with `CMAKE_BUILD_TYPE=Debug`, the debug build convention the Python
+tests expect, and install `lxml`; the JDK, Python and OpenSSL come from the qore-test-base images.
+
+**Found by a local CI-equivalent run:** the images set `JAVA_TOOL_OPTIONS`. Every JVM started with it prints
+`Picked up JAVA_TOOL_OPTIONS: ...` on stderr, which the Xerces, WSDL4J, CXF and Axis oracles and peers rightly
+report as an unexpected diagnostic: 256 tests failed. The options could also change a pinned oracle's behavior.
+`jvm.py` now gives every Java child process an environment without `JAVA_TOOL_OPTIONS`, `JDK_JAVA_OPTIONS` and
+`_JAVA_OPTIONS`; their configuration is on their command lines. `test_jvm.py` checks this with the real `java`
+and `javac` launchers. With the variable set, four local shards then ran all 523 tests, and `verify` passed.
+
+**Also:** `test_particle_corpus.py` read a corpus that had been extracted to `/tmp` by hand. It now extracts the
+pinned archive into a temporary directory; `WSDL_CORPUS` still selects a corpus, whose files are verified against
+the same hashes. The README's JDK requirement is corrected to 17+ (peers compile with `--release 17`) and its
+Python requirement to 3.12+ (`tarfile` extraction filters).
+
+Audit: `audits/P9c-01-python-ci.md`.

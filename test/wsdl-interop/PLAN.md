@@ -441,6 +441,9 @@ must not mistake success on RPC/encoded tests for WS-I literal-profile conforman
     manifest and a binding-style order workload), the `bench.qr` driver, `benchmark.py`, and a Release reference,
     `reference.json`. `test_benchmark.py` checks the pinned inputs, byte-identical outputs and the comparison
     rules, without timing assertions. See [the benchmark README](benchmark/README.md).
+  - **Implemented (P9c-01, 2026-09-25):** CI runs the complete Python suite on Ubuntu and Alpine in six shards per
+    distribution, and a verify job fails on any missing, duplicate, skipped or failed test. See
+    [Continuous integration](README.md#continuous-integration).
 
 **Final acceptance:** zero unclassified findings or missing corpus dependencies; zero rejected valid
 inputs in supported scope; zero serialization failures or invalid outputs for those inputs; no value,

@@ -108,7 +108,8 @@ results. A completed diagnostic run alone does not make recorded failures pass.
 
 The W3C XML Schema Databinding collection is a useful independent source of WSDL 1.1 descriptions,
 XSDs, and SOAP messages. Running it against this module exposed defects that the existing tests missed.
-The small regression suite runs offline in the normal `test/*.qtest` CI loop. The larger survey is a
+The small regression suite runs offline in the normal `test/*.qtest` CI loop, and CI runs the complete Python
+suite in this directory as well (see [Continuous integration](#continuous-integration)). The larger survey is a
 diagnostic tool with explicit failures and coverage limits, not a conformance certification.
 
 See [PLAN.md](PLAN.md) for the phased implementation plan, acceptance checks, and a complete mapping
@@ -234,7 +235,7 @@ XSD 1.0 rule. The Qore numeric regression subset uses ordinary positive values a
 rejection of the invalid signed inputs is implemented in P3-01. The small survey now serializes
 48 valid inputs and rejects all 16 signed unsigned inputs with `SOAP-DESERIALIZATION-ERROR`.
 
-The Python tests require Python 3.10+, `lxml`, and Qore's `json` module in addition to `xml`. They test the
+The Python tests require Python 3.12+, `lxml`, and Qore's `json` module in addition to `xml`. They test the
 real Qore subprocess, version selection, fixture checksums, empty input, namespace preservation,
 malformed messages, offline resolution, and separation of input/output validation failures.
 They also verify that missing, duplicate, malformed, or out-of-order worker results fail the survey.
@@ -279,6 +280,36 @@ XSD 1.0 union composition has separate scalar and interoperability checks:
 restrictions from nested union member composition while preserving primitive
 selection, list constraints, shared graphs and detached provider behavior. See
 [the implemented design](../../design/xsd-union-composition.md).
+
+## Continuous integration
+
+CI (`.gitlab-ci.yml`) runs the Qore test files and this directory's complete Python suite on Ubuntu and Alpine,
+with a debug build of the module in `build-debug`. The suite needs Python 3.12 or later with `lxml`, a JDK 17+,
+`openssl` and Qore. The CI scripts install `lxml` (`python3-lxml`, `py3-lxml`); the rest is in the
+qore-test-base images. Nothing is downloaded at run time: every corpus, specification and JAR is committed and
+pinned by SHA-256.
+
+The suite takes longer than one CI job allows, so `ci_suite.py` splits it by test module into six shards that
+run as parallel jobs (`python-ubuntu` and `python-alpine`), with warnings as errors:
+
+```sh
+cd test/wsdl-interop
+python3 -W error ci_suite.py list --shards 6                            # the assignment
+python3 -W error ci_suite.py run --shard 1/6 --output /tmp/ci-results    # one shard
+python3 -W error ci_suite.py verify --shards 6 --output /tmp/ci-results  # the completeness check
+```
+
+Each shard records every test with its outcome and duration in `shard-I-of-N.json`. The verify jobs
+(`python-verify-ubuntu`, `python-verify-alpine`) discover the suite independently and fail unless every
+discovered test ran exactly once, in its assigned shard, and passed. A missing shard result, a missing,
+duplicate, unknown, skipped or failed test, or a module that cannot be imported therefore fails CI instead of
+changing the counts. The verify jobs report the GitHub statuses `module-xml-python-ubuntu` and
+`module-xml-python-alpine`; the shard results and `summary.json` are archived for 30 days.
+
+The assignment is deterministic: modules are placed longest first on the least loaded shard, using the
+measured durations in `ci-timings.json`. The timings only balance the shards. After adding slow tests, record
+new ones from a complete set of shard results with `python3 ci_suite.py timings --output <results>`, and
+change `PYTHON_SHARDS` and `parallel` in `.gitlab-ci.yml` together.
 
 ## Fixture provenance
 
@@ -403,7 +434,7 @@ information; those require explicit value and infoset assertions.
 ## Independent source adjudication
 
 The second oracle is Apache Xerces-J 2.12.2, pinned by SHA-256 in `oracle/manifest.json` with the
-unmodified Maven JAR and its embedded license/notices. A JDK 11+ (`java`, `javac`) is required.
+unmodified Maven JAR and its embedded license/notices. A JDK 17+ (`java`, `javac`) is required.
 The worker compiles with `-Xlint:all -Werror`, runs with a 256 MiB heap and a 60-second deadline, and
 accepts at most 10,000 schema/document/resource blobs with 64 MiB aggregate raw content. Imported
 resources are supplied as bytes; unlisted locations and DTDs are rejected. Tests exercise malformed
@@ -1382,8 +1413,8 @@ derivative changes only the WSDL extension namespace from
 `http://schemas.xmlsoap.org/wsdl/soap/` to
 `http://schemas.xmlsoap.org/wsdl/soap12/`, and checks the resulting binding
 identity before invoking Qore. Original files remain untouched. `WSDL_CORPUS`
-can select a verified corpus root; the default is
-`/tmp/module-xml-wsdl-survey/databinding/examples/6/09`.
+can select a corpus root, whose files are verified against the same hashes; by
+default the test extracts the pinned archive into a temporary directory.
 
 The normative structural rules are XSD 1.0
 [Model Group Validation Rules](https://www.w3.org/TR/xmlschema-1/#cvc-model-group)

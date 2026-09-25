@@ -21,6 +21,7 @@ from lxml import etree
 import axis_interop
 from test_axis_peer import AxisPeer, PEER, classpath
 from test_cxf_peer import endpoint
+import jvm
 
 ROOT = Path(__file__).resolve().parent
 REPO = ROOT.parents[1]
@@ -121,7 +122,8 @@ class AxisInteropTest(unittest.TestCase):
             client = subprocess.run(self.java + ['-Daxis.ClientConfigFile=%s' % (self.peer.work / 'client-config.wsdd'),
                                                  '-Dqore.axis.capture=%s' % capture, 'AxisPeer', 'client',
                                                  'http://127.0.0.1:%d/axis/services/echo' % port],
-                                    cwd=self.peer.work, capture_output=True, text=True, timeout=EXCHANGE_TIMEOUT)
+                                    cwd=self.peer.work, capture_output=True, text=True, timeout=EXCHANGE_TIMEOUT,
+                                    env=jvm.environment())
         self.assertEqual((0, 'VERIFIED %d FAILURES 0\n' % len(operations()), ''),
                          (client.returncode, client.stdout, client.stderr))
         captured = [json.loads(line) for line in capture.read_text().splitlines()]

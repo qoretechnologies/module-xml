@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+import jvm
 
 ROOT = Path(__file__).resolve().parent
 ORACLE = ROOT / "oracle"
@@ -33,13 +34,13 @@ class WsdlImportTests(unittest.TestCase):
         cls.jar = ORACLE / "wsdl4j-1.6.3.jar"
         command = ["javac", "-Xlint:all", "-Werror", "-cp", str(cls.jar), "-d", str(cls.classes),
                    str(ORACLE / "WsdlImportOracle.java")]
-        result = subprocess.run(command, capture_output=True, text=True, timeout=60, check=True)
+        result = subprocess.run(command, capture_output=True, text=True, timeout=60, check=True, env=jvm.environment())
         if result.stdout or result.stderr:
             raise RuntimeError("unexpected oracle compiler diagnostics")
 
     def run_oracle(self, source, valid=True):
         command = ["java", "-cp", str(self.classes) + os.pathsep + str(self.jar), "WsdlImportOracle", str(source)]
-        result = subprocess.run(command, capture_output=True, text=True, timeout=30)
+        result = subprocess.run(command, capture_output=True, text=True, timeout=30, env=jvm.environment())
         if not valid:
             self.assertNotEqual(0, result.returncode)
             self.assertTrue(result.stderr.strip())

@@ -18,6 +18,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import jvm
 
 ROOT = Path(__file__).resolve().parent
 PEER = ROOT / 'axis-peer'
@@ -40,10 +41,10 @@ def generate_map_schema():
         classes = Path(work) / 'classes'
         classes.mkdir()
         subprocess.run(['javac', '--release', '17', '-Xlint:all', '-Werror', '-d', str(classes), str(MAP_ECHO)],
-                       check=True, capture_output=True, text=True, timeout=300)
+                       check=True, capture_output=True, text=True, timeout=300, env=jvm.environment())
         subprocess.run(['java', '-Dorg.apache.commons.logging.Log=org.apache.commons.logging.impl.NoOpLog',
                         '-cp', os.pathsep.join(jars + [str(classes)]), 'org.apache.axis.wsdl.Java2WSDL'] + JAVA2WSDL,
-                       cwd=work, check=True, capture_output=True, text=True, timeout=300)
+                       cwd=work, check=True, capture_output=True, text=True, timeout=300, env=jvm.environment())
         match = re.search(r'<schema targetNamespace="http://xml.apache.org/xml-soap".*?</schema>',
                           (Path(work) / 'map.wsdl').read_text(), re.S)
         if not match:

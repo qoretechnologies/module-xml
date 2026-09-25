@@ -29,8 +29,18 @@ ROOT = Path(__file__).resolve().parent
 
 
 class ParticleCorpusTest(unittest.TestCase):
+    def setUp(self):
+        # a verified corpus root may be supplied; otherwise the pinned archive is extracted for this test
+        configured = os.environ.get('WSDL_CORPUS')
+        if configured:
+            self.base = Path(configured)
+        else:
+            temporary = tempfile.TemporaryDirectory(prefix='wsdl-particle-corpus-')
+            self.addCleanup(temporary.cleanup)
+            self.base = corpus.extract(Path(temporary.name) / 'corpus')
+
     def test_original_corpus_values_and_retained_order(self):
-        base = Path(os.environ.get('WSDL_CORPUS', '/tmp/module-xml-wsdl-survey/databinding/examples/6/09'))
+        base = self.base
         records = {r['case']: r for r in corpus.read_manifest(ROOT / 'adjudication-report.json')['cases']}
         selection = corpus.read_manifest(ROOT / 'strict-selection.json')
         cases, expected, schemas, documents, parts, compilers = [], {}, {}, {}, {}, {}

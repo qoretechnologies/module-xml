@@ -11,6 +11,7 @@ import subprocess
 import tempfile
 import unittest
 from independent import SchemaJob, run
+import jvm
 
 ROOT = Path(__file__).resolve().parent
 ORACLE = ROOT / "oracle"
@@ -35,14 +36,14 @@ class WsdlOperationTests(unittest.TestCase):
         result = subprocess.run(
             ["javac", "-Xlint:all", "-Werror", "-cp", str(cls.jar), "-d", str(cls.classes),
              str(ORACLE / "WsdlOperationOracle.java")],
-            capture_output=True, text=True, timeout=60, check=True)
+            capture_output=True, text=True, timeout=60, check=True, env=jvm.environment())
         if result.stdout or result.stderr:
             raise RuntimeError("unexpected oracle compiler diagnostics")
 
     def oracle(self, path, valid=True):
         result = subprocess.run(
             ["java", "-cp", str(self.classes) + os.pathsep + str(self.jar), "WsdlOperationOracle", str(path)],
-            capture_output=True, text=True, timeout=30)
+            capture_output=True, text=True, timeout=30, env=jvm.environment())
         if not valid:
             self.assertNotEqual(0, result.returncode)
             self.assertEqual("", result.stdout)

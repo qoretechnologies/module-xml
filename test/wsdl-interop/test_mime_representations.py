@@ -17,6 +17,7 @@ import xml.etree.ElementTree as ET
 
 from independent import SchemaJob, run
 from test_cxf_peer import endpoint
+import jvm
 
 ROOT = Path(__file__).resolve().parent
 REPO = ROOT.parent.parent
@@ -107,7 +108,7 @@ class MimeRepresentationTests(unittest.TestCase):
             jar = oracle / 'wsdl4j-1.6.3.jar'
             result = subprocess.run(['javac', '-Xlint:all', '-Werror', '-cp', str(jar), '-d', directory,
                                      str(oracle / 'WsdlMimePartsOracle.java')], capture_output=True,
-                                    text=True, timeout=60, check=True)
+                                    text=True, timeout=60, check=True, env=jvm.environment())
             self.assertEqual('', result.stdout + result.stderr)
             path = Path(directory) / 'contract.wsdl'
             for row in cases():
@@ -115,7 +116,7 @@ class MimeRepresentationTests(unittest.TestCase):
                     path.write_text(row['xml'])
                     result = subprocess.run(['java', '-cp', directory + os.pathsep + str(jar),
                                              'WsdlMimePartsOracle', str(path)], capture_output=True,
-                                            text=True, timeout=30, check=True)
+                                            text=True, timeout=30, check=True, env=jvm.environment())
                     self.assertEqual('', result.stderr)
                     tree, expected = ET.fromstring(row['xml']), []
                     for direction in ('input', 'output'):

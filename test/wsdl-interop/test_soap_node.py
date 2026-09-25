@@ -14,6 +14,7 @@ from lxml import etree
 from test_cxf_peer import endpoint
 from test_http_request_url import origin
 from test_soap_envelope import ENV, URI, LocalSchemas, PEER as ENVELOPE_PEER
+import jvm
 
 ROOT = Path(__file__).resolve().parent
 PEER = ROOT / "soap-node-peer"
@@ -62,7 +63,7 @@ class SoapNodeTests(unittest.TestCase):
         jars = str(dependencies / "jars/*")
         result = subprocess.run(["javac", "--release", "17", "-Xlint:all", "-Werror", "-cp", jars,
                                  "-d", cls.directory.name, str(PEER / "NodePeer.java")],
-                                capture_output=True, text=True, timeout=60)
+                                capture_output=True, text=True, timeout=60, env=jvm.environment())
         if result.returncode or result.stdout or result.stderr:
             raise AssertionError(result.stdout + result.stderr)
         # Deliberate negative requests produce CXF warning-level fault logs; assertions inspect the actual faults.

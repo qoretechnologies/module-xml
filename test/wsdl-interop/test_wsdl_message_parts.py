@@ -10,6 +10,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+import jvm
 
 ROOT = Path(__file__).resolve().parent
 ORACLE = ROOT / "oracle"
@@ -32,7 +33,7 @@ class MessagePartsTests(unittest.TestCase):
         cls.jar = ORACLE / "wsdl4j-1.6.3.jar"
         result = subprocess.run(["javac", "-Xlint:all", "-Werror", "-cp", str(cls.jar), "-d", str(cls.classes),
                                  str(ORACLE / "WsdlMessagePartsOracle.java")], capture_output=True, text=True,
-                                timeout=60, check=True)
+                                timeout=60, check=True, env=jvm.environment())
         if result.stdout or result.stderr:
             raise RuntimeError("unexpected compiler diagnostics")
 
@@ -45,7 +46,8 @@ class MessagePartsTests(unittest.TestCase):
             with self.subTest(direction=direction):
                 result = subprocess.run(["java", "-cp", str(self.classes) + os.pathsep + str(self.jar),
                                          "WsdlMessagePartsOracle", str(fixture), "http://cxf.apache.org/swa",
-                                         "echoDataWithHeader" + direction], capture_output=True, text=True, timeout=30)
+                                         "echoDataWithHeader" + direction], capture_output=True, text=True, timeout=30,
+                                         env=jvm.environment())
                 self.assertEqual(0, result.returncode, result.stderr)
                 self.assertEqual("", result.stderr)
                 self.assertEqual([

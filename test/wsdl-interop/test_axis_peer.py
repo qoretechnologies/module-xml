@@ -22,6 +22,7 @@ from lxml import etree
 
 import encoded_corpus
 from test_cxf_peer import endpoint
+import jvm
 
 ROOT = Path(__file__).resolve().parent
 PEER = ROOT / 'axis-peer'
@@ -58,7 +59,8 @@ class AxisPeer:
         # with type mapping version 1.1 and both interop namespaces mapped to samples.echo.
         subprocess.run(['java', '-cp', classpath(self.classes), 'org.apache.axis.wsdl.WSDL2Java', '-o', str(generated),
                         '-T', '1.1', '-Nhttp://soapinterop.org/=samples.echo', '-Nhttp://soapinterop.org/xsd=samples.echo',
-                        str(PEER / 'contracts' / 'InteropTest.wsdl')], check=True, capture_output=True, text=True, timeout=300)
+                        str(PEER / 'contracts' / 'InteropTest.wsdl')], check=True, capture_output=True, text=True, timeout=300,
+                        env=jvm.environment())
         package = generated / 'samples' / 'echo'
         for name in ('InteropTestSoapBindingImpl.java', 'TestClient.java', 'echoHeaderStringHandler.java',
                      'echoHeaderStructHandler.java'):
@@ -66,10 +68,10 @@ class AxisPeer:
         # Third-party generated and sample sources are compiled unchanged; warnings in them are not ours to fix.
         subprocess.run(['javac', '--release', '17', '-nowarn', '-cp', classpath(self.classes), '-d', str(self.classes)]
                        + sorted(str(p) for p in generated.rglob('*.java')), check=True, capture_output=True, text=True,
-                       timeout=600)
+                       timeout=600, env=jvm.environment())
         self.harness = subprocess.run(['javac', '--release', '17', '-Xlint:all', '-Werror', '-cp', classpath(self.classes),
                                        '-d', str(self.classes), str(PEER / 'AxisPeer.java')],
-                                      capture_output=True, text=True, timeout=300)
+                                      capture_output=True, text=True, timeout=300, env=jvm.environment())
         (self.work / 'client-config.wsdd').write_text(CLIENT_CONFIG)
 
     def exchange(self, capture):
@@ -80,7 +82,7 @@ class AxisPeer:
             client = subprocess.run(java + ['-Daxis.ClientConfigFile=%s' % (self.work / 'client-config.wsdd'),
                                             '-Dqore.axis.capture=%s' % capture, 'AxisPeer', 'client',
                                             'http://127.0.0.1:%d/axis/services/echo' % port],
-                                    cwd=self.work, capture_output=True, text=True, timeout=300)
+                                    cwd=self.work, capture_output=True, text=True, timeout=300, env=jvm.environment())
         return client, [json.loads(line) for line in Path(capture).read_text().splitlines()]
 
 

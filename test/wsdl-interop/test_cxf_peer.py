@@ -17,6 +17,7 @@ import subprocess
 import tempfile
 import unittest
 import xml.etree.ElementTree as ET
+import jvm
 
 ROOT = Path(__file__).resolve().parent
 PEER = ROOT / "cxf-peer"
@@ -56,7 +57,8 @@ def infoset(xml):
 
 
 def checked(command, *, env=None, timeout=90):
-    result = subprocess.run(command, capture_output=True, text=True, env=env, timeout=timeout)
+    # child processes, including the Java peers, run without ambient JVM options; see jvm.py
+    result = subprocess.run(command, capture_output=True, text=True, env=jvm.environment(env), timeout=timeout)
     if result.returncode or result.stderr:
         raise AssertionError(f"{command}: exit {result.returncode}\n{result.stdout}\n{result.stderr}")
     return result.stdout
@@ -67,7 +69,7 @@ def endpoint(command, env=None):
     """Read a readiness event and send STOP; every exit path reaps the owned process."""
     with tempfile.TemporaryFile(mode="w+") as diagnostics:
         process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                   stderr=diagnostics, text=True, env=env)
+                                   stderr=diagnostics, text=True, env=jvm.environment(env))
         failure = None
         try:
             with selectors.DefaultSelector() as selector:

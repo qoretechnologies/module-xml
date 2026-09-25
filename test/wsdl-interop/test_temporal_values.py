@@ -17,6 +17,7 @@ import temporal_reference as temporal
 import test_builtin_list_values as atomic
 import test_list_values as lists
 from test_facet_declarations import facet
+import jvm
 
 
 def accepts(case, text):
@@ -195,12 +196,12 @@ class TemporalValuesTest(lists.ListValuesTest):
         source = Path(__file__).with_name('oracle') / 'TemporalValueOracle.java'
         with tempfile.TemporaryDirectory(prefix='wsdl-temporal-java-') as directory:
             built = subprocess.run(['javac', '-Xlint:all', '-Werror', '-d', directory, str(source)],
-                                   capture_output=True, text=True, timeout=30)
+                                   capture_output=True, text=True, timeout=30, env=jvm.environment())
             self.assertEqual(0, built.returncode, built.stderr)
             self.assertEqual('', built.stderr)
             data = ''.join(f'{i}\t{left}\t{right}\n' for i, (_, left, right, _) in enumerate(pairs))
             result = subprocess.run(['java', '-cp', directory, 'TemporalValueOracle'], input=data,
-                                    capture_output=True, text=True, timeout=30)
+                                    capture_output=True, text=True, timeout=30, env=jvm.environment())
             self.assertEqual(0, result.returncode, result.stderr)
             self.assertEqual('', result.stderr)
             rows = result.stdout.splitlines()

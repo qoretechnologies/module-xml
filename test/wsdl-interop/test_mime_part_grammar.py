@@ -13,6 +13,7 @@ import tempfile
 import unittest
 
 from independent import SchemaJob, run
+import jvm
 
 ROOT = Path(__file__).resolve().parent
 FIXTURES = ROOT / 'regressions/wsdl-mime-part-grammar'
@@ -84,7 +85,7 @@ class MimePartGrammarTest(unittest.TestCase):
             jar = oracle / 'wsdl4j-1.6.3.jar'
             compiled = subprocess.run(['javac', '-Xlint:all', '-Werror', '-cp', str(jar), '-d', directory,
                                        str(oracle / 'WsdlMimePartsOracle.java')], capture_output=True,
-                                      text=True, timeout=60, check=True)
+                                      text=True, timeout=60, check=True, env=jvm.environment())
             self.assertEqual('', compiled.stdout + compiled.stderr)
             path = Path(directory) / 'contract.wsdl'
             for row in manifest()['cases']:
@@ -94,7 +95,7 @@ class MimePartGrammarTest(unittest.TestCase):
                     path.write_text(row['xml'])
                     result = subprocess.run(['java', '-cp', directory + os.pathsep + str(jar),
                                              'WsdlMimePartsOracle', str(path)], capture_output=True,
-                                            text=True, timeout=30, check=True)
+                                            text=True, timeout=30, check=True, env=jvm.environment())
                     self.assertEqual('', result.stderr)
                     observations = [line.split('\t') for line in result.stdout.splitlines()]
                     self.assertEqual(6, len(observations), observations)
@@ -113,7 +114,7 @@ class MimePartGrammarTest(unittest.TestCase):
                     path.write_text(row['xml'])
                     result = subprocess.run(['java', '-cp', directory + os.pathsep + str(jar),
                                              'WsdlMimePartsOracle', str(path)], capture_output=True,
-                                            text=True, timeout=30, check=True)
+                                            text=True, timeout=30, check=True, env=jvm.environment())
                     self.assertEqual('', result.stderr)
                     observations = [line.split('\t') for line in result.stdout.splitlines()]
                     self.assertEqual(14, len(observations), observations)

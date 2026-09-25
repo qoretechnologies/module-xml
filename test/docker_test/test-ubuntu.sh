@@ -3,6 +3,15 @@
 set -e
 set -x
 
+# qtest (default): build the module and run the Qore test files
+# python-shard: build the module and run shard $CI_NODE_INDEX of $CI_NODE_TOTAL of the Python WSDL/SOAP suite
+# python-verify: check the combined results of all Python suite shards
+MODE=${1:-qtest}
+case "${MODE}" in
+    qtest|python-shard|python-verify) ;;
+    *) echo "unknown mode: ${MODE}" >&2; exit 2 ;;
+esac
+
 ENV_FILE=/tmp/env.sh
 
 . ${ENV_FILE}
@@ -25,11 +34,21 @@ echo "export QORE_GID=999" >> ${ENV_FILE}
 
 export MAKE_JOBS=4
 
+if [ "${MODE}" != "qtest" ]; then
+    # lxml is the Python suite's only package outside the standard library
+    apt-get update && DEBIAN_FRONTEND=noninteractive apt-get -y install --no-install-recommends python3-lxml
+fi
+
+if [ "${MODE}" = "python-verify" ]; then
+    exec ${MODULE_SRC_DIR}/test/docker_test/run-python-suite.sh verify
+fi
+
 # build module and install
 echo && echo "-- building module-xml --"
-mkdir -p ${MODULE_SRC_DIR}/build
-cd ${MODULE_SRC_DIR}/build
-cmake .. -DCMAKE_BUILD_TYPE=debug -DCMAKE_INSTALL_PREFIX=${INSTALL_PREFIX}
+export MODULE_BUILD_DIR=${MODULE_SRC_DIR}/build-debug
+mkdir -p ${MODULE_BUILD_DIR}
+cd ${MODULE_BUILD_DIR}
+cmake .. -DCMAKE_BUILD_TYPE=Debug -DCMAKE_INSTALL_PREFIX=${INSTALL_PREFIX}
 make -j${MAKE_JOBS}
 make install
 
@@ -42,6 +61,10 @@ useradd -o -m -d /home/qore -u ${QORE_UID} -g ${QORE_GID} qore
 
 # own everything by the qore user
 chown -R qore:qore ${MODULE_SRC_DIR}
+
+if [ "${MODE}" = "python-shard" ]; then
+    exec ${MODULE_SRC_DIR}/test/docker_test/run-python-suite.sh shard
+fi
 
 # run the tests
 export QORE_MODULE_DIR=${MODULE_SRC_DIR}/qlib:${QORE_MODULE_DIR}

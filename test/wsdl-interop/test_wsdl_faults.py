@@ -12,6 +12,7 @@ import tempfile
 import unittest
 
 from lxml import etree
+import jvm
 
 ROOT = Path(__file__).resolve().parent
 ORACLE = ROOT / "oracle"
@@ -37,7 +38,7 @@ class FaultDescriptionsTests(unittest.TestCase):
         cls.jar = ORACLE / "wsdl4j-1.6.3.jar"
         result = subprocess.run(["javac", "-Xlint:all", "-Werror", "-cp", str(cls.jar), "-d", str(cls.classes),
                                  str(ORACLE / "WsdlFaultsOracle.java")], capture_output=True, text=True,
-                                timeout=60, check=True)
+                                timeout=60, check=True, env=jvm.environment())
         if result.stdout or result.stderr:
             raise RuntimeError("unexpected compiler diagnostics")
 
@@ -65,7 +66,8 @@ class FaultDescriptionsTests(unittest.TestCase):
         path = Path(self.directory.name) / "input.wsdl"
         path.write_bytes(raw)
         result = subprocess.run(["java", "-cp", str(self.classes) + os.pathsep + str(self.jar),
-                                 "WsdlFaultsOracle", str(path)], capture_output=True, text=True, timeout=30)
+                                 "WsdlFaultsOracle", str(path)], capture_output=True, text=True, timeout=30,
+                                 env=jvm.environment())
         self.assertEqual(0, result.returncode, result.stderr)
         self.assertEqual("", result.stderr)
         return result.stdout.splitlines()

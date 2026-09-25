@@ -7,10 +7,12 @@
 set -e
 
 src_dir=$(cd "$(dirname "$0")/../.." && pwd)
+# the build directory of this checkout; CI builds in build-debug
+build_dir="${MODULE_BUILD_DIR:-${src_dir}/build}"
 
 # Load the qmods built from this checkout first. This validates the exact installable artifacts and honors Qore's
 # qmod-first module loading without allowing an older installed module to hide catalog drift.
-export QORE_MODULE_DIR="${src_dir}/build/qlib-qmod${QORE_MODULE_DIR:+:${QORE_MODULE_DIR}}"
+export QORE_MODULE_DIR="${build_dir}/qlib-qmod${QORE_MODULE_DIR:+:${QORE_MODULE_DIR}}"
 
 qore-data-provider-i18n --no-color --check-source-tree --require-standard-locales \
     --require-complete-locales --output "${src_dir}/qlib"

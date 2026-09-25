@@ -13,6 +13,7 @@ import subprocess
 import tempfile
 
 from corpus import check_digest, local_path, read_manifest
+import jvm
 
 
 ROOT = Path(__file__).resolve().parent / "oracle"
@@ -184,7 +185,7 @@ def _run(jobs: list[SchemaJob], resources: dict[str, bytes] | None, worker: str,
         compile_result = subprocess.run(["javac", "-Xlint:all", "-Werror", "-cp", classpath,
                                          "-d", temporary, str(ROOT / "XsdOracle.java"),
                                          str(ROOT / "XsdEntityOracle.java"), str(ROOT / "TypedXmlObserver.java")],
-                                        capture_output=True, text=True, check=True, timeout=30)
+                                        capture_output=True, text=True, check=True, timeout=30, env=jvm.environment())
         if compile_result.stdout or compile_result.stderr:
             raise RuntimeError(f"oracle compilation diagnostics: {compile_result.stdout}{compile_result.stderr}")
         # XSD 1.0 length counts Unicode characters, not Java UTF-16 storage units.
@@ -192,7 +193,7 @@ def _run(jobs: list[SchemaJob], resources: dict[str, bytes] | None, worker: str,
         process = subprocess.run(["java", "-Xmx256m",
                                  "-Dorg.apache.xerces.impl.dv.xs.useCodePointCountForStringLength=true",
                                  "-cp", classpath, worker, *(["--typed"] if typed else []), str(input_file)],
-                                 capture_output=True, text=True, check=True, timeout=60)
+                                 capture_output=True, text=True, check=True, timeout=60, env=jvm.environment())
         if process.stderr:
             raise RuntimeError(f"oracle worker diagnostics: {process.stderr}")
     return check_results(jobs, process.stdout, typed=typed)

@@ -14,6 +14,7 @@ import xml.etree.ElementTree as ET
 
 from independent import SchemaJob, run
 from test_media_types import read
+import jvm
 
 ROOT = Path(__file__).resolve().parent
 WSDL = 'http://schemas.xmlsoap.org/wsdl/'
@@ -94,7 +95,7 @@ class MimeContentDefaultsTest(unittest.TestCase):
             jar = oracle / 'wsdl4j-1.6.3.jar'
             compiled = subprocess.run(['javac', '-Xlint:all', '-Werror', '-cp', str(jar), '-d', directory,
                                        str(oracle / 'WsdlMimePartsOracle.java')], capture_output=True,
-                                      text=True, timeout=60, check=True)
+                                      text=True, timeout=60, check=True, env=jvm.environment())
             self.assertEqual('', compiled.stdout + compiled.stderr)
             path = Path(directory) / 'contract.wsdl'
             for row in rows():
@@ -104,7 +105,7 @@ class MimeContentDefaultsTest(unittest.TestCase):
                     path.write_text(row['xml'])
                     result = subprocess.run(['java', '-cp', directory + os.pathsep + str(jar),
                                              'WsdlMimePartsOracle', str(path)], capture_output=True,
-                                            text=True, timeout=30, check=True)
+                                            text=True, timeout=30, check=True, env=jvm.environment())
                     self.assertEqual('', result.stderr)
                     observed = [line.split('\t') for line in result.stdout.splitlines()]
                     contents = [fields for fields in observed if fields[1] == 'CONTENT']

@@ -10,6 +10,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+import jvm
 
 ROOT = Path(__file__).resolve().parent
 ORACLE = ROOT / "oracle"
@@ -34,7 +35,7 @@ class HeaderIdentitiesTests(unittest.TestCase):
         cls.jar = ORACLE / "wsdl4j-1.6.3.jar"
         result = subprocess.run(["javac", "-Xlint:all", "-Werror", "-cp", str(cls.jar), "-d", str(cls.classes),
                                  str(ORACLE / "WsdlHeadersOracle.java")], capture_output=True, text=True,
-                                timeout=60, check=True)
+                                timeout=60, check=True, env=jvm.environment())
         if result.stdout or result.stderr:
             raise RuntimeError("unexpected compiler diagnostics")
 
@@ -50,7 +51,8 @@ class HeaderIdentitiesTests(unittest.TestCase):
                 path = Path(self.directory.name) / "root.wsdl"
                 path.write_bytes(raw)
                 result = subprocess.run(["java", "-cp", str(self.classes) + os.pathsep + str(self.jar),
-                                         "WsdlHeadersOracle", str(path)], capture_output=True, text=True, timeout=30)
+                                         "WsdlHeadersOracle", str(path)], capture_output=True, text=True, timeout=30,
+                                         env=jvm.environment())
                 self.assertEqual(0, result.returncode, result.stderr)
                 self.assertEqual("", result.stderr)
                 self.assertEqual([direction + "\t{urn:header:" + namespace + "}H\ttoken"
@@ -74,7 +76,7 @@ class HeaderIdentitiesTests(unittest.TestCase):
                 path.write_text(raw)
                 result = subprocess.run(["java", "-cp", str(self.classes) + os.pathsep + str(self.jar),
                                          "WsdlHeadersOracle", str(path), "--metadata"], capture_output=True,
-                                        text=True, timeout=30)
+                                        text=True, timeout=30, env=jvm.environment())
                 self.assertEqual(0, result.returncode, result.stderr)
                 self.assertEqual("", result.stderr)
                 self.assertEqual([direction + "\t{urn:parts}H\ttoken\tencoded\turn:header-wire\t[" + encoding + "]"
@@ -101,7 +103,7 @@ class HeaderIdentitiesTests(unittest.TestCase):
                     path.write_text(raw)
                     result = subprocess.run(["java", "-cp", str(self.classes) + os.pathsep + str(self.jar),
                                              "WsdlHeadersOracle", str(path), "--faults"], capture_output=True,
-                                            text=True, timeout=30)
+                                            text=True, timeout=30, env=jvm.environment())
                     self.assertEqual(0, result.returncode, result.stderr)
                     self.assertEqual("", result.stderr)
                     self.assertEqual([direction + "\t{urn:parts}H\ttoken\t{urn:parts}Failure\tproblem\t"
