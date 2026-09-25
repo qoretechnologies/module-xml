@@ -11929,3 +11929,23 @@ ignored default-namespace undeclaration failed 62 documents on each path, and a 
 all 20 unbound-element-prefix cases, only through the parsed-data path.
 
 Audit: `audits/P9d-02-namespace-scopes.md`.
+
+## P9d-03: generated SOAP faults (2026-09-25)
+
+`test_soap_fault_generation.py` generates 150 SOAP 1.2 and 150 SOAP 1.1 faults (seed 20260926, case digest pinned;
+the same digest on CPython 3.12 and 3.14). The SOAP 1.2 faults have the standard codes spelled with a second prefix
+declared on the Fault, subcode chains of up to three QNames declared at the Envelope, Fault, Code or Value, one to
+three reasons in distinct languages, nodes, roles, details and header blocks. The SOAP 1.1 faults have standard,
+dotted and application fault codes, fault actors and details. `fault-info.qr` reads each with
+`WSDLLib::getSOAPFaultInfo()`, as SOAP clients do.
+
+Every generated fault is valid under the pinned W3C envelope schema. The module reads each fault's codes, reasons,
+actor, node, role, detail and header count exactly as lxml resolves them. Twelve mutations, 15 each, break one rule
+of the fault grammar (SOAP 1.2 Part 1 section 5.4, SOAP 1.1 section 4.4): a non-standard top-level code, a reason text
+without `xml:lang`, a missing reason, a subcode without a value, unbound subcode and fault code prefixes, a fault
+code that is not a QName, missing `faultcode` or `faultstring`, a repeated detail, and a reason before the code. The
+pinned schema rejects all of them, and so does the module, with `SOAP-DESERIALIZATION-ERROR`. The SOAP 1.1 schema
+also rejects a `faultstring` before the `faultcode`, which SOAP 1.1 permits (adjudicated in P7-05); the module reads
+those 15 faults exactly as lxml does. Removing the module's `xml:lang` check failed exactly the 15 cases that test it.
+
+Audit: `audits/P9d-03-soap-faults.md`.

@@ -423,8 +423,9 @@ must not mistake success on RPC/encoded tests for WS-I literal-profile conforman
   faults and attachments. Record seeds for reproducibility; expected valid/invalid behavior must come
   from requirements or an independent implementation, not from the code under test.
   - **Progress (2026-09-25):** seeded generation with independent references covers scalar values (calendar,
-    temporal, duration and IEEE lexicals), particle groups (complete finite languages and Xerces), and, since
-    P9d-02, namespace scopes (expat, `test_namespace_scopes.py`). Bindings, faults and attachments remain.
+    temporal, duration and IEEE lexicals), particle groups (complete finite languages and Xerces), namespace
+    scopes (P9d-02, expat, `test_namespace_scopes.py`) and SOAP faults (P9d-03, the pinned W3C envelope schemas
+    and lxml, `test_soap_fault_generation.py`). Bindings and attachments remain.
 - Track requirement identifiers, fixture hashes, expected behavior, actual result, fix commit and test
   location. Include response processing, typed-value/infoset comparisons, HTTP behavior and error codes
   in reported coverage. Add assertions that prevent missing/skipped/duplicate cases from improving counts.
