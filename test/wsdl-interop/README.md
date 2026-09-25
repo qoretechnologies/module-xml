@@ -291,7 +291,7 @@ specification and JAR is committed and pinned by SHA-256.
 
 `lxml` provides the suite's second independent validator, libxml2, and the expected validator results, including
 every adjudicated disagreement with the specifications, belong to one libxml2 version. Distributions build `lxml`
-against their own libxml2, and those versions validate differently, so the suite uses the `lxml` 6.0.2 wheels,
+against their own libxml2, and those versions validate differently, so the suite uses the `lxml` 6.1.0 wheels,
 which bundle libxml2 2.14.6, installed by hash from `requirements.txt` into a virtual environment. Xerces-J is
 pinned the same way by its JAR digest. `oracle_versions.py` checks the versions: `ci_suite.py` refuses to run with
 another `lxml` or libxml2, and `test_oracle_versions.py` fails. Locally:

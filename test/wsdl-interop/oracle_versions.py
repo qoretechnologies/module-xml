@@ -9,7 +9,7 @@ differently. The suite therefore runs with the lxml wheels pinned by requirement
 """
 from lxml import etree
 
-LXML = (6, 0, 2, 0)
+LXML = (6, 1, 0, 0)
 LIBXML2 = (2, 14, 6)
 
 

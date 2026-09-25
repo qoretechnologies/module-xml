@@ -11877,3 +11877,20 @@ payload.
 The full suite passes with this change (see P9c-03), and both tests pass in the Alpine and Ubuntu CI images.
 
 Audit: `audits/P9e-01-provider-examples.md`.
+
+## P9c-04: lxml 6.1.0 (2026-09-25)
+
+Dependabot proposed `lxml` 6.1.0 (pull request 235) for CVE-2026-41066: `iterparse()` and `ETCompatXMLParser`
+resolved external entities by default. The suite uses neither, and parses only its own pinned inputs, but it adopts
+the fixed release. The 6.1.0 wheels bundle the same libxml2 2.14.6, so the validator results adjudicated in P9c-03
+are unchanged. Dependabot's change alone failed by design: `oracle_versions.py` still named 6.0.2, and every shard
+stops at that check. `requirements.txt` now lists the hashes of every lxml 6.1.0 wheel on PyPI (binary wheels only,
+as the suite installs no source distribution), and `oracle_versions.py` pins 6.1.0. The superseded pull request's
+pipeline (57602) was cancelled.
+
+**Verification:** the full Python suite with lxml 6.1.0 ran 534 tests in six shards. Two tests exceeded their hang
+guards while other work loaded the machine (load average 22-26 from an unrelated build and CI job):
+the IEEE constraints worker's 180 s guard (the worker takes 84-95 s, as before P9e-01's 85-89 s) and a CXF client
+timeout in `test_swa_parts.py`. Both modules pass when rerun (8 tests), and the other 532 tests pass.
+
+Audit: `audits/P9c-04-lxml-6.1.0.md`.
