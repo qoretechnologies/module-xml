@@ -35,6 +35,38 @@ class RecordingReplyHandler inherits SoapReplyHandler {
     }
 }
 
+# an endpoint that accepts a delivered message only after the client has received the acknowledgment of its request
+class OrderingEndpoint inherits AbstractHttpRequestHandler {
+    private {
+        # the client signals that it has received the 202
+        Queue acks;
+        # for each delivery, True if it arrived after the acknowledgment
+        Queue order;
+    }
+
+    constructor(Queue acks, Queue order) {
+        self.acks = acks;
+        self.order = order;
+    }
+
+    hash<HttpResponseInfo> handleRequest(hash<auto> cx, hash<auto> hdr, *data body) {
+        bool acknowledged;
+        try {
+            acks.get(10000);
+            acknowledged = True;
+        } catch (hash<ExceptionInfo> ex) {
+            if (ex.err != "QUEUE-TIMEOUT") {
+                rethrow;
+            }
+            # a delivery before the acknowledgment blocks the server's response, so the client never signals
+            acknowledged = False;
+        }
+        order.push({"acknowledged": acknowledged, "protocol": protocol(cx), "body": body.typeCode() == NT_BINARY
+            ? body.toString("UTF-8") : body});
+        return <HttpResponseInfo>{"code": 202};
+    }
+}
+
 # WS-Addressing over HTTP/1.1, HTTP/2 and HTTP/3: anonymous replies and faults on the HTTP response, and replies and
 # faults sent to a non-anonymous response endpoint, with SoapClient, SoapClientIo, SoapHandler and SoapReplyHandler on
 # TLS listeners that offer all three protocols. The contract is CXF's pinned add_numbers.wsdl.
@@ -72,6 +104,7 @@ public class SoapAddressingTransportsTest inherits QUnit::Test {
         addTestCase("replies and faults to a non-anonymous endpoint", \decoupled());
         addTestCase("WS-Addressing faults", \addressingFaults());
         addTestCase("TLS and delivery options", \options());
+        addTestCase("messages to a non-anonymous endpoint follow the acknowledgment", \ordering());
         set_return_value(main());
     }
 
@@ -230,5 +263,45 @@ public class SoapAddressingTransportsTest inherits QUnit::Test {
             assertThrows("SOAP-HANDLER-ERROR", option + " option of a delivery",
                 \handler.setResponseEndpointAuthorizer(), (\SoapAddressingTransportsTest::local(), 15s, {option: 1}));
         }
+    }
+
+    # WS-Addressing SOAP Binding section 5.2: the reply is sent once the 202 has been sent, so a client has the
+    # acknowledgment first; clients such as Apache CXF drop a reply that arrives before it
+    ordering() {
+        Queue acks();
+        Queue order();
+        int endpoint_port;
+        HttpServer endpoint_http = server(\endpoint_port);
+        on_exit endpoint_http.stop();
+        endpoint_http.setDefaultHandler("ordering", new OrderingEndpoint(acks, order));
+        string endpoint = sprintf("https://127.0.0.1:%d/ordering", endpoint_port);
+        foreach hash<auto> protocol in (Protocols) {
+            handler.setResponseEndpointAuthorizer(\SoapAddressingTransportsTest::local(), 15s,
+                {"http_version": protocol.http_version});
+            string message_id = WsAddressingHelper::messageId();
+            string request = sprintf('<soapenv:Envelope xmlns:soapenv="%s" xmlns:wsa="%s"><soapenv:Header>'
+                '<wsa:Action>%saddNumbersRequest</wsa:Action><wsa:MessageID>%s</wsa:MessageID><wsa:ReplyTo>'
+                '<wsa:Address>%s</wsa:Address></wsa:ReplyTo></soapenv:Header><soapenv:Body><addNumbers '
+                'xmlns="http://apache.org/cxf/systest/ws/addr_feature/"><number1>5</number1><number2>6</number2>'
+                '</addNumbers></soapenv:Body></soapenv:Envelope>', SOAP_11_ENV, WSA_NS, PortType, message_id,
+                endpoint);
+            HTTPClient client({"url": sprintf("https://127.0.0.1:%d", port), "http_version": protocol.http_version,
+                "error_passthru": True, "timeout": 30000, "connect_timeout": 15000});
+            hash<auto> info;
+            client.send(request, "POST", "/addNonAnon", {"Content-Type": "text/xml;charset=UTF-8",
+                "SOAPAction": '"' + PortType + 'addNumbersRequest"'}, False, \info);
+            assertEq(202, info."response-headers".status_code, protocol.name);
+            assertEq(protocol.name, calls.get(10000));
+            # the client has the acknowledgment
+            acks.push(True);
+            hash<auto> delivered = order.get(20000);
+            assertTrue(delivered.acknowledged, protocol.name);
+            assertEq(protocol.name, delivered.protocol);
+            assertRegex(message_id, delivered.body, protocol.name);
+            assertRegex("<([a-z0-9]+:)?return>11</([a-z0-9]+:)?return>", delivered.body, protocol.name);
+        }
+        handler.setResponseEndpointAuthorizer();
+        assertEq(0, acks.size());
+        assertEq(0, calls.size());
     }
 }

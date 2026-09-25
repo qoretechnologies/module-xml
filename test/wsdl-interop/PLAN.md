@@ -509,9 +509,9 @@ Increments:
    responses, SOAP 1.1 and 1.2, in both directions.
    - The same exchanges also run over HTTP/1.1, HTTP/2 and HTTP/3 between the module's own clients and handlers.
      CXF 4.1.3 has no HTTP/3 transport, and its HTTP/2 transport needs Jetty artifacts that are not pinned.
-   - Done except CXF clients with decoupled responses. CXF drops a reply that arrives before the 202, so that
-     direction waits for a Qore HttpServer callback that runs after the response has been sent
-     (`/tmp/qore-http-after-send-hook.md`, approved 2026-09-24).
+   - Done. CXF drops a reply that arrives before the 202, so SoapHandler sends decoupled replies and faults from
+     the 202's `after_send` callback (HttpServerUtil 1.6, requested as a core change on 2026-09-24). CXF clients
+     then pass on the non-anonymous port too.
 8. P9a-08 - revalidate the 49 rows against the pinned text and map them to tests; update the documentation,
    release notes and a durable design document; P9a acceptance. A row may be reclassified only with
    specification-based evidence.
@@ -521,7 +521,7 @@ Increments:
      - Three defects were fixed: R1041 `wsa:FaultDetail`, R2745 explicit empty SOAPAction (with the approved
        `send_soapaction` option), and BP 2.0 R2901 for a present empty soapAction.
      - `verify_ledger.py` rejects WS-Addressing gaps.
-     - Acceptance waits for the CXF-client decoupled exchanges (P9a-07).
+     - P9a accepted 2026-09-25; see [P9a acceptance](P9a-acceptance.md).
 
 **Acceptance:** every applicable WS-Addressing row is covered by tests that exercise both directions where the
 requirement has two sides. CXF exchanges pass for anonymous and decoupled responses. Invalid MAPs fail with the
@@ -1872,3 +1872,14 @@ Open, outside P8:
 - bounded decompression in Qore core (`/tmp/qore-http-bounded-decompression.md`);
 - the per-call particle program rebuild (a P9 performance item);
 - the 49 WS-I profile gaps recorded in P7 (P9).
+
+## P9a acceptance
+
+P9a is accepted (2026-09-25); see [P9a acceptance](P9a-acceptance.md). WS-Addressing 1.0 Core, SOAP Binding and
+Metadata are implemented for WSDL 1.1 SOAP 1.1 and 1.2 services and clients:
+- The 49 WS-I rows are covered (45) or not applicable with an approved specification-based rationale (4).
+- Live Apache CXF 4.1.3 exchanges pass in both directions for anonymous and decoupled responses.
+- The module's own exchanges pass over HTTP/1.1, HTTP/2 and HTTP/3.
+
+P9b (performance) is next. Bounded decompression and the WS-I profile gaps, which were open after P8, are closed
+(P8-06 and P9a).

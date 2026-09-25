@@ -34,8 +34,8 @@
 # need mime definitions
 %requires Mime >= 1.1
 
-# need definitions from the HttpServerUtil
-%requires HttpServerUtil >= 0.3.11
+# need definitions from the HttpServerUtil; 1.6 adds HttpResponseInfo::after_send and max_decoded_body_size
+%requires HttpServerUtil >= 1.6
 
 # need Util functions
 %requires Util
@@ -113,8 +113,10 @@ module SoapHandler {
       address is accepted, and a reply or fault to it is discarded with an empty HTTP 202 response
 
     A reply or fault for an approved non-anonymous endpoint is sent as a separate HTTP request to its address, with
-    the reply's action as the SOAP action (WS-I R1144 and R1152), and the request is answered with an empty HTTP
-    202 response; a failed delivery is logged. The \c http_options argument of setResponseEndpointAuthorizer()
+    the reply's action as the SOAP action (WS-I R1144 and R1152). The request is answered with an empty HTTP 202
+    response, and the message is sent once that response has been sent (HttpServer's \c after_send callback), so a
+    client has the acknowledgment before the reply arrives, as clients such as Apache CXF require; a failed
+    delivery is logged. The \c http_options argument of setResponseEndpointAuthorizer()
     selects the delivery's HTTP version (such as HTTP/2 or HTTP/3) and TLS options. The SoapReplyHandler class
     receives such messages for clients. WS-Addressing works the same over HTTP/1.1, HTTP/2 and HTTP/3.
 
@@ -147,7 +149,7 @@ hash<auto> sub get_quote(hash<auto> cx, string symbol) {
       properties, and invalid headers are answered with WS-Addressing faults; mandatory WS-Addressing headers,
       which previously caused a MustUnderstand fault, are now understood unless setAddressing() disables them
     - non-anonymous WS-Addressing response endpoints approved by setResponseEndpointAuthorizer() receive replies
-      and faults as separate HTTP requests, over HTTP/1.1, HTTP/2 or HTTP/3 as selected by the setter's HTTPClient
+      and faults as separate HTTP requests, sent after the 202 acknowledgment of the request, over HTTP/1.1, HTTP/2 or HTTP/3 as selected by the setter's HTTPClient
       options; the new SoapReplyHandler class receives them for clients
     - WS-Addressing faults about invalid headers, and Sender faults about an invalid SOAP 1.2 \c action parameter,
       relate to the request when its message ID can be read
@@ -2248,6 +2250,9 @@ private nothing msglog(hash<auto> cx, hash<auto> msg) {
 
         # sends a reply or fault to a non-anonymous response endpoint as a separate HTTP request (WS-Addressing
         # SOAP Binding section 5.2, WS-I R1152) and acknowledges the request with an empty HTTP 202 response
+        # answers the request with an empty 202 and sends the message to its non-anonymous endpoint once the 202 has
+        # been sent (WS-Addressing SOAP Binding section 5.2): a client then has the acknowledgment before the message
+        # arrives, which clients such as Apache CXF require
         private hash<auto> deliver(hash<auto> cx, hash<auto> message, hash<WsaMessageAddressing> maps, bool soap12) {
             hash<auto> headers = message.hdr ?? {};
             # WS-I R1144: an HTTP request with wsa:Action carries the same SOAP action
@@ -2258,14 +2263,29 @@ private nothing msglog(hash<auto> cx, hash<auto> msg) {
             } else {
                 headers.SOAPAction = sprintf("\"%s\"", maps.action);
             }
+            return {
+                "code": 202,
+                "after_send": sub (hash<auto> send_cx, bool sent) {
+                    if (!sent) {
+                        # the request was processed, so its reply or fault is still sent
+                        SoapHandler::log(cx, "WS-Addressing: the acknowledgment could not be sent; sending the "
+                            "message to %s", maps.to);
+                    }
+                    send(cx, message.body, headers, maps);
+                },
+            };
+        }
+
+        # sends a reply or fault to a non-anonymous endpoint; failures are logged
+        private send(hash<auto> cx, data body, hash<auto> headers, hash<WsaMessageAddressing> maps) {
             hash<auto> url = parse_url(maps.to);
             string path = (url.path ?? "/") + (exists url.query ? "?" + url.query : "");
             try {
                 HTTPClient client((cx.addressing_delivery_options ?? {}) + {"url": maps.to,
                     "timeout": cx.addressing_delivery_timeout, "connect_timeout": cx.addressing_delivery_timeout});
                 hash<auto> info;
-                client.send(message.body, "POST", path, headers, False, \info);
-                msglog(cx, {"reason": "response", "code": 202, "header": headers, "body": message.body,
+                client.send(body, "POST", path, headers, False, \info);
+                msglog(cx, {"reason": "response", "code": 202, "header": headers, "body": body,
                     "destination": maps.to});
             } catch (hash<ExceptionInfo> ex) {
                 if (ex.err == "PROGRAM-INTERRUPTED" || ex.err == "THREAD-CANCELLED") { rethrow; }
@@ -2273,7 +2293,6 @@ private nothing msglog(hash<auto> cx, hash<auto> msg) {
                 SoapHandler::log(cx, "WS-Addressing: sending a message to %s failed: %s: %s", maps.to, ex.err,
                     ex.desc);
             }
-            return {"code": 202};
         }
 
         # the addressing properties of a fault sent on the HTTP response (WS-Addressing Core section 3.4)

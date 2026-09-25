@@ -18,9 +18,8 @@ PEER = ROOT / "addressing-peer"
 CONTRACTS = {"soap11": ROOT / "cxf/add_numbers.wsdl", "soap12": ROOT / "cxf/add_numbers_soap12.wsdl"}
 # every port of the contracts: WS-Addressing required, anonymous responses only, and non-anonymous responses only
 PORTS = ("AddNumbersPort", "AddNumbersOnlyAnonPort", "AddNumbersNonAnonPort")
-# CXF clients only accept a decoupled reply that arrives after the 202 acknowledgement, which SoapHandler cannot
-# order yet (see addressing-peer/README.md), so CXF clients exchange with the ports that reply on the back channel
-ANONYMOUS_PORTS = ("AddNumbersPort", "AddNumbersOnlyAnonPort")
+# CXF clients receive the non-anonymous port's replies at a decoupled endpoint
+DECOUPLED_PORTS = ("AddNumbersNonAnonPort",)
 
 
 class WsAddressingTests(unittest.TestCase):
@@ -97,11 +96,14 @@ class WsAddressingTests(unittest.TestCase):
 
     def test_live_cxf_clients_and_qore_server(self):
         for version, wsdl in CONTRACTS.items():
-            for port in ANONYMOUS_PORTS:
+            for port in PORTS:
                 with self.subTest(version=version, port=port):
+                    # SoapHandler sends a decoupled reply once its 202 has been sent: CXF drops one that arrives
+                    # before the acknowledgment
+                    mode = ["decoupled"] if port in DECOUPLED_PORTS else []
                     with endpoint([*self.qore, "server", str(wsdl), port], self.env) as (_, listener):
                         self.assertEqual("PASS\n", checked([*self.java[version], "client", str(wsdl),
-                                                            f"http://127.0.0.1:{listener}/add", port]))
+                                                            f"http://127.0.0.1:{listener}/add", port, *mode]))
 
 
 if __name__ == "__main__":

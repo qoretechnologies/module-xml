@@ -14,7 +14,8 @@ unmodified CXF system test resources `../cxf/add_numbers.wsdl` (SOAP 1.1) and `.
 - **Client:** records the properties that CXF sent (CXF replaces a supplied message ID), then checks each
   response's action and its relationship to the request. It covers `addNumbers`, `addNumbers2` and a declared
   `addNumbers` fault. SOAP 1.2 Sender faults arrive with HTTP 400, as the SOAP 1.2 HTTP binding requires, so the
-  client sets `org.apache.cxf.transport.process_fault_on_http_400`.
+  client sets `org.apache.cxf.transport.process_fault_on_http_400`. With `decoupled`, the client receives replies
+  and faults at a decoupled endpoint on a free local port, which its requests name as `wsa:ReplyTo`.
 
 `qore-peer.qr` is the Qore side:
 - **Server:** a `SoapHandler` serves the port's binding at `/add`, and its authorizer approves loopback response
@@ -32,10 +33,11 @@ Run `python3 -B test/wsdl-interop/test_ws_addressing.py -v` from the repository 
 - verifies the pinned dependencies and contracts;
 - generates and compiles one peer for each contract;
 - makes 12 Qore-client runs against CXF servers (3 ports × 2 clients × 2 SOAP versions);
-- makes 4 CXF-client runs against the Qore handler (the 2 anonymous ports × 2 SOAP versions).
+- makes 6 CXF-client runs against the Qore handler (3 ports × 2 SOAP versions); for
+  `AddNumbersNonAnonPort`, CXF uses a decoupled endpoint.
 
 Listeners report readiness and accept a STOP event, and every run must finish without diagnostics.
 
 CXF clients with a decoupled endpoint only accept a reply that arrives after the 202 acknowledgment. `SoapHandler`
-delivers replies before it returns the 202, so CXF clients do not call `AddNumbersNonAnonPort` yet. That exchange
-will be added once Qore's HttpServer can run a handler callback after a response has been sent.
+sends replies and faults to non-anonymous endpoints from HttpServer's `after_send` callback, once the 202 has been
+sent, so the decoupled exchanges pass.

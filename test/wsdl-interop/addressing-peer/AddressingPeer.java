@@ -1,5 +1,6 @@
 // Copyright (C) 2026 Qore Technologies, s.r.o.
 import java.io.*;
+import java.net.ServerSocket;
 import java.nio.charset.StandardCharsets;
 import java.util.Map;
 import javax.xml.namespace.QName;
@@ -102,6 +103,11 @@ public final class AddressingPeer implements AddNumbersPortType {
                 + (received.getRelatesTo() == null ? "missing" : received.getRelatesTo().getValue()));
     }
 
+    // a free local port for the decoupled endpoint, whose address the requests carry as wsa:ReplyTo
+    private static int freePort() throws IOException {
+        try (ServerSocket socket = new ServerSocket(0)) { return socket.getLocalPort(); }
+    }
+
     public static void main(String[] args) throws Exception {
         Bus bus = BusFactory.newInstance().createBus();
         QName service = new QName(NS, "AddNumbersService");
@@ -125,7 +131,7 @@ public final class AddressingPeer implements AddNumbersPortType {
                     check("STOP".equals(input.readLine()), "STOP");
                 } finally { server.destroy(); }
             } else {
-                // client <wsdl> <url> <port>
+                // client <wsdl> <url> <port> [decoupled]
                 JaxWsProxyFactoryBean factory = new JaxWsProxyFactoryBean();
                 factory.setBus(bus); factory.setServiceClass(AddNumbersPortType.class); factory.setWsdlURL(args[1]);
                 factory.setServiceName(service); factory.setEndpointName(new QName(NS, args[3]));
@@ -136,6 +142,10 @@ public final class AddressingPeer implements AddNumbersPortType {
                 try {
                     HTTPConduit conduit = (HTTPConduit)ClientProxy.getClient(client).getConduit();
                     conduit.getClient().setConnectionTimeout(10000); conduit.getClient().setReceiveTimeout(30000);
+                    if (args.length > 4 && args[4].equals("decoupled")) {
+                        // WS-Addressing SOAP Binding section 5.2: replies and faults arrive at a separate endpoint
+                        conduit.getClient().setDecoupledEndpoint("http://127.0.0.1:" + freePort() + "/decoupled");
+                    }
                     // the SOAP 1.2 HTTP binding sends Sender faults with HTTP 400, which CXF otherwise reports as a
                     // transport error without reading the fault
                     ((BindingProvider)client).getRequestContext().put(

@@ -11512,3 +11512,34 @@ gets 413 and the handler never runs (2 cases, 22 assertions).
   - the error-response mapping;
   - live streamed PUT and POST uploads over HTTP/2 and HTTP/3, each confirmed as streamed.
 - `XmlRpcHandler.qtest`: content types with parameters, and rejected types.
+
+## P9a completion: decoupled replies after the acknowledgment, and P9a acceptance (2026-09-25)
+
+The installed Qore now has the requested HttpServer `after_send` callback (HttpServerUtil 1.6) and gives request
+handlers `cx."header-info".max_request_body_size` (HttpServer 1.7, Qore `394b869c3`).
+
+**SoapHandler:**
+- `deliver()` returns the empty 202 with an `after_send` callback. The callback sends the reply or fault to the
+  approved endpoint once the 202 has been sent. If the 202 could not be sent, the message is still sent and the
+  failure is logged.
+- SoapHandler requires HttpServerUtil 1.6.
+
+**Tests:**
+- `soap-addressing-transports.qtest` gains "messages to a non-anonymous endpoint follow the acknowledgment" (5
+  cases, 145 assertions). Over HTTP/1.1, HTTP/2 and HTTP/3, the reply endpoint accepts the delivered reply only
+  after the client signals that it has the 202. Run against the previous synchronous delivery, the case fails.
+- `test_ws_addressing.py`:
+  - The Java peer's `decoupled` client mode is restored.
+  - CXF clients now call all three ports on both contracts (6 runs). On `AddNumbersNonAnonPort` they receive
+    replies and faults at a decoupled endpoint.
+  - Every run passes without diagnostics, over repeated runs.
+- `webdav_streaming.qtest` (8 cases, 74 assertions):
+  - Streamed PUT and POST over HTTP/2 and HTTP/3 beyond a 256 KiB server limit get 413.
+  - They leave no partial or temporary file, and an existing resource stays unchanged.
+
+**Environment:** an earlier install left a stale compiled `/usr/lib64/qore-modules/3.0.0/HttpServer.qmod`, which
+did not pass the limit. Qore was reinstalled on 2026-09-25 (libqore 07:56, HttpServer 08:05). With that install,
+the full suites run in the developer's normal environment, including the Qorus module path, whose AOT modules
+load again.
+
+P9a is accepted; see [P9a acceptance](P9a-acceptance.md).

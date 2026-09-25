@@ -274,8 +274,10 @@ endpoint's address, with its reference parameters. `SoapHandler::deliver()` hand
 - The SOAP action is the message's action (R1144): the SOAP 1.1 `SOAPAction` header, or the SOAP 1.2 `action`
   parameter of an `application/soap+xml` content type.
 - It returns an empty 202 on the back channel.
-- Delivery is synchronous and happens before the 202, so a client receives the reply no later than the
-  acknowledgment.
+- The message is sent from the 202's `after_send` callback (HttpServerUtil 1.6), once the 202 has been sent, so a
+  client has the acknowledgment before the reply arrives. Clients such as Apache CXF drop a reply that arrives
+  first. If the 202 could not be sent, the message is still sent and the failure is logged, because the request
+  has been processed.
 - A delivery failure is logged, because the request has already been processed.
 
 Faults that are never delivered to an endpoint:
@@ -324,10 +326,11 @@ pass through to the HttpClientIo connection manager.
 peer in `test/wsdl-interop/addressing-peer/`:
 - **Qore clients to CXF servers:** `SoapClient` and `SoapClientIo` call every port (required WS-Addressing,
   anonymous responses only, and non-anonymous responses through a `SoapReplyHandler`) with SOAP 1.1 and 1.2.
-- **CXF clients to the Qore handler:** CXF calls the two anonymous ports with SOAP 1.1 and 1.2.
+- **CXF clients to the Qore handler:** CXF calls every port with SOAP 1.1 and 1.2, and receives the non-anonymous
+  port's replies and faults at a decoupled endpoint.
 - **In both directions:** each side checks the other's actions, message IDs and reply relationships. `addNumbers3`'s
   relative `3in` action is rejected: Qore refuses to send it, and CXF's calls are faulted.
 
-CXF clients with a decoupled endpoint drop a reply that arrives before the 202 acknowledgment. Because
-`SoapHandler` delivers before it returns the 202, the non-anonymous port is not yet exchanged with CXF clients.
-This waits for a Qore HttpServer callback that runs after a response has been sent.
+`test/soap-addressing-transports.qtest` proves the delivery order over HTTP/1.1, HTTP/2 and HTTP/3. Its reply
+endpoint accepts a delivered message only after the client signals that it has received the 202. With delivery
+before the 202, the exchange would block and the test fails.
