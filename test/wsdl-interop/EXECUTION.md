@@ -11894,3 +11894,15 @@ the IEEE constraints worker's 180 s guard (the worker takes 84-95 s, as before P
 timeout in `test_swa_parts.py`. Both modules pass when rerun (8 tests), and the other 532 tests pass.
 
 Audit: `audits/P9c-04-lxml-6.1.0.md`.
+
+## P9c-05: one module-xml pipeline at a time (2026-09-25)
+
+A module-xml test pipeline runs the Qore tests and twelve Python suite shards, and CI resources are limited. The
+jobs now run in a child pipeline (`.gitlab/ci/module-xml.yml`, the former `.gitlab-ci.yml`), which `.gitlab-ci.yml`
+starts with one trigger job holding the resource group `module-xml-ci`. GitLab keeps a trigger job's resource until
+its downstream pipeline completes, so pipelines of all branches, including Dependabot's, wait instead of running
+concurrently; the group's process mode is `oldest_first`. A job-level resource group would serialize the shards
+instead of the pipelines. The project's auto-cancel setting cancels a waiting pipeline that a newer commit on the
+same branch supersedes; a running pipeline completes.
+
+Audit: `audits/P9c-05-serialized-pipelines.md`.
