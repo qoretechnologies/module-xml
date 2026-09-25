@@ -422,6 +422,9 @@ must not mistake success on RPC/encoded tests for WS-I literal-profile conforman
 - Add deterministic generated/boundary/mutation cases for scalar values, namespaces, groups, bindings,
   faults and attachments. Record seeds for reproducibility; expected valid/invalid behavior must come
   from requirements or an independent implementation, not from the code under test.
+  - **Progress (2026-09-25):** seeded generation with independent references covers scalar values (calendar,
+    temporal, duration and IEEE lexicals), particle groups (complete finite languages and Xerces), and, since
+    P9d-02, namespace scopes (expat, `test_namespace_scopes.py`). Bindings, faults and attachments remain.
 - Track requirement identifiers, fixture hashes, expected behavior, actual result, fix commit and test
   location. Include response processing, typed-value/infoset comparisons, HTTP behavior and error codes
   in reported coverage. Add assertions that prevent missing/skipped/duplicate cases from improving counts.

@@ -11906,3 +11906,26 @@ instead of the pipelines. The project's auto-cancel setting cancels a waiting pi
 same branch supersedes; a running pipeline completes.
 
 Audit: `audits/P9c-05-serialized-pipelines.md`.
+
+## P9d-02: generated namespace scopes (2026-09-25)
+
+P9 requires deterministic generated and mutation cases whose expected results come from requirements or an
+independent implementation. Scalar values and particle groups had them; namespaces had only character-boundary
+cases. `test_namespace_scopes.py` generates 300 documents (seed 20260925, case digest pinned; the same digest on
+CPython 3.12 and 3.14). They contain nested prefix declarations, rebinding within a prefix's scope, default namespaces
+and their undeclaration, prefixed, unprefixed and `xml:` attributes, and repeated names in changing scopes. The
+expected expanded element and attribute names come from Python's expat parser, which is independent of libxml2 and
+the module. Seven mutations, 20 each, break one Namespaces in XML 1.0 constraint: unbound element and attribute
+prefixes, duplicate expanded attributes, prefix undeclaration, and the reserved `xml`/`xmlns` prefixes and
+namespace name.
+
+`namespace-scopes.qr` resolves each document as SOAP decoding does, `parse_xml()` and then
+`XsdBase::expandElementNamespaces()`, and also passes the equivalent parsed data directly to
+`expandElementNamespaces()`, as callers and XML generator data do. libxml2 rejects every invalid text before the
+module sees it, so only the parsed-data path reaches the module's own checks. The module resolves all 300 documents
+through both paths exactly as expat does, and rejects all 140 invalid parsed documents with
+`SOAP-DESERIALIZATION-ERROR` (expat rejects every invalid text). Two deliberately introduced defects were detected: an
+ignored default-namespace undeclaration failed 62 documents on each path, and a removed unbound-prefix check failed
+all 20 unbound-element-prefix cases, only through the parsed-data path.
+
+Audit: `audits/P9d-02-namespace-scopes.md`.
