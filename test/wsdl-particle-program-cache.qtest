@@ -1,0 +1,181 @@
+#!/usr/bin/env qore
+# -*- mode: qore; indent-tabs-mode: nil -*-
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires xml
+%requires ../qlib/WSDL.qm
+
+%exec-class ParticleProgramCacheTest
+
+# A content model is compiled once per schema generation and its matching results are memoized: the cached
+# programs are shared between threads, a bounded memo keeps its results correct beyond its limit, and a program
+# compiled before substitution group membership is published is recompiled afterwards.
+public class ParticleProgramCacheTest inherits QUnit::Test {
+    private {
+        const Orders = get_script_dir() + "/wsdl-interop/benchmark/workloads/binding-styles.wsdl";
+
+        # nine optional elements: 512 possible child name lists
+        const Optional = '<definitions xmlns="http://schemas.xmlsoap.org/wsdl/"
+            xmlns:soap="http://schemas.xmlsoap.org/wsdl/soap/" xmlns:xsd="http://www.w3.org/2001/XMLSchema"
+            xmlns:x="urn:opt:xsd" xmlns:tns="urn:opt" targetNamespace="urn:opt">
+          <types><xsd:schema targetNamespace="urn:opt:xsd" elementFormDefault="qualified">
+            <xsd:element name="record"><xsd:complexType><xsd:sequence>{E}</xsd:sequence></xsd:complexType>
+            </xsd:element></xsd:schema></types>
+          <message name="In"><part name="body" element="x:record"/></message>
+          <portType name="P"><operation name="put"><input message="tns:In"/></operation></portType>
+          <binding name="B" type="tns:P"><soap:binding style="document"
+              transport="http://schemas.xmlsoap.org/soap/http"/>
+            <operation name="put"><soap:operation soapAction=""/><input><soap:body use="literal"/></input>
+            </operation></binding>
+          <service name="S"><port name="P" binding="tns:B"><soap:address location="http://localhost/o"/></port>
+          </service></definitions>';
+
+        # the head's substitution member is declared after the content model that uses the head
+        const Substitution = '<definitions xmlns="http://schemas.xmlsoap.org/wsdl/"
+            xmlns:soap="http://schemas.xmlsoap.org/wsdl/soap/" xmlns:xsd="http://www.w3.org/2001/XMLSchema"
+            xmlns:x="urn:sub:xsd" xmlns:tns="urn:sub" targetNamespace="urn:sub">
+          <types><xsd:schema targetNamespace="urn:sub:xsd" elementFormDefault="qualified">
+            <xsd:element name="basket"><xsd:complexType><xsd:sequence>
+              <xsd:element ref="x:fruit" maxOccurs="unbounded"/></xsd:sequence></xsd:complexType></xsd:element>
+            <xsd:element name="fruit" type="xsd:string"/>
+            <xsd:element name="apple" type="xsd:string" substitutionGroup="x:fruit"/>
+          </xsd:schema></types>
+          <message name="In"><part name="body" element="x:basket"/></message>
+          <portType name="P"><operation name="put"><input message="tns:In"/></operation></portType>
+          <binding name="B" type="tns:P"><soap:binding style="document"
+              transport="http://schemas.xmlsoap.org/soap/http"/>
+            <operation name="put"><soap:operation soapAction=""/><input><soap:body use="literal"/></input>
+            </operation></binding>
+          <service name="S"><port name="P" binding="tns:B"><soap:address location="http://localhost/s"/></port>
+          </service></definitions>';
+    }
+
+    constructor() : Test("ParticleProgramCacheTest", "1.0") {
+        addTestCase("threads share compiled content models", \concurrency());
+        addTestCase("memoized results remain correct beyond the memo limit", \memoLimit());
+        addTestCase("substitution members declared after a content model are admitted", \substitution());
+        set_return_value(main());
+    }
+
+    static hash<auto> order(int items) {
+        list<hash<auto>> lines();
+        for (int i = 1; i <= items; ++i) {
+            push lines, {"sku": sprintf("SKU-%04d", i), "quantity": i % 7 + 1, "price": i * 1.25n};
+        }
+        return {"id": 4711, "customer": "ACME", "placed": 2026-09-25T10:00:00Z, "item": lines, "notes": "x"};
+    }
+
+    static auto decode(WSOperation op, hash<auto> message, string binding) {
+        hash<auto> msg = WSDLLib::parseMultiPartSOAPMessage({"content-type": message.hdr."Content-Type",
+            "body": message.body}, False, True);
+        return op.deserializeRequest(WSDLLib::parseSOAPMessage(msg, False, True), binding);
+    }
+
+    concurrency() {
+        WebService ws(ReadOnlyFile::readTextFile(Orders));
+        hash<auto> sample = order(50);
+        hash<string, string> expected();
+        hash<string, hash<auto>> decoded();
+        foreach string binding in ("DocLiteral11", "RpcEncoded12") {
+            WSOperation op = ws.getBindingOperation(binding, "submit");
+            hash<auto> request = op.serializeRequest(binding =~ /^Doc/ ? {"body": sample} : {"order": sample},
+                NOTHING, NOTHING, NOTHING, NOTHING, NOTHING, binding);
+            expected{binding} = request.body;
+            decoded{binding} = decode(op, request, binding);
+            assertEq(50, decoded{binding}.item.size(), binding);
+            assertEq("SKU-0050", decoded{binding}.item[49].sku, binding);
+        }
+        Queue results();
+        Counter done();
+        for (int thread = 0; thread < 8; ++thread) {
+            done.inc();
+            background sub () {
+                on_exit done.dec();
+                try {
+                    for (int i = 0; i < 5; ++i) {
+                        foreach string binding in ("DocLiteral11", "RpcEncoded12") {
+                            WSOperation op = ws.getBindingOperation(binding, "submit");
+                            hash<auto> request = op.serializeRequest(binding =~ /^Doc/ ? {"body": sample}
+                                : {"order": sample}, NOTHING, NOTHING, NOTHING, NOTHING, NOTHING, binding);
+                            results.push({"binding": binding, "body": request.body,
+                                "decoded": decode(op, request, binding) == decoded{binding}});
+                        }
+                    }
+                } catch (hash<ExceptionInfo> ex) {
+                    results.push({"error": sprintf("%s: %s", ex.err, ex.desc)});
+                }
+            }();
+        }
+        done.waitForZero();
+        assertEq(80, results.size());
+        while (results.size()) {
+            hash<auto> result = results.get();
+            assertEq(NOTHING, result.error);
+            assertEq(expected{result.binding}, result.body, result.binding);
+            assertTrue(result.decoded, result.binding);
+        }
+    }
+
+    memoLimit() {
+        list<string> names();
+        for (int bit = 0; bit < 9; ++bit) {
+            push names, sprintf("e%d", bit);
+        }
+        string declarations = (map sprintf('<xsd:element name="%s" type="xsd:int" minOccurs="0"/>', $1),
+            names).join("");
+        string wsdl = replace(Optional, "{E}", declarations);
+        WebService ws(wsdl);
+        WSOperation op = ws.getBindingOperation("B", "put");
+        # 300 distinct child name lists, more than the memo keeps
+        hash<string, string> bodies();
+        for (int subset = 1; subset <= 300; ++subset) {
+            hash<auto> record = {};
+            for (int bit = 0; bit < 9; ++bit) {
+                if (subset & (1 << bit)) {
+                    record{names[bit]} = bit;
+                }
+            }
+            hash<auto> request = op.serializeRequest({"body": record}, NOTHING, NOTHING, NOTHING, NOTHING, NOTHING,
+                "B");
+            bodies{string(subset)} = request.body;
+            # absent optional elements decode as NOTHING
+            hash<auto> result = decode(op, request, "B");
+            assertEq(record, (map {$1.key: $1.value}, result.pairIterator(), exists $1.value), string(subset));
+        }
+        # results after the memo was reset match a service that never filled it
+        WebService fresh(wsdl);
+        WSOperation fresh_op = fresh.getBindingOperation("B", "put");
+        foreach int subset in (1, 100, 256, 257, 300) {
+            hash<auto> record = {};
+            for (int bit = 0; bit < 9; ++bit) {
+                if (subset & (1 << bit)) {
+                    record{names[bit]} = bit;
+                }
+            }
+            assertEq(bodies{string(subset)}, fresh_op.serializeRequest({"body": record}, NOTHING, NOTHING, NOTHING,
+                NOTHING, NOTHING, "B").body, string(subset));
+        }
+        # an invalid child list is still rejected every time
+        for (int i = 0; i < 2; ++i) {
+            assertThrows("SOAP-SERIALIZATION-ERROR", \op.serializeRequest(), ({"body": {"e0": 1, "unknown": 2}},
+                NOTHING, NOTHING, NOTHING, NOTHING, NOTHING, "B"));
+        }
+    }
+
+    substitution() {
+        WebService ws(Substitution);
+        WSOperation op = ws.getBindingOperation("B", "put");
+        hash<auto> request = op.serializeRequest({"body": {"fruit": "pear", "apple": "gala"}}, NOTHING, NOTHING,
+            NOTHING, NOTHING, NOTHING, "B");
+        assertRegex("<ns[0-9]*:fruit>pear</ns[0-9]*:fruit><ns[0-9]*:apple>gala</ns[0-9]*:apple>", request.body);
+        assertEq({"fruit": "pear", "apple": "gala"}, decode(op, request, "B"));
+        # a saved graph compiles its own programs
+        WebService copy = Serializable::deserialize(ws.serialize());
+        WSOperation copy_op = copy.getBindingOperation("B", "put");
+        assertEq(request.body, copy_op.serializeRequest({"body": {"fruit": "pear", "apple": "gala"}}, NOTHING,
+            NOTHING, NOTHING, NOTHING, NOTHING, "B").body);
+    }
+}

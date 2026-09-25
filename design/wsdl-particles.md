@@ -122,6 +122,33 @@ Run `qore -b --enable-debug test/wsdl-particle-matching.qtest` and
 The [matching evidence](../test/wsdl-interop/particle-matching-evidence.md) records
 the independent empty-choice and zero-count validator differences.
 
+## Compiled programs and memoized results
+
+A particle's compiled program (`XsdParticleProgram`) is built once and cached on the particle
+(`XsdParticle::getProgram()`), rather than built for every query:
+- **Invalidation:** the cache is valid for one schema generation (`XsdParticleProgram::Generation`). The generation
+  is a counter incremented by every change that a program depends on:
+  - named group resolution (`XsdParticle::resolveGroups()`);
+  - element reference resolution (`XsdElement::assimilate()`);
+  - substitution group affiliation and membership.
+
+  A program compiled during schema construction, before substitution group membership is published, is
+  therefore compiled again when it is next used.
+- **Sharing:** a compiled program is immutable, so threads share it. The cache holds the program and its
+  generation as one value, so a concurrent reader never pairs a program with the wrong generation.
+- **Memoized results:** a program's matching results depend only on the child names. `matches()`, `attribute()`,
+  `order()` and `elementOccurrenceRanges()` are memoized in the program, along with the particle's declarations
+  and field names (`XsdParticle::getDeclarationInfo()`).
+  - Keys are the operation and the names joined by a character that XML names cannot contain.
+  - The memo keeps at most 256 entries and is replaced as a whole, never modified in place.
+  - Exceptions are not memoized, so invalid input is rejected every time.
+  - Every call validates its names before the memo lookup. The validation loop is a cancellation check point, so
+    an interrupted or cancelled caller stops even when the result is memoized.
+
+Before this, every struct value recompiled its type's content model. A 50-item order took about 250 ms to
+serialize. It now takes about 120 ms, and decoding benefits similarly (P9b benchmark,
+`test/wsdl-interop/benchmark/`).
+
 ## Unique particle attribution
 
 Schema construction checks ordered particle attribution after declaration/group

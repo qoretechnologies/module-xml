@@ -11651,3 +11651,49 @@ and 13.4 by the end of list-values, and it is recorded with each workload.
 **Also:** three module-xml test processes from a 2026-09-23 suite run had been spinning for two days in a replaced
 libqore (Qore reinstalled mid-run) and distorted the first recording. They were stopped, and the reference was
 recorded again.
+
+## P9b-01: SOAP message serialization (2026-09-25)
+
+The first P9b finding was that a 50-item SOAP order took about 250 ms to serialize and 335 ms to decode.
+
+**Scaling:** the cost is linear in the item count, with no quadratic term, but the constants were large: about
+5 ms per line item of three scalar fields, plus about 13–15 ms per message.
+
+**Profile:** a Qore-level sampling profile of serializing a 200-item order showed three causes:
+- **Programs recompiled per value:** every `XsdParticle` query (`orderElementNames()`, `attributeElementNames()`,
+  `getElementOccurrenceRanges()`, `matchesElementNames()` and others) compiled a new `XsdParticleProgram`, including
+  its regex automaton, for every struct value. That was 35% of the time, 21% of it in the program constructor.
+- **Repeated matching:** each struct value then ran the same automaton several times over the same child name list.
+- **Repeated walks:** the particle's declarations and field names were recomputed for every value by a graph walk.
+
+**Changes:**
+- **Cached programs:** `XsdParticle::getProgram()` caches the compiled program per schema generation.
+  `XsdParticleProgram::Generation` is a `Counter` incremented by group resolution, element reference resolution and
+  substitution group affiliation and membership, so a program compiled during schema construction is compiled
+  again once membership is published.
+- **Memoized results:** `matches()`, `attribute()`, `order()` and `elementOccurrenceRanges()`, plus
+  `XsdParticle::getDeclarationInfo()` (declarations, substitution fields, field names and identities). The memo is
+  immutable per snapshot, holds at most 256 entries and never stores exceptions.
+- **`XsdDocumentValueCapture::validate()`:** describes the type once instead of twice per value.
+- **`XsdTypeSubstitutionHelper::builtin()`:** tests the type name before class reflection and namespace resolution.
+- **Removed:** the unused `XsdComplexType::getParticleDeclarations()`.
+
+**Result:** per line item, in the same session.
+
+| Binding | Serialize | Decode |
+| --- | --- | --- |
+| document/literal | 5.0 ms → 2.3 ms | 5.6 ms → 4.3 ms |
+| RPC/encoded | 4.9 ms → 2.3 ms | 7.9 ms → 6.6 ms |
+
+Outputs are byte-identical to the P9b reference: every binding style and the 12 gated list-values items.
+
+**Tests:** `test/wsdl-particle-program-cache.qtest` (3 cases, 555 assertions) covers:
+- 8 threads sharing one service's compiled programs, with outputs equal to a single-threaded baseline;
+- 300 distinct child name lists, beyond the memo limit, all round-tripping and matching a fresh service;
+- invalid input rejected on every call;
+- a substitution member declared after the content model that uses its head, in a source and a saved service.
+
+**Found by the full suite:** `wsdl-particle-matching.qtest` expects a call interrupted before it starts to raise
+`PROGRAM-INTERRUPTED`. A memo hit returned the remembered result without running any loop, so no cancellation check
+point was reached. The memoized methods now validate their names before the memo lookup, in a loop that is a check
+point, as the uncached methods did.
