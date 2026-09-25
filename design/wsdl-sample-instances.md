@@ -154,3 +154,37 @@ and concurrent calls. `test_sample_particles.py` exercises both actual SOAP
 bindings and both directions, including reconstructed schemas. It compares child
 order and exact integer values, and independently validates native and retained
 outputs with libxml2 and Xerces. Budget rejections are accounted separately.
+
+## Data provider examples
+
+The value providers of WSDL messages (`getDataProviderType()`) implement DataProvider's `getExampleValue()`, which
+applications use as request templates and to simulate responses. Each XSD provider returns the first of these
+candidates that it accepts, in its own output form:
+
+1. the ordinary DataProvider example for its base type category, such as `100` or `"example string"`, so that
+   examples that were already valid do not change;
+2. the sample value of the schema type the provider was created from: the value generated example messages use,
+   from `WSMessageHelper::getSampleTypeValue()` for a derived type (enumerations, then the facet-aware
+   `XsdSimpleType::getSampleValue()`) and `WSMessageHelper::getBuiltinSampleValue()` for a builtin;
+3. for a restriction, its base provider's example.
+
+The ordinary examples ignore XSD lexical spaces and facets: `"any value"` for an unbounded integer, a decimal or a
+complete calendar value; a field-name phrase for a Name, language or calendar string; `100` outside a range. Those
+are replaced by the sample. `xs:ID`, `xs:IDREF`, `xs:IDREFS` and their restrictions always use the shared builtin
+sample, as generated messages do, so that the references of a message resolve; a message with several ID fields
+still needs distinct values supplied.
+
+A restriction provider holds only compiled patterns and value checks, from which a sample cannot be generated
+again, so the factory stores the schema type's sample in the provider's facet metadata (`example`), and a union
+provider stores it as a member. The sample is therefore copied with optional and mandatory variants and kept by
+detached and saved providers. A provider saved without one falls back to the base provider's example when the
+restrictions accept it, and otherwise has no example. A restriction whose facets admit no generated value has no
+example either; its message then reports the missing value, as for a supplied message.
+
+A union restriction whose patterns reject the default, enumeration and pattern candidates also tries each member
+type's own sample, in declaration order; for example, a pattern restricting `int | date` to `[0-9]{4}-.*` is
+satisfied by the date member's sample.
+
+`test/wsdl-provider-examples.qtest` checks every builtin type and a restriction by each kind of facet, message
+round trips and saved providers; `test/wsdl-interop/test_provider_examples.py` has the serialized message examples
+validated by the pinned Xerces-J and libxml2.

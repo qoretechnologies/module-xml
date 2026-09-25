@@ -11845,3 +11845,35 @@ adjudication in three tests; the disagreements recorded against 2.12.10 remain i
 installs, and the affected Python tests (50) pass.
 
 Audit: `audits/P9c-03-pinned-lxml.md`.
+
+## P9e-01: valid data provider examples (2026-09-25)
+
+Reported from a Qorus SOAP simulation: `getExampleValue()` of a message with an `xs:decimal` field failed with
+`RUNTIME-TYPE-ERROR`, because the decimal provider's example was DataProvider's generic `"any value"`, which the
+provider rejects. A probe of every builtin type and a restriction by each kind of facet found 42 invalid examples:
+decimal, the unbounded integer types, all calendar types and duration (`"any value"` or a field-name phrase);
+language, Name, NCName, NMTOKEN, ID, IDREF, ENTITY and QName (a phrase with spaces); and numeric, sized, calendar,
+duration, list, union and boolean restrictions (bounds, lengths, patterns, enumerations and digits ignored). Only
+the binary types, plain lists and unrestricted strings, booleans and bounded integers had valid examples.
+
+The XSD providers now return the ordinary example where they accept it, and otherwise the schema type's sample,
+the value generated example messages use (see [the design](../../design/wsdl-sample-instances.md)). Restriction
+providers keep the sample in their facet metadata, as their compiled facets cannot generate one; unions keep it as
+a member. The ID types share the builtin sample so that references resolve. A pattern restriction of a union also
+tries its members' samples, which fixes the same case for generated example messages. `ENTITY` fields keep a
+lexically valid example, but no SOAP message can carry it (it needs a DTD declaration), so their messages still
+report that.
+
+Replacing every example with the sample first changed valid examples (`100` became `123` in
+`wsdl-native-type-providers.qtest` and `wsdl-substitution-roots.qtest`); valid ordinary examples are now kept.
+
+**Tests:** `test/wsdl-provider-examples.qtest` (5 cases, 296 assertions) checks every builtin type and 29
+restrictions: each example is accepted in the provider's output form, the message example serializes and decodes
+to the same value, saved and optional providers keep their examples, `ENTITY` messages are rejected explicitly, and
+the reported decimal message has an example. `test_provider_examples.py` serializes the input and output examples
+of 42 builtin and 30 restricted fields as SOAP 1.1 and 1.2 messages and has both pinned validators accept every
+payload.
+
+The full suite passes with this change (see P9c-03), and both tests pass in the Alpine and Ubuntu CI images.
+
+Audit: `audits/P9e-01-provider-examples.md`.
