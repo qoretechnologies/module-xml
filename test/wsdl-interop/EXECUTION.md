@@ -11964,3 +11964,25 @@ before it starts, or cancel its child pipeline with it. This change was pushed o
 no running pipeline with the previous configuration could be auto-cancelled by it.
 
 Audit: `audits/P9c-06-no-auto-cancel.md`.
+
+## P9d-04: generated multipart messages (2026-09-25)
+
+`test_mime_generation.py` generates 200 multipart/related SOAP messages (seed 20260927, case digest pinned; the same
+digest on CPython 3.12 and 3.14). They use boundaries of 1 to 70 RFC 2046 boundary characters, quoted or not,
+preambles and epilogues, the root part at any position with and without a `start` parameter, and 0 to 4 attachments.
+Attachment payloads include empty and 1000-byte binary data with CR, LF and near-delimiter byte sequences, in the
+binary, base64, quoted-printable and 7bit encodings, with and without Content-IDs, and header names in varying case.
+`mime-parts.qr` reads each message with `WSDLLib::parseMultiPartSOAPMessage()`, as SOAP clients and handlers do.
+
+For every message, Python's `email` parser (independent of the module) reads the generated payloads without
+defects, and the module reads the same root, attachments by Content-ID and number of unidentified parts. Six
+mutations, 20 each, break one rule: a `start` naming no part, a duplicate Content-ID, an invalid media type, an
+unknown transfer encoding, a missing close-delimiter, and a boundary parameter the body does not use. The module
+rejects all of them with `SOAP-MESSAGE-ERROR`. Removing the duplicate Content-ID check let 11 of the 20 duplicates
+through; the other 9 repeat the root's Content-ID and are still rejected by another check.
+
+The generator initially encoded quoted-printable payloads with `quopri`, which treats line feeds in binary data as
+text line breaks; `binascii.b2a_qp(istext=False)` encodes CR and LF as octets. The check that the independent parser
+reads the generated payloads caught this before any comparison with the module.
+
+Audit: `audits/P9d-04-multipart-messages.md`.
