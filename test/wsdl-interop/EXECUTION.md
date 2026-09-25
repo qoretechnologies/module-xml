@@ -11819,3 +11819,29 @@ specification text. Combined with `ci_suite.py verify`, which requires every tes
 now names cases that exist and pass in CI.
 
 Audit: `audits/P9d-01-ledger.md`.
+
+## P9c-03: the pinned lxml validator (2026-09-25)
+
+Decided 2026-09-25: the Python suite's second independent validator is pinned like Xerces-J. `requirements.txt`
+installs the `lxml` 6.0.2 wheel, which bundles libxml2 2.14.6, by hash into a virtual environment (`.venv`). It is
+available for CPython 3.12 (Alpine, musl) and 3.14 (Ubuntu and Fedora). `oracle_versions.py` checks the lxml and
+libxml2 versions: `ci_suite.py` refuses to run or verify with others, and `test_oracle_versions.py` fails. The CI
+scripts create the environment instead of installing the distribution's `lxml`; Ubuntu first installs
+`python3-venv`.
+
+**Re-adjudication against libxml2 2.14.6.** The whole suite run with the pinned validator differs from the 2.12.10
+adjudication in three tests; the disagreements recorded against 2.12.10 remain in their evidence documents:
+- **Arbitrary-precision integers:** 2.14.6 validates them, so the P1 precision disagreement no longer occurs.
+  `test_integer_range.py` (formerly 96 retained disagreements) and the strict coverage gate (formerly 56) now
+  require libxml2 to agree with the expected validity everywhere.
+- **Signed unsigned values:** 2.14.6 accepts `-0` and `+42` as `xs:unsignedShort`/`xs:unsignedInt`, as Xerces
+  does, although XSD 1.0 Part 2 section 3.3.21 gives the unsigned types no sign. The module still rejects them.
+  `test_survey.py` now records that both validators accept them and asserts the specification's rule
+  (`normative.lexical_valid()`) for each rejected input.
+- The Name and QName character disagreements found with Ubuntu's libxml2 2.15.2 do not occur with 2.14.6.
+
+**Verification:** with the pinned validator, every `test/*.qtest` file passes, and the Python suite runs 534 tests in
+190 modules and six shards, all passing (`ci_suite.py verify`). In the Alpine and Ubuntu CI images the pinned wheel
+installs, and the affected Python tests (50) pass.
+
+Audit: `audits/P9c-03-pinned-lxml.md`.

@@ -235,7 +235,8 @@ XSD 1.0 rule. The Qore numeric regression subset uses ordinary positive values a
 rejection of the invalid signed inputs is implemented in P3-01. The small survey now serializes
 48 valid inputs and rejects all 16 signed unsigned inputs with `SOAP-DESERIALIZATION-ERROR`.
 
-The Python tests require Python 3.12+, `lxml`, and Qore's `json` module in addition to `xml`. They test the
+The Python tests require Python 3.12+, the pinned `lxml` (see below), and Qore's `json` module in addition to `xml`.
+They test the
 real Qore subprocess, version selection, fixture checksums, empty input, namespace preservation,
 malformed messages, offline resolution, and separation of input/output validation failures.
 They also verify that missing, duplicate, malformed, or out-of-order worker results fail the survey.
@@ -284,19 +285,31 @@ selection, list constraints, shared graphs and detached provider behavior. See
 ## Continuous integration
 
 CI (`.gitlab-ci.yml`) runs the Qore test files and this directory's complete Python suite on Ubuntu and Alpine,
-with a debug build of the module in `build-debug`. The suite needs Python 3.12 or later with `lxml`, a JDK 17+,
-`openssl` and Qore. The CI scripts install `lxml` (`python3-lxml`, `py3-lxml`); the rest is in the
-qore-test-base images. Nothing is downloaded at run time: every corpus, specification and JAR is committed and
-pinned by SHA-256.
+with a debug build of the module in `build-debug`. The suite needs Python 3.12 or later, a JDK 17+, `openssl`, Qore
+and the pinned `lxml`; the rest is in the qore-test-base images. Nothing is downloaded at run time: every corpus,
+specification and JAR is committed and pinned by SHA-256.
+
+`lxml` provides the suite's second independent validator, libxml2, and the expected validator results, including
+every adjudicated disagreement with the specifications, belong to one libxml2 version. Distributions build `lxml`
+against their own libxml2, and those versions validate differently, so the suite uses the `lxml` 6.0.2 wheels,
+which bundle libxml2 2.14.6, installed by hash from `requirements.txt` into a virtual environment. Xerces-J is
+pinned the same way by its JAR digest. `oracle_versions.py` checks the versions: `ci_suite.py` refuses to run with
+another `lxml` or libxml2, and `test_oracle_versions.py` fails. Locally:
+
+```sh
+python3 -m venv test/wsdl-interop/.venv
+test/wsdl-interop/.venv/bin/pip install --only-binary=:all: --require-hashes -r test/wsdl-interop/requirements.txt
+cd test/wsdl-interop && .venv/bin/python -W error -m unittest discover -p 'test_*.py'
+```
 
 The suite takes longer than one CI job allows, so `ci_suite.py` splits it by test module into six shards that
 run as parallel jobs (`python-ubuntu` and `python-alpine`), with warnings as errors:
 
 ```sh
 cd test/wsdl-interop
-python3 -W error ci_suite.py list --shards 6                            # the assignment
-python3 -W error ci_suite.py run --shard 1/6 --output /tmp/ci-results    # one shard
-python3 -W error ci_suite.py verify --shards 6 --output /tmp/ci-results  # the completeness check
+.venv/bin/python -W error ci_suite.py list --shards 6                            # the assignment
+.venv/bin/python -W error ci_suite.py run --shard 1/6 --output /tmp/ci-results    # one shard
+.venv/bin/python -W error ci_suite.py verify --shards 6 --output /tmp/ci-results  # the completeness check
 ```
 
 Each shard records every test with its outcome and duration in `shard-I-of-N.json`. The verify jobs

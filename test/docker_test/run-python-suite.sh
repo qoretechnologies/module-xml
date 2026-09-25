@@ -13,6 +13,8 @@ set -e
 set -x
 
 suite_dir="${MODULE_SRC_DIR}/test/wsdl-interop"
+# the environment with the pinned lxml validator, created by the distribution script
+python="${suite_dir}/.venv/bin/python"
 results="${suite_dir}/ci-results"
 cd "${suite_dir}"
 
@@ -24,12 +26,12 @@ case "$1" in
         mkdir -p "${results}"
         chown qore:qore "${results}"
         # warnings are errors, as in local runs
-        exec gosu qore:qore python3 -W error ci_suite.py run --shard "${CI_NODE_INDEX}/${CI_NODE_TOTAL}" \
+        exec gosu qore:qore "${python}" -W error ci_suite.py run --shard "${CI_NODE_INDEX}/${CI_NODE_TOTAL}" \
             --output "${results}"
         ;;
     verify)
         : "${PYTHON_SHARDS:?}"
-        exec python3 -W error ci_suite.py verify --shards "${PYTHON_SHARDS}" --output "${results}"
+        exec "${python}" -W error ci_suite.py verify --shards "${PYTHON_SHARDS}" --output "${results}"
         ;;
     *)
         echo "usage: $0 shard|verify" >&2

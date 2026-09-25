@@ -18,6 +18,7 @@ from unittest.mock import patch
 
 from lxml import etree
 
+import normative
 import survey
 from test_attribute_values import description, NS
 from test_compositor_context import schema
@@ -141,7 +142,13 @@ class SurveyTest(unittest.TestCase):
             self.assertEqual(expected, {row["file"] for row in rejected})
             for row in rejected:
                 self.assertEqual("SOAP-DESERIALIZATION-ERROR", row["err"], row)
-                self.assertFalse(row["input_validation"]["ok"], row)
+                # XSD 1.0 unsigned types have no sign (Part 2 section 3.3.21). Both pinned validators, Xerces and
+                # libxml2 2.14.6, accept "-0" and "+42"; the rejection follows the specification's rule.
+                self.assertTrue(row["input_validation"]["ok"], row)
+                datatype = "unsigned" + row["case"].removeprefix("Unsigned").removesuffix("Element").removesuffix(
+                    "Attribute")
+                lexical = "-0" if "02-soap" in row["file"] else "+42"
+                self.assertFalse(normative.lexical_valid(datatype, lexical), row)
             self.assertEqual(80, len(result["source_sha256"]))
             self.assertEqual(False, result["scope"]["network"])
             self.assertIs(False, result["scope"]["preserve_types"])

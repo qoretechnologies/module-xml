@@ -30,7 +30,6 @@ BOUNDS = {
 class IntegerRangeTest(unittest.TestCase):
     def test_simple_content_and_attributes(self):
         cases, jobs, validators, expected, outputs, values = [], {}, {}, {}, {}, {}
-        libxml_disagreements = set()
         with tempfile.TemporaryDirectory(prefix="wsdl-integer-range-") as temporary:
             root = Path(temporary)
             for datatype, (minimum, maximum) in BOUNDS.items():
@@ -63,16 +62,10 @@ class IntegerRangeTest(unittest.TestCase):
                                 value = etree.SubElement(body, f"{{{NS}}}{wrapper}")
                                 value.text = lexical if location == "content" else ordinary
                                 value.set("count", lexical if location == "attribute" else ordinary)
-                                oracle_valid = validators[datatype].validate(value)
-                                if valid and not oracle_valid:
-                                    # P1's retained libxml2 arbitrary-integer precision disagreement:
-                                    # Xerces must accept the value, and exact Python integers govern fidelity.
-                                    self.assertIn(datatype, ("integer", "negativeInteger", "nonPositiveInteger",
-                                                             "positiveInteger", "nonNegativeInteger"))
-                                    self.assertGreater(len(lexical.lstrip("+-0")), 100)
-                                    libxml_disagreements.add(name)
-                                else:
-                                    self.assertEqual(valid, oracle_valid, (name, str(validators[datatype].error_log)))
+                                # The pinned libxml2 (2.14.6) validates arbitrary-precision integers; the P1
+                                # precision disagreement belonged to libxml2 2.12.10.
+                                self.assertEqual(valid, validators[datatype].validate(value),
+                                                 (name, str(validators[datatype].error_log)))
                                 if valid:
                                     values[name] = (int(value.text), int(value.attrib["count"]))
                                 jobs[datatype].documents[name] = etree.tostring(value)
@@ -107,8 +100,7 @@ class IntegerRangeTest(unittest.TestCase):
             self.assertEqual(f"{{{survey.SOAP_NAMESPACES[int(version == '12')]}}}Envelope", envelope.tag)
             value = envelope.find("{*}Body")[0]
             self.assertEqual(f"{{{NS}}}" + ("Submit" if direction == "request" else "Reply"), value.tag)
-            if not validators[datatype].validate(value):
-                self.assertIn(name, libxml_disagreements)
+            self.assertTrue(validators[datatype].validate(value), (name, str(validators[datatype].error_log)))
             content, attribute = values[name]
             self.assertEqual(content, int(value.text))
             self.assertEqual(attribute, int(value.attrib["count"]))
@@ -117,7 +109,6 @@ class IntegerRangeTest(unittest.TestCase):
             jobs[datatype].documents[name + "/output"] = etree.tostring(value)
         self.assertEqual(576, len(expected))
         self.assertEqual(416, len(outputs))
-        self.assertEqual(96, len(libxml_disagreements))
         results = run_independent(list(jobs.values()))
         self.assertEqual(set(expected) | set(outputs), set(results["documents"]))
         for name, valid in (expected | outputs).items():

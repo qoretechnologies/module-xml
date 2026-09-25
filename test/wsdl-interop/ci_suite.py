@@ -290,6 +290,10 @@ def main(argv=None):
     record.add_argument("--output", type=Path, required=True, help="the result directory")
     commands.add_parser("list", help="print the shard assignment").add_argument("--shards", type=int, required=True)
     args = parser.parse_args(argv)
+    if args.command in ("run", "verify"):
+        # expected validator results belong to the pinned lxml and libxml2 (oracle_versions.py)
+        import oracle_versions
+        oracle_versions.check()
     timings = read_timings()
     if args.command == "run":
         return run_shard(*args.shard, args.output, timings)

@@ -35,8 +35,11 @@ echo "export QORE_GID=1000" >> ${ENV_FILE}
 export MAKE_JOBS=4
 
 if [ "${MODE}" != "qtest" ]; then
-    # lxml is the Python suite's only package outside the standard library
-    apk --update --no-cache add py3-lxml
+    # lxml is the Python suite's only package outside the standard library: the pinned, hash-checked wheel
+    # (test/wsdl-interop/requirements.txt), whose bundled libxml2 is the suite's second independent validator
+    python3 -m venv ${MODULE_SRC_DIR}/test/wsdl-interop/.venv
+    ${MODULE_SRC_DIR}/test/wsdl-interop/.venv/bin/pip install --disable-pip-version-check --only-binary=:all: --require-hashes \
+        -r ${MODULE_SRC_DIR}/test/wsdl-interop/requirements.txt
 fi
 
 if [ "${MODE}" = "python-verify" ]; then

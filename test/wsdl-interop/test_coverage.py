@@ -5,7 +5,6 @@ Copyright (C) 2026 Qore Technologies, s.r.o.
 """
 
 from copy import deepcopy
-from collections import Counter
 import json
 from pathlib import Path
 import shutil
@@ -571,19 +570,12 @@ class CoverageTest(unittest.TestCase):
             self.assertTrue(message["rejection_passed"], message)
             self.assertEqual("SOAP-DESERIALIZATION-ERROR", message["deserialize"]["err"])
             self.assertEqual([], message["failures"])
+        # The pinned libxml2 (2.14.6) validates exact numeric outputs, so no output disagrees with it: the 56
+        # adjudicated precision disagreements belonged to libxml2 2.12.10 (the former 16 IDREF disagreements
+        # disappeared when P5-17b began rejecting those invalid inputs).
         disagreements = [m["output_oracle_disagreement"] for c in report["cases"] for m in c["messages"]
                          if "output_oracle_disagreement" in m]
-        # Exact numeric outputs retain the adjudicated libxml2 precision limitation.
-        # The former 16 IDREF disagreements disappeared when P5-17b began rejecting
-        # those invalid inputs; the rejection assertions above cover them explicitly.
-        families = Counter(c["case"] for c in report["cases"] for m in c["messages"]
-                           if "output_oracle_disagreement" in m)
-        self.assertEqual({"IntegerAttribute": 8, "IntegerElement": 8,
-                          **{base + position: 4 for base in ("Decimal", "NegativeInteger",
-                              "NonNegativeInteger", "NonPositiveInteger", "PositiveInteger")
-                             for position in ("Attribute", "Element")}}, families)
-        self.assertEqual(56, len(disagreements))
-        self.assertTrue(all(d["adjudicated"] for d in disagreements))
+        self.assertEqual([], disagreements)
 
 
 if __name__ == "__main__":
