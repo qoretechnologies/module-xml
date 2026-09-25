@@ -89,19 +89,43 @@ carried on each row as metadata and the verifier rejects any rationale that lean
 
 ## Accounting
 
+Current state, after P8-07 covered the 26 rows routed to P8 and P9a-08 closed the 49 WS-Addressing gaps:
+
 | Outcome | W3C | BP 1.2 | BP 2.0 | Total |
 | --- | --- | --- | --- | --- |
-| Covered by executable cases | 100 | 151 | 137 | 388 |
-| Recorded gap | 0 | 25 | 24 | 49 |
-| Not applicable, with a source-based rationale | 14 | 8 | 8 | 30 |
-| Routed to P8 | 26 | 0 | 0 | 26 |
+| Covered by executable cases | 126 | 174 | 159 | 459 |
+| Not applicable, with a source-based rationale | 14 | 10 | 10 | 34 |
 | **Total** | **140** | **184** | **169** | **493** |
 
-815 executable mappings, every one verified to exist.
+993 executable mappings, every one verified to exist.
 
-## Gaps are recorded as gaps
+At P7 the accounting was 388 covered, 49 recorded gaps, 30 not applicable and 26 routed to P8, with 815
+mappings. The sections below record why the P7 gaps were gaps and how P9a closed them.
 
-49 rows are recorded as gaps, not exclusions. They are the profile requirements that depend on
+## WS-Addressing: recorded as gaps at P7, closed in P9a
+
+P9a implements WS-Addressing 1.0 Core, SOAP Binding and Metadata. In P9a-08 (2026-09-24) each of the 49
+rows was revalidated against its pinned profile statement, and the two profiles' wordings were checked separately
+where they differ (SOAP 1.1 or 1.2 names, R1144's SOAPAction header or action parameter, R2901's
+"non-empty" or "if present").
+- **Covered:** 45 rows (23 requirements), each mapped to the cases that assert its behavior, in both
+  directions where it has two sides.
+- **Not applicable:** R1203 and R1204 in both profiles (4 rows). They apply only to a non-addressable
+  service instance, which receives its inputs on HTTP responses. SoapHandler is always an addressable HTTP
+  server, so the condition cannot arise. This scope decision was approved on 2026-09-24.
+
+Mapping the rows found three defects, fixed in P9a-08:
+- **R1041:** an addressing node did not understand `wsa:FaultDetail`, a WS-Addressing defined header block,
+  so a MustUnderstand fault could name it as not understood.
+- **R2745:** an explicit empty per-call SOAP action omitted the SOAPAction header. It now sends `""`. The
+  new `send_soapaction` client option omits the header for servers that reject it, and is refused for
+  WS-Addressing requests (R1144).
+- **R2901, Basic Profile 2.0:** a present but empty `wsoap12:operation` soapAction was treated as absent.
+  It must now equal an explicit input action.
+
+The verifier now rejects any WS-Addressing row recorded as a gap.
+
+At P7, 49 rows were recorded as gaps, not exclusions. They are the profile requirements that depend on
 WS-Addressing: the `wsa:Action` header block, the `wsam:Addressing` policy assertion and the
 anonymous/non-anonymous response rules. This module implements SOAP 1.1 and 1.2 messaging over WSDL
 1.1 and provides no WS-Addressing support, so those requirements apply to a Basic Profile conformance
@@ -112,8 +136,7 @@ conformance shortfall into a clean total. The verifier enforces the distinction 
 is missing, and a row cannot be both applicable and excluded.
 
 The module makes no formal Basic Profile conformance claim; it cites individual requirements (R2745,
-R2933, R2943) as guidance. This ledger does not create such a claim, and with 49 open gaps it could
-not support one.
+R2933, R2943) as guidance. This ledger does not create such a claim.
 
 The 14 not-applicable rows are not a residue of untested requirements. Two are the conformance
 statements of Part 1 section 1.2, which range over the other mandatory requirements rather than
@@ -167,7 +190,8 @@ the serialization-side fix.
 
 The accounting is complete for both sources, but it is accounting, not acceptance. P7 acceptance also
 requires the mandatory behavior for the advertised scope to pass, and the defects above are unresolved.
-The 26 W3C rows routed to P8 are not claimed, and the 49 WS-Addressing gaps are open by construction.
+At P7, the 26 W3C rows routed to P8 were not claimed and the 49 WS-Addressing gaps were open by construction;
+P8-07 and P9a-08 have since covered them.
 
 ## Reproduction
 

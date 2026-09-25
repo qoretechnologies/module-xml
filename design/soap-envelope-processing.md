@@ -285,7 +285,10 @@ Request actions have version-specific transport representations. SOAP 1.1 uses a
 quoted SOAPAction HTTP header, including the quoted empty default. SOAP 1.2 uses
 the quoted action parameter of the XML root's application/soap+xml media type and
 omits SOAPAction. Responses do not inherit a request action. The per-call override
-remains available; an explicit empty override suppresses both representations.
+remains available. An explicit empty override still sends the quoted empty SOAP 1.1
+SOAPAction (WS-I R2745) and sends no SOAP 1.2 action parameter. Only the client
+option `send_soapaction: False` omits the SOAP 1.1 header, for servers that reject
+it. It is refused for WS-Addressing requests (R1144).
 
 `WSDLLib::getSOAPAction()` decodes normalized root metadata. For SOAP 1.1 it removes
 HTTP quoting and surrounding optional whitespace, while accepting legacy unquoted

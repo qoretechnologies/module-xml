@@ -281,8 +281,16 @@ public class SoapRequestDataProvider inherits SoapDataProviderBase {
                 "display_name": "SOAP Action",
                 "short_desc": "Overrides the SOAPAction for the request",
                 "type": new QoreStringDataType(),
-                "desc": "An optional string that will override the `SOAPAction` for the request; an empty string here "
-                    "will prevent the `SOAPAction` from being sent",
+                "desc": "An optional string that will override the `SOAPAction` for the request; an empty string "
+                    "sends an empty SOAP 1.1 `SOAPAction` header (`\"\"`) and no SOAP 1.2 `action` parameter",
+            },
+            "send_soapaction": <DataProviderOptionInfo>{
+                "display_name": "Send SOAPAction",
+                "short_desc": "Send the SOAPAction header with a SOAP 1.1 request",
+                "type": new QoreBoolDataType(),
+                "desc": "Set to `False` to send a SOAP 1.1 request without the `SOAPAction` header, for a server that "
+                    "rejects it.\n\n**Note:** such requests do not conform to SOAP 1.1 or the WS-I Basic Profile, and "
+                    "requests using WS-Addressing always carry the header.",
             },
             "binding": <DataProviderOptionInfo>{
                 "display_name": "SOAP Binding",

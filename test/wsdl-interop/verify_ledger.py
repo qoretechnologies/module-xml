@@ -175,6 +175,9 @@ def main():
         if coverage == 'routed' and phase in ('P7', 'P8'):
             # P8 is accepted: its rows are covered, or recorded as gaps, against the current text
             fail(problems, f'{rid}: routed to a later phase but still recorded against {phase}')
+        if coverage == 'gap' and row.get('subject') == 'ws-addressing':
+            # P9a implements WS-Addressing 1.0: its rows are covered, or not applicable with a rationale
+            fail(problems, f'{rid}: WS-Addressing requirement still recorded as a gap')
         if coverage == 'gap' and not (row.get('gap') or '').strip():
             fail(problems, f'{rid}: recorded as a gap without saying what is missing')
         if coverage != 'gap' and row.get('gap'):

@@ -1,0 +1,242 @@
+#!/usr/bin/env qore
+# -*- mode: qore; indent-tabs-mode: nil -*-
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires xml
+%requires HttpServer
+%requires ../qlib/WSDL.qm
+%requires ../qlib/SoapHandler.qm
+%requires ../qlib/SoapClient.qm
+%requires ../qlib/SoapClientIo
+%requires ../qlib/SoapDataProvider
+
+%exec-class SoapActionHeaderTest
+
+# records the SOAP action metadata of each request and passes it to a SOAP handler
+class RecordingHandler inherits AbstractHttpRequestHandler {
+    public {
+        Queue requests();
+    }
+
+    private {
+        SoapHandler soap;
+    }
+
+    constructor(SoapHandler soap) {
+        self.soap = soap;
+    }
+
+    hash<HttpResponseInfo> handleRequest(hash<auto> cx, hash<auto> hdr, *data body) {
+        requests.push({"present": hdr.hasKey("soapaction"), "soapaction": hdr.soapaction,
+            "content_type": hdr."content-type"});
+        return cast<hash<HttpResponseInfo>>(soap.handleRequest(cx, hdr, body));
+    }
+}
+
+# WS-I Basic Profile 1.2 R2745 and SOAP 1.1 section 6.1.1: a SOAP 1.1 request carries a SOAPAction header, quoted
+# empty when the WSDL gives no action; the send_soapaction option omits it for servers that reject it, except for
+# WS-Addressing requests, which must carry it (R1144).
+public class SoapActionHeaderTest inherits QUnit::Test {
+    private {
+        const Contract = '<definitions xmlns="http://schemas.xmlsoap.org/wsdl/"
+            xmlns:soap="http://schemas.xmlsoap.org/wsdl/soap/" xmlns:soap12="http://schemas.xmlsoap.org/wsdl/soap12/"
+            xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:x="urn:echo:xsd" xmlns:tns="urn:echo"
+            targetNamespace="urn:echo">
+          <types><xsd:schema targetNamespace="urn:echo:xsd" elementFormDefault="qualified">
+            <xsd:element name="In" type="xsd:string"/><xsd:element name="Out" type="xsd:string"/>
+          </xsd:schema></types>
+          <message name="In"><part name="body" element="x:In"/></message>
+          <message name="Out"><part name="body" element="x:Out"/></message>
+          <portType name="Echo"><operation name="echo"><input message="tns:In"/><output message="tns:Out"/>
+            </operation></portType>
+          <binding name="B11" type="tns:Echo"><soap:binding style="document"
+              transport="http://schemas.xmlsoap.org/soap/http"/>
+            <operation name="echo"><soap:operation soapAction=""/>
+              <input><soap:body use="literal"/></input><output><soap:body use="literal"/></output></operation>
+          </binding>
+          <binding name="B12" type="tns:Echo"><soap12:binding style="document"
+              transport="http://schemas.xmlsoap.org/soap/http"/>
+            <operation name="echo"><soap12:operation soapAction="urn:echo:echo"/>
+              <input><soap12:body use="literal"/></input><output><soap12:body use="literal"/></output></operation>
+          </binding>
+          <service name="S">
+            <port name="P11" binding="tns:B11"><soap:address location="http://localhost/echo11"/></port>
+            <port name="P12" binding="tns:B12"><soap12:address location="http://localhost/echo12"/></port>
+          </service></definitions>';
+
+        WebService ws;
+        HttpServer http;
+        RecordingHandler recorder;
+        string base_url;
+    }
+
+    constructor() : Test("SoapActionHeaderTest", "1.0") {
+        ws = new WebService(Contract);
+        SoapHandler soap(new PermissiveAuthenticator());
+        foreach hash<auto> row in ({"binding": "B11", "path": "echo11"}, {"binding": "B12", "path": "echo12"}) {
+            soap.addMethod(ws, ws.getOperation("echo"), \echo(), NOTHING, NOTHING, NOTHING, NOTHING, NOTHING,
+                row.path, row.binding);
+        }
+        recorder = new RecordingHandler(soap);
+        http = new HttpServer();
+        on_exit http.stop();
+        http.setDefaultHandler("soap", recorder);
+        http.addListener(0);
+        base_url = sprintf("http://127.0.0.1:%d", http.getListenerInfo(0).port);
+
+        addTestCase("SOAP 1.1 requests carry a SOAPAction header", \carried());
+        addTestCase("send_soapaction omits the SOAPAction header", \omitted());
+        addTestCase("WS-Addressing requests always carry the SOAPAction header", \addressing());
+        addTestCase("SOAP 1.2 actions", \soap12());
+        addTestCase("invalid send_soapaction values", \invalid());
+        addTestCase("SOAP request data providers", \dataProvider());
+        set_return_value(main());
+    }
+
+    static string echo(hash<auto> cx, string value) {
+        return value;
+    }
+
+    # a client of the given kind for the given port
+    object newClient(string kind, string port = "P11", *hash<auto> opts) {
+        hash<auto> options = {"wsdl": ws, "service": "S", "port": port,
+            "url": base_url + (port == "P11" ? "/echo11" : "/echo12"), "timeout": 20000, "connect_timeout": 20000};
+        return kind == "SoapClient" ? new SoapClient(options + opts) : new SoapClientIo(options + opts);
+    }
+
+    static close(object client) {
+        if (client instanceof SoapClientIo) {
+            cast<SoapClientIo>(client).close();
+        }
+    }
+
+    # calls echo and returns the received SOAP action metadata
+    hash<auto> call(object client, *hash<auto> opts) {
+        assertEq("hi", client.callOperation("echo", "hi", opts));
+        return recorder.requests.get(10000);
+    }
+
+    carried() {
+        foreach string kind in ("SoapClient", "SoapClientIo") {
+            object client = newClient(kind);
+            on_exit close(client);
+            # the WSDL's empty soapAction, and an explicit empty action, are sent as a quoted empty string
+            assertEq({"present": True, "soapaction": '""'}, call(client){"present", "soapaction"}, kind);
+            assertEq({"present": True, "soapaction": '""'}, call(client, {"soapaction": ""}){"present", "soapaction"},
+                kind);
+            assertEq('"urn:echo:other"', call(client, {"soapaction": "urn:echo:other"}).soapaction, kind);
+            # the call option can also turn the header back on explicitly
+            assertEq('""', call(client, {"send_soapaction": True}).soapaction, kind);
+        }
+        assertEq(0, recorder.requests.size());
+    }
+
+    omitted() {
+        foreach string kind in ("SoapClient", "SoapClientIo") {
+            # a client option for a server that rejects the header
+            object client = newClient(kind, "P11", {"send_soapaction": False});
+            on_exit close(client);
+            assertFalse(call(client).present, kind);
+            assertFalse(call(client, {"soapaction": "urn:echo:other"}).present, kind);
+            # the call option overrides the client option
+            assertEq('""', call(client, {"send_soapaction": True}).soapaction, kind);
+            # a call option alone
+            object plain = newClient(kind);
+            on_exit close(plain);
+            assertFalse(call(plain, {"send_soapaction": False}).present, kind);
+            assertTrue(call(plain).present, kind);
+        }
+        # saved clients keep the option
+        SoapClient saved = Serializable::deserialize(cast<SoapClient>(newClient("SoapClient", "P11",
+            {"send_soapaction": False})).serialize());
+        assertFalse(call(saved).present);
+        # a connection option
+        string file = tmp_location() + DirSep + sprintf("soap-action-header-%d.wsdl", getpid());
+        on_exit unlink(file);
+        {
+            File f();
+            f.open2(file, O_CREAT | O_TRUNC | O_WRONLY);
+            f.write(Contract);
+        }
+        foreach bool send in (False, True) {
+            SoapConnection conn("test", "test", "soap://" + file, {}, {"target_url": base_url + "/echo11",
+                "port": "P11", "send_soapaction": send});
+            SoapClient client = conn.get();
+            assertEq(send, call(client).present);
+        }
+        assertEq(0, recorder.requests.size());
+    }
+
+    addressing() {
+        foreach string kind in ("SoapClient", "SoapClientIo") {
+            object client = newClient(kind, "P11", {"send_soapaction": False});
+            on_exit close(client);
+            string err = kind == "SoapClient" ? "SOAP-CLIENT-ERROR" : "SOAP-CLIENT-IO-ERROR";
+            assertThrows(err, "R1144", \client.callOperation(), ("echo", "hi", {"addressing": {}}), kind);
+            object addressed = newClient(kind, "P11", {"addressing": True});
+            on_exit close(addressed);
+            assertThrows(err, "R1144", \addressed.callOperation(), ("echo", "hi", {"send_soapaction": False}), kind);
+            # with the header, the request carries the wsa:Action value
+            hash<auto> received = call(addressed);
+            assertEq('"urn:echo:Echo:echoRequest"', received.soapaction, kind);
+        }
+        # nothing was sent for the refused requests
+        assertEq(0, recorder.requests.size());
+    }
+
+    soap12() {
+        foreach string kind in ("SoapClient", "SoapClientIo") {
+            object client = newClient(kind, "P12");
+            on_exit close(client);
+            hash<auto> received = call(client);
+            assertFalse(received.present, kind);
+            assertRegex(";action=\"?urn:echo:echo", received.content_type, kind);
+            # an empty action sends no action parameter
+            received = call(client, {"soapaction": ""});
+            assertFalse(received.present, kind);
+            assertFalse(received.content_type =~ /action=/, kind);
+            # send_soapaction concerns only the SOAP 1.1 header
+            received = call(client, {"send_soapaction": False});
+            assertRegex(";action=\"?urn:echo:echo", received.content_type, kind);
+        }
+        assertEq(0, recorder.requests.size());
+    }
+
+    invalid() {
+        assertThrows("SOAP-CLIENT-ERROR", "send_soapaction option must be a bool", sub () {
+            newClient("SoapClient", "P11", {"send_soapaction": "no"});
+        });
+        assertThrows("SOAP-CLIENT-IO-ERROR", "send_soapaction option must be a bool", sub () {
+            newClient("SoapClientIo", "P11", {"send_soapaction": 0});
+        });
+        foreach string kind in ("SoapClient", "SoapClientIo") {
+            object client = newClient(kind);
+            on_exit close(client);
+            assertThrows(kind == "SoapClient" ? "SOAP-CLIENT-ERROR" : "SOAP-CLIENT-IO-ERROR",
+                "send_soapaction call option must be a bool", \client.callOperation(),
+                ("echo", "hi", {"send_soapaction": "no"}), kind);
+        }
+        SoapClientIo io = newClient("SoapClientIo", "P12");
+        on_exit io.close();
+        assertThrows("SOAP-CLIENT-IO-ERROR", "request-only option", \io.getSoapResponse(), ("echo", "/r",
+            {"send_soapaction": False}));
+        assertEq(0, recorder.requests.size());
+    }
+
+    dataProvider() {
+        SoapClient client = newClient("SoapClient");
+        SoapDataProvider provider(ws, client);
+        AbstractDataProvider echo = provider.getChildProviderPath("echo");
+        assertTrue(echo.getInfo().request_options.hasKey("send_soapaction"));
+        assertEq("hi", echo.doRequest({"body": "hi"}));
+        assertEq('""', recorder.requests.get(10000).soapaction);
+        assertEq("hi", echo.doRequest({"body": "hi"}, {"soapaction": ""}));
+        assertEq('""', recorder.requests.get(10000).soapaction);
+        assertEq("hi", echo.doRequest({"body": "hi"}, {"send_soapaction": False}));
+        assertFalse(recorder.requests.get(10000).present);
+        assertEq(0, recorder.requests.size());
+    }
+}

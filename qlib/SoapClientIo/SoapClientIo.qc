@@ -97,6 +97,9 @@ public class SoapClientIo {
         #! whether the WS-Addressing request headers are marked mustUnderstand
         bool addressing_must_understand = False;
 
+        #! whether SOAP 1.1 requests carry the SOAPAction header
+        bool send_soapaction = True;
+
         #! the receiver of replies sent to a non-anonymous address
         *WSDL::WsaReplyReceiver reply_receiver;
 
@@ -153,6 +156,9 @@ public class SoapClientIo {
           WSDL supports WS-Addressing; see <a href="../../WSDL/html/index.html#wsdl_addressing">WS-Addressing</a> in the WSDL module
         - \c addressing_must_understand: @ref Qore::True "True" to mark the WS-Addressing request headers
           \c mustUnderstand
+        - \c send_soapaction: @ref Qore::False "False" to send SOAP 1.1 requests without a \c SOAPAction header, for
+          servers that reject it (default: @ref Qore::True "True"); such requests do not conform to SOAP 1.1 or
+          WS-I R2745, and requests using WS-Addressing always carry the header (WS-I R1144)
         - \c reply_receiver: a @ref WSDL::WsaReplyReceiver "WsaReplyReceiver" whose address request-response
           calls use as \c wsa:ReplyTo and \c wsa:FaultTo; the reply then arrives as a separate HTTP request at a
           handler such as \c SoapHandler::SoapReplyHandler, which delivers it to the receiver
@@ -199,7 +205,7 @@ SoapClientIo client({"wsdl": service, "url": "https://example.org/services/v1"})
         if (exists h.message_limits) {
             setMessageLimits(h.message_limits);
         }
-        foreach string option in (("addressing", "addressing_must_understand")) {
+        foreach string option in (("addressing", "addressing_must_understand", "send_soapaction")) {
             if (exists h{option} && h{option}.typeCode() != NT_BOOLEAN) {
                 throw "SOAP-CLIENT-IO-ERROR", sprintf("the %s option must be a bool; got %y", option,
                     h{option}.type());
@@ -207,6 +213,7 @@ SoapClientIo client({"wsdl": service, "url": "https://example.org/services/v1"})
         }
         addressing = h.addressing;
         addressing_must_understand = h.addressing_must_understand ?? False;
+        send_soapaction = h.send_soapaction ?? True;
         if (exists h.reply_receiver) {
             if (!(h.reply_receiver instanceof WSDL::WsaReplyReceiver)) {
                 throw "SOAP-CLIENT-IO-ERROR", "the reply_receiver option must be a WsaReplyReceiver";
@@ -332,8 +339,11 @@ auto result = client.call("echo", {"body": "invoice-71"});
         - \c soap_header: a hash giving SOAP header information, if required by the message
         - \c http_header: a hash giving HTTP header information to include in the message
         - \c xml_opts: an integer XML generation option code
-        - \c soapaction: an optional string overriding the SOAPAction for the request; an empty string
-          prevents the SOAPAction from being sent
+        - \c soapaction: an optional string overriding the SOAPAction for the request; an empty string sends an
+          empty SOAP 1.1 \c SOAPAction header (\c "", WS-I R2745) and no SOAP 1.2 \c action parameter
+        - \c send_soapaction: overrides the client's \c send_soapaction option for this call:
+          @ref Qore::False "False" sends a SOAP 1.1 request without a \c SOAPAction header, for servers that reject
+          it; not allowed for requests using WS-Addressing (WS-I R1144)
         - \c soap_node: optional ultimate-receiver @ref WSDL::SoapProcessingNode "SoapProcessingNode"
           overriding the constructor's response header capabilities for this call only
         - \c xml_values: True to return @ref WSDL::SoapXmlMessageInfo "SoapXmlMessageInfo" with retained
@@ -364,6 +374,10 @@ auto result = client.callOperation("echo", {"body": "invoice-71"}, {"xml_values"
         if (opts.xml_values && opts.preserve_types) {
             throw "SOAP-CLIENT-IO-ERROR", "xml_values and preserve_types cannot be combined";
         }
+        if (exists opts.send_soapaction && opts.send_soapaction.typeCode() != NT_BOOLEAN) {
+            throw "SOAP-CLIENT-IO-ERROR", "the send_soapaction call option must be a bool";
+        }
+        bool send_action = opts.send_soapaction ?? send_soapaction;
         if (exists opts.addressing && opts.addressing.typeCode() != NT_HASH) {
             throw "SOAP-CLIENT-IO-ERROR", "the addressing call option must be a hash of WS-Addressing properties";
         }
@@ -382,6 +396,13 @@ auto result = client.callOperation("echo", {"body": "invoice-71"}, {"xml_values"
             WSDL::SoapMtomScope mtom_scope(mtom, mtom_threshold);
             msg = op.serializeRequest(args, opts.soap_header, "utf-8", NOTHING, opts.xml_opts,
                 opts.soapaction, binding, opts.http_header);
+        }
+        if (!send_action && msg.hdr.hasKey("SOAPAction")) {
+            if (request_maps) {
+                throw "SOAP-CLIENT-IO-ERROR", "a request using WS-Addressing must carry the SOAPAction header "
+                    "(WS-I R1144); send_soapaction cannot be False";
+            }
+            remove msg.hdr.SOAPAction;
         }
 
         string path = msg.path ?? "";
@@ -421,7 +442,7 @@ auto result = client.getSoapResponse("echo", "/resource");
     */
     auto getSoapResponse(string operation, string resource_url, *hash<auto> opts,
             *reference<hash<auto>> info) {
-        foreach string key in (("soap_header", "soapaction", "xml_opts", "addressing")) {
+        foreach string key in (("soap_header", "soapaction", "send_soapaction", "xml_opts", "addressing")) {
             if (exists opts{key}) {
                 throw "SOAP-CLIENT-IO-ERROR", sprintf("%y is a request-only option and cannot be used with "
                     "SOAP response retrieval", key);

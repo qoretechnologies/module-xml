@@ -56,7 +56,8 @@ class SoapActionTests(unittest.TestCase):
                     content_type = Message(); content_type['Content-Type'] = headers['content-type']
                     self.assertEqual('application/soap+xml' if version == '12' else 'text/xml',content_type.get_content_type())
                     self.assertEqual(action if version == '12' else None,content_type.get_param('action'))
-                    self.assertEqual('"'+action+'"' if version == '11' and action else None,headers.get('soapaction'))
+                    # SOAP 1.1 always carries SOAPAction, "" for an explicit empty action (WS-I R2745)
+                    self.assertEqual(('"'+(action or '')+'"') if version == '11' else None,headers.get('soapaction'))
                     if version == '12' and action:
                         self.assertIn(';action="'+action+'"',headers['content-type'])
                     document = etree.fromstring(request['body']); self.schemas[version].assertValid(document)

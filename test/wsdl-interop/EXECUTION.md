@@ -11427,3 +11427,49 @@ and `test_ieee_scalars.py`. They come from a libqore regression in the installed
 from about -2.18e307 to -8.71e307 collide with the short-string and opaque-reference tags, so `-2^1022` decodes as
 NOTHING, even in plain Qore. The module is not at fault. The regression is handed off in
 `/tmp/qore-nanbox-double-tag-collision.md`.
+
+## P9a-08: WS-Addressing ledger rows
+
+The 49 WS-I Basic Profile 1.2 and 2.0 rows recorded as WS-Addressing gaps at P7 (25 requirements) were
+revalidated against their pinned statements. The profile-specific wordings were checked separately where they
+differ.
+
+**Outcome:** `verify_ledger.py` reports 459 covered rows, 34 not applicable and 993 executable mappings.
+- **Covered:** 45 rows, mapped to the cases that assert their behavior.
+- **Not applicable:** R1203 and R1204 in both profiles. They apply only to a non-addressable service
+  instance, a role SoapHandler never has; the user approved this classification on 2026-09-24.
+- **Verifier:** now rejects any WS-Addressing row recorded as a gap. This was negative-tested with an injected
+  gap.
+
+**Found and fixed:**
+- **R1041:** the addressing node understood only the message addressing properties. A mandatory
+  `wsa:FaultDetail`, a header block that the SOAP Binding defines, was reported as not understood, including
+  from endpoints with a `wsam:Addressing` policy. `WsAddressingHelper::HeaderBlocks` now includes it.
+- **R2745:** an explicit empty per-call SOAP action omitted the SOAP 1.1 SOAPAction header, although the header
+  must then be `""`. It is now sent. The user chose an explicit option for suppression: `send_soapaction`, on
+  SoapClient and SoapClientIo, per call, on SoapConnection and on the SOAP request data provider. It omits the
+  header, and is refused for WS-Addressing requests (R1144).
+- **R2901, Basic Profile 2.0:** "the soapAction attribute, if present" of `wsoap12:operation` was treated like
+  Basic Profile 1.2's "non-empty". A present empty SOAP 1.2 soapAction that differs from an explicit input
+  action is now rejected; the user approved rejecting it.
+
+**New coverage:**
+- MustUnderstand and VersionMismatch faults (R1035, R1036, R1041), for endpoints with no policy, an optional
+  policy and a required one, with none and with approved non-anonymous response endpoints.
+- SOAP 1.2 endpoint references (R1154) and one-way `wsa:To` (R1142).
+- The fault-to-reply-endpoint fallback, with the none and receiver endpoints (R1161).
+- `test/soap-action-header.qtest` (6 cases, 84 assertions) covers the SOAPAction header over live requests: both
+  clients, a connection and a data provider.
+
+P9a acceptance still waits for CXF clients with decoupled responses (P9a-07), which need the Qore HttpServer
+after-send callback.
+
+**Verification:** the full suites run in a clean environment, without the Qorus module path and providers from the
+user's shell. That environment's Qorus AOT modules did not load with the new libqore (`undefined symbol:
+qore_rt_box_float`), and their warnings failed stderr-checking tests. Against the new libqore, which fixes the
+NaN-boxing regression, all 292 qtests and 498 Python tests pass. Two more changes came from this run:
+- `test_soap_actions.py` expects the SOAP 1.1 `SOAPAction: ""` for an explicit empty action (R2745).
+- **Missing repeated elements:** Qore `a4049e8ad` makes a mandatory `SoftListDataType` reject NOTHING with
+  `RUNTIME-TYPE-ERROR`. A missing mandatory repeated element therefore stopped raising the module's
+  `MISSING-VALUE-ERROR` (`wsdl-particle-occurrences.qtest`). The user chose to keep `MISSING-VALUE-ERROR`: the
+  new `XsdRepeatedElementDataType` raises it for an absent mandatory value and otherwise keeps the core behavior.

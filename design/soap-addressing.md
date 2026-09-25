@@ -88,9 +88,12 @@ Description checks:
 - **R1158:** an effective alternative with both response assertions is rejected. This is checked for the binding
   merged with each operation, and again with each port's policy.
 - **Actions:** checked with each effective policy (`Binding::checkActions()`). An explicit input action must
-  equal a non-empty SOAP action (R2901, for SOAP 1.1 and 1.2). With WS-Addressing supported and no explicit
+  equal a non-empty SOAP 1.1 action (Basic Profile 1.2 R2901) and a SOAP 1.2 `soapAction` whenever the attribute
+  is present, even when empty (Basic Profile 2.0 R2901). The binding check records whether the attribute is
+  present; the port-level re-check needs only the policy-dependent rule. With WS-Addressing supported and no explicit
   input action, a SOAP action that supplies the action must be absolute (Metadata section 4.4.1).
-- **Empty SOAP actions:** an empty SOAP action counts as absent, since it supplies no action.
+- **Empty SOAP actions:** an empty SOAP action supplies no action, so the default or explicit action applies;
+  only the SOAP 1.2 R2901 comparison treats a present empty attribute as a value.
 
 `wsdl:required="true"` is accepted on the elements that are processed: `wsp:Policy`, `wsp:PolicyReference`, a
 port's `wsa:EndpointReference`, and `wsaw:UsingAddressing` on ports and bindings. Other required extensions are

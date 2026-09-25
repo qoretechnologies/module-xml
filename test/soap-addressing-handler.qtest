@@ -13,6 +13,18 @@
 
 %exec-class SoapAddressingHandlerTest
 
+# records the requests that an endpoint receives
+class RecordingEndpoint inherits AbstractHttpRequestHandler {
+    public {
+        Queue received();
+    }
+
+    hash<HttpResponseInfo> handleRequest(hash<auto> cx, hash<auto> hdr, *data body) {
+        received.push(body);
+        return <HttpResponseInfo>{"code": 202, "body": ""};
+    }
+}
+
 # P9a-05: SoapHandler processes WS-Addressing headers when requests carry them, checks them against the operation
 # and its WSDL policy, replies with related message addressing properties, and sends WS-Addressing faults.
 public class SoapAddressingHandlerTest inherits QUnit::Test {
@@ -82,6 +94,7 @@ public class SoapAddressingHandlerTest inherits QUnit::Test {
         addTestCase("message IDs and response endpoints", \endpoints());
         addTestCase("invalid WS-Addressing headers", \invalidHeaders());
         addTestCase("fault messages", \faults());
+        addTestCase("MustUnderstand and VersionMismatch faults", \envelopeFaults());
         addTestCase("disabling WS-Addressing", \disabled());
         set_return_value(main());
     }
@@ -294,6 +307,12 @@ public class SoapAddressingHandlerTest inherits QUnit::Test {
                 + WSA_NONE + '</wsa:Address></wsa:FaultTo>'), sprintf(Body, "ERR"));
             assertEq(202, result.status);
             seen.get(10000);
+            # Core section 3.4 (WS-I R1161): without a fault endpoint, a fault goes to the reply endpoint, here none
+            result = post(url, soap12, maps("urn:quotes:ask", "urn:uuid:e4", '<wsa:ReplyTo><wsa:Address>'
+                + WSA_NONE + '</wsa:Address></wsa:ReplyTo>'), sprintf(Body, "ERR"));
+            assertEq(202, result.status);
+            assertEq(NOTHING, result.body);
+            seen.get(10000);
         }
         # WS-Addressing Metadata section 3.1.3: the policy requires non-anonymous responses
         HttpServer nonanonymous_http;
@@ -385,6 +404,77 @@ public class SoapAddressingHandlerTest inherits QUnit::Test {
             }
             assertEq(0, seen.size());
         }
+    }
+
+    # posts a raw message; returns the status and the fault, and the WS-Addressing properties of the response
+    static hash<auto> postRaw(string url, string path, string content_type, string xml) {
+        HTTPClient client({"url": url, "error_passthru": True, "timeout": 10000});
+        hash<auto> info;
+        string response = client.post(path, xml, {"Content-Type": content_type, "SOAPAction": '""'}, \info);
+        SoapProcessingNode node(<SoapNodeOptions>{"addressing": True});
+        return {
+            "status": info."response-headers".status_code,
+            "fault": WSDLLib::getSOAPFaultInfo(response),
+            "addressing": WsAddressingHelper::parse(map $1.header,
+                node.processMessage(response, {}, NOTHING, NOTHING, True).headers),
+        };
+    }
+
+    # WS-I R1035, R1036 and R1041: MustUnderstand and VersionMismatch faults go on the HTTP response whatever the
+    # response endpoints, carry the SOAP fault action when they carry wsa:Action, and never report a WS-Addressing
+    # header block as not understood, also for endpoints whose policy contains wsam:Addressing
+    envelopeFaults() {
+        # an approved non-anonymous endpoint that must receive nothing
+        HttpServer endpoint_http();
+        on_exit endpoint_http.stop();
+        RecordingEndpoint endpoint();
+        endpoint_http.setDefaultHandler("endpoint", endpoint);
+        endpoint_http.addListener(0);
+        string endpoint_url = sprintf("http://127.0.0.1:%d/endpoint", endpoint_http.getListenerInfo(0).port);
+        foreach string policy in ("", Optional, Required) {
+            HttpServer http;
+            SoapHandler handler;
+            string url = server(\http, \handler, service(policy));
+            on_exit http.stop();
+            handler.setResponseEndpointAuthorizer(bool sub (hash<auto> cx, hash<WsaEndpointReference> epr) {
+                return True;
+            }, 10s);
+            foreach bool soap12 in (False, True) {
+                string mu = soap12 ? "true" : "1";
+                string label = sprintf("policy %y SOAP %s", policy ? "wsam:Addressing" : "none",
+                    soap12 ? "1.2" : "1.1");
+                foreach string endpoints in (sprintf('<wsa:FaultTo><wsa:Address>%s</wsa:Address></wsa:FaultTo>',
+                        WSA_NONE), sprintf('<wsa:ReplyTo><wsa:Address>%s</wsa:Address></wsa:ReplyTo><wsa:FaultTo>'
+                        '<wsa:Address>%s</wsa:Address></wsa:FaultTo>', endpoint_url, endpoint_url)) {
+                    hash<auto> result = post(url, soap12, sprintf('<wsa:Action s:mustUnderstand="%s">urn:quotes:ask'
+                        '</wsa:Action><wsa:MessageID s:mustUnderstand="%s">urn:uuid:m1</wsa:MessageID>%s'
+                        '<wsa:FaultDetail s:mustUnderstand="%s"/><u:Unknown xmlns:u="urn:unknown" '
+                        's:mustUnderstand="%s"/>', mu, mu, endpoints, mu, mu), sprintf(Body, "Q"));
+                    assertEq(500, result.status, label);
+                    assertEq("MustUnderstand", result.fault.code.getLocalName(), label);
+                    assertEq(WSA_SOAP_FAULT_ACTION, result.addressing.action, label);
+                    assertEq("urn:uuid:m1", result.addressing.relates_to[0].message_id, label);
+                    if (soap12) {
+                        list<XsdXmlValue> not_understood = select result.fault.headers,
+                            $1.getLocalName() == "NotUnderstood";
+                        assertEq(("{urn:unknown}Unknown",), map $1.resolveQName(
+                            $1.getElementData()."^attributes^".qname), not_understood, label);
+                    }
+                }
+                # a message that is not a SOAP envelope has no readable properties: the VersionMismatch fault
+                # carries no wsa:Action and goes on the HTTP response
+                string xml = sprintf('<e:Envelope xmlns:e="urn:not-soap" xmlns:wsa="%s"><e:Header>%s<wsa:FaultTo>'
+                    '<wsa:Address>%s</wsa:Address></wsa:FaultTo></e:Header><e:Body/></e:Envelope>', WSA_NS,
+                    maps("urn:quotes:ask", "urn:uuid:v1"), endpoint_url);
+                hash<auto> result = postRaw(url, soap12 ? "q12" : "q11", soap12 ? "application/soap+xml" : "text/xml",
+                    xml);
+                assertEq(500, result.status, label);
+                assertEq("VersionMismatch", result.fault.code.getLocalName(), label);
+                assertEq(NOTHING, result.addressing, label);
+            }
+        }
+        assertEq(0, seen.size());
+        assertEq(0, endpoint.received.size());
     }
 
     disabled() {

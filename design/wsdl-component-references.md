@@ -183,8 +183,8 @@ headers; an operation with no abstract input/output declaration is invalid.
 
 An absent concrete SOAP action stays empty rather than being synthesized from
 the namespace and operation name. Default SOAP 1.1 requests carry `SOAPAction:
-""`, following WS-I Basic Profile R2745; an explicit per-call empty override keeps
-the documented header-suppression option. Authored actions retain their declared
+""`, following WS-I Basic Profile R2745, and so does an explicit per-call empty
+override. The `send_soapaction` client option is the only way to omit the header. Authored actions retain their declared
 value. SOAP 1.2 does not receive a SOAP 1.1 empty-action header by default.
 
 SoapHandler can dispatch bare scalar roots as well as complex roots. A document

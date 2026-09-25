@@ -515,6 +515,13 @@ Increments:
 8. P9a-08 - revalidate the 49 rows against the pinned text and map them to tests; update the documentation,
    release notes and a durable design document; P9a acceptance. A row may be reclassified only with
    specification-based evidence.
+   - Done 2026-09-24 except acceptance:
+     - 45 rows are covered and mapped to tests.
+     - R1203/R1204 (4 rows) are not applicable (non-addressable service instances), which was approved.
+     - Three defects were fixed: R1041 `wsa:FaultDetail`, R2745 explicit empty SOAPAction (with the approved
+       `send_soapaction` option), and BP 2.0 R2901 for a present empty soapAction.
+     - `verify_ledger.py` rejects WS-Addressing gaps.
+     - Acceptance waits for the CXF-client decoupled exchanges (P9a-07).
 
 **Acceptance:** every applicable WS-Addressing row is covered by tests that exercise both directions where the
 requirement has two sides. CXF exchanges pass for anonymous and decoupled responses. Invalid MAPs fail with the
