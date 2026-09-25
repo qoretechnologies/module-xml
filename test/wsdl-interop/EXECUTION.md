@@ -11949,3 +11949,18 @@ also rejects a `faultstring` before the `faultcode`, which SOAP 1.1 permits (adj
 those 15 faults exactly as lxml does. Removing the module's `xml:lang` check failed exactly the 15 cases that test it.
 
 Audit: `audits/P9d-03-soap-faults.md`.
+
+## P9c-06: no auto-cancel of serialized pipelines (2026-09-25)
+
+P9c-05 relied on the project's auto-cancel setting to cancel only waiting pipelines, and stated that a running
+pipeline completes. It does not: pushing 338a7cf while pipeline 57618 (32d49ef) ran cancelled 57618's trigger job
+as redundant, but not its child pipeline 57619, which kept running. Cancelling the trigger job released the resource
+group, so 57623 started its child pipeline 57624, and two module-xml test pipelines ran at once. The orphaned child
+pipeline 57619 was cancelled by hand.
+
+`.gitlab-ci.yml` now disables auto-cancel (`workflow:auto_cancel:on_new_commit: none`), so a running pipeline keeps
+the lock until its child pipeline completes. A superseded pipeline runs when its turn comes; to skip one, cancel it
+before it starts, or cancel its child pipeline with it. This change was pushed only after 57623 completed, so that
+no running pipeline with the previous configuration could be auto-cancelled by it.
+
+Audit: `audits/P9c-06-no-auto-cancel.md`.

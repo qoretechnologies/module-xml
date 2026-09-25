@@ -286,7 +286,9 @@ selection, list constraints, shared graphs and detached provider behavior. See
 
 CI runs the Qore test files and this directory's complete Python suite on Ubuntu and Alpine in the child pipeline
 `.gitlab/ci/module-xml.yml`. Its trigger job in `.gitlab-ci.yml` holds a project-wide resource group until the child
-pipeline completes, so that only one module-xml test pipeline runs at a time; others wait in order. The pipeline runs
+pipeline completes, so that only one module-xml test pipeline runs at a time; others wait in order. Auto-cancel is
+disabled, because cancelling a redundant pipeline cancels only its trigger job and releases the lock while the child
+pipeline keeps running. The pipeline runs
 with a debug build of the module in `build-debug`. The suite needs Python 3.12 or later, a JDK 17+, `openssl`, Qore
 and the pinned `lxml`; the rest is in the qore-test-base images. Nothing is downloaded at run time: every corpus,
 specification and JAR is committed and pinned by SHA-256.
