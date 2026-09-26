@@ -12146,3 +12146,26 @@ makes CMake reject a system libxml2 without the fix. The design is recorded in `
 Full suite: all 298 qtests pass without warnings, and the Python suite passes 556 tests in 6 shards.
 
 Audit: `audits/P9h-01-xsd-name-characters.md`.
+
+## P9i-01: tests against the Qore with shared HTTP body charset rules (2026-09-26)
+
+The Qore installed on 2026-09-26 (480ee1438) decodes HTTP message bodies with one set of rules per media type
+(Qore #5469). Against it, three module-xml tests failed in source mode; the previous Qore passed them all.
+
+- **`soap-actions.qtest` (test assumption):** the test stored every `HTTPClient::post()` reply in a `string`. A
+  `multipart/related` MTOM reply is not text, so it is now a `binary` value, as it should be. The test keeps the
+  raw reply for the multipart parser and uses the string only for XML replies. It passes on both Qore versions.
+- **`xmlrpc-text.qtest` (test dependency):** the test used `MimeTypeXml` without requiring `Mime`, and depended
+  on its re-export by another module. It now requires `Mime` itself.
+- **`wsdl-redirect-locations.qtest` (Qore regression, open):** `FileLocationHandlerHttp::getIoResourceResult()`
+  returns `binary(resp.body)` for text media types. Since #5469 that is the decoded string, so the byte order mark
+  is removed and `FileResourceResult.data` is not the octets received.
+  - The WSDL module decodes resource octets as XML 1.0 Appendix F and RFC 7303 prescribe: BOM, then transport
+    charset, then XML declaration. A UTF-16 document served with a BOM and a wrong charset now fails with
+    `Char 0x0 out of allowed range`.
+  - `/tmp/qore-filelocation-http-octets/repro.qr` shows the loss with `getBinaryFileFromLocation()` for
+    `application/xml`, with or without a charset, and for `text/plain`; `application/octet-stream` is intact.
+  - The handoff is `/tmp/qore-filelocation-http-octets/README.md`. The module is not changed to restore the BOM,
+    because that would be a workaround for the Qore defect.
+
+Audit: `audits/P9i-01-http-charset-tests.md`.
