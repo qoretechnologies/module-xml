@@ -34,6 +34,7 @@
 #include "libxml2-identity-table-probe.h"
 #include "libxml2-instance-identity-probe.h"
 #include "libxml2-anyuri-probe.h"
+#include "libxml2-name-edition-probe.h"
 
 static int check_namespace(const char* source, const char* expected) {
     xmlTextReaderPtr reader = xmlReaderForMemory(source, (int)strlen(source), NULL, "UTF-8", 0);
@@ -175,6 +176,11 @@ int main(void) {
         int instance_identities = check_instance_identities();
         result |= instance_identities;
         printf("instance_identities=%s\n", instance_identities ? "FAIL" : "PASS");
+    }
+    {
+        int name_edition = check_name_edition_values();
+        result |= name_edition;
+        printf("name_edition=%s\n", name_edition ? "FAIL" : "PASS");
     }
     xmlCleanupParser();
     return result;

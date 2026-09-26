@@ -12104,3 +12104,45 @@ belongs in the Qore compiler; the handoff with the measurements and reproduction
 The failure remains open for P9 runtime acceptance until a Qore build with the fix is verified.
 
 Audit: `audits/P9g-01-aot-stack-root-cause.md`.
+
+## P9h-01: XSD name characters in the bundled libxml2 (2026-09-26)
+
+This entry adjudicates the open P9c-02 item: Ubuntu's libxml2 2.15.2 accepted `xs:Name` and QName local-name
+documents that the pinned Xerces rejects.
+
+**Cause:** since 2.15, libxml2's `xmlValidateName()`, `xmlValidateNCName()`, `xmlValidateQName()` and
+`xmlValidateNMToken()` scan with the XML 1.0 Fifth Edition name characters (`xmlScanName()` without
+`XML_SCAN_OLD10`); 2.14 and earlier used the Second Edition Appendix B tables. The schema processor uses these
+functions for every Name-derived datatype. XSD 1.0 defines those datatypes with the XML 1.0 Second Edition
+productions, as `builtin-list-values-evidence.md` records, so 2.15 is non-conforming for XSD 1.0. The pinned oracle
+(libxml2 2.14.6) and Xerces reject the Fifth Edition only characters.
+
+**Module defect:** the module's bundled libxml2 2.15.4 behaves the same way. `XmlDoc::validateSchema()`,
+`parse_xml_with_schema()` and `XmlReader` accepted Name, NCName, QName and NMTOKEN values such as `Ͱa` (U+0370),
+`⁰a` (U+2070) and `𐀀a` (U+10000), while the WSDL module rejects them.
+
+**Decided 2026-09-26:** use the Second Edition rule only. The user asked whether SOAP 1.2 could use the Fifth
+Edition. It cannot, because SOAP 1.1 and SOAP 1.2 both use XSD 1.0 datatypes and only XSD 1.1 permits Fifth
+Edition names, so there is no per-version or optional Fifth Edition mode.
+
+**Fix:** `cmake/QoreXmlLibXml2NameEditionFix.cmake`, applied last in the chain, gives the schema processor Second
+Edition validators (`XML_SCAN_OLD10`) and uses them for every name check in `xmlschemastypes.c` and
+`xmlschemas.c`: instance values, schema-document QName and `id` attributes, and `ENTITY` values. XML parsing, DTD
+validation and the public functions keep the Fifth Edition characters. `cmake/libxml2-name-edition-probe.h`
+makes CMake reject a system libxml2 without the fix. The design is recorded in `design/xml-name-characters.md`.
+
+**Tests:**
+
+- `test/xml-name-edition.qtest` covers the three native validators, lists, ID/IDREF(S), ENTITY, schema documents,
+  and XML names, which must keep the Fifth Edition characters. It passes 5 cases with 221 assertions. Against the
+  previous build, its three strict cases fail.
+- `test/cmake/test_libxml2_provider.py` adds an unexpected-input test and a detection and idempotence test. A
+  library built without the fix reports `name_edition=FAIL` and falls back to the bundled copy. The complete
+  fixture chain now also contains the SAX-reference, calendar-year-guard and name fixes, and one test locates the
+  active `xmlschemastypes.c` instead of assuming the anyURI copy. All 88 provider tests pass.
+- Valgrind reports no leaks. Its one error is Qore's known uninitialised-read report, which a QUnit-only script
+  also reproduces.
+
+Full suite: all 298 qtests pass without warnings, and the Python suite passes 556 tests in 6 shards.
+
+Audit: `audits/P9h-01-xsd-name-characters.md`.

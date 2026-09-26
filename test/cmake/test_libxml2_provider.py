@@ -162,6 +162,37 @@ qore_xml_fix_libxml2_anyuri("{project}" "{project}/build-debug")
                     self.assertFalse((project / "build-debug/qore-anyuri-fix").exists())
 
 
+    def test_name_edition_patch_rejects_unexpected_inputs(self):
+        with tempfile.TemporaryDirectory(prefix="qore-xml-name-edition-input-") as directory:
+            root = Path(directory)
+            for name, sources, diagnostic in [
+                    ("missing", [], "Cannot locate libxml2 xmlschemastypes.c for XSD name characters"),
+                    ("unknown", ["one/xmlschemastypes.c", "one/xmlschemas.c"],
+                     "Unexpected libxml2 xmlschemastypes.c; cannot apply the XSD name"),
+                    ("duplicate", ["one/xmlschemastypes.c", "two/xmlschemastypes.c"],
+                     "Duplicate libxml2 xmlschemastypes.c target source")]:
+                with self.subTest(name=name):
+                    project = root / name
+                    project.mkdir()
+                    for source in sources:
+                        path = project / source
+                        path.parent.mkdir(exist_ok=True)
+                        path.write_text("/* Deliberately unrelated source. */\n")
+                    quoted = " ".join(f'"{project / source}"' for source in sources)
+                    (project / "CMakeLists.txt").write_text(f'''cmake_minimum_required(VERSION 3.18...3.31)
+project(name_edition_input NONE)
+add_library(LibXml2 INTERFACE)
+set_property(TARGET LibXml2 PROPERTY SOURCES {quoted})
+include("{REPO}/cmake/QoreXmlLibXml2NameEditionFix.cmake")
+qore_xml_fix_libxml2_name_edition("{project}" "{project}/build-debug")
+''')
+                    result = subprocess.run(["cmake", "-S", str(project), "-B", str(project / "build-debug")],
+                                            text=True, capture_output=True, timeout=30)
+                    self.assertNotEqual(0, result.returncode)
+                    self.assertIn(diagnostic, result.stderr)
+                    self.assertFalse((project / "build-debug/qore-name-edition-fix").exists())
+
+
 class LibXml2ProviderTest(unittest.TestCase):
     @classmethod
     def run_command(cls, args, *, success=True, input=None):
@@ -372,6 +403,13 @@ qore_xml_fix_libxml2_instance_identities("{cls.source}" "${{CMAKE_CURRENT_BINARY
 include("{REPO}/cmake/QoreXmlLibXml2AnyUriFix.cmake")
 qore_xml_fix_libxml2_anyuri("{cls.source}" "${{CMAKE_CURRENT_BINARY_DIR}}/libxml")
 qore_xml_fix_libxml2_anyuri("{cls.source}" "${{CMAKE_CURRENT_BINARY_DIR}}/libxml")
+include("{REPO}/cmake/QoreXmlLibXml2SaxReferenceFix.cmake")
+qore_xml_fix_libxml2_sax_reference("{cls.source}" "${{CMAKE_CURRENT_BINARY_DIR}}/libxml")
+include("{REPO}/cmake/QoreXmlLibXml2CalendarYearGuardFix.cmake")
+qore_xml_fix_libxml2_calendar_year_guard("{cls.source}" "${{CMAKE_CURRENT_BINARY_DIR}}/libxml")
+include("{REPO}/cmake/QoreXmlLibXml2NameEditionFix.cmake")
+qore_xml_fix_libxml2_name_edition("{cls.source}" "${{CMAKE_CURRENT_BINARY_DIR}}/libxml")
+qore_xml_fix_libxml2_name_edition("{cls.source}" "${{CMAKE_CURRENT_BINARY_DIR}}/libxml")
 ''')
         cls.fixed = cls.root / "fixed/build-debug"
         cls.run_command(["cmake", "-S", fixed_project, "-B", cls.fixed, "-DCMAKE_BUILD_TYPE=Debug",
@@ -450,6 +488,7 @@ endif()
         self.assertIn("instance_identities=PASS", output)
         self.assertIn("uri_identity=PASS", output)
         self.assertIn("anyuri_values=PASS", output)
+        self.assertIn("name_edition=PASS", output)
         self.assertIn("entity_values=PASS", output)
         self.assertIn("occurs_values=PASS", output)
         self.assertIn("particle_identity=PASS", output)
@@ -1073,6 +1112,35 @@ set_property(TARGET LibXml2 PROPERTY SOURCES "${native_sources}")
                        f"-DFETCHCONTENT_SOURCE_DIR_QORE_XML_LIBXML2={self.source}")
         self.assertEqual(before, {name: (folder / name).stat().st_mtime_ns for name in before})
 
+    def test_name_edition_detection_and_idempotence(self):
+        project = self.root / "name-edition-broken/source"
+        project.mkdir(parents=True)
+        (project / "CMakeLists.txt").write_text(self.previous_name_edition_fixture())
+        build = self.root / "name-edition-broken/build-debug"
+        self.run_command(["cmake", "-S", project, "-B", build, "-DCMAKE_BUILD_TYPE=Debug",
+                          "-DBUILD_SHARED_LIBS=ON", "-DLIBXML2_WITH_PROGRAMS=OFF",
+                          "-DLIBXML2_WITH_TESTS=OFF", "-DLIBXML2_WITH_PYTHON=OFF"])
+        self.run_command(["cmake", "--build", build, "--target", "LibXml2", "-j4"])
+        libraries = list((build / "libxml").glob("libxml2.so")) + list((build / "libxml").glob("libxml2.dylib"))
+        self.assertEqual(1, len(libraries))
+        options = [f"-DLIBXML2_INCLUDE_DIR={self.fixed_include}", f"-DLIBXML2_LIBRARY={libraries[0]}",
+                   f"-DFETCHCONTENT_SOURCE_DIR_QORE_XML_LIBXML2={self.source}"]
+        output = self.configure("name-edition-broken-auto", "-DQORE_XML_LIBXML2_PROVIDER=AUTO", *options)
+        self.assertIn("using private static libxml2 2.15.4", output)
+        probe = (self.root / "name-edition-broken-auto/system-libxml2/namespace-probe.log").read_text()
+        # Only the omitted correction fails.
+        self.assertIn("anyuri_values=PASS", probe)
+        self.assertIn("instance_identities=PASS", probe)
+        self.assertIn("qname_values=PASS", probe)
+        self.assertIn("name_edition=FAIL", probe)
+        self.configure("name-edition-broken-system", "-DQORE_XML_LIBXML2_PROVIDER=SYSTEM", *options,
+                       success=False)
+        folder = self.root / "bundled/_deps/qore_xml_libxml2-build/qore-name-edition-fix"
+        before = {name: (folder / name).stat().st_mtime_ns for name in ("xmlschemas.c", "xmlschemastypes.c")}
+        self.configure("bundled", "-DQORE_XML_LIBXML2_PROVIDER=BUNDLED",
+                       f"-DFETCHCONTENT_SOURCE_DIR_QORE_XML_LIBXML2={self.source}")
+        self.assertEqual(before, {name: (folder / name).stat().st_mtime_ns for name in before})
+
     def test_instance_identity_detection_and_idempotence(self):
         project = self.root / "instance-identity-broken/source"
         project.mkdir(parents=True)
@@ -1276,12 +1344,23 @@ set_property(TARGET LibXml2 PROPERTY SOURCES "${native_sources}")
         self.assertIn("Native identity table allocation: PASS",
                       self.run_command([self.root / "bundled/identity-table-allocation"]))
 
+    def previous_name_edition_fixture(self):
+        """All prior fixes with libxml2 2.15's Fifth Edition XSD name characters."""
+        fixed = (self.root / "fixed/source/CMakeLists.txt").read_text()
+        fixed = fixed.replace(f'include("{REPO}/cmake/QoreXmlLibXml2NameEditionFix.cmake")\n', "")
+        return fixed.replace(f'qore_xml_fix_libxml2_name_edition("{self.source}" '
+                             '"${CMAKE_CURRENT_BINARY_DIR}/libxml")\n', "")
+
     def previous_anyuri_fixture(self):
         """All prior fixes before XSD anyURI content assessment."""
-        fixed = (self.root / "fixed/source/CMakeLists.txt").read_text()
-        fixed = fixed.replace(f'include("{REPO}/cmake/QoreXmlLibXml2AnyUriFix.cmake")\n', "")
-        return fixed.replace(f'qore_xml_fix_libxml2_anyuri("{self.source}" '
-                             '"${CMAKE_CURRENT_BINARY_DIR}/libxml")\n', "")
+        fixed = self.previous_name_edition_fixture()
+        # The later fixes of the same sources expect the anyURI output.
+        for module, function in (("CalendarYearGuard", "calendar_year_guard"), ("SaxReference", "sax_reference"),
+                                 ("AnyUri", "anyuri")):
+            fixed = fixed.replace(f'include("{REPO}/cmake/QoreXmlLibXml2{module}Fix.cmake")\n', "")
+            fixed = fixed.replace(f'qore_xml_fix_libxml2_{function}("{self.source}" '
+                                  '"${CMAKE_CURRENT_BINARY_DIR}/libxml")\n', "")
+        return fixed
 
     def previous_instance_identity_fixture(self):
         """All prior fixes without builtin attribute and list identity assessment."""
@@ -1690,7 +1769,19 @@ set_property(TARGET LibXml2 PROPERTY SOURCES "${native_sources}")
         fixture = (self.root / "fixed/source/CMakeLists.txt").read_text()
         fixture += '''
 get_target_property(native_sources LibXml2 SOURCES)
-set(original "${CMAKE_CURRENT_BINARY_DIR}/libxml/qore-anyuri-fix/xmlschemastypes.c")
+set(original "")
+foreach(candidate IN LISTS native_sources)
+    get_filename_component(candidate_name "${candidate}" NAME)
+    if(candidate_name STREQUAL "xmlschemastypes.c")
+        if(original)
+            message(FATAL_ERROR "Duplicate active xmlschemastypes.c source")
+        endif()
+        set(original "${candidate}")
+    endif()
+endforeach()
+if(NOT original)
+    message(FATAL_ERROR "Missing active xmlschemastypes.c source")
+endif()
 file(READ "${original}" source)
 string(REPLACE [=[            if (ret < 0) {
                 goto error;
