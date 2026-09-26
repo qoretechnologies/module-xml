@@ -3,12 +3,13 @@
 set -e
 set -x
 
-# qtest (default): build the module and run the Qore test files
+# qtest (default): build the module and run the Qore test files, from source and AOT-compiled
+# valgrind: build the module and run its native Qore test files under valgrind
 # python-shard: build the module and run shard $CI_NODE_INDEX of $CI_NODE_TOTAL of the Python WSDL/SOAP suite
 # python-verify: check the combined results of all Python suite shards
 MODE=${1:-qtest}
 case "${MODE}" in
-    qtest|python-shard|python-verify) ;;
+    qtest|valgrind|python-shard|python-verify) ;;
     *) echo "unknown mode: ${MODE}" >&2; exit 2 ;;
 esac
 
@@ -43,6 +44,10 @@ if [ "${MODE}" != "qtest" ]; then
         -r ${MODULE_SRC_DIR}/test/wsdl-interop/requirements.txt
 fi
 
+if [ "${MODE}" = "valgrind" ]; then
+    apt-get update && DEBIAN_FRONTEND=noninteractive apt-get -y install --no-install-recommends valgrind
+fi
+
 if [ "${MODE}" = "python-verify" ]; then
     exec ${MODULE_SRC_DIR}/test/docker_test/run-python-suite.sh verify
 fi
@@ -70,6 +75,10 @@ if [ "${MODE}" = "python-shard" ]; then
     exec ${MODULE_SRC_DIR}/test/docker_test/run-python-suite.sh shard
 fi
 
+if [ "${MODE}" = "valgrind" ]; then
+    exec ${MODULE_SRC_DIR}/test/docker_test/run-valgrind-qtests.sh ${MAKE_JOBS} gosu qore:qore
+fi
+
 # run the tests
 export QORE_MODULE_DIR=${MODULE_SRC_DIR}/qlib:${QORE_MODULE_DIR}
 cd ${MODULE_SRC_DIR}
@@ -86,11 +95,17 @@ for test in test/*.qtest; do
     fi
 done
 
+# run the tests again against the AOT-compiled modules of this build
+AOT_FAILED=
+${MODULE_SRC_DIR}/test/docker_test/run-aot-qtests.sh ${MODULE_BUILD_DIR} gosu qore:qore || AOT_FAILED=1
+
 # name the failing test files at the end of the log
 if [ -n "$FAILED" ]; then
     echo "FAILED TEST FILES:"
     for test in $FAILED; do
         echo "    $test"
     done
+fi
+if [ -n "$FAILED" ] || [ -n "$AOT_FAILED" ]; then
     exit 1 # fail
 fi

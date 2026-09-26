@@ -3,7 +3,7 @@
 set -e
 set -x
 
-# qtest (default): build the module and run the Qore test files
+# qtest (default): build the module and run the Qore test files, from source and AOT-compiled
 # python-shard: build the module and run shard $CI_NODE_INDEX of $CI_NODE_TOTAL of the Python WSDL/SOAP suite
 # python-verify: check the combined results of all Python suite shards
 MODE=${1:-qtest}
@@ -89,11 +89,17 @@ for test in test/*.qtest; do
     fi
 done
 
+# run the tests again against the AOT-compiled modules of this build
+AOT_FAILED=
+${MODULE_SRC_DIR}/test/docker_test/run-aot-qtests.sh ${MODULE_BUILD_DIR} gosu qore:qore || AOT_FAILED=1
+
 # name the failing test files at the end of the log
 if [ -n "$FAILED" ]; then
     echo "FAILED TEST FILES:"
     for test in $FAILED; do
         echo "    $test"
     done
+fi
+if [ -n "$FAILED" ] || [ -n "$AOT_FAILED" ]; then
     exit 1 # fail
 fi

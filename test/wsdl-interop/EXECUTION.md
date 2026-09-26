@@ -12169,3 +12169,56 @@ The Qore installed on 2026-09-26 (480ee1438) decodes HTTP message bodies with on
     because that would be a workaround for the Qore defect.
 
 Audit: `audits/P9i-01-http-charset-tests.md`.
+
+## P9c-08: AOT-compiled modules and valgrind in CI (2026-09-26)
+
+Decided 2026-09-26: CI runs the tests against the AOT-compiled modules, and a strict valgrind job. The user chose
+to push this only once the CI images contain the Qore fixes, so that CI never fails for a known Qore defect.
+
+**AOT pass:**
+
+- The qtest jobs run every test again after the source pass, with the same build (`run-aot-qtests.sh`).
+- The tests load the in-repo modules by path, so a copy of each of the 255 tests that load one uses their names
+  instead, in the test and in the sub-programs it parses. The copy runs with `build-debug/qlib-qmod` first in the
+  module path and without the source directory.
+- A preflight check requires all 17 compiled modules to load from the build.
+
+Run locally with modules compiled by the Qore installed on 2026-09-26 (with the AOT frame fix 486392806), 253 of
+the 255 files pass. The two failures are open:
+
+- **`CargoXmlDataProvider.qtest` (AOT-only):** the compiled module reads its bundled `schemas/` relative to
+  `get_script_dir()`, which is the qmod's directory. Qore's AOT macro stages and installs only top-level
+  svg/yaml/json/proto resources and `jar/` there, so `new CargoXmlDataProvider()` fails in a normal installation
+  too. Decided 2026-09-26: fix this generically in the Qore macro (handoff `/tmp/qore-aot-qmod-resource-dirs.md`),
+  not with module-local rules.
+- **`wsdl-redirect-locations.qtest`:** the FileLocationHandler regression of P9i-01, which also fails in source
+  mode.
+
+With the previous modules, compiled by an unfixed qcc, the deep QName case and `soap-message-limits.qtest`'s depth
+bound also exceeded the stack. The frame fix resolves both, and the P9g-01 failure is closed: the seven methods of
+each QName recursion level now take 24,280 bytes instead of 88,616, and the 128-level case passes.
+
+**Valgrind job:**
+
+- `test-valgrind` (Ubuntu) runs the 43 native tests, those that load no `qlib` module, 4 at a time
+  (`run-valgrind-qtests.sh`). It uses `--error-exitcode`, and definite and indirect leaks are errors.
+- `QORE_PCRE2_NO_JIT=1` avoids the PCRE2 JIT false positive (see the handoff note of 2026-09-26). With the PCRE2
+  JIT on, the same command exits 99 on a QUnit-only script, so the job does fail on an error.
+- Locally, all 43 pass in 275 s.
+- The WSDL/SOAP tests are not included: they would take hours under valgrind (about 50 times slower, with about a
+  minute of startup per test).
+
+**Verification with the fixed Qore (466733bc4, installed 2026-09-26):** the Qore team fixed both handoffs.
+
+- **Resource directories (820305238):** the AOT macro links a module's resource subdirectories beside its qmod.
+  After a reconfigure, `qlib-qmod/CargoXmlDataProvider/schemas` is a symlink. A DESTDIR install links
+  `lib64/qore-modules/CargoXmlDataProvider/schemas` to the source-side copy, and `new CargoXmlDataProvider()`
+  succeeds from the installed qmod.
+- **FileLocationHandler (466733bc4):** it returns the received octets again, which closes the P9i-01 open item.
+  `/tmp/qore-filelocation-http-octets/repro.qr` exits 0, and `wsdl-redirect-locations.qtest` passes 10/10.
+- **Results:** all 255 AOT test files pass, all 298 qtests pass without warnings, and the Python suite passes 556
+  tests in 6 shards.
+- **CI images:** they still have Qore 331b37b9e (2026-09-25), which has none of these fixes, so this commit is held
+  until they are rebuilt.
+
+Audit: `audits/P9c-08-aot-valgrind-ci.md`.

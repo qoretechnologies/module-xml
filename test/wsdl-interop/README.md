@@ -328,6 +328,29 @@ measured durations in `ci-timings.json`. The timings only balance the shards. Af
 new ones from a complete set of shard results with `python3 ci_suite.py timings --output <results>`, and
 change `PYTHON_SHARDS` and `parallel` in `.gitlab/ci/module-xml.yml` together.
 
+The Qore test jobs (`test-ubuntu`, `test-alpine`) run every `test/*.qtest` twice, first against the module
+sources and then against the AOT-compiled modules that the same build produces (`QORE_BUILD_AOT_MODULES`, on by
+default). The tests load the in-repo modules by path (`%requires ../qlib/WSDL.qm`), which never exercises the
+compiled modules, so `test/docker_test/run-aot-qtests.sh` writes a copy of each test that loads them by name, in
+the test and in the sub-programs it parses, and runs it with `build-debug/qlib-qmod` first in the module path and
+without the source directory. It first checks that every compiled module loads from the build. Locally:
+
+```sh
+test/docker_test/run-aot-qtests.sh build-debug
+```
+
+The `test-valgrind` job runs the native module's tests under valgrind (`test/docker_test/run-valgrind-qtests.sh`):
+the tests that load no in-repo Qore module and so exercise the C++ module and its bundled libxml2. Each must
+report no valgrind error and no definitely or indirectly lost memory. Valgrind is about 50 times slower than a
+normal run, so the WSDL/SOAP tests, which mostly exercise the Qore code of the `qlib` modules, are left to the
+other jobs. The runs set `QORE_PCRE2_NO_JIT=1`: PCRE2's JIT matcher reads a subject in blocks past its length,
+which valgrind reports as uninitialised reads, so its interpreter is used instead. The job reports the GitHub
+status `module-xml-valgrind`. Locally:
+
+```sh
+test/docker_test/run-valgrind-qtests.sh 4
+```
+
 ## Fixture provenance
 
 The first P2 increment covers declaration-local namespaces, distinct no-namespace
