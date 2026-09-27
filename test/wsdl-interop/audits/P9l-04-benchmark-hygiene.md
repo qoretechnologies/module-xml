@@ -4,6 +4,10 @@ Copyright (C) 2026 Qore Technologies, s.r.o.
 
 Applied `/home/david/.claude/skills/audit-changes/SKILL.md` on `develop` based on 954e332. Scope: `.gitignore` (`__pycache__/`), untracked `test/wsdl-interop/benchmark/__pycache__/benchmark.cpython-314.pyc`, `benchmark/benchmark.py` (`qore_git_hash`), `EXECUTION.md`.
 
+**Correction (P9l-05):** the attribution of the provider-phase slowdown to the Qore build in check 53 is wrong: the
+comparison loaded the same WSDL source in every run (see the P9l-04 correction in EXECUTION.md). The cause is in
+WSDL.qm (P9e-01) and is fixed by P9l-05.
+
 All 62 checks are explicitly accounted for:
 
 | # | Check | Status | Evidence |

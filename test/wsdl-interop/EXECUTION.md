@@ -12405,21 +12405,30 @@ stays at its P9b recording until a quiet machine is available.
 
 Audit: `audits/P9l-03-benchmark-load.md`.
 
-## P9l-04: benchmark hygiene, and a Qore-side slowdown of the provider phase (2026-09-27)
+## P9l-04: benchmark hygiene, and a slowdown of the provider phase (2026-09-27)
 
 A quiet recording (load 4.3-4.4 through the run, accepted by the P9l-03 check) measured these list-values phases
 against the P9b reference: construction -6%, copy -8%, conversion -19%, serialization -26% and sample -23%, but
 `provider` +93% (8.9 s to 17.2 s). Binding-styles `request` measured -62% and `request-decode` -53%.
 
-**Provider phase:** timed with the current Qore on a quiet machine, alternating module-xml's `qlib` at the reference
-(0ee292d), after P9b-02 (c9b6233), after P9e-01 (1317ca9) and at HEAD. The phase took 16.6, 16.6, 16.9 and 17.5 s
-respectively: the module code did not slow it down. Between the recordings only libqore changed, from the build
-installed on 2026-09-25 to e82fa0eb0.
+**Provider phase (original finding; its attribution is corrected in P9l-05):** timed with the current Qore on a quiet
+machine, alternating module-xml's `qlib` at the reference (0ee292d), after P9b-02 (c9b6233), after P9e-01 (1317ca9)
+and at HEAD. The phase took 16.6, 16.6, 16.9 and 17.5 s respectively, which was read as "the module code did not
+slow it down". Between the recordings only libqore changed, from the build installed on 2026-09-25 to e82fa0eb0, and
+the slowdown was handed off to the Qore team as a Qore runtime regression with a reproducer:
+`/tmp/qore-provider-phase-regression/`.
 
-The phase converts message parts to data provider types and makes a `Serializable` round trip of them. Its time is
-mostly WSDL's sample-value generation (numeric and IEEE samples, facet validation, simple value serialization), plus
-the builtin `Serializable` calls and about 10% in Qore's DataProvider module. The same code became faster in the
-other phases. This is handed off to the Qore team with a reproducer: `/tmp/qore-provider-phase-regression/`.
+**Correction:** the comparison did not load the sources it named. It selected each `qlib` with `QORE_MODULE_DIR`,
+but `bench.qr` imports `%requires ../../../qlib/WSDL.qm` by an explicit path beside the driver, so all four runs
+loaded HEAD's WSDL source (and `%prepend-module-path` put the same `qlib` first for the other modules); the four
+times are four measurements of the same code. This was checked against the commands of that comparison, which ran
+the in-repo driver and changed only `QORE_MODULE_DIR`. A controlled comparison by the Qore
+session (same Qore, same modules, only the explicitly loaded WSDL source changed) measured the provider phase at
+8.2 s with WSDL 0ee292d and 15.6 s with WSDL 58072a0, with identical digests of all 13,760 output rows, and
+reproduced the difference on an older Qore build (97899cc02). The slowdown is in WSDL.qm: P9e-01 (1317ca9) made
+provider construction generate a checked sample for every restricted simple type, repeating the same numeric
+samples for every occurrence of a type. The Qore runtime is not implicated. P9l-05 fixes the cost and the
+benchmark's source selection.
 
 **Hygiene:**
 
@@ -12432,3 +12441,69 @@ other phases. This is handed off to the Qore team with a reproducer: `/tmp/qore-
 The reference is not re-recorded here. A recording needs a clean working tree and a quiet machine.
 
 Audit: `audits/P9l-04-benchmark-hygiene.md`.
+
+## P9l-05: provider samples generated once per constraint set; explicit WSDL source for comparisons (2026-09-27)
+
+**Cause** (see the P9l-04 correction): P9e-01 (1317ca9) made each restricted simple type's provider carry a checked
+sample (`XsdExampleHelper::sample()`), generated during provider construction. Numeric sample generation tries
+candidates through full facet validation and serialization, and it ran again for every occurrence of a type. Counted
+on the full pinned list-values workload (384 items, 768 parts), three provider phases made 9,216 sample requests,
+all for numeric restrictions, with only 40 distinct constraint sets.
+
+**Fix:** `XsdExampleHelper::sample()` remembers the result for a numeric restriction chain by its complete effective
+inputs, `XsdSimpleType::getNumericSampleKey()`: the builtin root and, for each restriction level, its name, white
+space, source and compiled patterns, enumeration keys in order, string enumeration, fixed facets and the exact typed
+spelling of every length, range and digit facet and enumeration value (a float by 17 significant digits, a number by
+its full spelling, so that equal-looking float and number values differ). Facets and base links are public and can
+change, so a key is computed for each request; a changed own or inherited facet, pattern, base or enumeration order
+gives a new key. The key is NOTHING, and the sample generated each time, for anything outside these plain numeric
+chains: subclasses, unions, lists, QName and scoped enumerations, and facet values of other types. A result is stored
+as `{"sample": result}`, so a remembered missing sample (`XSD-SAMPLE-ERROR`) is distinct from a miss; any other
+exception propagates and nothing is stored. The table is bounded (512 entries, then restarted) and replaced as a
+whole on each update, so concurrent readers see a consistent table. It holds only strings and sample values, never a
+schema or type object. Examples are unchanged, and P9e-01's detached `Serializable` providers are unaffected: the
+provider still carries its example.
+
+**Benchmark source selection:** `bench.qr` loads `qlib/WSDL.qm` beside it by an explicit path, which is why the P9l-04
+comparison measured one source four times. `benchmark.py --wsdl-dir DIR` now runs a temporary driver that loads
+`DIR/WSDL.qm`, and every run fails unless the module the driver reports loading (`get_module_hash()`, new result
+field `wsdl_module`) is the requested file. Measurements record `wsdl_module` and `wsdl_module_sha256`. `--wsdl-dir`
+is refused with `--record`. `test_benchmark.py` checks that the default run loads the checkout's source, that a
+comparison loads a distinct copy although the driver has a sibling `qlib`, that a directory without `WSDL.qm` is an
+error, and the refusal.
+
+**Tests:** `test/wsdl-sample-cache.qtest` (5 cases, 51 assertions): exact keys (scope, chain, float against number,
+the nearest doubles, source and compiled patterns separately); changed own and inherited facets, including an
+enumerated derived type whose base example is not acceptable, so only a new sample is; reordered enumerations;
+returned values; a remembered missing sample followed by a valid definition; construction and generation errors
+raised each time and not remembered; shared elements, repeated providers, serialization round trips, optional and
+soft copies; and 8 threads with distinct bounds. Nine mutations of the key and the table (base levels unkeyed or
+skipped, own facets dropped, enumeration order, lossy float spelling, number as float, both or only the compiled
+patterns dropped, errors remembered) each fail it. `wsdl-provider-examples.qtest` and `test_provider_examples.py`
+pass unchanged.
+
+**Measurement** (`P9l-05-provider-comparison.json`): Release build, Qore 6f6df181 (`/usr/lib64/libqore.so.20.0.0`,
+SHA-256 16fcbe2b...), AMD Ryzen 9 5950X, five alternating full list-values runs of HEAD's WSDL.qm (19abed0, SHA-256
+5e13ff40...) and the fix (14fd6d2f...), each loaded source verified; load 2.4-4.2 except the last run (9.8 at its end).
+Phase medians, before and after:
+
+| Phase | Before | After |
+| --- | --- | --- |
+| construction | 8.80 s | 8.94 s |
+| copy | 9.42 s | 9.51 s |
+| provider | 16.51 s | 9.37 s (-43%) |
+| conversion | 9.98 s | 10.17 s |
+| serialization | 16.00 s | 16.29 s |
+| sample | 18.38 s | 18.88 s |
+
+All ten runs have the aggregate digest `4935781b...` of the Qore session's comparison, with identical per-item
+outputs. The other phases differ by 1-3%, within the spread of the runs (construction before ranged 8.63-8.94 s).
+**Residual:** the provider phase is 9.4 s against 8.9 s in the P9b reference, which predates P9e-01's valid
+examples; the remaining cost is the key computed for each of the 3,072 requests of a phase, the 40 generations, and
+providers carrying their examples through the `Serializable` round trip. Binding-styles, three alternating pairs:
+identical digest `4d13523d...`; the pairs measured at a steady load differ by at most 0.5% (load 6.2) and 2-5%
+(load 5.6-6.0) in every phase; the third pair's second run was invalidated by a load of 22 from other work.
+
+The P9b reference is still not re-recorded; that needs a clean tree and a quiet machine.
+
+Audit: `audits/P9l-05-provider-samples.md`.

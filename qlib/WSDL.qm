@@ -394,6 +394,10 @@ if (policy.required) {
       space and constraining facets, so that a message with a decimal, unbounded integer, calendar, duration,
       Name-like, QName or restricted field has an example that serializes; union restrictions also try their
       members' samples
+    - data provider construction generates the sample of a numeric restriction once for each distinct set of
+      constraints instead of once for every occurrence of the type: equal constraints (the whole restriction chain,
+      its facets, patterns and enumeration order) share one remembered result, including the absence of a sample;
+      examples are unchanged, and the provider phase of the module's list-values benchmark is 43% faster
     - SOAP 1.2 encoded struct members of a schema that qualifies local elements are decoded: their namespace names
       were checked a second time after their prefixes had been removed, so every such message, including one this
       module serialized, was rejected as a member label mismatch (SOAP 1.2 Part 2 section 3.1.3)
@@ -21429,8 +21433,54 @@ thread_local *XsdUnionMetadataContext UnionMetadataContext;
 # restrictions are expressed by the provider as compiled patterns and value checks, from which the XSD sample
 # generator (XsdSimpleType::getSampleValue()) cannot be applied again.
 class XsdExampleHelper {
+    # the most numeric samples remembered; a document's numeric restrictions repeat a few constraint sets
+    const NumericSampleLimit = 512;
+
+    private {
+        # generated samples of numeric restriction chains, keyed by XsdSimpleType::getNumericSampleKey(): key
+        # "sample" holds the sample() result, which is NOTHING when the restrictions admit no generated value; the
+        # whole hash is replaced on each update, so that concurrent readers see a consistent hash (concurrent updates
+        # can drop each other's new entry, which is then generated again)
+        static hash<string, hash<auto>> NumericSamples();
+    }
+
     #! returns the sample of a schema type in key "value", or NOTHING when its restrictions admit no generated value
+    /** Provider construction requests the samples of the same numeric restrictions many times, so the result for a
+        numeric restriction chain is remembered by the complete constraints that determine it.
+    */
     static *hash<auto> sample(XsdAbstractType type) {
+        *string key = type instanceof XsdSimpleType ? cast<XsdSimpleType>(type).getNumericSampleKey() : NOTHING;
+        if (key) {
+            *hash<auto> known = NumericSamples{key};
+            if (known) {
+                return known.sample;
+            }
+        }
+        *hash<auto> result = generate(type);
+        if (key) {
+            hash<string, hash<auto>> known = NumericSamples;
+            hash<string, hash<auto>> next = known.size() >= NumericSampleLimit ? {} : known;
+            next{key} = {"sample": result};
+            NumericSamples = next;
+        }
+        return result;
+    }
+
+    #! returns an exact, typed spelling of a facet or enumeration value for a sample key, or NOTHING for another
+    #! value type
+    static *string exact(auto value) {
+        switch (value.typeCode()) {
+            case NT_NOTHING: return "-";
+            case NT_STRING: return "s:" + value;
+            case NT_INT: return "i:" + value;
+            case NT_BOOLEAN: return value ? "b:1" : "b:0";
+            # 17 significant digits identify a double exactly
+            case NT_FLOAT: return "f:" + sprintf("%.17g", value);
+            case NT_NUMBER: return "n:" + value.toString();
+        }
+    }
+
+    private static *hash<auto> generate(XsdAbstractType type) {
         try {
             return {"value": WSMessageHelper::getSampleTypeValue(type)};
         } catch (hash<ExceptionInfo> ex) {
@@ -26933,6 +26983,54 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
         if (type instanceof XsdSimpleType) {
             return cast<XsdSimpleType>(type).getPatternSampleIntern(min_reps);
         }
+    }
+
+    #! returns the inputs that determine the generated sample of a restriction chain of a numeric builtin type
+    /** @return the chain's builtin, and for each restriction its name, white space, patterns (as declared and as
+        compiled), enumeration (in order), fixed facets and bound, length and digit facets, each value spelled
+        exactly; NOTHING when the chain has other structure (a union, list or QName enumeration, a subclass, or a
+        facet value of another type), whose sample is generated each time
+        @see XsdExampleHelper::sample()
+
+        @since %WSDL 0.5.8
+    */
+    *string getNumericSampleKey() {
+        if (!getNumericBaseName()) {
+            return;
+        }
+        list<auto> levels();
+        XsdAbstractType current = self;
+        while (current instanceof XsdSimpleType) {
+            if (Class::getClass(current).getPathName() != "WSDL::XsdSimpleType") {
+                return;
+            }
+            XsdSimpleType level = cast<XsdSimpleType>(current);
+            if (!level.type || level.unionTypes || level.union || level.listItemType || level.listItemTypeInfo
+                    || level.qnameEnumValues || level.qnameEnumeration || level.scopedUnionEnumeration
+                    || level.listItemValueInfo || level.listEnumValues || level.listEnumKeys
+                    || level.pendingQNameEnumeration) {
+                return;
+            }
+            # an unset facet is spelled "-"; a value of another type cannot be spelled exactly
+            list<string> values();
+            foreach auto value in ((level.length, level.minLength, level.maxLength, level.minInclusive,
+                    level.maxInclusive, level.minExclusive, level.maxExclusive, level.totalDigits,
+                    level.fractionDigits) + (level.enumValues ? level.enumValues.values() : ())) {
+                *string spelled = XsdExampleHelper::exact(value);
+                if (!exists spelled) {
+                    return;
+                }
+                push values, spelled;
+            }
+            push levels, (level.name, level.whiteSpace, level.patterns,
+                (map $1.typeCode() == NT_STRING ? $1 : cast<XsdCompiledPattern>($1).getSource(), level.pcre_patterns),
+                keys level.enumValues, keys level.stringEnumValues, keys level.fixedFacets, values);
+            current = level.type;
+        }
+        if (!(current instanceof XsdBaseType) || Class::getClass(current).getPathName() != "WSDL::XsdBaseType") {
+            return;
+        }
+        return sprintf("%y", (current.name, levels));
     }
 
     #! returns a sample value satisfying the constraining facets declared for this type

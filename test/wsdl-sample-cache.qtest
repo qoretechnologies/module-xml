@@ -1,0 +1,211 @@
+#!/usr/bin/env qore
+# -*- mode: qore; indent-tabs-mode: nil -*-
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires xml
+%requires ../qlib/WSDL.qm
+
+%exec-class SampleCacheTest
+
+# The generated samples of numeric restriction chains, which data provider examples use, are remembered by the
+# complete constraints that determine them (XsdSimpleType::getNumericSampleKey()). These tests check that a
+# remembered sample always equals a fresh one: a changed facet, base or enumeration order gives a new sample, a
+# restriction without a generated sample stays without one, and other types are generated each time.
+public class SampleCacheTest inherits QUnit::Test {
+    private {
+        const Schema = '<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:t="urn:t" targetNamespace="urn:t">
+          <xs:simpleType name="Min"><xs:restriction base="xs:int"><xs:minInclusive value="500"/></xs:restriction>
+          </xs:simpleType>
+          <xs:simpleType name="Base"><xs:restriction base="xs:int"><xs:minInclusive value="500"/></xs:restriction>
+          </xs:simpleType>
+          <xs:simpleType name="Derived"><xs:restriction base="t:Base"><xs:maxInclusive value="900"/></xs:restriction>
+          </xs:simpleType>
+          <xs:simpleType name="Chosen"><xs:restriction base="t:Base"><xs:enumeration value="600"/>
+            <xs:enumeration value="850"/></xs:restriction></xs:simpleType>
+          <xs:simpleType name="Enum"><xs:restriction base="xs:int"><xs:enumeration value="7"/>
+            <xs:enumeration value="3"/></xs:restriction></xs:simpleType>
+          <xs:simpleType name="Range"><xs:restriction base="xs:int"><xs:minInclusive value="10"/>
+            <xs:maxInclusive value="50"/></xs:restriction></xs:simpleType>
+          <xs:simpleType name="NoSample"><xs:restriction base="xs:int"><xs:minInclusive value="500"/>
+            <xs:pattern value="[0-9]*x"/></xs:restriction>
+          </xs:simpleType>
+          <xs:simpleType name="Dec"><xs:restriction base="xs:decimal"><xs:minInclusive value="0.1"/>
+            <xs:fractionDigits value="2"/></xs:restriction></xs:simpleType>
+          <xs:simpleType name="Union"><xs:union memberTypes="xs:int xs:string"/></xs:simpleType>
+          <xs:simpleType name="List"><xs:list itemType="xs:int"/></xs:simpleType>
+          <xs:simpleType name="Text"><xs:restriction base="xs:string"><xs:minLength value="3"/></xs:restriction>
+          </xs:simpleType>
+          <xs:element name="first" type="t:Min"/><xs:element name="second" type="t:Min"/>
+        </xs:schema>';
+    }
+
+    const MinName = '<xs:simpleType name="Min"><xs:restriction base="xs:int">';
+    const MinFacet = MinName + '<xs:minInclusive value="500"/>';
+
+    constructor() : Test("SampleCacheTest", "1.0") {
+        addTestCase("numeric restriction chains have exact sample keys", \keyTest());
+        addTestCase("a changed facet, base or enumeration order gives a new example", \changeTest());
+        addTestCase("a restriction without a generated sample stays without one", \noSampleTest());
+        addTestCase("shared, repeated and restored providers keep their examples", \sharedTest());
+        addTestCase("concurrent providers get their own examples", \concurrentTest());
+        set_return_value(main());
+    }
+
+    static XsdSimpleType type(XsdSchema schema, string name) {
+        return cast<XsdSimpleType>(schema.findType(name));
+    }
+
+    static auto example(XsdSchema schema, string name) {
+        return type(schema, name).getDataProviderType().getExampleValue();
+    }
+
+    keyTest() {
+        XsdSchema schema(Schema, {"async_only": True});
+        foreach string name in ("Min", "Derived", "Enum", "Range", "NoSample", "Dec") {
+            assertTrue(exists type(schema, name).getNumericSampleKey(), name);
+        }
+        # other structure is generated each time
+        foreach string name in ("Union", "List", "Text") {
+            assertNothing(type(schema, name).getNumericSampleKey(), name);
+        }
+        # equal constraints have equal keys in another schema; the key includes the whole chain
+        XsdSchema other(Schema, {"async_only": True});
+        assertEq(type(schema, "Derived").getNumericSampleKey(), type(other, "Derived").getNumericSampleKey());
+        assertNeq(type(schema, "Min").getNumericSampleKey(), type(schema, "Base").getNumericSampleKey());
+        # generation matches the compiled patterns, and messages report the source patterns; each is part of the key
+        XsdSimpleType patterned = type(other, "NoSample");
+        string key = patterned.getNumericSampleKey();
+        patterned.pcre_patterns = ("[0-9]*y",);
+        string compiled = patterned.getNumericSampleKey();
+        assertNeq(key, compiled);
+        patterned.patterns = ("[0-9]*y",);
+        assertNeq(compiled, patterned.getNumericSampleKey());
+        # facet values are spelled exactly: the nearest doubles and a number and a float of the same value differ
+        XsdSimpleType a = type(schema, "Dec");
+        XsdSimpleType b = type(other, "Dec");
+        a.minInclusive = 0.1;
+        b.minInclusive = 0.1 + 1.3877787807814457e-17;
+        assertTrue(0.1 != b.minInclusive);
+        assertNeq(a.getNumericSampleKey(), b.getNumericSampleKey());
+        a.minInclusive = 1.5;
+        b.minInclusive = 1.5n;
+        assertNeq(a.getNumericSampleKey(), b.getNumericSampleKey());
+        # a facet value of another type is not spelled, and the sample is generated each time
+        a.minInclusive = 2026-09-27;
+        assertNothing(a.getNumericSampleKey());
+    }
+
+    changeTest() {
+        XsdSchema schema(Schema, {"async_only": True});
+        assertEq(500, example(schema, "Min"));
+        # the type's own facet
+        XsdSimpleType min = type(schema, "Min");
+        min.minInclusive = "700";
+        assertEq(700, example(schema, "Min"));
+        min.minInclusive = "500";
+        assertEq(500, example(schema, "Min"));
+        # an inherited facet; the enumeration of Chosen excludes the example of Base, so only a sample generated
+        # for the new lower bound is accepted
+        assertEq(500, example(schema, "Derived"));
+        assertEq(600, example(schema, "Chosen"));
+        XsdSimpleType base = type(schema, "Base");
+        base.minInclusive = "800";
+        assertEq(800, example(schema, "Derived"));
+        assertEq(850, example(schema, "Chosen"));
+        # the enumeration order decides the example
+        assertEq(7, example(schema, "Enum"));
+        XsdSimpleType enum_type = type(schema, "Enum");
+        enum_type.enumValues = {"3": True, "7": True};
+        assertEq(3, example(schema, "Enum"));
+        # a changed example does not change a returned one
+        auto returned = example(schema, "Min");
+        returned += 1;
+        assertEq(500, example(schema, "Min"));
+    }
+
+    noSampleTest() {
+        XsdSchema schema(Schema, {"async_only": True});
+        for (int i = 0; i < 2; ++i) {
+            assertNothing(example(schema, "NoSample"));
+        }
+        # a valid definition then has an example; the generic example is below the lower bound, so it is the sample
+        XsdSimpleType no_sample = type(schema, "NoSample");
+        *string key = no_sample.getNumericSampleKey();
+        no_sample.patterns = ("[0-9]*",);
+        no_sample.pcre_patterns = ("[0-9]*",);
+        assertNeq(key, no_sample.getNumericSampleKey());
+        XsdSchema fresh(replace(Schema, "[0-9]*x", "[0-9]*"), {"async_only": True});
+        assertEq(example(fresh, "NoSample"), example(schema, "NoSample"));
+        assertEq("500", example(schema, "NoSample"));
+        # a construction error is raised each time and not remembered
+        XsdSimpleType range = type(schema, "Range");
+        range.maxInclusive = "5";
+        for (int i = 0; i < 2; ++i) {
+            assertThrows("XSD-SIMPLETYPE-ERROR", \example(), (schema, "Range"));
+        }
+        range.maxInclusive = "40";
+        assertEq(10, example(schema, "Range"));
+        # an error while generating the sample is raised each time and not remembered as a missing sample
+        range.patterns = ("(",);
+        range.pcre_patterns = ("(",);
+        for (int i = 0; i < 2; ++i) {
+            assertThrows("REGEX-COMPILATION-ERROR", \example(), (schema, "Range"));
+        }
+        range.patterns = ("[0-9]+",);
+        range.pcre_patterns = ("[0-9]+",);
+        # a pattern-constrained sample is the lexical spelling
+        assertEq("10", example(schema, "Range"));
+    }
+
+    sharedTest() {
+        XsdSchema schema(Schema, {"async_only": True});
+        # two elements of one type, and the type's providers built repeatedly
+        for (int i = 0; i < 3; ++i) {
+            foreach string element in ("first", "second") {
+                assertEq(500, schema.getElement("urn:t", element).getDataProviderType().getExampleValue());
+            }
+        }
+        # a restored provider keeps its example, detached from the schema
+        AbstractDataProviderType provider = type(schema, "Dec").getDataProviderType();
+        auto expected = provider.getExampleValue();
+        assertEq(0.1, expected);
+        AbstractDataProviderType restored = Serializable::deserialize(provider.serialize());
+        assertEq(expected, restored.getExampleValue());
+        # optional and soft copies keep the example
+        assertEq(expected, provider.getOrNothingType().getExampleValue());
+        assertEq(expected, provider.getSoftType().getExampleValue());
+        assertEq(expected, Serializable::deserialize(provider.getOrNothingType().serialize()).getExampleValue());
+        assertEq(expected, type(new XsdSchema(Schema, {"async_only": True}), "Dec").getDataProviderType()
+            .getExampleValue());
+    }
+
+    concurrentTest() {
+        # each thread's restriction has its own lower bound, and so its own example
+        Counter done(8);
+        list<string> errors();
+        Mutex m();
+        for (int t = 0; t < 8; ++t) {
+            background sub () {
+                on_exit done.dec();
+                try {
+                    for (int i = 0; i < 20; ++i) {
+                        int bound = 1000 + t * 100 + i;
+                        XsdSchema schema(replace(Schema, MinFacet, sprintf('%s<xs:minInclusive value="%d"/>',
+                            MinName, bound)), {"async_only": True});
+                        auto value = example(schema, "Min");
+                        if (value != bound) {
+                            m.lock(); errors += sprintf("%d: %y", bound, value); m.unlock();
+                        }
+                    }
+                } catch (hash<ExceptionInfo> ex) {
+                    m.lock(); errors += ex.desc; m.unlock();
+                }
+            }();
+        }
+        done.waitForZero();
+        assertEq((), errors);
+    }
+}

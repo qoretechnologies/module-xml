@@ -55,9 +55,25 @@ average exceeds a quarter of its CPUs. It checks before the run and again after 
 rise after a run starts on a quiet machine; each workload's load is stored in the reference. `--force` records
 anyway.
 
+### Comparing another WSDL source
+
+The driver loads `qlib/WSDL.qm` beside it by an explicit path, so `QORE_MODULE_DIR` cannot select another version
+of WSDL. To time another version with the same Qore and modules, pass the directory of its `WSDL.qm`:
+
+```
+git show 0ee292d:qlib/WSDL.qm > /tmp/wsdl-before/WSDL.qm
+python3 test/wsdl-interop/benchmark/benchmark.py --wsdl-dir /tmp/wsdl-before
+```
+
+The benchmark then runs a temporary copy of the driver that loads that file, and fails unless the file the driver
+actually loaded (`get_module_hash()`) is the requested one. The other modules still come from the checkout. Every
+result records the loaded file (`wsdl_module`) and its SHA-256 (`wsdl_module_sha256`). `--wsdl-dir` cannot be
+combined with `--record`: a reference always measures the checkout's own source.
+
 `test_benchmark.py` is the suite gate. It makes no timing assertions. It checks:
 - the pinned workload digests and manifest;
 - that the current code reproduces the reference outputs for every binding style, and for one list-values item for
   each value model, SOAP version and provider kind;
 - the comparison rules;
+- that a comparison loads the requested WSDL source, although the driver has a sibling `qlib`, and reports it;
 - that the benchmark requires a Release build.

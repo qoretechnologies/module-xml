@@ -8,6 +8,8 @@ It checks that the workloads are the pinned ones, that the current code produces
 binding style and for one list-values item per value model, SOAP version and provider kind, and that the benchmark
 reports regressions and output changes as it should.
 """
+import contextlib
+import io
 import json
 import os
 from pathlib import Path
@@ -51,6 +53,29 @@ class BenchmarkTests(unittest.TestCase):
         self.assertEqual(expected["digest"], result["digest"])
         self.assertEqual(expected["rows"], result["rows"])
         self.assertEqual(sorted(expected["phases"]), sorted(result["phases"]))
+
+    def test_selects_the_requested_wsdl_source(self):
+        # the driver loads the WSDL source beside it by an explicit path, which QORE_MODULE_DIR cannot change; a
+        # comparison must load the requested source, and every run reports and checks the one it loaded
+        workload = benchmark.WORKLOADS["binding-styles"]
+        result = benchmark.run_driver("binding-styles", workload, self.build, (1,))
+        self.assertEqual((REPO / "qlib" / "WSDL.qm").resolve(), Path(result["wsdl_module"]).resolve())
+        with tempfile.TemporaryDirectory(prefix="xml-benchmark-source-") as temp:
+            # a distinct copy of the source, so that the loaded file is identified by its location
+            source = Path(temp) / "WSDL.qm"
+            source.write_text((REPO / "qlib" / "WSDL.qm").read_text() + "\n# benchmark source selection test\n")
+            result = benchmark.run_driver("binding-styles", workload, self.build, (1,), wsdl_dir=temp)
+            self.assertEqual(source.resolve(), Path(result["wsdl_module"]).resolve())
+            self.assertEqual(self.reference["workloads"]["binding-styles"]["digest"], result["digest"])
+        with tempfile.TemporaryDirectory(prefix="xml-benchmark-source-") as temp:
+            with self.assertRaisesRegex(RuntimeError, "no WSDL.qm"):
+                benchmark.run_driver("binding-styles", workload, self.build, (1,), wsdl_dir=temp)
+        # a reference always measures the checkout's own source
+        errors = io.StringIO()
+        with contextlib.redirect_stderr(errors):
+            self.assertEqual(2, benchmark.main(["--build", str(self.build), "--allow-debug", "--record", "--wsdl-dir",
+                                                str(REPO / "qlib")]))
+        self.assertIn("--wsdl-dir is for comparisons only", errors.getvalue())
 
     def test_list_value_outputs_match_the_reference(self):
         expected = self.reference["workloads"]["list-values"]["items"]

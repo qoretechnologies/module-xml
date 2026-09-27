@@ -60,27 +60,57 @@ def unpack(archive, destination):
     return Path(destination) / "list-values"
 
 
-def run_driver(workload, target, build, extra=(), timeout=1800):
-    """Runs bench.qr once; returns its parsed JSON result."""
+def driver_for(wsdl_dir, temp):
+    """Returns the driver loading WSDL.qm from wsdl_dir, or the standard driver for the checkout's qlib.
+
+    The standard driver loads the WSDL source beside it by an explicit path, which QORE_MODULE_DIR cannot change, so
+    another source needs a copy of the driver that names that source.
+    """
+    if wsdl_dir is None:
+        return DRIVER
+    source = Path(wsdl_dir).resolve()
+    if not (source / "WSDL.qm").is_file():
+        raise RuntimeError(f"{source}: no WSDL.qm")
+    text = DRIVER.read_text()
+    for old, new in (('%prepend-module-path "${SCRIPT_DIR}/../../../qlib"', f'%prepend-module-path "{source}"'),
+                     ("%requires ../../../qlib/WSDL.qm", f"%requires {source}/WSDL.qm")):
+        if text.count(old) != 1:
+            raise RuntimeError(f"{DRIVER}: cannot select another WSDL source: {old!r} not found once")
+        text = text.replace(old, new)
+    driver = Path(temp) / "bench.qr"
+    driver.write_text(text)
+    return driver
+
+
+def run_driver(workload, target, build, extra=(), timeout=1800, wsdl_dir=None):
+    """Runs bench.qr once; returns its parsed JSON result, after verifying which WSDL.qm it loaded."""
+    expected = (Path(wsdl_dir).resolve() if wsdl_dir is not None else REPO / "qlib") / "WSDL.qm"
     env = os.environ.copy()
-    env["QORE_MODULE_DIR"] = os.pathsep.join((str(Path(build).resolve()), str(REPO / "qlib")))
-    command = [os.environ.get("QORE", "qore"), "-b", str(DRIVER), workload, str(target), *map(str, extra)]
-    result = subprocess.run(command, capture_output=True, text=True, env=env, timeout=timeout)
+    env["QORE_MODULE_DIR"] = os.pathsep.join((str(Path(build).resolve()), str(expected.parent)))
+    with tempfile.TemporaryDirectory(prefix="xml-benchmark-driver-") as temp:
+        command = [os.environ.get("QORE", "qore"), "-b", str(driver_for(wsdl_dir, temp)), workload, str(target),
+                   *map(str, extra)]
+        result = subprocess.run(command, capture_output=True, text=True, env=env, timeout=timeout)
     if result.returncode or result.stderr:
         raise RuntimeError(f"{command}: exit {result.returncode}\n{result.stdout}\n{result.stderr}")
-    return json.loads(result.stdout)
+    output = json.loads(result.stdout)
+    if Path(output.get("wsdl_module", "")).resolve() != expected.resolve():
+        raise RuntimeError(f"the driver loaded {output.get('wsdl_module')!r}, not {str(expected)!r}")
+    return output
 
 
-def measure(workload, target, build, repetitions, extra=()):
+def measure(workload, target, build, repetitions, extra=(), wsdl_dir=None):
     """Runs a workload repeatedly; returns the median phase times and the (identical) output digests."""
-    runs = [run_driver(workload, target, build, extra) for _ in range(repetitions)]
+    runs = [run_driver(workload, target, build, extra, wsdl_dir=wsdl_dir) for _ in range(repetitions)]
     digests = {run["digest"] for run in runs}
     if len(digests) != 1:
         raise RuntimeError(f"{workload}: output differs between repetitions")
     phases = {phase: int(statistics.median(run["phases"].get(phase, 0) for run in runs))
               for phase in sorted(runs[0]["phases"])}
     return {"digest": runs[0]["digest"], "items": runs[0]["items"], "rows": runs[0]["rows"], "phases": phases,
-            "total": int(statistics.median(run["total"] for run in runs)), "repetitions": repetitions}
+            "total": int(statistics.median(run["total"] for run in runs)), "repetitions": repetitions,
+            # the WSDL source measured
+            "wsdl_module": runs[0]["wsdl_module"], "wsdl_module_sha256": sha256(Path(runs[0]["wsdl_module"]))}
 
 
 def compare(reference, measured, tolerance):
@@ -145,15 +175,16 @@ def busy_workloads(measured):
     return sorted(name for name, result in measured.items() if busy(result.get("load_average", 0)) is not None)
 
 
-def run_workloads(build, repetitions, names):
+def run_workloads(build, repetitions, names, wsdl_dir=None):
     results = {}
     with tempfile.TemporaryDirectory(prefix="xml-benchmark-") as temp:
         for name in names:
             if name == "list-values":
                 target = unpack(WORKLOADS[name], temp)
-                results[name] = measure(name, target, build, repetitions)
+                results[name] = measure(name, target, build, repetitions, wsdl_dir=wsdl_dir)
             else:
-                results[name] = measure(name, WORKLOADS[name], build, repetitions, (BINDING_ITERATIONS,))
+                results[name] = measure(name, WORKLOADS[name], build, repetitions, (BINDING_ITERATIONS,),
+                                        wsdl_dir=wsdl_dir)
             results[name]["input_sha256"] = sha256(WORKLOADS[name])
             # other work on the machine distorts the timings
             results[name]["load_average"] = round(os.getloadavg()[0], 2)
@@ -189,11 +220,17 @@ def main(argv=None):
                         help="accept a non-Release build (output checks only; timings are not comparable)")
     parser.add_argument("--json", help="also write the measurement to this file")
     parser.add_argument("--force", action="store_true", help="record a reference even on a busy machine")
+    parser.add_argument("--wsdl-dir", help="measure the WSDL.qm in this directory instead of the checkout's qlib; "
+                        "for comparisons only, not for a reference")
     args = parser.parse_args(argv)
 
     kind = build_type(args.build)
     if kind != "Release" and not args.allow_debug:
         print(f"{args.build}: CMAKE_BUILD_TYPE is {kind!r}; the benchmark needs an optimized Release build",
+              file=sys.stderr)
+        return 2
+    if args.record and args.wsdl_dir:
+        print("a reference measures the checkout's own WSDL source; --wsdl-dir is for comparisons only",
               file=sys.stderr)
         return 2
     if args.record and kind != "Release":
@@ -214,7 +251,7 @@ def main(argv=None):
             print("refusing to record a reference on a busy machine; use --force to record anyway",
                   file=sys.stderr)
             return 2
-    measured = run_workloads(args.build, args.repetitions, names)
+    measured = run_workloads(args.build, args.repetitions, names, args.wsdl_dir)
     if args.json:
         Path(args.json).write_text(json.dumps(measured, indent=1, sort_keys=True) + "\n")
     if args.record and not args.force and busy_workloads(measured):
