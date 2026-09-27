@@ -23,12 +23,15 @@ cd "${src_dir}"
 export QORE_MODULE_DIR="${qmod_dir}${QORE_MODULE_DIR:+:${QORE_MODULE_DIR}}"
 export QORE_MODULE_DIR=$(echo "${QORE_MODULE_DIR}" | tr ':' '\n' | grep -v -x -F "${src_dir}/qlib" | paste -s -d ':')
 
-# every module compiled from qlib must load from the build
-modules=$(cd "${qmod_dir}" && find . -name '*.qmod' | sed -E 's#^\./([^/]+/)?([^/]+)\.qmod$#\2#' | sort)
-if [ -z "${modules}" ]; then
-    echo "no AOT-compiled modules in ${qmod_dir}; configure with QORE_BUILD_AOT_MODULES=ON" >&2
-    exit 1
-fi
+# every module in qlib must have been compiled, and must load from the build: a missing .qmod would otherwise be
+# replaced silently by the module's source or an installed copy
+modules=$( (cd qlib && ls *.qm | sed 's/\.qm$//'; for d in */; do [ -f "${d}${d%/}.qm" ] && echo "${d%/}"; done) | sort)
+for module in ${modules}; do
+    if [ ! -f "${qmod_dir}/${module}.qmod" ] && [ ! -f "${qmod_dir}/${module}/${module}.qmod" ]; then
+        echo "${module} has no AOT-compiled module in ${qmod_dir}; configure with QORE_BUILD_AOT_MODULES=ON" >&2
+        exit 1
+    fi
+done
 for module in ${modules}; do
     "$@" qore -e "%requires ${module}
 string file = get_module_hash().\"${module}\".filename;

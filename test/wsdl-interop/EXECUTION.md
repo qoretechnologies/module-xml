@@ -12341,3 +12341,50 @@ Full suite on Qore e82fa0eb0: all 300 qtests pass without warnings, 257 AOT test
 pass in 6 shards.
 
 Audit: `audits/P9l-01-encoded-decoding.md`.
+
+## P9l-02: one type selection per element (2026-09-27)
+
+After P9l-01, the literal styles' profile was flat. Among its costs, every element selected its instance type and
+opened its QName namespace scope twice:
+
+1. `XsdElement::deserializeTypedValue()` opens the scope for the element's attributes, and
+   `XsdTypeSubstitutionHelper::select()` consumes the `xsi:type` annotation.
+2. It then calls `XsdDocumentValueHelper::deserializeValue()` with the selected type, which opens a second scope
+   with the same declarations and selects again. That finds no annotation and returns the type it was given.
+
+The helper now takes `preselected` and skips both steps. The element passes it unless a default value replaced its
+content: `XsdEmptyElementDefaultHelper::apply()` can supply the default's own namespace declarations for QName
+defaults, and those need the second scope. A mutant that always passes `preselected` fails
+`wsdl-element-defaults.qtest` ("Canonical defaults obey actual-type patterns"). The other callers, such as RPC
+parts and generic content, keep selecting.
+
+**Result:** 30 decodes of the P9b order, in user-space instructions:
+
+| Binding | After P9l-01 | Now | Change |
+| --- | --- | --- | --- |
+| document/literal 1.1 | 68.0e9 | 66.3e9 | -2.5% |
+| RPC/encoded 1.1 | 81.8e9 | 79.6e9 | -2.7% |
+
+Together with P9l-01, RPC/encoded 1.1 decoding needs 13% fewer instructions than before (91.8e9 to 79.6e9), and the
+literal styles 2.5% fewer. The benchmark outputs remain byte-identical to the P9b reference.
+
+**Not changed:** the remaining profile is spread over per-element bookkeeping: identity scopes, value-constraint
+lookups and value capture (`describeAtomic()` for the ID/IDREF/ENTITY checks). Skipping any of it would need
+schema-generation invalidation like the particle program cache, or would change which checks run, and none shows
+a single dominant cost.
+
+**AOT preflight gap (fixed):** during this verification, `build-debug/qlib-qmod/WSDL.qmod` was missing after a
+compile in the build tree. `run-aot-qtests.sh` checked only the `.qmod` files present, so the AOT pass loaded the
+system-installed `WSDL.qmod` instead and passed. The preflight now derives the module list from `qlib` (`*.qm` and
+module directories) and fails when a module has no compiled `.qmod`; removing `WSDL.qmod` makes it fail with
+"WSDL has no AOT-compiled module". The AOT pass was then rerun with the current `WSDL.qmod`.
+
+**Alpine image note:** the qore-test-base Alpine image puts `/root/.cargo/bin` first in `PATH`, and `/root` is
+mode 700. For the non-root `qore` user, busybox `sh` then reports every command not found in an earlier `PATH`
+entry as "Permission denied" instead of "not found": the litmus test's `sh: litmus: Permission denied` in CI. The
+skip is correct, but the message can hide a missing command. The fix belongs in the image, not in this repository.
+
+Full suite on Qore e82fa0eb0: all 300 qtests pass without warnings; with all 17 compiled modules, 257 AOT test
+files pass; 556 Python tests pass in 6 shards.
+
+Audit: `audits/P9l-02-single-selection.md`.
