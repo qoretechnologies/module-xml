@@ -55,6 +55,8 @@ hashdecl WebDavLockInfo {
     date expires;
     #! User who created the lock (from auth context)
     *string user;
+    #! The URL path of the lock root, as requested; the lock discovery reports it (RFC 4918 section 14.12)
+    *string href;
 }
 
 #! Abstract WebDavHandler interface class
@@ -356,6 +358,9 @@ public class AbstractWebDavHandler inherits public HttpServer::AbstractHttpReque
             cx.webdav_path = getRealPath(cx.raw_path);
             *hash<HttpResponseInfo> rv = checkAuth(hdr.method, cx, hdr, body);
             if (!rv) {
+                rv = checkPreconditions(cx, hdr);
+            }
+            if (!rv) {
                 rv = call_object_method(self, method, cx, hdr, body);
             }
             # MUST have a Content-Length header in the response, even for HTTP responses that cannot return a msg body
@@ -366,6 +371,21 @@ public class AbstractWebDavHandler inherits public HttpServer::AbstractHttpReque
         }
 
         return response(405, "Method Not Allowed");
+    }
+
+    #! Checks the preconditions of a request before its method is called
+    /** Handlers that support locking evaluate the \c If header and enforce write locks here (RFC 4918 sections 7
+        and 10.4).
+
+        @param cx the call context, with \c webdav_path and, for \c COPY and \c MOVE, \c webdav_dest_path
+        @param hdr the request headers
+
+        @return a response that ends the request, or @ref nothing to call the method; this base class method returns
+        @ref nothing
+
+        @since WebDavHandler 1.3
+    */
+    private *hash<HttpResponseInfo> checkPreconditions(hash<auto> cx, hash<auto> hdr) {
     }
 
     #! Returns a relative path from an absolute path

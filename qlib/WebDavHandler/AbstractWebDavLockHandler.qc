@@ -69,6 +69,14 @@ public class AbstractWebDavLockHandler {
     */
     abstract list<hash<WebDavLockInfo>> getLocks(string resource);
 
+    #! Get the locks on a resource and on all resources below it
+    /** @param resource the resource path
+        @return the locks whose root is the resource or one of its members, at any depth
+
+        @since WebDavHandler 1.3
+    */
+    abstract list<hash<WebDavLockInfo>> getLocksInTree(string resource);
+
     #! Check if a resource is locked
     /** @param resource the resource path to check
         @param exclude_token optional token to exclude from conflict check

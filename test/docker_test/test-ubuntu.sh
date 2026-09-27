@@ -48,6 +48,12 @@ if [ "${MODE}" = "valgrind" ]; then
     apt-get update && DEBIAN_FRONTEND=noninteractive apt-get -y install --no-install-recommends valgrind
 fi
 
+if [ "${MODE}" = "qtest" ]; then
+    # the litmus WebDAV compliance suite; the test fails instead of skipping without it here (Alpine has no package)
+    apt-get update && DEBIAN_FRONTEND=noninteractive apt-get -y install --no-install-recommends litmus
+    export QORE_XML_REQUIRE_LITMUS=1
+fi
+
 if [ "${MODE}" = "python-verify" ]; then
     exec ${MODULE_SRC_DIR}/test/docker_test/run-python-suite.sh verify
 fi

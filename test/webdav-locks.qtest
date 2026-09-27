@@ -1,0 +1,259 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires HttpServer
+%requires FsUtil
+%requires xml
+%requires ../qlib/WebDavHandler
+
+%exec-class WebDavLocksTest
+
+# RFC 4918 write locks, If headers and COPY/MOVE depth in FsWebDavHandler, independent of the litmus suite
+class WebDavLocksTest inherits QUnit::Test {
+    private {
+        TmpDir tmp;
+        HttpServer server;
+        HTTPClient client;
+        string origin;
+
+        const LockBody = "<?xml version=\"1.0\" encoding=\"utf-8\"?><lockinfo xmlns='DAV:'><lockscope><%s/></lockscope>"
+            "<locktype><write/></locktype><owner>test</owner></lockinfo>";
+    }
+
+    constructor() : Test("WebDAV locks", "1.0") {
+        addTestCase("If headers parse by RFC 4918 section 10.4", \ifHeaders());
+        addTestCase("COPY and MOVE honor Depth and report new resources", \copyMove());
+        addTestCase("LOCK accepts default-namespace bodies and reports the URL lock root", \lockRequests());
+        addTestCase("Write locks require their tokens", \enforcement());
+        addTestCase("If header conditions decide the request", \conditions());
+        addTestCase("Refresh and UNLOCK apply to the lock scope", \refreshUnlock());
+        addTestCase("Entity tags and multistatus hrefs", \etagsHrefs());
+
+        tmp = new TmpDir("webdav-locks-");
+        WebDavHandler::FsWebDavHandler handler(tmp.path);
+        server = new HttpServer();
+        server.setHandler("webdav", "/", NOTHING, handler);
+        server.setDefaultHandler("webdav", handler);
+        map server.addHttpMethod($1), handler.getHttpMethods();
+        int port = server.addListener(<HttpListenerOptionInfo>{"service": 0}).port;
+        origin = sprintf("http://localhost:%d", port);
+        client = new HTTPClient({"url": origin,
+            "additional_methods": WebDavHandler::AbstractWebDavHandler::RequestMethods});
+        on_exit server.stop();
+        set_return_value(main());
+    }
+
+    # sends a request and returns the status code, headers and body
+    hash<auto> request(string method, string path, *hash<auto> hdr, *data body) {
+        hash<auto> info;
+        try {
+            hash<auto> rv = client.send(body, method, path, hdr, False, \info);
+            return {"code": rv.status_code, "hdr": rv, "body": rv.body};
+        } catch (hash<ExceptionInfo> ex) {
+            if (info."response-headers") {
+                return {"code": info."response-headers".status_code, "hdr": info."response-headers",
+                    "body": info."response-headers".body};
+            }
+            rethrow;
+        }
+    }
+
+    # creates a collection with one member and returns its path
+    string collection(string name) {
+        assertEq(201, request("MKCOL", "/" + name + "/").code);
+        assertEq(201, request("PUT", "/" + name + "/member", NOTHING, "data").code);
+        return "/" + name;
+    }
+
+    # locks a resource and returns the lock token
+    string lock(string path, string scope = "exclusive", string depth = "infinity", *string token) {
+        hash<auto> hdr = {"Depth": depth, "Timeout": "Second-3600", "Content-Type": "application/xml"};
+        if (token) {
+            hdr."If" = sprintf("(<%s>)", token);
+        }
+        hash<auto> rv = request("LOCK", path, hdr, sprintf(LockBody, scope));
+        assertTrue(rv.code == 200 || rv.code == 201, sprintf("LOCK %s: %y", path, rv));
+        return (rv.hdr."lock-token" =~ x/<([^>]+)>/)[0];
+    }
+
+    ifHeaders() {
+        WebDavHandler::WebDavIfHeader h("(<urn:uuid:1> [\"e\"]) (Not <DAV:no-lock>)");
+        assertFalse(h.tagged);
+        assertEq(2, h.lists.size());
+        assertEq({"negated": False, "token": "urn:uuid:1"}, h.lists[0].conditions[0]);
+        assertEq({"negated": False, "etag": "\"e\""}, h.lists[0].conditions[1]);
+        assertEq({"negated": True, "token": "DAV:no-lock"}, h.lists[1].conditions[0]);
+        # negated state tokens are not submitted
+        assertEq(("urn:uuid:1",), h.getStateTokens());
+
+        h = new WebDavHandler::WebDavIfHeader("</a/b> (<x> [W/\"w\"]) </c> (Not<y>)");
+        assertTrue(h.tagged);
+        assertEq(("/a/b", "/c"), (map $1.resource, h.lists));
+        assertEq("W/\"w\"", h.lists[0].conditions[1].etag);
+        assertEq(("x",), h.getStateTokens());
+
+        assertTrue(WebDavHandler::WebDavIfHeader::etagMatches("W/\"a\"", "\"a\""));
+        assertFalse(WebDavHandler::WebDavIfHeader::etagMatches("\"a\"", "\"b\""));
+
+        foreach string bad in ("", "(", "()", "foo", "(<x>) </a> (<y>)", "</a> (<x>) (<y>) (", "([\"e\")",
+                "([e])", "(<>)", "</a>", "(Not)") {
+            assertThrows("WEBDAV-IF-HEADER-ERROR", sub () { new WebDavHandler::WebDavIfHeader(bad); }, NOTHING,
+                bad);
+        }
+    }
+
+    copyMove() {
+        collection("shallow");
+        # a shallow copy creates the collection without its members (RFC 4918 section 9.8.3)
+        assertEq(201, request("COPY", "/shallow/", {"Destination": origin + "/shallow-copy/", "Depth": "0"}).code);
+        assertTrue(is_dir(tmp.path + "/shallow-copy"));
+        assertFalse(is_file(tmp.path + "/shallow-copy/member"));
+        # "0" is a valid Depth value and not a missing one
+        assertEq(201, request("COPY", "/shallow/", {"Destination": origin + "/deep-copy/"}).code);
+        assertTrue(is_file(tmp.path + "/deep-copy/member"));
+        assertEq(201, request("COPY", "/shallow/", {"Destination": origin + "/deep-copy2/",
+            "Depth": "Infinity"}).code);
+        assertTrue(is_file(tmp.path + "/deep-copy2/member"));
+        # an existing destination is replaced: 204
+        assertEq(204, request("COPY", "/shallow/", {"Destination": origin + "/deep-copy/"}).code);
+        assertEq(412, request("COPY", "/shallow/", {"Destination": origin + "/deep-copy/", "Overwrite": "F"}).code);
+        assertEq(400, request("COPY", "/shallow/", {"Destination": origin + "/other/", "Depth": "1"}).code);
+        assertFalse(is_dir(tmp.path + "/other"));
+        assertEq(403, request("COPY", "/shallow/", {"Destination": origin + "/"}).code);
+
+        # MOVE acts with depth infinity, the only value a client may send
+        assertEq(201, request("MOVE", "/deep-copy2/", {"Destination": origin + "/moved/",
+            "Depth": "infinity"}).code);
+        assertTrue(is_file(tmp.path + "/moved/member"));
+        assertEq(403, request("MOVE", "/moved/", {"Destination": origin + "/moved2/", "Depth": "0"}).code);
+        assertTrue(is_dir(tmp.path + "/moved"));
+    }
+
+    lockRequests() {
+        assertEq(201, request("PUT", "/doc", NOTHING, "text").code);
+        # empty <exclusive/>, <shared/> and <write/> elements in the default DAV: namespace
+        hash<auto> rv = request("LOCK", "/doc", {"Depth": "0", "Content-Type": "application/xml"},
+            sprintf(LockBody, "exclusive"));
+        assertEq(200, rv.code);
+        string token = (rv.hdr."lock-token" =~ x/<([^>]+)>/)[0];
+        hash<auto> xml = parse_xml(rv.body);
+        # the lock root is the request URL, not the server's file path
+        assertEq("/doc", xml."DAV:prop"."DAV:lockdiscovery"."DAV:activelock"."DAV:lockroot"."DAV:href");
+        assertEq(token, xml."DAV:prop"."DAV:lockdiscovery"."DAV:activelock"."DAV:locktoken"."DAV:href");
+        assertEq(423, request("LOCK", "/doc", {"Depth": "0", "Content-Type": "application/xml"},
+            sprintf(LockBody, "shared")).code);
+        assertEq(204, request("UNLOCK", "/doc", {"Lock-Token": "<" + token + ">"}).code);
+
+        string first = lock("/doc", "shared", "0");
+        string second = lock("/doc", "shared", "0");
+        assertTrue(first != second);
+        assertEq(400, request("LOCK", "/doc", {"Content-Type": "application/xml"},
+            "<lockinfo xmlns='DAV:'><lockscope><other/></lockscope><locktype><write/></locktype></lockinfo>").code);
+        # a lock on an unmapped URL creates an empty resource
+        assertEq(201, request("LOCK", "/unmapped", {"Depth": "0", "Content-Type": "application/xml"},
+            sprintf(LockBody, "exclusive")).code);
+    }
+
+    enforcement() {
+        assertEq(201, request("PUT", "/locked", NOTHING, "v1").code);
+        string token = lock("/locked", "exclusive", "0");
+        hash<auto> rv = request("PUT", "/locked", NOTHING, "v2");
+        assertEq(423, rv.code);
+        # the error names the lock root (RFC 4918 section 16)
+        assertEq("/locked", parse_xml(rv.body)."DAV:error"."DAV:lock-token-submitted"."DAV:href");
+        assertEq(423, request("DELETE", "/locked").code);
+        assertEq(423, request("PROPPATCH", "/locked", {"Content-Type": "application/xml"},
+            "<propertyupdate xmlns='DAV:' xmlns:Z='urn:z'><set><prop><Z:p>v</Z:p></prop></set></propertyupdate>").code);
+        assertEq(423, request("MOVE", "/locked", {"Destination": origin + "/elsewhere"}).code);
+        # a lock on the source does not prevent copying it
+        assertEq(201, request("COPY", "/locked", {"Destination": origin + "/copy-of-locked"}).code);
+        # nor does a wrong token satisfy the lock; a bogus token makes the If header false
+        assertEq(412, request("PUT", "/locked", {"If": "(<urn:uuid:bogus>)"}, "v2").code);
+        assertEq(204, request("PUT", "/locked", {"If": sprintf("(<%s>)", token)}, "v2").code);
+        assertEq("v2", ReadOnlyFile::readTextFile(tmp.path + "/locked"));
+
+        # a depth 0 lock on a collection protects its membership
+        collection("members");
+        string coll_token = lock("/members/", "exclusive", "0");
+        assertEq(423, request("PUT", "/members/new", NOTHING, "x").code);
+        assertEq(423, request("DELETE", "/members/member").code);
+        assertEq(423, request("MKCOL", "/members/sub/").code);
+        # but not the content of existing members
+        assertEq(204, request("PUT", "/members/member", NOTHING, "changed").code);
+        # an untagged list applies to the new member, which the depth 0 lock does not cover: the If header is false
+        assertEq(412, request("PUT", "/members/new", {"If": sprintf("(<%s>)", coll_token)}, "x").code);
+        # a list tagged with the collection submits its token
+        assertEq(201, request("PUT", "/members/new", {"If": sprintf("</members/> (<%s>)", coll_token)}, "x").code);
+
+        # a locked member prevents deleting its collection without the token
+        collection("outer");
+        string member_token = lock("/outer/member", "exclusive", "0");
+        assertEq(423, request("DELETE", "/outer/").code);
+        assertTrue(is_dir(tmp.path + "/outer"));
+        # the member's lock does not apply to the collection: an untagged list is false
+        assertEq(412, request("DELETE", "/outer/", {"If": sprintf("(<%s>)", member_token)}).code);
+        assertEq(204, request("DELETE", "/outer/", {"If": sprintf("</outer/member> (<%s>)", member_token)}).code);
+        assertFalse(is_dir(tmp.path + "/outer"));
+
+        # a depth infinity lock covers every member
+        collection("deep");
+        string deep_token = lock("/deep/", "exclusive", "infinity");
+        assertEq(423, request("PUT", "/deep/member", NOTHING, "x").code);
+        assertEq(204, request("PUT", "/deep/member", {"If": sprintf("</deep/> (<%s>)", deep_token)}, "x").code);
+    }
+
+    conditions() {
+        assertEq(201, request("PUT", "/cond", NOTHING, "a").code);
+        string etag = request("HEAD", "/cond").hdr.etag;
+        # an untagged list applies to the request resource
+        assertEq(412, request("PUT", "/cond", {"If": "(<urn:uuid:bogus>)"}, "b").code);
+        assertEq(204, request("PUT", "/cond", {"If": "(Not <DAV:no-lock>)"}, "b").code);
+        etag = request("HEAD", "/cond").hdr.etag;
+        assertEq(204, request("PUT", "/cond", {"If": sprintf("([%s])", etag)}, "c").code);
+        assertEq(412, request("PUT", "/cond", {"If": "([\"stale\"])"}, "d").code);
+        # any true list makes the header true
+        assertEq(204, request("PUT", "/cond", {"If": "(<urn:uuid:bogus>) (Not <DAV:no-lock>)"}, "e").code);
+        assertEq(412, request("PUT", "/cond", {"If": "(<urn:uuid:bogus> Not <DAV:no-lock>)"}, "f").code);
+        # a tagged list applies to its resource, which may be another one
+        assertEq(201, request("PUT", "/other-cond", NOTHING, "o").code);
+        string other_etag = request("HEAD", "/other-cond").hdr.etag;
+        assertEq(204, request("PUT", "/cond", {"If": sprintf("<%s/other-cond> ([%s])", origin, other_etag)},
+            "g").code);
+        assertEq(412, request("PUT", "/cond", {"If": "</other-cond> ([\"stale\"])"}, "h").code);
+        # the If header is evaluated for reads too
+        assertEq(412, request("GET", "/cond", {"If": "(<urn:uuid:bogus>)"}).code);
+        assertEq(400, request("GET", "/cond", {"If": "(<unterminated"}).code);
+    }
+
+    refreshUnlock() {
+        collection("scope");
+        string token = lock("/scope/", "exclusive", "infinity");
+        # a refresh through a member of a depth infinity lock (RFC 4918 section 9.10.2)
+        hash<auto> rv = request("LOCK", "/scope/member", {"If": sprintf("(<%s>)", token),
+            "Timeout": "Second-60"});
+        assertEq(200, rv.code, sprintf("%y", rv));
+        assertEq("/scope/", parse_xml(rv.body)."DAV:prop"."DAV:lockdiscovery"."DAV:activelock"."DAV:lockroot"
+            ."DAV:href");
+        assertEq(412, request("LOCK", "/scope/member", {"If": "(<urn:uuid:bogus>)"}).code);
+        # UNLOCK from within the scope releases the lock at its root
+        assertEq(409, request("UNLOCK", "/doc2", {"Lock-Token": "<" + token + ">"}).code);
+        assertEq(204, request("UNLOCK", "/scope/member", {"Lock-Token": "<" + token + ">"}).code);
+        assertEq(201, request("PUT", "/scope/new", NOTHING, "x").code);
+    }
+
+    etagsHrefs() {
+        assertEq(201, request("PUT", "/tagged", NOTHING, "x").code);
+        string etag = request("HEAD", "/tagged").hdr.etag;
+        # an entity-tag is a quoted string
+        assertRegex("^\"[0-9]+-[0-9]+-[0-9T]+\"$", etag);
+        hash<auto> rv = request("PROPPATCH", "/tagged", {"Content-Type": "application/xml"},
+            "<propertyupdate xmlns='DAV:' xmlns:Z='urn:z'><set><prop><Z:p>v</Z:p></prop></set></propertyupdate>");
+        assertEq(207, rv.code);
+        # the response names the URL, not the server's file path
+        assertEq("/tagged", parse_xml(rv.body)."DAV:multistatus"."DAV:response"."DAV:href");
+        assertFalse(rv.body.contains(tmp.path));
+    }
+}

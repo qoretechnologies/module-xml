@@ -111,6 +111,189 @@ public class FsWebDavHandler inherits AbstractWebDavHandler {
         return path;
     }
 
+    #! Evaluates the If header and enforces write locks before a request's method is called
+    /** The If header must be true for every method (RFC 4918 section 10.4), or the request fails with status 412.
+        A method that changes a resource must submit the token of every lock that applies to it (section 7), or the
+        request fails with status 423:
+        - PUT, POST, PROPPATCH and MKCOL: the locks of the resource and, when a new resource is created, the locks
+          on its parent collection, which protect the collection's membership
+        - DELETE and MOVE: the locks of the source, the locks of every member below it, and the locks on its parent
+        - COPY and MOVE: the locks of the destination and, if it exists, of every member below it, and the locks on
+          the destination's parent
+        - LOCK of an unmapped URL, which creates a resource: the locks on its parent
+
+        @since WebDavHandler 1.3
+    */
+    private *hash<HttpResponseInfo> checkPreconditions(hash<auto> cx, hash<auto> hdr) {
+        string path = cx.webdav_path;
+        list<string> single = ();
+        list<string> trees = ();
+        list<string> members = ();
+        switch (hdr.method) {
+            case "PUT":
+            case "POST":
+            case "MKCOL":
+                single += path;
+                if (!hstat(path)) {
+                    members += dirname(path);
+                }
+                break;
+            case "PROPPATCH":
+                single += path;
+                break;
+            case "DELETE":
+                trees += path;
+                members += dirname(path);
+                break;
+            case "COPY":
+            case "MOVE":
+                if (hdr.method == "MOVE") {
+                    trees += path;
+                    members += dirname(path);
+                }
+                if (exists cx.webdav_dest_path) {
+                    string dest = cx.webdav_dest_path;
+                    if (hstat(dest)) {
+                        trees += dest;
+                    } else {
+                        single += dest;
+                    }
+                    members += dirname(dest);
+                }
+                break;
+            case "LOCK":
+                if (!hstat(path)) {
+                    members += dirname(path);
+                }
+                break;
+        }
+
+        lock_handler.cleanExpired();
+        *WebDavIfHeader if_header;
+        if (exists hdr."if") {
+            try {
+                if_header = new WebDavIfHeader(hdr."if");
+            } catch (hash<ExceptionInfo> ex) {
+                if (ex.err == "WEBDAV-IF-HEADER-ERROR") {
+                    return response(400, ex.desc);
+                }
+                rethrow;
+            }
+            if (!evaluateIf(cx, if_header)) {
+                return response(412, "the If header precondition is false");
+            }
+        }
+
+        # the locks whose tokens must be submitted
+        hash<string, hash<WebDavLockInfo>> required;
+        foreach string p in (single) {
+            map required{$1.token} = $1, getApplicableLocks(p);
+        }
+        foreach string p in (trees) {
+            map required{$1.token} = $1, getApplicableLocks(p) + lock_handler.getLocksInTree(p);
+        }
+        foreach string p in (members) {
+            if (p.length() >= basePath.length() - 1) {
+                map required{$1.token} = $1, lock_handler.getLocks(p);
+            }
+        }
+        if (!required) {
+            return;
+        }
+        hash<string, bool> submitted = map {$1: True}, (if_header ? if_header.getStateTokens() : ());
+        foreach hash<WebDavLockInfo> lock_info in (required.iterator()) {
+            if (!submitted{lock_info.token} || !ownsLock(cx, lock_info)) {
+                return lockedResponse(lock_info);
+            }
+        }
+    }
+
+    #! Returns True if the request's user may use the lock: locks created by an authenticated user belong to them
+    private bool ownsLock(hash<auto> cx, hash<WebDavLockInfo> lock_info) {
+        return !exists lock_info.user || lock_info.user == cx.user;
+    }
+
+    #! Returns the locks that apply to a resource: its own, and those of its ancestors with depth infinity
+    /** @param path a normalized resource path in the handler's directory
+
+        @since WebDavHandler 1.3
+    */
+    private list<hash<WebDavLockInfo>> getApplicableLocks(string path) {
+        list<hash<WebDavLockInfo>> rv = lock_handler.getLocks(path);
+        string root = basePath.substr(0, -1);
+        string current = path;
+        while (current.length() > root.length()) {
+            string parent = dirname(current);
+            if (parent == current) {
+                break;
+            }
+            current = parent;
+            rv += (map $1, lock_handler.getLocks(current), $1.depth == "infinity");
+        }
+        return rv;
+    }
+
+    #! Returns True if the If header is true: one of its lists is true (RFC 4918 section 10.4.2)
+    private bool evaluateIf(hash<auto> cx, WebDavIfHeader if_header) {
+        foreach hash<WebDavIfList> l in (if_header.lists) {
+            *string path = exists l.resource ? getIfResourcePath(l.resource) : cx.webdav_path;
+            if (exists path && evaluateIfList(path, l)) {
+                return True;
+            }
+        }
+        return False;
+    }
+
+    #! Returns True if all conditions of an If header list are true for the resource
+    private bool evaluateIfList(string path, hash<WebDavIfList> l) {
+        *list<string> tokens;
+        foreach hash<WebDavIfCondition> c in (l.conditions) {
+            bool result;
+            if (exists c.token) {
+                if (!exists tokens) {
+                    tokens = map $1.token, getApplicableLocks(path);
+                }
+                result = inlist(c.token, tokens);
+            } else {
+                result = hstat(path) && WebDavIfHeader::etagMatches(c.etag, getETag(path));
+            }
+            if (c.negated) {
+                result = !result;
+            }
+            if (!result) {
+                return False;
+            }
+        }
+        return True;
+    }
+
+    #! Returns the path of a resource tagged in an If header, or @ref nothing if it is not in this handler
+    private *string getIfResourcePath(string resource) {
+        try {
+            *hash<UrlInfo> url = parseURL(resource);
+            return getRealPath(url.path ?? resource);
+        } catch (hash<ExceptionInfo> ex) {
+            if (ex.err == "WEBDAVHANDLER-FORBIDDEN") {
+                return;
+            }
+            rethrow;
+        }
+    }
+
+    #! Returns a 423 response naming the lock whose token was not submitted (RFC 4918 section 16)
+    private hash<HttpResponseInfo> lockedResponse(hash<WebDavLockInfo> lock_info) {
+        return <HttpResponseInfo>{
+            "code": 423,
+            "hdr": {"Content-Type": MimeTypeXml},
+            "body": make_xml({
+                "DAV:error": {
+                    "^attributes^": {"xmlns:DAV": DavNs},
+                    "DAV:lock-token-submitted": {"DAV:href": lock_info.href ?? lock_info.resource},
+                },
+            }),
+        };
+    }
+
     #! Returns the content type for the file based on its extension
     private *string getContentType(string filePath) {
         return get_mime_type_from_ext(filePath, MimeTypeOctetStream);
@@ -183,11 +366,8 @@ public class FsWebDavHandler inherits AbstractWebDavHandler {
 
     private:internal string getETag(string path) {
         hash<StatInfo> h = hstat(path);
-        return sprintf("%d-%d-%s",
-            h.dev, # inode
-            h.size,
-            format_date("YYYYMMDDTHHmmSS", h.mtime)
-        );
+        # an entity-tag is a quoted string (RFC 9110 section 8.8.3)
+        return sprintf("\"%d-%d-%s\"", h.inode, h.size, format_date("YYYYMMDDTHHmmSS", h.mtime));
     }
 
     private:internal hash<HttpResponseInfo> internalGet(hash<auto> cx, hash<auto> hdr, *data body,
@@ -730,16 +910,16 @@ public class FsWebDavHandler inherits AbstractWebDavHandler {
 
         # Extract lock scope (exclusive or shared)
         string scope;
-        if (lockinfo."DAV:lockscope"."DAV:exclusive") {
+        if (FsWebDavHandler::hasElement(lockinfo."DAV:lockscope", "DAV:exclusive")) {
             scope = "exclusive";
-        } else if (lockinfo."DAV:lockscope"."DAV:shared") {
+        } else if (FsWebDavHandler::hasElement(lockinfo."DAV:lockscope", "DAV:shared")) {
             scope = "shared";
         } else {
             return response(400, "lockscope must be 'exclusive' or 'shared'");
         }
 
         # Extract lock type (must be "write" per RFC 4918)
-        if (!lockinfo."DAV:locktype"."DAV:write") {
+        if (!FsWebDavHandler::hasElement(lockinfo."DAV:locktype", "DAV:write")) {
             return response(400, "locktype must be 'write'");
         }
 
@@ -766,6 +946,7 @@ public class FsWebDavHandler inherits AbstractWebDavHandler {
             "timeout": timeout,
             "expires": timeout == 0 ? 9999-12-31 : now() + seconds(timeout),
             "user": cx.user,
+            "href": cx.raw_path,
         };
 
         # Try to acquire the lock
@@ -800,23 +981,20 @@ public class FsWebDavHandler inherits AbstractWebDavHandler {
             return response(400, "Lock refresh requires If header with lock token");
         }
 
-        # Parse token from If header - format: (<token>)
-        *list<*string> matches = (if_header =~ x/<([^>]+)>/g);
-        if (!matches || !matches[0]) {
-            return response(400, "Could not parse lock token from If header");
+        # the If header names the lock to refresh; it may be the lock of a collection that contains the resource
+        # with depth infinity (RFC 4918 section 9.10.2)
+        hash<string, hash<WebDavLockInfo>> applicable = map {$1.token: $1}, getApplicableLocks(path);
+        *hash<WebDavLockInfo> lock_info;
+        foreach string tok in (new WebDavIfHeader(if_header).getStateTokens()) {
+            if (applicable{tok}) {
+                lock_info = applicable{tok};
+                break;
+            }
         }
-        string token = matches[0];
-
-        # Get the lock
-        *hash<WebDavLockInfo> lock_info = lock_handler.getLock(token);
         if (!lock_info) {
-            return response(412, "Lock token not found");
+            return response(412, "the If header names no lock of this resource");
         }
-
-        # Verify the lock is for this resource
-        if (lock_info.resource != path) {
-            return response(412, "Lock token does not match resource");
-        }
+        string token = lock_info.token;
 
         # Parse new timeout
         int timeout = parseTimeout(hdr.timeout);
@@ -882,7 +1060,7 @@ public class FsWebDavHandler inherits AbstractWebDavHandler {
             "DAV:depth": lock_info.depth,
             "DAV:timeout": timeout_str,
             "DAV:locktoken": {"DAV:href": lock_info.token},
-            "DAV:lockroot": {"DAV:href": lock_info.resource},
+            "DAV:lockroot": {"DAV:href": lock_info.href ?? lock_info.resource},
         };
 
         if (lock_info.owner) {
@@ -964,13 +1142,13 @@ public class FsWebDavHandler inherits AbstractWebDavHandler {
             return response(409, "Lock token not found");
         }
 
-        # Verify the lock is for this resource
-        if (lock_info.resource != path) {
+        # the resource must be in the scope of the lock (RFC 4918 section 9.11)
+        if (!inlist(token, map $1.token, getApplicableLocks(path))) {
             return response(409, "Lock token does not match resource");
         }
 
-        # Release the lock
-        if (!lock_handler.unlock(path, token)) {
+        # Release the lock at its root
+        if (!lock_handler.unlock(lock_info.resource, token)) {
             return response(409, "Failed to release lock");
         }
 
@@ -1176,7 +1354,7 @@ public class FsWebDavHandler inherits AbstractWebDavHandler {
     private *hash<string, hash<string, hash<string, bool>>> handleProppatchImpl(reference<string> href, hash<auto> cx,
             hash<auto> hdr, *hash<auto> request_xml, *list<hash<PropPatchActionInfo>> actions) {
         string path = cx.webdav_path;
-        href = path;
+        href = cx.raw_path;
 
         *hash<StatInfo> h = hstat(path);
         if (!h) {
@@ -1227,8 +1405,9 @@ public class FsWebDavHandler inherits AbstractWebDavHandler {
 
     #! Process copy and moves (without deletion) internally including properties (properties are moved, files are copied)
     private:internal hash<HttpResponseInfo> doCopyMoveIntern(hash<auto> cx, hash<auto> hdr, *data body, bool copy_props) {
+        bool created;
         try {
-            internalCopyMove(cx, hdr, body, copy_props);
+            created = internalCopyMove(cx, hdr, body, copy_props);
         } catch (hash<ExceptionInfo> ex) {
             if (ex.err =~ /^[0-9]{3}$/) {
                 return response(ex.err.toInt(), ex.desc);
@@ -1238,11 +1417,17 @@ public class FsWebDavHandler inherits AbstractWebDavHandler {
             rethrow;
         }
 
-        return response(hdr.overwrite == "F" ? 201 : 204);
+        # 201 for a new destination resource, 204 for an existing one that was replaced (RFC 4918 section 9.8.5)
+        return response(created ? 201 : 204);
     }
 
-    #! Copy or move the file and any properties
-    private:internal internalCopyMove(hash<auto> cx, hash<auto> hdr, *data body, bool copy_props) {
+    #! Returns True if the parsed element has the given child element; an empty child element has no value
+    private static bool hasElement(auto element, string name) {
+        return element.typeCode() == NT_HASH && element.hasKey(name);
+    }
+
+    #! Copy or move the file and any properties; returns True if the destination did not exist before
+    private:internal bool internalCopyMove(hash<auto> cx, hash<auto> hdr, *data body, bool copy_props) {
         if (!body) {
             # body is already buffered by the async HttpServer framework; no need to fetch
         }
@@ -1254,7 +1439,14 @@ public class FsWebDavHandler inherits AbstractWebDavHandler {
             dest_path = dest_path.substr(0, dest_path.size()-1);
         }
 
-        if (hdr.method == "MOVE" && hdr.hasKey("depth") && hdr.depth != "infinite") {
+        # COPY accepts Depth "0" or "infinity", the default (RFC 4918 section 9.8.3); MOVE acts on a collection as
+        # with "infinity", which is the only value a client may send (section 9.9.2)
+        # the string "0" is a valid value but false in a boolean context
+        *string depth = exists hdr.depth ? hdr.depth.lwr() : NOTHING;
+        if (exists depth && depth != "0" && depth != "infinity") {
+            throw "400", sprintf("invalid Depth header value %y; only \"0\" or \"infinity\" are accepted", hdr.depth);
+        }
+        if (hdr.method == "MOVE" && exists depth && depth != "infinity") {
             throw "403", "Cannot MOVE with specified depth";
         }
 
@@ -1264,7 +1456,7 @@ public class FsWebDavHandler inherits AbstractWebDavHandler {
         }
 
         # copy to root -> 403
-        if (dest_path == basePath) {
+        if (dest_path + "/" == basePath) {
             throw "403", "Cannot copy to root";
         }
 
@@ -1275,28 +1467,29 @@ public class FsWebDavHandler inherits AbstractWebDavHandler {
         }
 
         # check Overwrite header
-        if (hstat(dest_path)) {
+        bool created = !hstat(dest_path);
+        if (!created) {
             if (hdr.overwrite == "F") {
                 throw "412", "Target does exist and it cannot be overwriten";
             } else if (hdr.overwrite != "F") {
                 FsUtil::remove_path(dest_path);
             }
         }
-        #if (hdr.depth == "0") {
-        #    mkdir(dest_path);
-        #}
-        # TODO/FIXME: how to handle depth 1?
-        #else if (hdr.depth == 1) {
-        #}
-        #else {
-        FsUtil::copy_path(src_path, dest_path);
-        #}
+        if (depth == "0" && is_dir(src_path)) {
+            # a shallow copy creates the collection and its properties, but not its members
+            if (mkdir(dest_path)) {
+                throw "500", sprintf("cannot create collection %y: %s", dest_path, strerror());
+            }
+        } else {
+            FsUtil::copy_path(src_path, dest_path);
+        }
 
         if (copy_props) {
             copyProperties(src_path, dest_path);
         } else {
             moveProperties(src_path, dest_path);
         }
+        return created;
     }
 } # class FsWebDavHandler
 } # namespace WebDavHandler

@@ -12222,3 +12222,49 @@ each QName recursion level now take 24,280 bytes instead of 88,616, and the 128-
   until they are rebuilt.
 
 Audit: `audits/P9c-08-aot-valgrind-ci.md`.
+
+## P9k-01: the litmus WebDAV compliance suite in CI, and RFC 4918 write locks (2026-09-27)
+
+Decided 2026-09-27: `litmus` runs in CI. The Ubuntu qtest job installs it (`litmus` 0.17-1) and sets
+`QORE_XML_REQUIRE_LITMUS=1`, so the test fails instead of skipping when litmus is missing. Alpine has no package,
+so the test skips there, and says so. Before, the test printed an INFO line and passed without `litmus`: it had
+never run in CI or locally. The Salesforce test keeps skipping without credentials, as intended.
+
+Litmus then found WebDAV defects in `FsWebDavHandler`. All are fixed, and all five suites pass: basic 16/16,
+copymove 13/13, props 33/33, locks 40/40 and http 4/4.
+
+- **COPY `Depth: 0` copied members:** `hdr.depth ? ... : NOTHING` treated `"0"` as false, so a shallow copy of a
+  collection copied its members. The implementation was also commented out, with a TODO. A shallow copy now
+  creates the collection only (RFC 4918 section 9.8.3). Other values than `0` and `infinity` fail with 400.
+- **MOVE rejected `Depth: infinity`:** the check compared against `"infinite"`, so MOVE rejected the one value a
+  client may send.
+- **Wrong COPY/MOVE status:** they returned 201 only for `Overwrite: F`; they now return 201 for a new destination
+  and 204 for a replaced one (section 9.8.5).
+- **Copy to root:** it compared the destination with the base path including its trailing slash, so it was never
+  refused. It now fails with 403.
+- **LOCK rejected empty elements:** it tested the empty `exclusive`, `shared` and `write` elements by truth value.
+  Every LOCK request failed with 400.
+- **Write locks were not enforced, and no `If` header was evaluated:**
+  - `WebDavIfHeader` parses the header by section 10.4: tagged and untagged lists, `Not`, lock tokens and entity
+    tags.
+  - The new `checkPreconditions()` hook evaluates it for every method (412 if false) and requires the tokens of the
+    locks that apply (423 with `DAV:lock-token-submitted`). These are the resource's own locks, depth infinity
+    locks of its ancestors, the locks of a collection whose membership changes, and the locks below a deleted,
+    moved or replaced collection. A lock on a COPY source does not block the copy.
+  - The new abstract `AbstractWebDavLockHandler::getLocksInTree()` lists the locks below a collection. The lock API
+    has not been released (58942bd), so the addition breaks no released subclass.
+- **Refresh and UNLOCK scope:** refresh and UNLOCK required the lock root. They now accept any resource in the
+  lock's scope (sections 9.10.2 and 9.11).
+- **Server file paths in responses:** the lock discovery's `lockroot` and PROPPATCH's multistatus `href` gave the
+  server's file path. They now give the request URL.
+- **Entity tags:** they were unquoted and built from the device number, not the inode. They are now quoted strings
+  of inode, size and time.
+
+`test/webdav-locks.qtest` (7 cases, 111 assertions) covers each fix without litmus. Its six behavioural cases fail
+against the previous handler.
+
+Full suite on Qore 466733bc4: all 299 qtests pass without warnings; the 256 AOT test files pass (the WebDAV
+ones rerun after rebuilding the compiled module with the new source file); 556 Python tests pass in 6 shards; and
+litmus, required, passes in the Ubuntu CI image.
+
+Audit: `audits/P9k-01-webdav-litmus.md`.

@@ -208,6 +208,22 @@ public class InMemoryWebDavLockHandler inherits AbstractWebDavLockHandler {
     }
 
     #! Clean up expired locks
+    #! Get the locks on a resource and on all resources below it
+    /** @param resource the resource path
+        @return the locks whose root is the resource or one of its members, at any depth
+    */
+    list<hash<WebDavLockInfo>> getLocksInTree(string resource) {
+        AutoReadLock al(m_lock);
+        resource = normalizeResource(resource);
+        list<hash<WebDavLockInfo>> result = ();
+        foreach hash<auto> i in (resource_locks.pairIterator()) {
+            if (i.key == resource || i.key.equalPartial(resource + "/")) {
+                result += (map locks{$1}, i.value);
+            }
+        }
+        return result;
+    }
+
     cleanExpired() {
         AutoWriteLock al(m_lock);
         cleanExpiredInternal();

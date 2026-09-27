@@ -339,6 +339,10 @@ without the source directory. It first checks that every compiled module loads f
 test/docker_test/run-aot-qtests.sh build-debug
 ```
 
+The Ubuntu qtest job also installs the `litmus` WebDAV compliance suite and sets `QORE_XML_REQUIRE_LITMUS=1`, so
+`test/webdav_FsWebDavHandler_litmus.qtest` fails instead of skipping when `litmus` is missing there; Alpine has no
+`litmus` package, and the test skips explicitly without it.
+
 The `test-valgrind` job runs the native module's tests under valgrind (`test/docker_test/run-valgrind-qtests.sh`):
 the tests that load no in-repo Qore module and so exercise the C++ module and its bundled libxml2. Each must
 report no valgrind error and no definitely or indirectly lost memory. Valgrind is about 50 times slower than a
