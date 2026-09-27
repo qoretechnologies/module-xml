@@ -9,6 +9,7 @@ binding style and for one list-values item per value model, SOAP version and pro
 reports regressions and output changes as it should.
 """
 import json
+import os
 from pathlib import Path
 import sys
 import tempfile
@@ -79,6 +80,15 @@ class BenchmarkTests(unittest.TestCase):
         # a phase missing on either side is a failure
         failures, _, _ = benchmark.compare(reference, dict(reference, phases={"construction": 1000}), 0.25)
         self.assertEqual(2, len(failures))
+
+    def test_busy_recording(self):
+        # the load of each workload is taken when it finishes; a recording needs every one on a quiet machine
+        quiet, loaded = (os.cpu_count() or 1) / 4, (os.cpu_count() or 1) / 4 + 0.01
+        self.assertIsNone(benchmark.busy(quiet))
+        self.assertEqual(loaded, benchmark.busy(loaded))
+        self.assertEqual([], benchmark.busy_workloads({"a": {"load_average": quiet}, "b": {}}))
+        self.assertEqual(["a", "c"], benchmark.busy_workloads({"c": {"load_average": loaded}, "b": {"load_average": 0},
+                                                               "a": {"load_average": loaded + 10}}))
 
     def test_requires_a_release_build(self):
         self.assertEqual("Debug", benchmark.build_type(REPO / "build-debug"))

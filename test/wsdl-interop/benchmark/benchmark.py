@@ -130,10 +130,16 @@ def environment(build):
     }
 
 
-def busy():
-    """Returns the 1-minute load average when other work competes for the CPUs, else None."""
-    load = os.getloadavg()[0]
+def busy(load=None):
+    """Returns the 1-minute load average (by default the current one) when other work competes for the CPUs, else
+    None."""
+    load = os.getloadavg()[0] if load is None else load
     return load if load > (os.cpu_count() or 1) / 4 else None
+
+
+def busy_workloads(measured):
+    """Returns the workloads that finished on a busy machine: the load can rise after a run starts on a quiet one."""
+    return sorted(name for name, result in measured.items() if busy(result.get("load_average", 0)) is not None)
 
 
 def run_workloads(build, repetitions, names):
@@ -208,6 +214,11 @@ def main(argv=None):
     measured = run_workloads(args.build, args.repetitions, names)
     if args.json:
         Path(args.json).write_text(json.dumps(measured, indent=1, sort_keys=True) + "\n")
+    if args.record and not args.force and busy_workloads(measured):
+        print("refusing to record a reference: the machine became busy during " + ", ".join(
+            f"{name} (load {measured[name]['load_average']})" for name in busy_workloads(measured))
+            + "; use --force to record anyway", file=sys.stderr)
+        return 2
     if args.record:
         tolerance = args.tolerance if args.tolerance is not None else DEFAULT_TOLERANCE
         REFERENCE.write_text(json.dumps({

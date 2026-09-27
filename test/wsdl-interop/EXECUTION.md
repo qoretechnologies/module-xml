@@ -12388,3 +12388,19 @@ Full suite on Qore e82fa0eb0: all 300 qtests pass without warnings; with all 17 
 files pass; 556 Python tests pass in 6 shards.
 
 Audit: `audits/P9l-02-single-selection.md`.
+
+## P9l-03: the benchmark refuses recordings made under load (2026-09-27)
+
+The P9b reference is due for a new recording, since it predates P9b-02, P9l-01 and P9l-02. A recording on
+2026-09-27 started at load 6.5 on 32 CPUs, below the refusal threshold of 8. Other sessions then raised the load to
+17-26 during the 15-minute run, and some list-values phases measured up to three times their old times (`provider`
+8.9 s, then 26.5 s), which reflects the load, not the code. Binding-styles `request` and `request-decode` still
+measured about half their old times (30.2 s to 14.6 s, 40.1 s to 23.7 s), consistent with P9b-01 to P9l-02. The
+recording was discarded.
+
+`benchmark.py` checked the load only before the run, although it records each workload's load when the workload
+finishes. `--record` now also refuses when any workload finished on a busy machine (`busy_workloads()`), unless
+`--force` is given. `test_benchmark.py` checks the threshold and the selection of busy workloads. The reference
+stays at its P9b recording until a quiet machine is available.
+
+Audit: `audits/P9l-03-benchmark-load.md`.
