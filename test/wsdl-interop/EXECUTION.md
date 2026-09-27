@@ -12268,3 +12268,20 @@ ones rerun after rebuilding the compiled module with the new source file); 556 P
 litmus, required, passes in the Ubuntu CI image.
 
 Audit: `audits/P9k-01-webdav-litmus.md`.
+
+## P9 acceptance (2026-09-27)
+
+The CI images were rebuilt with Qore e82fa0eb0, which contains 486392806, 820305238 and 466733bc4. The user pushed
+2a16eca (P9i-01, P9c-08 and P9k-01), and child pipeline 57689 passed every job.
+
+- **Qore test jobs:** on Ubuntu and Alpine, all 17 compiled modules load from the build, and 256 AOT test files
+  pass after the source pass.
+- **litmus:** on Ubuntu, it is installed and required, and all five suites pass in both passes. On Alpine, the test
+  skips explicitly.
+- **test-valgrind:** the 43 native tests are clean.
+- **Python suite:** it passes in 12 shards, with both verify jobs.
+
+`P9-acceptance.md` records the evidence for every P9 requirement and final criterion, and `PLAN.md` marks P9
+accepted.
+
+Audit: `audits/P9-acceptance.md`.

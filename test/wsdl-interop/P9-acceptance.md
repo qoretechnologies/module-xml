@@ -2,11 +2,17 @@
 
 Copyright (C) 2026 Qore Technologies, s.r.o.
 
-**Status: pending CI confirmation.** All criteria are met locally with the Qore installed on 2026-09-26
-(466733bc4). The final pipeline needs CI images built with that Qore. The images of 2026-09-25 (Qore 331b37b9e)
-predate three fixes that the new AOT pass depends on: 486392806 (AOT stack frames), 820305238 (qmod resource
-directories) and 466733bc4 (FileLocationHandler octets). P9a is accepted separately; see
-[P9a acceptance](P9a-acceptance.md).
+Accepted 2026-09-27 on `develop` at 2a16eca. Child pipeline 57689 passed every job on CI images with Qore
+e82fa0eb0, which includes the three Qore fixes the new jobs depend on: 486392806 (AOT stack frames), 820305238 (qmod
+resource directories) and 466733bc4 (FileLocationHandler octets).
+
+- **Qore test jobs, Ubuntu and Alpine:** both run the source pass and the AOT pass. All 17 compiled modules load from
+  the build, and 256 AOT test files run.
+- **litmus, Ubuntu:** installed and required; all five suites pass in both passes.
+- **test-valgrind:** the 43 native tests are clean.
+- **Python suite:** 12 shards pass, and the verify jobs pass on both distributions.
+
+P9a is accepted separately; see [P9a acceptance](P9a-acceptance.md).
 
 ## P9 requirements
 
@@ -40,7 +46,3 @@ The litmus WebDAV compliance suite is no longer skipped: the Ubuntu qtest job in
 `QORE_XML_REQUIRE_LITMUS=1`, so `webdav_FsWebDavHandler_litmus.qtest` fails instead of skipping there (decided
 2026-09-27). Alpine has no `litmus` package, so the test skips explicitly there. Running it found WebDAV defects
 that are now fixed (P9k-01), and all five litmus suites pass.
-
-## Open
-
-- A pipeline with CI images built from Qore 466733bc4 or later, including the P9c-08 jobs.
