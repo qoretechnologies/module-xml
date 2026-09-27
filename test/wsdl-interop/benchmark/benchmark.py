@@ -122,6 +122,9 @@ def environment(build):
         "cpus": os.cpu_count(),
         "system": platform.platform(),
         "qore": qore.splitlines()[1].strip() if len(qore.splitlines()) > 1 else qore,
+        # the build's source revision; the version line alone names no build
+        "qore_git_hash": next((line.split(":", 1)[1].strip() for line in qore.splitlines()
+                               if line.strip().startswith("git hash:")), None),
         "libqore_sha256": sha256(Path(libqore).resolve()) if libqore else None,
         "module_xml_commit": run(["git", "-C", str(REPO), "rev-parse", "HEAD"]),
         "module_xml_dirty": bool(run(["git", "-C", str(REPO), "status", "--porcelain", "--untracked-files=no"])),

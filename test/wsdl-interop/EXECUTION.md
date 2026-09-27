@@ -12404,3 +12404,31 @@ finishes. `--record` now also refuses when any workload finished on a busy machi
 stays at its P9b recording until a quiet machine is available.
 
 Audit: `audits/P9l-03-benchmark-load.md`.
+
+## P9l-04: benchmark hygiene, and a Qore-side slowdown of the provider phase (2026-09-27)
+
+A quiet recording (load 4.3-4.4 through the run, accepted by the P9l-03 check) measured these list-values phases
+against the P9b reference: construction -6%, copy -8%, conversion -19%, serialization -26% and sample -23%, but
+`provider` +93% (8.9 s to 17.2 s). Binding-styles `request` measured -62% and `request-decode` -53%.
+
+**Provider phase:** timed with the current Qore on a quiet machine, alternating module-xml's `qlib` at the reference
+(0ee292d), after P9b-02 (c9b6233), after P9e-01 (1317ca9) and at HEAD. The phase took 16.6, 16.6, 16.9 and 17.5 s
+respectively: the module code did not slow it down. Between the recordings only libqore changed, from the build
+installed on 2026-09-25 to e82fa0eb0.
+
+The phase converts message parts to data provider types and makes a `Serializable` round trip of them. Its time is
+mostly WSDL's sample-value generation (numeric and IEEE samples, facet validation, simple value serialization), plus
+the builtin `Serializable` calls and about 10% in Qore's DataProvider module. The same code became faster in the
+other phases. This is handed off to the Qore team with a reproducer: `/tmp/qore-provider-phase-regression/`.
+
+**Hygiene:**
+
+- `benchmark/__pycache__/benchmark.cpython-314.pyc` was tracked in git by mistake (added in P9b). Every run
+  rewrote it, so `module_xml_dirty` was always true. It is no longer tracked, and `.gitignore` ignores
+  `__pycache__/`.
+- The reference now also records Qore's git hash (`qore_git_hash`). The version line alone could not name the
+  reference's Qore build.
+
+The reference is not re-recorded here. A recording needs a clean working tree and a quiet machine.
+
+Audit: `audits/P9l-04-benchmark-hygiene.md`.
