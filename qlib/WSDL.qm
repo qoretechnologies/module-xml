@@ -378,6 +378,10 @@ if (policy.required) {
       results, instead of recompiling it for every value: a 50-item SOAP order serializes about twice as fast
     - decoding checks each distinct element name once per document and each distinct namespace binding once, and
       skips namespace processing for elements without attributes: literal SOAP messages decode 20-30% faster
+    - SOAP-encoded messages decode with about 9-11% fewer instructions: the namespaces and expanded attributes of an
+      attribute set are derived once and remembered for the repeated sets of a document (such as the \c xsi:type
+      annotation of every accessor), valid \c xsi:type annotations are resolved once, and an annotation naming the
+      declared builtin type selects it without constructing another type object; results are unchanged
     - received RPC messages are checked for their part accessors: the accessor of a type part in a literal message
       must not be namespace-qualified (WS-I Basic Profile R2735), while element parts and encoded messages may have
       qualified accessors; an omitted literal accessor is now decoded as an absent value (\c NOTHING) for every
@@ -3459,6 +3463,12 @@ public class XsdBase inherits Qore::Serializable {
         # namespace bindings found valid, keyed by the prefix length, the prefix and the URI; the whole hash is
         # replaced on each update, so that concurrent readers see a consistent hash
         static hash<string, bool> ValidBindings();
+        # the most attribute sets remembered with the information derived from them; a document's elements repeat a
+        # few attribute sets, such as the type annotation of every accessor in a SOAP-encoded message
+        const AttributeInfoLimit = 256;
+        # element namespaces and expanded attributes derived from an attribute set, keyed by attributeKey(); the whole
+        # hash is replaced on each update, so that concurrent readers see a consistent hash
+        static hash<string, hash<auto>> AttributeInfo();
     }
 
     #! obtains the in-scope prefixes declared by an XML attribute hash
@@ -3572,6 +3582,38 @@ public class XsdBase inherits Qore::Serializable {
         if (!attributes) {
             return {};
         }
+        string key = attributeKey(attributes);
+        *hash<auto> info = AttributeInfo{key};
+        if (info.hasKey("expanded")) {
+            return info.expanded;
+        }
+        hash<auto> expanded = expandAttributes(attributes);
+        rememberAttributeInfo(key, attributes, "expanded", expanded);
+        return expanded;
+    }
+
+    # returns the key of an attribute set for AttributeInfo: the formatted lists of its names and of its values, in
+    # which every string is quoted and escaped, so that distinct sets of string values have distinct keys; a set with
+    # another value type cannot share the key of a remembered set, since only a string is formatted with a quote
+    private static string attributeKey(hash<auto> attributes) {
+        return sprintf("%y%y", keys attributes, attributes.values());
+    }
+
+    # remembers information derived from a valid attribute set of string values; a failed derivation is never
+    # remembered
+    private static rememberAttributeInfo(string key, hash<auto> attributes, string field, auto value) {
+        foreach auto v in (attributes.iterator()) {
+            if (v.typeCode() != NT_STRING) {
+                return;
+            }
+        }
+        hash<string, hash<auto>> known = AttributeInfo;
+        hash<string, hash<auto>> next = known.size() >= AttributeInfoLimit ? {} : known;
+        next{key}{field} = value;
+        AttributeInfo = next;
+    }
+
+    private static hash<auto> expandAttributes(hash<auto> attributes) {
         hash<string, string> namespaces = getAttributeNamespaces(attributes);
         hash<auto> expanded();
         foreach string key in (keys attributes) {
@@ -3608,6 +3650,22 @@ public class XsdBase inherits Qore::Serializable {
         @since %WSDL 0.5.8
     */
     static hash<string, string> getElementNamespaces(*hash<auto> attributes,
+            *hash<string, string> inherited) {
+        # without inherited bindings, the result depends only on the attribute set
+        if (inherited || !attributes) {
+            return deriveElementNamespaces(attributes, inherited);
+        }
+        string key = attributeKey(attributes);
+        *hash<auto> info = AttributeInfo{key};
+        if (info.hasKey("namespaces")) {
+            return info.namespaces;
+        }
+        hash<string, string> namespaces = deriveElementNamespaces(attributes);
+        rememberAttributeInfo(key, attributes, "namespaces", namespaces);
+        return namespaces;
+    }
+
+    private static hash<string, string> deriveElementNamespaces(*hash<auto> attributes,
             *hash<string, string> inherited) {
         hash<string, string> prefixes = inherited ?? {};
         *string default_ns = remove prefixes{""};
@@ -34068,6 +34126,14 @@ hashdecl XsdTypeSubstitutionPair {
 # Instance derivation uses a fixed exclusion set and resolved component identities.
 # Each pair is visited once; shared union graphs never expand repeated dependency paths.
 class XsdTypeSubstitutionHelper {
+    # the most type annotations remembered as valid QNames; a document uses few distinct annotations
+    const AnnotationLimit = 256;
+    private {
+        # the prefix and local name of each type annotation text found to be a valid QName; the whole hash is
+        # replaced on each update, so that concurrent readers see a consistent hash
+        static hash<string, list<string>> Annotations();
+    }
+
     const BuiltinParents = {
         "normalizedString": "string", "token": "normalizedString", "language": "token",
         "Name": "token", "NCName": "Name", "ID": "NCName", "IDREF": "NCName", "ENTITY": "NCName",
@@ -34226,6 +34292,30 @@ class XsdTypeSubstitutionHelper {
         }
     }
 
+    # resolves a type annotation in the instance QName scope; returns its namespace URI and local name
+    private static list<string> resolveAnnotation(auto annotation) {
+        if (annotation.typeCode() == NT_STRING) {
+            # a remembered valid text needs only its prefix binding, which the scope validated when it was declared
+            *list<string> parts = Annotations{annotation};
+            if (parts) {
+                string prefix = parts[0];
+                *string uri = prefix == "xml" ? "http://www.w3.org/XML/1998/namespace" : QNameInputNamespaces{prefix};
+                if (!prefix || uri) {
+                    return (uri ?? "", parts[1]);
+                }
+            }
+        }
+        XsdQNameValue identity = XsdQNameValueHelper::resolve(annotation, SOAP_DESERIALIZATION_ERROR,
+            QNameInputNamespaces);
+        if (annotation.typeCode() == NT_STRING) {
+            hash<string, list<string>> known = Annotations;
+            hash<string, list<string>> next = known.size() >= AnnotationLimit ? {} : known;
+            next{annotation} = (identity.getPrefix(), identity.getLocalName());
+            Annotations = next;
+        }
+        return (identity.getNamespaceUri(), identity.getLocalName());
+    }
+
     # The caller owns the instance QName scope. Consume only the resolved type annotation;
     # namespace bindings and other attributes remain available to scalar/content conversion.
     static XsdAbstractType select(reference<auto> value, XsdAbstractType declared,
@@ -34234,13 +34324,14 @@ class XsdTypeSubstitutionHelper {
         hash<auto> attributes = XsdBase::getExpandedAttributes(value.typeCode() == NT_HASH ? value."^attributes^" : NOTHING);
         string attribute = type_qname(XSI_NS, "type");
         if (exists attributes{attribute}) {
-            XsdQNameValue identity = XsdQNameValueHelper::resolve(attributes{attribute},
-                SOAP_DESERIALIZATION_ERROR, QNameInputNamespaces);
-            string uri = identity.getNamespaceUri();
-            string local = identity.getLocalName();
+            (string uri, string local) = resolveAnnotation(attributes{attribute});
             *string builtin = uri == XSD_NS ? (local != "binary" && XsdBaseType::BuiltinTypes{local} ? local : NOTHING)
                 : (uri == SOAP_ENCODING ? XsdArrayType::encodingBuiltin(local) : NOTHING);
-            if (builtin) {
+            if (builtin && declared.name == builtin && XsdTypeSubstitutionHelper::builtin(declared, builtin)) {
+                # the annotation names the declared builtin type itself, as the accessors of SOAP-encoded messages
+                # do; a separate type object would only be found the same type and replaced by the declared one
+                selected = declared;
+            } else if (builtin) {
                 # SOAP 1.1 section 5.2.1 names each builtin simple type in the encoding namespace as well; it
                 # only adds the id and href reference attributes. Independent output state avoids populating a
                 # shared schema's lazy builtin cache.
@@ -34266,8 +34357,11 @@ class XsdTypeSubstitutionHelper {
                     remove value."^attributes^"{key};
                     continue;
                 }
+                if (!key.endsWith(":type")) {
+                    continue;
+                }
                 list<string> parts = key.split(":");
-                if (parts.size() == 2 && parts[1] == "type" && QNameInputNamespaces{parts[0]} == XSI_NS) {
+                if (parts.size() == 2 && QNameInputNamespaces{parts[0]} == XSI_NS) {
                     remove value."^attributes^"{key};
                 }
             }

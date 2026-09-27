@@ -1,0 +1,180 @@
+#!/usr/bin/env qore
+# -*- mode: qore; indent-tabs-mode: nil -*-
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires xml
+%requires ../qlib/WSDL.qm
+
+%exec-class AttributeInfoCacheTest
+
+# The namespaces and expanded attributes derived from an attribute set, and the resolution of xsi:type annotations,
+# are remembered. These tests check that the remembered results equal a fresh derivation: every set is kept apart,
+# failures are never remembered, and an annotation resolves in the scope of each element.
+public class AttributeInfoCacheTest inherits QUnit::Test {
+    private {
+        const XSI = "http://www.w3.org/2001/XMLSchema-instance";
+        const Encoding = "http://schemas.xmlsoap.org/soap/encoding/";
+        const Envelope = "http://schemas.xmlsoap.org/soap/envelope/";
+    }
+
+    constructor() : Test("AttributeInfoCacheTest", "1.0") {
+        addTestCase("repeated attribute sets give the derived results", \repeated());
+        addTestCase("attribute sets that format alike are kept apart", \distinct());
+        addTestCase("invalid attribute sets are rejected every time", \invalid());
+        addTestCase("sets with other value types keep their values", \values());
+        addTestCase("sets are consistent beyond the memo limit and between threads", \limit());
+        addTestCase("type annotations resolve in each element's scope", \annotations());
+        addTestCase("builtin annotations select the declared or derived type", \builtins());
+        set_return_value(main());
+    }
+
+    repeated() {
+        hash<auto> attributes = {"p:a": "1", "b": "2", "xmlns:p": "urn:x"};
+        hash<auto> expected = {"{urn:x}a": "1", "{}b": "2"};
+        for (int i = 0; i < 3; ++i) {
+            assertEq(expected, XsdBase::getExpandedAttributes(attributes));
+            assertEq({"xml": "http://www.w3.org/XML/1998/namespace", "p": "urn:x"},
+                XsdBase::getElementNamespaces(attributes));
+        }
+        # the order of the set is kept in its results
+        assertEq(("{}b", "{urn:x}a"), keys XsdBase::getExpandedAttributes({"b": "2", "p:a": "1", "xmlns:p": "urn:x"}));
+        # a default namespace is part of the element namespaces, not of the attributes
+        assertEq("urn:d", XsdBase::getElementNamespaces({"xmlns": "urn:d", "a": "1"}){""});
+        assertEq({"{}a": "1"}, XsdBase::getExpandedAttributes({"xmlns": "urn:d", "a": "1"}));
+        # inherited bindings still apply
+        assertEq("urn:i", XsdBase::getElementNamespaces({"a": "1"}, {"q": "urn:i"}).q);
+    }
+
+    distinct() {
+        # these sets have the same %y representation
+        hash<auto> plain = {"a": "b", "c": "d"};
+        hash<auto> crafted = {"a: \"b\", c": "d"};
+        assertEq(sprintf("%y", plain), sprintf("%y", crafted));
+        assertEq({"{}a": "b", "{}c": "d"}, XsdBase::getExpandedAttributes(plain));
+        # the crafted name has an unbound prefix
+        assertThrows("SOAP-DESERIALIZATION-ERROR", \XsdBase::getExpandedAttributes(), (crafted,));
+        assertEq({"{}a": "b", "{}c": "d"}, XsdBase::getExpandedAttributes(plain));
+        # values that differ only by escaping
+        assertEq({"{}a": "x\", \"y"}, XsdBase::getExpandedAttributes({"a": "x\", \"y"}));
+        assertEq({"{}a": "x", "{}y": ""}, XsdBase::getExpandedAttributes({"a": "x", "y": ""}));
+        # the same prefix bound to another namespace
+        assertEq({"{urn:one}a": "1"}, XsdBase::getExpandedAttributes({"p:a": "1", "xmlns:p": "urn:one"}));
+        assertEq({"{urn:two}a": "1"}, XsdBase::getExpandedAttributes({"p:a": "1", "xmlns:p": "urn:two"}));
+    }
+
+    invalid() {
+        for (int i = 0; i < 2; ++i) {
+            assertThrows("SOAP-DESERIALIZATION-ERROR", "unbound XML attribute prefix",
+                \XsdBase::getExpandedAttributes(), ({"q:a": "1"},));
+            assertThrows("SOAP-DESERIALIZATION-ERROR", "invalid XML namespace binding",
+                \XsdBase::getElementNamespaces(), ({"xmlns:p": ""},));
+            assertThrows("SOAP-DESERIALIZATION-ERROR", "duplicate expanded attribute",
+                \XsdBase::getExpandedAttributes(), ({"p:a": "1", "q:a": "2", "xmlns:p": "urn:x", "xmlns:q": "urn:x"},));
+            assertThrows("SOAP-DESERIALIZATION-ERROR", "reserved default XML namespace",
+                \XsdBase::getElementNamespaces(), ({"xmlns": "http://www.w3.org/2000/xmlns/"},));
+        }
+    }
+
+    values() {
+        # a set with another value type is derived each time, and never mistaken for a set of strings
+        assertEq({"{}a": 1}, XsdBase::getExpandedAttributes({"a": 1}));
+        assertEq({"{}a": "1"}, XsdBase::getExpandedAttributes({"a": "1"}));
+        assertEq({"{}a": 1}, XsdBase::getExpandedAttributes({"a": 1}));
+        assertEq({"{}a": <0102>}, XsdBase::getExpandedAttributes({"a": <0102>}));
+        assertEq({"{}a": <0304>}, XsdBase::getExpandedAttributes({"a": <0304>}));
+        XsdQNameValue first("urn:x", "p:v");
+        XsdQNameValue second("urn:y", "p:v");
+        assertTrue(XsdBase::getExpandedAttributes({"a": first})."{}a" === first);
+        assertTrue(XsdBase::getExpandedAttributes({"a": second})."{}a" === second);
+    }
+
+    limit() {
+        # more distinct sets than the memo keeps, from several threads
+        Counter done(4);
+        list<string> errors();
+        Mutex m();
+        for (int t = 0; t < 4; ++t) {
+            background sub () {
+                on_exit done.dec();
+                try {
+                    for (int i = 0; i < 300; ++i) {
+                        string uri = sprintf("urn:t%d:%d", t, i);
+                        hash<auto> result = XsdBase::getExpandedAttributes({"p:a": string(i), "xmlns:p": uri});
+                        if (result != {"{" + uri + "}a": string(i)}) {
+                            m.lock(); errors += sprintf("%y", result); m.unlock();
+                        }
+                    }
+                } catch (hash<ExceptionInfo> ex) {
+                    m.lock(); errors += ex.desc; m.unlock();
+                }
+            }();
+        }
+        done.waitForZero();
+        assertEq((), errors);
+    }
+
+    static string wsdl(string part_type, *string extra_types) {
+        return sprintf('<definitions xmlns="http://schemas.xmlsoap.org/wsdl/" xmlns:soap="http://schemas.xmlsoap.org/wsdl/soap/"
+            xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:t="urn:t" targetNamespace="urn:t">
+          <types><xsd:schema targetNamespace="urn:t"><xsd:complexType name="Base"><xsd:sequence>
+            <xsd:element name="a" type="xsd:string"/></xsd:sequence></xsd:complexType>
+            <xsd:complexType name="Derived"><xsd:complexContent><xsd:extension base="t:Base"><xsd:sequence>
+              <xsd:element name="b" type="xsd:string"/></xsd:sequence></xsd:extension></xsd:complexContent>
+            </xsd:complexType>%s</xsd:schema></types>
+          <message name="In"><part name="v" type="%s"/></message>
+          <message name="Out"><part name="r" type="xsd:string"/></message>
+          <portType name="P"><operation name="op"><input message="t:In"/><output message="t:Out"/></operation></portType>
+          <binding name="B" type="t:P"><soap:binding style="rpc" transport="http://schemas.xmlsoap.org/soap/http"/>
+            <operation name="op"><soap:operation soapAction="urn:op"/>
+              <input><soap:body use="encoded" namespace="urn:rpc" encodingStyle="%s"/></input>
+              <output><soap:body use="encoded" namespace="urn:rpc" encodingStyle="%s"/></output></operation></binding>
+          <service name="S"><port name="p" binding="t:B"><soap:address location="http://localhost/x"/></port></service>
+        </definitions>', extra_types ?? "", part_type, Encoding, Encoding);
+    }
+
+    static auto decode(WSOperation op, string accessor) {
+        string xml = sprintf('<e:Envelope xmlns:e="%s" xmlns:xsi="%s"><e:Body><w:op xmlns:w="urn:rpc" '
+            'e:encodingStyle="%s">%s</w:op></e:Body></e:Envelope>', Envelope, XSI, Encoding, accessor);
+        hash<auto> msg = WSDLLib::parseMultiPartSOAPMessage({"content-type": "text/xml", "body": xml}, False, True);
+        return op.deserializeRequest(WSDLLib::parseSOAPMessage(msg, False, True), "B");
+    }
+
+    annotations() {
+        WebService ws(wsdl("t:Base"));
+        WSOperation op = ws.getBindingOperation("B", "op");
+        # the same annotation text names the derived type, then a type of another namespace, then nothing
+        for (int i = 0; i < 2; ++i) {
+            auto v = decode(op, '<v xmlns:p="urn:t" xsi:type="p:Derived"><a>1</a><b>2</b></v>');
+            assertEq({"a": "1", "b": "2"}, v);
+            assertThrows("SOAP-DESERIALIZATION-ERROR", "unknown explicit type \\{urn:other\\}Derived", \decode(),
+                (op, '<v xmlns:p="urn:other" xsi:type="p:Derived"><a>1</a><b>2</b></v>'));
+            assertThrows("SOAP-DESERIALIZATION-ERROR", "unbound QName prefix", \decode(),
+                (op, '<v xsi:type="p:Derived"><a>1</a><b>2</b></v>'));
+            # an invalid annotation is rejected every time
+            assertThrows("SOAP-DESERIALIZATION-ERROR", \decode(), (op, '<v xsi:type="p:"><a>1</a></v>'));
+        }
+    }
+
+    builtins() {
+        # the declared builtin itself, in the schema and in the SOAP encoding namespace
+        WSOperation int_op = new WebService(wsdl("xsd:int")).getBindingOperation("B", "op");
+        for (int i = 0; i < 2; ++i) {
+            assertEq(7, decode(int_op, '<v xmlns:x="http://www.w3.org/2001/XMLSchema" xsi:type="x:int">7</v>'));
+            assertEq(7, decode(int_op, '<v xmlns:enc="http://schemas.xmlsoap.org/soap/encoding/" xsi:type="enc:int">7</v>'));
+            # a type that does not derive from the declared one is rejected
+            assertThrows("SOAP-DESERIALIZATION-ERROR", \decode(),
+                (int_op, '<v xmlns:x="http://www.w3.org/2001/XMLSchema" xsi:type="x:string">7</v>'));
+        }
+        # a builtin derived from the declared builtin selects the derived type
+        WSOperation decimal_op = new WebService(wsdl("xsd:decimal")).getBindingOperation("B", "op");
+        auto v = decode(decimal_op, '<v xmlns:x="http://www.w3.org/2001/XMLSchema" xsi:type="x:int">7</v>');
+        assertEq(7, v);
+        assertEq(NT_INT, v.typeCode());
+        auto d = decode(decimal_op, '<v xmlns:x="http://www.w3.org/2001/XMLSchema" xsi:type="x:decimal">7.5</v>');
+        # xsd:decimal decodes to a float by default
+        assertEq(7.5, d);
+    }
+}

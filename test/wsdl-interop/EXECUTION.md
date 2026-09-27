@@ -12285,3 +12285,59 @@ The CI images were rebuilt with Qore e82fa0eb0, which contains 486392806, 820305
 accepted.
 
 Audit: `audits/P9-acceptance.md`.
+
+## P9l-01: SOAP-encoded decoding (2026-09-27)
+
+P9b-02 left RPC/encoded decoding the most expensive path. A 50-item order took about 453 ms to decode, against
+about 240 ms for the literal styles. The cause, recorded then, was that each element's attribute and namespace
+information is derived again by several consumers.
+
+**Profile:** a sampling profile of `binding-styles.wsdl`, RPC/encoded SOAP 1.1, showed where the time goes:
+
+- The type substitution `select()` took 22.6% inclusive. For every accessor it expanded the attributes again,
+  resolved its `xsi:type` into a new `XsdQNameValue`, and constructed a new `XsdBaseType` with its own
+  `Namespaces` object, only to find it the same type as the declared one and replace it.
+- Deriving namespaces again took another 30%, in `getAttributeNamespaces()`, `getElementNamespaces()` and
+  `getExpandedAttributes()`.
+
+**Changes, all in `qlib/WSDL.qm`:**
+
+- **Attribute sets:** `XsdBase::getElementNamespaces()`, without inherited bindings, and
+  `XsdBase::getExpandedAttributes()` remember their results per attribute set, in a bounded (256) copy-on-write
+  memo like `ValidBindings`. The key is `sprintf("%y%y", keys, values)`. It is injective for sets of string values,
+  because every string, name or value, is quoted and escaped, and a set with another value type cannot share a
+  remembered key. A single `%y` of the hash would not be injective: an unquoted name such as `a: "b", c` formats
+  like the two-name set `{a: "b", c: "d"}`, and the test checks this case. Only sets of string values are
+  remembered, and failed derivations never are.
+- **Type annotations:** `select()` remembers each valid `xsi:type` text as its prefix and local name, and resolves
+  the prefix in the element's own scope each time. An unbound prefix falls back to the full resolution, so it still
+  gets its error.
+- **Declared builtin:** an annotation naming the declared builtin type itself selects the declared type directly.
+  The old path reached the same result after constructing and comparing another type object.
+- **Tried and not kept:** replacing the per-attribute regular expressions with string operations made no measurable
+  difference, so it was reverted.
+
+**Result:** the machine was under load (load average about 38), so wall time was not a usable measure. User-space
+instruction counts (`perf stat -e instructions:u`, 30 decodes each, old and new module alternated) showed:
+
+| Binding | Old | New | Change |
+| --- | --- | --- | --- |
+| RPC/encoded 1.1 | 91.8e9 | 81.8e9 | -10.9% |
+| RPC/encoded 1.2 | 99.0e9 | 89.9e9 | -9.1% |
+| document/literal 1.1 | 68.0e9 | 68.0e9 | -0.1% |
+| RPC/literal 1.2 | 68.4e9 | 68.1e9 | -0.4% |
+
+The benchmark outputs are byte-identical to the P9b reference (`test_benchmark.py`). The reference timings are not
+re-recorded.
+
+**Tests:** `test/wsdl-attribute-info-cache.qtest` has 7 cases and 51 assertions. It covers repeated sets, sets that
+format alike under one `%y`, invalid sets rejected every time, other value types, the memo limit from four threads,
+annotations whose prefix is bound to other namespaces or unbound, and builtin annotations, both declared and
+derived. It passes against the previous module, since the results are unchanged. It fails against a module with a
+single `%y` key ("attribute sets that format alike are kept apart") and against an annotation memo that ignores the
+element's scope ("type annotations resolve in each element's scope").
+
+Full suite on Qore e82fa0eb0: all 300 qtests pass without warnings, 257 AOT test files pass, and 556 Python tests
+pass in 6 shards.
+
+Audit: `audits/P9l-01-encoded-decoding.md`.
