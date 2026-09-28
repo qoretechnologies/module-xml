@@ -12578,3 +12578,31 @@ Tests: `wsdl-sample-cache.qtest` 5/51, `wsdl-provider-examples.qtest` 5/301, `so
 (`localNamespaces()` 5, `soapTestCase()` 2). This is QUnit's accounting of expected nested failures, not a defect.
 
 Audit: `audits/P9l-08-provider-examples-dataprovider.md`.
+
+## P9l-09: attribute and message examples with the current DataProvider module (2026-09-28)
+
+The full suite with Qore 8c9b43574 found two more failures that also occur at ee677de, before P9l-08:
+`wsdl-recursive-providers.qtest` (the example of a record type with a required attribute had no value) and
+`wsdl-cxf-replay.qtest` (the example of a document/literal message with a nillable part could not be serialized:
+"SOAP elements cannot supply every selected message part"). The cause is the same Qore change as in P9l-08
+(858269ba4): generated examples are validated and discarded when rejected, and optional record fields without an
+example are omitted.
+
+- `XsdAttributeDataType` wraps an attribute's scalar provider with the attribute's requiredness. It had no example
+  of its own, so the generic placeholder of its value type was used; the DataProvider module now rejects it for an
+  `xs:integer` attribute, and a required attribute left the attribute hash, and so the record, without an example.
+  The wrapper's example is now the wrapped provider's example, which satisfies the attribute's XSD type.
+- A message example omitted a part whose example is absent, such as a nillable element: the generic record example
+  now omits optional fields without an example. Every part of a message is present in the message, and an explicit
+  no-value part serializes as `xsi:nil` (CXF case `bare-5`), so `XsdMessageDataType` builds the part map itself and
+  keeps each part's key.
+
+Both implementations use the `getExampleValueImpl()` hook, so the DataProvider module's cycle handling and
+validation still apply. `wsdl-recursive-providers.qtest` 11/207, `wsdl-cxf-replay.qtest` 5/1393,
+`wsdl-provider-examples.qtest` 5/301 and `wsdl-sample-cache.qtest` 5/51 pass.
+
+**Finding (not changed):** `XsdMessageDataType::acceptsValue()` accepts a document/literal message without the key
+of a nillable part, which serialization then rejects, since each part must be present. Requiring the key would
+change validation of header and RPC parts as well, and needs a decision.
+
+Audit: `audits/P9l-09-attribute-message-examples.md`.
