@@ -12546,3 +12546,35 @@ P9b-02 and P9l-01 to P9l-05. Every output digest is unchanged. Against the previ
 
 The provider phase remains 8% slower than the previous reference, which predates P9e-01's valid provider examples;
 the residual cost is described in P9l-05.
+
+## P9l-08: provider examples with the current DataProvider module (2026-09-28)
+
+With Qore 8c9b43574, installed on 2026-09-28, two example tests failed that passed at P9l-05 with Qore 6f6df181:
+`wsdl-sample-cache.qtest` (the optional copy of a restricted decimal provider had no example) and
+`wsdl-provider-examples.qtest` (a message with an ENTITY field raised `MISSING-VALUE-ERROR` instead of the schema's
+`RUNTIME-TYPE-ERROR`). Both fail on a clean checkout of ee677de.
+
+**Cause:** Qore 858269ba4 ("keep generated schema examples within their constraints") changed
+`AbstractDataProviderType::getExampleValue()`: it validates the example from `getExampleValueImpl()` with the
+type's own `acceptsValue()` and returns no example when that raises an exception. WSDL depended on the old behavior
+in two places:
+- `XsdExampleHelper::choose()` tries the generic example first. The generic example of a restricted provider is now
+  absent where the placeholder violates the restriction, and an optional provider accepts an absent value, so
+  `choose()` returned no example instead of the schema sample.
+- `XsdMessageDataType::getExampleValue()` generated the part map with `HashDataType::getExampleValue()`, which now
+  validates it with the message's `acceptsValue()` and discards the diagnostic; the message's own check then
+  received no value and raised `MISSING-VALUE-ERROR`.
+
+**Fix:** `choose()` skips absent candidates: an absent value is not an example. `XsdMessageDataType` generates and
+checks its example in `getExampleValueImpl()`, which the DataProvider module calls outside its validation, so the
+schema's diagnostic propagates as documented. `getExampleValueImpl()` exists since Qore 62422fe5d, which the CI
+images (e82fa0eb0) contain; with them, `getExampleValue()` does not validate, and the result is the same.
+
+Tests: `wsdl-sample-cache.qtest` 5/51, `wsdl-provider-examples.qtest` 5/301, `soap.qtest` 25 cases and
+`test_provider_examples.py` pass with Qore 8c9b43574.
+
+`soap.qtest` reports 556 assertions and 549 successes although every case passes: the 7 are the inner assertions of
+`compareSoapMsgs()`, which the negative cases expect to fail inside `assertThrows("TEST-EXCEPTION", ...)`
+(`localNamespaces()` 5, `soapTestCase()` 2). This is QUnit's accounting of expected nested failures, not a defect.
+
+Audit: `audits/P9l-08-provider-examples-dataprovider.md`.
