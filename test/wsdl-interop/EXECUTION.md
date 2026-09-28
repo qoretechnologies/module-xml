@@ -12524,3 +12524,25 @@ or only in the 1-minute one, is refused, and that the 15-minute average is ignor
 the test fails.
 
 Audit: `audits/P9l-06-benchmark-load-window.md`.
+
+## P9l-07: new P9b reference (2026-09-28)
+
+`reference.json` was re-recorded from a clean tree at a75761f with the Release build, Qore 8c9b43574 (libqore
+SHA-256 beb114ac...), load 6.1-6.3 by the P9l-06 check (threshold 8 on 32 CPUs). The previous reference predated
+P9b-02 and P9l-01 to P9l-05. Every output digest is unchanged. Against the previous reference:
+
+| Workload | Phase | Previous | New |
+| --- | --- | --- | --- |
+| list-values | construction | 9.70 s | 9.21 s (-5%) |
+| list-values | copy | 10.52 s | 9.76 s (-7%) |
+| list-values | provider | 8.91 s | 9.58 s (+8%) |
+| list-values | conversion | 12.94 s | 10.45 s (-19%) |
+| list-values | serialization | 22.80 s | 16.74 s (-27%) |
+| list-values | sample | 24.97 s | 19.49 s (-22%) |
+| binding-styles | request | 30.20 s | 11.54 s (-62%) |
+| binding-styles | request-decode | 40.10 s | 18.67 s (-53%) |
+| binding-styles | response | 0.97 s | 0.63 s (-35%) |
+| binding-styles | response-decode | 1.27 s | 0.84 s (-33%) |
+
+The provider phase remains 8% slower than the previous reference, which predates P9e-01's valid provider examples;
+the residual cost is described in P9l-05.
