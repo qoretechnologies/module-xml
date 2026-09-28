@@ -39,12 +39,12 @@ hash<auto> result = client.call("system.listMethods");
 if (result.fault) {
     printf("error: %s\n", result.fault.faultString);
 } else {
-    printf("result: %N\n", result.params);
+    printf("result: %Y\n", result.params);
 }
 client.close();
     @endcode
 
-    @since xml 2.3
+    @since %XmlRpcClientIo 1.0
 */
 public class XmlRpcClientIo {
     public {

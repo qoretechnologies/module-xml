@@ -57,7 +57,7 @@ list<hash<auto>> pages = WebCrawler::crawl("https://docs.example.com/", {
 });
     @endcode
 
-    @since WebContentUtil 1.0
+    @since %WebContentUtil 1.0
 */
 public class WebCrawler {
     #! Default maximum crawl depth

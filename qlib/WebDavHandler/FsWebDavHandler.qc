@@ -122,7 +122,7 @@ public class FsWebDavHandler inherits AbstractWebDavHandler {
           the destination's parent
         - LOCK of an unmapped URL, which creates a resource: the locks on its parent
 
-        @since WebDavHandler 1.3
+        @since %WebDavHandler 1.3
     */
     private *hash<HttpResponseInfo> checkPreconditions(hash<auto> cx, hash<auto> hdr) {
         string path = cx.webdav_path;
@@ -216,7 +216,7 @@ public class FsWebDavHandler inherits AbstractWebDavHandler {
     #! Returns the locks that apply to a resource: its own, and those of its ancestors with depth infinity
     /** @param path a normalized resource path in the handler's directory
 
-        @since WebDavHandler 1.3
+        @since %WebDavHandler 1.3
     */
     private list<hash<WebDavLockInfo>> getApplicableLocks(string path) {
         list<hash<WebDavLockInfo>> rv = lock_handler.getLocks(path);

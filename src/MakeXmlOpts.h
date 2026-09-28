@@ -81,7 +81,7 @@ public:
 
     /**
      * Creates the wrapper with options filled from hash.
-     * @param hash Hash with formatting options; see @ref xml_generation_opts
+     * @param hash Hash with formatting options; see @ref xmlgenerationopts
      *             for more information about possible values.
      * @returns MakeXmlOpts with options parsed from hash. Not specified
      *          options are defaulted. Unknown options are skipped.

@@ -24,7 +24,7 @@
 
 #! The main namespace for the SaxDataProvider module
 public namespace SaxDataProvider {
-#! The read-only CSV data provider factory
+#! The factory for SAX data providers that read XML data
 public class SaxDataProviderFactory inherits AbstractDataProviderFactory {
     private {
         #! Data provider type info
@@ -72,7 +72,7 @@ public class SaxDataProviderFactory inherits AbstractDataProviderFactory {
         - This base class method throws a \c DATA-PROVIDER-ERROR exception by default; override in subclasses to
           implement this method properly
 
-        @since DataProvider 2.1
+        @since %DataProvider 2.1
     */
     private AbstractDataProvider getProviderFromExampleImpl(InputStream example, *hash<auto> constructor_options) {
         return new SaxDataProvider(constructor_options.stream ?? constructor_options.path ?? example,

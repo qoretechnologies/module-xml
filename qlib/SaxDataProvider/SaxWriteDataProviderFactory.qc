@@ -25,6 +25,8 @@
 public namespace SaxDataProvider {
 
 #! Factory class for creating SaxWriteDataProvider objects
+/** @since %SaxDataProvider 1.11
+*/
 public class SaxWriteDataProviderFactory inherits DataProvider::AbstractDataProviderFactory {
     private {
         #! Factory info

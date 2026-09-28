@@ -48,7 +48,7 @@ list<string> urls = SitemapParser::fetchAndParse("https://example.com/", {
 });
     @endcode
 
-    @since WebContentUtil 1.0
+    @since %WebContentUtil 1.0
 */
 public class SitemapParser {
     #! Default per-request HTTP timeout when fetching sitemap files

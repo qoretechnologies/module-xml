@@ -12606,3 +12606,55 @@ of a nillable part, which serialization then rejects, since each part must be pr
 change validation of header and RPC parts as well, and needs a decision.
 
 Audit: `audits/P9l-09-attribute-message-examples.md`.
+
+## P9l-10: documentation follows the Qore module-structure guide and describes 2.3.0 (2026-09-28)
+
+The documentation was reviewed against the "Module Documentation" section of Qore's
+`design/qore-module-structure.md` and against the changes since the last release (origin/2.x), with read-only audits
+of the binary module, the SOAP/WSDL modules and the WebDAV/XML-RPC/other user modules.
+
+**xml module (`docs/`):** the 1,290-line mainpage is split into a concise, high-level index (introduction and key
+capabilities with links to the authoritative specifications: XML 1.0, XML namespaces, XML Schema 1.0 Parts 1 and 2,
+RELAX NG, XPath 1.0, XML-RPC, WSDL 1.1, SOAP 1.1, SOAP 1.2 Parts 1 and 2, SwA, MTOM, XOP, WS-Addressing and RFC 4918;
+navigation; license) and subpages wired into `QORE_DOX_TMPL_SRC` and the generated Doxygen input: getting started, XML serialization (with the generation options and entity references), schema
+validation (APIs, resources and sandboxing, entities, XSD conformance, libxml2 selection), XML-RPC, SOAP and WSDL
+(module choice, supported standards, SOAP versions, behavior choices, limitations), WebDAV (module choice, server
+features, litmus conformance, clients), user modules, a cookbook, an API overview (the complete class list, function and constant groups, module option
+constants, code tags), streaming and SAX processing (choosing between the SAX iterators, `XmlReader` and
+SaxDataProvider, with validation while reading) and the release notes. All user modules' tag files are loaded in the
+final pass of the xml documentation (`qore_binary_module_two_phase_docs()`), so module names refer to their
+introductions and classes to their reference pages with `@ref`, like `WSDL::WebService`. The SOAP guide states that SOAP 1.0 is not supported: there is no SOAP
+1.0 standard; the 1999 drafts (IETF draft-box-http-soap) were superseded by the SOAP 1.1 W3C Note. Function names in
+the pages link to their reference documentation with explicit `@ref Qore::Xml::name()` references: Doxygen does not
+autolink an unqualified function of the `Qore::Xml` namespace from a page, so `parse_xml()`,
+`parse_xml_with_schema()`, `parse_xml_with_relaxng()` and the other functions were plain text before. Section IDs take the `xml`
+prefix (references in `src/` updated). Every Qore `@code` block uses `@code{.py}` (104 blocks in `src/*.qpp`). The
+2.3.0 release notes are regrouped for users (compatibility notes, new features, parsing and generation, XML Schema
+validation, XML-RPC, WebDAV, build and dependencies, and every user module with a reference to its introduction and
+its release notes); user-module details moved to the modules' own notes,
+missing items added (SoapClientIo and the other new modules, HTTPS schema retrieval, sandboxing, callback order,
+`XMLREADER-XSD-ERROR`, compatibility changes), and two inaccurate build bullets corrected (fast_float is always used;
+the C++11 branch cannot be reached with Qore 3.0). The 2.0.1 notes are synchronized with origin/2.x, and a wrong issue
+link (4960/4968) is corrected to issue 4958 from its commit. The module version is 2.3.0 in CMake, `configure.ac` and
+the RPM spec; the notes and `@since` tags already said 2.3.0 while CMake said 2.2.0.
+
+**API documentation:** `XmlDoc::validateSchemaFile()` and `XmlReader::schemaValidateString()` list the sandbox and TLS
+exceptions; `AbstractXmlIoInputCallback::open()` no longer has a malformed `@throw`; old-syntax examples in
+`QC_XmlRpcClient.qpp` use `%modern` syntax.
+
+**User modules:** every module has the `<Module> Module Introduction` section and its release notes on their own
+page; mainpages describe current capabilities (WSDL: supported standards and components; SoapClient/SoapHandler:
+SOAP versions, header processing, limits, MTOM, SwA, SOAP 1.2 GET, WS-Addressing, option lists; WebDavHandler:
+RFC 4918 classes 1 and 2, locks, If header, streaming, litmus); missing `@since` tags and parameter docs were added and
+release-note gaps filled. Version fixes: SalesforceSoapClient 1.5 (its notes already described 1.5), SoapDataProvider
+2.1 (changed since the released 2.0), XmlRpcHandler's `Version` constant 1.1.1. The SaxDataProvider introduction
+described CSV files by mistake.
+
+**Examples:** every example of the new pages was run; `test_doc_examples.py` now runs all complete examples of the
+documentation pages (26) and compares the documented output of the serialization examples (6), and fails on a broken
+example (checked by breaking one). Two defects in existing examples were fixed: an XML array example used `{...}` for
+a list (a parse error) and showed an attribute its data did not have.
+
+Doxygen builds all module documentation without warnings; all cross-module links of the xml pages resolve.
+
+Audit: `audits/P9l-10-documentation.md`.

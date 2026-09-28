@@ -27,6 +27,8 @@ public namespace SaxDataProvider {
 #! Provides a data provider for writing XML files from records
 /** Records are accumulated as child elements under a configurable root element.
     The XML is written when commit() is called or the provider is destroyed.
+
+    @since %SaxDataProvider 1.11
 */
 public class SaxWriteDataProvider inherits DataProvider::AbstractDataProvider {
     public {

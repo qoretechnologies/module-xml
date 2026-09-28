@@ -207,10 +207,11 @@ public class InMemoryWebDavLockHandler inherits AbstractWebDavLockHandler {
         return NOTHING;
     }
 
-    #! Clean up expired locks
     #! Get the locks on a resource and on all resources below it
     /** @param resource the resource path
         @return the locks whose root is the resource or one of its members, at any depth
+
+        @since %WebDavHandler 1.3
     */
     list<hash<WebDavLockInfo>> getLocksInTree(string resource) {
         AutoReadLock al(m_lock);

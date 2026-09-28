@@ -42,7 +42,7 @@ client.put("/test.txt", "Hello, World!");
 *data content = client.get("/test.txt");
     @endcode
 
-    @since WebDavClientIo 1.0
+    @since %WebDavClientIo 1.0
 */
 public class WebDavClientIo {
     public {

@@ -33,6 +33,12 @@ public namespace SoapClientIo {
     - \c "target_url": overrides the URL in the WSDL
     - \c "connect_timeout": connection timeout to use in milliseconds (default: 45000)
     - \c "timeout": transfer timeout to use in milliseconds (default: 45000)
+    - \c "mtom": @ref Qore::True "True" to send SOAP requests as MTOM/XOP packages, with base64Binary content of at
+      least \c "mtom_threshold" octets in binary MIME parts (default: @ref Qore::False "False"); MTOM responses are
+      always accepted
+    - \c "mtom_threshold": the minimum size in octets of base64Binary content sent as a binary MTOM part; 0 sends
+      every value as a part (default: @ref WSDL::MTOM_THRESHOLD "MTOM_THRESHOLD"); applies only when \c "mtom" is
+      @ref Qore::True "True"
 
     @see @ref SoapClientIo::SoapClientIo "SoapClientIo::constructor()" for more information on the
     above options

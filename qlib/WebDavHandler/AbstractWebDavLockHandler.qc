@@ -73,7 +73,7 @@ public class AbstractWebDavLockHandler {
     /** @param resource the resource path
         @return the locks whose root is the resource or one of its members, at any depth
 
-        @since WebDavHandler 1.3
+        @since %WebDavHandler 1.3
     */
     abstract list<hash<WebDavLockInfo>> getLocksInTree(string resource);
 

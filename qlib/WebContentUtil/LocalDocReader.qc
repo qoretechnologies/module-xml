@@ -41,7 +41,7 @@ list<hash<auto>> pages = LocalDocReader::read("/var/www/docs/", {
 });
     @endcode
 
-    @since WebContentUtil 1.0
+    @since %WebContentUtil 1.0
 */
 public class LocalDocReader {
     #! Default maximum pages to read

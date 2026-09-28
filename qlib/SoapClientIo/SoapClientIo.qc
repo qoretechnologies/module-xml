@@ -42,7 +42,7 @@ auto result = client.callOperation("echo", {"body": "invoice-71"});
 client.close();
     @endcode
 
-    @since xml 2.3
+    @since %SoapClientIo 1.0
 */
 public class SoapClientIo {
     public {
@@ -168,7 +168,8 @@ public class SoapClientIo {
         - \c accept_all_certs: @ref Qore::True "True" to accept any TLS server certificate, for test and
           development servers only (default: @ref Qore::False "False")
         - \c ssl_verify_mode: a TLS certificate verification mode, such as @ref Qore::SSL_VERIFY_PEER
-          "SSL_VERIFY_PEER"; by default the connection manager's
+          "SSL_VERIFY_PEER"; if not set, the default verification mode of the \c HttpClientIo connection
+          manager applies
         - \c max_response_body_size: the maximum size in bytes of a response body, as received and after its
           content encoding is decoded; a larger body, such as a small compressed body that expands to a huge size,
           fails the call with \c HTTP-CLIENT-RESPONSE-BODY-TOO-LARGE as soon as the limit is exceeded (default: 0,

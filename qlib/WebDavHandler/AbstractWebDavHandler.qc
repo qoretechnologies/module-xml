@@ -56,6 +56,8 @@ hashdecl WebDavLockInfo {
     #! User who created the lock (from auth context)
     *string user;
     #! The URL path of the lock root, as requested; the lock discovery reports it (RFC 4918 section 14.12)
+    /** @since %WebDavHandler 1.3
+    */
     *string href;
 }
 
@@ -102,10 +104,14 @@ public class AbstractWebDavHandler inherits public HttpServer::AbstractHttpReque
             size is unknown because of \c "Transfer-Encoding: chunked") are delivered to the
             handler as a stream rather than buffered in memory. The default is 4 MB; override
             per-instance via @ref setBodyStreamingThreshold().
+
+            @since %WebDavHandler 1.3
         */
         const BodyStreamingThreshold = 4 * 1024 * 1024;
 
         #! Default per-chunk read timeout used by @ref streamBodyToOutputStream() (5 minutes)
+        /** @since %WebDavHandler 1.3
+        */
         const DefaultStreamingTimeout = 5m;
     }
 
@@ -161,6 +167,8 @@ public class AbstractWebDavHandler inherits public HttpServer::AbstractHttpReque
         the data before the limit has been written to \a out
         @throw QUEUE-TIMEOUT no HTTP/2 body data arrived within \a io_timeout
         @throw QUIC-STREAM-TIMEOUT no HTTP/3 body data arrived within \a io_timeout
+
+        @since %WebDavHandler 1.3
     */
     static streamBodyToOutputStream(hash<auto> cx, hash<auto> hdr, Qore::OutputStream out,
             timeout io_timeout = DefaultStreamingTimeout) {
@@ -230,7 +238,7 @@ public class AbstractWebDavHandler inherits public HttpServer::AbstractHttpReque
         the body stopped arriving (\c QUEUE-TIMEOUT, \c QUIC-STREAM-TIMEOUT), otherwise
         @ref NOTHING
 
-        @since WebDavHandler 1.3
+        @since %WebDavHandler 1.3
     */
     static *hash<HttpResponseInfo> getBodyReadErrorResponse(hash<ExceptionInfo> ex) {
         switch (ex.err) {
@@ -249,12 +257,18 @@ public class AbstractWebDavHandler inherits public HttpServer::AbstractHttpReque
 
         @param threshold the new threshold in bytes; pass \c 0 to stream every PUT/POST body
         regardless of size
+
+        @since %WebDavHandler 1.3
     */
     setBodyStreamingThreshold(int threshold) {
         body_streaming_threshold = threshold;
     }
 
     #! Returns the currently configured body-streaming threshold in bytes
+    /** @return the body-streaming threshold in bytes; \c 0 means that every PUT/POST body is streamed
+
+        @since %WebDavHandler 1.3
+    */
     int getBodyStreamingThreshold() {
         return body_streaming_threshold;
     }
@@ -383,7 +397,7 @@ public class AbstractWebDavHandler inherits public HttpServer::AbstractHttpReque
         @return a response that ends the request, or @ref nothing to call the method; this base class method returns
         @ref nothing
 
-        @since WebDavHandler 1.3
+        @since %WebDavHandler 1.3
     */
     private *hash<HttpResponseInfo> checkPreconditions(hash<auto> cx, hash<auto> hdr) {
     }

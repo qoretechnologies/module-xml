@@ -65,7 +65,7 @@ SsrfFilter::checkUrl("https://example.com/");
 SsrfFilter::checkUrl("http://localhost:8080/", {"allow_private": True});
     @endcode
 
-    @since WebContentUtil 1.0
+    @since %WebContentUtil 1.0
 */
 public class SsrfFilter {
     #! Hostname patterns that match well-known internal services

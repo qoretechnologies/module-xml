@@ -52,7 +52,7 @@ if (robots && !robots.isAllowed("/admin/")) {
 *int delay = robots ? robots.getCrawlDelay() : NOTHING;
     @endcode
 
-    @since WebContentUtil 1.0
+    @since %WebContentUtil 1.0
 */
 public class RobotsTxt {
     #! Default request timeout for fetching robots.txt

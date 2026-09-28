@@ -130,6 +130,17 @@ EXTRA_DIST = COPYING.LGPL COPYING.MIT AUTHORS README \
 	test/ \
 	examples/ \
     docs/mainpage.doxygen.tmpl \
+    docs/xml-getting-started.doxygen.tmpl \
+    docs/xml-serialization.doxygen.tmpl \
+    docs/xml-schema-validation.doxygen.tmpl \
+    docs/xml-streaming.doxygen.tmpl \
+    docs/xml-rpc.doxygen.tmpl \
+    docs/xml-soap-guide.doxygen.tmpl \
+    docs/xml-webdav-guide.doxygen.tmpl \
+    docs/xml-user-modules.doxygen.tmpl \
+    docs/xml-cookbook.doxygen.tmpl \
+    docs/xml-api-overview.doxygen.tmpl \
+    docs/release-notes.doxygen.tmpl \
     docs/footer_template.html \
 	$(USER_MODULES) \
     ${USER_SPLIT_MODULES} \
@@ -144,7 +155,8 @@ if COND_DOXYGEN
 USER_MODS = $(basename $(notdir $(USER_MODULES)))
 USER_SPLIT_MODS = $(basename $(notdir $(USER_SPLIT_MODULES)))
 DOXYGEN_OUTPUT = docs/xml/html $(addprefix docs/,$(addsuffix /html,$(USER_MODS) $(USER_SPLIT_MODS)))
-DOXYFILES = docs/doxyfile docs/mainpage.doxygen
+DOC_PAGES = docs/mainpage.doxygen docs/xml-getting-started.doxygen docs/xml-serialization.doxygen docs/xml-schema-validation.doxygen docs/xml-streaming.doxygen docs/xml-rpc.doxygen docs/xml-soap-guide.doxygen docs/xml-webdav-guide.doxygen docs/xml-user-modules.doxygen docs/xml-cookbook.doxygen docs/xml-api-overview.doxygen docs/release-notes.doxygen
+DOXYFILES = docs/doxyfile $(DOC_PAGES)
 DOXYFILES_SRC = docs/doxyfile.tmpl docs/qlib/Doxyfile.tmpl docs/footer_template.html
 TMP_MOD_TARG = docs/qlib/XmlRpcHandler.qm.dox.h docs/qlib/Doxyfile.XmlRpcHandler \
 	docs/qlib/SoapClient.qm.dox.h docs/qlib/Doxyfile.SoapClient \
@@ -249,7 +261,7 @@ docs/xml/html: $(DOXYFILES)
 	cd docs; $(DOXYGEN_CMD) doxyfile;
 	$(QDX) --post docs/xml/html docs/xml/search
 
-docs/mainpage.doxygen: docs/mainpage.doxygen.tmpl
+$(DOC_PAGES): docs/%.doxygen: docs/%.doxygen.tmpl
 	$(QDX) -d $< $@
 
 docs/doxyfile: docs/doxyfile.tmpl

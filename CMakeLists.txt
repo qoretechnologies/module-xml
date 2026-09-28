@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.18...3.31)
 project(qore-xml-module)
 
 set (VERSION_MAJOR 2)
-set (VERSION_MINOR 2)
+set (VERSION_MINOR 3)
 set (VERSION_PATCH 0)
 
 find_package(Qore 3.0 REQUIRED)
@@ -121,17 +121,31 @@ qore_wrap_qpp_value(QPP_SOURCES METALIST QPP_META_SOURCES ${QPP_SRC})
 
 # Doxygen consumes generated public declarations, not the C++ implementation
 # files that share the build directory with them.
-set(MODULE_DOX_INPUT "${CMAKE_BINARY_DIR}/mainpage.dox")
+set(QORE_DOX_TMPL_SRC
+  docs/mainpage.doxygen.tmpl
+  docs/xml-getting-started.doxygen.tmpl
+  docs/xml-serialization.doxygen.tmpl
+  docs/xml-schema-validation.doxygen.tmpl
+  docs/xml-streaming.doxygen.tmpl
+  docs/xml-rpc.doxygen.tmpl
+  docs/xml-soap-guide.doxygen.tmpl
+  docs/xml-webdav-guide.doxygen.tmpl
+  docs/xml-user-modules.doxygen.tmpl
+  docs/xml-cookbook.doxygen.tmpl
+  docs/xml-api-overview.doxygen.tmpl
+  docs/release-notes.doxygen.tmpl
+)
+set(MODULE_DOX_INPUT)
+foreach(_xml_dox_tmpl IN LISTS QORE_DOX_TMPL_SRC)
+    get_filename_component(_xml_dox_name "${_xml_dox_tmpl}" NAME_WE)
+    list(APPEND MODULE_DOX_INPUT "${CMAKE_BINARY_DIR}/${_xml_dox_name}.dox")
+endforeach()
 foreach(_xml_qpp_source IN LISTS QPP_SRC)
     get_filename_component(_xml_qpp_name "${_xml_qpp_source}" NAME_WE)
     list(APPEND MODULE_DOX_INPUT "${CMAKE_BINARY_DIR}/${_xml_qpp_name}.dox.h")
 endforeach()
 
 SET (module_name "xml")
-
-set(QORE_DOX_TMPL_SRC
-  docs/mainpage.doxygen.tmpl
-)
 
 add_library(${module_name} MODULE ${QPP_SOURCES} ${CPP_SRC})
 
@@ -213,7 +227,11 @@ if (DOXYGEN_FOUND)
       "\nIMAGE_PATH = ${CMAKE_SOURCE_DIR}/docs\nTAGFILES += ${_xml_external_doc_tags}\n")
   endforeach()
   if (COMMAND qore_binary_module_two_phase_docs)
-    qore_binary_module_two_phase_docs(xml "WSDL;WebContentUtil")
+    # every user module, so that the xml documentation can refer to their classes and pages with @ref
+    set(_xml_doc_user_modules WSDL SoapClient SoapClientIo SoapHandler SoapDataProvider SalesforceSoapClient
+        CargoXmlDataProvider CdaDataProvider SaxDataProvider WebDavHandler WebDavClient WebDavClientIo
+        WebDavClientDataProvider XmlRpcClientIo XmlRpcConnection XmlRpcHandler WebContentUtil)
+    qore_binary_module_two_phase_docs(xml "${_xml_doc_user_modules}")
     file(APPEND "${CMAKE_BINARY_DIR}/Doxyfile.final" "\nTAGFILES += ${_xml_external_doc_tags}\n")
   endif()
 endif()

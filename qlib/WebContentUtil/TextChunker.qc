@@ -39,7 +39,7 @@ list<hash<auto>> chunks = TextChunker::chunk(text, "https://docs.example.com/pag
 });
     @endcode
 
-    @since WebContentUtil 1.0
+    @since %WebContentUtil 1.0
 */
 public class TextChunker {
     #! Default target chunk size in tokens

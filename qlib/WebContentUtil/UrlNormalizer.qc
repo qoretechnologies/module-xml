@@ -35,7 +35,7 @@ string url = UrlNormalizer::normalize("HTTP://Example.COM:80/a/../b?z=1&a=2#sect
 # returns "http://example.com/b?a=1&z=2"
     @endcode
 
-    @since WebContentUtil 1.0
+    @since %WebContentUtil 1.0
 */
 public class UrlNormalizer {
     #! Default ports stripped during normalization

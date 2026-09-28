@@ -61,7 +61,7 @@ hash<LinkInfo> info = HtmlExtractor::extractLinks(html, "https://example.com/pag
 # info.canonical = the <link rel=canonical> if present
     @endcode
 
-    @since WebContentUtil 1.0
+    @since %WebContentUtil 1.0
 */
 public class HtmlExtractor {
     #! Default CSS selectors stripped from HTML before text extraction

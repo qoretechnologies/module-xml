@@ -24,6 +24,8 @@
 #! Main public WebDavHandler namespace
 public namespace WebDavHandler {
 #! One condition of a WebDAV If header list (RFC 4918 section 10.4)
+/** @since %WebDavHandler 1.3
+*/
 public hashdecl WebDavIfCondition {
     #! True if the condition is negated with \c "Not"
     bool negated = False;
@@ -34,6 +36,8 @@ public hashdecl WebDavIfCondition {
 }
 
 #! One list of a WebDAV If header (RFC 4918 section 10.4)
+/** @since %WebDavHandler 1.3
+*/
 public hashdecl WebDavIfList {
     #! the tagged resource (the Simple-ref without its angle brackets), or @ref nothing for the request resource
     *string resource;
@@ -53,7 +57,7 @@ WebDavIfHeader header("</locked/doc> (<urn:uuid:181d4fae-7d8c-11d0-a765-00a0c91e
 list<string> tokens = header.getStateTokens();
     @endcode
 
-    @since WebDavHandler 1.3
+    @since %WebDavHandler 1.3
 */
 public class WebDavIfHeader {
     public {
@@ -110,6 +114,9 @@ public class WebDavIfHeader {
     }
 
     #! Returns the state tokens of all non-negated conditions, which submit lock tokens (RFC 4918 section 10.4.1)
+    /** @return the state tokens of all conditions not negated with \c "Not", in header order; an empty list if
+        there are none
+    */
     list<string> getStateTokens() {
         list<string> rv = ();
         foreach hash<WebDavIfList> l in (lists) {
@@ -123,6 +130,11 @@ public class WebDavIfHeader {
     }
 
     #! Returns True if two entity tags match with the weak comparison function (RFC 9110 section 8.8.3.2)
+    /** @param a the first entity tag, including its quotes and any \c "W/" weak prefix
+        @param b the second entity tag, including its quotes and any \c "W/" weak prefix
+
+        @return True if the tags are equal after removing any \c "W/" weak prefix from both
+    */
     static bool etagMatches(string a, string b) {
         return regex_subst(a, "^W/", "") == regex_subst(b, "^W/", "");
     }

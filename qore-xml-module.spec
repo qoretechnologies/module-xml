@@ -1,4 +1,4 @@
-%global mod_ver 2.1.0
+%global mod_ver 2.3.0
 
 %{?_datarootdir: %global mydatarootdir %_datarootdir}
 %{!?_datarootdir: %global mydatarootdir /usr/share}
@@ -132,6 +132,9 @@ qore -l ./xml-api-%{module_api}.qmod test/webdav_FsWebDavHandler.qtest -v
 qore -l ./xml-api-%{module_api}.qmod test/xml.qtest -v
 
 %changelog
+* Mon Sep 28 2026 David Nichols <david@qore.org> - 2.3.0
+- updated to version 2.3.0
+
 * Tue Jan 20 2026 David Nichols <david@qore.org> - 2.1.0
 - updated qore version requirements to 2.3 for %modern tests
 
