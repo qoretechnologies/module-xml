@@ -16,6 +16,7 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+import unittest.mock
 
 ROOT = Path(__file__).resolve().parent
 REPO = ROOT.parent.parent
@@ -114,6 +115,14 @@ class BenchmarkTests(unittest.TestCase):
         self.assertEqual([], benchmark.busy_workloads({"a": {"load_average": quiet}, "b": {}}))
         self.assertEqual(["a", "c"], benchmark.busy_workloads({"c": {"load_average": loaded}, "b": {"load_average": 0},
                                                                "a": {"load_average": loaded + 10}}))
+        # a busy period during a run shows in the 5-minute average after the 1-minute one has fallen
+        with unittest.mock.patch("os.getloadavg", return_value=(quiet, loaded, quiet)):
+            self.assertEqual(loaded, benchmark.current_load())
+            self.assertEqual(loaded, benchmark.busy())
+        with unittest.mock.patch("os.getloadavg", return_value=(loaded, quiet, quiet)):
+            self.assertEqual(loaded, benchmark.busy())
+        with unittest.mock.patch("os.getloadavg", return_value=(quiet, quiet, loaded + 10)):
+            self.assertIsNone(benchmark.busy())
 
     def test_requires_a_release_build(self):
         self.assertEqual("Debug", benchmark.build_type(REPO / "build-debug"))

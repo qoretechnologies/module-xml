@@ -12507,3 +12507,20 @@ identical digest `4d13523d...`; the pairs measured at a steady load differ by at
 The P9b reference is still not re-recorded; that needs a clean tree and a quiet machine.
 
 Audit: `audits/P9l-05-provider-samples.md`.
+
+## P9l-06: the benchmark's busy check covers the whole workload (2026-09-28)
+
+A recording of the P9b reference on 2026-09-28 passed the P9l-03 check (1-minute load 5.2 and 6.0 after the two
+workloads), but its list-values phases were inflated by other work during the run: provider 12.41 s, construction
+11.26 s, copy 11.96 s. The 5-minute load average was 10.0 when it finished, above the threshold of 8 on 32 CPUs. A
+single list-values run immediately afterwards, with the load sampled every 5 s (5.9-7.5), measured provider 9.84 s
+and construction 9.30 s, near the P9l-05 medians; outputs matched the reference in both. The recording was
+discarded.
+
+The check sampled only the 1-minute average when a workload finished, while a list-values recording runs for about 8
+minutes. The load of a workload is now the higher of the 1- and 5-minute averages (`current_load()`), used both before
+the run and after each workload. `test_busy_recording` checks that a busy period visible only in the 5-minute average,
+or only in the 1-minute one, is refused, and that the 15-minute average is ignored; with the 1-minute average alone
+the test fails.
+
+Audit: `audits/P9l-06-benchmark-load-window.md`.

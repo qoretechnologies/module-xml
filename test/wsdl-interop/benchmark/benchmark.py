@@ -163,10 +163,18 @@ def environment(build):
     }
 
 
+def current_load():
+    """Returns the higher of the 1- and 5-minute load averages.
+
+    A workload runs for minutes, and the 1-minute average when it finishes can miss other work during its run; the
+    5-minute average covers most of the run.
+    """
+    return max(os.getloadavg()[:2])
+
+
 def busy(load=None):
-    """Returns the 1-minute load average (by default the current one) when other work competes for the CPUs, else
-    None."""
-    load = os.getloadavg()[0] if load is None else load
+    """Returns the load (by default current_load()) when other work competes for the CPUs, else None."""
+    load = current_load() if load is None else load
     return load if load > (os.cpu_count() or 1) / 4 else None
 
 
@@ -187,7 +195,7 @@ def run_workloads(build, repetitions, names, wsdl_dir=None):
                                         wsdl_dir=wsdl_dir)
             results[name]["input_sha256"] = sha256(WORKLOADS[name])
             # other work on the machine distorts the timings
-            results[name]["load_average"] = round(os.getloadavg()[0], 2)
+            results[name]["load_average"] = round(current_load(), 2)
     return results
 
 

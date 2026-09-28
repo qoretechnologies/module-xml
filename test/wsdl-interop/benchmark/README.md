@@ -50,9 +50,11 @@ Timing depends on the machine. `reference.json` records the environment it was m
 libqore digest, module-xml commit and build type. Compare only on the same machine class, or record a new
 reference first. Record a reference only from a clean working tree, and state in the commit why it changed.
 
-Other work on the machine distorts the timings, so `--record` refuses a busy machine: one whose 1-minute load
-average exceeds a quarter of its CPUs. It checks before the run and again after each workload, since the load can
-rise after a run starts on a quiet machine; each workload's load is stored in the reference. `--force` records
+Other work on the machine distorts the timings, so `--record` refuses a busy machine: one whose load, the higher of
+its 1- and 5-minute load averages, exceeds a quarter of its CPUs. It checks before the run and again after each
+workload, since the load can rise after a run starts on a quiet machine; a workload runs for minutes, and the
+5-minute average still shows other work that the 1-minute average no longer does when it finishes. Each workload's
+load is stored in the reference. `--force` records
 anyway.
 
 ### Comparing another WSDL source
