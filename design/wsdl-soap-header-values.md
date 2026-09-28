@@ -29,6 +29,20 @@ for message containers. Both request and response serialization accept these
 maps, including client/handler and data-provider calls. See
 [body selection](wsdl-body-parts.md) for input validation and examples.
 
+## Presence
+
+A serialized message contains every part and every header that its binding describes (WS-I Basic Profile 1.2 and 2.0
+R2738 for headers). A bound header without a value raises `SOAP-SERIALIZATION-ERROR`; a fault is not described by
+the operation's output binding, so its headers are not required. A nillable element part without a value is
+serialized as nil, in document and RPC bindings, because an absent value and an explicit `NOTHING` are the same in
+Qore data; other parts without a value still raise `SOAP-SERIALIZATION-ERROR`. For example, with
+`<xs:element name="amount" type="xs:decimal" nillable="true"/>` as a document part, `{"quantity": 2}` and
+`{"amount": NOTHING, "quantity": 2}` both serialize `<amount xsi:nil="true"/>`.
+
+Decoding stays lenient: a received message without a bound header is decoded, and the header has no value. The
+message data provider validates the abstract message and does not know the binding, so it cannot apply these
+binding rules. `test/wsdl-message-presence.qtest` covers both rules.
+
 With headers and no overlapping parts:
 
 1. A single body part can return its value directly only if that value is

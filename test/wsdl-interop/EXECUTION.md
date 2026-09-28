@@ -12658,3 +12658,46 @@ a list (a parse error) and showed an attribute its data did not have.
 Doxygen builds all module documentation without warnings; all cross-module links of the xml pages resolve.
 
 Audit: `audits/P9l-10-documentation.md`.
+
+## P9l-11: messages contain every bound header and part (2026-09-28)
+
+Found while fixing P9l-09 and decided by the user: the message provider and the serializer disagreed about parts and
+headers that are left out. With the pinned CXF fixtures:
+
+| Omitted | Provider `acceptsValue()` | Serializer (before) |
+| --- | --- | --- |
+| mandatory body part (document or RPC) | rejects | rejects |
+| nillable element body part (`bare-4`) | accepts | rejects ("SOAP elements cannot supply every selected message part") |
+| header part bound in the binding (`header-doc`, `header-rpc`) | rejects | serializes the message without the header |
+
+The last row violates WS-I Basic Profile 1.2 and 2.0 R2738 ("An ENVELOPE MUST include all soap:headers specified on a
+wsdl:input or wsdl:output of a wsdl:operation of a wsdl:binding that describes it"). The ledger mapped R2738 to tests
+that never omit a header.
+
+**Changes:**
+- `SoapBinding` serialization raises `SOAP-SERIALIZATION-ERROR` for a bound header without a value, naming R2738.
+  Faults are not described by the output binding and need no header. Decoding stays lenient: a received message
+  without a bound header is decoded, and the header has no value.
+- A nillable element part without a value is serialized as nil, in document and RPC bindings, as an explicit
+  `NOTHING` is; an absent hash key and `NOTHING` are the same in Qore data. Other parts without a value still fail.
+- The message data provider is unchanged: it validates the abstract WSDL message, which has no binding, and it is
+  also used for decoded data, where an omitted RPC accessor is an absent value.
+
+**Compatibility:** a caller that leaves out a header its binding describes now gets `SOAP-SERIALIZATION-ERROR`, and a
+`SoapHandler` callback must return the headers of its output binding. These messages violated R2738, and the provider
+already rejected them. The nillable-part change only lets calls succeed that failed before. The WSDL, SoapClient and
+SoapHandler release notes and the xml 2.3.0 compatibility notes describe the change; `design/wsdl-soap-header-values.md`
+has a new "Presence" section.
+
+**Tests:** new `test/wsdl-message-presence.qtest` (3 cases, 24 assertions): nil for omitted nillable document and RPC
+parts, identical to explicit `NOTHING`, and still an error for other parts; required headers for SOAP 1.1 and SOAP 1.2
+requests and responses, supplied as a header argument or with the message values; faults without headers; decoding
+of a received message without its header. Four mutations (no header check, no document nil, no RPC nil, header check
+on faults) each fail it. The ledger's R2738 rows (wsi12, wsi20) now also map to it. `soap-mtom-output.qtest` omitted
+the bound `token` header to produce an empty Header; it now supplies it and checks the R2738 error, keeping its
+purpose, the serialization of unqualified generic content. In `test_soap_container_whitespace.py`, the
+`empty-header` messages (document and RPC, SOAP 1.1 and 1.2, request and response) have an empty Header for a binding
+that describes a header: they are still decoded, and serializing the decoded value now raises the R2738 error, which
+the test asserts for all eight.
+
+Audit: `audits/P9l-11-message-presence.md`.

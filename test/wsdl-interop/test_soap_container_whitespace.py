@@ -26,6 +26,8 @@ class SoapContainerWhitespaceTest(unittest.TestCase):
 
     def check_boundaries(self, headers, scalar_rpc=False):
         jobs, contracts, expected, lookup = {}, [], {}, {}
+        # received messages without a bound header are decoded, but cannot be serialized again (WS-I R2738)
+        missing_header = set()
         value = " A\tB\r\n "
         with tempfile.TemporaryDirectory(prefix="wsdl-soap-space-") as temporary:
             root = Path(temporary)
@@ -95,6 +97,8 @@ class SoapContainerWhitespaceTest(unittest.TestCase):
                             message_path.write_bytes(etree.tostring(envelope))
                             messages.append({"file": key, "path": str(message_path), "direction": direction})
                             expected[key] = valid
+                            if headers and location == "empty":
+                                missing_header.add(key)
                             lookup[key] = style, version, wire_name
                     contracts.append({"name": name, "wsdl": str(path), "base": "http://example.invalid/",
                                       "operation": "submit", "binding": "Soap" + version, "messages": messages})
@@ -113,6 +117,10 @@ class SoapContainerWhitespaceTest(unittest.TestCase):
                     self.assertEqual(expected[row["file"]], row["ok"], row)
                     if not expected[row["file"]]:
                         self.assertEqual("SOAP-DESERIALIZATION-ERROR", row["err"], row)
+                elif row["stage"] == "serialize" and row["file"] in missing_header:
+                    self.assertFalse(row["ok"], row)
+                    self.assertEqual("SOAP-SERIALIZATION-ERROR", row["err"], row)
+                    self.assertIn("R2738", row["desc"], row)
                 elif row["stage"] == "serialize":
                     self.assertTrue(row["ok"], row)
                     style, version, wire_name = lookup[row["file"]]
@@ -130,7 +138,9 @@ class SoapContainerWhitespaceTest(unittest.TestCase):
                         self.assertEqual(9, int(payload[1].text))
                     jobs[style].documents[row["file"]] = etree.tostring(payload)
                     outputs.add(row["file"])
-        self.assertEqual({name for name, valid in expected.items() if valid}, outputs)
+        self.assertEqual({name for name, valid in expected.items() if valid} - missing_header, outputs)
+        if headers:
+            self.assertEqual(8, len(missing_header))
         oracle = run_independent(list(jobs.values()))
         self.assertEqual(set(jobs), set(oracle["schemas"]))
         self.assertEqual(outputs, set(oracle["documents"]))
