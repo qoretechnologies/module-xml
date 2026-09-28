@@ -55,7 +55,7 @@ public:
     DLLLOCAL QoreSaxIterator(QoreStringNode* xml, const char* ename, const QoreHashNode* opts, ExceptionSink* xsink) : QoreXmlReaderData(xml, setOptions(opts), opts, xsink), element_name(ename) {
     }
 
-    DLLLOCAL QoreSaxIterator(QoreXmlDocData* doc, const char* ename, ExceptionSink* xsink) : QoreXmlReaderData(doc, xsink), element_name(ename), xml_parse_options(QORE_XML_PARSER_OPTIONS) {
+    DLLLOCAL QoreSaxIterator(QoreXmlDocData* doc, const char* ename, ExceptionSink* xsink) : QoreXmlReaderData(doc, xsink), element_name(ename), xml_parse_options(QORE_XML_READER_OPTIONS) {
     }
 
     DLLLOCAL QoreSaxIterator(ExceptionSink* xsink, const char* fn, const char* ename, const char* enc = nullptr, const QoreHashNode* opts = nullptr) : QoreXmlReaderData(fn, enc, setOptions(opts), opts, xsink), element_name(ename) {

@@ -57,7 +57,7 @@ public:
    DLLLOCAL QoreXmlReaderData(const char* n_fn, const char* n_enc, int options, const QoreHashNode* opts, ExceptionSink* xsink) : QoreXmlReader(xsink, n_fn, n_enc, options, opts), fn(n_fn), enc(n_enc ? n_enc : "") {
    }
 
-   DLLLOCAL QoreXmlReaderData(const QoreXmlReaderData& old, ExceptionSink* xsink) : QoreXmlReader(xsink, old.xmlstr, QORE_XML_PARSER_OPTIONS, old.doc ? old.doc->getDocPtr() : 0, old.fn.empty() ? 0 : old.fn.c_str(), old.enc.empty() ? 0 : old.enc.c_str()), doc((QoreXmlDocData*)old.doc), xmlstr(old.xmlstr), fn(old.fn), enc(old.enc) {
+   DLLLOCAL QoreXmlReaderData(const QoreXmlReaderData& old, ExceptionSink* xsink) : QoreXmlReader(xsink, old.xmlstr, QORE_XML_READER_OPTIONS, old.doc ? old.doc->getDocPtr() : 0, old.fn.empty() ? 0 : old.fn.c_str(), old.enc.empty() ? 0 : old.enc.c_str()), doc((QoreXmlDocData*)old.doc), xmlstr(old.xmlstr), fn(old.fn), enc(old.enc) {
       if (doc) {
          assert(!xmlstr);
          doc->ref();
@@ -70,9 +70,9 @@ public:
 
    DLLLOCAL void reset(ExceptionSink* xsink) {
       if (!fn.empty())
-         QoreXmlReader::reset(xsink, fn.c_str(), enc.empty() ? 0 : enc.c_str(), QORE_XML_PARSER_OPTIONS);
+         QoreXmlReader::reset(xsink, fn.c_str(), enc.empty() ? 0 : enc.c_str(), QORE_XML_READER_OPTIONS);
       else if (xmlstr)
-         QoreXmlReader::reset(xsink, xmlstr, QORE_XML_PARSER_OPTIONS, doc ? doc->getDocPtr() : 0);
+         QoreXmlReader::reset(xsink, xmlstr, QORE_XML_READER_OPTIONS, doc ? doc->getDocPtr() : 0);
       else {
          assert(false);
          xsink->raiseException("XMLREADER-RESET-ERROR", "Unsupported operation");
@@ -93,7 +93,7 @@ public:
    }
 
    DLLLOCAL static int getOptions(const QoreHashNode* opts) {
-      int xml_parse_options = QORE_XML_PARSER_OPTIONS;
+      int xml_parse_options = QORE_XML_READER_OPTIONS;
       if (opts) {
           bool found;
           xml_parse_options |= (int)opts->getKeyAsBigInt("xml_parse_options", found);

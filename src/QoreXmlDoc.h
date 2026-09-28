@@ -66,6 +66,11 @@ DLLLOCAL xmlParserErrors qore_xml_document_resource_loader(void* data, const cha
     QORE_XML_ENTITY_OPTIONS
 #endif
 
+// Readers report parse errors through QoreXmlReader's per-reader callback.
+// NOERROR suppresses that callback too, so release builds must not inherit it
+// from the DOM parser defaults: libxml2 can continue after a namespace error.
+#define QORE_XML_READER_OPTIONS ((QORE_XML_PARSER_OPTIONS) & ~XML_PARSE_NOERROR)
+
 // HTML parser options for lenient real-world HTML parsing.
 //
 // HTML_PARSE_RECOVER: keep parsing on errors (essential for malformed HTML5)

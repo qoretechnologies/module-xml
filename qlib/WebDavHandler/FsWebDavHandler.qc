@@ -581,7 +581,8 @@ public class FsWebDavHandler inherits AbstractWebDavHandler {
                 if (f.open(path, O_CREAT | O_TRUNC | O_WRONLY, 0644, "UTF-8")) {
                     return response(500, "Could not create new file: %s", strerror());
                 }
-                f.write(body);
+                # Store representation bytes without transcoding text to the file encoding.
+                f.write(body instanceof string ? body.toBinary() : body);
             } else {
                 string tmp_path = path + ".webdav-upload";
                 on_error if (is_file(tmp_path)) unlink(tmp_path);
@@ -675,7 +676,8 @@ public class FsWebDavHandler inherits AbstractWebDavHandler {
                 if (f.open(path, O_CREAT | O_TRUNC | O_WRONLY, 0644)) {
                     return response(500, "Could not create/update file: %s", strerror());
                 }
-                f.write(body);
+                # Store representation bytes without transcoding text to the file encoding.
+                f.write(body instanceof string ? body.toBinary() : body);
             } else {
                 string tmp_path = path + ".webdav-upload";
                 on_error if (is_file(tmp_path)) unlink(tmp_path);
