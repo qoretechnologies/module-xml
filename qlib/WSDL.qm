@@ -756,6 +756,9 @@ if (policy.required) {
       and network-path references, and asynchronous WSDL retrieval retains the document's HTTP directory
     - Document URI and XML Base resolution use Qore 3.0 resolve_url(); malformed document URI percent escapes
       raise WSDL-LOCATION-ERROR, while XML Base retains raw Unicode, spaces and relative parents
+    - Custom-scheme document locations that are not RFC 3986 URIs, such as \c "resource://service:orders.wsdl",
+      load as opaque document identities (WSDLLib::isOpaqueDocumentLocation()); only a relative import or
+      include that must be resolved against such a location raises WSDL-LOCATION-ERROR
     - WSDLLib::resolveDocumentLocation() resolves full-document URI references according to RFC 3986;
       HTTP document retrieval preserves queries and excludes fragments from request targets
     - WSDL component references validate their expanded QNames and required targets before
@@ -1518,6 +1521,14 @@ public const SOAP_TRANSPORT = (
 # the default base URI of a SOAP message package (SwA Note section 3; RFC 2557 section 5)
 const SwaDefaultBase = "thismessage:/";
 
+# document location schemes whose syntax is RFC 3986 and which are always validated strictly; any other scheme
+# is defined by its registered FileLocationHandler and may name a document with an opaque location
+const RfcLocationSchemes = {"file": True, "http": True, "https": True, "ftp": True};
+
+# a valid absolute base used only to validate same-document and absolute references against an opaque document
+# location; neither kind of reference takes any component from this base
+const OpaqueReferenceCheckBase = "urn:wsdl:opaque-document";
+
 #! XOP (XML-binary Optimized Packaging) namespace URI
 /** @since %WSDL 0.5.8 */
 public const XOP_NS = "http://www.w3.org/2004/08/xop/include";
@@ -1591,6 +1602,12 @@ class WsdlUriComponents {
             }
             rethrow;
         }
+    }
+
+    # Normalizes a directory base for identity comparisons.  An opaque custom-scheme location has no directory;
+    # it is its own identity and is not resolved.
+    static string normalizeBase(string base) {
+        return WSDLLib::isOpaqueDocumentLocation(base) ? base : WSDLLib::resolveLocation(".", base);
     }
 
     static string httpPath(string location) {
@@ -1860,11 +1877,16 @@ string method = WSDLLib::fromXmlName("Hello_x0020_world"); # "Hello world"
     /** @param location the location of a WSDL or XSD document
 
         @return the directory of the given path, or, if the location is a URL, the URL with the last path component
-        removed
+        removed; an opaque custom-scheme location (see isOpaqueDocumentLocation()) has no directory and is returned
+        without its fragment
 
         @since %WSDL 0.5.8
     */
     static string getLocationBase(string location) {
+        if (WSDLLib::isOpaqueDocumentLocation(location)) {
+            location =~ s/#.*//;
+            return location;
+        }
         if (WSDLLib::hasScheme(location)) {
             hash<WsdlUriParts> uri = WsdlUriComponents::parse(location);
             uri.path = substr(uri.path, 0, uri.path.rfind("/") + 1);
@@ -1890,11 +1912,18 @@ string method = WSDLLib::fromXmlName("Hello_x0020_world"); # "Hello world"
 
         @return the resolved location
 
+        @throw WSDL-LOCATION-ERROR a relative reference cannot be resolved against an opaque custom-scheme base
+        (see isOpaqueDocumentLocation()), or a URI reference is invalid
+
         @since %WSDL 0.5.8
     */
     static string resolveLocation(string location, *string base) {
         if (!base) {
             return location;
+        }
+        if (WSDLLib::isOpaqueDocumentLocation(base)) {
+            # an opaque location has no directory; only references independent of the base resolve against it
+            return resolveDocumentLocation(location, base);
         }
         if (WSDLLib::hasScheme(base)) {
             hash<WsdlUriParts> uri = WsdlUriComponents::parse(base);
@@ -1915,9 +1944,14 @@ string method = WSDLLib::fromXmlName("Hello_x0020_world"); # "Hello world"
         @param document_location the absolute URI of the containing document, including its filename and query
         @return the URI resolved using RFC 3986 section 5.2
         @throw WSDL-LOCATION-ERROR a base without a scheme, an unescaped space/control character, or a colon
-        in the first segment of a relative path, or malformed percent escapes
+        in the first segment of a relative path, or malformed percent escapes; or a relative reference that must be
+        resolved against an opaque document location (see isOpaqueDocumentLocation())
         @note This method preserves escaped octets and empty query/fragment delimiters. It does not validate
         scheme-specific addresses or retrieve resources. Bare filesystem paths use resolveLocation() instead.
+        @note A custom-scheme location that is not an RFC 3986 URI (for example \c "resource://service:orders.wsdl")
+        is an opaque document identity owned by its FileLocationHandler: as \a location it is returned unchanged;
+        as \a document_location it resolves empty and fragment-only references to itself and absolute references
+        to themselves, while other relative references raise \c WSDL-LOCATION-ERROR naming the base.
         @par Example
         @code{.py}
         WSDLLib::resolveDocumentLocation("?version=2", "https://partner.example/contracts/orders.wsdl?version=1");
@@ -1926,8 +1960,84 @@ string method = WSDLLib::fromXmlName("Hello_x0020_world"); # "Hello world"
         @since %WSDL 0.5.8
     */
     static string resolveDocumentLocation(string location, string document_location) {
+        # An absolute handler-owned location needs no base; it is used as given.
+        if (exists WSDLLib::getOpaqueLocationReason(location)) {
+            return location;
+        }
+        *string opaque_reason = WSDLLib::getOpaqueLocationReason(document_location);
+        if (exists opaque_reason) {
+            return WSDLLib::resolveAgainstOpaqueLocation(location, document_location, opaque_reason);
+        }
+        return WSDLLib::resolveStrict(document_location, location);
+    }
+
+    #! returns @ref True "True" if a document location is an opaque identity owned by a custom location handler
+    /** Locations with a custom scheme (any scheme other than \c file, \c http, \c https and \c ftp) are defined
+        by the \c FileLocationHandler registered for that scheme, which may use a syntax that is not an RFC 3986
+        URI; for example \c "resource://service:orders.wsdl" has a non-numeric port. Such a location identifies
+        its document for caching, aliases and diagnostics, but it cannot serve as a base for relative references.
+
+        @param location a document location
+        @return @ref True "True" if \a location has a custom scheme, contains no unescaped spaces or control
+        characters, and is not a valid RFC 3986 URI
+
+        @note An opaque document location is not rejected when a WSDL or XSD is loaded. Absolute and same-document
+        references still resolve against it; any other relative reference raises \c WSDL-LOCATION-ERROR when it
+        must be resolved.
+
+        @par Example
+        @code{.py}
+        WSDLLib::isOpaqueDocumentLocation("resource://service:orders.wsdl");   # True
+        WSDLLib::isOpaqueDocumentLocation("resource://service/orders.wsdl");   # False
+        WSDLLib::isOpaqueDocumentLocation("https://host:port/orders.wsdl");    # False (strictly validated)
+        @endcode
+
+        @since %WSDL 0.5.8
+    */
+    static bool isOpaqueDocumentLocation(string location) {
+        return exists WSDLLib::getOpaqueLocationReason(location);
+    }
+
+    # Returns why a handler-owned custom-scheme location is not an RFC 3986 URI, or NOTHING if the location is
+    # a valid URI or is governed by RFC 3986 (file, http, https, ftp) and so must be validated strictly.
+    private static *string getOpaqueLocationReason(string location) {
+        *string scheme = (location =~ x/^([A-Za-z][A-Za-z0-9+.-]*):/)[0];
+        if (!exists scheme || RfcLocationSchemes{scheme.lwr()} || location =~ /[\x00-\x20\x7f]/) {
+            return;
+        }
         try {
-            return resolve_url(document_location, location, RESOLVE_URL_STRICT);
+            string checked = resolve_url(location, "", RESOLVE_URL_STRICT);
+        } catch (hash<ExceptionInfo> ex) {
+            if (ex.err == "RESOLVE-URL-ERROR") {
+                return ex.desc;
+            }
+            rethrow;
+        }
+    }
+
+    # An opaque base supports only references that do not depend on its structure: same-document references
+    # (empty or fragment-only) and absolute URIs.
+    private static string resolveAgainstOpaqueLocation(string location, string document_location,
+            string opaque_reason) {
+        string document = document_location;
+        document =~ s/#.*//;
+        if (location == "" || location.startsWith("#")) {
+            # validate the fragment grammar without depending on the opaque base
+            string checked = WSDLLib::resolveStrict(OpaqueReferenceCheckBase, location);
+            return document + location;
+        }
+        if (location =~ /^[A-Za-z][A-Za-z0-9+.-]*:/) {
+            # RFC 3986 section 5.2.2: an absolute reference is its own target; the base is not used
+            return WSDLLib::resolveStrict(OpaqueReferenceCheckBase, location);
+        }
+        throw "WSDL-LOCATION-ERROR", sprintf("cannot resolve relative reference %y against document location %y: "
+            "the location is not an RFC 3986 URI (%s) and cannot be used as a base URI; use an absolute reference "
+            "or a document location that is a valid URI", location, document_location, opaque_reason);
+    }
+
+    private static string resolveStrict(string base, string location) {
+        try {
+            return resolve_url(base, location, RESOLVE_URL_STRICT);
         } catch (hash<ExceptionInfo> ex) {
             if (ex.err == "RESOLVE-URL-ERROR") {
                 throw "WSDL-LOCATION-ERROR", ex.desc;
@@ -30533,8 +30643,8 @@ class WsdlDocumentCatalog {
                     if (exists known{child_location}) {
                         index = known{child_location};
                     } else if (!location && child_source == source
-                            && WSDLLib::normalizeLocation(WSDLLib::resolveLocation(".", child_base ?? "."))
-                                == WSDLLib::normalizeLocation(WSDLLib::resolveLocation(".", base ?? "."))) {
+                            && WSDLLib::normalizeLocation(WsdlUriComponents::normalizeBase(child_base ?? "."))
+                                == WSDLLib::normalizeLocation(WsdlUriComponents::normalizeBase(base ?? "."))) {
                         index = 0;
                     } else {
                         if (depths[next - 1] + 1 > max_depth) {
@@ -44644,7 +44754,7 @@ public class XsdSchema inherits WSDL::XsdBase {
         }
         # Legacy inline sources have only a directory base.
         if (base) {
-            base = WSDLLib::resolveLocation(".", base);
+            base = WsdlUriComponents::normalizeBase(base);
             base =~ s{/+$}{};
         }
         return sprintf("base:%Y:%Y:%s", uri ?? "", base ?? "", xml.toSHA512());

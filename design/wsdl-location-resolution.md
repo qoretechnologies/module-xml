@@ -21,6 +21,26 @@ in a relative first path segment raises `WSDL-LOCATION-ERROR`. Only Qore's
 `RESOLVE-URL-ERROR` is translated; cancellation and other exceptions propagate.
 Scheme-specific address validation belongs to retrieval.
 
+`file`, `http`, `https` and `ftp` locations are RFC 3986 URIs and are always
+validated strictly. A location with any other scheme belongs to the
+`FileLocationHandler` registered for that scheme, which may define a syntax that is
+not an RFC 3986 URI; for example the `resource://<service>:<file>` form has a
+non-numeric "port". When such a location contains no unescaped spaces or control
+characters but fails strict validation, `WSDLLib::isOpaqueDocumentLocation()` is
+true and the location is an opaque document identity: it is retained (without its
+fragment) as `document_location`, as a cache and alias key and in diagnostics, and is
+not rejected when a WSDL or XSD is loaded. This applies equally to a
+handler-reported effective location and to the requested location that stands in for
+an unknown effective location. An opaque location has no directory:
+`getLocationBase()` returns it unchanged, and directory identity comparisons do not
+resolve it. Only references that do not depend on a base's structure resolve against
+it: empty and fragment-only references (the same document) and absolute references
+(RFC 3986 section 5.2.2), which are still validated strictly. Any other relative
+reference raises `WSDL-LOCATION-ERROR` naming the reference and the opaque base when it
+must be resolved, before any retrieval; a document without relative references never
+needs its location as a base. An opaque absolute reference (for example an XSD
+`schemaLocation` of `resource://<service>:<types.xsd>`) is used as given.
+
 The existing `getLocationBase()` and `resolveLocation()` interface uses a directory
 base. URL directory extraction discards the query and fragment before removing
 the filename. Resolution handles root-relative paths using the URL authority and

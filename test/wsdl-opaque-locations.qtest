@@ -1,0 +1,535 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires ../qlib/WSDL.qm
+%requires ../qlib/SoapClient.qm
+%requires ../qlib/SoapClientIo
+%requires HttpServer
+%requires FileLocationHandler
+%exec-class OpaqueLocationsTest
+
+const OpaqueNs = "urn:opaque";
+
+# handler-owned scheme whose resources never report an effective location
+const UnknownScheme = "xmlopaqueunknown";
+# handler-owned scheme whose resources report an opaque effective location
+const KnownScheme = "xmlopaqueknown";
+
+string sub opaqueSchema(string content) {
+    return '<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" targetNamespace="' + OpaqueNs + '">'
+        + content + '</xs:schema>';
+}
+
+string sub opaqueWsdl(string content) {
+    return '<w:definitions xmlns:w="http://schemas.xmlsoap.org/wsdl/" xmlns:t="' + OpaqueNs + '"'
+        + ' xmlns:s="http://schemas.xmlsoap.org/wsdl/soap/" targetNamespace="' + OpaqueNs + '">'
+        + content + '</w:definitions>';
+}
+
+# a WSDL whose types include (or import) the given schema location
+string sub includingWsdl(string schema_location, bool import = False) {
+    string reference = import
+        ? '<xs:import namespace="urn:opaque-types" schemaLocation="' + schema_location + '"/>'
+        : '<xs:include schemaLocation="' + schema_location + '"/>';
+    return opaqueWsdl('<w:types>' + opaqueSchema(reference) + '</w:types>' + OpaqueServiceDeclarations);
+}
+
+# a message, SOAP binding and service, so that SoapClient and SoapClientIo can select a port
+const OpaqueServiceDeclarations = '<w:message name="M"/><w:portType name="P"><w:operation name="op">'
+    + '<w:input message="t:M"/></w:operation></w:portType><w:binding name="B" type="t:P">'
+    + '<s:binding style="document" transport="http://schemas.xmlsoap.org/soap/http"/><w:operation name="op">'
+    + '<s:operation soapAction="urn:op"/><w:input><s:body use="literal"/></w:input></w:operation></w:binding>'
+    + '<w:service name="S"><w:port name="Port" binding="t:B"><s:address location="http://localhost:8001/opaque"/>'
+    + '</w:port></w:service>';
+
+const ValueSchema = '<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" targetNamespace="' + OpaqueNs
+    + '"><xs:element name="Value" type="xs:int"/></xs:schema>';
+
+class OpaqueLocationsTest inherits QUnit::Test {
+    private {
+        OpaqueResourceHandler unknown_handler(False);
+        OpaqueResourceHandler known_handler(True);
+        string simple_wsdl;
+    }
+
+    constructor() : Test("WSDL opaque custom-scheme document locations", "1.0") {
+        FileLocationHandler::registerHandler(UnknownScheme, unknown_handler);
+        FileLocationHandler::registerHandler(KnownScheme, known_handler);
+        simple_wsdl = ReadOnlyFile::readTextFile(get_script_dir() + DirSep + "simple.wsdl");
+
+        addTestCase("Opaque location detection and resolution grammar", \grammar());
+        addTestCase("Requested opaque locations load through every loader", \unknownEffectiveLocation());
+        addTestCase("Handler-reported opaque effective locations load", \knownEffectiveLocation());
+        addTestCase("Relative references against an opaque base are rejected when resolved",
+            \relativeReferencesRejected());
+        addTestCase("Absolute references from an opaque document resolve", \absoluteReferences());
+        addTestCase("Valid custom, file and HTTP locations still resolve relative references",
+            \validLocationsUnchanged());
+        addTestCase("Malformed references are still rejected where they are resolved", \malformedReferences());
+        set_return_value(main());
+    }
+
+    private WebService asyncLoad(string location) {
+        WsdlPollOperation op(location, {"timeout": 30000, "connect_timeout": 30000});
+        on_error op.abort();
+        date deadline = now_us() + 30s;
+        while (!op.goalReached()) {
+            *hash<SocketPollInfo> info = op.continuePoll();
+            if (info) {
+                int remaining = (deadline - now_us()).durationMilliseconds();
+                if (remaining <= 0) {
+                    throw "TEST-ERROR", "asynchronous WSDL retrieval deadline exceeded";
+                }
+                Socket::poll((info,), remaining);
+            }
+        }
+        return op.getOutput();
+    }
+
+    # loads a WSDL with the named loader
+    private WebService load(string location, string mode) {
+        switch (mode) {
+            case "sync": return WSDLLib::getWebServiceFromUrl(location);
+            case "async": return asyncLoad(location);
+            case "client": return (new SoapClient({"wsdl": location})).getWebService();
+            case "client-file": return (new SoapClient({"wsdl_file": location})).getWebService();
+            case "client-io": return (new SoapClientIo({"wsdl": location})).getWebService();
+        }
+        throw "TEST-ERROR", sprintf("unknown loader %y", mode);
+    }
+
+    private checkValue(XsdSchema schema) {
+        XsdXmlValue value('<Value xmlns="' + OpaqueNs + '">42</Value>');
+        assertEq(value, schema.validateXmlValue(value));
+        assertThrows("SOAP-SERIALIZATION-ERROR", \schema.validateXmlValue(),
+            (new XsdXmlValue('<Value xmlns="' + OpaqueNs + '">invalid</Value>'),));
+    }
+
+    # asserts that loading fails with WSDL-LOCATION-ERROR naming the opaque base and the reference
+    private assertLocationError(code load, string base, string reference, string label) {
+        try {
+            load();
+            fail(sprintf("%s: relative reference %y against %y accepted", label, reference, base));
+        } catch (hash<ExceptionInfo> ex) {
+            assertEq("WSDL-LOCATION-ERROR", ex.err, label);
+            assertTrue(ex.desc =~ /cannot resolve relative reference/, label + ": " + ex.desc);
+            assertTrue(ex.desc.contains(sprintf("%y", base)), label + ": " + ex.desc);
+            assertTrue(ex.desc.contains(sprintf("%y", reference)), label + ": " + ex.desc);
+            assertTrue(ex.desc.contains("RFC 3986"), label + ": " + ex.desc);
+        }
+    }
+
+    private grammar() {
+        foreach string location in ("resource://svc:simple.wsdl", "resource://remote:svc:simple.wsdl",
+                "resource://issue-3834-soap:simple.wsdl",
+                "RESOURCE://svc:simple.wsdl", "resource://svc:simple.wsdl#part", "x-custom+1.0://a:b:c") {
+            assertTrue(WSDLLib::isOpaqueDocumentLocation(location), location);
+        }
+        # valid URIs, RFC 3986 schemes, locations without a scheme and invalid characters are never opaque
+        foreach string location in ("resource://svc/simple.wsdl", "resource://svc:8080/simple.wsdl",
+                "resource:svc:simple.wsdl", "urn:a:b", "http://host:port/a.wsdl", "HTTPS://host:port/a",
+                "file://host:port/a", "ftp://host:port/a", "relative/svc:a.wsdl", "", "resource://svc:a b",
+                "resource://svc:a\tb", "resource://svc:a\x7fb", "resource://svc:a" + chr(0) + "b",
+                "1resource://svc:a") {
+            assertFalse(WSDLLib::isOpaqueDocumentLocation(location), sprintf("%y", location));
+        }
+
+        string base = "resource://svc:root.wsdl";
+        # same-document and absolute references need no base structure
+        assertEq(base, WSDLLib::resolveDocumentLocation("", base));
+        assertEq(base, WSDLLib::resolveDocumentLocation("", base + "#frag"));
+        assertEq(base + "#part", WSDLLib::resolveDocumentLocation("#part", base + "#frag"));
+        assertEq(base + "#", WSDLLib::resolveDocumentLocation("#", base));
+        assertEq("http://host/b.xsd", WSDLLib::resolveDocumentLocation("http://host/a/../b.xsd", base));
+        assertEq("resource://svc:types.xsd", WSDLLib::resolveDocumentLocation("resource://svc:types.xsd", base));
+        assertEq("resource://svc/types.xsd", WSDLLib::resolveDocumentLocation("resource://svc/types.xsd", base));
+        # an opaque absolute reference is used as given, whatever its base
+        assertEq("resource://svc:types.xsd", WSDLLib::resolveDocumentLocation("resource://svc:types.xsd",
+            "https://host/a.wsdl"));
+        # relative references require the base structure
+        foreach string reference in ("types.xsd", "./types.xsd", "../types.xsd", "/types.xsd", "//host/types.xsd",
+                "?version=2", "svc/types.xsd") {
+            assertLocationError(sub () { WSDLLib::resolveDocumentLocation(reference, base); }, base, reference,
+                reference);
+        }
+        # malformed same-document and absolute references are rejected with Qore's grammar diagnostics
+        foreach string reference in ("#%gg", "#a b", "http://host:port/a.xsd", "http://host/%gg", "a b",
+                "1:relative") {
+            assertThrows("WSDL-LOCATION-ERROR", \WSDLLib::resolveDocumentLocation(), (reference, base), reference);
+        }
+        try {
+            WSDLLib::resolveDocumentLocation("http://host:port/a.xsd", base);
+            fail("malformed absolute reference accepted");
+        } catch (hash<ExceptionInfo> ex) {
+            assertEq("WSDL-LOCATION-ERROR", ex.err);
+            assertTrue(ex.desc.contains("http://host:port/a.xsd"), ex.desc);
+            assertTrue(ex.desc =~ /invalid port/, ex.desc);
+        }
+
+        # valid bases keep RFC 3986 resolution; RFC 3986 schemes are still validated strictly
+        assertEq("resource://svc/dir/types.xsd",
+            WSDLLib::resolveDocumentLocation("types.xsd", "resource://svc/dir/root.wsdl"));
+        assertEq("https://host/dir/types.xsd?v=2",
+            WSDLLib::resolveDocumentLocation("types.xsd?v=2", "https://host/dir/root.wsdl?v=1"));
+        foreach string bad_base in ("https://host:port/a.wsdl", "file://host:port/a", "relative/a.wsdl", "",
+                "resource://svc:a b") {
+            assertThrows("WSDL-LOCATION-ERROR", \WSDLLib::resolveDocumentLocation(), ("types.xsd", bad_base),
+                sprintf("%y", bad_base));
+        }
+
+        # the document_location option retains opaque identities and still rejects invalid values
+        XsdSchema schema(ValueSchema, {"document_location": base + "#root", "async_only": True});
+        assertEq(base, schema.document_location);
+        checkValue(schema);
+        XsdSchema restored = Serializable::deserialize(schema.serialize());
+        assertEq(base, restored.document_location);
+        checkValue(restored);
+        foreach string bad in ("https://host:port/a.xsd", "relative/file.xsd", "", "resource://svc:a b") {
+            assertThrows("WSDL-LOCATION-ERROR", sub () {
+                XsdSchema s(ValueSchema, {"document_location": bad, "async_only": True});
+            }, NOTHING, sprintf("%y", bad));
+        }
+        assertLocationError(sub () {
+            XsdSchema s(opaqueSchema('<xs:include schemaLocation="types.xsd"/>'),
+                {"document_location": base, "async_only": True, "xsd_cache": {}});
+        }, base, "types.xsd", "schema option");
+    }
+
+    private unknownEffectiveLocation() {
+        foreach string location in (UnknownScheme + "://svc:simple.wsdl",
+                UnknownScheme + "://remote:svc:simple.wsdl") {
+            string resource = location.substr(UnknownScheme.size() + 3);
+            unknown_handler.set({resource: simple_wsdl});
+            assertTrue(WSDLLib::isOpaqueDocumentLocation(location));
+
+            *string def_path = "stale";
+            *string effective = "stale";
+            hash<string, string> aliases = {"stale": "stale"};
+            assertEq(simple_wsdl, WSDLLib::getWSDL(location, NOTHING, NOTHING, \def_path, \effective, \aliases));
+            assertNothing(effective);
+            assertEq({}, aliases);
+
+            foreach string mode in ("sync", "async", "client", "client-file", "client-io") {
+                unknown_handler.clear();
+                WebService ws = load(location, mode);
+                assertEq(location, ws.document_location, mode);
+                assertEq(("CompanyInfoService",), (map $1.name, ws.listServices()), mode);
+                assertEq("http://localhost:8001/SOAP/CompanyInfoService",
+                    ws.getService("CompanyInfoService").port.CompanyInfoPort.address, mode);
+                assertEq((resource,), unknown_handler.requests, mode);
+
+                # saved services reconstruct without retrieval and keep the opaque identity
+                unknown_handler.enabled = False;
+                on_exit unknown_handler.enabled = True;
+                WebService restored = Serializable::deserialize(ws.serialize());
+                assertEq(location, restored.document_location, mode);
+                assertEq(ws.getHash(), restored.getHash(), mode);
+            }
+        }
+    }
+
+    private knownEffectiveLocation() {
+        string location = KnownScheme + "://svc:alias.wsdl";
+        known_handler.set({"svc:alias.wsdl": simple_wsdl}, {"svc:alias.wsdl": KnownScheme + "://svc:current.wsdl"});
+        foreach string mode in ("sync", "async", "client", "client-io") {
+            known_handler.clear();
+            WebService ws = load(location, mode);
+            assertEq(KnownScheme + "://svc:current.wsdl", ws.document_location, mode);
+            assertEq(("svc:alias.wsdl",), known_handler.requests, mode);
+            assertEq(("CompanyInfoService",), (map $1.name, ws.listServices()), mode);
+        }
+        *string effective;
+        WSDLLib::getWSDL(location, NOTHING, NOTHING, NOTHING, \effective);
+        assertEq(KnownScheme + "://svc:current.wsdl", effective);
+
+        # a relative reference in a document with an opaque effective location names that location
+        known_handler.set({"svc:alias.wsdl": includingWsdl("types.xsd")},
+            {"svc:alias.wsdl": KnownScheme + "://svc:current.wsdl"});
+        foreach string mode in ("sync", "async", "client", "client-io") {
+            known_handler.clear();
+            assertLocationError(sub () { load(location, mode); }, KnownScheme + "://svc:current.wsdl", "types.xsd",
+                mode);
+            assertEq(("svc:alias.wsdl",), known_handler.requests, mode);
+        }
+    }
+
+    private relativeReferencesRejected() {
+        string location = UnknownScheme + "://svc:root.wsdl";
+        hash<string, string> sources = {
+            "schema include": includingWsdl("types.xsd"),
+            "schema import": includingWsdl("../types.xsd", True),
+            "query-only include": includingWsdl("?version=2"),
+            "root-relative include": includingWsdl("/types.xsd"),
+            "WSDL import": opaqueWsdl('<w:import namespace="' + OpaqueNs + '" location="child.wsdl"/>'),
+        };
+        hash<string, string> references = {
+            "schema include": "types.xsd",
+            "schema import": "../types.xsd",
+            "query-only include": "?version=2",
+            "root-relative include": "/types.xsd",
+            "WSDL import": "child.wsdl",
+        };
+        foreach hash<auto> i in (sources.pairIterator()) {
+            foreach string mode in ("sync", "async", "client", "client-io") {
+                string label = i.key + " " + mode;
+                unknown_handler.set({"svc:root.wsdl": i.value});
+                assertLocationError(sub () { load(location, mode); }, location, references{i.key}, label);
+                # the relative reference is never retrieved, neither directly nor through a guessed base
+                assertEq(("svc:root.wsdl",), unknown_handler.requests, label);
+            }
+        }
+
+        # a relative include in an opaque dependency names that dependency's location as the base
+        unknown_handler.set({
+            "svc:root.wsdl": includingWsdl(UnknownScheme + "://svc:types.xsd"),
+            "svc:types.xsd": opaqueSchema('<xs:include schemaLocation="nested.xsd"/>'),
+        });
+        foreach string mode in ("sync", "async") {
+            unknown_handler.clear();
+            assertLocationError(sub () { load(location, mode); }, UnknownScheme + "://svc:types.xsd", "nested.xsd",
+                mode);
+            assertEq(("svc:root.wsdl", "svc:types.xsd"), unknown_handler.requests, mode);
+        }
+
+        # a schema added to a service with an opaque document location is resolved against that location
+        unknown_handler.set({"svc:root.wsdl": includingWsdl(UnknownScheme + "://svc:value.xsd"),
+            "svc:value.xsd": ValueSchema});
+        WebService ws = WSDLLib::getWebServiceFromUrl(location);
+        assertLocationError(sub () { ws.addSchemaString(opaqueSchema('<xs:include schemaLocation="more.xsd"/>')); },
+            location, "more.xsd", "addSchemaString");
+        # the failed addition leaves the service usable
+        assertEq(location, ws.document_location);
+        checkValue(ws);
+    }
+
+    private absoluteReferences() {
+        string location = UnknownScheme + "://svc:root.wsdl";
+        unknown_handler.set({
+            # WSDL import locations are xs:anyURI values, so an imported WSDL uses a valid URI
+            "svc:root.wsdl": opaqueWsdl('<w:import namespace="' + OpaqueNs + '" location="' + UnknownScheme
+                + '://svc/child.wsdl#part"/>' + '<w:types>'
+                + opaqueSchema('<xs:include schemaLocation="' + UnknownScheme + '://svc:types.xsd"/>')
+                + '</w:types>'),
+            "svc/child.wsdl": opaqueWsdl('<w:message name="M"><w:part name="value" element="t:Value"/>'
+                + '</w:message>'),
+            "svc:types.xsd": opaqueSchema('<xs:include schemaLocation="' + UnknownScheme
+                + '://svc/dir/value.xsd"/>'),
+            "svc/dir/value.xsd": opaqueSchema('<xs:include schemaLocation="../value.xsd"/>'),
+            "svc/value.xsd": ValueSchema,
+        });
+        foreach string mode in ("sync", "async") {
+            unknown_handler.clear();
+            WebService ws = load(location, mode);
+            assertEq(location, ws.document_location, mode);
+            assertEq("M", ws.getMessage("M").name, mode);
+            checkValue(ws);
+            # a valid URI imported from an opaque document still resolves its own relative references
+            assertEq(sort(("svc:root.wsdl", "svc/child.wsdl", "svc:types.xsd", "svc/dir/value.xsd",
+                "svc/value.xsd")), sort(unknown_handler.requests), mode);
+            unknown_handler.enabled = False;
+            on_exit unknown_handler.enabled = True;
+            WebService restored = Serializable::deserialize(ws.serialize());
+            assertEq(ws.getHash(), restored.getHash(), mode);
+            checkValue(restored);
+        }
+    }
+
+    private validLocationsUnchanged() {
+        # a custom scheme location that is a valid URI keeps RFC 3986 relative resolution
+        unknown_handler.set({
+            "svc/dir/root.wsdl": includingWsdl("types/value.xsd?v=1"),
+            "svc/dir/types/value.xsd?v=1": ValueSchema,
+        });
+        foreach string mode in ("sync", "async", "client", "client-io") {
+            unknown_handler.clear();
+            WebService ws = load(UnknownScheme + "://svc/dir/root.wsdl", mode);
+            assertEq(UnknownScheme + "://svc/dir/root.wsdl", ws.document_location, mode);
+            assertEq(("svc/dir/root.wsdl", "svc/dir/types/value.xsd?v=1"), unknown_handler.requests, mode);
+            checkValue(ws);
+        }
+
+        # local files
+        string dir = sprintf("%s/wsdl-opaque-%d-%d", tmp_location(), getpid(), gettid());
+        mkdir(dir);
+        on_exit rmdir(dir);
+        mkdir(dir + "/types");
+        on_exit rmdir(dir + "/types");
+        string root = dir + "/root.wsdl";
+        string types = dir + "/types/value.xsd";
+        File f();
+        f.open2(root, O_CREAT | O_TRUNC | O_WRONLY);
+        on_exit unlink(root);
+        f.write(includingWsdl("types/value.xsd"));
+        f.close();
+        f.open2(types, O_CREAT | O_TRUNC | O_WRONLY);
+        on_exit unlink(types);
+        f.write(ValueSchema);
+        f.close();
+        foreach string location in (root, "file://" + root) {
+            foreach string mode in ("sync", "async", "client", "client-io") {
+                WebService ws = load(location, mode);
+                assertEq("file://" + root, ws.document_location, mode);
+                checkValue(ws);
+            }
+        }
+
+        # HTTP
+        HttpServer server();
+        on_exit server.stop();
+        Queue requests();
+        server.setDefaultHandler("opaque", new OpaqueHttpPeer(requests, {
+            "/dir/root.wsdl": includingWsdl("types/value.xsd"),
+            "/dir/types/value.xsd": ValueSchema,
+        }));
+        server.addListener(0);
+        string url = sprintf("http://127.0.0.1:%d/dir/root.wsdl", server.getListenerInfo(0).port);
+        foreach string mode in ("sync", "async", "client", "client-io") {
+            WebService ws = load(url, mode);
+            assertEq(url, ws.document_location, mode);
+            assertEq("/dir/root.wsdl", requests.get(30000), mode);
+            assertEq("/dir/types/value.xsd", requests.get(30000), mode);
+            checkValue(ws);
+        }
+        assertEq(0, requests.size());
+    }
+
+    private malformedReferences() {
+        # references resolved against valid bases are still validated strictly
+        foreach string reference in ("a%gg.xsd", "1:types.xsd", "http://host:port/types.xsd", "a%2.xsd") {
+            foreach string base in (UnknownScheme + "://svc/dir/root.wsdl", UnknownScheme + "://svc:root.wsdl") {
+                string resource = base.substr(UnknownScheme.size() + 3);
+                unknown_handler.set({resource: includingWsdl(reference)});
+                foreach string mode in ("sync", "async") {
+                    unknown_handler.clear();
+                    string label = sprintf("%y against %y (%s)", reference, base, mode);
+                    try {
+                        load(base, mode);
+                        fail(label + " accepted");
+                    } catch (hash<ExceptionInfo> ex) {
+                        assertEq("WSDL-LOCATION-ERROR", ex.err, label + ": " + ex.desc);
+                    }
+                    assertEq((resource,), unknown_handler.requests, label);
+                }
+            }
+        }
+        # a requested custom-scheme location with unescaped spaces is not a usable document identity
+        unknown_handler.set({"svc:a b.wsdl": includingWsdl(UnknownScheme + "://svc/value.xsd"),
+            "svc/value.xsd": ValueSchema});
+        assertThrows("WSDL-LOCATION-ERROR", \WSDLLib::getWebServiceFromUrl(), (UnknownScheme + "://svc:a b.wsdl",));
+    }
+}
+
+# serves WSDL/XSD sources by location; an unknown location is a test failure
+class OpaqueResourceHandler inherits AbstractFileLocationHandler {
+    public {
+        bool enabled = True;
+        list<string> requests();
+    }
+
+    private {
+        bool known;
+        hash<string, string> sources();
+        hash<string, string> effective();
+        Mutex m();
+    }
+
+    constructor(bool known) {
+        self.known = known;
+    }
+
+    set(hash<string, string> sources, hash<string, string> effective = {}) {
+        m.lock();
+        on_exit m.unlock();
+        self.sources = sources;
+        self.effective = effective;
+        requests = ();
+    }
+
+    clear() {
+        m.lock();
+        on_exit m.unlock();
+        requests = ();
+    }
+
+    private hash<FileResourceResult> getResourceImpl(string scheme, string location, *hash<auto> opts) {
+        m.lock();
+        on_exit m.unlock();
+        if (!enabled) {
+            throw "TEST-UNEXPECTED-IO", location;
+        }
+        requests += location;
+        if (!exists sources{location}) {
+            throw "TEST-UNKNOWN-RESOURCE", sprintf("no test source for %y", location);
+        }
+        hash<FileResourceInfo> info = <FileResourceInfo>{"requested_location": scheme + "://" + location};
+        if (known && exists effective{location}) {
+            info.effective_location = effective{location};
+        }
+        return <FileResourceResult>{"data": binary(sources{location}), "info": info};
+    }
+
+    private AbstractPollOperation<hash<FileResourceResult>> getResourcePollerImpl(string scheme,
+            string location, *hash<auto> opts) {
+        return new FileResourcePollOperation(new ImmediateDataPollOperation(getResourceImpl(scheme, location, opts)),
+            hash<FileResourceResult> sub (auto output) { return output; });
+    }
+
+    private string getTextFileImpl(string scheme, string location, *hash<auto> opts) {
+        return getBinaryFileImpl(scheme, location, opts).toString();
+    }
+
+    private binary getBinaryFileImpl(string scheme, string location, *hash<auto> opts) {
+        return getResourceImpl(scheme, location, opts).data;
+    }
+
+    private Qore::AbstractPollOperation getIoPollerForLocationImpl(string scheme, string location,
+            *hash<auto> opts) {
+        return new ImmediateDataPollOperation(getBinaryFileImpl(scheme, location, opts));
+    }
+
+    private Qore::StreamReader getStreamReaderImpl(string scheme, string location, *hash<auto> opts) {
+        throw "UNIMPLEMENTED", "not supported";
+    }
+
+    private Qore::InputStream getBinaryStreamImpl(string scheme, string location, *hash<auto> opts) {
+        throw "UNIMPLEMENTED", "not supported";
+    }
+
+    private writeFileImpl(string scheme, string location, data contents, *hash<auto> opts) {
+        throw "UNIMPLEMENTED", "not supported";
+    }
+
+    private OutputStreamWrapper getOutputStreamImpl(string scheme, string location, *hash<auto> opts) {
+        throw "UNIMPLEMENTED", "not supported";
+    }
+
+    private hash<string, hash<FileHandlerOptionInfo>> getReadOptionsImpl() {
+        return {};
+    }
+
+    private hash<string, hash<FileHandlerOptionInfo>> getWriteOptionsImpl() {
+        return {};
+    }
+}
+
+class OpaqueHttpPeer inherits AbstractHttpRequestHandler {
+    private {
+        Queue requests;
+        hash<string, string> sources;
+    }
+
+    constructor(Queue requests, hash<string, string> sources) {
+        self.requests = requests;
+        self.sources = sources;
+    }
+
+    hash<HttpResponseInfo> handleRequest(hash<auto> cx, hash<auto> hdr, *data body) {
+        requests.push(cx.raw_path);
+        if (!exists sources{cx.raw_path}) {
+            return makeResponse(404, "not found");
+        }
+        return makeResponse(200, sources{cx.raw_path}, {"Content-Type": "application/xml"});
+    }
+}
