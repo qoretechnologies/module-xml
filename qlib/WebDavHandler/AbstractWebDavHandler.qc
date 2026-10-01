@@ -1238,6 +1238,7 @@ public class AbstractWebDavHandler inherits public HttpServer::AbstractHttpReque
 
         return <HttpResponseInfo>{
             "code": 207,
+            "hdr": {"Content-Type": MimeTypeXml + "; charset=UTF-8"},
             "body": xml,
         };
     }

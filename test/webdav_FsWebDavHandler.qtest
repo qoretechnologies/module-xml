@@ -9,6 +9,7 @@
 %requires QUnit
 %requires FsUtil
 %requires Logger
+%requires Mime
 %requires xml
 
 %exec-class Main
@@ -47,6 +48,8 @@ class Main inherits QUnit::Test {
     constructor() : QUnit::Test("webdavhandler", "1.0") {
         addTestCase("FS webdavhandler test", \test());
         addTestCase("uploaded text retains representation bytes", \uploadedBytes());
+        addTestCase("property responses declare XML media types", \xmlResponseTypes());
+        addTestCase("proxy constructors and mounted routes", \proxyRoutes());
 
         set_return_value(main());
     }
@@ -71,6 +74,85 @@ class Main inherits QUnit::Test {
                 assertEq(payload, client.send(NOTHING, "GET", "/upload.bin", NOTHING, True).body);
                 client.send(NOTHING, "DELETE", "/upload.bin");
             }
+        }
+    }
+
+    private xmlResponseTypes() {
+        TmpDir tmp();
+        WebDavHandler::FsWebDavHandler handler(tmp.path);
+        Server srv(<HttpServerOptionInfo>{"debug": True}, handler);
+        on_exit srv.stop();
+        Client client("http://127.0.0.1:" + srv.getPort());
+        assertEq(201, client.send("test", "PUT", "/resource").status_code);
+        foreach *string body in (NOTHING, "<propfind xmlns='DAV:'><allprop/></propfind>") {
+            hash<auto> response = client.send(body, "PROPFIND", "/resource", {"Depth": "0", "Accept-Charset": "ISO-8859-1"});
+            assertEq(207, response.status_code);
+            assertEq(MimeTypeXml, response."content-type".split(";")[0]);
+            assertEq("text/xml; charset=UTF-8", response."_qore_orig_content_type");
+            assertTrue(exists parse_xml(response.body)."DAV:multistatus"."DAV:response");
+        }
+        hash<auto> response = client.send("<propertyupdate xmlns='DAV:'><set><prop>"
+            "<label xmlns='urn:test'>café</label></prop></set></propertyupdate>",
+            "PROPPATCH", "/resource", {"Content-Type": MimeTypeXml});
+        assertEq(207, response.status_code);
+        assertEq(MimeTypeXml, response."content-type".split(";")[0]);
+        assertTrue(exists parse_xml(response.body)."DAV:multistatus"."DAV:response");
+        response = client.send("<propfind xmlns='DAV:'><prop><label xmlns='urn:test'/></prop></propfind>",
+            "PROPFIND", "/resource", {"Content-Type": MimeTypeXml, "Depth": "0"});
+        assertEq(207, response.status_code);
+        assertEq(MimeTypeXml, response."content-type".split(";")[0]);
+        assertTrue(response.body =~ /café/);
+        # An ordinary resource GET must retain its own media type and bytes.
+        response = client.send(NOTHING, "GET", "/resource", NOTHING, True);
+        assertEq(MimeTypeOctetStream, response."content-type".split(";")[0]);
+        assertEq("test".toBinary(), response.body);
+
+        WebDavHandler::WebDavHandlerProxy proxy({"files": handler});
+        Server proxy_srv(<HttpServerOptionInfo>{"debug": True}, proxy);
+        on_exit proxy_srv.stop();
+        Client proxy_client("http://127.0.0.1:" + proxy_srv.getPort());
+        response = proxy_client.send(NOTHING, "PROPFIND", "/", {"Depth": "1"});
+        assertEq(207, response.status_code);
+        assertEq(MimeTypeXml, response."content-type".split(";")[0]);
+        assertTrue(response.body =~ /files/);
+        hash<auto> listing = parse_xml(response.body)."DAV:multistatus"."DAV:response";
+        assertEq("/files", listing."DAV:href");
+    }
+
+    private proxyRoutes() {
+        TmpDir tmp();
+        File file();
+        file.open2(tmp.path + "/resource", O_WRONLY | O_CREAT, 0600);
+        file.write("mounted content");
+        file.close();
+        Logger logger("proxy", LoggerLevel::getLevelInfo());
+        WebDavHandler::FsWebDavHandler child(tmp.path, NOTHING, "/files");
+        WebDavHandler::FsWebDavHandler mounted(tmp.path, NOTHING, "/dav/files");
+        foreach hash<auto> row in (
+                {"handler": new WebDavHandler::WebDavHandlerProxy({"files": child}), "base": ""},
+                {"handler": new WebDavHandler::WebDavHandlerProxy({"files": mounted}, "/dav"), "base": "/dav"},
+                {"handler": new WebDavHandler::WebDavHandlerProxy({"files": mounted}, logger, "/dav"), "base": "/dav"}) {
+            Server srv(<HttpServerOptionInfo>{"debug": True}, row.handler);
+            on_exit srv.stop();
+            Client client("http://127.0.0.1:" + srv.getPort());
+            assertEq("mounted content".toBinary(), client.send(NOTHING, "GET", row.base + "/files/resource").body);
+            hash<auto> response = client.send(NOTHING, "PROPFIND", row.base + "/", {"Depth": "1"});
+            assertEq(207, response.status_code);
+            assertEq(row.base + "/files", parse_xml(response.body)."DAV:multistatus"."DAV:response"."DAV:href");
+            string resource = row.base + "/files/resource";
+            response = client.send(NOTHING, "PROPFIND", resource, {"Depth": "0"});
+            assertEq(resource, parse_xml(response.body)."DAV:multistatus"."DAV:response"."DAV:href");
+            string origin = "http://127.0.0.1:" + srv.getPort();
+            assertEq(201, client.send(NOTHING, "COPY", resource,
+                {"Destination": origin + row.base + "/files/copy"}).status_code);
+            assertEq("mounted content".toBinary(), client.send(NOTHING, "GET", row.base + "/files/copy").body);
+            assertEq(201, client.send(NOTHING, "MOVE", row.base + "/files/copy",
+                {"Destination": origin + row.base + "/files/moved"}).status_code);
+            assertEq("mounted content".toBinary(), client.send(NOTHING, "GET", row.base + "/files/moved").body);
+            assertEq(204, client.send(NOTHING, "DELETE", row.base + "/files/moved").status_code);
+            assertThrows("HTTP-CLIENT-RECEIVE-ERROR", sub () {
+                client.send(NOTHING, "GET", row.base + "/missing");
+            });
         }
     }
 

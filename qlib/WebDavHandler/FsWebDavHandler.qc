@@ -284,7 +284,7 @@ public class FsWebDavHandler inherits AbstractWebDavHandler {
     private hash<HttpResponseInfo> lockedResponse(hash<WebDavLockInfo> lock_info) {
         return <HttpResponseInfo>{
             "code": 423,
-            "hdr": {"Content-Type": MimeTypeXml},
+            "hdr": {"Content-Type": MimeTypeXml + "; charset=UTF-8"},
             "body": make_xml({
                 "DAV:error": {
                     "^attributes^": {"xmlns:DAV": DavNs},
@@ -968,7 +968,7 @@ public class FsWebDavHandler inherits AbstractWebDavHandler {
             "code": h ? 200 : 201,
             "hdr": {
                 "Lock-Token": sprintf("<%s>", token),
-                "Content-Type": MimeTypeXml,
+                "Content-Type": MimeTypeXml + "; charset=UTF-8",
             },
             "body": make_xml(resp),
         };
@@ -1017,7 +1017,7 @@ public class FsWebDavHandler inherits AbstractWebDavHandler {
             "code": 200,
             "hdr": {
                 "Lock-Token": sprintf("<%s>", token),
-                "Content-Type": MimeTypeXml,
+                "Content-Type": MimeTypeXml + "; charset=UTF-8",
             },
             "body": make_xml(resp),
         };
@@ -1336,6 +1336,7 @@ public class FsWebDavHandler inherits AbstractWebDavHandler {
         }
         return <HttpResponseInfo>{
             "code": 207,
+            "hdr": {"Content-Type": MimeTypeXml + "; charset=UTF-8"},
             "body": make_xml(resp),
         };
     }

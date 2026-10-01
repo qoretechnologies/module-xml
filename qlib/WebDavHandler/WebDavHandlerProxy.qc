@@ -23,8 +23,20 @@
 
 public namespace WebDavHandler {
 
-#! Proxy  WebDavHandler inteface class.
-public class WebDavHandlerProxy inherits AbstractWebDavHandler {
+#! Routes WebDAV requests to child handlers and provides a virtual root collection
+/** Uses DummyWebDavHandler's concrete defaults for operations not handled by the proxy.
+
+    Each child must use its complete public mount path as its virtual base,
+    including this proxy's base path. Requests and Destination headers retain
+    their public URLs so child listings and COPY/MOVE destinations agree.
+
+    @par Example:
+    @code{.py}
+    FsWebDavHandler files("/srv/documents", NOTHING, "/dav/files");
+    WebDavHandlerProxy proxy({"files": files}, "/dav");
+    @endcode
+*/
+public class WebDavHandlerProxy inherits DummyWebDavHandler {
     private {
         hash<string, AbstractWebDavHandler> m_ifaces;
     }
@@ -42,7 +54,7 @@ public class WebDavHandlerProxy inherits AbstractWebDavHandler {
         stripped from requests internally when serving WebDavHandler resources
     */
     constructor(hash<string, AbstractWebDavHandler> interfaces, string virtual_relative_path_base)
-            : AbstractWebDavHandler(NOTHING, virtual_relative_path_base) {
+            : DummyWebDavHandler(virtual_relative_path_base) {
         m_ifaces = interfaces;
     }
 
@@ -54,32 +66,23 @@ public class WebDavHandlerProxy inherits AbstractWebDavHandler {
     */
     constructor(hash<string, AbstractWebDavHandler> interfaces, Logger logger,
             string virtual_relative_path_base = "/")
-                : AbstractWebDavHandler(NOTHING, logger, NOTHING, virtual_relative_path_base) {
+                : DummyWebDavHandler(logger, new InMemoryWebDavPropertyHandler(), virtual_relative_path_base) {
         m_ifaces = interfaces;
     }
 
-    private *hash<auto> handleChildRaw(string method_name, hash<auto> cx, hash<auto> hdr, *data body) {
-#printf("---- %s\n", method_name);
-#printf("---- raw path %s\n", cx.raw_path);
+    private *hash<HttpResponseInfo> handleChildRaw(hash<auto> cx, hash<auto> hdr, *data body) {
         string path = getRelativePath(cx.raw_path);
-#printf("----     path %s\n", path);
-
-        cx.raw_path = "/" + path;
-
+        path =~ s/^\/+//;
         list<string> parts = path.split("/");
-#printf("---- %n\n", parts);
-
         if (parts.size() && m_ifaces.hasKey(parts[0])) {
-#printf("---- %s\n", "Y");
-            AbstractWebDavHandler handler = m_ifaces{parts[0]};
-            return call_object_method(handler, method_name, cx, hdr, body);
+            # Child dispatch must derive its filesystem path and enforce its own
+            # authentication and lock preconditions before invoking a method.
+            return m_ifaces{parts[0]}.handleRequest(cx, hdr, body);
         }
-#printf("---- %s\n", "N");
     }
 
-    private hash<HttpResponseInfo> handleChild(string method_name, hash<auto> cx, hash<auto> hdr, *data body) {
-        *hash<auto> ret = handleChildRaw(method_name, cx, hdr, body);
-        return ret ? cast<hash<HttpResponseInfo>>(ret) : response(501, "Not Implemented");
+    private hash<HttpResponseInfo> handleChild(hash<auto> cx, hash<auto> hdr, *data body) {
+        return handleChildRaw(cx, hdr, body) ?? response(501, "Not Implemented");
     }
 
     /**
@@ -88,7 +91,7 @@ public class WebDavHandlerProxy inherits AbstractWebDavHandler {
         Get a resource.
     */
     hash<HttpResponseInfo> handleGet(hash<auto> cx, hash<auto> hdr, *data body) {
-        return handleChild("handleGet", cx, hdr, body);
+        return handleChild(cx, hdr, body);
     }
 
     /**
@@ -97,7 +100,7 @@ public class WebDavHandlerProxy inherits AbstractWebDavHandler {
         Same like GET but without sending a body.
     */
     hash<HttpResponseInfo> handleHead(hash<auto> cx, hash<auto> hdr, *data body) {
-        return handleChild("handleHead", cx, hdr, body);
+        return handleChild(cx, hdr, body);
     }
 
     /**
@@ -106,7 +109,7 @@ public class WebDavHandlerProxy inherits AbstractWebDavHandler {
         Create new resource.
     */
     hash<HttpResponseInfo> handlePost(hash<auto> cx, hash<auto> hdr, *data body) {
-        return handleChild("handlePost", cx, hdr, body);
+        return handleChild(cx, hdr, body);
     }
 
     /**
@@ -115,7 +118,7 @@ public class WebDavHandlerProxy inherits AbstractWebDavHandler {
         Modify resource.
     */
     hash<HttpResponseInfo> handlePut(hash<auto> cx, hash<auto> hdr, *data body) {
-        return handleChild("handlePut", cx, hdr, body);
+        return handleChild(cx, hdr, body);
     }
 
     /**
@@ -124,7 +127,7 @@ public class WebDavHandlerProxy inherits AbstractWebDavHandler {
         Delete a resource.
     */
     hash<HttpResponseInfo> handleDelete(hash<auto> cx, hash<auto> hdr, *data body) {
-        return handleChild("handleDelete", cx, hdr, body);
+        return handleChild(cx, hdr, body);
     }
 
     /**
@@ -133,7 +136,7 @@ public class WebDavHandlerProxy inherits AbstractWebDavHandler {
         Copy a resource from one URI to another.
     */
     hash<HttpResponseInfo> handleCopy(hash<auto> cx, hash<auto> hdr, *data body) {
-        return handleChild("handleCopy", cx, hdr, body);
+        return handleChild(cx, hdr, body);
     }
 
     /**
@@ -142,7 +145,7 @@ public class WebDavHandlerProxy inherits AbstractWebDavHandler {
         Move a resource from one URI to another.
     */
     hash<HttpResponseInfo> handleMove(hash<auto> cx, hash<auto> hdr, *data body) {
-        return handleChild("handleMove", cx, hdr, body);
+        return handleChild(cx, hdr, body);
     }
 
     /**
@@ -160,7 +163,7 @@ public class WebDavHandlerProxy inherits AbstractWebDavHandler {
         Remove a lock from a resource.
     */
     hash<HttpResponseInfo> handleUnlock(hash<auto> cx, hash<auto> hdr, *data body) {
-        return handleChild("handleUnlock", cx, hdr, body);
+        return handleChild(cx, hdr, body);
     }
 
     /**
@@ -169,7 +172,7 @@ public class WebDavHandlerProxy inherits AbstractWebDavHandler {
         Create collections (aka a directory).
     */
     hash<HttpResponseInfo> handleMkcol(hash<auto> cx, hash<auto> hdr, *data body) {
-        return handleChild("handleMkcol", cx, hdr, body);
+        return handleChild(cx, hdr, body);
     }
 
     /**
@@ -181,16 +184,16 @@ public class WebDavHandlerProxy inherits AbstractWebDavHandler {
     */
     hash<HttpResponseInfo> handlePropfind(hash<auto> cx, hash<auto> hdr, *data body) {
         # handle children first
-        *hash<auto> ret = handleChildRaw("handlePropfind", cx, hdr, body);
+        *hash<HttpResponseInfo> ret = handleChildRaw(cx, hdr, body);
         if (ret) {
             return cast<hash<HttpResponseInfo>>(ret);
         }
 
         # then top level impl
         hash<auto> resp = {
-            "multistatus" : {
-                "^attributes^" : {"xmlns": "DAV:"},
-                "response" : list(),
+            "DAV:multistatus" : {
+                "^attributes^" : {"xmlns:DAV": "DAV:"},
+                "DAV:response" : list(),
             },
         };
 
@@ -200,12 +203,15 @@ public class WebDavHandlerProxy inherits AbstractWebDavHandler {
                 "displayname": it.getKey(),
                 "size": 0,
             };
-            string path = cx.raw_path + "/" + it.getKey();
-            resp.multistatus.response += preparePropFindXmlResponse(path, path, True, props);
+            string path = cx.raw_path;
+            path =~ s/\/+$//;
+            path += "/" + it.getKey();
+            resp."DAV:multistatus"."DAV:response" += preparePropFindXmlResponse(path, path, True, props);
         }
 
         return <HttpResponseInfo>{
             "code": 207,
+            "hdr": {"Content-Type": MimeTypeXml + "; charset=UTF-8"},
             "body": make_xml(resp),
         };
     }
@@ -216,7 +222,7 @@ public class WebDavHandlerProxy inherits AbstractWebDavHandler {
         Change and delete multiple properties on a resource in a single atomic act.
     */
     hash<HttpResponseInfo> handleProppatch(hash<auto> cx, hash<auto> hdr, *data body) {
-        return handleChild("handleProppatch", cx, hdr, body);
+        return handleChild(cx, hdr, body);
     }
 } # class WebDavHandlerProxy
 } # namespace WebDavHandler

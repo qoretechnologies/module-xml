@@ -64,6 +64,8 @@ EXTRA_DIST = COPYING.LGPL COPYING.MIT AUTHORS README \
     CMakeLists.txt \
     cmake/QoreXmlLibXml2.cmake cmake/QoreXmlLibXml2CatalogFix.cmake cmake/QoreXmlLibXml2QNameFix.cmake \
     cmake/QoreXmlLibXml2AnyUriFix.cmake cmake/libxml2-anyuri-probe.h \
+    cmake/QoreXmlLibXml2OccurrenceFlowFix.cmake \
+    test/cmake/test_libxml2_occurrence_flow.py \
     cmake/QoreXmlLibXml2NameEditionFix.cmake cmake/libxml2-name-edition-probe.h \
     cmake/QoreXmlLibXml2UriFix.cmake cmake/QoreXmlLibXml2EntityFix.cmake \
     cmake/QoreXmlLibXml2OccursFix.cmake cmake/libxml2-occurs.inc \
