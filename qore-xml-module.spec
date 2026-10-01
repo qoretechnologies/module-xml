@@ -1,225 +1,136 @@
-%global mod_ver 2.3.0
-
-%{?_datarootdir: %global mydatarootdir %_datarootdir}
-%{!?_datarootdir: %global mydatarootdir /usr/share}
-
-%global module_api %(qore --latest-module-api 2>/dev/null)
-%global module_dir %{_libdir}/qore-modules
-%global user_module_dir %{mydatarootdir}/qore-modules/
-
-%if 0%{?sles_version}
-
-%global dist .sles%{?sles_version}
-
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+# SPDX-License-Identifier: MIT
+# Use the pinned source epoch for RPM headers and installed file timestamps.
+%global source_date_epoch_from_changelog 1
+%global use_source_date_epoch_as_buildtime 1
+%if v"%{rpmversion}" >= v"4.20"
+%global build_mtime_policy clamp_to_source_date_epoch
 %else
-%if 0%{?suse_version}
-
-# get *suse release major version
-%global os_maj %(echo %suse_version|rev|cut -b3-|rev)
-# get *suse release minor version without trailing zeros
-%global os_min %(echo %suse_version|rev|cut -b-2|rev|sed s/0*$//)
-
-%if %suse_version
-%global dist .opensuse%{os_maj}_%{os_min}
+%global clamp_mtime_to_source_date_epoch 1
 %endif
-
-%endif
-%endif
-
-# see if we can determine the distribution type
-%if 0%{!?dist:1}
-%global rh_dist %(if [ -f /etc/redhat-release ];then cat /etc/redhat-release|sed "s/[^0-9.]*//"|cut -f1 -d.;fi)
-%if 0%{?rh_dist}
-%global dist .rhel%{rh_dist}
-%else
-%global dist .unknown
-%endif
-%endif
-
-Summary: XML module for Qore
+%bcond_without tests
+%bcond_without docs
 Name: qore-xml-module
-Version: %{mod_ver}
-Release: 1%{dist}
-License: MIT
-Group: Development/Languages/Other
-URL: http://qore.org
-Source: http://prdownloads.sourceforge.net/qore/%{name}-%{version}.tar.bz2
-BuildRoot: %{_tmppath}/%{name}-%{version}-%{release}-root
-Requires: /usr/bin/env
-Requires: qore-module(abi)%{?_isa} = %{module_api}
-Requires: qore >= 2.3
-%if 0%{?el7}
-BuildRequires: devtoolset-7-gcc-c++
-%endif
-BuildRequires: cmake >= 3.5
+Version: 2.3.0
+Release: 1%{?dist}
+Summary: XML, SOAP and WebDAV integration for Qore
+License: (LGPL-2.1-or-later OR MIT) AND MIT
+URL: https://github.com/qoretechnologies/module-xml
+Source0: %{name}-%{version}.tar.xz
+Source1: libxml2-2.15.4.tar.xz
+Provides: bundled(libxml2) = 2.15.4
+Provides: bundled(fast_float) = 8.3.0
+%global _find_debuginfo_dwz_opts %{nil}
+BuildRequires: cmake >= 3.18
+BuildRequires: make
 BuildRequires: gcc-c++
-BuildRequires: qore-devel >= 2.3
-BuildRequires: qore-stdlib >= 2.3
-BuildRequires: qore >= 2.3
-BuildRequires: libxml2-devel
-BuildRequires: openssl-devel
-BuildRequires: fdupes
-BuildRequires: doxygen
-%if 0%{?suse_version} || 0%{?sles_version}
-BuildRequires: timezone
-%else
-BuildRequires: tzdata
+BuildRequires: pkgconfig(openssl)
+BuildRequires: pkgconfig(zlib)
+BuildRequires: patch
+BuildRequires: qore-uuid-module
+%if %{with tests}
+BuildRequires: python3
+BuildRequires: litmus >= 0.18
+BuildRequires: qore-process-module >= 2.1.0
+BuildRequires: qore-misc-tools >= 3.0.0~
 %endif
+BuildRequires: qore-devel >= 3.0.0~
+BuildRequires: qore-rpm-macros >= 3.0.0~
+%if %{with docs}
+BuildRequires: doxygen
+%if 0%{?suse_version}
+BuildRequires: util-linux
+%else
+BuildRequires: util-linux-core
+%endif
+%endif
+%{?qore_enable_aot_post}
 
 %description
-This package contains the xml module for the Qore Programming Language.
+XML parsing, generation and validation, WSDL/SOAP, XML-RPC and WebDAV.
+Includes source and compiled modules, compiler metadata, provider resources,
+translations and command-line tools. Uses a private patched XML parser.
 
-XML is a markup language for encoding information.
-
-%if 0%{?suse_version}
-%debug_package
-%endif
-
+%if %{with docs}
 %package doc
-Summary: Documentation and examples for the Qore xml module
-Group: Development/Languages/Other
-
+Summary: XML and web service module reference documentation
+BuildArch: noarch
 %description doc
-This package contains the HTML documentation and example programs for the Qore
-xml module.
-
-%files doc
-%defattr(-,root,root,-)
-%doc docs/xml docs/CdaDataProvider docs/XmlRpcHandler docs/SalesforceSoapClient docs/SaxDataProvider docs/SoapClient docs/SoapDataProvider docs/SoapHandler docs/WSDL docs/XmlRpcConnection test examples
+Native and user-module API references, tutorials and web service examples.
+%endif
 
 %prep
-%setup -q
-
+%autosetup -a 1
 %build
-%if 0%{?el7}
-# enable devtoolset7
-. /opt/rh/devtoolset-7/enable
+%{?set_build_flags}
+. %{_rpmconfigdir}/qore/module-env.sh
+qore_set_source_prefix_maps "%{qore_debug_source_dir}"
+cmake -S . -B build -G 'Unix Makefiles' \
+  -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_FLAGS_RELEASE=-DNDEBUG \
+  -DCMAKE_INSTALL_PREFIX=%{_prefix} -DCMAKE_INSTALL_LIBDIR=%{_lib} \
+  -DCMAKE_SKIP_RPATH=ON -DCMAKE_IGNORE_PREFIX_PATH=/usr/local \
+  -DQore_DIR=%{_libdir}/cmake/Qore -DQORE_EXECUTABLE=/usr/bin/qore \
+  -DQORE_QPP_EXECUTABLE=/usr/bin/qpp -DQORE_QCC_EXECUTABLE=/usr/bin/qcc \
+  -DQORE_XML_LIBXML2_PROVIDER=BUNDLED \
+  -DFETCHCONTENT_SOURCE_DIR_QORE_XML_LIBXML2:PATH=$PWD/libxml2-2.15.4 \
+  -DFETCHCONTENT_FULLY_DISCONNECTED=ON \
+  -DQORE_BUILD_AOT_MODULES=ON -DQORE_AOT_LINK_SOURCE_MODULES=OFF \
+  -DQORE_XML_STRICT_DOCS=ON \
+  -DQORE_GENERATE_JAVA_BINDINGS=OFF \
+  -DQORE_QM_METADATA_ENV:STRING="QORE_MODULE_DIR=$QORE_MODULE_DIR:$PWD/qlib;QORE_MODULE_DIR_ONLY=1;QORE_INCLUDE_DIR=;LD_LIBRARY_PATH=" \
+  -DCMAKE_DISABLE_FIND_PACKAGE_Doxygen=%{!?with_docs:ON}%{?with_docs:OFF}
+cmake --build build -- %{?_smp_mflags}
+%if %{with docs}
+cmake --build build --target docs -- %{?_smp_mflags}
 %endif
-export CXXFLAGS="%{?optflags}"
-cmake -DCMAKE_INSTALL_PREFIX=%{_prefix} -DCMAKE_BUILD_TYPE=RELWITHDEBINFO -DCMAKE_SKIP_RPATH=1 -DCMAKE_SKIP_INSTALL_RPATH=1 -DCMAKE_SKIP_BUILD_RPATH=1 -DCMAKE_PREFIX_PATH=${_prefix}/lib64/cmake/Qore .
-make %{?_smp_mflags}
-%{__make}
-%{__make} docs
-sed -i 's/#!\/usr\/bin\/env qore/#!\/usr\/bin\/qore/' test/*.qtest
-
 %install
-make DESTDIR=%{buildroot} install %{?_smp_mflags}
-
-%clean
-rm -rf $RPM_BUILD_ROOT
-
+DESTDIR=%{buildroot} cmake --install build
+for command in soaputil webdav-server; do
+    sed -i '1s|.*|#!/usr/bin/qore|' %{buildroot}%{_bindir}/$command
+    install -Dm644 debian/man/$command.1 %{buildroot}%{_mandir}/man1/$command.1
+done
+%qore_install_aot_sources qlib
+find %{buildroot}%{_libdir}/qore-modules -type f -name '*.qmod' -exec chmod 755 {} +
+%if %{with docs}
+install -d %{buildroot}%{_docdir}/%{name}-doc
+cp -a build/docs %{buildroot}%{_docdir}/%{name}-doc/
+hardlink -t -O %{buildroot}%{_docdir}/%{name}-doc
+%endif
+%check
+%if %{with tests}
+. %{_rpmconfigdir}/qore/module-env.sh
+python3 -B -W error debian/tests/test_aot_metadata.py
+python3 -B -W error test/cmake/test_libxml2_occurrence_flow.py \
+  build/_deps/qore_xml_libxml2-build/qore-name-edition-fix/xmlschemas.c -v
+cmake --build build --parallel %{_smp_build_ncpus} --target \
+  qore-xml-namespace-probe qore-xml-float-test qore-xml-uri-allocation qore-xml-entity-allocation
+build/qore-xml-namespace-probe
+build/qore-xml-float-test
+build/qore-xml-uri-allocation
+build/qore-xml-entity-allocation
+python3 -B -W error rpm/run-tests.py --build-dir "$PWD/build"
+qore-data-provider-i18n --no-color --check-source-tree --require-standard-locales \
+  --require-complete-locales --output "$PWD/qlib"
+%endif
 %files
-%defattr(-,root,root,-)
-%{module_dir}
-%{user_module_dir}
+%license COPYING.MIT COPYING.LGPL cmake/third-party/fast_float/LICENSE-MIT
+%license %{_datadir}/licenses/qore-xml/
+%doc README
 %{_bindir}/soaputil
 %{_bindir}/webdav-server
-%doc COPYING.LGPL COPYING.MIT README RELEASE-NOTES AUTHORS
-
-%check
-export QORE_MODULE_DIR=$QORE_MODULE_DIR:qlib
-qore -l ./xml-api-%{module_api}.qmod test/InputStreamSaxIterator.qtest -v
-qore -l ./xml-api-%{module_api}.qmod test/Salesforce.com.qtest -v
-qore -l ./xml-api-%{module_api}.qmod test/SoapClient.qtest -v
-qore -l ./xml-api-%{module_api}.qmod test/SoapHandler.qtest -v
-qore -l ./xml-api-%{module_api}.qmod test/XmlRpcClient.qtest -v
-qore -l ./xml-api-%{module_api}.qmod test/XmlRpcHandler.qtest -v
-qore -l ./xml-api-%{module_api}.qmod test/CdaDataProvider.qtest -v
-qore -l ./xml-api-%{module_api}.qmod test/soap.qtest -v
-qore -l ./xml-api-%{module_api}.qmod test/webdav_DummyWebDavHandler.qtest -v
-qore -l ./xml-api-%{module_api}.qmod test/webdav_FsWebDavHandler.qtest -v
-#qore -l ./xml-api-%{module_api}.qmod test/webdav_FsWebDavHandler_litmus.qtest -v
-qore -l ./xml-api-%{module_api}.qmod test/xml.qtest -v
-
+%{_mandir}/man1/soaputil.1*
+%{_mandir}/man1/webdav-server.1*
+%{_libdir}/qore-modules/*
+%{_datadir}/qore-modules/*
+%dir %{_datadir}/qore/metadata/xml
+%{_datadir}/qore/metadata/xml/*.meta.json
+%{_datadir}/qore/i18n/
+%if %{with docs}
+%files doc
+%license COPYING.MIT COPYING.LGPL
+%doc %{_docdir}/%{name}-doc/
+%endif
 %changelog
-* Mon Sep 28 2026 David Nichols <david@qore.org> - 2.3.0
-- updated to version 2.3.0
-
-* Tue Jan 20 2026 David Nichols <david@qore.org> - 2.1.0
-- updated qore version requirements to 2.3 for %modern tests
-
-* Mon Dec 30 2025 David Nichols <david@qore.org> - 2.1.0
-- xml module: replaced assertions with proper error handling in I/O callback class
-- xml module: added exception checking after container operations in XML parsing
-- xml module: added input validation for numeric conversions in XML-RPC parsing
-- WSDL: fixed namespace handling, improved prefix generation (6 chars)
-- WSDL: added tryGetInputNamespaceUri() for safe namespace lookups
-- WSDL: fixed WSOperation serialize/deserialize to support header-only operations
-- WSDL: added @debug blocks for namespace stack operations
-- SoapClient: improved SOAP fault detection regex, fixed documentation typos
-- SoapHandler: fixed version constant mismatch, fixed malformed error string,
-  added message size limits
-- tests: enabled debug mode in CI to catch @debug block parse errors
-- updated module copyrights to 2025
-
-* Fri Jul 18 2025 David Nichols <david@qore.org> - 2.0.1
-- fixed a memory error handling XML-RPC I/O; updated to v2.0.1
-
-* Sun Oct 1 2023 David Nichols <david@qore.org> - 2.0.0
-- added support for the DataProvider app/action catalog
-
-* Thu Jun 15 2023 David Nichols <david@qore.org> - 1.8.1
-- allow wsdl to be chosen as a file in the SoapClient connection
-
-* Mon Dec 19 2022 David Nichols <david@qore.org> - 1.8.0
-- use cmake for build
-
-* Sun Nov 6 2022 David Nichols <david@qore.org> - 1.8.0
-- updated to version 1.8.0
-
-* Fri Oct 14 2022 David Nichols <david@qore.org> - 1.7.1
-- updated to version 1.7.1
-
-* Wed Sep 14 2022 David Nichols <david@qore.org> - 1.7.0
-- updated to version 1.7.0
-
-* Thu Jul 7 2022 David Nichols <david@qore.org> - 1.6.1
-- updated to version 1.6.1
-
-* Fri Apr 1 2022 David Nichols <david@qore.org> - 1.6.0
-- updated to version 1.6.0
-
-* Fri Feb 18 2022 David Nichols <david@qore.org> - 1.5.3
-- updated to version 1.5.3
-
-* Sat Feb 12 2022 David Nichols <david@qore.org> - 1.5.2
-- updated to version 1.5.2
-
-* Tue Jan 25 2022 David Nichols <david@qore.org> - 1.5.1
-- updated to version 1.5.1
-
-* Tue Jun 19 2018 David Nichols <david@qore.org> - 1.5
-- updated to version 1.5
-
-* Tue May 15 2018 David Nichols <david@qore.org> - 1.4.2
-- updated to version 1.4.2
-
-* Fri Apr 13 2018 David Nichols <david@qore.org> - 1.4.1
-- updated to version 1.4.1
-
-* Thu Feb 2 2017 David Nichols <david@qore.org> - 1.4
-- updated to version 1.4
-
-* Thu Feb 2 2017 David Nichols <david@qore.org> - 1.3.2
-- updated to version 1.3.2
-
-* Mon Sep 5 2016 David Nichols <david@qore.org> - 1.3.1
-- updated to version 1.3.1
-
-* Sat Jan 4 2014 David Nichols <david@qore.org> - 1.3
-- updated to version 1.3
-
-* Mon Nov 12 2012 David Nichols <david@qore.org> - 1.2
-- updated to version 1.2
-
-* Thu May 31 2012 David Nichols <david@qore.org> - 1.1
-- updated to qpp
-
-* Thu Oct 20 2011 Petr Vanek <petr.vanek@qoretechnologies.com> - 1.1
-- 1.1 release
-
-* Tue Dec 28 2010 David Nichols <david@qore.org> - 1.1
-- updated to version 1.1
-
-* Fri Dec 17 2010 David Nichols <david@qore.org> - 1.0
-- initial spec file for xml module
+* Thu Oct 01 2026 David Nichols <david@qore.org> - 2.3.0-1
+- Package native and compiled XML modules with verified private parser sources.
+- Require complete offline suites, WebDAV compliance and native regression probes.
