@@ -1,7 +1,7 @@
 #!/usr/bin/python3
 # Copyright (C) 2026 David Nichols
 # SPDX-License-Identifier: MIT
-"""Exercise built or installed XML modules without falling back to qlib sources."""
+"""Exercise built XML qmods or installed artifacts, excluding checkout sources."""
 import argparse
 import json
 import os
@@ -9,6 +9,7 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 
 parser = argparse.ArgumentParser(description=__doc__)
@@ -42,6 +43,14 @@ for module in modules:
     if not ((module_dir / (module + '.qmod')).is_file()
             or (module_dir / module / (module + '.qmod')).is_file()):
         raise SystemExit(f'Missing compiled module: {module}')
+installed_sources = set()
+if args.installed:
+    # Accept only sources owned by this package, never checkout or user modules.
+    installed_sources = {
+        Path(p).resolve() for p in subprocess.check_output(
+            ['dpkg-query', '-L', 'qore-xml-module'], text=True).splitlines()
+        if p.endswith('.qm')
+    }
 env.update(QORE_MODULE_DIR=':'.join(paths), QORE_MODULE_DIR_ONLY='1',
            QORE_XML_REQUIRE_LITMUS='1', LC_ALL='C.UTF-8', TZ='UTC')
 # No Salesforce credentials are supplied by package qualification.
@@ -57,13 +66,35 @@ with tempfile.TemporaryDirectory(prefix='qore-xml-package-', dir=os.environ.get(
     shutil.copytree(source / 'docs', work / 'docs')
     lines = ['%modern'] + ['%requires ' + module for module in modules]
     for module in modules:
-        lines += [f'if (!get_module_hash().{json.dumps(module)}.filename.equalPartial('
-                  f'{json.dumps(str(module_dir) + "/")})) {{',
-                  f'    throw "PACKAGE-TEST-ERROR", {json.dumps("Wrong artifact for " + module)};', '}']
+        lines += [f'printf("%s\\t%s\\n", {json.dumps(module)}, '
+                  f'get_module_hash().{json.dumps(module)}.filename);']
     preflight = work / 'preflight.q'
     preflight.write_text('\n'.join(lines) + '\n')
-    subprocess.run([*command, str(preflight)], cwd=work, env=env, check=True, timeout=180)
-    print(f'Preflight: all {len(modules)} modules resolve to compiled artifacts in {module_dir}', flush=True)
+    result = subprocess.run([*command, str(preflight)], cwd=work, env=env,
+                            capture_output=True, text=True, timeout=180)
+    # Keep diagnostics visible; a successful fallback is not silent qualification.
+    print(result.stderr, end='', file=sys.stderr, flush=True)
+    result.check_returncode()
+    loaded = [line.split('\t') for line in result.stdout.splitlines()]
+    if len(loaded) != len(modules) or any(len(row) != 2 for row in loaded):
+        raise SystemExit(f'Invalid preflight output: {result.stdout!r}')
+    if [row[0] for row in loaded] != modules:
+        raise SystemExit(f'Unexpected preflight module inventory: {loaded!r}')
+    for module, filename in loaded:
+        artifact = Path(filename).resolve()
+        compiled = {(module_dir / (module + '.qmod')).resolve(),
+                    (module_dir / module / (module + '.qmod')).resolve()}
+        if artifact not in compiled:
+            # New optional dependencies invalidate AOT assumptions. Qore must use
+            # the installed source in that case; build tests still require qmods.
+            stale_optional = any(
+                f"for feature '{module}'" in line and 'AOT-MODULE-STALE:' in line
+                and 'was compiled when optional module ' in line
+                for line in result.stderr.splitlines())
+            if (not args.installed or artifact not in installed_sources
+                    or artifact.name != module + '.qm' or not stale_optional):
+                raise SystemExit(f'Wrong artifact for {module}: {filename}')
+        print(f'Preflight: {module}: {artifact}', flush=True)
     suites = sorted((work / 'test').glob('*.qtest'))
     for suite in suites:
         text = suite.read_text()
