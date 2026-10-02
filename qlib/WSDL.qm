@@ -103,6 +103,34 @@ hash<auto> h = op.serializeRequest({"Create": {"MOAttributes": {"default-subscri
     The data provider type of an element with empty content is a hash type with no fields, which also accepts
     @ref nothing "NOTHING" for an optional element.
 
+    @section wsdl_nil_elements Nillable Elements and xsi:nil
+
+    \c xsi:nil is an XML Schema instance attribute that can be set on every element declared with
+    \c nillable="true"; it is never declared as an attribute of the element's type.  A required nillable element
+    with no value (@ref nothing "NOTHING") is serialized with \c xsi:nil="true" automatically, while an optional
+    nillable element (i.e. declared with \c minOccurs="0") with no value is left out of the message.
+
+    To serialize an optional nillable element with \c xsi:nil="true" (ex: to withdraw a service), give the
+    attribute in the \c "^attributes^" hash of the element's value as \c "xsi:nil" or as \c "nil":
+    @code{.py}
+# serializes "<mtas:hotline xsi:nil="true"/>" in the message
+hash<auto> h = op.serializeRequest({"Set": {"MOAttributes": {"setSubscription": {"services": {
+    "hotline": {"^attributes^": {"nil": "true"}},
+}}}}});
+    @endcode
+
+    Any \c xs:boolean value is accepted for the attribute (\c "true", \c "false", \c "1", \c "0", or a boolean
+    value); if the value is false, then the attribute is not serialized, and the element is serialized normally.
+    An element with \c xsi:nil="true" is serialized with no content; the content required by its type is not
+    required, but the attributes declared by its type can still be given and are still required if declared so.
+    A \c SOAP-SERIALIZATION-ERROR exception is raised if content is supplied for such an element, if the element
+    is not nillable, or if the value of the attribute is not a valid \c xs:boolean value.
+
+    If the element's type declares an attribute named \c "nil" itself, then \c "nil" refers to this attribute, and
+    \c xsi:nil must be given as \c "xsi:nil".
+
+    An element with \c xsi:nil="true" is deserialized as @ref nothing "NOTHING".
+
     @section wsdl_model_groups Named and Optional Model Groups
 
     A reference to a named model group (\c "<xs:group ref=\"x\"/>") is handled as a model group made up of the
@@ -232,6 +260,10 @@ hash<auto> rv = op.deserializeResponse(msg);
       header values; body values are also no longer overwritten by header values or discarded when they cannot be
       merged with the header values
       (<a href="https://github.com/qoretechnologies/qore/issues/5453">issue 5453</a>)
+    - fixed serializing nillable elements with \c xsi:nil="true"; \c xsi:nil was handled as an attribute of the
+      element's type, so a \c SOAP-SERIALIZATION-ERROR exception was raised for an unknown attribute, and there
+      was no way to serialize an optional nillable element with \c xsi:nil="true".  The attribute can now be given
+      in the \c "^attributes^" hash of the element's value as \c "xsi:nil" or \c "nil" (see @ref wsdl_nil_elements)
 
     @subsection wsdl_0_5_6 WSDL v0.5.6
     - fixed handling nested XSD model groups; elements declared in an \c xs:sequence, \c xs:choice, or \c xs:all
@@ -1219,6 +1251,30 @@ public class WSDL::XsdAbstractType inherits WSDL::XsdNamedData {
         # this method intentionally left empty
     }
 
+    #! returns @ref True "True" if the type declares an attribute with the given name
+    /** @since %WSDL 0.5.7
+    */
+    bool hasAttribute(string name) {
+        return False;
+    }
+
+    #! serializes the attributes of an element of this type
+    /** @param nsc the namespace container
+        @param mah the attribute values to serialize, keyed by attribute name
+
+        @return the serialized attribute values
+
+        @throw SOAP-SERIALIZATION-ERROR unknown or prohibited attribute, or a required attribute is missing
+
+        @since %WSDL 0.5.7
+    */
+    *hash<auto> serializeAttributes(Namespaces nsc, *hash<auto> mah) {
+        if (mah) {
+            throw SOAP_SERIALIZATION_ERROR, sprintf("cannot set unknown attribute %y of element %y; known "
+                "attributes: %y", mah.firstKey(), getName(), ());
+        }
+    }
+
     abstract auto serialize(Namespaces nsc, auto val, *softbool omitType);
     abstract auto deserialize(string en, hash<string, XsdAbstractType> tmap, *hash<auto> mrh, auto val);
     abstract AbstractDataProviderType getDataProviderType();
@@ -2009,10 +2065,7 @@ public class WSDL::XsdElement inherits WSDL::XsdTypedData {
                 return;
 
             if (nillable || type.isNillable()) {
-                hash<auto> rh = ("xsi:nil": "true");
-                if ((!omitType || type != self.type) && type.hasRealName())
-                    rh += ("xsi:type": type.getNameWithNS());
-                return ("^attributes^": rh);
+                return getNilValue(type, omitType);
             }
 
             if (!type.isRequired())
@@ -2040,12 +2093,20 @@ public class WSDL::XsdElement inherits WSDL::XsdTypedData {
 
             list<auto> l = ();
             foreach auto e in (h) {
-                l += (pf + type.serialize(nsc, e, omitType));
+                # an element explicitly marked with xsi:nil="true" is serialized without any content
+                *hash<auto> nilh = serializeNil(nsc, type, \e, omitType);
+                l += nilh ?? (pf + type.serialize(nsc, e, omitType));
             }
             return l;
         }
         if (minOccurs > 1)
             throw SOAP_SERIALIZATION_ERROR, sprintf("only one element passed to element %y of type %y, but minOccurs = %d", name, type.getName(), minOccurs);
+
+        # an element explicitly marked with xsi:nil="true" is serialized without any content
+        *hash<auto> nilh = serializeNil(nsc, type, \h, omitType);
+        if (nilh) {
+            return nilh;
+        }
 
         #printf("DEBUG: element %y type %s: %y omitType: %y h: %y\n", name, type.className(), type.name, omitType, h);
         # issue #2899: combine return value in a hash if necessary
@@ -2061,6 +2122,123 @@ public class WSDL::XsdElement inherits WSDL::XsdTypedData {
             }
         }
         return pf;
+    }
+
+    #! returns the serialized value of an element with \c xsi:nil="true"
+    /** @param type the type to serialize the element as
+        @param omitType if the \c xsi:type attribute can be omitted
+        @param ah any other serialized attributes of the element
+
+        @since %WSDL 0.5.7
+    */
+    private hash<auto> getNilValue(XsdAbstractType type, *softbool omitType, *hash<auto> ah) {
+        hash<auto> rh = ("xsi:nil": "true");
+        if ((!omitType || type != self.type) && type.hasRealName()) {
+            rh += ("xsi:type": type.getNameWithNS());
+        }
+        return ("^attributes^": rh + ah);
+    }
+
+    #! handles the \c xsi:nil attribute supplied in the value to serialize for an element
+    /** \c xsi:nil is an XML Schema instance attribute that is valid on every element declared with
+        \c nillable="true"; it is never declared as an attribute of the element's type, so it must be handled here
+        and must not be passed on to the type as one of its attributes.
+
+        The attribute is given in the \c "^attributes^" hash of the element's value as \c "xsi:nil", or as \c "nil"
+        unless the element's type declares an attribute with this name itself.  It is always removed from the value;
+        if it is false, then the element is serialized normally from the remaining value.
+
+        @param nsc the namespace container
+        @param type the type to serialize the element as
+        @param v the value to serialize for the element; the \c xsi:nil attribute is removed from the value
+        @param omitType if the \c xsi:type attribute can be omitted
+
+        @return the serialized value of the element if \c xsi:nil is true, or @ref nothing "NOTHING" if the element
+        must be serialized normally
+
+        @throw SOAP-SERIALIZATION-ERROR the element is not nillable, the value of the \c xsi:nil attribute is not a
+        valid \c xs:boolean value, or content was supplied for an element with \c xsi:nil="true"
+
+        @since %WSDL 0.5.7
+    */
+    private *hash<auto> serializeNil(Namespaces nsc, XsdAbstractType type, reference<auto> v, *softbool omitType) {
+        if (v.typeCode() != NT_HASH || v."^attributes^".typeCode() != NT_HASH) {
+            return;
+        }
+        *string nk;
+        if (v."^attributes^".hasKey("xsi:nil")) {
+            nk = "xsi:nil";
+        } else if (v."^attributes^".hasKey("nil") && !type.hasAttribute("nil")) {
+            nk = "nil";
+        }
+        if (!nk) {
+            return;
+        }
+
+        if (!nillable && !type.isNillable()) {
+            throw SOAP_SERIALIZATION_ERROR, sprintf("cannot set attribute %y of element %y of type %y; the element "
+                "is not declared as nillable", nk, name, type.getName());
+        }
+
+        bool nil = XsdElement::parseNil(remove v."^attributes^"{nk}, name);
+        if (!nil) {
+            # the element is serialized normally from the remaining value
+            if (!v."^attributes^") {
+                remove v."^attributes^";
+            }
+            return;
+        }
+
+        # an element with xsi:nil="true" cannot have any content, but can have attributes and comments
+        hash<auto> rh;
+        foreach hash<auto> i in (v.pairIterator()) {
+            if (i.key == "^attributes^") {
+                continue;
+            }
+            if (i.key =~ /^\^comment/) {
+                rh{i.key} = i.value;
+                continue;
+            }
+            if (exists i.value) {
+                throw SOAP_SERIALIZATION_ERROR, sprintf("cannot serialize element %y of type %y with "
+                    "xsi:nil=\"true\" and with content (%y); an element with xsi:nil=\"true\" must be empty", name,
+                    type.getName(), i.key);
+            }
+        }
+
+        return rh + getNilValue(type, omitType, type.serializeAttributes(nsc, v."^attributes^"));
+    }
+
+    #! returns the boolean value of an \c xsi:nil attribute value
+    /** @param v the value of the attribute; must be a valid \c xs:boolean value
+        @param name the name of the element for error reporting
+
+        @throw SOAP-SERIALIZATION-ERROR the value is not a valid \c xs:boolean value
+
+        @since %WSDL 0.5.7
+    */
+    private static bool parseNil(auto v, string name) {
+        switch (v.typeCode()) {
+            case NT_BOOLEAN:
+                return v;
+            case NT_INT:
+                if (v == 0 || v == 1) {
+                    return boolean(v);
+                }
+                break;
+            case NT_STRING: {
+                string str = trim(v);
+                if (str == "true" || str == "1") {
+                    return True;
+                }
+                if (str == "false" || str == "0") {
+                    return False;
+                }
+                break;
+            }
+        }
+        throw SOAP_SERIALIZATION_ERROR, sprintf("invalid value %y (type %y) for attribute \"xsi:nil\" of element %y; "
+            "expecting an xs:boolean value (\"true\", \"false\", \"1\", or \"0\")", v, v.type(), name);
     }
 
     auto deserialize(hash<string, XsdAbstractType> tmap, *hash<auto> mrh, auto val, bool present) {
@@ -4657,6 +4835,48 @@ public class WSDL::XsdComplexType inherits WSDL::XsdAbstractType {
         return rv;
     }
 
+    #! returns @ref True "True" if the type declares an attribute with the given name
+    /** @since %WSDL 0.5.7
+    */
+    bool hasAttribute(string name) {
+        return exists attrs{name};
+    }
+
+    #! serializes the attributes of an element of this type
+    /** @param nsc the namespace container
+        @param mah the attribute values to serialize, keyed by attribute name
+
+        @return the serialized attribute values
+
+        @throw SOAP-SERIALIZATION-ERROR unknown or prohibited attribute, or a required attribute is missing
+
+        @since %WSDL 0.5.7
+    */
+    *hash<auto> serializeAttributes(Namespaces nsc, *hash<auto> mah) {
+        *hash<auto> ah;
+        foreach string k in (keys mah) {
+            if (!attrs{k}) {
+                throw SOAP_SERIALIZATION_ERROR, sprintf("cannot set unknown attribute %y of element %y; known "
+                    "attributes: %y", k, getName(), attrs.keys());
+            }
+            if (attrs{k}.use == "prohibited") {
+                throw SOAP_SERIALIZATION_ERROR, sprintf("cannot set attribute %y of element %y; the WSDL "
+                    "marks this attribute as prohibited", k, getName());
+            }
+            # issue #5405: attribute values must be serialized according to their type like element values; a missing
+            # value is left untouched so that the check for required attributes below still catches it
+            ah{k} = exists mah{k} ? attrs{k}.serializeValue(nsc, mah{k}) : mah{k};
+        }
+        # check for required attributes
+        foreach XsdAttribute attr in (attrs.iterator()) {
+            if (attr.use == "required" && !exists ah.(attr.name)) {
+                throw SOAP_SERIALIZATION_ERROR, sprintf("cannot serialize element %y without attribute %y; the "
+                    "WSDL marks this attribute as required", getName(), attr.name);
+            }
+        }
+        return ah;
+    }
+
     *hash<auto> serialize(Namespaces nsc, auto h, *softbool omitType) {
         if (array) {
             return array.serialize(nsc, h, omitType);
@@ -4666,28 +4886,11 @@ public class WSDL::XsdComplexType inherits WSDL::XsdAbstractType {
         *hash<auto> ah;
         hash<auto> rh;
         if (h.typeCode() == NT_HASH) {
+            *hash<auto> mah;
             if (h."^attributes^") {
-                hash<auto> mah = remove h."^attributes^";
-                foreach string k in (keys mah) {
-                    if (!attrs{k}) {
-                        throw SOAP_SERIALIZATION_ERROR, sprintf("cannot set unknown attribute %y of element %y; known "
-                            "attributes: %y", k, getName(), attrs.keys());
-                    }
-                    if (attrs{k}.use == "prohibited") {
-                        throw SOAP_SERIALIZATION_ERROR, sprintf("cannot set attribute %y of element %y; the WSDL "
-                            "marks this attribute as prohibited", k, getName());
-                    }
-                    # issue #5405: attribute values must be serialized according to their type like element values; a missing
-                    # value is left untouched so that the check for required attributes below still catches it
-                    ah{k} = exists mah{k} ? attrs{k}.serializeValue(nsc, mah{k}) : mah{k};
-                }
+                mah = remove h."^attributes^";
             }
-            # check for required attributes
-            foreach XsdAttribute attr in (attrs.iterator()) {
-                if (attr.use == "required" && !exists ah.(attr.name))
-                    throw SOAP_SERIALIZATION_ERROR, sprintf("cannot serialize element %y without attribute %y; the "
-                        "WSDL marks this attribute as required", getName(), attr.name);
-            }
+            ah = serializeAttributes(nsc, mah);
             foreach string k in (keys h) {
                 if (k =~ /^\^comment/) {
                     rh{k} = remove h{k};
