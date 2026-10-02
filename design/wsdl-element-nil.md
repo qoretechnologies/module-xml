@@ -11,7 +11,8 @@ for one non-nillable empty complex record retains its prior meaning.
 The expanded attribute `{http://www.w3.org/2001/XMLSchema-instance}nil` uses
 the XSD boolean lexical space: `true`, `1`, `false`, `0`, with XML whitespace
 collapsed. An element that is not nillable cannot carry that attribute, even
-with `false`. Other namespaces and unqualified `nil` are ordinary attributes.
+with `false`. In parsed XML, other namespaces and unqualified `nil` are ordinary
+attributes. Typed native input also accepts the legacy serialization alias below.
 
 A true nil value contains no characters or child elements and cannot have a
 fixed element constraint. Comments and zero-length CDATA contribute no
@@ -44,6 +45,31 @@ Use the explicit carrier for optional nil fields and for nil occurrences in a
 list. `NOTHING` retains the established optional-omission behavior. A required
 nillable element can still serialize `NOTHING` as one nil occurrence when its
 attributes permit this; an explicit carrier is needed to supply attributes.
+
+For compatibility with 2.x, direct typed element serialization also accepts
+`{"^attributes^": {"xsi:nil": "true"}}`. The unqualified `nil` spelling is an
+alias unless the selected complex type declares a field named `nil`. The marker
+uses `XsdBooleanLexicalHelper`, including native booleans and numeric zero/one.
+The element consumes it before type conversion: true becomes `XsdNilValue` with
+the remaining native attributes, while false continues ordinary serialization.
+Both require a nillable declaration; true also excludes fixed element values.
+Present content fields are rejected, absent fields are ignored, and comments
+are retained. Caller hashes and the receiving schema remain unchanged on success
+and failure. Repeated occurrences and selected-type wrappers use the same path.
+
+```qore
+# Equivalent direct serialization input for the weight schema above:
+XsdXmlValue compatible = schema.serializeXmlValue("", "weight",
+    {"^attributes^": {"nil": "true", "unit": "kg"}});
+```
+
+This alias does not change generic `xs:anyType` XML-data assessment or provider
+validation: providers require `XsdNilValue` for an explicit nil. It is not a
+second internal nil representation. Built-in and restricted simple serializers
+validate attributes before extracting scalar content, using serialization errors
+for ordinary attributes, unresolved prefixes and unconsumed `xsi:nil`. QName and
+NOTATION values retain their lexical namespace bindings. Input attribute
+validation continues to allow schema-instance metadata for element assessment.
 
 With ordinary decoding, an attribute-free nil keeps its established `NOTHING`
 projection. Native type capture (`preserve_types=True`) returns `XsdNilValue`

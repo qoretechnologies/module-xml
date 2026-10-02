@@ -132,12 +132,59 @@ hash<auto> h = op.serializeRequest({"Create": {"MOAttributes": {"default-subscri
     An optional element (i.e. declared with \c minOccurs="0") with no value (@ref nothing "NOTHING") is left out
     of the message, while a required element is always serialized. Supplying any content for an element of such a
     type raises a \c SOAP-SERIALIZATION-ERROR exception, as the content cannot be represented in the message. An
-    element with \c xsi:nil="true" is deserialized as @ref nothing "NOTHING", as with any other type.
+    element with \c xsi:nil="true" follows the nil projection described below.
 
     The same holds for every element that is present without content while its type permits empty content, for
     example a list wrapper whose items are all optional: it is deserialized as its record with no members (ex:
     \c {"item": NOTHING}), independently of whether the sender declared namespaces on the element. A missing
     element is still deserialized as @ref nothing "NOTHING", so that the two can be told apart.
+
+    @section wsdl_nil_elements Nillable Elements and xsi:nil
+
+    Use @ref WSDL::XsdNilValue "XsdNilValue" to send an explicitly present nilled element, including an
+    optional element. For example, withdrawing the hotline and incoming-call barring rules in an Ericsson
+    EDA/MTAS request requires nilled elements rather than omitted fields:
+    @code{.py}
+hash<auto> h = op.serializeRequest({"Req": {
+    "hotline": new XsdNilValue(),
+    "incoming-communication-barring": {
+        "icb-operator-configuration": {"icb-ruleset": new XsdNilValue()},
+    },
+}});
+# includes <ns:hotline xsi:nil="true"/> and <ns:icb-ruleset xsi:nil="true"/>
+    @endcode
+
+    The receiving element must declare \c nillable="true" and have no fixed value. Its content is absent,
+    while its attributes are still validated, including required attributes. Supply native attribute values
+    to the carrier, for example:
+    @code{.py}
+XsdNilValue unavailable({"id": "subscriber-17"});
+    @endcode
+    An optional field with
+    @ref nothing "NOTHING" is omitted; a required nillable field with @ref nothing "NOTHING" is nilled when
+    its attributes permit this. A list can contain both ordinary values and \c XsdNilValue occurrences.
+
+    Direct element serialization, including \c WSOperation::serializeRequest() and \c SoapClient, also
+    accepts the 2.x input form:
+    @code{.py}
+hash<auto> h = op.serializeRequest({"Req": {
+    "hotline": {"^attributes^": {"nil": "true"}},
+    "incoming-communication-barring": {
+        "icb-operator-configuration": {"icb-ruleset": {"^attributes^": {"xsi:nil": "true"}}},
+    },
+}});
+    @endcode
+    For typed elements, \c "xsi:nil" is recognized in \c "^attributes^"; unqualified \c "nil" is also
+    recognized unless it is an attribute declared by the selected type. Boolean values use the existing
+    \c xs:boolean conversion, including \c True, \c False, \c "true", \c "false", \c "1" and \c "0".
+    True rejects supplied content and retains comments and the remaining type attributes. False removes
+    the marker and validates the ordinary value; even false is forbidden on a non-nillable element.
+    Generic \c xs:anyType XML values keep their namespace-aware handling of instance attributes.
+
+    Data provider validation requires \c XsdNilValue for an explicit nil; the legacy hash form is an alias
+    at the direct serialization boundary. When decoding, an attribute-free nil becomes @ref nothing "NOTHING",
+    or \c XsdNilValue with \c preserve_types=True. Nilled values with attributes retain them in
+    \c XsdNilValue. See the class documentation for selected-type wrappers.
 
     @section wsdl_swaref Attachment References (swaRef)
 
@@ -831,6 +878,10 @@ if (policy.required) {
       true nil values reject character/element content and still validate required, fixed and wildcard attributes
     - XsdNilValue preserves explicitly present nil occurrences and their native attributes through saved values,
       optional/repeated fields, selected types, providers and SOAP clients/handlers
+    - typed elements accept the 2.x \c "^attributes^" nil input as an alias for XsdNilValue, preserving
+      comments and validating nillability, content and attributes; see @ref wsdl_nil_elements
+    - simple-type serialization rejects ordinary attributes and unconsumed nil metadata before extracting
+      scalar content; restricted simple types accept valid value/attribute wrappers without overload errors
     - mixed native records retain ordered text, CDATA and typed child segments; repeated list-valued children
       preserve occurrence boundaries, and explicit native capture retains uninterpreted text's namespace context
     - mixed providers and bounded examples preserve complete particle order, including repeated groups,
@@ -4125,15 +4176,28 @@ public class XsdBase inherits Qore::Serializable {
     #! rejects ordinary XML attributes on a simple type value
     /** @param attributes the XML attribute hash and namespace declarations
         @param type_name the type name used in diagnostics
-        @throw SOAP-DESERIALIZATION-ERROR an ordinary attribute or unresolved prefix
+        @param error the conversion error category; output also rejects unconsumed xsi:nil metadata
+        @throw SOAP-DESERIALIZATION-ERROR invalid attributes or unresolved prefixes on input
+        @throw SOAP-SERIALIZATION-ERROR invalid attributes, unresolved prefixes or unconsumed xsi:nil on output
         @since %WSDL 0.5.8
     */
-    static validateSimpleAttributes(*hash<auto> attributes, string type_name) {
-        foreach string identity in (keys getExpandedAttributes(attributes)) {
-            if (!isInstanceAttribute(identity)) {
-                throw SOAP_DESERIALIZATION_ERROR, sprintf("simple type %Y cannot contain attribute %Y", type_name,
-                    identity);
+    static validateSimpleAttributes(auto attributes, string type_name,
+            string error = SOAP_DESERIALIZATION_ERROR) {
+        if (exists attributes && attributes.typeCode() != NT_HASH) {
+            throw error, "XML attributes must be a hash";
+        }
+        try {
+            foreach string identity in (keys getExpandedAttributes(attributes)) {
+                if (!isInstanceAttribute(identity)
+                        || (error == SOAP_SERIALIZATION_ERROR && identity == type_qname(XSI_NS, "nil"))) {
+                    throw error, sprintf("simple type %Y cannot contain attribute %Y", type_name, identity);
+                }
             }
+        } catch (hash<ExceptionInfo> ex) {
+            if (ex.err == SOAP_DESERIALIZATION_ERROR && error != SOAP_DESERIALIZATION_ERROR) {
+                rethrow error, ex.desc, ex.arg;
+            }
+            rethrow;
         }
     }
 
@@ -14494,6 +14558,9 @@ public class XsdBaseType inherits WSDL::XsdAbstractType {
                 new Namespaces({}, self.nsc));
             return XsdDocumentValueHelper::serializeValue(inferred, nsc, val, False, GenericDocumentValueResult);
         }
+        if (val.typeCode() == NT_HASH) {
+            XsdBase::validateSimpleAttributes(val."^attributes^", name, SOAP_SERIALIZATION_ERROR);
+        }
         if (name == "QName" || name == "NOTATION") {
             hash<string, string> bindings = XsdScopedLexicalContext::serializationBindings(nsc,
                 val.typeCode() == NT_HASH ? val."^attributes^" : NOTHING);
@@ -17045,12 +17112,57 @@ public class XsdElement inherits WSDL::XsdTypedData {
             tuples.instanceAttributes(empty, SOAP_SERIALIZATION_ERROR, namespaces);
             return empty;
         }
+        *hash<auto> nil_comments;
+        if (value.typeCode() == NT_HASH && value."^attributes^".typeCode() == NT_HASH
+                && !XsdTypeSubstitutionHelper::builtin(selected, "anyType")) {
+            # The 2.x attribute form is an input alias for the native nil carrier.
+            # Generic anyType values retain their existing XML namespace assessment below.
+            *string key = value."^attributes^".hasKey("xsi:nil") ? "xsi:nil" : NOTHING;
+            if (!key && value."^attributes^".hasKey("nil")) {
+                key = "nil";
+                if (selected instanceof XsdComplexType) {
+                    foreach XsdAttribute attribute in (cast<XsdComplexType>(selected).attrs.iterator()) {
+                        if (attribute.name == "nil") {
+                            key = NOTHING;
+                            break;
+                        }
+                    }
+                }
+            }
+            if (key) {
+                if (!nillable) {
+                    throw SOAP_SERIALIZATION_ERROR, sprintf("element %Y does not permit xsi:nil", name);
+                }
+                bool nil = XsdBooleanLexicalHelper::decode(remove value."^attributes^"{key},
+                    SOAP_SERIALIZATION_ERROR);
+                if (nil) {
+                    foreach string field in (keys value) {
+                        if (field.startsWith("^comment")) {
+                            nil_comments{field} = value{field};
+                        } else if (field != "^attributes^" && exists value{field}) {
+                            throw SOAP_SERIALIZATION_ERROR, sprintf("nilled element %Y must be empty; got content %Y",
+                                name, field);
+                        }
+                    }
+                    try {
+                        value = new XsdNilValue(value."^attributes^");
+                    } catch (hash<ExceptionInfo> ex) {
+                        if (ex.err == "XSD-NIL-VALUE-ERROR") {
+                            rethrow SOAP_SERIALIZATION_ERROR, ex.desc, ex.arg;
+                        }
+                        rethrow;
+                    }
+                } else if (!value."^attributes^") {
+                    remove value."^attributes^";
+                }
+            }
+        }
         if (value instanceof XsdNilValue || (!exists value && nillable)) {
             tuples.value(selected, NOTHING);
             hash<auto> nil = serializeNil(selected, namespaces, value ?? new XsdNilValue());
             nil."^attributes^" += type_attributes;
             tuples.instanceAttributes(nil, SOAP_SERIALIZATION_ERROR, namespaces);
-            return nil;
+            return nil_comments ? nil_comments + nil : nil;
         }
         if (XsdTypeSubstitutionHelper::builtin(selected, "anyType") && value.typeCode() == NT_HASH) {
             # Generic XML values can carry an explicit xsi:nil and xsi:type. Assess
@@ -26553,6 +26665,9 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
             lexical_scope = new XsdScopedLexicalContext(val, nsc);
             val = val.getLexicalValue();
         }
+        if (val.typeCode() == NT_HASH) {
+            XsdBase::validateSimpleAttributes(val."^attributes^", name, SOAP_SERIALIZATION_ERROR);
+        }
         if (getFacetKind() == "QName" || getFacetKind() == "NOTATION") {
             hash<string, string> bindings = XsdScopedLexicalContext::serializationBindings(nsc,
                 val.typeCode() == NT_HASH ? val."^attributes^" : NOTHING);
@@ -26574,8 +26689,8 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
                     rh{k} = remove val{k};
                 }
             }
-            if (val.size() == 1 && val.firstKey() == "^value^") {
-                val = val."^value^";
+            if (!val || val.hasKey("^attributes^") || (val.size() == 1 && val.firstKey() == "^value^")) {
+                val = XsdScalarTextHelper::value(val, SOAP_SERIALIZATION_ERROR);
             }
         }
 
