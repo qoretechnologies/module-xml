@@ -153,7 +153,7 @@ public class SoapClientIo {
           client decodes; see setMessageLimits()
         - \c addressing: @ref Qore::True "True" to send WS-Addressing headers with every request,
           @ref Qore::False "False" to send none; by default they are sent when the effective policy of the
-          WSDL supports WS-Addressing; see <a href="../../WSDL/html/index.html#wsdl_addressing">WS-Addressing</a> in the WSDL module
+          WSDL supports WS-Addressing; see @ref wsdlintro "WS-Addressing" in the WSDL module
         - \c addressing_must_understand: @ref Qore::True "True" to mark the WS-Addressing request headers
           \c mustUnderstand
         - \c send_soapaction: @ref Qore::False "False" to send SOAP 1.1 requests without a \c SOAPAction header, for
@@ -180,7 +180,7 @@ public class SoapClientIo {
         @throw SOAP-CLIENT-IO-ERROR missing or conflicting options, an unknown service or port, or a port
         that cannot be selected
 
-        @note A remote %WSDL is retrieved with an ordinary HTTP client owned by the @ref WSDL "WSDL" module;
+        @note A remote %WSDL is retrieved with an ordinary HTTP client owned by the @ref wsdlintro "WSDL" module;
         only SOAP operation traffic uses the async connection manager.
 
         @par Example

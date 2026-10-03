@@ -159,6 +159,13 @@ endif()
 # Preserve caller-supplied core/dependency documentation tags across module macros.
 set(_xml_external_doc_tags "${TAGFILES}")
 
+set(QORE_DOXYGEN_IMAGES
+    "${CMAKE_SOURCE_DIR}/qlib/CargoXmlDataProvider/cargo-xml-logo.svg"
+    "${CMAKE_SOURCE_DIR}/qlib/CdaDataProvider/cda-logo.svg"
+    "${CMAKE_SOURCE_DIR}/qlib/SaxDataProvider/xml-logo.svg"
+    "${CMAKE_SOURCE_DIR}/qlib/SoapDataProvider/generic-soap-logo.svg"
+    "${CMAKE_SOURCE_DIR}/qlib/WebDavClientDataProvider/webdav-logo.svg"
+)
 qore_external_binary_module(${module_name} "${VERSION_MAJOR}.${VERSION_MINOR}.${VERSION_PATCH}" ${QORE_XML_LIBXML2_TARGET})
 add_executable(qore-xml-namespace-probe EXCLUDE_FROM_ALL cmake/libxml2-namespace-probe.c)
 target_link_libraries(qore-xml-namespace-probe PRIVATE ${QORE_XML_LIBXML2_TARGET})
