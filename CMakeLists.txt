@@ -8,7 +8,7 @@ set (VERSION_PATCH 0)
 
 find_package(Qore 3.0 REQUIRED)
 # Import installed public indexes referenced by XML user-module documentation.
-list(APPEND QORE_DOXYGEN_MODULES HttpClientIo HttpServer HttpServerUtil DataProvider ConnectionProvider Mime Util)
+list(APPEND QORE_DOXYGEN_MODULES HttpClientIo HttpServer HttpServerUtil DataProvider ConnectionProvider Mime Util Logger)
 option(QORE_XML_STRICT_DOCS "Fail XML documentation builds on warnings" OFF)
 
 if (DEFINED ENV{LIBXML2_LIBRARY})
