@@ -105,9 +105,9 @@ public class WebDavClientDataProvider inherits WebDavClientDataProviderBase {
     #! Returns a WebDAV client from options
     /** Selects, in priority order:
         - an existing @ref WebDavClientIo::WebDavClientIo "WebDavClientIo" passed as
-          `webdavclientio`
-        - an existing @ref WebDavClient::WebDavClient "WebDavClient" passed as `webdavclient`
-        - a new @ref WebDavClientIo::WebDavClientIo "WebDavClientIo" built from `url`
+          <tt>webdavclientio</tt>
+        - an existing @ref WebDavClient::WebDavClient "WebDavClient" passed as <tt>webdavclient</tt>
+        - a new @ref WebDavClientIo::WebDavClientIo "WebDavClientIo" built from <tt>url</tt>
           (async I/O is the preferred default for new instances)
     */
     static object getClient(*hash<auto> options) {

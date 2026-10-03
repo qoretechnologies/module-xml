@@ -25,7 +25,7 @@
 public namespace WebContentUtil {
 
 #! Parses sitemap.xml and sitemap-index.xml files per the sitemaps.org protocol
-/** Implements the [sitemaps.org protocol](https://www.sitemaps.org/protocol.html)
+/** Implements the <a href="https://www.sitemaps.org/protocol.html">sitemaps.org protocol</a>
     for both regular sitemap files (containing \c &lt;urlset&gt;&lt;url&gt;&lt;loc&gt;) and sitemap
     index files (containing \c &lt;sitemapindex&gt;&lt;sitemap&gt;&lt;loc&gt;).  Uses libxml2 (via
     @ref Qore::Xml::parse_xml() and the underlying @ref Qore::Xml::XmlDoc) for

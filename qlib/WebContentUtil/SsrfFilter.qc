@@ -31,22 +31,22 @@ public namespace WebContentUtil {
     networks via crawled links.
 
     Blocked categories:
-    - **IPv4 private ranges** (RFC 1918): 10/8, 172.16/12, 192.168/16
-    - **IPv4 loopback**: 127/8
-    - **IPv4 link-local**: 169.254/16 (includes cloud metadata endpoint 169.254.169.254)
-    - **IPv4 CGNAT**: 100.64/10
-    - **IPv4 "this network"**: 0/8
-    - **IPv6 loopback**: ::1
-    - **IPv6 unique local**: fc00::/7
-    - **IPv6 link-local**: fe80::/10
-    - **IPv6 IPv4-mapped**: \c &#58;&#58;ffff:0:0/96 (so a mapped IPv4 still goes through IPv4 checks)
-    - **Hostnames**: localhost, *.local, *.svc.cluster.local, *.cluster.local,
+    - <b>IPv4 private ranges</b> (RFC 1918): 10/8, 172.16/12, 192.168/16
+    - <b>IPv4 loopback</b>: 127/8
+    - <b>IPv4 link-local</b>: 169.254/16 (includes cloud metadata endpoint 169.254.169.254)
+    - <b>IPv4 CGNAT</b>: 100.64/10
+    - <b>IPv4 "this network"</b>: 0/8
+    - <b>IPv6 loopback</b>: ::1
+    - <b>IPv6 unique local</b>: fc00::/7
+    - <b>IPv6 link-local</b>: fe80::/10
+    - <b>IPv6 IPv4-mapped</b>: \c &#58;&#58;ffff:0:0/96 (so a mapped IPv4 still goes through IPv4 checks)
+    - <b>Hostnames</b>: localhost, *.local, *.svc.cluster.local, *.cluster.local,
       kubernetes.default*, metadata.google.internal, metadata.azure.com
-    - **Local-only schemes**: a \c file:// URL addresses the machine running the
+    - <b>Local-only schemes</b>: a \c file:// URL addresses the machine running the
       code, so one with no authority implies \c "localhost" (see
       @ref LocalSchemes)
 
-    Hostname-based URLs are resolved to IPs via DNS and **all** returned addresses
+    Hostname-based URLs are resolved to IPs via DNS and <b>all</b> returned addresses
     are checked — a hostname can resolve to multiple addresses, including a public
     address that redirects to a private one.
 
