@@ -967,7 +967,8 @@ if (SsrfFilter::isLocalScheme(parse_url(source).protocol)) {
             scheme = parse_url(url).protocol;
         } catch (hash<ExceptionInfo> ex) {
             throw "WEBCRAWLER-UNSUPPORTED-SCHEME",
-                sprintf("seed URL %y cannot be parsed: %s: %s", url, ex.err, ex.desc);
+                sprintf("seed URL %y cannot be parsed: %s: %s", SsrfFilter::maskUrl(url), ex.err,
+                    replace(ex.desc, url, SsrfFilter::maskUrl(url)));
         }
         if (!scheme.val()) {
             throw "WEBCRAWLER-UNSUPPORTED-SCHEME",

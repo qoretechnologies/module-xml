@@ -68,6 +68,22 @@ SsrfFilter::checkUrl("http://localhost:8080/", {"allow_private": True});
     @since %WebContentUtil 1.0
 */
 public class SsrfFilter {
+    #! Returns a URL with any password masked, for messages; never throws
+    /** @param url the URL, which might not be valid
+
+        @return the URL without its password (see @ref Qore::get_safe_url() "get_safe_url()"); for a string that is not
+        a valid URL, the text between the first \c ':' and the last \c '@' of its authority is replaced with
+        \c "<masked>"
+    */
+    static string maskUrl(string url) {
+        try {
+            return get_safe_url(url);
+        } catch (hash<ExceptionInfo> ex) {
+            # not a URL that can be parsed
+        }
+        return regex_subst(url, "^([^:/?#]+://[^:/?#@]*):[^/?#]*@", "$1:<masked>@");
+    }
+
     #! Hostname patterns that match well-known internal services
     /** These are checked as case-insensitive suffix or full matches before any DNS
         resolution, so even a public DNS entry that resolves to a private host won't
@@ -201,11 +217,11 @@ if (pinned_ip) {
             parts = parse_url(url);
         } catch (hash<ExceptionInfo> ex) {
             throw "SSRF-BLOCKED", sprintf("URL %y could not be parsed: %s: %s",
-                url, ex.err, ex.desc);
+                SsrfFilter::maskUrl(url), ex.err, replace(ex.desc, url, SsrfFilter::maskUrl(url)));
         }
         *string host = SsrfFilter::getUrlHost(parts);
         if (!host.val()) {
-            throw "SSRF-BLOCKED", sprintf("URL %y has no host", url);
+            throw "SSRF-BLOCKED", sprintf("URL %y has no host", SsrfFilter::maskUrl(url));
         }
 
         # Caller-supplied blocklist (case-insensitive exact match)
@@ -214,7 +230,7 @@ if (pinned_ip) {
             foreach string blocked in (blocked_hostnames) {
                 if (lhost == blocked.lwr()) {
                     throw "SSRF-BLOCKED-HOSTNAME",
-                        sprintf("URL %y targets explicitly-blocked hostname %y", url, host);
+                        sprintf("URL %y targets explicitly-blocked hostname %y", SsrfFilter::maskUrl(url), host);
                 }
             }
         }
@@ -222,7 +238,7 @@ if (pinned_ip) {
         # Hostname pattern check (loopback, k8s DNS, etc.)
         if (!allow_private && SsrfFilter::isPrivateHostname(host)) {
             throw "SSRF-BLOCKED",
-                sprintf("URL %y targets a private/internal address (host: %y)", url, host);
+                sprintf("URL %y targets a private/internal address (host: %y)", SsrfFilter::maskUrl(url), host);
         }
 
         # A local-only scheme addresses this machine, so there is no remote
@@ -235,7 +251,7 @@ if (pinned_ip) {
         if (ip_address_type(host) != "invalid") {
             if (!allow_private && SsrfFilter::isPrivateIp(host)) {
                 throw "SSRF-BLOCKED",
-                    sprintf("URL %y targets a private/internal address (host: %y)", url, host);
+                    sprintf("URL %y targets a private/internal address (host: %y)", SsrfFilter::maskUrl(url), host);
             }
             return NOTHING;
         }
@@ -268,7 +284,7 @@ if (pinned_ip) {
             if (!allow_private && SsrfFilter::isPrivateIp(addr)) {
                 throw "SSRF-BLOCKED",
                     sprintf("URL %y resolves to private/reserved IP address %y",
-                        url, addr);
+                        SsrfFilter::maskUrl(url), addr);
             }
             string addr_type = ip_address_type(addr);
             if (!first_ipv4 && addr_type == "IPv4") {
@@ -299,12 +315,12 @@ if (pinned_ip) {
             parts = parse_url(url);
         } catch (hash<ExceptionInfo> ex) {
             throw "SSRF-BLOCKED", sprintf("URL %y could not be parsed: %s: %s",
-                url, ex.err, ex.desc);
+                SsrfFilter::maskUrl(url), ex.err, replace(ex.desc, url, SsrfFilter::maskUrl(url)));
         }
 
         *string host = SsrfFilter::getUrlHost(parts);
         if (!host.val()) {
-            throw "SSRF-BLOCKED", sprintf("URL %y has no host", url);
+            throw "SSRF-BLOCKED", sprintf("URL %y has no host", SsrfFilter::maskUrl(url));
         }
 
         # Caller-supplied blocklist (case-insensitive exact match)
@@ -313,7 +329,7 @@ if (pinned_ip) {
             foreach string blocked in (blocked_hostnames) {
                 if (lhost == blocked.lwr()) {
                     throw "SSRF-BLOCKED-HOSTNAME",
-                        sprintf("URL %y targets explicitly-blocked hostname %y", url, host);
+                        sprintf("URL %y targets explicitly-blocked hostname %y", SsrfFilter::maskUrl(url), host);
                 }
             }
         }
@@ -324,7 +340,7 @@ if (pinned_ip) {
 
         if (SsrfFilter::isHostPrivate(host)) {
             throw "SSRF-BLOCKED",
-                sprintf("URL %y targets a private/internal address (host: %y)", url, host);
+                sprintf("URL %y targets a private/internal address (host: %y)", SsrfFilter::maskUrl(url), host);
         }
     }
 
