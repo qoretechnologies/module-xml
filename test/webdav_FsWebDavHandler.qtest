@@ -50,8 +50,115 @@ class Main inherits QUnit::Test {
         addTestCase("uploaded text retains representation bytes", \uploadedBytes());
         addTestCase("property responses declare XML media types", \xmlResponseTypes());
         addTestCase("proxy constructors and mounted routes", \proxyRoutes());
+        addTestCase("path traversal is refused", \pathTraversal());
 
         set_return_value(main());
+    }
+
+    #! Sends an HTTP request with the request path used verbatim, so ".." components reach the server unnormalized
+    /** An HTTPClient normalizes the request path before sending, which would hide path-traversal payloads, so this
+        test sends the raw request line itself.
+    */
+    private hash<auto> rawRequest(int port, string method, string path, *hash<auto> extra_hdr, *data body) {
+        Socket s();
+        s.connect("127.0.0.1:" + port);
+        on_exit s.close();
+        string req = sprintf("%s %s HTTP/1.1\r\nHost: 127.0.0.1:%d\r\nConnection: close\r\n", method, path, port);
+        foreach hash<auto> i in (extra_hdr.pairIterator()) {
+            req += sprintf("%s: %s\r\n", i.key, i.value);
+        }
+        req += sprintf("Content-Length: %d\r\n\r\n", body ? body.size() : 0);
+        s.send(req);
+        if (body) {
+            s.send(body);
+        }
+        hash<auto> resp = s.readHTTPHeader(10s);
+        *data rbody;
+        if (resp."content-length" && resp."content-length".toInt() > 0) {
+            rbody = s.recv(resp."content-length".toInt(), 10s);
+        } else if (resp."transfer-encoding" == "chunked") {
+            rbody = s.readHTTPChunkedBody(10s).body;
+        }
+        return {"status": resp.status_code, "body": rbody};
+    }
+
+    private pathTraversal() {
+        TmpDir root();
+        Dir d();
+        d.chdir(root.path);
+        d.mkdir("base");
+        d.mkdir("outside");
+        string base = root.path + "/base";
+        string outside = root.path + "/outside";
+        {
+            File f();
+            f.open2(outside + "/secret.txt", O_CREAT | O_WRONLY | O_TRUNC);
+            f.write("TOP-SECRET");
+        }
+        {
+            File f();
+            f.open2(base + "/inside.txt", O_CREAT | O_WRONLY | O_TRUNC);
+            f.write("inside");
+        }
+        Dir bd();
+        bd.chdir(base);
+        bd.mkdir("sub");
+
+        WebDavHandler::FsWebDavHandler handler(base);
+        Server srv(<HttpServerOptionInfo>{"debug": True}, handler);
+        on_exit srv.stop();
+        int port = srv.getPort();
+
+        # read traversal: the secret file outside the root must never be served, and the response must be refused
+        foreach string path in ("/../outside/secret.txt", "/sub/../../outside/secret.txt", "//../outside/secret.txt") {
+            hash<auto> r = rawRequest(port, "GET", path);
+            assertEq(403, r.status, "GET " + path);
+            assertFalse(exists r.body && r.body =~ /TOP-SECRET/, "no leak: GET " + path);
+        }
+        # directory listing outside the root must be refused
+        assertEq(403, rawRequest(port, "PROPFIND", "/../outside", {"Depth": "1"}).status);
+
+        # write methods outside the root must be refused and must not change the filesystem
+        assertEq(403, rawRequest(port, "PUT", "/../outside/put.txt", NOTHING, "x").status);
+        assertFalse(is_file(outside + "/put.txt"));
+        assertEq(403, rawRequest(port, "MKCOL", "/../outside/newdir").status);
+        assertFalse(is_dir(outside + "/newdir"));
+        {
+            File f();
+            f.open2(outside + "/delme.txt", O_CREAT | O_WRONLY | O_TRUNC);
+            f.write("x");
+        }
+        assertEq(403, rawRequest(port, "DELETE", "/../outside/delme.txt").status);
+        assertTrue(is_file(outside + "/delme.txt"));
+
+        # COPY/MOVE must enforce containment on both the source path and the Destination header
+        assertEq(403, rawRequest(port, "COPY", "/inside.txt", {"Destination": "/../outside/copied.txt"}).status);
+        assertFalse(is_file(outside + "/copied.txt"));
+        assertEq(403, rawRequest(port, "COPY", "/../outside/secret.txt", {"Destination": "/stolen.txt"}).status);
+        assertFalse(is_file(base + "/stolen.txt"));
+        {
+            File f();
+            f.open2(base + "/tomove.txt", O_CREAT | O_WRONLY | O_TRUNC);
+            f.write("m");
+        }
+        assertEq(403, rawRequest(port, "MOVE", "/tomove.txt", {"Destination": "/../outside/moved.txt"}).status);
+        assertFalse(is_file(outside + "/moved.txt"));
+        assertTrue(is_file(base + "/tomove.txt"));
+
+        # a symbolic link inside the root that points outside it must not provide an escape hatch either
+        if (PlatformOS != "Windows") {
+            symlink(outside, base + "/link");
+            assertEq(403, rawRequest(port, "GET", "/link/secret.txt").status);
+            assertEq(403, rawRequest(port, "PUT", "/link/via-symlink.txt", NOTHING, "x").status);
+            assertFalse(is_file(outside + "/via-symlink.txt"));
+        }
+
+        # legitimate requests inside the root are unaffected by the containment check
+        assertEq("inside", rawRequest(port, "GET", "/inside.txt").body.toString());
+        assertEq(201, rawRequest(port, "PUT", "/created.txt", NOTHING, "ok").status);
+        assertTrue(is_file(base + "/created.txt"));
+        assertEq(201, rawRequest(port, "MKCOL", "/sub2").status);
+        assertTrue(is_dir(base + "/sub2"));
     }
 
     private uploadedBytes() {

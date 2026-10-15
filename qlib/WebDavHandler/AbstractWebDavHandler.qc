@@ -360,16 +360,25 @@ public class AbstractWebDavHandler inherits public HttpServer::AbstractHttpReque
     */
     hash<HttpResponseInfo> handleRequest(hash<auto> cx, hash<auto> hdr, *data body) {
         if (*string method = RequestMethods{hdr.method}) {
-            # parse destination path if needed
-            if (DestMethods{hdr.method}) {
-                if (!exists hdr.destination) {
-                    return response(400, "WebDAV request missing 'Destination' header for method %y", hdr.method);
+            try {
+                # parse destination path if needed
+                if (DestMethods{hdr.method}) {
+                    if (!exists hdr.destination) {
+                        return response(400, "WebDAV request missing 'Destination' header for method %y", hdr.method);
+                    }
+                    *hash<UrlInfo> dest_url = parseURL(hdr.destination);
+                    cx.webdav_dest_path = getRealPath(dest_url.path ?? hdr.destination);
                 }
-                *hash<UrlInfo> dest_url = parseURL(hdr.destination);
-                cx.webdav_dest_path = getRealPath(dest_url.path ?? hdr.destination);
+                # parse source path
+                cx.webdav_path = getRealPath(cx.raw_path);
+            } catch (hash<ExceptionInfo> ex) {
+                # a request (source or Destination) path that resolves outside the handler's root is refused for
+                # every method, so a client cannot read, write, or delete files outside the served directory
+                if (ex.err == "WEBDAVHANDLER-FORBIDDEN") {
+                    return response(403, ex.desc);
+                }
+                rethrow;
             }
-            # parse source path
-            cx.webdav_path = getRealPath(cx.raw_path);
             *hash<HttpResponseInfo> rv = checkAuth(hdr.method, cx, hdr, body);
             if (!rv) {
                 rv = checkPreconditions(cx, hdr);

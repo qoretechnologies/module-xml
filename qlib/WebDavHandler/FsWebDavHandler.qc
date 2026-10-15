@@ -28,6 +28,9 @@ public class FsWebDavHandler inherits AbstractWebDavHandler {
     private {
         #! The root directory for serving files
         string basePath;
+
+        #! The root directory with symbolic links resolved (for the containment check in getRealPath())
+        string realBasePath;
         bool debug;
 
         #! Lock handler for DAV Class 2 locking support
@@ -96,11 +99,18 @@ public class FsWebDavHandler inherits AbstractWebDavHandler {
         if (!is_dir(basePath)) {
             throw "WEBDAV-BASE-PATH-ERROR", sprintf("path %y is not a directory", path);
         }
+        # resolve symbolic links in the root once, so getRealPath() can reject any request path that resolves
+        # outside the root through a symbolic link as well as through ".." components
+        realBasePath = normalize_dir(realpath(basePath)) + "/";
         lock_handler = new InMemoryWebDavLockHandler();
     }
 
     #! Converts a request path to a normalized real path on the filesystem in the root WebDavHandler directory
-    /** @throw WEBDAVHANDLER-FORBIDDEN if the path is not valid
+    /** The request path is resolved against the root directory and the result is required to stay within it: a
+        path that climbs out of the root with \c ".." components or through a symbolic link is rejected.  This is
+        enforced for every method and for the \c Destination header of \c COPY and \c MOVE.
+
+        @throw WEBDAVHANDLER-FORBIDDEN the path resolves outside the root WebDavHandler directory
     */
     private string getRealPath(string raw_path) {
         string path = getRelativePath(raw_path);
@@ -108,7 +118,50 @@ public class FsWebDavHandler inherits AbstractWebDavHandler {
         if (path =~ /\/$/) {
             splice path, -1;
         }
+        if (!pathWithinRoot(path)) {
+            throw "WEBDAVHANDLER-FORBIDDEN", sprintf("request path %y resolves outside the WebDAV root directory",
+                raw_path);
+        }
         return path;
+    }
+
+    #! Returns @ref True if the normalized filesystem path is contained in the root directory
+    /** The check is performed both lexically on the normalized path and, for the longest existing ancestor of the
+        path, after resolving symbolic links, so that neither \c ".." components nor a symbolic link inside the
+        root can escape it.
+
+        @param path a filesystem path already normalized by @ref Util::normalize_dir() with no trailing slash
+
+        @return @ref True if the path is the root directory itself or a descendant of it
+    */
+    private bool pathWithinRoot(string path) {
+        # lexical containment: basePath ends in "/", so comparing "path/" against it rejects a sibling like
+        # "/base2" when the root is "/base" while accepting the root itself and any descendant
+        string root = basePath.substr(0, -1);
+        if (path != root && (path + "/").substr(0, basePath.length()) != basePath) {
+            return False;
+        }
+        # symbolic-link containment: resolve the longest existing ancestor (a new resource created by PUT/MKCOL/
+        # COPY/MOVE does not exist yet) and require its real path to stay within the resolved root
+        string existing = path;
+        while (existing != root && !hstat(existing)) {
+            string parent = dirname(existing);
+            if (parent == existing) {
+                break;
+            }
+            existing = parent;
+        }
+        string realRoot = realBasePath.substr(0, -1);
+        string realExisting;
+        try {
+            realExisting = normalize_dir(realpath(existing));
+        } catch (hash<ExceptionInfo> ex) {
+            if (ex.err == "REALPATH-ERROR") {
+                return False;
+            }
+            rethrow;
+        }
+        return realExisting == realRoot || (realExisting + "/").substr(0, realBasePath.length()) == realBasePath;
     }
 
     #! Evaluates the If header and enforces write locks before a request's method is called
