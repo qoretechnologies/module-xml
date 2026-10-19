@@ -1751,13 +1751,13 @@ public class AbstractWebDavHandler inherits public HttpServer::AbstractHttpReque
     private:internal *hash<auto> fixDavPrefixes(string ns, hash<auto> h, *string pfx) {
         # process namespaces
         foreach hash<auto> i in (h."^attributes^".pairIterator()) {
-            *string ns = (i.key =~ x/^xmlns:(.+)$/)[0];
-            if (!exists ns) {
+            *string xmlns_pfx = (i.key =~ x/^xmlns:(.+)$/)[0];
+            if (!exists xmlns_pfx) {
                 continue;
             }
-            ns += ":";
-            nsinfo.nsmap{ns} = i.value;
-            nsinfo.nsrmap{i.value} = ns;
+            xmlns_pfx += ":";
+            nsinfo.nsmap{xmlns_pfx} = i.value;
+            nsinfo.nsrmap{i.value} = xmlns_pfx;
         }
 
         *string nns = h."^attributes^".xmlns;
