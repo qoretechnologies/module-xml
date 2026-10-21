@@ -1,0 +1,153 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+#
+# XSD 1.0 Part 2 section 2.2: the value space of a string type contains only XML characters (XML 1.0 section 2.2),
+# and only those can be written to a document. A value with another character, such as NUL, another C0 control
+# character or U+FFFE, is refused by data provider type checks (RUNTIME-TYPE-ERROR) and by serialization
+# (SOAP-SERIALIZATION-ERROR), before any XML is generated.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires xml
+%requires ../qlib/WSDL.qm
+%exec-class XmlCharacterTest
+
+class XmlCharacterTest inherits QUnit::Test {
+    public {
+        const Xsi = "http://www.w3.org/2001/XMLSchema-instance";
+    }
+
+    private {
+        # characters that no XML document can contain, and the escapes that messages show for them
+        # (a list, since a hash key cannot contain a NUL character)
+        list<hash<auto>> invalid = (
+            {"key": chr(0), "value": "\\u{0000}"},
+            {"key": chr(1), "value": "\\u{0001}"},
+            {"key": chr(11), "value": "\\u{000B}"},
+            {"key": chr(31), "value": "\\u{001F}"},
+            {"key": <efbfbe>.toString("UTF-8"), "value": "\\u{FFFE}"},
+            {"key": <efbfbf>.toString("UTF-8"), "value": "\\u{FFFF}"},
+        );
+        # every class of XML character, including the whitespace characters and the extremes of each range
+        string valid = "\t\n\r " + <ed9fbf>.toString("UTF-8") + <ee8080>.toString("UTF-8")
+            + <efbfbd>.toString("UTF-8") + <f0908080>.toString("UTF-8") + <f48fbfbf>.toString("UTF-8") + chr(127);
+    }
+
+    constructor() : Test("WSDL XML characters", "1.0") {
+        addTestCase("Builtin string values", \builtins());
+        addTestCase("Restricted, list and union string values", \derived());
+        addTestCase("Generic XML content", \generic());
+        addTestCase("Mixed content text", \mixed());
+        addTestCase("SOAP operation values", \operation());
+        set_return_value(main());
+    }
+
+    # asserts that the call raises the given error, with a description containing the given text
+    private checkError(string err, string text, code call, *softlist<auto> args, string label) {
+        try {
+            call_function_args(call, args);
+            fail(sprintf("%s: expected %s", label, err));
+        } catch (hash<ExceptionInfo> ex) {
+            if (ex.err == "TEST-EXCEPTION") {
+                rethrow;
+            }
+            assertEq(err, ex.err, label + ": " + ex.desc);
+            assertTrue(ex.desc.contains(text), sprintf("%s: %y contains %y", label, ex.desc, text));
+        }
+    }
+
+    private static XsdSchema schema(string declarations) {
+        return new XsdSchema('<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:t="urn:p" '
+            'targetNamespace="urn:p">' + declarations + '</xs:schema>', {"async_only": True});
+    }
+
+    private builtins() {
+        XsdSchema s = schema("");
+        foreach string name in ("string", "normalizedString", "token", "anySimpleType", "anyType") {
+            XsdBaseType type(name, s.nsc);
+            AbstractDataProviderType provider = type.getDataProviderType();
+            foreach hash<auto> bad in (invalid) {
+                string label = sprintf("%s %s", name, bad.value);
+                string value = "a" + bad.key + "b";
+                # the message shows the character as an escape, so it survives logs and faults whole
+                checkError("SOAP-SERIALIZATION-ERROR", bad.value, \type.serializeValue(), (s.nsc, value, True),
+                    "serialized " + label);
+                checkError("RUNTIME-TYPE-ERROR", "is not XML character text", \provider.acceptsValue(), (value,),
+                    "provider " + label);
+            }
+            # whitespace processing applies to the valid text first
+            string expected = name == "string" || name == "anySimpleType" || name == "anyType" ? valid
+                : XsdSimpleType::normalizeWhiteSpace(valid, name == "token" ? "collapse" : "replace");
+            auto serialized = type.serializeValue(s.nsc, valid, True);
+            assertEq(expected, serialized.typeCode() == NT_HASH ? serialized."^value^" : serialized, "valid " + name);
+            assertTrue(exists provider.acceptsValue(valid), "valid provider " + name);
+        }
+    }
+
+    private derived() {
+        XsdSchema s = schema('<xs:simpleType name="R"><xs:restriction base="xs:string"><xs:maxLength value="20"/>'
+            '</xs:restriction></xs:simpleType>'
+            '<xs:simpleType name="L"><xs:list itemType="xs:string"/></xs:simpleType>'
+            '<xs:simpleType name="U"><xs:union memberTypes="xs:int xs:string"/></xs:simpleType>');
+        hash<string, list<auto>> cases = {
+            "R": ("a" + chr(1), "a" + chr(9)),
+            "L": (("a", "b" + chr(1)), ("a", "b")),
+            "U": ("a" + chr(1), "a"),
+        };
+        foreach hash<auto> row in (cases.pairIterator()) {
+            XsdSimpleType type = s.findType(make_qname("urn:p", row.key));
+            AbstractDataProviderType provider = type.getDataProviderType();
+            checkError("SOAP-SERIALIZATION-ERROR", "", \type.serializeValue(), (s.nsc, row.value[0], True),
+                "serialized " + row.key);
+            checkError("RUNTIME-TYPE-ERROR", "", \provider.acceptsValue(), (row.value[0],), "provider " + row.key);
+            assertTrue(exists type.serializeValue(s.nsc, row.value[1], True), "valid " + row.key);
+            assertTrue(exists provider.acceptsValue(row.value[1]), "valid provider " + row.key);
+        }
+    }
+
+    private generic() {
+        XsdSchema s = new XsdSchema('<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">'
+            '<xs:element name="v" type="xs:anyType"/></xs:schema>', {"async_only": True});
+        AbstractDataProviderType provider = s.getElement("", "v").getDataProviderType();
+        hash<string, hash<auto>> cases = {
+            "child text": {"child": "a" + chr(1)},
+            "value": {"^value^": "a" + chr(0) + "b:c"},
+            "attribute": {"^attributes^": {"note": "a" + chr(1)}, "child": "x"},
+            "CDATA": {"^cdata^": "a" + chr(1)},
+            "comment": {"^comment^": "a" + chr(1), "child": "x"},
+        };
+        foreach hash<auto> row in (cases.pairIterator()) {
+            checkError("SOAP-SERIALIZATION-ERROR", "is not XML character text", \s.serializeXmlValue(),
+                ("", "v", row.value), "serialized " + row.key);
+            checkError("RUNTIME-TYPE-ERROR", "is not XML character text", \provider.acceptsValue(), (row.value,),
+                "provider " + row.key);
+        }
+        assertRegex("<child>x</child>", s.serializeXmlValue("", "v", {"child": "x", "^comment^": "note"}).getXml());
+        assertEq({"child": valid}, provider.acceptsValue({"child": valid}));
+    }
+
+    private mixed() {
+        XsdSchema s = new XsdSchema('<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">'
+            '<xs:element name="m"><xs:complexType mixed="true"><xs:sequence><xs:element name="b" type="xs:string" '
+            'minOccurs="0"/></xs:sequence></xs:complexType></xs:element></xs:schema>', {"async_only": True});
+        checkError("SOAP-SERIALIZATION-ERROR", "is not XML character text", \s.serializeXmlValue(),
+            ("", "m", {"^value^": "a" + chr(1), "b": "x"}), "mixed text");
+        checkError("SOAP-SERIALIZATION-ERROR", "is not XML character text", \s.serializeXmlValue(),
+            ("", "m", {"b": "x" + chr(1)}), "mixed child");
+        assertRegex("text<b>x</b>", s.serializeXmlValue("", "m", {"^value^": "text", "b": "x"}).getXml());
+    }
+
+    private operation() {
+        WebService ws(ReadOnlyFile::readTextFile(get_script_dir() + "/test.wsdl"));
+        WSOperation op = ws.getBindingOperation("b1", "getInfo");
+        AbstractDataProviderType request = op.input.getDataProviderType();
+        foreach hash<auto> bad in (invalid) {
+            # was PARSE-XML-EXCEPTION from validating the generated envelope, or a malformed message before that
+            checkError("SOAP-SERIALIZATION-ERROR", bad.value, \op.serializeRequest(),
+                ({"GetInfo": {"tickerSymbol": "A" + bad.key}},), "request " + bad.value);
+            checkError("RUNTIME-TYPE-ERROR", "is not XML character text", \request.acceptsValue(),
+                ({"body": {"tickerSymbol": "A" + bad.key}},), "request provider " + bad.value);
+        }
+        assertRegex("<[^>]*tickerSymbol>A\t", op.serializeRequest({"GetInfo": {"tickerSymbol": "A\tB"}}).body);
+    }
+}
