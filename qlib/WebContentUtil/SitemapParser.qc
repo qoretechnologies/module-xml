@@ -173,6 +173,11 @@ public class SitemapParser {
         if (depth > max_depth) {
             return result;
         }
+        # a URL with a NUL character, such as a Sitemap line of a robots.txt file, is invalid, as parse_url() also
+        # finds below, and cannot be a key
+        if (sitemap_url.contains(chr(0))) {
+            return result;
+        }
         if (visited_sitemaps{sitemap_url}) {
             return result;
         }

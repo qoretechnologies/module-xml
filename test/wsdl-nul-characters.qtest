@@ -1,0 +1,439 @@
+#!/usr/bin/env qore
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+#
+# A hash key cannot contain a NUL character, and Qore raises HASH-KEY-ERROR for one. These tests send a NUL character
+# through every place where message data becomes a key: each place raises the error of the check that the value
+# fails, or treats the value as naming nothing, instead of raising HASH-KEY-ERROR.
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+%requires QUnit
+%requires xml
+%requires Mime
+%requires ../qlib/WSDL.qm
+%requires ../qlib/SoapHandler.qm
+%requires HttpServer
+%exec-class NulCharacterTest
+
+class NulCharacterTest inherits QUnit::Test {
+    public {
+        const Nul = chr(0);
+        const Xsi = "http://www.w3.org/2001/XMLSchema-instance";
+        const Xs = "http://www.w3.org/2001/XMLSchema";
+    }
+
+    constructor() : Test("WSDL NUL characters", "1.0") {
+        addTestCase("Attribute sets with a NUL character are not remembered", \attributeSets());
+        addTestCase("Namespace names are XML character text", \namespaceNames());
+        addTestCase("Patterns and enumerations never match a NUL character", \facets());
+        addTestCase("Field choices with a NUL character", \fieldChoices());
+        addTestCase("Identity constraint values with a NUL character", \identity());
+        addTestCase("QName text and type annotations with a NUL character", \qnameText());
+        addTestCase("Decoded MIME identifiers and locations", \mimeIdentifiers());
+        addTestCase("MIME format selectors and part media types", \mimeFormats());
+        addTestCase("WS-Addressing IRIs and expected replies", \addressing());
+        addTestCase("Fault and binding predicates", \predicates());
+        addTestCase("SOAP request paths with an escaped NUL character", \handlerPath());
+        set_return_value(main());
+    }
+
+    # asserts that the call raises the given error, with a description containing the given text
+    private checkError(string err, string text, code call, *softlist<auto> args, string label) {
+        try {
+            call_function_args(call, args);
+            fail(sprintf("%s: expected %s", label, err));
+        } catch (hash<ExceptionInfo> ex) {
+            if (ex.err == "QUNIT-ASSERTION-FAILED") {
+                rethrow;
+            }
+            assertEq(err, ex.err, label + ": " + ex.desc);
+            assertTrue(ex.desc.contains(text), sprintf("%s: %y contains %y", label, ex.desc, text));
+        }
+    }
+
+    private static XsdSchema schema(string declarations) {
+        return new XsdSchema('<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:t="urn:p" '
+            'targetNamespace="urn:p">' + declarations + '</xs:schema>', {"async_only": True});
+    }
+
+    private WSOperation tickerOperation() {
+        WebService ws(ReadOnlyFile::readTextFile(get_script_dir() + "/test.wsdl"));
+        return ws.getBindingOperation("b1", "getInfo");
+    }
+
+    private attributeSets() {
+        # a hostile ^content-type^ is internal metadata, not an attribute; the set has no cache key and the
+        # media-type check reports it (see also invalid-wire-15 in wsdl-media-types.qtest)
+        hash<auto> attributes = {"^content-type^": "text/plain;x=\"a" + Nul + "b\"", "a": "1"};
+        foreach int i in (1, 2) {
+            assertEq({"{}a": "1"}, XsdBase::getExpandedAttributes(attributes), "metadata " + i);
+        }
+        # a value with a NUL character is kept; it is validated where it is written
+        assertEq({"{}a": "x" + Nul}, XsdBase::getExpandedAttributes({"a": "x" + Nul}));
+        assertEq("urn:p", XsdBase::getElementNamespaces({"xmlns:p": "urn:p", "^content-type^": "a" + Nul}).p);
+        # the same names with valid values are still remembered and derived normally
+        assertEq({"{}a": "x"}, XsdBase::getExpandedAttributes({"a": "x"}));
+        assertEq({"{urn:p}a": "1"}, XsdBase::getExpandedAttributes({"xmlns:p": "urn:p", "p:a": "1"}));
+
+        WSOperation op = tickerOperation();
+        checkError("SOAP-SERIALIZATION-ERROR", "cannot contain attribute", \op.serializeRequest(),
+            ({"GetInfo": {"tickerSymbol": {"^attributes^": {"x": "a" + Nul}, "^value^": "ABC"}}},),
+            "simple type attribute");
+    }
+
+    private namespaceNames() {
+        foreach string uri in ("urn:a" + Nul, "urn:a\x01b") {
+            string label = sprintf("%y", binary(uri));
+            checkError("SOAP-DESERIALIZATION-ERROR", "invalid XML namespace binding", \XsdBase::getElementNamespaces(),
+                ({"xmlns:p": uri},), "element " + label);
+            checkError("SOAP-DESERIALIZATION-ERROR", "invalid XML namespace binding",
+                \XsdBase::getExpandedAttributes(), ({"xmlns:p": uri, "p:x": "1"},), "attributes " + label);
+            checkError("SOAP-DESERIALIZATION-ERROR", "invalid default XML namespace",
+                \XsdBase::expandElementNamespaces(), ({"a": "x"}, {"": uri}), "inherited default " + label);
+            checkError("SOAP-DESERIALIZATION-ERROR", "invalid default XML namespace",
+                \XsdBase::expandElementNamespaces(), ({"a": {"^attributes^": {"xmlns": uri}}},),
+                "declared default " + label);
+            checkError("SOAP-DESERIALIZATION-ERROR", "invalid XML namespace binding",
+                \XsdBase::expandElementNamespaces(), ({"p:a": "x"}, {"p": uri}), "inherited prefix " + label);
+            WSOperation op = tickerOperation();
+            checkError("SOAP-SERIALIZATION-ERROR", "invalid XML namespace binding", \op.serializeRequest(),
+                ({"GetInfo": {"tickerSymbol": {"^attributes^": {"xmlns:p": uri}, "^value^": "ABC"}}},),
+                "serialized " + label);
+        }
+        assertEq("urn:p", XsdBase::getElementNamespaces({"xmlns:p": "urn:p"}).p);
+        assertEq({"{urn:d}a": "x"}, XsdBase::expandElementNamespaces({"a": "x"}, {"": "urn:d"}));
+        hash<auto> declared = XsdBase::expandElementNamespaces({"a": {"^attributes^": {"xmlns": "urn:d"},
+            "^value^": "x"}});
+        assertEq("x", declared."{urn:d}a"."^value^");
+    }
+
+    private facets() {
+        XsdCompiledPattern pattern("a.b");
+        assertTrue(pattern.matches("axb"));
+        assertFalse(pattern.matches("a" + Nul + "b"));
+        XsdCompiledPattern repeated("(ab)*");
+        assertTrue(repeated.matches("abab"));
+        assertFalse(repeated.matches("ab" + Nul));
+
+        # a lookup with "a\x00" once read the entry for "a", so the NUL character values are the enumerated value
+        # followed by a NUL character
+        hash<string, list<auto>> cases = {
+            '<xs:simpleType name="Value"><xs:restriction base="xs:string"><xs:pattern value="a.b"/>'
+                '</xs:restriction></xs:simpleType>': ("a" + Nul + "b", "axb", "pattern"),
+            '<xs:simpleType name="Value"><xs:restriction base="xs:string"><xs:enumeration value="a"/>'
+                '</xs:restriction></xs:simpleType>': ("a" + Nul, "a", "enumeration"),
+            '<xs:simpleType name="Value"><xs:restriction base="xs:string"><xs:maxLength value="5"/>'
+                '<xs:enumeration value="a"/></xs:restriction></xs:simpleType>': ("a" + Nul, "a", "enumeration"),
+            '<xs:simpleType name="Value"><xs:restriction base="xs:NMTOKENS"><xs:enumeration value="a b"/>'
+                '</xs:restriction></xs:simpleType>': ("a b" + Nul, "a b", "enumeration"),
+            '<xs:simpleType name="L"><xs:list itemType="xs:string"/></xs:simpleType>'
+                '<xs:simpleType name="Value"><xs:restriction base="t:L"><xs:enumeration value="a b"/>'
+                '</xs:restriction></xs:simpleType>': (("a", "b" + Nul), ("a", "b"), "enumeration"),
+            '<xs:simpleType name="U"><xs:union memberTypes="xs:string xs:int"/></xs:simpleType>'
+                '<xs:simpleType name="L"><xs:list itemType="t:U"/></xs:simpleType>'
+                '<xs:simpleType name="Value"><xs:restriction base="t:L"><xs:enumeration value="a b"/>'
+                '</xs:restriction></xs:simpleType>': (("a", "b" + Nul), ("a", "b"), "enumeration"),
+        };
+        foreach hash<auto> row in (cases.pairIterator()) {
+            XsdSchema s = schema(row.key);
+            XsdSimpleType type = s.findType(make_qname("urn:p", "Value"));
+            string label = row.key.substr(0, 90);
+            auto invalid = row.value[0];
+            checkError("SOAP-SERIALIZATION-ERROR", "", \type.serializeValue(), (s.nsc, invalid, True),
+                "serialize " + label);
+            AbstractDataProviderType provider = type.getDataProviderType();
+            checkError("RUNTIME-TYPE-ERROR", "", \provider.acceptsValue(), (invalid,), "provider " + label);
+            if (invalid.typeCode() == NT_STRING) {
+                checkError("SOAP-DESERIALIZATION-ERROR", "", \type.deserializeValue(),
+                    ("value", s.getTypeMap(), NOTHING, invalid), "deserialize " + label);
+            }
+            # the valid value is still accepted
+            assertTrue(exists type.serializeValue(s.nsc, row.value[1], True), "valid " + label);
+            assertTrue(exists provider.acceptsValue(row.value[1]), "valid provider " + label);
+        }
+
+        # a SOAP operation serializes the enumerated value and refuses it with a NUL character
+        XsdSchema s = schema('<xs:simpleType name="Code"><xs:restriction base="xs:string">'
+            '<xs:enumeration value="Q"/></xs:restriction></xs:simpleType><xs:element name="code" type="t:Code"/>');
+        assertRegex("Q</", s.serializeXmlValue("urn:p", "code", "Q").getXml());
+        checkError("SOAP-SERIALIZATION-ERROR", "enumeration", \s.serializeXmlValue(), ("urn:p", "code", "Q" + Nul),
+            "element enumeration");
+        AbstractDataProviderType native = s.getNativeDataProviderType("urn:p", "code");
+        assertEq("Q", native.acceptsValue("Q"));
+        checkError("RUNTIME-TYPE-ERROR", "", \native.acceptsValue(), ("Q" + Nul,), "element provider enumeration");
+    }
+
+    private fieldChoices() {
+        XsdSchema s = schema('<xs:simpleType name="L"><xs:list itemType="xs:string"/></xs:simpleType>'
+            '<xs:simpleType name="U"><xs:union memberTypes="xs:int xs:string"/></xs:simpleType>'
+            '<xs:element name="r"><xs:complexType><xs:sequence>'
+            '<xs:element name="l" type="t:L" minOccurs="0"/><xs:element name="u" type="t:U" minOccurs="0"/>'
+            '<xs:element name="lr" type="t:L" minOccurs="0" maxOccurs="unbounded"/>'
+            '</xs:sequence></xs:complexType></xs:element>');
+        hash<string, AbstractDataField> fields = s.getElement("urn:p", "r").getDataProviderType().getFields();
+        AbstractDataField list_field = fields.l;
+        AbstractDataField union_field = fields.u;
+        assertEq("XsdListDataField", list_field.className());
+        assertEq("XsdUnionDataField", union_field.className());
+
+        list_field.setAllowedValues((("x",),));
+        assertEq(("x",), list_field.acceptsValue(("x",)));
+        checkError("FIELD-VALUE-ERROR", "does not accept list value", \list_field.acceptsValue(), (("x" + Nul,),),
+            "list value");
+        checkError("XSD-SIMPLETYPE-ERROR", "NUL character", \list_field.setAllowedValues(), ((("x" + Nul,),),),
+            "list choice");
+        AbstractDataField repeated = fields.lr;
+        repeated.setElementAllowedValues((("x",),));
+        assertEq((("x",),), repeated.acceptsValue((("x",),)));
+        checkError("FIELD-VALUE-ERROR", "does not accept list element value", \repeated.acceptsValue(),
+            ((("x" + Nul,),),), "list element value");
+        checkError("XSD-SIMPLETYPE-ERROR", "NUL character", \repeated.setElementAllowedValues(),
+            ((("x" + Nul,),),), "list element choice");
+
+        union_field.setAllowedValues(("x",));
+        assertEq("x", union_field.acceptsValue("x"));
+        checkError("FIELD-VALUE-ERROR", "does not accept union value", \union_field.acceptsValue(), ("x" + Nul,),
+            "union value");
+        checkError("RUNTIME-TYPE-ERROR", "NUL character", \union_field.setAllowedValues(), (("x" + Nul,),),
+            "union choice");
+        checkError("RUNTIME-TYPE-ERROR", "NUL character", \union_field.setElementAllowedValues(), (("x" + Nul,),),
+            "union element choice");
+    }
+
+    private identity() {
+        XsdSchema s = new XsdSchema('<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">'
+            '<xs:element name="root"><xs:complexType><xs:sequence>'
+            '<xs:element name="item" type="xs:string" maxOccurs="unbounded"/>'
+            '</xs:sequence></xs:complexType>'
+            '<xs:unique name="u"><xs:selector xpath="item"/><xs:field xpath="."/></xs:unique>'
+            '</xs:element></xs:schema>', {"async_only": True});
+        AbstractDataProviderType type = s.getElement("", "root").getDataProviderType();
+        assertEq(("a", "c"), type.acceptsValue({"item": ("a", "c")}).item);
+        checkError("RUNTIME-TYPE-ERROR", "has a value with a NUL character", \type.acceptsValue(),
+            ({"item": ("a" + Nul + "b", "c")},), "provider");
+        checkError("SOAP-SERIALIZATION-ERROR", "has a value with a NUL character", \s.serializeXmlValue(),
+            ("", "root", {"item": ("a" + Nul + "b", "c")}), "serialize");
+        checkError("SOAP-SERIALIZATION-ERROR", "duplicate field values", \s.serializeXmlValue(),
+            ("", "root", {"item": ("a", "a")}), "duplicate");
+    }
+
+    private qnameText() {
+        # a token prefix with a NUL character is no declared prefix; the scoped text is not XML character text
+        XsdSchema any = new XsdSchema('<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">'
+            '<xs:element name="v" type="xs:anyType"/></xs:schema>', {"async_only": True});
+        checkError("XSD-SCOPED-VALUE-ERROR", "XML character text", \any.serializeXmlValue(),
+            ("", "v", {"^value^": "a" + Nul + "b:c"}), "anyType text");
+        AbstractDataProviderType any_provider = any.getElement("", "v").getDataProviderType();
+        checkError("XSD-SCOPED-VALUE-ERROR", "XML character text", \any_provider.acceptsValue(),
+            ({"^value^": "a" + Nul + "b:c"},), "anyType provider text");
+        XsdSchema s = schema('<xs:simpleType name="QL"><xs:list itemType="xs:QName"/></xs:simpleType>'
+            '<xs:simpleType name="U"><xs:union memberTypes="t:QL xs:string"/></xs:simpleType>'
+            '<xs:simpleType name="V"><xs:restriction base="xs:string"><xs:maxLength value="10"/></xs:restriction>'
+            '</xs:simpleType><xs:element name="u" type="t:U"/>');
+        checkError("XSD-SCOPED-VALUE-ERROR", "XML character text", \s.serializeXmlValue(),
+            ("urn:p", "u", "x:y a" + Nul + "b:c"), "QName list union");
+
+        # an xsi:type with a NUL character is never remembered and is not a QName
+        XsdSimpleType type = s.findType(make_qname("urn:p", "V"));
+        hash<auto> annotated = {"^attributes^": {"xmlns:xsi": Xsi, "xmlns:xs": Xs, "xsi:type": "xs:str" + Nul + "ing"},
+            "^value^": "a"};
+        checkError("SOAP-DESERIALIZATION-ERROR", "", \type.deserializeValue(), ("v", s.getTypeMap(), NOTHING,
+            annotated), "deserialized xsi:type");
+        XsdBaseType any_type("anyType", s.nsc);
+        checkError("SOAP-SERIALIZATION-ERROR", "", \any_type.serializeValue(), (s.nsc, annotated, True),
+            "serialized xsi:type");
+        # the valid annotation is resolved as before
+        annotated."^attributes^" += {"xmlns:t": "urn:p", "xsi:type": "t:V"};
+        assertEq("a", type.deserializeValue("v", s.getTypeMap(), NOTHING, annotated));
+    }
+
+    private mimeIdentifiers() {
+        string text = ReadOnlyFile::readTextFile(get_script_dir()
+            + "/wsdl-interop/regressions/wsdl-swa-parts/literal.wsdl");
+        WebService ws(text);
+        WSOperation op = ws.getOperation("exchange");
+        hash<auto> input = {"text": "Order", "data": <00ff410d0a>, "invoice": {"id": 7, "label": "Invoice"}};
+        hash<auto> wire = op.serializeRequest(input, NOTHING, "UTF-8");
+        hash<auto> parsed = WSDLLib::parseSOAPMessage(WSDLLib::parseMultiPartSOAPMessage({"body": wire.body,
+            "_qore_orig_content_type": wire.hdr."Content-Type"}));
+        hash<auto> expected = op.deserializeRequest(parsed);
+        assertEq("Order", expected.text);
+        # an entity whose part name decodes (%00) to a NUL character identifies no part
+        parsed."^mime-parts^"{"te%00xt=0123@qore.org"} = parsed."^mime-parts^".firstValue();
+        assertEq(expected, op.deserializeRequest(parsed));
+
+        # an explicit part whose identifier decodes to a NUL character names no MIME-bound part, so it is sent
+        hash<auto> explicit = op.serializeRequest({"^body^": input, "^headers^": {},
+            "^parts^": {"a%00b=1@x": <01>}}, NOTHING, "UTF-8");
+        assertTrue(binary_to_string(explicit.body).contains("<a%00b=1@x>"));
+
+        # a MIME tree entity whose Content-ID decodes to a NUL character is matched by its media type
+        WebService tree(mimeSource('<m:multipartRelated><m:part>' + mimeContent("first", "text/plain")
+            + '</m:part><m:part>' + mimeContent("second", "application/octet-stream")
+            + '</m:part></m:multipartRelated>'));
+        WSOperation tree_op = tree.getOperation("call");
+        hash<WsdlMimeEntityInfo> node = <WsdlMimeEntityInfo>{"format": "multipart:0", "root": 0, "parts": (
+            <WsdlMimeEntityInfo>{"format": "content:first", "value": "one", "content_id": "fi%00rst=x@peer"},
+            <WsdlMimeEntityInfo>{"format": "content:second", "value": <00ff>, "content_id": "second@peer"})};
+        hash<auto> tree_wire = tree_op.serializeRequest({"^mime^": node});
+        hash<auto> received = tree_op.deserializeRequest({"body": tree_wire.body,
+            "content-type": tree_wire.hdr."Content-Type"});
+        assertEq(("one", <00ff>), map $1.value, received."^mime^".parts);
+
+        # a Content-Location with a NUL or another control character is malformed; a valid one labels its part
+        string envelope = "<soap:Envelope xmlns:soap=\"http://schemas.xmlsoap.org/soap/envelope/\"><soap:Body>"
+            "<x href=\"rel\"/></soap:Body></soap:Envelope>";
+        code<hash<auto>(string)> package = hash<auto> sub (string location) {
+            return {"content-type": "multipart/related; boundary=\"b\"; type=\"text/xml\"",
+                "body": binary("--b\r\nContent-Type: text/xml\r\nContent-ID: <root@x>\r\n\r\n" + envelope
+                    + "\r\n--b\r\nContent-Type: application/octet-stream\r\nContent-ID: <a@x>\r\nContent-Location: "
+                    + location + "\r\n\r\ndata\r\n--b--\r\n")};
+        };
+        assertEq(binary("data"), WSDLLib::parseSOAPMessage(WSDLLib::parseMultiPartSOAPMessage(package("rel")))
+            ."^mime-parts^"."a@x".body);
+        foreach string bad in ("a" + Nul + "b", "a\x01b") {
+            string label = sprintf("%y", binary(bad));
+            hash<auto> message = WSDLLib::parseMultiPartSOAPMessage(package(bad));
+            checkError("SOAP-MESSAGE-ERROR", "invalid MIME Content-Location", \WSDLLib::parseSOAPMessage(),
+                (message,), "part location " + label);
+            hash<auto> located = package("rel") + {"content-location": "http://h/" + bad + "/"};
+            message = WSDLLib::parseMultiPartSOAPMessage(located);
+            checkError("SOAP-MESSAGE-ERROR", "invalid MIME Content-Location", \WSDLLib::parseSOAPMessage(),
+                (message,), "package location " + label);
+            message = WSDLLib::parseMultiPartSOAPMessage(package("rel"));
+            message.header."content-location" = "http://h/" + bad + "/";
+            checkError("SOAP-MESSAGE-ERROR", "invalid MIME Content-Location", \WSDLLib::parseSOAPMessage(),
+                (message,), "root location " + label);
+        }
+    }
+
+    private static string mimeSource(string layout) {
+        return '<w:definitions xmlns:w="http://schemas.xmlsoap.org/wsdl/" '
+            'xmlns:h="http://schemas.xmlsoap.org/wsdl/http/" xmlns:m="http://schemas.xmlsoap.org/wsdl/mime/" '
+            'xmlns:x="http://www.w3.org/2001/XMLSchema" xmlns:t="urn:mime-tree" targetNamespace="urn:mime-tree">'
+            '<w:message name="M"><w:part name="first" type="x:string"/><w:part name="second" type="x:string"/>'
+            '</w:message><w:portType name="P"><w:operation name="call"><w:input message="t:M"/>'
+            '<w:output message="t:M"/></w:operation></w:portType><w:binding name="B" type="t:P">'
+            '<h:binding verb="POST"/><w:operation name="call"><h:operation location="/call"/><w:input>' + layout
+            + '</w:input><w:output>' + layout + '</w:output></w:operation></w:binding><w:service name="S">'
+            '<w:port name="Endpoint" binding="t:B"><h:address location="http://example.invalid/"/></w:port>'
+            '</w:service></w:definitions>';
+    }
+
+    private static string mimeContent(string part, string media) {
+        return '<m:content part="' + part + '" type="' + media + '"/>';
+    }
+
+    private mimeFormats() {
+        WebService tree(mimeSource('<m:multipartRelated><m:part>' + mimeContent("first", "text/plain")
+            + '</m:part><m:part>' + mimeContent("second", "application/octet-stream")
+            + '</m:part></m:multipartRelated>'));
+        WSOperation op = tree.getOperation("call");
+        hash<WsdlMimeEntityInfo> node = <WsdlMimeEntityInfo>{"format": "multipart:0", "root": 0, "parts": (
+            <WsdlMimeEntityInfo>{"format": "content:first", "value": "one", "content_id": "first@peer"},
+            <WsdlMimeEntityInfo>{"format": "content:second", "value": <00ff>, "content_id": "second@peer"})};
+        hash<auto> wire = op.serializeRequest({"^mime^": node});
+        hash<auto> message = {"body": wire.body, "content-type": wire.hdr."Content-Type"};
+        assertEq("one", op.deserializeRequest(message, NOTHING, False, "multipart:0")."^mime^".parts[0].value);
+
+        hash<WsdlMimeEntityInfo> child = node;
+        child.parts[0].format = "content:first" + Nul;
+        checkError("SOAP-MESSAGE-ERROR", "unknown MIME", \op.serializeRequest(), ({"^mime^": child},),
+            "child format");
+        hash<WsdlMimeEntityInfo> root = node;
+        root.format = "multipart:0" + Nul;
+        checkError("SOAP-MESSAGE-ERROR", "unknown MIME format", \op.serializeRequest(), ({"^mime^": root},),
+            "root format");
+        hash<WsdlMimeEntityInfo> unselected = node;
+        remove unselected.format;
+        checkError("SOAP-MESSAGE-ERROR", "unknown MIME format", \op.serializeRequest(),
+            ({"^mime^": unselected}, NOTHING, NOTHING, NOTHING, NOTHING, NOTHING, NOTHING, NOTHING,
+                "multipart:0" + Nul), "serialized selector");
+        checkError("SOAP-MESSAGE-ERROR", "unknown MIME format", \op.deserializeRequest(),
+            (message, NOTHING, False, "multipart:0" + Nul), "deserialized selector");
+        hash<WsdlMimeSelectionInfo> selection = <WsdlMimeSelectionInfo>{"parts": (
+            <WsdlMimeSelectionInfo>{"format": "content:first" + Nul},)};
+        checkError("SOAP-MESSAGE-ERROR", "unknown MIME", \op.deserializeRequest(), (message, NOTHING, False,
+            selection), "deserialized child selector");
+        BindingMessageDescription description = op.getBinding().input;
+        checkError("SOAP-MESSAGE-ERROR", "unknown MIME format", \description.getMimeDescription(), ("x" + Nul,),
+            "description");
+        checkError("SOAP-MESSAGE-ERROR", "unknown MIME format", \description.isMimeContent(), ("x" + Nul,),
+            "content description");
+
+        # the media type of a part value is checked before it selects one of several direct representations
+        WebService direct(mimeSource(mimeContent("first", "text/plain")
+            + mimeContent("second", "application/octet-stream")));
+        WSOperation direct_op = direct.getOperation("call");
+        hash<auto> plain = direct_op.serializeRequest({"first": {"^value^": "a",
+            "^attributes^": {"^content-type^": "text/plain"}}});
+        assertEq("text/plain;charset=UTF-8", plain.hdr."Content-Type");
+        checkError("SOAP-MESSAGE-ERROR", "invalid MIME content type", \direct_op.serializeRequest(),
+            ({"first": {"^value^": "a", "^attributes^": {"^content-type^": "text/plain" + Nul}}},),
+            "part media type");
+        checkError("SOAP-MESSAGE-ERROR", "invalid MIME content type", \direct_op.serializeRequest(),
+            ({"first": {"^value^": "a", "^attributes^": {"^content-type^": "text/"}}},), "part media type grammar");
+        checkError("SOAP-MESSAGE-ERROR", "unavailable", \direct_op.deserializeRequest(),
+            ({"body": "a", "content-type": "text/plain" + Nul},), "received media type");
+    }
+
+    private addressing() {
+        string id = "urn:a" + Nul + "b";
+        checkError("WSA-SERIALIZATION-ERROR", "must be an absolute IRI", \WsAddressingHelper::validate(),
+            (<WsaMessageAddressing>{"action": "urn:x", "message_id": id},), "message ID");
+        checkError("WSA-SERIALIZATION-ERROR", "must be an absolute IRI", \WsAddressingHelper::validate(),
+            (<WsaMessageAddressing>{"action": id},), "action");
+        checkError("WSA-SERIALIZATION-ERROR", "must be an absolute IRI", \WsAddressingHelper::validate(),
+            (<WsaMessageAddressing>{"action": "urn:a\x01b"},), "control character action");
+        WsAddressingHelper::validate(<WsaMessageAddressing>{"action": "urn:x", "message_id": "urn:uuid:1"});
+
+        WsaReplyReceiver receiver(<WsaEndpointReference>{"address": "http://client.example:8081/replies"});
+        checkError("WSA-RECEIVER-ERROR", "NUL character", \receiver.expect(), (id,), "expect");
+        assertFalse(receiver.isExpected(id));
+        receiver.cancel(id);
+        checkError("WSA-RECEIVER-ERROR", "no reply", \receiver.wait(), (id, 1), "wait");
+        assertFalse(receiver.deliver(<WsaReceivedMessage>{"headers": {}, "addressing": <WsaMessageAddressing>{
+            "action": "urn:x", "relates_to": (<WsaRelationship>{"message_id": id},)}}));
+        # an expected reply is still delivered
+        receiver.expect("urn:uuid:2");
+        assertTrue(receiver.isExpected("urn:uuid:2"));
+        assertTrue(receiver.deliver(<WsaReceivedMessage>{"headers": {}, "addressing": <WsaMessageAddressing>{
+            "action": "urn:x", "relates_to": (<WsaRelationship>{"message_id": "urn:uuid:2"},)}}));
+        assertEq("urn:x", receiver.wait("urn:uuid:2", 1000).addressing.action);
+    }
+
+    private predicates() {
+        WebService ws(ReadOnlyFile::readTextFile(get_script_dir() + "/simple.wsdl"));
+        WSOperation op = ws.getOperation("getCompanyInfo");
+        assertTrue(op.hasFault("getCompanyInfoFault"));
+        assertFalse(op.hasFault("getCompanyInfoFault" + Nul + "x"));
+        string binding = op.getBinding().name;
+        assertTrue(op.hasBinding(binding));
+        assertFalse(op.hasBinding(binding + Nul));
+    }
+
+    private handlerPath() {
+        HttpServer server();
+        on_exit server.stop();
+        SoapHandler handler(new PermissiveAuthenticator());
+        server.setDefaultHandler("soap", handler);
+        int port = server.addListener(<HttpListenerOptionInfo>{"node": "127.0.0.1", "service": 0}).port;
+        WebService ws(ReadOnlyFile::readTextFile(get_script_dir() + "/test.wsdl"));
+        handler.addMethod(ws, ws.getBindingOperation("b1", "getInfo"), auto sub (hash<auto> cx, auto data) {
+            return {"GetInfoResult": {"result": 1.0}};
+        }, NOTHING, NOTHING, NOTHING, NOTHING, NOTHING, NOTHING, "b1");
+        # an unknown service path is not found; an escaped NUL character is an invalid request target
+        assertEq(501, status(port, "GET", "/unknown?wsdl"));
+        assertEq(400, status(port, "GET", "/a%00b?wsdl"));
+        assertEq(400, status(port, "POST", "/a%00b", "<x/>"));
+    }
+
+    # sends the request target as given; HTTPClient would escape its percent signs
+    private static int status(int port, string method, string target, string body = "") {
+        Socket socket();
+        socket.connect(sprintf("127.0.0.1:%d", port), 30s);
+        on_exit socket.close();
+        socket.send(sprintf("%s %s HTTP/1.1\r\nHost: localhost\r\nContent-Type: text/xml\r\n"
+            "Content-Length: %d\r\nConnection: close\r\n\r\n%s", method, target, body.size(), body));
+        return socket.readHTTPHeader(30s).status_code;
+    }
+}

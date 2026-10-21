@@ -189,6 +189,11 @@ public class RobotsTxt {
                         current_uas = ();
                         in_group_header = True;
                     }
+                    # a product token with a NUL character names no crawler (RFC 9309 section 2.2.1) and cannot be
+                    # a key: the line still opens its group, whose rules then apply to no other user agent
+                    if (value.contains(chr(0))) {
+                        break;
+                    }
                     current_uas += value.lwr();
                     if (!groups{value.lwr()}) {
                         groups{value.lwr()} = <RobotsGroup>{};

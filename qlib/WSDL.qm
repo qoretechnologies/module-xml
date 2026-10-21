@@ -469,6 +469,11 @@ if (policy.required) {
     @tableofcontents
 
     @section wsdl_0_5_8 WSDL v0.5.8
+    - message data with a NUL character, which a hash key cannot contain, raises the error of the check that it fails
+      instead of \c HASH-KEY-ERROR: an invalid \c Content-Type or MIME \c Content-Location raises
+      \c SOAP-MESSAGE-ERROR, a value checked by a pattern, enumeration, identity constraint or field choice is
+      refused by that check, a namespace name or WS-Addressing IRI that is not XML character text is invalid, and a
+      MIME identifier or selector that decodes to a NUL character names no part, MIME format, fault or binding
     - the errors of loading a WSDL and of resolving its locations no longer contain the password of a URL; it is
       masked (@ref WSDLLib::maskUrl())
     - message serialization and decoding compile each complex type's content model once and memoize its matching
@@ -1647,6 +1652,11 @@ class WsdlUriComponents {
     # XSD anyURI lexical values can contain characters needing URI escaping.
     # Classify using Qore's URI mapping without changing the stored declaration.
     static bool isAbsoluteValue(string value) {
+        # an anyURI value is XML text, as normalize_xsd_uri() requires; checked first, because RESOLVE_URL_ENCODE
+        # would escape a NUL or another character that a document cannot contain
+        if (!WsdlLibPriv::isXmlText(value)) {
+            throw WSDL_ERROR, sprintf("invalid WSDL URI value %Y: a URI value must be XML character text", value);
+        }
         try {
             return exists parse(resolve_url("", value, RESOLVE_URL_RELATIVE_BASE | RESOLVE_URL_ENCODE)).scheme;
         } catch (hash<ExceptionInfo> ex) {
@@ -2944,7 +2954,7 @@ class SwaPackageReferences {
     constructor(*hash<auto> parts, *list<auto> unidentified, *string package_location, *string root_location) {
         self.parts = parts ?? {};
         string package_base = exists package_location
-            ? resolve_url(SwaDefaultBase, trim(package_location))
+            ? resolveLocation(SwaDefaultBase, package_location)
             : SwaDefaultBase;
         foreach hash<auto> part in (self.parts.iterator()) {
             addLocationLabel(part, package_base);
@@ -2952,7 +2962,17 @@ class SwaPackageReferences {
         foreach hash<auto> part in (unidentified) {
             addLocationLabel(part, package_base);
         }
-        base = exists root_location ? resolve_url(package_base, trim(root_location)) : package_base;
+        base = exists root_location ? resolveLocation(package_base, root_location) : package_base;
+    }
+
+    # a Content-Location is a URI reference in a MIME header, which cannot contain a control character; the
+    # resolved label is also a key, which cannot contain a NUL character
+    private static string resolveLocation(string base, string location) {
+        string reference = trim(location);
+        if (reference =~ /[\x00-\x1f\x7f]/) {
+            throw "SOAP-MESSAGE-ERROR", sprintf("invalid MIME Content-Location %Y", location);
+        }
+        return resolve_url(base, reference);
     }
 
     # restores the references of a parsed message: its identified parts and the labels it carries
@@ -2988,7 +3008,8 @@ class SwaPackageReferences {
             }
             return parts{id};
         }
-        *list<hash<auto>> matches = labels{uri};
+        # a URI with a NUL character, from a base supplied with the message, matches no label
+        *list<hash<auto>> matches = WsdlLibPriv::lookup(labels, uri);
         if (matches.size() > 1) {
             throw "SOAP-MESSAGE-ERROR", sprintf("attachment reference %y matches the Content-Location of %d parts",
                 href, matches.size());
@@ -2999,7 +3020,7 @@ class SwaPackageReferences {
     # a part's Content-Location is resolved against the base URI of the package enclosing it (RFC 2557 section 5)
     private addLocationLabel(hash<auto> part, string package_base) {
         if (exists part.hdr."content-location") {
-            push labels{resolve_url(package_base, trim(part.hdr."content-location"))}, part;
+            push labels{resolveLocation(package_base, part.hdr."content-location")}, part;
         }
     }
 }
@@ -3051,7 +3072,8 @@ class WsdlAttachmentHelper {
                 throw SOAP_DESERIALIZATION_ERROR, "invalid percent escape in MIME part identifier";
             }
             string part = decode_url(encoded_part);
-            if (!msg.pmap.hasKey(part) || !description.parts.hasKey(msg.pmap{part})) {
+            # an escaped NUL character (%00) decodes to a name that no part has and that cannot be a key
+            if (!WsdlLibPriv::isKey(part) || !msg.pmap.hasKey(part) || !description.parts.hasKey(msg.pmap{part})) {
                 continue;
             }
             string unique = id.substr(equal + 1);
@@ -3091,7 +3113,8 @@ class WsdlAttachmentHelper {
         if (equal > 0 && msg) {
             string encoded = id.substr(0, equal);
             *string part = encoded =~ /%(?![0-9A-Fa-f]{2})/ ? NOTHING : decode_url(encoded);
-            if (exists part && msg.pmap.hasKey(part) && description.parts.hasKey(msg.pmap{part})) {
+            if (exists part && WsdlLibPriv::isKey(part) && msg.pmap.hasKey(part)
+                    && description.parts.hasKey(msg.pmap{part})) {
                 throw SOAP_SERIALIZATION_ERROR, sprintf("Content-ID %y in ^parts^ would identify the MIME-bound "
                     "part %y", id, part);
             }
@@ -3611,6 +3634,28 @@ class SoapActionHelper {
 
 # Private, non-exported class.
 class WsdlLibPriv {
+    private {
+        const Nul = chr(0);
+    }
+
+    # returns True if the string can be a hash key: a hash key cannot contain a NUL character, so a string with one
+    # names no declared, registered or remembered entry, and Qore raises HASH-KEY-ERROR when it is used as a key
+    static bool isKey(string value) {
+        return !value.contains(Nul);
+    }
+
+    # returns the entry of a hash for a runtime value, or NOTHING when the value is a string that cannot be a key and
+    # therefore names no entry
+    static auto lookup(*hash<auto> h, auto key) {
+        return key.typeCode() == NT_STRING && !isKey(key) ? NOTHING : h{key};
+    }
+
+    # returns True if the string is XML character text (XML 1.0 section 2.2, the Char production); only such text
+    # can be written to an XML document, so a namespace name or lexical value with another character cannot be
+    static bool isXmlText(string value) {
+        return value !~ /[^\x{9}\x{A}\x{D}\x{20}-\x{D7FF}\x{E000}-\x{FFFD}\x{10000}-\x{10FFFF}]/;
+    }
+
     static validateSoapCharset(*string charset) {
         if (!exists charset) { return; }
         if (!charset) { throw "SOAP-MESSAGE-ERROR", "a SOAP charset parameter cannot be empty"; }
@@ -3765,14 +3810,18 @@ public class XsdBase inherits Qore::Serializable {
     }
 
     private static validateAttributeNamespace(string prefix, auto uri) {
-        # the check depends only on the prefix and the URI, so a valid binding is checked once
-        *string key = uri.typeCode() == NT_STRING ? sprintf("%d:%s%s", prefix.size(), prefix, uri) : NOTHING;
+        # the check depends only on the prefix and the URI, so a valid binding is checked once; a URI with a NUL
+        # character cannot be part of a key, and it is not XML character text, so the binding is invalid
+        *string key = uri.typeCode() == NT_STRING && WsdlLibPriv::isKey(uri)
+            ? sprintf("%d:%s%s", prefix.size(), prefix, uri)
+            : NOTHING;
         hash<string, bool> known = ValidBindings;
         if (key && known{key}) {
             return;
         }
-        if (uri.typeCode() != NT_STRING || !uri || !Namespaces::isNCName(prefix) || prefix == "xmlns"
-                || uri == "http://www.w3.org/2000/xmlns/"
+        # a namespace name that is not XML character text cannot be declared in a document
+        if (uri.typeCode() != NT_STRING || !uri || !WsdlLibPriv::isXmlText(uri) || !Namespaces::isNCName(prefix)
+                || prefix == "xmlns" || uri == "http://www.w3.org/2000/xmlns/"
                 || ((prefix == "xml") != (uri == XmlNamespace))) {
             throw SOAP_DESERIALIZATION_ERROR, sprintf("invalid XML namespace binding %Y to %Y", prefix, uri);
         }
@@ -3850,8 +3899,8 @@ public class XsdBase inherits Qore::Serializable {
         if (!attributes) {
             return {};
         }
-        string key = attributeKey(attributes);
-        *hash<auto> info = AttributeInfo{key};
+        *string key = attributeKey(attributes);
+        *hash<auto> info = exists key ? AttributeInfo{key} : NOTHING;
         if (info.hasKey("expanded")) {
             return info.expanded;
         }
@@ -3862,14 +3911,21 @@ public class XsdBase inherits Qore::Serializable {
 
     # returns the key of an attribute set for AttributeInfo: the formatted lists of its names and of its values, in
     # which every string is quoted and escaped, so that distinct sets of string values have distinct keys; a set with
-    # another value type cannot share the key of a remembered set, since only a string is formatted with a quote
-    private static string attributeKey(hash<auto> attributes) {
-        return sprintf("%y%y", keys attributes, attributes.values());
+    # another value type cannot share the key of a remembered set, since only a string is formatted with a quote.
+    # A set with a NUL character in a value, such as a hostile ^content-type^, has no key: a hash key cannot contain
+    # one, so the set is processed without being looked up or remembered, and its values are validated where they
+    # are used
+    private static *string attributeKey(hash<auto> attributes) {
+        string key = sprintf("%y%y", keys attributes, attributes.values());
+        return WsdlLibPriv::isKey(key) ? key : NOTHING;
     }
 
     # remembers information derived from a valid attribute set of string values; a failed derivation is never
     # remembered
-    private static rememberAttributeInfo(string key, hash<auto> attributes, string field, auto value) {
+    private static rememberAttributeInfo(*string key, hash<auto> attributes, string field, auto value) {
+        if (!exists key) {
+            return;
+        }
         foreach auto v in (attributes.iterator()) {
             if (v.typeCode() != NT_STRING) {
                 return;
@@ -3923,8 +3979,8 @@ public class XsdBase inherits Qore::Serializable {
         if (inherited || !attributes) {
             return deriveElementNamespaces(attributes, inherited);
         }
-        string key = attributeKey(attributes);
-        *hash<auto> info = AttributeInfo{key};
+        *string key = attributeKey(attributes);
+        *hash<auto> info = exists key ? AttributeInfo{key} : NOTHING;
         if (info.hasKey("namespaces")) {
             return info.namespaces;
         }
@@ -3948,6 +4004,10 @@ public class XsdBase inherits Qore::Serializable {
             if (default_ns == "http://www.w3.org/XML/1998/namespace"
                     || default_ns == "http://www.w3.org/2000/xmlns/") {
                 throw SOAP_DESERIALIZATION_ERROR, sprintf("reserved default XML namespace %Y", default_ns);
+            }
+            # the default namespace is part of every expanded name in its scope
+            if (!WsdlLibPriv::isXmlText(default_ns)) {
+                throw SOAP_DESERIALIZATION_ERROR, sprintf("invalid default XML namespace %Y", default_ns);
             }
             namespaces{""} = default_ns;
         }
@@ -9983,7 +10043,8 @@ class XsdScopedLexicalHelper {
             int colon = token.find(":");
             if (colon > 0) {
                 string prefix = token.substr(0, colon);
-                if (bindings.hasKey(prefix)) {
+                # a prefix with a NUL character is not bound; XsdScopedLexicalValue rejects the text
+                if (WsdlLibPriv::isKey(prefix) && bindings.hasKey(prefix)) {
                     result{prefix} = bindings{prefix};
                 }
             }
@@ -11474,7 +11535,7 @@ class XsdSizedFacetHelper {
                         value, facets.name);
                 }
             }
-            if (exists facets.enumeration && !enumeration{value}) {
+            if (exists facets.enumeration && !WsdlLibPriv::lookup(enumeration, value)) {
                 throw error, sprintf("value %Y is outside the enumeration for simpleType %Y", value, facets.name);
             }
         }
@@ -11852,7 +11913,7 @@ public class XsdListRestrictionDataType inherits AbstractDataProviderType {
         if (exists facets.enumeration) {
             *string key = item.union_item ? (lexical.identity ? XsdUnionValueHelper::key(lexical.identity) : NOTHING)
                 : XsdListValueHelper::key(item, converted, "RUNTIME-TYPE-ERROR");
-            if (!exists key || !enumeration{key}) {
+            if (!exists key || !WsdlLibPriv::lookup(enumeration, key)) {
                 throw "RUNTIME-TYPE-ERROR", sprintf("list value for %Y is outside its enumeration", facets.name);
             }
         }
@@ -13979,7 +14040,7 @@ public class XsdListDataField inherits QoreDataField {
     */
     AbstractDataField setAllowedValues(list<auto> choices, *bool creatable) {
         list<hash<AllowedValueInfo>> resolved = resolveChoices(choices);
-        hash<string, bool> value_map = map {valueKey($1.value): True}, resolved;
+        hash<string, bool> value_map = map {choiceKey($1.value): True}, resolved;
         allowed_values = resolved;
         allowed_values_map = value_map;
         allowed_values_creatable = creatable ?? False;
@@ -13994,7 +14055,7 @@ public class XsdListDataField inherits QoreDataField {
     */
     AbstractDataField setElementAllowedValues(list<auto> choices, *bool creatable) {
         list<hash<AllowedValueInfo>> resolved = resolveChoices(choices);
-        hash<string, bool> value_map = map {valueKey($1.value): True}, resolved;
+        hash<string, bool> value_map = map {choiceKey($1.value): True}, resolved;
         element_allowed_values = resolved;
         element_allowed_values_map = value_map;
         element_allowed_values_creatable = creatable ?? False;
@@ -14019,6 +14080,15 @@ public class XsdListDataField inherits QoreDataField {
         return XsdListValueHelper::key(item, value, "XSD-SIMPLETYPE-ERROR");
     }
 
+    # a choice is XML text, which cannot contain a NUL character; nor can the key that it is compared with
+    private string choiceKey(auto value) {
+        string key = valueKey(value);
+        if (!WsdlLibPriv::isKey(key)) {
+            throw "XSD-SIMPLETYPE-ERROR", sprintf("list field choice %Y contains a NUL character", value);
+        }
+        return key;
+    }
+
     #! validates the type and compares finite choices in the list value space
     /** @param value a native list value or XML lexical spelling
         @return the provider's validated value with retained lexical information
@@ -14033,14 +14103,14 @@ public class XsdListDataField inherits QoreDataField {
         on_error rethrow $1.err, sprintf("%s (while setting field %Y)", $1.desc, getName()), $1.arg;
         value = getType().acceptsValue(value);
         if (exists value && allowed_values && !allowed_values_creatable) {
-            if (!allowed_values_map{valueKey(value)}) {
+            if (!WsdlLibPriv::lookup(allowed_values_map, valueKey(value))) {
                 throw "FIELD-VALUE-ERROR", sprintf("field %Y does not accept list value %Y; allowed values: %Y",
                     getName(), value, map $1.value, allowed_values);
             }
         }
         if (exists value && element_allowed_values && !element_allowed_values_creatable) {
             foreach auto item in (value) {
-                if (!element_allowed_values_map{valueKey(item)}) {
+                if (!WsdlLibPriv::lookup(element_allowed_values_map, valueKey(item))) {
                     throw "FIELD-VALUE-ERROR", sprintf("field %Y does not accept list element value %Y",
                         getName(), item);
                 }
@@ -14092,7 +14162,7 @@ public class XsdUnionDataField inherits QoreDataField {
     */
     AbstractDataField setAllowedValues(list<auto> choices, *bool creatable) {
         list<hash<AllowedValueInfo>> resolved = resolveChoices(choices);
-        hash<string, bool> values = map {comparison.valueKey($1.value): True}, resolved;
+        hash<string, bool> values = map {choiceKey($1.value): True}, resolved;
         allowed_values = resolved;
         allowed_values_map = values;
         allowed_values_creatable = creatable ?? False;
@@ -14107,7 +14177,7 @@ public class XsdUnionDataField inherits QoreDataField {
     */
     AbstractDataField setElementAllowedValues(list<auto> choices, *bool creatable) {
         list<hash<AllowedValueInfo>> resolved = resolveChoices(choices);
-        hash<string, bool> values = map {comparison.valueKey($1.value): True}, resolved;
+        hash<string, bool> values = map {choiceKey($1.value): True}, resolved;
         element_allowed_values = resolved;
         element_allowed_values_map = values;
         element_allowed_values_creatable = creatable ?? False;
@@ -14117,6 +14187,15 @@ public class XsdUnionDataField inherits QoreDataField {
     private static list<hash<AllowedValueInfo>> resolveChoices(list<auto> choices) {
         return map $1.typeCode() == NT_HASH ? new hash<AllowedValueInfo>($1)
             : <AllowedValueInfo>{"value": $1, "display_name": XsdDataFieldHelper::display($1)}, choices;
+    }
+
+    # a choice in a union's value space is XML text, which cannot contain a NUL character; nor can its key
+    private string choiceKey(auto value) {
+        string key = comparison.valueKey(value);
+        if (!WsdlLibPriv::isKey(key)) {
+            throw "RUNTIME-TYPE-ERROR", sprintf("union field choice %Y contains a NUL character", value);
+        }
+        return key;
     }
 
     #! validates the union and compares finite choices in its value space
@@ -14133,12 +14212,12 @@ public class XsdUnionDataField inherits QoreDataField {
         on_error rethrow $1.err, sprintf("%s (while setting field %Y)", $1.desc, getName()), $1.arg;
         value = getType().acceptsValue(value);
         if (exists value && allowed_values && !allowed_values_creatable
-                && !allowed_values_map{comparison.valueKey(value)}) {
+                && !WsdlLibPriv::lookup(allowed_values_map, comparison.valueKey(value))) {
             throw "FIELD-VALUE-ERROR", sprintf("field %Y does not accept union value %Y", getName(), value);
         }
         if (exists value && element_allowed_values && !element_allowed_values_creatable) {
             foreach auto item in (value) {
-                if (!element_allowed_values_map{comparison.valueKey(item)}) {
+                if (!WsdlLibPriv::lookup(element_allowed_values_map, comparison.valueKey(item))) {
                     throw "FIELD-VALUE-ERROR", sprintf("field %Y does not accept union element %Y", getName(), item);
                 }
             }
@@ -14290,7 +14369,8 @@ class XsdGenericValueHelper {
                 int colon = token.find(":");
                 if (colon > 0) {
                     string prefix = token.substr(0, colon);
-                    if (QNameInputNamespaces.hasKey(prefix)) {
+                    # a prefix with a NUL character is not declared; the text is rejected as XML text below
+                    if (WsdlLibPriv::isKey(prefix) && QNameInputNamespaces.hasKey(prefix)) {
                         bindings{prefix} = QNameInputNamespaces{prefix};
                     }
                 }
@@ -20830,6 +20910,11 @@ class XsdIdentityTupleNode {
                     continue;
                 }
                 string value_key = XsdUnionValueHelper::key(field.value);
+                # a value with a NUL character cannot be written to a document, nor be part of a tuple's key
+                if (!WsdlLibPriv::isKey(value_key)) {
+                    throw error, sprintf("identity constraint %Y field %d has a value with a NUL character",
+                        definition.getExpandedName(), $# + 1);
+                }
                 parts += sprintf("%d:%s", value_key.length(), value_key);
             }
             if (!complete) {
@@ -23305,6 +23390,11 @@ class XsdRegexProgram {
 
     bool matches(string value) {
         @assert(!frames && nodes);
+        # a NUL character is not an XML character, so no XSD expression matches text containing one; the matcher
+        # also remembers its results by character, and a hash key cannot contain a NUL character
+        if (!WsdlLibPriv::isKey(value)) {
+            return False;
+        }
         if (repeated_literal) {
             int width = repeated_literal.length();
             if (value.length() % width) {
@@ -26550,16 +26640,18 @@ public class XsdSimpleType inherits WSDL::XsdAbstractType {
     private bool enumerationAccepts(auto value, *hash<XsdUnionValueIdentity> identity) {
         if (exists listEnumKeys) {
             if (listItemValueInfo.union_item && identity) {
-                return boolean(listEnumKeys{XsdUnionValueHelper::key(identity)});
+                return boolean(WsdlLibPriv::lookup(listEnumKeys, XsdUnionValueHelper::key(identity)));
             }
-            return boolean(listEnumKeys{XsdListValueHelper::key(listItemValueInfo, value,
-                "XSD-SIMPLETYPE-ERROR")});
+            return boolean(WsdlLibPriv::lookup(listEnumKeys, XsdListValueHelper::key(listItemValueInfo, value,
+                "XSD-SIMPLETYPE-ERROR")));
         }
+        # a value that cannot be a hash key has a NUL character, which no enumerated XML value contains
         if (exists stringEnumValues) {
-            return boolean(stringEnumValues{value});
+            return boolean(WsdlLibPriv::lookup(stringEnumValues, value));
         }
         # Numeric enumeration is checked together with the other value facets.
-        return getNumericBaseName() || getCalendarBaseName() || getDurationBaseName() || !enumValues || boolean(enumValues{value});
+        return getNumericBaseName() || getCalendarBaseName() || getDurationBaseName() || !enumValues
+            || boolean(WsdlLibPriv::lookup(enumValues, value));
     }
 
     *list<auto> getAllowedValues() {
@@ -29757,9 +29849,14 @@ public class WsaReplyReceiver {
 
     #! registers a request whose reply is expected
     /** @param message_id the request's message ID
-        @throw WSA-RECEIVER-ERROR the message ID is already expected
+        @throw WSA-RECEIVER-ERROR the message ID is already expected, or it contains a NUL character, which no IRI
+        contains
     */
     expect(string message_id) {
+        if (!WsdlLibPriv::isKey(message_id)) {
+            throw "WSA-RECEIVER-ERROR", sprintf("invalid message ID %Y: an IRI cannot contain a NUL character",
+                message_id);
+        }
         AutoLock al(lock);
         if (pending{message_id}) {
             throw "WSA-RECEIVER-ERROR", sprintf("a reply to message %Y is already expected", message_id);
@@ -29771,6 +29868,10 @@ public class WsaReplyReceiver {
     /** @param message_id the request's message ID; unknown IDs are ignored
     */
     cancel(string message_id) {
+        # an ID with a NUL character is never expected
+        if (!WsdlLibPriv::isKey(message_id)) {
+            return;
+        }
         AutoLock al(lock);
         remove pending{message_id};
         remove delivered{message_id};
@@ -29779,7 +29880,7 @@ public class WsaReplyReceiver {
     #! returns True if a reply to the message is expected
     bool isExpected(string message_id) {
         AutoLock al(lock);
-        return exists pending{message_id};
+        return exists WsdlLibPriv::lookup(pending, message_id);
     }
 
     #! waits for the reply to a request and stops expecting it
@@ -29793,7 +29894,7 @@ public class WsaReplyReceiver {
         Queue queue;
         {
             AutoLock al(lock);
-            if (!pending{message_id}) {
+            if (!WsdlLibPriv::lookup(pending, message_id)) {
                 throw "WSA-RECEIVER-ERROR", sprintf("no reply to message %Y is expected", message_id);
             }
             queue = pending{message_id};
@@ -29818,7 +29919,7 @@ public class WsaReplyReceiver {
     bool deliver(hash<WsaReceivedMessage> message) {
         AutoLock al(lock);
         foreach hash<WsaRelationship> relationship in (message.addressing.relates_to) {
-            if (relationship.type == WSA_REPLY && pending{relationship.message_id}
+            if (relationship.type == WSA_REPLY && WsdlLibPriv::lookup(pending, relationship.message_id)
                     && !delivered{relationship.message_id}) {
                 delivered{relationship.message_id} = True;
                 pending{relationship.message_id}.push(message);
@@ -33195,7 +33296,8 @@ class XsdWildcardElementHelper {
                 int colon = token.find(":");
                 if (colon > 0) {
                     string prefix = token.substr(0, colon);
-                    if (QNameInputNamespaces.hasKey(prefix)) {
+                    # a prefix with a NUL character is not declared; the text is rejected as XML text below
+                    if (WsdlLibPriv::isKey(prefix) && QNameInputNamespaces.hasKey(prefix)) {
                         bindings{prefix} = QNameInputNamespaces{prefix};
                     }
                 }
@@ -34784,8 +34886,9 @@ class XsdTypeSubstitutionHelper {
     # resolves a type annotation in the instance QName scope; returns its namespace URI and local name
     private static list<string> resolveAnnotation(auto annotation) {
         if (annotation.typeCode() == NT_STRING) {
-            # a remembered valid text needs only its prefix binding, which the scope validated when it was declared
-            *list<string> parts = Annotations{annotation};
+            # a remembered valid text needs only its prefix binding, which the scope validated when it was declared;
+            # a text with a NUL character is never remembered, and the QName check below rejects it
+            *list<string> parts = WsdlLibPriv::lookup(Annotations, annotation);
             if (parts) {
                 string prefix = parts[0];
                 *string uri = prefix == "xml" ? "http://www.w3.org/XML/1998/namespace" : QNameInputNamespaces{prefix};
@@ -37687,7 +37790,8 @@ public class WSOperation inherits WSDL::XsdNamedData {
         @since %WSDL 0.5.8
     */
     bool hasBinding(string key) {
-        return bindings.hasKey(binding_keys{key} ?? key);
+        # a name with a NUL character cannot be a key, so it names no binding
+        return WsdlLibPriv::isKey(key) && bindings.hasKey(binding_keys{key} ?? key);
     }
 
     #! returns a hash of fault messages keyed by fault name
@@ -37697,7 +37801,8 @@ public class WSOperation inherits WSDL::XsdNamedData {
 
     #! returns True if the given string is a valid fault message for the operation
     bool hasFault(string fault) {
-        return faults.hasKey(fault);
+        # a name with a NUL character, such as the code of an exception raised by a service, names no fault
+        return WsdlLibPriv::isKey(fault) && faults.hasKey(fault);
     }
 
     #! this method is called if this operation supports at least one binding with document style
@@ -41071,7 +41176,7 @@ class WsdlMimeTreeCodec {
             string part = string($#);
             *string selected = choices{part}.format;
             hash<string, hash<WsdlMimeFormatInfo>> formats = description.getMimeFormats();
-            if (exists selected && !formats.hasKey(selected)) {
+            if (exists selected && (!WsdlLibPriv::isKey(selected) || !formats.hasKey(selected))) {
                 throw "SOAP-MESSAGE-ERROR", "unknown MIME entity format selection";
             }
             foreach string id in (exists selected ? (selected,) : keys formats) {
@@ -41097,7 +41202,8 @@ class WsdlMimeTreeCodec {
                     string encoded = cid.substr(0, equal);
                     if (encoded !~ /%(?![0-9a-fA-F]{2})/) {
                         string part = decode_url(encoded);
-                        if (message.pmap.hasKey(part)) { public_part = part; }
+                        # an escaped NUL character (%00) decodes to a name that no part has
+                        if (WsdlLibPriv::isKey(part) && message.pmap.hasKey(part)) { public_part = part; }
                     }
                 }
             }
@@ -42024,7 +42130,7 @@ public class BindingMessageDescription inherits Serializable {
             }
             return NOTHING;
         }
-        if (exists selection && !mime_formats.hasKey(selection)) {
+        if (exists selection && (!WsdlLibPriv::isKey(selection) || !mime_formats.hasKey(selection))) {
             throw "SOAP-MESSAGE-ERROR", sprintf("unknown MIME format %Y; available formats: %Y",
                 selection, keys mime_formats);
         }
@@ -42070,6 +42176,11 @@ public class BindingMessageDescription inherits Serializable {
                 if (format.content && !format.content.formUrlEncoded) {
                     *string media = message.getPartContentType(format.content.part, value);
                     if (exists media) {
+                        # the media type is compared as a key, so its grammar is checked first
+                        if (!WsdlMediaType::read(media)) {
+                            throw "SOAP-MESSAGE-ERROR", sprintf("invalid MIME content type %Y for message part %Y",
+                                media, format.content.part);
+                        }
                         selected{media} = True;
                     }
                 }
@@ -42133,7 +42244,7 @@ public class BindingMessageDescription inherits Serializable {
         if (!exists selection) {
             return self;
         }
-        if (!mime_formats.hasKey(selection)) {
+        if (!WsdlLibPriv::isKey(selection) || !mime_formats.hasKey(selection)) {
             throw "SOAP-MESSAGE-ERROR", sprintf("unknown MIME format %Y", selection);
         }
         validateMimeFormat(selection, mime_formats{selection});
