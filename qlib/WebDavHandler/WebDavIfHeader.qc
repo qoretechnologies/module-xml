@@ -183,7 +183,8 @@ public class WebDavIfHeader {
             error(sprintf("unterminated %y", open));
         }
         string rv = value.substr(pos + 1, end - pos - 1);
-        if (!rv.val() || rv =~ /[ \t\r\n<]/) {
+        # a Coded-URL or Simple-ref is a URI reference, which contains no space or control character
+        if (!rv.val() || rv =~ /[\x00-\x20\x7f<]/) {
             error(sprintf("invalid reference %y", rv));
         }
         pos = end + 1;

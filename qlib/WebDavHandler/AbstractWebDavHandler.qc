@@ -24,7 +24,7 @@
 #! Main public WebDavHandler namespace
 public namespace WebDavHandler {
 #! PROPPATCH action info
-hashdecl PropPatchActionInfo {
+public hashdecl PropPatchActionInfo {
     #! Action
     string action;
     #! Namespace
@@ -36,7 +36,7 @@ hashdecl PropPatchActionInfo {
 }
 
 #! WebDAV lock information structure
-hashdecl WebDavLockInfo {
+public hashdecl WebDavLockInfo {
     #! Unique lock token URI (e.g., "urn:uuid:...")
     string token;
     #! Resource path being locked
@@ -365,6 +365,10 @@ public class AbstractWebDavHandler inherits public HttpServer::AbstractHttpReque
                 if (DestMethods{hdr.method}) {
                     if (!exists hdr.destination) {
                         return response(400, "WebDAV request missing 'Destination' header for method %y", hdr.method);
+                    }
+                    # a Destination is a URI reference, which contains no control character (RFC 4918 section 10.3)
+                    if (hdr.destination.typeCode() == NT_STRING && hdr.destination =~ /[\x00-\x1f\x7f]/) {
+                        return response(400, "invalid WebDAV 'Destination' header %y", hdr.destination);
                     }
                     *hash<UrlInfo> dest_url = parseURL(hdr.destination);
                     cx.webdav_dest_path = getRealPath(dest_url.path ?? hdr.destination);

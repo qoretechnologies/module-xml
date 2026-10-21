@@ -1011,6 +1011,9 @@ public class FsWebDavHandler inherits AbstractWebDavHandler {
             if (ex.err == "LOCK-CONFLICT") {
                 return response(423, ex.desc);
             }
+            if (ex.err == "WEBDAVHANDLER-ERROR") {
+                return response(ex.arg ?? 500, ex.desc);
+            }
             rethrow;
         }
 

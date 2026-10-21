@@ -36,6 +36,8 @@ public class AbstractWebDavLockHandler {
         @return the lock token
 
         @throw LOCK-CONFLICT if the resource is already locked in a conflicting way
+        @throw WEBDAVHANDLER-ERROR (400) the resource path or the lock token contains a NUL character, which no
+        resource or lock can have; the other methods treat such a path or token as naming no resource or lock
     */
     abstract string lock(string resource, hash<WebDavLockInfo> lock_info);
 

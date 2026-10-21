@@ -41,7 +41,15 @@ public class InMemoryWebDavLockHandler inherits AbstractWebDavLockHandler {
     }
 
     #! Acquire a lock on a resource
+    /** @throw LOCK-CONFLICT the resource is already locked in a conflicting way
+        @throw WEBDAVHANDLER-ERROR (400) the resource path or the lock token contains a NUL character
+    */
     string lock(string resource, hash<WebDavLockInfo> lock_info) {
+        # resource paths and tokens are keys, and one with a NUL character names no resource or lock
+        if (!named(resource) || !named(lock_info.token)) {
+            throw "WEBDAVHANDLER-ERROR", sprintf("cannot lock resource %y with token %y: a resource path or lock "
+                "token cannot contain a NUL character", resource, lock_info.token), 400;
+        }
         AutoWriteLock al(m_lock);
 
         # Clean expired locks first
@@ -117,7 +125,8 @@ public class InMemoryWebDavLockHandler inherits AbstractWebDavLockHandler {
 
         resource = normalizeResource(resource);
 
-        if (!locks{token}) {
+        # a token or resource path with a NUL character names no lock or resource
+        if (!named(token) || !named(resource) || !locks{token}) {
             return False;
         }
 
@@ -139,7 +148,8 @@ public class InMemoryWebDavLockHandler inherits AbstractWebDavLockHandler {
     bool refresh(string token, int timeout) {
         AutoWriteLock al(m_lock);
 
-        if (!locks{token}) {
+        # a token with a NUL character names no lock
+        if (!named(token) || !locks{token}) {
             return False;
         }
 
@@ -152,7 +162,8 @@ public class InMemoryWebDavLockHandler inherits AbstractWebDavLockHandler {
     #! Get lock information for a specific token
     *hash<WebDavLockInfo> getLock(string token) {
         AutoReadLock al(m_lock);
-        return locks{token};
+        # a token with a NUL character names no lock
+        return named(token) ? locks{token} : NOTHING;
     }
 
     #! Get all locks on a resource
@@ -163,7 +174,8 @@ public class InMemoryWebDavLockHandler inherits AbstractWebDavLockHandler {
 
         list<hash<WebDavLockInfo>> result = ();
 
-        if (*list<string> tokens = resource_locks{resource}) {
+        # a resource path with a NUL character has no locks
+        if (*list<string> tokens = named(resource) ? resource_locks{resource} : NOTHING) {
             foreach string tok in (tokens) {
                 result += locks{tok};
             }
@@ -177,6 +189,10 @@ public class InMemoryWebDavLockHandler inherits AbstractWebDavLockHandler {
         AutoReadLock al(m_lock);
 
         resource = normalizeResource(resource);
+        # a resource path with a NUL character names no resource, and no resource it is in
+        if (!named(resource)) {
+            return NOTHING;
+        }
 
         # Check direct locks
         if (*list<string> tokens = resource_locks{resource}) {
@@ -254,6 +270,11 @@ public class InMemoryWebDavLockHandler inherits AbstractWebDavLockHandler {
 
             remove locks{tok};
         }
+    }
+
+    # returns True if the string can be a key: a resource path or token with a NUL character cannot
+    private static bool named(string value) {
+        return !value.contains(chr(0));
     }
 
     #! Normalize resource path
