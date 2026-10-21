@@ -311,33 +311,110 @@ QoreXmlRelaxNGContext::QoreXmlRelaxNGContext(const char* rng, int size, Exceptio
 }
 #endif
 
+// XML 1.0 section 2.2 (the Char production): a document can contain only these characters, either literally or
+// as character references; any other character, such as NUL, makes it malformed
+static bool is_xml_char(unsigned cp) {
+    return cp == 9 || cp == 10 || cp == 13 || (cp >= 0x20 && cp <= 0xd7ff) || (cp >= 0xe000 && cp <= 0xfffd)
+        || (cp >= 0x10000 && cp <= 0x10ffff);
+}
+
+// returns the code point at byte offset i of UTF-8 text and its length in bytes; ASCII needs no decoding
+static unsigned get_xml_code_point(const QoreString& utf8, size_t i, unsigned& length, ExceptionSink* xsink) {
+    const unsigned char c = utf8.c_str()[i];
+    if (c < 0x80) {
+        length = 1;
+        return c;
+    }
+    length = 0;
+    return utf8.getUnicodePointFromBytePos(i, length, xsink);
+}
+
+// raises err unless the UTF-8 text is XML character text; a context, if given, names the text in the message
+static int check_xml_text(ExceptionSink* xsink, const QoreString& utf8, const char* err, const char* context = nullptr) {
+    assert(utf8.getEncoding() == QCS_UTF8);
+    size_t count = 0;
+    for (size_t i = 0; i < utf8.size();) {
+        if (!(count++ % 100) && qore_check_cancel(xsink, "XML character validation")) {
+            return -1;
+        }
+        unsigned length;
+        unsigned cp = get_xml_code_point(utf8, i, length, xsink);
+        if (*xsink) {
+            return -1;
+        }
+        assert(length);
+        if (!is_xml_char(cp)) {
+            if (context) {
+                xsink->raiseException(err, "%s: U+%04X is not an XML 1.0 character", context, cp);
+            } else {
+                xsink->raiseException(err, "U+%04X is not an XML 1.0 character", cp);
+            }
+            return -1;
+        }
+        i += length;
+    }
+    return 0;
+}
+
 // XML 1.0 sections 2.11 and 3.3.3 normalize literal CR in text and all
 // attribute whitespace. References preserve the caller's actual characters.
+// Text that is not XML character text raises err: no reference can represent such a character.
 static int concat_xml_string(ExceptionSink* xsink, QoreString& str, const QoreString& value,
-        const MakeXmlOpts& opts, bool attribute = false) {
+        const MakeXmlOpts& opts, bool attribute = false, const char* err = "MAKE-XML-ERROR") {
     TempEncodingHelper utf8(&value, QCS_UTF8, xsink);
     if (!utf8) {
         return -1;
     }
     size_t start = 0;
+    size_t count = 0;
     const unsigned flags = CE_XML | (opts.m_useNumericRefs ? CE_NONASCII : 0);
-    for (size_t i = 0; i < utf8->size(); ++i) {
-        if (!(i % 100) && qore_check_cancel(xsink, attribute ? "XML attribute serialization" : "XML text serialization")) {
+    for (size_t i = 0; i < utf8->size();) {
+        if (!(count++ % 100) && qore_check_cancel(xsink, attribute ? "XML attribute serialization"
+                : "XML text serialization")) {
             return -1;
         }
-        const char c = utf8->c_str()[i];
-        if (c != '\r' && (!attribute || (c != '\t' && c != '\n'))) {
+        unsigned length;
+        unsigned cp = get_xml_code_point(**utf8, i, length, xsink);
+        if (*xsink) {
+            return -1;
+        }
+        assert(length);
+        if (!is_xml_char(cp)) {
+            xsink->raiseException(err, "U+%04X is not an XML 1.0 character", cp);
+            return -1;
+        }
+        if (cp != '\r' && (!attribute || (cp != '\t' && cp != '\n'))) {
+            i += length;
             continue;
         }
         QoreString part(utf8->c_str() + start, i - start, QCS_UTF8);
         if (str.concatEncode(xsink, part, flags)) {
             return -1;
         }
-        str.concat(c == '\t' ? "&#9;" : (c == '\n' ? "&#10;" : "&#13;"));
-        start = i + 1;
+        str.concat(cp == '\t' ? "&#9;" : (cp == '\n' ? "&#10;" : "&#13;"));
+        start = ++i;
     }
     QoreString part(utf8->c_str() + start, utf8->size() - start, QCS_UTF8);
     return str.concatEncode(xsink, part, flags);
+}
+
+// an element or attribute name is written as it is, so a name that is not XML character text is refused
+static int check_xml_name(ExceptionSink* xsink, const char* name, const QoreEncoding* enc, const char* kind) {
+    // names are nearly always printable ASCII, which needs no decoding
+    const char* p = name;
+    while (*p && static_cast<unsigned char>(*p) >= 0x20 && static_cast<unsigned char>(*p) < 0x80) {
+        ++p;
+    }
+    if (!*p) {
+        return 0;
+    }
+    QoreString text(name, enc);
+    TempEncodingHelper utf8(&text, QCS_UTF8, xsink);
+    if (!utf8) {
+        return -1;
+    }
+    QoreStringMaker context("%s %s", kind, utf8->c_str());
+    return check_xml_text(xsink, **utf8, "MAKE-XML-ERROR", context.c_str());
 }
 
 static int concat_simple_value(ExceptionSink* xsink, QoreString &str, const QoreValue n_arg, const MakeXmlOpts &opts) {
@@ -399,6 +476,11 @@ static int concat_simple_cdata_value(QoreString& str, const QoreValue n, Excepti
     if (!utf8) {
         return -1;
     }
+    // CDATA has no character references: its text must be XML character text (and cannot contain a NUL that would
+    // end the search below early)
+    if (check_xml_text(xsink, **utf8, "MAKE-XML-ERROR", "CDATA text")) {
+        return -1;
+    }
     if (strstr(utf8->c_str(), "]]>")) {
         xsink->raiseException("MAKE-XML-ERROR", "CDATA text contains illegal ']]>' sequence");
         return -1;
@@ -425,18 +507,24 @@ static int concat_simple_cdata_value(QoreString& str, const QoreValue n, Excepti
 }
 
 static int concat_simple_comment(QoreString &str, const QoreValue n, ExceptionSink* xsink) {
-	   //printd(5, "concat_simple_comment() n: %p (%s) %s\n", n, n->getTypeName(), n->getType() == NT_STRING ? ((QoreStringNode*)n)->c_str() : "unknown");
-	   if (n.getType() == NT_STRING) {
-	      QoreStringValueHelper qsn(n);
-	      if (strstr(qsn->c_str(), "-->")) {
-	         xsink->raiseException("MAKE-XML-ERROR", "Comment text contains illegal '-->' sequence");
-	         return -1;
-	      }
-	      str.concat(*qsn, xsink);
-	      return *xsink ? -1 : 0;
-	   }
+    if (n.getType() == NT_STRING) {
+        TempEncodingHelper utf8(n.get<const QoreStringNode>(), QCS_UTF8, xsink);
+        if (!utf8) {
+            return -1;
+        }
+        // a comment has no character references: its text must be XML character text
+        if (check_xml_text(xsink, **utf8, "MAKE-XML-ERROR", "comment text")) {
+            return -1;
+        }
+        if (strstr(utf8->c_str(), "-->")) {
+            xsink->raiseException("MAKE-XML-ERROR", "Comment text contains illegal '-->' sequence");
+            return -1;
+        }
+        str.concat(*utf8, xsink);
+        return *xsink ? -1 : 0;
+    }
 
-   return concat_simple_value(xsink, str, n, MakeXmlOpts());
+    return concat_simple_value(xsink, str, n, MakeXmlOpts());
 }
 
 static int make_xml(ExceptionSink* xsink, QoreString &str, const QoreHashNode &h, int indent, const MakeXmlOpts &opts);
@@ -450,6 +538,11 @@ static void add_xml_element(ExceptionSink* xsink, const char* key, QoreString &s
     // see concat_simple_value(): a container holds the reference, not its target
     const QoreValue n = n_arg.resolveIndirect();
     //QORE_TRACE("add_xml_element()");
+
+    // every path below writes the name as it is
+    if (check_xml_name(xsink, key, str.getEncoding(), "element")) {
+        return;
+    }
 
     if (n.isNullOrNothing()) {
         str.concat('<');
@@ -535,6 +628,9 @@ static void add_xml_element(ExceptionSink* xsink, const char* key, QoreString &s
             ConstHashIterator hi(ah);
             while (hi.next()) {
                 const char* tkey = hi.getKey();
+                if (check_xml_name(xsink, tkey, QCS_DEFAULT, "attribute")) {
+                    return;
+                }
                 str.sprintf(" %s=\"", tkey);
                 QoreValue v = hi.get();
                 if (!v.isNullOrNothing()) {
@@ -837,29 +933,8 @@ static QoreStringNode* make_xml_intern(ExceptionSink* xsink, const QoreStringNod
 // Validate XML 1.0 character data before escaping. Invalid characters cannot be
 // repaired by a numeric reference; callers must use binary values for such data.
 static int concat_xmlrpc_string(ExceptionSink *xsink, QoreString &output, const QoreString &value, int flags) {
-    TempEncodingHelper utf8(&value, QCS_UTF8, xsink);
-    if (!utf8) {
-        return -1;
-    }
-    size_t count = 0;
-    for (size_t i = 0; i < utf8->size();) {
-        if (!(count++ % 100) && qore_check_cancel(xsink, "XML-RPC character validation")) {
-            return -1;
-        }
-        unsigned length = 0;
-        unsigned cp = utf8->getUnicodePointFromBytePos(i, length, xsink);
-        if (*xsink) {
-            return -1;
-        }
-        assert(length);
-        if (cp != 9 && cp != 10 && cp != 13 && !(cp >= 0x20 && cp <= 0xd7ff) && !(cp >= 0xe000 && cp <= 0xfffd) &&
-            !(cp >= 0x10000 && cp <= 0x10ffff)) {
-            xsink->raiseException("XMLRPC-SERIALIZATION-ERROR", "U+%04X is not an XML 1.0 character", cp);
-            return -1;
-        }
-        i += length;
-    }
-    return concat_xml_string(xsink, output, **utf8, MakeXmlOpts::createFromFlags(flags, output.getEncoding()));
+    return concat_xml_string(xsink, output, value, MakeXmlOpts::createFromFlags(flags, output.getEncoding()), false,
+        "XMLRPC-SERIALIZATION-ERROR");
 }
 
 static int add_xmlrpc_value(QoreString *str, const QoreValue n, int indent, const QoreEncoding *ccs, int flags,
@@ -2002,7 +2077,8 @@ string canonical_xsd_float(string lexical, bool double_precision = False) [flags
 
     @return an XML string corresponding to the input data, with an XML header
 
-    @throw MAKE-XML-ERROR An error occurred serializing the %Qore data to an XML string
+    @throw MAKE-XML-ERROR An error occurred serializing the %Qore data to an XML string, including a string, name,
+    CDATA section or comment with a character that is not an XML 1.0 character (such as NUL)
     @throw PARSE-XML-EXCEPTION An embedded \c ^xml^ element fragment is not well-formed XML
 
     @see @ref xmlserialization
@@ -2025,7 +2101,8 @@ string make_xml(string key, hash data, *int flags, *string encoding) [flags=RET_
     @return an XML string corresponding to the input data, with an XML header
 
     @throw MAKE-XML-STRING-PARAMETER-EXCEPTION the hash passed not not have a single top-level key (either has no keys or more than one)
-    @throw MAKE-XML-ERROR An error occurred serializing the %Qore data to an XML string
+    @throw MAKE-XML-ERROR An error occurred serializing the %Qore data to an XML string, including a string, name,
+    CDATA section or comment with a character that is not an XML 1.0 character (such as NUL)
     @throw PARSE-XML-EXCEPTION An embedded \c ^xml^ element fragment is not well-formed XML
 
     @see @ref xmlserialization
@@ -2056,7 +2133,8 @@ string make_xml(hash data, *int flags, *string encoding) [flags=RET_VALUE_ONLY,N
 
     @throw MAKE-XML-STRING-PARAMETER-EXCEPTION the hash passed does not have a single top-level key (either has no keys or more than one)
     @throw MAKE-XML-OPTS-INVALID the options hash passed is not valid; see @ref xmlgenerationopts for more information
-    @throw MAKE-XML-ERROR An error occurred serializing the %Qore data to an XML string
+    @throw MAKE-XML-ERROR An error occurred serializing the %Qore data to an XML string, including a string, name,
+    CDATA section or comment with a character that is not an XML 1.0 character (such as NUL)
     @throw PARSE-XML-EXCEPTION An embedded \c ^xml^ element fragment is not well-formed XML
 
     @see @ref xmlserialization
@@ -2088,7 +2166,8 @@ string make_xml(hash data, hash options) [flags=RET_VALUE_ONLY,NAMED_ARGS] {
 
     @return an XML string corresponding to the input data, without whitespace formatting but with an XML header
 
-    @throw MAKE-XML-ERROR An error occurred serializing the %Qore data to an XML string
+    @throw MAKE-XML-ERROR An error occurred serializing the %Qore data to an XML string, including a string, name,
+    CDATA section or comment with a character that is not an XML 1.0 character (such as NUL)
     @throw PARSE-XML-EXCEPTION An embedded \c ^xml^ element fragment is not well-formed XML
 
     @see @ref xmlserialization
@@ -2107,7 +2186,8 @@ string makeXMLString(string key, hash h, *string encoding) [flags=RET_VALUE_ONLY
     @return an XML string corresponding to the input data, without whitespace formatting but with an XML header
 
     @throw MAKE-XML-STRING-PARAMETER-EXCEPTION the hash passed not not have a single top-level key (either has no keys or more than one)
-    @throw MAKE-XML-ERROR An error occurred serializing the %Qore data to an XML string
+    @throw MAKE-XML-ERROR An error occurred serializing the %Qore data to an XML string, including a string, name,
+    CDATA section or comment with a character that is not an XML 1.0 character (such as NUL)
     @throw PARSE-XML-EXCEPTION An embedded \c ^xml^ element fragment is not well-formed XML
 
     @see @ref xmlserialization
@@ -2134,7 +2214,8 @@ string makeXMLString(hash h, *string encoding) [flags=RET_VALUE_ONLY,DEPRECATED]
 
     @return an XML string corresponding to the input data, with whitespace formatting and with an XML header
 
-    @throw MAKE-XML-ERROR An error occurred serializing the %Qore data to an XML string
+    @throw MAKE-XML-ERROR An error occurred serializing the %Qore data to an XML string, including a string, name,
+    CDATA section or comment with a character that is not an XML 1.0 character (such as NUL)
     @throw PARSE-XML-EXCEPTION An embedded \c ^xml^ element fragment is not well-formed XML
 
     @see @ref xmlserialization
@@ -2154,7 +2235,8 @@ string makeFormattedXMLString(string key, hash h, *string encoding) [flags=RET_V
     @return an XML string corresponding to the input data, with whitespace formatting and with an XML header
 
     @throw MAKE-FORMATTED-XML-STRING-PARAMETER-EXCEPTION the hash passed not not have a single top-level key (either has no keys or more than one)
-    @throw MAKE-XML-ERROR An error occurred serializing the %Qore data to an XML string
+    @throw MAKE-XML-ERROR An error occurred serializing the %Qore data to an XML string, including a string, name,
+    CDATA section or comment with a character that is not an XML 1.0 character (such as NUL)
     @throw PARSE-XML-EXCEPTION An embedded \c ^xml^ element fragment is not well-formed XML
 
     @see @ref xmlserialization
@@ -2184,7 +2266,8 @@ string makeFormattedXMLString(hash h, *string encoding) [flags=RET_VALUE_ONLY,DE
 
     @return an XML string corresponding to the input data, without whitespace formatting and without an XML header
 
-    @throw MAKE-XML-ERROR An error occurred serializing the %Qore data to an XML string
+    @throw MAKE-XML-ERROR An error occurred serializing the %Qore data to an XML string, including a string, name,
+    CDATA section or comment with a character that is not an XML 1.0 character (such as NUL)
     @throw PARSE-XML-EXCEPTION An embedded \c ^xml^ element fragment is not well-formed XML
 
     @see @ref xmlserialization
@@ -2208,7 +2291,8 @@ string make_xml_fragment(hash data, *int flags, *string encoding) [flags=RET_VAL
 
     @return an XML string corresponding to the input data, without whitespace formatting and without an XML header
 
-    @throw MAKE-XML-ERROR An error occurred serializing the %Qore data to an XML string
+    @throw MAKE-XML-ERROR An error occurred serializing the %Qore data to an XML string, including a string, name,
+    CDATA section or comment with a character that is not an XML 1.0 character (such as NUL)
     @throw PARSE-XML-EXCEPTION An embedded \c ^xml^ element fragment is not well-formed XML
 
     @see @ref xmlserialization
@@ -2238,7 +2322,8 @@ nothing makeXMLFragment() [flags=RUNTIME_NOOP,DEPRECATED] {
 
     @return an XML string corresponding to the input data, with whitespace formatting but without an XML header
 
-    @throw MAKE-XML-ERROR An error occurred serializing the %Qore data to an XML string
+    @throw MAKE-XML-ERROR An error occurred serializing the %Qore data to an XML string, including a string, name,
+    CDATA section or comment with a character that is not an XML 1.0 character (such as NUL)
     @throw PARSE-XML-EXCEPTION An embedded \c ^xml^ element fragment is not well-formed XML
 
     @see @ref xmlserialization
@@ -2712,6 +2797,8 @@ string makeXMLRPCCallStringArgsWithEncoding(string encoding, string[doc] method,
 
     @return a string in XML-RPC fault format in the same encoding as given by the msg argument, without whitespace formatting
 
+    @throw XMLRPC-SERIALIZATION-ERROR the message contains a character that is not an XML 1.0 character
+
     @par Example:
     @code{.py} string response = make_xmlrpc_fault(500, message); @endcode
 
@@ -2723,7 +2810,7 @@ string makeXMLRPCCallStringArgsWithEncoding(string encoding, string[doc] method,
     - makeFormattedXMLRPCFaultResponseString()
     - makeFormattedXMLRPCFaultResponseStringWithEncoding()
 */
-string make_xmlrpc_fault(softint code, string message, *int flags, *string encoding) [flags=CONSTANT,NAMED_ARGS] {
+string make_xmlrpc_fault(softint code, string message, *int flags, *string encoding) [flags=RET_VALUE_ONLY,NAMED_ARGS] {
    return make_xmlrpc_fault(xsink, encoding ? QEM.findCreate(encoding) : 0, code, message, flags);
 }
 
@@ -2737,7 +2824,7 @@ string make_xmlrpc_fault(softint code, string message, *int flags, *string encod
 
     @deprecated use make_xmlrpc_fault(); camel-case function names were deprecated in xml 1.3
 */
-string makeXMLRPCFaultResponseString(softint code, string msg) [flags=CONSTANT,DEPRECATED] {
+string makeXMLRPCFaultResponseString(softint code, string msg) [flags=RET_VALUE_ONLY,DEPRECATED] {
    return make_xmlrpc_fault(xsink, 0, code, msg);
 }
 
@@ -2768,7 +2855,7 @@ string makeXMLRPCFaultResponseStringWithEncoding(string encoding, softint code, 
 
     @deprecated use make_xmlrpc_fault(); camel-case function names were deprecated in xml 1.3
 */
-string makeFormattedXMLRPCFaultResponseString(softint code, string msg) [flags=CONSTANT,DEPRECATED] {
+string makeFormattedXMLRPCFaultResponseString(softint code, string msg) [flags=RET_VALUE_ONLY,DEPRECATED] {
    return make_xmlrpc_fault(xsink, 0, code, msg, XGF_ADD_FORMATTING);
 }
 
