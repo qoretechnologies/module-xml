@@ -261,7 +261,8 @@ SoapClientIo client({"wsdl": service, "url": "https://example.org/services/v1"})
         hash<auto> service_info = wsdl.getService(svc);
 
         port = h.port ?? service_info.port.firstKey();
-        if (!service_info.port.hasKey(port)) {
+        # a name with a NUL character names no port
+        if ((port ?? "").contains(chr(0)) || !service_info.port.hasKey(port)) {
             throw "SOAP-CLIENT-IO-ERROR", sprintf("service %y has no port %y", svc, port);
         }
         *string unsupported = service_info.port{port}.unsupported_reason

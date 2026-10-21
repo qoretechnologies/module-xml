@@ -73,7 +73,8 @@ public class CargoXmlParseMessageDataProvider inherits AbstractDataProvider {
 
     private auto doRequestImpl(auto req, *hash<auto> request_options) {
         string qname = req.message_qname;
-        *hash<CargoXmlMessageInfo> mi = parent.getMessages(){qname};
+        # a name with a NUL character names no message
+        *hash<CargoXmlMessageInfo> mi = qname.contains(chr(0)) ? NOTHING : parent.getMessages(){qname};
         if (!mi) {
             throw "CARGO-XML-MESSAGE-ERROR", sprintf("unknown cargo XML message %y; the message must "
                 "be one of the qualified names discovered from %y", qname, parent.schema_dir);

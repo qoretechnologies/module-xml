@@ -107,7 +107,8 @@ public class CdaDataProvider inherits AbstractDataProvider {
 
     #! Returns a child action provider
     private *AbstractDataProvider getChildProviderImpl(string name) {
-        *Class cls = ChildMap{name};
+        # a name with a NUL character names no child provider
+        *Class cls = name.contains(chr(0)) ? NOTHING : ChildMap{name};
         return cls ? cls.newObject(self) : NOTHING;
     }
 

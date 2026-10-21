@@ -146,7 +146,8 @@ public class WebDavClientDataProvider inherits WebDavClientDataProviderBase {
 
     #! Returns the given child provider or @ref nothing if the given child is unknown
     private *DataProvider::AbstractDataProvider getChildProviderImpl(string name) {
-        *Class cls = ChildMap{name};
+        # a name with a NUL character names no child provider
+        *Class cls = name.contains(chr(0)) ? NOTHING : ChildMap{name};
         if (!cls) {
             return;
         }

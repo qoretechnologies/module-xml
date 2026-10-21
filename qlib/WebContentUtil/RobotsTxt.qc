@@ -232,7 +232,8 @@ public class RobotsTxt {
         # Per RFC 9309 §2.2.1, the longest matching User-agent prefix wins.
         # For simplicity we do exact-match-or-star, with case-insensitive comparison.
         *hash<RobotsGroup> matched_group;
-        if (groups{ua_lower}) {
+        # a user agent with a NUL character names no group exactly; a group can still match its prefix below
+        if (!ua_lower.contains(chr(0)) && groups{ua_lower}) {
             matched_group = groups{ua_lower};
         } else {
             # Try substring matches: a group "MyBot" matches a UA "MyBot/1.0"

@@ -154,6 +154,13 @@ public class SaxWriteDataProvider inherits DataProvider::AbstractDataProvider {
 
     #! Returns the accumulated XML as binary data
     binary getData() {
+        # an element name is written as it is, and a name with a NUL character cannot be a key; make_xml() refuses
+        # other characters that XML cannot contain the same way
+        foreach string name in ((root_element_name, element_name)) {
+            if (name.contains(chr(0))) {
+                throw "MAKE-XML-ERROR", sprintf("element %s: U+0000 is not an XML 1.0 character", name);
+            }
+        }
         hash<auto> xml_hash = {
             root_element_name: {element_name: records},
         };

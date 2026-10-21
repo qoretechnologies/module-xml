@@ -187,6 +187,10 @@ public class WebDavClientIo {
         if (properties) {
             hash<auto> props;
             foreach string prop in (properties) {
+                # a property name becomes an element name, which cannot contain a NUL character
+                if (prop.contains(chr(0))) {
+                    throw "MAKE-XML-ERROR", sprintf("element DAV:%s: U+0000 is not an XML 1.0 character", prop);
+                }
                 props{"DAV:" + prop} = NOTHING;
             }
             body = {

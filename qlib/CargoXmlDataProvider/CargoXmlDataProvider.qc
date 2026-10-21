@@ -154,6 +154,10 @@ public class CargoXmlDataProvider inherits AbstractDataProvider {
         per-message providers.
     */
     private *AbstractDataProvider getChildProviderImpl(string name) {
+        # a name with a NUL character names no child provider
+        if (name.contains(chr(0))) {
+            return;
+        }
         *Class cls = ChildMap{name};
         if (cls) {
             return cls.newObject(self);
