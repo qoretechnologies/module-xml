@@ -35,6 +35,7 @@
 #include "libxml2-instance-identity-probe.h"
 #include "libxml2-anyuri-probe.h"
 #include "libxml2-name-edition-probe.h"
+#include "libxml2-probe-isolation.h"
 
 static int check_namespace(const char* source, const char* expected) {
     xmlTextReaderPtr reader = xmlReaderForMemory(source, (int)strlen(source), NULL, "UTF-8", 0);
@@ -60,42 +61,49 @@ static int check_namespace(const char* source, const char* expected) {
     return result || !seen || status < 0;
 }
 
+/* the namespace identity checks, run as one probe check */
+static int check_namespace_identity(void) {
+    int result = 0;
+    result |= check_namespace("<r xmlns:p='urn:a&amp;b'><p:x/></r>", "urn:a&b");
+    result |= check_namespace("<r xmlns:p='urn:a&#38;b'><p:x/></r>", "urn:a&b");
+    result |= check_namespace("<r xmlns:p='urn:a&#x26;b'><p:x/></r>", "urn:a&b");
+    result |= check_namespace("<r xmlns:p='urn:a&amp;#38;b'><p:x/></r>", "urn:a&#38;b");
+    return result;
+}
+
 int main(void) {
     int result = 0;
     if (prepare_value_allocation()) {
         return 1;
     }
     {
-        int anyuri = check_anyuri_values();
+        int anyuri = QORE_XML_PROBE_CHECK(check_anyuri_values);
         result |= anyuri;
         printf("anyuri_values=%s\n", anyuri ? "FAIL" : "PASS");
     }
-    result |= check_namespace("<r xmlns:p='urn:a&amp;b'><p:x/></r>", "urn:a&b");
-    result |= check_namespace("<r xmlns:p='urn:a&#38;b'><p:x/></r>", "urn:a&b");
-    result |= check_namespace("<r xmlns:p='urn:a&#x26;b'><p:x/></r>", "urn:a&b");
-    result |= check_namespace("<r xmlns:p='urn:a&amp;#38;b'><p:x/></r>", "urn:a&#38;b");
+    result |= QORE_XML_PROBE_CHECK(check_namespace_identity);
     {
-        int qnames = check_qname_values();
-        int unions = check_qname_unions();
-        int uris = check_uri_values();
-        int entities = check_entity_values();
-        int occurs = check_occurs_values();
-        int particles = check_particle_identity();
-        int attribution = check_particle_attribution();
-        int ranges = check_particle_ranges();
-        int finals = check_type_final_defaults();
-        int substitutions = check_element_substitution();
-        int consistency = check_element_consistency();
-        int wildcard_ids = (check_wildcard_ids() | check_id_type_schemas());
-        int wildcard_types = check_wildcard_types();
-        int schema_whitespace = check_schema_whitespace();
-        int character_content = check_character_content();
-        int fixed_values = check_fixed_values();
-        int time_values = check_time_values();
-        int value_allocation = check_value_allocation();
-        int unsigned_values = check_unsigned_values();
-        uris |= check_schema_uri_values();
-        uris |= check_schema_uri_hints();
+        int qnames = QORE_XML_PROBE_CHECK(check_qname_values);
+        int unions = QORE_XML_PROBE_CHECK(check_qname_unions);
+        int uris = QORE_XML_PROBE_CHECK(check_uri_values);
+        int entities = QORE_XML_PROBE_CHECK(check_entity_values);
+        int occurs = QORE_XML_PROBE_CHECK(check_occurs_values);
+        int particles = QORE_XML_PROBE_CHECK(check_particle_identity);
+        int attribution = QORE_XML_PROBE_CHECK(check_particle_attribution);
+        int ranges = QORE_XML_PROBE_CHECK(check_particle_ranges);
+        int finals = QORE_XML_PROBE_CHECK(check_type_final_defaults);
+        int substitutions = QORE_XML_PROBE_CHECK(check_element_substitution);
+        int consistency = QORE_XML_PROBE_CHECK(check_element_consistency);
+        int wildcard_ids = (QORE_XML_PROBE_CHECK(check_wildcard_ids) | QORE_XML_PROBE_CHECK(check_id_type_schemas));
+        int wildcard_types = QORE_XML_PROBE_CHECK(check_wildcard_types);
+        int schema_whitespace = QORE_XML_PROBE_CHECK(check_schema_whitespace);
+        int character_content = QORE_XML_PROBE_CHECK(check_character_content);
+        int fixed_values = QORE_XML_PROBE_CHECK(check_fixed_values);
+        int time_values = QORE_XML_PROBE_CHECK(check_time_values);
+        int value_allocation = QORE_XML_PROBE_CHECK(check_value_allocation);
+        int unsigned_values = QORE_XML_PROBE_CHECK(check_unsigned_values);
+        uris |= QORE_XML_PROBE_CHECK(check_schema_uri_values);
+        uris |= QORE_XML_PROBE_CHECK(check_schema_uri_hints);
         result |= qnames | unions | uris | entities | occurs | particles | attribution | ranges | finals | substitutions | consistency | wildcard_ids | wildcard_types | schema_whitespace | character_content | fixed_values | time_values | value_allocation | unsigned_values;
         printf("libxml2 headers=%s runtime=%s namespace_identity=%s qname_values=%s qname_unions=%s uri_identity=%s entity_values=%s occurs_values=%s particle_identity=%s particle_attribution=%s particle_ranges=%s type_final_defaults=%s element_substitution=%s element_consistency=%s wildcard_ids=%s wildcard_types=%s schema_whitespace=%s character_content=%s fixed_values=%s time_values=%s value_allocation=%s unsigned_values=%s\n",
             LIBXML_DOTTED_VERSION, xmlParserVersion, result ? "FAIL" : "PASS", qnames ? "FAIL" : "PASS",
@@ -104,81 +112,81 @@ int main(void) {
     /* Flush completed checks before probing a library's builtin particle paths. */
     fflush(stdout);
     {
-        int builtin_particles = check_builtin_particles();
+        int builtin_particles = QORE_XML_PROBE_CHECK(check_builtin_particles);
         result |= builtin_particles;
         printf("builtin_particles=%s\n", builtin_particles ? "FAIL" : "PASS");
     }
     {
-        int id_bindings = check_id_bindings();
+        int id_bindings = QORE_XML_PROBE_CHECK(check_id_bindings);
         result |= id_bindings;
         printf("id_bindings=%s\n", id_bindings ? "FAIL" : "PASS");
     }
     {
-        int numeric_defaults = check_numeric_defaults();
+        int numeric_defaults = QORE_XML_PROBE_CHECK(check_numeric_defaults);
         result |= numeric_defaults;
         printf("numeric_defaults=%s\n", numeric_defaults ? "FAIL" : "PASS");
     }
     {
-        int ieee = check_ieee_values();
+        int ieee = QORE_XML_PROBE_CHECK(check_ieee_values);
         result |= ieee;
         printf("ieee_values=%s\n", ieee ? "FAIL" : "PASS");
     }
     {
-        int calendar = check_calendar_values();
-        int constraints = check_calendar_constraints();
+        int calendar = QORE_XML_PROBE_CHECK(check_calendar_values);
+        int constraints = QORE_XML_PROBE_CHECK(check_calendar_constraints);
         result |= calendar | constraints;
         printf("calendar_values=%s\n", calendar ? "FAIL" : "PASS");
         printf("calendar_constraints=%s\n", constraints ? "FAIL" : "PASS");
     }
     {
-        int defaults = check_element_defaults();
-        int namespaces = check_default_namespaces();
-        int allocation = check_qname_allocation();
+        int defaults = QORE_XML_PROBE_CHECK(check_element_defaults);
+        int namespaces = QORE_XML_PROBE_CHECK(check_default_namespaces);
+        int allocation = QORE_XML_PROBE_CHECK(check_qname_allocation);
         result |= defaults | namespaces | allocation;
         printf("element_defaults=%s\n", defaults ? "FAIL" : "PASS");
         printf("default_namespaces=%s\n", namespaces ? "FAIL" : "PASS");
         printf("qname_allocation=%s\n", allocation ? "FAIL" : "PASS");
     }
     {
-        int annotations = check_annotations();
+        int annotations = QORE_XML_PROBE_CHECK(check_annotations);
         result |= annotations;
         printf("annotations=%s\n", annotations ? "FAIL" : "PASS");
     }
     {
-        int component_qnames = check_component_qnames();
+        int component_qnames = QORE_XML_PROBE_CHECK(check_component_qnames);
         result |= component_qnames;
         printf("component_qnames=%s\n", component_qnames ? "FAIL" : "PASS");
     }
     {
-        int identity_paths = check_identity_paths();
+        int identity_paths = QORE_XML_PROBE_CHECK(check_identity_paths);
         result |= identity_paths;
         printf("identity_paths=%s\n", identity_paths ? "FAIL" : "PASS");
-        int notations = check_notations();
+        int notations = QORE_XML_PROBE_CHECK(check_notations);
         result |= notations;
         printf("notations=%s\n", notations ? "FAIL" : "PASS");
     }
     {
-        int key_nillable = check_key_nillable();
+        int key_nillable = QORE_XML_PROBE_CHECK(check_key_nillable);
         result |= key_nillable;
         printf("key_nillable=%s\n", key_nillable ? "FAIL" : "PASS");
     }
     {
-        int nil_identities = check_nil_identities();
+        int nil_identities = QORE_XML_PROBE_CHECK(check_nil_identities);
         result |= nil_identities;
         printf("nil_identities=%s\n", nil_identities ? "FAIL" : "PASS");
     }
     {
-        int identity_tables = check_identity_tables();
+        int identity_tables = QORE_XML_PROBE_CHECK(check_identity_tables);
         result |= identity_tables;
         printf("identity_tables=%s\n", identity_tables ? "FAIL" : "PASS");
     }
     {
-        int instance_identities = check_instance_identities();
+        int instance_identities = QORE_XML_PROBE_CHECK(check_instance_identities);
         result |= instance_identities;
         printf("instance_identities=%s\n", instance_identities ? "FAIL" : "PASS");
     }
     {
-        int name_edition = check_name_edition_values();
+        int name_edition = QORE_XML_PROBE_CHECK(check_name_edition_values);
         result |= name_edition;
         printf("name_edition=%s\n", name_edition ? "FAIL" : "PASS");
     }

@@ -8,6 +8,7 @@ artifacts are retained in the printed temporary directory for diagnosis.
 """
 import os
 import json
+import re
 import shlex
 import shutil
 from pathlib import Path
@@ -191,6 +192,38 @@ qore_xml_fix_libxml2_name_edition("{project}" "{project}/build-debug")
                     self.assertNotEqual(0, result.returncode)
                     self.assertIn(diagnostic, result.stderr)
                     self.assertFalse((project / "build-debug/qore-name-edition-fix").exists())
+
+
+class ProbeIsolationTest(unittest.TestCase):
+    """A check of the libxml2 probe that crashes in a defective library fails the probe without crashing it."""
+
+    def test_a_crashing_check_fails_without_a_core_dump(self):
+        import resource
+        with tempfile.TemporaryDirectory(prefix="qore-xml-probe-isolation-") as directory:
+            root = Path(directory)
+            program = root / "probe-isolation"
+            subprocess.run([os.environ.get("CC", "cc"), "-o", str(program), "-I", str(REPO / "cmake"),
+                            str(REPO / "test/cmake/libxml2_probe_isolation.c")], check=True, timeout=60)
+
+            def allow_cores():
+                resource.setrlimit(resource.RLIMIT_CORE, (resource.RLIM_INFINITY, resource.RLIM_INFINITY))
+
+            result = subprocess.run([str(program)], cwd=root, text=True, capture_output=True, timeout=60,
+                                    preexec_fn=allow_cores)
+            self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+            self.assertEqual(1, result.stdout.count("probe output before the checks"), result.stdout)
+            self.assertEqual(2, result.stdout.count("check_passes ran"), result.stdout)
+            self.assertIn("check_crashes: the check ended with signal", result.stderr)
+            self.assertIn("check_aborts: the check ended with signal", result.stderr)
+            self.assertEqual([], sorted(p.name for p in root.iterdir() if p.name.startswith("core")))
+
+    def test_every_check_of_the_probe_runs_isolated(self):
+        source = (REPO / "cmake/libxml2-namespace-probe.c").read_text()
+        main = source[source.index("int main(void) {"):]
+        isolated = re.findall(r"QORE_XML_PROBE_CHECK\((check_\w+)\)", main)
+        self.assertIn("check_value_allocation", isolated)
+        direct = re.findall(r"(?<!QORE_XML_PROBE_CHECK\()\b(check_\w+)\s*\(", main)
+        self.assertEqual([], direct, "probe checks called in the probe's own process")
 
 
 class LibXml2ProviderTest(unittest.TestCase):
