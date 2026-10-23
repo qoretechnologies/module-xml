@@ -96,10 +96,13 @@ public class XmlRpcClientIo {
         @param opts optional client options:
         - \c connect_timeout: connection timeout in milliseconds (default: 45000)
         - \c timeout: transfer timeout in milliseconds (default: 45000)
-        - \c default_path: default URL path if none in URL (default: \c "RPC2")
+        - \c default_path: fallback path when the URL has no path, with or without a leading slash (default: \c "RPC2")
         - \c http_protocol: HTTP protocol to use (\c "auto", \c "h1", \c "h2", \c "h3"; default: \c "auto")
         - \c logger: a \c LoggerInterface object for logging
         - \c headers: extra default headers as a hash
+
+        @see xmlrpcclientio_urls
+        @throw HTTP-ENDPOINT-URL-ERROR the endpoint URL or fallback path is invalid
 
         @par Example:
         @code{.py}
@@ -108,16 +111,8 @@ XmlRpcClientIo client("http://localhost:8080/RPC2", {"timeout": 30000});
     */
     constructor(string url, *hash<auto> opts) {
         # Map custom schemes to http/https
-        self.url = mapUrl(url);
-        *string path = parse_url(self.url).path;
-        string default_path = opts.default_path ?? DefaultXmlRpcPath;
-        if (!path.val()) {
-            # Append default path if none in URL
-            url_path = "/" + default_path;
-            self.url += url_path;
-        } else {
-            url_path = path;
-        }
+        self.url = get_http_endpoint_url(mapUrl(url), opts.default_path ?? DefaultXmlRpcPath);
+        url_path = get_http_request_target(self.url);
 
         connect_timeout = opts.connect_timeout ?? DefaultConnectTimeout;
         io_timeout = opts.timeout ?? DefaultTimeout;
@@ -142,6 +137,9 @@ XmlRpcClientIo client("http://localhost:8080/RPC2", {"timeout": 30000});
         @param no_connect this parameter is accepted for compatibility but ignored; connections
         are established on demand
 
+        @see xmlrpcclientio_urls
+        @throw HTTP-ENDPOINT-URL-ERROR the endpoint URL or fallback path is invalid
+
         @par Example:
         @code{.py}
 XmlRpcClientIo client({"url": "http://localhost:8080/RPC2", "timeout": 30000});
@@ -153,15 +151,8 @@ XmlRpcClientIo client({"url": "http://localhost:8080/RPC2", "timeout": 30000});
             throw "XMLRPCCLIENTIO-ERROR", "missing required 'url' option";
         }
 
-        self.url = mapUrl(input_url);
-        *string path = parse_url(self.url).path;
-        string default_path = opts.default_path ?? DefaultXmlRpcPath;
-        if (!path.val()) {
-            url_path = "/" + default_path;
-            self.url += url_path;
-        } else {
-            url_path = path;
-        }
+        self.url = get_http_endpoint_url(mapUrl(input_url), opts.default_path ?? DefaultXmlRpcPath);
+        url_path = get_http_request_target(self.url);
 
         connect_timeout = opts.connect_timeout ?? DefaultConnectTimeout;
         io_timeout = opts.timeout ?? DefaultTimeout;
@@ -301,7 +292,7 @@ hash<auto> result = client.callArgsWithInfo(\info, "method.name", arg_list);
         return doRequestWithInfo(body, \info);
     }
 
-    #! Returns the server URL
+    #! Returns the server URL with the selected path, its query, and no fragment
     /** @return the full URL including path
     */
     string getUrl() {

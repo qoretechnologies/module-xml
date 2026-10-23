@@ -76,9 +76,6 @@ public class SoapClientIo {
         #! the target endpoint URL
         string url;
 
-        #! the path component of the target endpoint URL
-        *string url_path;
-
         #! response header capabilities for this client
         WSDL::SoapProcessingNode soap_node;
 
@@ -139,9 +136,10 @@ public class SoapClientIo {
     /** @param h valid option keys:
         - \c wsdl: the URL of the web service or a @ref WSDL::WebService "WebService" object itself
         - \c wsdl_file: a path to use to load the %WSDL and create the @ref WSDL::WebService "WebService" object
-        - \c url: override the target URL given in the %WSDL
+        - \c url: override the complete endpoint URL given in the %WSDL; see @ref soapclientio_urls
         - \c service: in case multiple service entries are found in the WSDL, give the one to be used here
-        - \c port: in case multiple port entries are found in the WSDL, give the one to be used here
+        - \c port: in case multiple port entries are found in the WSDL, give the one to be used here;
+          a port name containing NUL is unknown and raises \c SOAP-CLIENT-IO-ERROR
         - \c soap_node: optional ultimate-receiver @ref WSDL::SoapProcessingNode "SoapProcessingNode" for
           response headers; the default has no application header capabilities and rejects unknown targeted
           mandatory headers
@@ -179,6 +177,7 @@ public class SoapClientIo {
 
         @throw SOAP-CLIENT-IO-ERROR missing or conflicting options, an unknown service or port, or a port
         that cannot be selected
+        @throw HTTP-ENDPOINT-URL-ERROR the selected endpoint is not a valid absolute HTTP(S) URL
 
         @note A remote %WSDL is retrieved with an ordinary HTTP client owned by the @ref wsdlintro "WSDL" module;
         only SOAP operation traffic uses the async connection manager.
@@ -273,8 +272,7 @@ SoapClientIo client({"wsdl": service, "url": "https://example.org/services/v1"})
         }
         binding = service_info.port{port}.binding.getComponentKey();
 
-        url = h.url ?? service_info.port{port}.address;
-        url_path = parse_url(url).path;
+        url = get_http_endpoint_url(h.url ?? service_info.port{port}.address, NOTHING);
 
         connect_timeout = h.connect_timeout ?? DefaultConnectTimeout;
         io_timeout = h.timeout ?? DefaultTimeout;
@@ -407,17 +405,9 @@ auto result = client.callOperation("echo", {"body": "invoice-71"}, {"xml_values"
             remove msg.hdr.SOAPAction;
         }
 
-        string path = msg.path ?? "";
-        if (path && path !~ /^[\/\?]/) {
-            path = "/" + path;
-        }
-        if (url_path) {
-            path = rtrim(url_path, "/") + path;
-        }
-        if (!path.val()) {
-            path = "/";
-        }
-        return doRequest(op, msg.method ?? "POST", path, headers + (msg.hdr ?? {}), msg.body,
+        string request_url = op.getBinding(binding) instanceof WSDL::HttpBinding
+            ? resolve_url(url, msg.path ?? "", RESOLVE_URL_ENCODE | RESOLVE_URL_NO_FRAGMENT) : url;
+        return doRequest(op, msg.method ?? "POST", request_url, getRequestHeaders(request_url, msg.hdr), msg.body,
             opts, \info, {"request-soap-headers": opts.soap_header}, request_maps);
     }
 
@@ -427,7 +417,8 @@ auto result = client.callOperation("echo", {"body": "invoice-71"}, {"xml_values"
         declarations.
 
         @param operation the SOAP operation supplying the output and fault declarations
-        @param resource_url the resource to retrieve, resolved against the client endpoint
+        @param resource_url a URI reference resolved against the complete client endpoint, including an
+        absolute URL or authority-relative reference; see @ref soapclientio_urls
         @param opts an optional hash of options; \c xml_values, \c preserve_types, \c soap_node and
         \c http_header are honored; request-only options are rejected
         @param info an optional reference returning technical information about the call
@@ -457,8 +448,9 @@ auto result = client.getSoapResponse("echo", "/resource");
                 "output message";
         }
         string request_url = resolve_url(url, resource_url, RESOLVE_URL_ENCODE | RESOLVE_URL_NO_FRAGMENT);
-        return doRequest(op, "GET", parse_url(request_url).path ?? "/",
-            headers + {"Accept": "application/soap+xml"} + (opts.http_header ?? {}), NOTHING, opts, \info);
+        return doRequest(op, "GET", request_url,
+            getRequestHeaders(request_url, {"Accept": "application/soap+xml"} + (opts.http_header ?? {})),
+            NOTHING, opts, \info);
     }
 
     #! transparently serializes the arguments and makes a call to the given operation
@@ -476,7 +468,11 @@ auto result = client.getSoapResponse("echo", "/resource");
         return wsdl;
     }
 
-    #! returns the target endpoint URL
+    #! returns the selected endpoint URL with an explicit path and without its fragment
+    /** @return the endpoint used as the base for operation references; request-local resolution never changes it
+        @note The result can contain credentials; use Qore::get_safe_url() for display.
+        @see soapclientio_urls
+    */
     string getUrl() {
         return url;
     }
@@ -535,10 +531,32 @@ auto result = client.getSoapResponse("echo", "/resource");
     }
 
     #! @cond nodoc
+    # Client defaults belong to the configured origin; explicit call headers belong to the selected target.
+    private hash<auto> getRequestHeaders(string request_url, *hash<auto> call_headers) {
+        hash<auto> hdr = headers;
+        # Merge case-insensitively so explicit headers replace defaults regardless of their spelling.
+        hash<string, bool> overridden;
+        foreach string name in (keys (call_headers ?? {})) {
+            overridden{name.lwr()} = True;
+        }
+        bool same_origin = HttpUtil::HttpRedirectFollower::isSameOrigin(url, request_url);
+        foreach string name in (keys hdr) {
+            if (overridden{name.lwr()} || (!same_origin
+                    && inlist(name.lwr(), ("authorization", "cookie", "host")))) {
+                remove hdr{name};
+            }
+        }
+        return hdr + (call_headers ?? {});
+    }
+
     #! performs one SOAP exchange and decodes the response with the operation's declarations
-    private auto doRequest(WSDL::WSOperation op, string method, string path, hash<auto> hdr, *data body,
+    private auto doRequest(WSDL::WSOperation op, string method, string request_url, hash<auto> hdr, *data body,
             *hash<auto> opts, *reference<hash<auto>> info, *hash<auto> extra_info,
             *hash<WSDL::WsaMessageAddressing> request_maps) {
+        string path = get_http_request_target(request_url);
+        # User information in an operation reference must never become connection credentials.
+        string origin = HttpUtil::HttpRedirectFollower::getOriginUrl(
+            HttpUtil::HttpRedirectFollower::parseOrigin(request_url));
         WSDL::OperationalBinding selected = op.getBinding(binding);
         # the response is parsed and decoded within the limits of this client, the thread or the WSDL (P8-06)
         WSDL::SoapMessageLimitsScope limits_scope(message_limits ?? WSDL::SoapMessageLimitsScope::getSelected()
@@ -561,7 +579,7 @@ auto result = client.getSoapResponse("echo", "/resource");
             "headers": hdr,
         };
         if (logger) {
-            logger.info("SoapClientIo: %s %s%s", method, url, path);
+            logger.info("SoapClientIo: %s %s%s", method, origin, path);
         }
         # WS-Addressing SOAP Binding section 5.2: a response endpoint at the reply receiver receives the response as
         # a separate HTTP request
@@ -574,7 +592,7 @@ auto result = client.getSoapResponse("echo", "/resource");
         on_exit if (decoupled) {
             reply_receiver.cancel(request_maps.message_id);
         }
-        hash<auto> resp = getManager().request(url, method, path, hdr, body, io_timeout);
+        hash<auto> resp = getManager().request(origin, method, path, hdr, body, io_timeout);
         if (decoupled && resp.status_code == 202 && !resp.body) {
             # the back channel acknowledges the request; the response arrives at the reply receiver
             hash<WSDL::WsaReceivedMessage> received = reply_receiver.wait(request_maps.message_id, io_timeout);
@@ -593,7 +611,7 @@ auto result = client.getSoapResponse("echo", "/resource");
             "response-code": resp.status_code,
             "response-headers": resp.headers,
             "response-body": resp.body,
-            "effective-url": resp.effective_url ?? (url + path),
+            "effective-url": resp.effective_url ?? (origin + path),
         };
 
         bool is_soap = selected instanceof WSDL::SoapBinding;
@@ -617,11 +635,11 @@ auto result = client.getSoapResponse("echo", "/resource");
             }
             if (!fault) {
                 throw "SOAP-CLIENT-IO-HTTP-ERROR", sprintf("HTTP status %d returned from %s%s",
-                    resp.status_code, url, path), rh;
+                    resp.status_code, origin, path), rh;
             }
         } else if (resp.status_code < 200 || resp.status_code >= 300) {
             throw "SOAP-CLIENT-IO-HTTP-ERROR", sprintf("HTTP status %d returned from %s%s",
-                resp.status_code, url, path), rh;
+                resp.status_code, origin, path), rh;
         }
 
         if (!op.output && !fault) {

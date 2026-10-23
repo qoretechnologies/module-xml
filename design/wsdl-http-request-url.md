@@ -19,3 +19,28 @@ The focused Qore tests check source and saved services, provider calls, replacem
 Each registration owns a shallow binding copy and, for replacement templates, a separate input descriptor. Immutable message/schema graphs remain shared. Opaque temporary tokens protect replacement part names during URI encoding and are restored before compiling the route; Unicode literals therefore match the encoded request without changing part identities. Matching prefers a complete raw path and supports the mount-relative path as well. Decoding uses the exact path that matched. Encoded slashes remain data and are decoded only as replacement values. A resolved template that loses an input part cannot decode that part and rejects at registration.
 
 For an empty operation reference, generated GET parameters replace a base query, while a zero-part input retains the base query. Fixed queries remain part of template matching. Dot-only replacement values are percent-encoded before reference resolution so `.` and `..` remain data. Literal operation dot segments still follow Qore's normal resolution.
+
+## Async client
+
+`SoapClientIo` uses the same URI resolver for HTTP-binding operation references
+and SOAP-response resource references. It passes the resolved origin and the
+complete path/query separately to `HttpClientConnectionManager::request()`;
+passing only the resolved path would lose an absolute reference's destination.
+SOAP bindings use their fixed endpoint, preserving its trailing slash and query.
+`Util::get_http_endpoint_url()` selects and encodes that endpoint, removes its
+fragment, and supplies `/` only when there is no path.
+
+A request-local header copy drops default Authorization, Cookie, and Host for a
+cross-origin reference and merges explicit call headers case-insensitively.
+The manager receives an origin without user information, so credentials embedded
+in an operation reference cannot override configured authentication. Constructor
+username/password options retain their existing precedence over endpoint user
+information. Neither the base URL nor the default headers are changed by a call.
+The module's Endpoint URLs and Operation References section documents the full
+resolution matrix, fixed-endpoint behavior, and origin rules.
+
+Generated GET parameters are inserted before the operation reference's fragment.
+A question mark inside the fragment cannot be mistaken for the query delimiter.
+Both clients share this serialization, and their wire tests cover fragments with
+and without existing queries. Scheme-bearing absolute HTTP operation locations
+remain invalid WSDL; absolute resource URLs are supported by `getSoapResponse()`.
