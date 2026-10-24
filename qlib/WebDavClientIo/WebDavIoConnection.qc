@@ -27,7 +27,8 @@ public namespace WebDavClientIo {
 #! WebDAV connection class for ConnectionProvider integration; instantiates @ref WebDavClientIo
 public class WebDavIoConnection inherits ConnectionProvider::HttpBasedConnection {
     public {
-        const ConnectionScheme = <ConnectionSchemeInfo>{
+        const ConnectionScheme = ConnectionProvider::connection_scheme_presentation("WebDavClientIo",
+            "WebDavIoConnection", "en", <ConnectionSchemeInfo>{
             "display_name": "WebDAV (Async I/O)",
             "short_desc": "WebDAV server connection using async socket I/O",
             "desc": "WebDAV server connection supporting RFC 4918 operations using async I/O via "
@@ -89,7 +90,7 @@ public class WebDavIoConnection inherits ConnectionProvider::HttpBasedConnection
                         "or when `ping_path`/`ping_method` are not both set",
                 },
             },
-        };
+        });
     }
 
     #! Creates the connection object

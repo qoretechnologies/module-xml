@@ -49,7 +49,8 @@ public class SoapIoConnection inherits ConnectionProvider::HttpBasedConnection {
         hash<auto> real_opts;
 
         #! Connection entry info
-        const ConnectionScheme = <ConnectionSchemeInfo>{
+        const ConnectionScheme = ConnectionProvider::connection_scheme_presentation("SoapClientIo",
+            "SoapIoConnection", "en", <ConnectionSchemeInfo>{
             "display_name": "SOAP (Async I/O) Connection",
             "short_desc": "A connection to a SOAP server using async I/O",
             "desc": "A connection to a SOAP server using async I/O via HttpClientIo with automatic "
@@ -108,7 +109,7 @@ public class SoapIoConnection inherits ConnectionProvider::HttpBasedConnection {
                     "freeform": True,
                 },
             },
-        };
+        });
     }
 
     #! creates the SoapIoConnection object

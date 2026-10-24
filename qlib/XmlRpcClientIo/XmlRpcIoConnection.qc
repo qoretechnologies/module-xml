@@ -39,7 +39,8 @@ public class XmlRpcIoConnection inherits ConnectionProvider::HttpBasedConnection
         hash<auto> real_opts;
 
         #! Connection entry info
-        const ConnectionScheme = <ConnectionSchemeInfo>{
+        const ConnectionScheme = ConnectionProvider::connection_scheme_presentation("XmlRpcClientIo",
+            "XmlRpcIoConnection", "en", <ConnectionSchemeInfo>{
             "display_name": "XML-RPC (Async I/O) Connection",
             "short_desc": "A connection to an XML-RPC server using async I/O",
             "desc": "A connection to an XML-RPC server using async I/O via HttpClientIo with automatic "
@@ -54,7 +55,7 @@ public class XmlRpcIoConnection inherits ConnectionProvider::HttpBasedConnection
                 "https": "xmlrpcios",
                 "http": "xmlrpcio",
             },
-        };
+        });
     }
 
     #! Creates the XmlRpcIoConnection object
