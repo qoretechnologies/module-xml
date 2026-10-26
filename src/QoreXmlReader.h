@@ -189,7 +189,7 @@ protected:
         assert(fd == -1);
 
         // Check filesystem security before opening file
-        QoreSandboxManagerHelper smh;
+        QoreSandboxManagerHelper smh(QoreSandboxManagerHelper::Policy);
         if (smh && !smh->checkFilesystemAccess(fn, QSEC_READ, xsink)) {
             return;  // Exception already raised: FILESYSTEM-ACCESS-DENIED
         }
