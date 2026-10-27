@@ -75,8 +75,9 @@ public class WebDavClientIo {
         #! Logger
         *LoggerInterface logger;
 
-        #! Default headers for all requests
-        hash<string, string> default_headers;
+        #! Default headers for all requests; a value is converted to a string, and a list to a list of strings,
+        #! which are sent as repeated headers
+        hash<string, union<softstring, list<softstring>>> default_headers;
 
         #! Debug flag
         bool debug = False;
@@ -91,7 +92,9 @@ public class WebDavClientIo {
         - \c http_protocol: (optional) HTTP protocol to use (\c "auto", \c "h1", \c "h2",
           \c "h3"; default: \c "auto")
         - \c logger: (optional) a \c LoggerInterface object for logging
-        - \c headers: (optional) extra default headers as a hash
+        - \c headers: (optional) extra default headers as a hash; a value that is not a string is converted to a
+          string, and the elements of a list are sent as repeated headers; a hash, \c NULL or missing value raises
+          \c RUNTIME-TYPE-ERROR
     */
     constructor(hash<auto> opts) {
         string input_url = opts.url ?? "";
@@ -120,7 +123,7 @@ public class WebDavClientIo {
 
         default_headers = {};
         if (opts.headers.typeCode() == NT_HASH) {
-            default_headers += cast<hash<string, string>>(opts.headers);
+            default_headers += opts.headers;
         }
 
         mgr = createConnectionManager();

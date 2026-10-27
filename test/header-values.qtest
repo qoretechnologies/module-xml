@@ -1,0 +1,202 @@
+#!/usr/bin/env qore
+# -*- mode: qore; indent-tabs-mode: nil -*-
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+
+%modern
+%no-child-restrictions
+
+%requires xml
+%requires QUnit
+%requires HttpServer
+%requires Logger
+%requires ../qlib/XmlRpcClientIo
+%requires ../qlib/WebDavClientIo
+
+%exec-class HeaderValuesTest
+
+#! the headers given to every client
+const Headers = {"X-Int": 5, "X-List": ("a", 2), "X-Bool": True, "X-Str": "s"};
+
+#! the header names, as the server receives them
+const HeaderNames = ("x-int", "x-list", "x-bool", "x-str");
+
+#! the headers that every client must send; the server parses repeated headers into a list
+const Sent = "x-int=\"5\" x-list=list(a,2) x-bool=\"1\" x-str=\"s\"";
+
+#! the result of every check
+const Expected = {
+    "xmlrpc-connection-call": "ok",
+    "xmlrpc-url-call": "ok",
+    "xmlrpc-options-call": "ok",
+    "webdav-connection-call": "ok",
+    "webdav-options-call": "ok",
+    "xmlrpc-connection-headers": Sent,
+    "xmlrpc-url-headers": Sent,
+    "xmlrpc-options-headers": Sent,
+    "webdav-connection-headers": Sent,
+    "webdav-options-headers": Sent,
+    "xmlrpc-bad-hash": "RUNTIME-TYPE-ERROR",
+    "webdav-bad-hash": "RUNTIME-TYPE-ERROR",
+    "xmlrpc-bad-null": "RUNTIME-TYPE-ERROR",
+    "webdav-bad-null": "RUNTIME-TYPE-ERROR",
+};
+
+#! records the headers of the first request of each client and answers XML-RPC and WebDAV GET requests
+class Peer inherits AbstractHttpRequestHandler {
+    public {
+        hash<string, hash<auto>> seen;
+    }
+
+    hash<HttpResponseInfo> handleRequest(hash<auto> cx, hash<auto> hdr, *data body) {
+        string client = hdr."x-client";
+        if (!seen{client}) {
+            seen{client} = hdr;
+        }
+        if (hdr.method == "POST") {
+            return makeResponse(200, make_xmlrpc_response("ok"), {"Content-Type": "text/xml"});
+        }
+        return makeResponse(200, "content", {"Content-Type": "text/plain"});
+    }
+}
+
+#! Tests that the XmlRpcClientIo and WebDavClientIo clients send header values of any type
+/** A \c headers option value that is not a string is converted to a string, and the elements of a list to strings,
+    which are sent as repeated headers, as with HTTPClient; an int header raised RUNTIME-TYPE-ERROR.  A hash or NULL
+    value raises RUNTIME-TYPE-ERROR when the client is created.  Each client is given an int, a
+    list, a bool and a string header through a connection and through its options, and the headers that a local server
+    receives are checked, in this program and in a child program run in each execution mode; run against the
+    AOT-compiled modules, this program and its children load those.
+*/
+class HeaderValuesTest inherits QUnit::Test {
+    public {
+        #! set in the environment of a child program, which prints its results instead of running the tests
+        const ChildEnv = "QORE_XML_HEADER_VALUES_CHILD";
+
+        #! the execution modes that the child program is run in
+        const ExecModes = ("ast", "ir", "jit", "tiered");
+    }
+
+    constructor() : QUnit::Test("HeaderValuesTest", "1.0", ENV{ChildEnv} ? () : \ARGV) {
+        if (ENV{ChildEnv}) {
+            foreach hash<auto> i in (HeaderValuesTest::runChecks().pairIterator()) {
+                printf("%s=%s\n", i.key, i.value);
+            }
+            return;
+        }
+        addTestCase("in this program", \testInProgram());
+        addTestCase("each execution mode", \testExecModes());
+        set_return_value(main());
+    }
+
+    testInProgram() {
+        checkResults("in-program", HeaderValuesTest::runChecks());
+    }
+
+    testExecModes() {
+        string qore_bin = ENV.QORE_BIN ?? ENV.QORE_BINARY ?? QORE_ARGV[0] ?? "qore";
+        foreach string mode in (ExecModes) {
+            string out = backquote(sprintf("%s=1 %s -b --enable-debug --exec-mode=%s %s 2>&1", ChildEnv, qore_bin,
+                mode, get_script_path()));
+            hash<string, string> results = {};
+            foreach string line in (out.split("\n")) {
+                *list<*string> parts = (line =~ x/^([-a-z]+)=(.*)$/);
+                if (!parts) {
+                    if (line.val()) {
+                        fail(sprintf("%s: unexpected output: %y", mode, out));
+                    }
+                    continue;
+                }
+                results{parts[0]} = parts[1];
+            }
+            checkResults(mode, results);
+        }
+    }
+
+    private checkResults(string label, hash<string, string> results) {
+        assertEq(sort(keys Expected), sort(keys results), label + ": checks run");
+        foreach hash<auto> i in (Expected.pairIterator()) {
+            assertEq(i.value, results{i.key}, sprintf("%s: %s", label, i.key));
+        }
+    }
+
+    #! describes the test headers received
+    static string describe(*hash<auto> hdr) {
+        if (!hdr) {
+            return "no request";
+        }
+        list<string> l = ();
+        foreach string name in (HeaderNames) {
+            auto v = hdr{name};
+            push l, sprintf("%s=%s", name, v.typeCode() == NT_LIST ? ("list(" + v.join(",") + ")") : sprintf("%y", v));
+        }
+        return l.join(" ");
+    }
+
+    #! returns the result of the call, or the error it raised
+    static string tryc(code c) {
+        try {
+            c();
+            return "ok";
+        } catch (hash<ExceptionInfo> ex) {
+            return ex.err;
+        }
+    }
+
+    #! sends a request with each client and returns the results
+    static hash<string, string> runChecks() {
+        Logger logger("header-values", LoggerLevel::getLevelError());
+        Peer peer();
+        HttpServer server(<HttpServerOptionInfo>{"logger": logger});
+        on_exit server.stop();
+        server.setDefaultHandler("peer", peer);
+        string url = sprintf("http://127.0.0.1:%d",
+            server.addListener(<HttpListenerOptionInfo>{"node": "127.0.0.1", "service": 0}).port);
+
+        hash<string, string> results;
+        results."xmlrpc-connection-call" = HeaderValuesTest::tryc(sub () {
+            XmlRpcIoConnection conn("xmlrpc", "test", replace(url, "http:", "xmlrpcio:"), {"monitor": False},
+                {"headers": Headers + {"X-Client": "xmlrpc-connection"}});
+            XmlRpcClientIo c = conn.get();
+            on_exit c.close();
+            c.call("echo");
+        });
+        results."xmlrpc-url-call" = HeaderValuesTest::tryc(sub () {
+            XmlRpcClientIo c(url, {"http_protocol": "h1", "headers": Headers + {"X-Client": "xmlrpc-url"}});
+            on_exit c.close();
+            c.call("echo");
+        });
+        results."xmlrpc-options-call" = HeaderValuesTest::tryc(sub () {
+            XmlRpcClientIo c({"url": url, "http_protocol": "h1",
+                "headers": Headers + {"X-Client": "xmlrpc-options"}});
+            on_exit c.close();
+            c.call("echo");
+        });
+        results."webdav-connection-call" = HeaderValuesTest::tryc(sub () {
+            WebDavIoConnection conn("webdav", "test", replace(url, "http:", "webdavio:"), {"monitor": False},
+                {"headers": Headers + {"X-Client": "webdav-connection"}});
+            WebDavClientIo c = conn.get();
+            on_exit c.close();
+            c.get("/file.txt");
+        });
+        results."webdav-options-call" = HeaderValuesTest::tryc(sub () {
+            WebDavClientIo c({"url": url, "http_protocol": "h1", "headers": Headers + {"X-Client": "webdav-options"}});
+            on_exit c.close();
+            c.get("/file.txt");
+        });
+        # header values that cannot be sent raise an error when the client is created
+        foreach hash<auto> bad in ({"name": "hash", "value": {"a": 1}}, {"name": "null", "value": NULL}) {
+            hash<auto> hdrs = {"X-Bad": bad.value};
+            results{"xmlrpc-bad-" + bad.name} = HeaderValuesTest::tryc(sub () {
+                XmlRpcClientIo c(url, {"headers": hdrs});
+            });
+            results{"webdav-bad-" + bad.name} = HeaderValuesTest::tryc(sub () {
+                WebDavClientIo c({"url": url, "headers": hdrs});
+            });
+        }
+        foreach string client in (("xmlrpc-connection", "xmlrpc-url", "xmlrpc-options", "webdav-connection",
+                "webdav-options")) {
+            results{client + "-headers"} = HeaderValuesTest::describe(peer.seen{client});
+        }
+        return results;
+    }
+}
