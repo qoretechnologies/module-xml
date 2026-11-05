@@ -66,6 +66,9 @@ public class WebCrawler {
     #! Default maximum pages to crawl
     const DefaultMaxPages = 500;
 
+    #! The default cap on requests sent is this many times max_pages
+    const DefaultAttemptsFactor = 4;
+
     #! Default number of concurrent requests per batch
     const DefaultConcurrency = 10;
 
@@ -131,6 +134,10 @@ public class WebCrawler {
         # Configuration (set in constructor)
         int max_depth;
         int max_pages;
+        # Upper bound on the requests the crawl sends, whatever their outcome.  max_pages bounds only the pages that
+        # were fetched and committed, so a site whose links all fail (404, 5xx, a connection error, a non-HTML file)
+        # would otherwise be fetched once per link it advertises, however many that is.
+        int max_attempts;
         int concurrency;
         int delay_ms;
         bool allow_private_ips;
@@ -202,6 +209,9 @@ public class WebCrawler {
         # In non-streaming mode num_fetched == pages.size(), so behaviour is
         # unchanged for callers that accumulate results.
         int num_fetched = 0;
+        # Requests sent so far, guarded by state_mutex; a rate-limited request that is queued again is taken back, as
+        # it is sent again and is one attempt
+        int num_attempts = 0;
 
         # Per-batch state (reset each batch)
         int rate_limited;
@@ -268,6 +278,7 @@ public class WebCrawler {
     constructor(string seed_url, *hash<auto> opts) {
         max_depth = opts.max_depth ?? DefaultMaxDepth;
         max_pages = opts.max_pages ?? DefaultMaxPages;
+        max_attempts = opts.max_attempts ?? (max_pages * DefaultAttemptsFactor);
         concurrency = opts.concurrency ?? DefaultConcurrency;
         delay_ms = opts.delay_ms ?? 0;
         progress = opts.progress;
@@ -497,7 +508,7 @@ public class WebCrawler {
             {
                 state_mutex.lock();
                 on_exit state_mutex.unlock();
-                if (num_fetched >= max_pages) {
+                if (num_fetched >= max_pages || num_attempts >= max_attempts) {
                     break;
                 }
                 while (queue && batch.size() < concurrency) {
@@ -580,6 +591,9 @@ return c.run();
         @param opts crawl options hash:
           - \c max_depth (int, default 3): maximum link-follow depth
           - \c max_pages (int, default 500): hard page cap
+          - \c max_attempts (int, default 4 * \c max_pages): hard cap on the requests sent, whatever their outcome
+            (a page, an error, an HTTP status other than 200, a file that is not HTML); a request that is sent again
+            after a 429 or 503 counts once
           - \c concurrency (int, default 10): parallel requests per batch
           - \c delay_ms (int, default 0): delay between batches in milliseconds
           - \c progress (\c *code<nothing(int, int)>): progress callback (pages, queued)
@@ -725,6 +739,15 @@ return c.run();
                 url_host,
                 url_parts.port ? sprintf(":%d", url_parts.port) : "");
             string req_path = url_parts.path ?? "/";
+            {
+                # one attempt per request sent; the cap holds against a batch that was drained before it was reached
+                state_mutex.lock();
+                on_exit state_mutex.unlock();
+                if (num_attempts >= max_attempts) {
+                    return;
+                }
+                ++num_attempts;
+            }
             hash<auto> resp = mgr.request(base_url, "GET", req_path, fetch_headers);
 
             if (resp.status_code == 429 || resp.status_code == 503) {
@@ -733,6 +756,7 @@ return c.run();
                 state_mutex.lock();
                 on_exit state_mutex.unlock();
                 ++rate_limited;
+                --num_attempts;
                 remove visited{citem.url};
                 queue += {"url": citem.url, "depth": citem.depth};
                 return;
