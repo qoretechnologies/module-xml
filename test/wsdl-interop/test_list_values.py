@@ -280,7 +280,7 @@ class ListValuesTest(unittest.TestCase):
                 else:
                     variant = variants[row["index"]]
                     if not variant["expected"]:
-                        self.assertEqual("RUNTIME-TYPE-ERROR", row.get("err"), row)
+                        self.assertEqual("TYPE-VALUE-ERROR", row.get("err"), row)
                         self.assertNotIn("body", row)
                         continue
                     lexical, count = variant["lexical"], variant["count"]

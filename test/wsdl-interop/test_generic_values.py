@@ -126,7 +126,7 @@ class GenericValuesTest(unittest.TestCase):
                 if not document['valid']:
                     for error, expected in (('error', 'SOAP-DESERIALIZATION-ERROR'),
                                             ('encode_error', 'SOAP-SERIALIZATION-ERROR'),
-                                            ('provider_error', 'RUNTIME-TYPE-ERROR'),
+                                            ('provider_error', 'TYPE-VALUE-ERROR'),
                                             ('retained_error', 'SOAP-SERIALIZATION-ERROR')):
                         self.assertEqual(expected, row[error], row)
                     continue

@@ -184,7 +184,7 @@ class NumericFacetsTest(unittest.TestCase):
             seen.add(name)
             model, first, variants = expectations[row["name"]]
             if row["index"] != "example" and not variants[row["index"]]["ok"]:
-                self.assertEqual("RUNTIME-TYPE-ERROR", row.get("err"), row)
+                self.assertEqual("TYPE-VALUE-ERROR", row.get("err"), row)
                 self.assertNotIn("body", row)
                 continue
             self.assertNotIn("err", row)

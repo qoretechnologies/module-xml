@@ -68,7 +68,7 @@ class WildcardElementsTest(unittest.TestCase):
                 else:
                     self.assertEqual('SOAP-DESERIALIZATION-ERROR', row['error'], row)
                     self.assertEqual('SOAP-SERIALIZATION-ERROR', row['encode_error'], row)
-                    self.assertEqual('RUNTIME-TYPE-ERROR', row['provider_error'], row)
+                    self.assertEqual('TYPE-VALUE-ERROR', row['provider_error'], row)
                 documents[document['name'] + '/input'] = document['xml'].encode()
             jobs.append(SchemaJob(model['name'], f'http://example.invalid/wsdl-wildcards/{len(jobs)}.xsd',
                                   model['schema'].encode(), documents))

@@ -175,7 +175,7 @@ class NameGrammarBoundariesTest(unittest.TestCase):
                 self.assertEqual(row["expected"], validators[row["builtin"]].validate(
                     etree.fromstring(jobs[row["builtin"]].documents[row["name"]])))
                 for operation, error in (("serialize", "SOAP-SERIALIZATION-ERROR"),
-                        ("deserialize", "SOAP-DESERIALIZATION-ERROR"), ("provider", "RUNTIME-TYPE-ERROR")):
+                        ("deserialize", "SOAP-DESERIALIZATION-ERROR"), ("provider", "TYPE-VALUE-ERROR")):
                     if row["expected"]:
                         self.assertNotIn(operation + "_error", result)
                         self.assertEqual(row["value"], result[operation])
