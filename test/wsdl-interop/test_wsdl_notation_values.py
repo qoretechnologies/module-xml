@@ -80,7 +80,7 @@ class WsdlNotationValuesTest(unittest.TestCase):
                         # identities, but legacy output omits the xsi:type that keeps them
                         # distinct, so serialization rejects the projected duplicate.
                         self.assertEqual(LEGACY_QNAME_IDENTITY, result['identity'], result)
-                        self.assertEqual('RUNTIME-TYPE-ERROR', result['error'], result)
+                        self.assertEqual('TYPE-VALUE-ERROR', result['error'], result)
                         self.assertEqual('WSDL message part "body": ' + DUPLICATE_KEY, result['description'], result)
                         self.assertNotIn('xml', result)
                         counts['legacy_projection_rejected'] += 1

@@ -10,7 +10,7 @@ import test_native_type_values
 
 class NativeTypeProvidersTest(test_native_type_values.NativeTypeValuesTest):
     worker = 'native-type-providers.qr'
-    manual_error = 'RUNTIME-TYPE-ERROR'
+    manual_error = 'TYPE-VALUE-ERROR'
 
 
 if __name__ == '__main__':

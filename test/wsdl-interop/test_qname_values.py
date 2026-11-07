@@ -123,7 +123,7 @@ class QNameValuesTest(unittest.TestCase):
                         key = source + "_" + operation
                         if not row["valid"]:
                             self.assertNotIn(key, result)
-                            self.assertEqual("XSD-QNAME-VALUE-ERROR" if operation == "value" else "RUNTIME-TYPE-ERROR",
+                            self.assertEqual("XSD-QNAME-VALUE-ERROR" if operation == "value" else "TYPE-VALUE-ERROR",
                                              result[key + "_error"])
                             continue
                         self.assertNotIn(key + "_error", result)

@@ -973,7 +973,7 @@ test/wsdl-interop/test_numeric_facets.py -v` independently checks 1,440 document
 across actual SOAP 1.1/1.2 bindings and both directions: attributes/simple content,
 lists/unions, native values, reconstructed consumers and generated examples. Both
 libxml2 and Xerces validate every document; exact Decimal values and expanded names
-are asserted separately. Negative provider cases must raise `RUNTIME-TYPE-ERROR`.
+are asserted separately. Negative provider cases must raise `TYPE-VALUE-ERROR`.
 
 All nine integer pattern families now have exact value assertions in the strict
 gate, now expanded with string families: 88 descriptions / 752 message directions,

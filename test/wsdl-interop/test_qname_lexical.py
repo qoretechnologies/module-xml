@@ -166,7 +166,7 @@ class QNameCharacterBoundariesTest(unittest.TestCase):
                 self.assertEqual([], oracle["documents"][row["name"]]["warnings"])
                 self.assertEqual(row["expected"], validator.validate(etree.fromstring(job.documents[row["name"]])))
                 for operation, error in (("serialize", "SOAP-SERIALIZATION-ERROR"),
-                        ("deserialize", "SOAP-DESERIALIZATION-ERROR"), ("provider", "RUNTIME-TYPE-ERROR")):
+                        ("deserialize", "SOAP-DESERIALIZATION-ERROR"), ("provider", "TYPE-VALUE-ERROR")):
                     if row["expected"]:
                         self.assertNotIn(operation + "_error", result)
                         self.assertEqual(row["value"], result[operation])
