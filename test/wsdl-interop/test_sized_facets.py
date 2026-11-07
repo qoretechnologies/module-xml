@@ -182,7 +182,7 @@ class SizedFacetsTest(unittest.TestCase):
                     self.assertNotIn("body", row)
                     continue
                 if row["index"] != "example" and variants[row["index"]]["expected"] is None:
-                    self.assertEqual("RUNTIME-TYPE-ERROR", row.get("err"), row)
+                    self.assertEqual("TYPE-VALUE-ERROR", row.get("err"), row)
                     self.assertNotIn("body", row)
                     continue
                 self.assertNotIn("err", row)

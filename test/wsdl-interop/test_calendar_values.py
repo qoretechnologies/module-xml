@@ -298,7 +298,7 @@ class CalendarBoundariesTest(unittest.TestCase):
                 except ValueError:
                     expected = None
                 for operation, error in (('serialize', 'SOAP-SERIALIZATION-ERROR'),
-                        ('deserialize', 'SOAP-DESERIALIZATION-ERROR'), ('provider', 'RUNTIME-TYPE-ERROR')):
+                        ('deserialize', 'SOAP-DESERIALIZATION-ERROR'), ('provider', 'TYPE-VALUE-ERROR')):
                     if expected is None:
                         self.assertEqual(error, actual.get(operation + '_error'), source)
                         self.assertNotIn(operation, actual)
@@ -316,7 +316,7 @@ class CalendarBoundariesTest(unittest.TestCase):
                         if valid:
                             self.assertIs(True, actual.get(constraint), (source, actual))
                         else:
-                            self.assertEqual('RUNTIME-TYPE-ERROR', actual.get(constraint + '_error'), (source, actual))
+                            self.assertEqual('TYPE-VALUE-ERROR', actual.get(constraint + '_error'), (source, actual))
 
 
 if __name__ == '__main__':

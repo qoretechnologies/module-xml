@@ -100,7 +100,7 @@ class DurationArithmeticTest(unittest.TestCase):
                     if valid:
                         self.assertIs(True, observed.get(facet), observed)
                     else:
-                        self.assertEqual('RUNTIME-TYPE-ERROR', observed.get(facet + '_error'), observed)
+                        self.assertEqual('TYPE-VALUE-ERROR', observed.get(facet + '_error'), observed)
 
 # The common binding driver exercises actual SOAP 1.1/1.2 WSDL bindings, both
 # directions, scalar/record/repeated values, detached fields and generated examples.

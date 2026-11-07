@@ -143,7 +143,7 @@ class EntityWsdlTest(unittest.TestCase):
                     valid = row["index"] in VALID[datatype]
                     with self.subTest(row=row):
                         if "err" in row:
-                            self.assertIn(row["err"], {"SOAP-SERIALIZATION-ERROR", "RUNTIME-TYPE-ERROR",
+                            self.assertIn(row["err"], {"SOAP-SERIALIZATION-ERROR", "TYPE-VALUE-ERROR",
                                                       "FIELD-VALUE-ERROR", "XSD-SAMPLE-ERROR"})
                             if row["index"] != "example":
                                 self.assertFalse(valid)
