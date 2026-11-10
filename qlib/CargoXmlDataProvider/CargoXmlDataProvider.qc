@@ -49,7 +49,7 @@ public class CargoXmlDataProvider inherits AbstractDataProvider {
         string schema_dir;
 
         #! catalog of discovered messages keyed by \c "{namespace}name"
-        hash<string, hash<CargoXmlMessageInfo>> messages;
+        hash<string, hash<CargoXmlMessageInfo>> messages = {};
 
         #! static action provider children, mapped by name -> Qore class
         /** The two action providers (\c parse-message, \c build-message) are exposed as
@@ -209,7 +209,7 @@ public class CargoXmlDataProvider inherits AbstractDataProvider {
         when the caller asks for record-type introspection.
     */
     private hash<string, hash<CargoXmlMessageInfo>> discoverMessages(string dir) {
-        hash<string, hash<CargoXmlMessageInfo>> rv;
+        hash<string, hash<CargoXmlMessageInfo>> rv = {};
         Dir d();
         d.chdir(dir);
         list<string> files = sort(d.listFiles("\\.xsd$"));
