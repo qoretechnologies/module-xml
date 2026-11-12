@@ -421,7 +421,26 @@ class ModuleRunner:
 
     def run_one(self, name, expected):
         """Runs one module; returns its result (see module_result()), or None when the run was interrupted
-        before the module started."""
+        before the module started. Any error fails the module's tests with the error, so the report is still
+        written."""
+        started = time.monotonic()
+        try:
+            return self.run_module_process(name, expected)
+        except Exception as error:
+            return self.failed(name, expected, started, self.logs / f"{name}.log", error)
+
+    def failed(self, name, expected, started, log_path, error):
+        """The result of a module that could not be run or evaluated: its tests fail with the error."""
+        result = module_result(name, expected, [], 2, False, self.timeout)
+        result["status"] = f"could not be run: {error!r}"
+        for entry in result["records"].values():
+            entry["detail"] = f"module {name} could not be run: {error!r}"
+        result["seconds"] = round(time.monotonic() - started, 3)
+        result["returncode"] = None
+        self.report(name, log_path, f"{name}: could not be run: {error!r}")
+        return result
+
+    def run_module_process(self, name, expected):
         log_path = self.logs / f"{name}.log"
         events_path = self.logs / f"{name}.events"
         started = time.monotonic()
@@ -455,14 +474,7 @@ class ModuleRunner:
                     process.wait()
         except Exception as error:
             # the module could not be run or waited for: its tests fail with the reason
-            result = module_result(name, expected, [], 2, False, self.timeout)
-            result["status"] = f"could not be run: {error!r}"
-            for entry in result["records"].values():
-                entry["detail"] = f"module {name} could not be run: {error!r}"
-            result["seconds"] = round(time.monotonic() - started, 3)
-            result["returncode"] = None
-            self.report(name, log_path, f"{name}: could not be run: {error!r}")
-            return result
+            return self.failed(name, expected, started, log_path, error)
         seconds = time.monotonic() - started
         result = module_result(name, expected, read_events(events_path), process.returncode, state == "timeout",
                                self.timeout)
@@ -478,16 +490,20 @@ class ModuleRunner:
         return result
 
     def report(self, name, log_path, summary):
-        """Prints a module's whole output between its markers."""
+        """Prints a module's whole output between its markers; an output error is printed to stderr instead of
+        changing the module's result."""
         try:
             output = log_path.read_text(encoding="utf-8", errors="replace")
         except OSError as error:
             output = f"(no output: {error})\n"
         with self.lock:
-            self.stream.write(f"===== begin {name}\n")
-            self.stream.write(output)
-            self.stream.write(f"===== end {summary}\n")
-            self.stream.flush()
+            try:
+                self.stream.write(f"===== begin {name}\n")
+                self.stream.write(output)
+                self.stream.write(f"===== end {summary}\n")
+                self.stream.flush()
+            except Exception as error:
+                print(f"cannot print the output of {name}: {error!r}", file=sys.stderr)
 
     def run(self, names, expected, timings):
         """Runs the modules, longest first by the recorded durations; returns {name: result}.

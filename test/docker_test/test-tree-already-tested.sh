@@ -8,8 +8,8 @@
 #   pipeline whose child pipeline failed or is missing, or when only this pipeline itself passed;
 # - picks a later full pass of the same commit after a partial one;
 # - fails open (reuses nothing) when the pipeline list, the trigger jobs or the jobs cannot be read;
-# and that every job in FULL_JOBS is a job of .gitlab/ci/module-xml.yml. Needs git, python3 and bash; takes about 4 s
-# in the CI images.
+# and that every job in FULL_JOBS or FULL_JOBS_EXEMPT is a job of .gitlab/ci/module-xml.yml and every job there is in
+# one of them. Needs git, python3 and bash; takes about 4 s in the CI images.
 # Exits nonzero on the first failed check.
 #
 # Copyright 2026 Qore Technologies, s.r.o.
@@ -30,12 +30,65 @@ fail() {
     exit 1
 }
 
-# every job the script requires exists in the child pipeline
+# every job the script requires exists in the child pipeline, and every job of the child pipeline is required or
+# explicitly exempt (a job added without being required would let a pipeline that skipped it count as a full pass)
 full_jobs=$(sed -n 's/^FULL_JOBS=\${FULL_JOBS:-"\(.*\)"}$/\1/p' "${script}")
 [ -n "${full_jobs}" ] || fail "FULL_JOBS not found in tree-already-tested.sh"
-for job in ${full_jobs}; do
-    grep -q "^${job}:\$" "${yml}" || fail "FULL_JOBS names ${job}, which is not a job of module-xml.yml"
+exempt=$(sed -n 's/^FULL_JOBS_EXEMPT="\(.*\)"$/\1/p' "${script}")
+[ -n "${exempt}" ] || fail "FULL_JOBS_EXEMPT not found in tree-already-tested.sh"
+# check_jobs YML: checks FULL_JOBS and FULL_JOBS_EXEMPT against the top-level jobs of a child pipeline file: every
+# top-level key that is not hidden (".name") and not a global keyword is a job, quoted or not, with spaces or dots;
+# a line that cannot be read as a key, or an include (whose jobs this cannot see), fails
+check_jobs() {
+    jobs_file=$(python3 - "$1" <<'PYEOF'
+import re, sys
+keywords = {"stages", "default", "variables", "workflow", "image", "services", "cache", "before_script",
+            "after_script"}
+for number, line in enumerate(open(sys.argv[1]), 1):
+    line = line.rstrip("\n")
+    if not line.strip() or line[0] in " \t#" or line.startswith("---"):
+        continue
+    match = re.fullmatch(r"""(?:"([^"]+)"|'([^']+)'|([^\s"'#][^:]*?))\s*:(?:\s.*)?""", line)
+    if match is None:
+        sys.exit(f"line {number}: cannot read a top-level key: {line}")
+    key = match.group(1) or match.group(2) or match.group(3)
+    if key == "include":
+        sys.exit(f"line {number}: an include, whose jobs cannot be checked")
+    if key.startswith(".") or key in keywords:
+        continue
+    print(key)
+PYEOF
+) || fail "$1: ${jobs_file}"
+    for job in ${full_jobs} ${exempt}; do
+        printf '%s\n' "${jobs_file}" | grep -qxF "${job}" \
+            || fail "FULL_JOBS or FULL_JOBS_EXEMPT names ${job}, which is not a job of $1"
+    done
+    printf '%s\n' "${jobs_file}" | while IFS= read -r job; do
+        case " ${full_jobs} ${exempt} " in
+            *" ${job} "*) ;;
+            *) fail "$1 has the job ${job}, which neither FULL_JOBS nor FULL_JOBS_EXEMPT lists" ;;
+        esac
+    done || exit 1
+}
+check_jobs "${yml}"
+# a job added to the child pipeline without being listed fails the check, whatever the shape of its key
+for added in 'test-valgrind-new:' '"quoted job":' "'single quoted':" 'job with spaces:' 'job.dot :'; do
+    { cat "${yml}"; printf '%s\n  script: [true]\n' "${added}"; } > "${dir}/added.yml"
+    if (check_jobs "${dir}/added.yml") 2> "${dir}/added.err"; then
+        fail "the added job ${added} was not found"
+    fi
+    grep -q "has the job .*, which neither FULL_JOBS nor FULL_JOBS_EXEMPT lists" "${dir}/added.err" \
+        || fail "the added job ${added} failed for another reason: $(cat "${dir}/added.err")"
 done
+# an include, and a line that is no key, fail too
+{ cat "${yml}"; printf 'include:\n  - local: other.yml\n'; } > "${dir}/added.yml"
+if (check_jobs "${dir}/added.yml") 2> /dev/null; then
+    fail "an include was accepted"
+fi
+{ cat "${yml}"; printf 'not a key\n'; } > "${dir}/added.yml"
+if (check_jobs "${dir}/added.yml") 2> /dev/null; then
+    fail "a line that is no key was accepted"
+fi
 
 # a repository with a pull request branch merged into develop without changes: the merge has the branch's tree
 repo=${dir}/repo
