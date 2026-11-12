@@ -328,15 +328,24 @@ measured durations in `ci-timings.json`. The timings only balance the shards. Af
 new ones from a complete set of shard results with `python3 ci_suite.py timings --output <results>`, and
 change `PYTHON_SHARDS` and `parallel` in `.gitlab/ci/module-xml.yml` together.
 
-The Qore test jobs (`test-ubuntu`, `test-alpine`) run every `test/*.qtest` twice, first against the module
-sources and then against the AOT-compiled modules that the same build produces (`QORE_BUILD_AOT_MODULES`, on by
-default). The tests load the in-repo modules by path (`%requires ../qlib/WSDL.qm`), which never exercises the
-compiled modules, so `test/docker_test/run-aot-qtests.sh` writes a copy of each test that loads them by name, in
-the test and in the sub-programs it parses, and runs it with `build-debug/qlib-qmod` first in the module path and
-without the source directory. It first checks that every compiled module loads from the build. Locally:
+The Qore test jobs run every `test/*.qtest` against the module sources (`test-ubuntu`, `test-alpine`) and, in
+parallel jobs, against the AOT-compiled modules that the same build produces (`test-ubuntu-aot`,
+`test-alpine-aot`; `QORE_BUILD_AOT_MODULES`, on by default). The tests load the in-repo modules by path
+(`%requires ../qlib/WSDL.qm`), which never exercises the compiled modules, so `test/docker_test/run-aot-qtests.sh`
+writes a copy of each test that loads them by name, in the test and in the sub-programs it parses, and runs it
+with `build-debug/qlib-qmod` first in the module path and without the source directory. It first checks that every
+compiled module loads from the build. Each job runs as many test files at a time as its pod has CPUs
+(`test/docker_test/run-qtests.sh`, sized by `cpu-jobs.sh` from the cgroup CPU quota, or by `QTEST_JOBS`), and
+prints each file's output whole when it finishes. Each file runs in its own session, and a file that runs longer
+than 600 s (`QTEST_FILE_TIMEOUT`) fails and is killed with every process it started; an interrupted runner kills
+every file it started. `test/docker_test/test-run-qtests.sh` checks the runner first in each job. The four jobs
+report the GitHub statuses `module-xml-ubuntu`, `module-xml-ubuntu-aot`, `module-xml-alpine` and
+`module-xml-alpine-aot`, and their combined result is reported as `module-xml`. Locally, with 4 files at a time:
 
 ```sh
-test/docker_test/run-aot-qtests.sh build-debug
+ls test/*.qtest | grep -v '\.aot\.qtest$' > /tmp/qtests.txt
+test/docker_test/run-qtests.sh 4 /tmp/qtests.txt
+test/docker_test/run-aot-qtests.sh build-debug 4
 ```
 
 The Ubuntu qtest job also installs the `litmus` WebDAV compliance suite and sets `QORE_XML_REQUIRE_LITMUS=1`, so
