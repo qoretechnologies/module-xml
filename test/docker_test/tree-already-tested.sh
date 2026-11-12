@@ -23,11 +23,15 @@
 # The JSON responses are read with python3.
 
 set -u
-# the jobs of a full child pipeline (.gitlab/ci/module-xml.yml); test-tree-already-tested.sh checks that each is a job
-# there.  The Python suite's shard jobs have numbered names ("python-ubuntu 1/2"); its verify jobs pass only when
-# every shard of their distribution ran completely and passed.  A job renamed or added there without being listed
-# here only makes this script find no full pass (fail open).
+# the jobs of a full child pipeline (.gitlab/ci/module-xml.yml).  The Python suite's shard jobs have numbered names
+# ("python-ubuntu 1/2"); its verify jobs pass only when every shard of their distribution ran completely and passed.
+# qtest-passed and qtest-failed only report the Qore test jobs' result.  A renamed job only makes this script find no
+# full pass (fail open), but a job added there without being listed here would let a pipeline that skipped it count as
+# a full pass, so test-tree-already-tested.sh checks both ways: every job listed here is a job there, and every job
+# there is listed here or in FULL_JOBS_EXEMPT.
 FULL_JOBS=${FULL_JOBS:-"test-ubuntu test-ubuntu-aot test-alpine test-alpine-aot test-valgrind python-verify-ubuntu python-verify-alpine"}
+# the jobs of the child pipeline that a full pass need not list: covered by a job of FULL_JOBS, or reporting only
+FULL_JOBS_EXEMPT="python-ubuntu python-alpine qtest-passed qtest-failed"
 out=tree-tested.env
 # a dotenv report needs one variable even when the tree must be tested
 echo "QORE_TREE_TESTED_CHECKED=1" > "$out"

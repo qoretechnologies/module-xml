@@ -540,6 +540,45 @@ class ParallelRunnerTest(unittest.TestCase):
         self.assertEqual("error", report["tests"]["test_good.T.test_one"]["outcome"])
         self.assertIn("could not be run", report["tests"]["test_good.T.test_one"]["detail"])
 
+    def test_error_after_the_module_ran(self):
+        # an error while evaluating a finished module (here: its events cannot be read) still fails only its tests
+        runner = self.runner(2)
+        original = ci_suite.read_events
+
+        def broken(path):
+            if path.name == "test_bad.events":
+                raise OSError("events unreadable")
+            return original(path)
+        ci_suite.read_events = broken
+        self.addCleanup(setattr, ci_suite, "read_events", original)
+        status, report = self.run_modules(["test_bad", "test_good"], runner=runner)
+        self.assertEqual(1, status)
+        self.assertEqual("could not be run: OSError('events unreadable')", report["module_status"]["test_bad"])
+        self.assertEqual("error", report["tests"]["test_bad.T.test_passes"]["outcome"])
+        self.assertEqual("ok", report["module_status"]["test_good"])
+        self.assertIn("===== end test_bad: could not be run", self.stream.getvalue())
+
+    def test_output_error_keeps_the_result(self):
+        # a stream that cannot be written does not change the module's result or report it twice
+        class Broken:
+            writes = 0
+
+            def write(self, text):
+                Broken.writes += 1
+                raise OSError("stream closed")
+
+            def flush(self):
+                pass
+        runner = self.runner(1)
+        runner.stream = Broken()
+        errors = io.StringIO()
+        with contextlib.redirect_stderr(errors):
+            status, report = self.run_modules(["test_good"], runner=runner)
+        self.assertEqual(0, status)
+        self.assertEqual("ok", report["module_status"]["test_good"])
+        self.assertEqual(1, Broken.writes)
+        self.assertEqual(1, errors.getvalue().count("cannot print the output of test_good: OSError('stream closed')"))
+
     def test_unexpected_tests_fail(self):
         # a module process that reports other tests than the runner discovered fails the run
         result = ci_suite.module_result("test_x", ["test_x.T.test_1"],

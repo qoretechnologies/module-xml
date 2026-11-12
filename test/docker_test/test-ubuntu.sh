@@ -96,6 +96,8 @@ fi
 ${MODULE_SRC_DIR}/test/docker_test/test-run-qtests.sh
 # the tree-already-tested check of develop pipelines (about 4 s)
 ${MODULE_SRC_DIR}/test/docker_test/test-tree-already-tested.sh
+# the valgrind paths of partial pipelines cover what the valgrind tests load and read (about 1 s)
+python3 -W error ${MODULE_SRC_DIR}/test/docker_test/test-change-rules.py
 
 # the number of test files to run at a time
 QTEST_JOBS=${QTEST_JOBS:-$(${MODULE_SRC_DIR}/test/docker_test/cpu-jobs.sh)}

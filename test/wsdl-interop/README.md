@@ -355,10 +355,13 @@ the Python suite these are the native module and its build, `WSDL.qm`, the `Soap
 modules, `docs/` (`test_doc_examples.py`), the `test/soap*.qtest` and `test/wsdl*.qtest` files the assertion ledger
 names, `test/xml-id-bindings.qtest`, `test/*.wsdl`, `test/*.xsd`, `test/cmake`, this directory, `test/docker_test`
 and the CI files; for valgrind, the native module and its build, the test files and test data at the top of `test/`,
-`test/docker_test` and the CI files. A skipped job posts no GitHub status. Develop, master, tags, scheduled, web,
-API and pipeline-triggered pipelines run everything, as does a branch pipeline with the CI variable `FULL_CI=1`
-(`git push -o ci.variable="FULL_CI=1"`). A develop merge reuses the result of the pull request's pipeline only when
-that pipeline ran every job (`tree-already-tested.sh`).
+the fixtures in `test/wsdl-interop/fixtures`, the in-repo modules the valgrind tests load (`WSDL.qm`,
+`WebDavHandler`, `SaxDataProvider`, `XmlRpcClientIo`), `test/docker_test` and the CI files
+(`test/docker_test/test-change-rules.py`, run in every pipeline, checks that these cover everything the valgrind
+tests load and read). A skipped job posts no GitHub status. Develop, master, tags, scheduled, web, API and
+pipeline-triggered pipelines run everything, as does a branch pipeline with the CI variable `FULL_CI=1` (`git push
+-o ci.variable="FULL_CI=1"`). A develop merge reuses the result of the pull request's pipeline only when that
+pipeline ran every job (`tree-already-tested.sh`).
 
 The Qore test jobs run every `test/*.qtest` against the module sources (`test-ubuntu`, `test-alpine`) and, in
 parallel jobs, against the AOT-compiled modules that the same build produces (`test-ubuntu-aot`,
@@ -385,12 +388,15 @@ The Ubuntu qtest job also installs the `litmus` WebDAV compliance suite and sets
 `litmus` package, and the test skips explicitly without it.
 
 The `test-valgrind` job runs the native module's tests under valgrind (`test/docker_test/run-valgrind-qtests.sh`):
-the tests that load no in-repo Qore module and so exercise the C++ module and its bundled libxml2. Each must
-report no valgrind error and no definitely or indirectly lost memory. Valgrind is about 50 times slower than a
-normal run, so the WSDL/SOAP tests, which mostly exercise the Qore code of the `qlib` modules, are left to the
-other jobs. The runs set `QORE_PCRE2_NO_JIT=1`: PCRE2's JIT matcher reads a subject in blocks past its length,
-which valgrind reports as uninitialised reads, so its interpreter is used instead. The job reports the GitHub
-status `module-xml-valgrind`. Locally:
+the test files without a `qlib/` reference, which exercise the C++ module and its bundled libxml2
+(`run-valgrind-qtests.sh --list` prints them). Each must report no valgrind error and no definitely or indirectly
+lost memory. Valgrind is about 50 times slower than a normal run, so the WSDL/SOAP tests, which load the `qlib`
+modules by path and mostly exercise their Qore code, are left to the other jobs. Seven of the selected tests load
+in-repo modules by name through the module path, which the CI job sets to the checkout's `qlib` first (`WSDL`,
+`WebDavHandler`, `SaxDataProvider`, `XmlRpcClientIo`; `xml.qtest`, the main native API test, among them); they stay
+under valgrind. The runs set `QORE_PCRE2_NO_JIT=1`: PCRE2's JIT matcher reads a subject in blocks past its length,
+which valgrind reports as uninitialised reads, so its interpreter is used instead. The job reports the GitHub status
+`module-xml-valgrind`. Locally:
 
 ```sh
 test/docker_test/run-valgrind-qtests.sh 4
