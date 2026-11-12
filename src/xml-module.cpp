@@ -50,6 +50,9 @@ static void xml_module_delete();
 
 DLLLOCAL void init_option_constants(QoreNamespace& ns);
 
+// the module's namespace; purged when the module is deleted (see xml_qore_module_desc())
+QoreNamespace XNS("Qore::Xml");
+
 // module declaration for Qore 0.9.5+
 extern "C" DLLEXPORT void xml_qore_module_desc(QoreModuleInfo& mod_info) {
     mod_info.name = "xml";
@@ -62,13 +65,15 @@ extern "C" DLLEXPORT void xml_qore_module_desc(QoreModuleInfo& mod_info) {
     mod_info.init = xml_module_init;
     mod_info.ns_init = xml_module_ns_init;
     mod_info.del = xml_module_delete;
+#ifdef QORE_HAS_MODULE_NS_PURGE
+    // the namespace is purged when the module is deleted, before the types are freed (see QoreModuleInfo::ns)
+    mod_info.ns = &XNS;
+#endif
     mod_info.license = QL_MIT;
     mod_info.license_str = "MIT";
 }
 
 thread_local AbstractXmlIoInputCallback* xml_io_callback = nullptr;
-
-QoreNamespace XNS("Qore::Xml");
 
 static void qoreXmlGenericErrorFunc(QoreString *err, const char *msg, ...) {
    va_list args;
