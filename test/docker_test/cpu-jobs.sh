@@ -7,7 +7,8 @@
 # job. This prints the smallest CPU quota, rounded up, of the process's cgroup and its ancestors (cgroup v2 cpu.max,
 # or cgroup v1 cpu.cfs_quota_us and cpu.cfs_period_us), and nproc when there is none. The cgroup is looked up from
 # /proc/self/cgroup: a privileged container (as the CI jobs are) sees the host's cgroup tree, where its own quota is
-# in its cgroup's directory, not at /sys/fs/cgroup.
+# in its cgroup's directory, not at /sys/fs/cgroup. The result is at most CPU_JOBS_MAX (default 8), so that a
+# container without a quota does not start a job for each of a large node's CPUs.
 #
 # Copyright 2026 Qore Technologies, s.r.o.
 
@@ -64,8 +65,11 @@ else
     done
 fi
 
-if [ -n "${best}" ]; then
-    echo "${best}"
-else
-    nproc
+if [ -z "${best}" ]; then
+    best=$(nproc)
 fi
+max=${CPU_JOBS_MAX:-8}
+if [ "${best}" -gt "${max}" ]; then
+    best=${max}
+fi
+echo "${best}"
