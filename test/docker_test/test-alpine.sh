@@ -3,12 +3,14 @@
 set -e
 set -x
 
-# qtest (default): build the module and run the Qore test files, from source and AOT-compiled
+# qtest (default): build the module and run the Qore test files against the module sources
+# qtest-aot: build the module and run the Qore test files against the AOT-compiled modules of the build
+# (both run QTEST_JOBS test files at a time, by default as many as the container's CPUs: see cpu-jobs.sh)
 # python-shard: build the module and run shard $CI_NODE_INDEX of $CI_NODE_TOTAL of the Python WSDL/SOAP suite
 # python-verify: check the combined results of all Python suite shards
 MODE=${1:-qtest}
 case "${MODE}" in
-    qtest|python-shard|python-verify) ;;
+    qtest|qtest-aot|python-shard|python-verify) ;;
     *) echo "unknown mode: ${MODE}" >&2; exit 2 ;;
 esac
 
@@ -34,7 +36,7 @@ echo "export QORE_GID=1000" >> ${ENV_FILE}
 
 export MAKE_JOBS=4
 
-if [ "${MODE}" != "qtest" ]; then
+if [ "${MODE}" != "qtest" ] && [ "${MODE}" != "qtest-aot" ]; then
     # lxml is the Python suite's only package outside the standard library: the pinned, hash-checked wheel
     # (test/wsdl-interop/requirements.txt), whose bundled libxml2 is the suite's second independent validator
     python3 -m venv ${MODULE_SRC_DIR}/test/wsdl-interop/.venv
@@ -77,36 +79,20 @@ if [ "${MODE}" = "python-shard" ]; then
     exec ${MODULE_SRC_DIR}/test/docker_test/run-python-suite.sh shard
 fi
 
-# run the tests
+# the number of test files to run at a time
+QTEST_JOBS=${QTEST_JOBS:-$(${MODULE_SRC_DIR}/test/docker_test/cpu-jobs.sh)}
+
+if [ "${MODE}" = "qtest-aot" ]; then
+    # run the tests against the AOT-compiled modules of this build
+    exec ${MODULE_SRC_DIR}/test/docker_test/run-aot-qtests.sh ${MODULE_BUILD_DIR} ${QTEST_JOBS} gosu qore:qore
+fi
+
+# run the tests against the module sources
 cd ${MODULE_SRC_DIR}
-FAILED=
+ls test/*.qtest | grep -v '\.aot\.qtest$' > /tmp/qtests.txt
+rc=0
+${MODULE_SRC_DIR}/test/docker_test/run-qtests.sh ${QTEST_JOBS} /tmp/qtests.txt gosu qore:qore || rc=1
 
-for test in test/*.qtest; do
-    # run with debugging enabled to catch @debug block parse errors
-    # capture the status instead of letting it propagate: under "set -e" a failing
-    # test aborts the job immediately, which skips every later test file
-    # "-v" reports each test case and every failure in full; "-vv" also lists each passing
-    # assertion, which pushes the job log past GitLab's size limit and hides later failures
-    gosu qore:qore qore -p enable-debug $test -v && rc=0 || rc=$?
-    if [ "$rc" != "0" ]; then
-        FAILED="$FAILED $test"
-    fi
-done
-
-# ... and they still do once the tests have run
-${MODULE_SRC_DIR}/test/docker_test/check-loaded-modules.sh ${MODULE_BUILD_DIR} gosu qore:qore
-
-# run the tests again against the AOT-compiled modules of this build
-AOT_FAILED=
-${MODULE_SRC_DIR}/test/docker_test/run-aot-qtests.sh ${MODULE_BUILD_DIR} gosu qore:qore || AOT_FAILED=1
-
-# name the failing test files at the end of the log
-if [ -n "$FAILED" ]; then
-    echo "FAILED TEST FILES:"
-    for test in $FAILED; do
-        echo "    $test"
-    done
-fi
-if [ -n "$FAILED" ] || [ -n "$AOT_FAILED" ]; then
-    exit 1 # fail
-fi
+# ... and they still load the modules that this job built once the tests have run
+${MODULE_SRC_DIR}/test/docker_test/check-loaded-modules.sh ${MODULE_BUILD_DIR} gosu qore:qore || rc=1
+exit ${rc}

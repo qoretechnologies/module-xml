@@ -65,13 +65,46 @@ variables:
     paths:
       - test/wsdl-interop/ci-results/
 
-test-ubuntu:
+# The Qore tests run in four jobs, in parallel: against the module sources and against the AOT-compiled modules of
+# the build (run-aot-qtests.sh), on Ubuntu and Alpine. Each job builds the module itself and runs QTEST_JOBS test
+# files at a time, by default as many as the CPUs of its pod (cpu-jobs.sh reads the cgroup CPU quota; the runner
+# gives a build container a request and limit of 4 CPUs), and reports its own GitHub status; qtest-passed and
+# qtest-failed report their combined result as "module-xml", the status that develop's branch protection requires.
+#
+# Job timeouts: one job used to run both passes serially, and test-alpine job 226887 (pipeline 64294) hit the
+# default 1 h timeout on the node supah, which is 2-2.7 times slower than spinster and dugout under the load of
+# the rest of the pipeline. Serial pass times measured (build and setup take 2-4 min more):
+#   from source, 313 files: 778-1001 s on spinster/dugout, 1693 s and 2217 s on supah
+#   AOT, 264 files:          444-953 s on spinster/dugout, 863 s and 1300 s on supah (the latter extrapolated
+#                            from 1158 s for 235 files when the job was killed)
+# The slowest single file took 77 s (wsdl-identity-tuples.qtest, supah); run-qtests.sh kills a file after 600 s.
+# With 4 files at a time in a 4-CPU container (podman --cpus=4, the two Alpine jobs side by side on one host), the
+# from-source files ran in 413 s (1645 s of file time; 510 s for the whole job) and the AOT files in 203 s (795 s;
+# 300 s for the job): about 2 times faster than the serial pass on spinster/dugout, not 4, as a test process uses
+# more than one CPU. Timeout = worst serial pass on supah x 1.5 / 2 (the speedup) + 5 min to set up and build:
+#   from source: 2217 s x 1.5 / 2 + 300 s = 1963 s -> 35 min
+#   AOT:         1300 s x 1.5 / 2 + 300 s = 1275 s -> 25 min
+.qtest: &qtest
   <<: *report
   stage: test
+
+test-ubuntu:
+  <<: *qtest
   image: $CI_REGISTRY/infrastructure/qore-test-base/qore-test-base:develop
+  timeout: 35m
   variables:
     TEST_SCRIPT: test/docker_test/test-ubuntu.sh
     TEST_MODE: qtest
+    STATUS_CONTEXT: module-xml-ubuntu
+
+test-ubuntu-aot:
+  <<: *qtest
+  image: $CI_REGISTRY/infrastructure/qore-test-base/qore-test-base:develop
+  timeout: 25m
+  variables:
+    TEST_SCRIPT: test/docker_test/test-ubuntu.sh
+    TEST_MODE: qtest-aot
+    STATUS_CONTEXT: module-xml-ubuntu-aot
 
 # the native module's tests under valgrind (see test/docker_test/run-valgrind-qtests.sh)
 test-valgrind:
@@ -84,12 +117,58 @@ test-valgrind:
     STATUS_CONTEXT: module-xml-valgrind
 
 test-alpine:
-  <<: *report
-  stage: test
+  <<: *qtest
   image: $CI_REGISTRY/infrastructure/qore-test-base/qore-test-base:develop-alpine
+  timeout: 35m
   variables:
     TEST_SCRIPT: test/docker_test/test-alpine.sh
     TEST_MODE: qtest
+    STATUS_CONTEXT: module-xml-alpine
+
+test-alpine-aot:
+  <<: *qtest
+  image: $CI_REGISTRY/infrastructure/qore-test-base/qore-test-base:develop-alpine
+  timeout: 25m
+  variables:
+    TEST_SCRIPT: test/docker_test/test-alpine.sh
+    TEST_MODE: qtest-aot
+    STATUS_CONTEXT: module-xml-alpine-aot
+
+# the combined result of the four Qore test jobs, reported as "module-xml": qtest-passed runs when all of them
+# passed, qtest-failed when any of them failed (a job with "needs" runs on the result of the jobs it needs)
+.qtest-status: &qtest-status
+  stage: verify
+  image: $CI_REGISTRY/infrastructure/qore-test-base/qore-test-base:develop
+  needs:
+    - job: test-ubuntu
+      artifacts: false
+    - job: test-ubuntu-aot
+      artifacts: false
+    - job: test-alpine
+      artifacts: false
+    - job: test-alpine-aot
+      artifacts: false
+  variables:
+    GIT_DEPTH: "1"
+    STATUS_CONTEXT: module-xml
+
+qtest-passed:
+  <<: *qtest-status
+  when: on_success
+  script:
+    - |
+        curl "https://api.github.com/repos/qoretechnologies/${REPO_NAME}/statuses/${CI_COMMIT_SHA}" \
+          -X POST --oauth2-bearer ${GITHUB_ACCESS_TOKEN} -H "Content-Type: application/json" \
+          -d "{\"state\": \"success\", \"context\": \"${STATUS_CONTEXT}\", \"description\": \"Gitlab CI: the Qore test jobs passed\", \"target_url\": \"${CI_PIPELINE_URL}\"}"
+
+qtest-failed:
+  <<: *qtest-status
+  when: on_failure
+  script:
+    - |
+        curl "https://api.github.com/repos/qoretechnologies/${REPO_NAME}/statuses/${CI_COMMIT_SHA}" \
+          -X POST --oauth2-bearer ${GITHUB_ACCESS_TOKEN} -H "Content-Type: application/json" \
+          -d "{\"state\": \"failure\", \"context\": \"${STATUS_CONTEXT}\", \"description\": \"Gitlab CI: a Qore test job failed\", \"target_url\": \"${CI_PIPELINE_URL}\"}"
 
 python-ubuntu:
   <<: *python-shard
