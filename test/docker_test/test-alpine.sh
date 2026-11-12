@@ -79,6 +79,9 @@ if [ "${MODE}" = "python-shard" ]; then
     exec ${MODULE_SRC_DIR}/test/docker_test/run-python-suite.sh shard
 fi
 
+# the parallel test runner itself (about 5 s)
+${MODULE_SRC_DIR}/test/docker_test/test-run-qtests.sh
+
 # the number of test files to run at a time
 QTEST_JOBS=${QTEST_JOBS:-$(${MODULE_SRC_DIR}/test/docker_test/cpu-jobs.sh)}
 

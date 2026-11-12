@@ -336,7 +336,9 @@ writes a copy of each test that loads them by name, in the test and in the sub-p
 with `build-debug/qlib-qmod` first in the module path and without the source directory. It first checks that every
 compiled module loads from the build. Each job runs as many test files at a time as its pod has CPUs
 (`test/docker_test/run-qtests.sh`, sized by `cpu-jobs.sh` from the cgroup CPU quota, or by `QTEST_JOBS`), and
-prints each file's output whole when it finishes. The four jobs report the GitHub statuses `module-xml-ubuntu`,
+prints each file's output whole when it finishes. Each file runs in its own session, and a file that runs longer
+than 600 s (`QTEST_FILE_TIMEOUT`) fails and is killed with every process it started;
+`test/docker_test/test-run-qtests.sh` checks the runner first in each job. The four jobs report the GitHub statuses `module-xml-ubuntu`,
 `module-xml-ubuntu-aot`, `module-xml-alpine` and `module-xml-alpine-aot`, and their combined result is reported as
 `module-xml`. Locally, with 4 files at a time:
 
