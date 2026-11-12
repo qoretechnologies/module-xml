@@ -17,6 +17,11 @@
 # whatever is left in its process group is killed, and so is the group of its watchdog. The slowest files and the
 # failing files are listed at the end. Exits nonzero if any file fails.
 #
+# Because the tests and watchdogs run in their own sessions, an interrupt of the runner (Ctrl-C, or SIGTERM when the
+# CI runner stops the job's script at RUNNER_SCRIPT_TIMEOUT) does not reach them. Every worker therefore records the
+# process groups that it starts, and kills them itself when it is interrupted; the runner stops starting files and
+# kills every recorded group on SIGINT, SIGTERM and SIGHUP and on exit, so nothing outlives an interrupted run.
+#
 # The tests share nothing that would keep them from running at the same time: their servers listen on port 0 of a
 # loopback address (test/listener-addresses.qtest checks this), and their temporary files and directories have
 # unique names (the process ID or a random string).
@@ -31,6 +36,10 @@ shift 2
 case "${jobs}" in
     ""|*[!0-9]*|0) echo "run-qtests.sh: invalid job count: \"${jobs}\"" >&2; exit 2 ;;
 esac
+if [ ! -f "${list}" ] || [ ! -r "${list}" ]; then
+    echo "ERROR: cannot read the test list \"${list}\"" >&2
+    exit 1
+fi
 list=$(readlink -f "${list}")
 src_dir=$(cd "$(dirname "$0")/../.." && pwd)
 cd "${src_dir}"
@@ -42,7 +51,35 @@ if [ "${count}" = "0" ]; then
 fi
 
 log_dir=$(mktemp -d)
-trap 'rm -rf "${log_dir}"' EXIT
+mkdir "${log_dir}/groups"
+xargs_pid=
+
+# kills every process group that a worker recorded (a file per test file, one group ID per line)
+kill_groups() {
+    local f g
+    for f in "${log_dir}"/groups/*; do
+        [ -f "${f}" ] || continue
+        while read -r g; do
+            kill -KILL -"${g}" 2> /dev/null || :
+        done < "${f}"
+    done
+}
+
+# on an interrupt: no new files (the stop file, and xargs ends), and no test, child or watchdog left running
+interrupted() {
+    trap - INT TERM HUP
+    echo "run-qtests.sh: interrupted (SIG$1): killing the running test files" >&2
+    : > "${log_dir}/stop"
+    if [ -n "${xargs_pid}" ]; then
+        kill -TERM "${xargs_pid}" 2> /dev/null || :
+    fi
+    kill_groups
+    exit "$2"
+}
+trap 'interrupted INT 130' INT
+trap 'interrupted TERM 143' TERM
+trap 'interrupted HUP 129' HUP
+trap 'kill_groups; rm -rf "${log_dir}"' EXIT
 
 echo "running ${count} test files, ${jobs} in parallel"
 start=$(date +%s)
@@ -51,49 +88,91 @@ export LOG_DIR="${log_dir}"
 export RUNNER="$*"
 export QTEST_FILE_TIMEOUT=${QTEST_FILE_TIMEOUT:-600}
 export QTEST_FILE_KILL_GRACE=${QTEST_FILE_KILL_GRACE:-30}
-# The file name is the worker's argument ("$1"), never part of its code. A background job of a non-interactive shell
-# is not a process group leader, so setsid runs the command in a new session without forking, and $! is the ID of
-# its process group. The watchdog writes LOG.timeout before it kills the group. Each worker writes one short line
-# when its file finishes, "STATUS SECONDS FILE"; the loop below is the only writer of the job log, so the logs print
-# whole.
-grep . "${list}" | tr '\n' '\0' | xargs -0 -n 1 -P "${jobs}" sh -c '
+# The worker runs one file, its argument ("$1"), which is never part of its code. A background job of a
+# non-interactive shell is not a process group leader, so setsid runs the command in a new session without forking,
+# and $! is the ID of its process group. The worker records each group in groups/KEY before it waits; if it is
+# interrupted (its trap sets "stop"; a caught signal is reset to the default in the commands it starts), or the runner
+# has stopped (the stop file, or the log directory is gone), it kills its groups and keeps waiting until the test has
+# ended. The watchdog writes KEY.timeout before it kills the test's group. The worker ends with one line, "STATUS
+# SECONDS KEY FILE", where KEY (the cksum of the name) names its log; the loop below is the only writer of the job log,
+# so the logs print whole.
+grep . "${list}" | tr '\n' '\0' > "${log_dir}/list0"
+mkfifo "${log_dir}/results.fifo"
+xargs -0 -n 1 -P "${jobs}" sh -c '
+    stop=
+    trap "stop=1" INT TERM HUP
     f=$1
-    log="${LOG_DIR}/$(printf "%s" "${f}" | cksum | cut -d" " -f1).log"
+    key=$(printf "%s" "${f}" | cksum | cut -d" " -f1)
+    log="${LOG_DIR}/${key}.log"
     t0=$(date +%s)
     setsid ${RUNNER} qore -p enable-debug "${f}" -v > "${log}" 2>&1 < /dev/null &
     pid=$!
+    echo "${pid}" >> "${LOG_DIR}/groups/${key}" 2> /dev/null || :
     setsid sh -c "sleep ${QTEST_FILE_TIMEOUT}; : > \"\$1\"; kill -TERM -${pid}; sleep ${QTEST_FILE_KILL_GRACE}; kill -KILL -${pid}" \
         sh "${log}.timeout" > /dev/null 2>&1 < /dev/null &
     watchdog=$!
-    wait "${pid}" && rc=0 || rc=$?
+    echo "${watchdog}" >> "${LOG_DIR}/groups/${key}" 2> /dev/null || :
+    rc=
+    while :; do
+        if [ -n "${stop}" ] || [ -e "${LOG_DIR}/stop" ] || [ ! -d "${LOG_DIR}/groups" ]; then
+            kill -KILL -"${pid}" -"${watchdog}" 2> /dev/null || :
+        fi
+        wait "${pid}" && rc=0 || rc=$?
+        # a trapped signal interrupts wait; the test has ended only when it is gone
+        if ! kill -0 "${pid}" 2> /dev/null; then
+            break
+        fi
+    done
     kill -KILL -"${watchdog}" 2> /dev/null || :
     kill -KILL -"${pid}" 2> /dev/null || :
+    if [ -n "${stop}" ] || [ ! -d "${LOG_DIR}/groups" ]; then
+        exit 1
+    fi
     if [ -e "${log}.timeout" ]; then
         rc=timeout
     fi
-    printf "%s %s %s\n" "${rc}" "$(( $(date +%s) - t0 ))" "${f}"' sh | while read -r rc secs test; do
-    log="${log_dir}/$(printf "%s" "${test}" | cksum | cut -d" " -f1).log"
+    printf "%s %s %s %s\n" "${rc}" "$(( $(date +%s) - t0 ))" "${key}" "${f}"' sh \
+    < "${log_dir}/list0" > "${log_dir}/results.fifo" &
+xargs_pid=$!
+
+# splits a result line, "STATUS SECONDS KEY FILE", without changing the file name
+parse() {
+    local rest
+    rc=${1%% *}
+    rest=${1#* }
+    secs=${rest%% *}
+    rest=${rest#* }
+    key=${rest%% *}
+    test=${rest#* }
+}
+
+while IFS= read -r line; do
+    parse "${line}"
     echo "==== ${test}: exit ${rc}, ${secs}s"
-    cat "${log}"
+    cat "${log_dir}/${key}.log"
     case "${rc}" in
         0) ;;
         timeout) echo "==== ${test}: FAILED (timed out after ${QTEST_FILE_TIMEOUT}s; its process group was killed)" ;;
         *) echo "==== ${test}: FAILED (exit ${rc})" ;;
     esac
-    printf "%s %s %s\n" "${rc}" "${secs}" "${test}" >> "${log_dir}/results.txt"
-done
+    printf "%s\n" "${line}" >> "${log_dir}/results.txt"
+done < "${log_dir}/results.fifo"
+wait "${xargs_pid}" || :
+xargs_pid=
 
 touch "${log_dir}/results.txt"
 ran=$(grep -c . "${log_dir}/results.txt" || true)
 echo "ran ${ran} of ${count} test files in $(( $(date +%s) - start ))s with ${jobs} in parallel; the slowest:"
-sort -k2,2nr "${log_dir}/results.txt" | head -10 | while read -r rc secs test; do
+sort -k2,2nr "${log_dir}/results.txt" | head -10 | while IFS= read -r line; do
+    parse "${line}"
     printf "    %5ss %s\n" "${secs}" "${test}"
 done
 rc=0
-grep -v '^0 ' "${log_dir}/results.txt" | sort -k3 > "${log_dir}/failed.txt" || true
+grep -v '^0 ' "${log_dir}/results.txt" | sort -k4 > "${log_dir}/failed.txt" || true
 if [ -s "${log_dir}/failed.txt" ]; then
     echo "FAILED TEST FILES:"
-    while read -r status secs test; do
+    while IFS= read -r line; do
+        parse "${line}"
         echo "    ${test}"
     done < "${log_dir}/failed.txt"
     rc=1

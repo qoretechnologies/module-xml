@@ -91,7 +91,7 @@ if [ "${MODE}" = "valgrind" ]; then
     exec ${MODULE_SRC_DIR}/test/docker_test/run-valgrind-qtests.sh ${MAKE_JOBS} gosu qore:qore
 fi
 
-# the parallel test runner itself (about 5 s)
+# the parallel test runner itself (about 7 s)
 ${MODULE_SRC_DIR}/test/docker_test/test-run-qtests.sh
 
 # the number of test files to run at a time

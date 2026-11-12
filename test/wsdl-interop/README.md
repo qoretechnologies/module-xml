@@ -337,10 +337,10 @@ with `build-debug/qlib-qmod` first in the module path and without the source dir
 compiled module loads from the build. Each job runs as many test files at a time as its pod has CPUs
 (`test/docker_test/run-qtests.sh`, sized by `cpu-jobs.sh` from the cgroup CPU quota, or by `QTEST_JOBS`), and
 prints each file's output whole when it finishes. Each file runs in its own session, and a file that runs longer
-than 600 s (`QTEST_FILE_TIMEOUT`) fails and is killed with every process it started;
-`test/docker_test/test-run-qtests.sh` checks the runner first in each job. The four jobs report the GitHub statuses `module-xml-ubuntu`,
-`module-xml-ubuntu-aot`, `module-xml-alpine` and `module-xml-alpine-aot`, and their combined result is reported as
-`module-xml`. Locally, with 4 files at a time:
+than 600 s (`QTEST_FILE_TIMEOUT`) fails and is killed with every process it started; an interrupted runner kills
+every file it started. `test/docker_test/test-run-qtests.sh` checks the runner first in each job. The four jobs
+report the GitHub statuses `module-xml-ubuntu`, `module-xml-ubuntu-aot`, `module-xml-alpine` and
+`module-xml-alpine-aot`, and their combined result is reported as `module-xml`. Locally, with 4 files at a time:
 
 ```sh
 ls test/*.qtest | grep -v '\.aot\.qtest$' > /tmp/qtests.txt
