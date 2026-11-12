@@ -26,20 +26,30 @@ variables:
   PYTHON_SHARDS: "6"
 
 # runs $TEST_SCRIPT with $TEST_MODE and reports the result to GitHub under $STATUS_CONTEXT
+# The result is posted once, by after_script, from CI_JOB_STATUS, so that a job that fails, times out or is canceled
+# also replaces its pending status. A job that tree-tested-skip.sh ended has posted its status already and left
+# .tree-tested-skip, and after_script posts nothing for it. On a job timeout the runner kills the job's pod
+# (FF_USE_POD_ACTIVE_DEADLINE_SECONDS) without running after_script, so every job using this sets
+# RUNNER_SCRIPT_TIMEOUT below its job timeout: the runner then stops the script itself and runs after_script with
+# CI_JOB_STATUS "timedout" (checked with a probe job on this runner: timeout 3m, RUNNER_SCRIPT_TIMEOUT 1m).
 .report: &report
   script:
+    # the default before_script ends with "set +e", so the status is passed on explicitly
+    - ${TEST_SCRIPT} ${TEST_MODE} || exit 1
+  after_script:
     - |
-        if ${TEST_SCRIPT} ${TEST_MODE}; then
-          curl "https://api.github.com/repos/qoretechnologies/${REPO_NAME}/statuses/${CI_COMMIT_SHA}" \
-            -X POST --oauth2-bearer ${GITHUB_ACCESS_TOKEN} -H "Content-Type: application/json" \
-            -d "{\"state\": \"success\", \"context\": \"${STATUS_CONTEXT}\", \"description\": \"Gitlab CI\", \"target_url\": \"${CI_JOB_URL}\"}"
+        if [ -e .tree-tested-skip ]; then
           exit 0
-        else
-          curl "https://api.github.com/repos/qoretechnologies/${REPO_NAME}/statuses/${CI_COMMIT_SHA}" \
-            -X POST --oauth2-bearer ${GITHUB_ACCESS_TOKEN} -H "Content-Type: application/json" \
-            -d "{\"state\": \"failure\", \"context\": \"${STATUS_CONTEXT}\", \"description\": \"Gitlab CI\", \"target_url\": \"${CI_JOB_URL}\"}"
-          exit 1
         fi
+        case "${CI_JOB_STATUS}" in
+          success) state=success ;;
+          failed|timedout) state=failure ;;
+          *) state=error ;;
+        esac
+        curl -s --max-time 30 "https://api.github.com/repos/qoretechnologies/${REPO_NAME}/statuses/${CI_COMMIT_SHA}" \
+          -X POST --oauth2-bearer ${GITHUB_ACCESS_TOKEN} -H "Content-Type: application/json" \
+          -d "{\"state\": \"${state}\", \"context\": \"${STATUS_CONTEXT}\", \"description\": \"Gitlab CI: ${CI_JOB_STATUS}\", \"target_url\": \"${CI_JOB_URL}\"}" \
+          > /dev/null
 
 # one shard of the Python suite; the verify job of the same distribution reports the combined result
 .python-shard: &python-shard
@@ -77,13 +87,17 @@ variables:
 #   from source, 313 files: 778-1001 s on spinster/dugout, 1693 s and 2217 s on supah
 #   AOT, 264 files:          444-953 s on spinster/dugout, 863 s and 1300 s on supah (the latter extrapolated
 #                            from 1158 s for 235 files when the job was killed)
-# The slowest single file took 77 s (wsdl-identity-tuples.qtest, supah); run-qtests.sh kills a file after 600 s.
-# With 4 files at a time in a 4-CPU container (podman --cpus=4, the two Alpine jobs side by side on one host), the
-# from-source files ran in 413 s (1645 s of file time; 510 s for the whole job) and the AOT files in 203 s (795 s;
-# 300 s for the job): about 2 times faster than the serial pass on spinster/dugout, not 4, as a test process uses
-# more than one CPU. Timeout = worst serial pass on supah x 1.5 / 2 (the speedup) + 5 min to set up and build:
-#   from source: 2217 s x 1.5 / 2 + 300 s = 1963 s -> 35 min
-#   AOT:         1300 s x 1.5 / 2 + 300 s = 1275 s -> 25 min
+# The slowest single file took 77 s (wsdl-identity-tuples.qtest, supah); run-qtests.sh kills a file after 600 s, so
+# a hang fails within 10 min of its start, and the job timeouts are only a backstop.
+# With 4 files at a time, in the first full pipeline of this layout (64492, under the rest of the pipeline's load),
+# the from-source files ran in 593-597 s and the AOT files in 259-398 s: about 1.3 times faster than the serial
+# pass on spinster/dugout, not 4, as a test process uses more than one CPU and the jobs share their nodes. Setup
+# before the tests (clone, build, AOT-compiled modules, checks) took 104-109 s in the from-source jobs and 133-196 s
+# in the AOT jobs. Timeout = worst serial pass on supah / 1.3 + longest setup x 2.7 (supah), with about 35% margin:
+#   from source: 2217 s / 1.3 + 109 s x 2.7 = 1705 s + 294 s = 1999 s -> 45 min (2700 s)
+#   AOT:         1300 s / 1.3 + 196 s x 2.7 = 1000 s + 529 s = 1529 s -> 35 min (2100 s)
+# RUNNER_SCRIPT_TIMEOUT is 3 min less (42 and 32 min), leaving time for after_script (see .report); the jobs that keep
+# the default 1 h job timeout use 55 min.
 .qtest: &qtest
   <<: *report
   stage: test
@@ -91,8 +105,10 @@ variables:
 test-ubuntu:
   <<: *qtest
   image: $CI_REGISTRY/infrastructure/qore-test-base/qore-test-base:develop
-  timeout: 35m
+  timeout: 45m
   variables:
+    RUNNER_SCRIPT_TIMEOUT: 42m
+    RUNNER_AFTER_SCRIPT_TIMEOUT: 2m
     TEST_SCRIPT: test/docker_test/test-ubuntu.sh
     TEST_MODE: qtest
     STATUS_CONTEXT: module-xml-ubuntu
@@ -100,8 +116,10 @@ test-ubuntu:
 test-ubuntu-aot:
   <<: *qtest
   image: $CI_REGISTRY/infrastructure/qore-test-base/qore-test-base:develop
-  timeout: 25m
+  timeout: 35m
   variables:
+    RUNNER_SCRIPT_TIMEOUT: 32m
+    RUNNER_AFTER_SCRIPT_TIMEOUT: 2m
     TEST_SCRIPT: test/docker_test/test-ubuntu.sh
     TEST_MODE: qtest-aot
     STATUS_CONTEXT: module-xml-ubuntu-aot
@@ -112,6 +130,8 @@ test-valgrind:
   stage: test
   image: $CI_REGISTRY/infrastructure/qore-test-base/qore-test-base:develop
   variables:
+    RUNNER_SCRIPT_TIMEOUT: 55m
+    RUNNER_AFTER_SCRIPT_TIMEOUT: 2m
     TEST_SCRIPT: test/docker_test/test-ubuntu.sh
     TEST_MODE: valgrind
     STATUS_CONTEXT: module-xml-valgrind
@@ -119,8 +139,10 @@ test-valgrind:
 test-alpine:
   <<: *qtest
   image: $CI_REGISTRY/infrastructure/qore-test-base/qore-test-base:develop-alpine
-  timeout: 35m
+  timeout: 45m
   variables:
+    RUNNER_SCRIPT_TIMEOUT: 42m
+    RUNNER_AFTER_SCRIPT_TIMEOUT: 2m
     TEST_SCRIPT: test/docker_test/test-alpine.sh
     TEST_MODE: qtest
     STATUS_CONTEXT: module-xml-alpine
@@ -128,8 +150,10 @@ test-alpine:
 test-alpine-aot:
   <<: *qtest
   image: $CI_REGISTRY/infrastructure/qore-test-base/qore-test-base:develop-alpine
-  timeout: 25m
+  timeout: 35m
   variables:
+    RUNNER_SCRIPT_TIMEOUT: 32m
+    RUNNER_AFTER_SCRIPT_TIMEOUT: 2m
     TEST_SCRIPT: test/docker_test/test-alpine.sh
     TEST_MODE: qtest-aot
     STATUS_CONTEXT: module-xml-alpine-aot
@@ -189,6 +213,8 @@ python-verify-ubuntu:
     - job: python-ubuntu
       artifacts: true
   variables:
+    RUNNER_SCRIPT_TIMEOUT: 55m
+    RUNNER_AFTER_SCRIPT_TIMEOUT: 2m
     TEST_SCRIPT: test/docker_test/test-ubuntu.sh
     TEST_MODE: python-verify
     STATUS_CONTEXT: module-xml-python-ubuntu
@@ -200,6 +226,8 @@ python-verify-alpine:
     - job: python-alpine
       artifacts: true
   variables:
+    RUNNER_SCRIPT_TIMEOUT: 55m
+    RUNNER_AFTER_SCRIPT_TIMEOUT: 2m
     TEST_SCRIPT: test/docker_test/test-alpine.sh
     TEST_MODE: python-verify
     STATUS_CONTEXT: module-xml-python-alpine
