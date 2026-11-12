@@ -2,28 +2,70 @@
 #
 # Prints the number of CPUs that this container may use: cpu-jobs.sh
 #
-# A Kubernetes CPU limit is a CFS quota, which nproc does not see: in a CI job pod limited to 4 CPUs nproc reports all
-# the node's CPUs (32), and sizing parallel work by it would overload the job. The quota of the container's cgroup
-# (cgroup v2 cpu.max, or cgroup v1 cpu.cfs_quota_us and cpu.cfs_period_us), rounded up, is printed when there is one,
-# and otherwise nproc.
+# A Kubernetes CPU limit is a CFS quota, which neither BusyBox's nproc nor the CPU affinity mask reflects: in a CI job
+# pod limited to 4 CPUs they report all the node's CPUs (32), and sizing parallel work by them would overload the
+# job. This prints the smallest CPU quota, rounded up, of the process's cgroup and its ancestors (cgroup v2 cpu.max,
+# or cgroup v1 cpu.cfs_quota_us and cpu.cfs_period_us), and nproc when there is none. The cgroup is looked up from
+# /proc/self/cgroup: a privileged container (as the CI jobs are) sees the host's cgroup tree, where its own quota is
+# in its cgroup's directory, not at /sys/fs/cgroup.
 #
 # Copyright 2026 Qore Technologies, s.r.o.
 
-quota=
-period=
-if [ -r /sys/fs/cgroup/cpu.max ]; then
-    read -r quota period < /sys/fs/cgroup/cpu.max
-elif [ -r /sys/fs/cgroup/cpu/cpu.cfs_quota_us ] && [ -r /sys/fs/cgroup/cpu/cpu.cfs_period_us ]; then
-    read -r quota < /sys/fs/cgroup/cpu/cpu.cfs_quota_us
-    read -r period < /sys/fs/cgroup/cpu/cpu.cfs_period_us
-fi
-case "${quota}:${period}" in
-    *[!0-9:]*|:*|*:) nproc ;;
-    *)
-        if [ "${quota}" -gt 0 ] && [ "${period}" -gt 0 ]; then
-            echo $(( (quota + period - 1) / period ))
-        else
-            nproc
+best=
+
+# consider QUOTA PERIOD: keeps the smallest whole number of CPUs
+consider() {
+    case "$1:$2" in
+        *[!0-9:]*|:*|*:) return ;;
+    esac
+    if [ "$1" -gt 0 ] && [ "$2" -gt 0 ]; then
+        n=$(( ($1 + $2 - 1) / $2 ))
+        if [ -z "${best}" ] || [ "${n}" -lt "${best}" ]; then
+            best=${n}
         fi
-        ;;
-esac
+    fi
+}
+
+# the directories from DIR up to ROOT
+walk() {
+    dir=$1
+    root=$2
+    while :; do
+        echo "${dir}"
+        if [ "${dir}" = "${root}" ] || [ "${dir}" = "/" ]; then
+            break
+        fi
+        dir=$(dirname "${dir}")
+    done
+}
+
+if [ -r /sys/fs/cgroup/cgroup.controllers ]; then
+    # cgroup v2: "0::PATH"
+    path=$(sed -n 's/^0:://p' /proc/self/cgroup 2>/dev/null)
+    for dir in $(walk "/sys/fs/cgroup${path%/}" /sys/fs/cgroup); do
+        if [ -r "${dir}/cpu.max" ]; then
+            read -r quota period < "${dir}/cpu.max"
+            consider "${quota}" "${period}"
+        fi
+    done
+else
+    # cgroup v1: "N:...cpu...:PATH"
+    path=$(sed -n 's/^[0-9]*:\([^:]*,\)\{0,1\}cpu\(,[^:]*\)\{0,1\}:\(.*\)$/\3/p' /proc/self/cgroup 2>/dev/null | head -1)
+    for base in /sys/fs/cgroup/cpu /sys/fs/cgroup/cpu,cpuacct; do
+        [ -d "${base}" ] || continue
+        for dir in $(walk "${base}${path%/}" "${base}"); do
+            if [ -r "${dir}/cpu.cfs_quota_us" ] && [ -r "${dir}/cpu.cfs_period_us" ]; then
+                read -r quota < "${dir}/cpu.cfs_quota_us"
+                read -r period < "${dir}/cpu.cfs_period_us"
+                consider "${quota}" "${period}"
+            fi
+        done
+        break
+    done
+fi
+
+if [ -n "${best}" ]; then
+    echo "${best}"
+else
+    nproc
+fi
