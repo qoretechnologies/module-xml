@@ -113,7 +113,9 @@ public class CdaDataProvider inherits AbstractDataProvider {
     }
 
     #! Returns effective parse/validation options for a request
-    hash<auto> getRequestOptions(auto req) {
+    # issue #5838: not getRequestOptions(), which AbstractDataProvider calls without arguments for the option
+    # definitions and which a call of it could select instead
+    hash<auto> resolveRequestOptions(auto req) {
         hash<auto> rv = {
             "validate": exists req{"validate"} ? req.validate : validate_default,
             "xsd_path": req.xsd_path ?? xsd_path,

@@ -66,7 +66,7 @@ public class CdaParseDocumentDataProvider inherits AbstractDataProvider {
     }
 
     private auto doRequestImpl(auto req, *hash<auto> request_options) {
-        return CdaDocumentParser::parse(req.xml, parent.getRequestOptions(req));
+        return CdaDocumentParser::parse(req.xml, parent.resolveRequestOptions(req));
     }
 
     private hash<DataProviderInfo> getStaticInfoImpl() {
@@ -116,7 +116,7 @@ public class CdaValidateDocumentDataProvider inherits AbstractDataProvider {
     }
 
     private auto doRequestImpl(auto req, *hash<auto> request_options) {
-        hash<auto> opts = parent.getRequestOptions(req);
+        hash<auto> opts = parent.resolveRequestOptions(req);
         opts.validate = True;
         return CdaDocumentParser::validate(req.xml, opts);
     }
