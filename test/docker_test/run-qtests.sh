@@ -54,20 +54,24 @@ log_dir=$(mktemp -d)
 mkdir "${log_dir}/groups"
 xargs_pid=
 
-# kills every process group that a worker recorded (a file per test file, one group ID per line)
+# kills every process group that a worker recorded (a file per running test file, one group ID per line). A group
+# exists only once setsid has run in the process that leads it: right after the worker started it, the process is not
+# yet a group leader, and killing the group misses it (ESRCH). The process keeps its ID through setsid, RUNNER and
+# qore, so the process itself is killed too. A worker removes its file when its test has ended.
 kill_groups() {
     local f g
     for f in "${log_dir}"/groups/*; do
         [ -f "${f}" ] || continue
         while read -r g; do
-            kill -KILL -"${g}" 2> /dev/null || :
+            kill -KILL -"${g}" "${g}" 2> /dev/null || :
         done < "${f}"
     done
 }
 
 # on an interrupt: no new files (the stop file, and xargs ends), and no test, child or watchdog left running
 interrupted() {
-    trap - INT TERM HUP
+    # ignored, not reset to the default: a second signal must not end the shell before the groups are killed
+    trap '' INT TERM HUP
     echo "run-qtests.sh: interrupted (SIG$1): killing the running test files" >&2
     : > "${log_dir}/stop"
     if [ -n "${xargs_pid}" ]; then
@@ -90,7 +94,8 @@ export QTEST_FILE_TIMEOUT=${QTEST_FILE_TIMEOUT:-600}
 export QTEST_FILE_KILL_GRACE=${QTEST_FILE_KILL_GRACE:-30}
 # The worker runs one file, its argument ("$1"), which is never part of its code. A background job of a
 # non-interactive shell is not a process group leader, so setsid runs the command in a new session without forking,
-# and $! is the ID of its process group. The worker records each group in groups/KEY before it waits; if it is
+# and $! is the ID of its process group once setsid has run (until then, killing the group misses the process, so the
+# process is killed too: see kill_groups). The worker records each group in groups/KEY before it waits; if it is
 # interrupted (its trap sets "stop"; a caught signal is reset to the default in the commands it starts), or the runner
 # has stopped (the stop file, or the log directory is gone), it kills its groups and keeps waiting until the test has
 # ended. The watchdog writes KEY.timeout before it kills the test's group. The worker ends with one line, "STATUS
@@ -115,7 +120,7 @@ xargs -0 -n 1 -P "${jobs}" sh -c '
     rc=
     while :; do
         if [ -n "${stop}" ] || [ -e "${LOG_DIR}/stop" ] || [ ! -d "${LOG_DIR}/groups" ]; then
-            kill -KILL -"${pid}" -"${watchdog}" 2> /dev/null || :
+            kill -KILL -"${pid}" "${pid}" -"${watchdog}" "${watchdog}" 2> /dev/null || :
         fi
         wait "${pid}" && rc=0 || rc=$?
         # a trapped signal interrupts wait; the test has ended only when it is gone
@@ -123,8 +128,10 @@ xargs -0 -n 1 -P "${jobs}" sh -c '
             break
         fi
     done
-    kill -KILL -"${watchdog}" 2> /dev/null || :
+    kill -KILL -"${watchdog}" "${watchdog}" 2> /dev/null || :
+    # the test is reaped, so its ID may be reused: only its group (which keeps the ID from reuse while it exists)
     kill -KILL -"${pid}" 2> /dev/null || :
+    rm -f "${LOG_DIR}/groups/${key}"
     if [ -n "${stop}" ] || [ ! -d "${LOG_DIR}/groups" ]; then
         exit 1
     fi

@@ -154,6 +154,9 @@ check_none_left "after a run with a timeout"
 # so that the probe cannot time out first)
 export QTEST_SYNC_FIFO="${dir}/sync" QTEST_RELEASE_FIFO="${dir}/release"
 mkfifo "${QTEST_SYNC_FIFO}" "${QTEST_RELEASE_FIFO}"
+# held open for reading and writing, so that neither the stand-in nor this test waits in open() for the other: a
+# stand-in that never starts fails the read below after 30 s instead of blocking this test
+exec 4<> "${QTEST_SYNC_FIFO}"
 key() {
     printf '%s' "$1" | cksum | cut -d' ' -f1
 }
@@ -171,8 +174,8 @@ mid_run() {
     "${runner}" 1 "${dir}/list" > "${dir}/out.txt" 2>&1 &
     pid=$!
     bg=${pid}
-    read -r started < "${QTEST_SYNC_FIFO}"
-    [ "${started}" = started ] || fail "${what}: probe.qtest did not start"
+    read -r -t 30 started <&4 || started=
+    [ "${started}" = started ] || fail "${what}: probe.qtest did not start within 30 s"
     SETTLE=20 check_gone "${what}, while the next file runs" "$@"
     # opened for reading and writing, the FIFO does not wait for a reader (in case the probe ended meanwhile)
     exec 3<> "${QTEST_RELEASE_FIFO}"
@@ -228,8 +231,8 @@ for how in "TERM runner" "INT group"; do
     fi
     pid=$!
     bg=${pid}
-    read -r started < "${QTEST_SYNC_FIFO}"
-    [ "${started}" = started ] || fail "SIG$1: the blocking file did not start"
+    read -r -t 30 started <&4 || started=
+    [ "${started}" = started ] || fail "SIG$1: the blocking file did not start within 30 s"
     # a runner that ignores the signal would wait for the blocking file for 100 min: it is killed after 30 s instead
     # (in its own process group, the guard and its sleep end together when they are no longer needed)
     ( sleep 30; kill -KILL -"${pid}" 2> /dev/null ) &
