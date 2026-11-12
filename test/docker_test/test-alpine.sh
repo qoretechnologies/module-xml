@@ -6,7 +6,8 @@ set -x
 # qtest (default): build the module and run the Qore test files against the module sources
 # qtest-aot: build the module and run the Qore test files against the AOT-compiled modules of the build
 # (both run QTEST_JOBS test files at a time, by default as many as the container's CPUs: see cpu-jobs.sh)
-# python-shard: build the module and run shard $CI_NODE_INDEX of $CI_NODE_TOTAL of the Python WSDL/SOAP suite
+# python-shard: build the module and run shard $CI_NODE_INDEX of $CI_NODE_TOTAL of the Python WSDL/SOAP suite,
+# PYTHON_JOBS test modules at a time (by default half the container's CPUs, rounded up; see run-python-suite.sh)
 # python-verify: check the combined results of all Python suite shards
 MODE=${1:-qtest}
 case "${MODE}" in
@@ -81,6 +82,8 @@ fi
 
 # the parallel test runner itself (about 7 s)
 ${MODULE_SRC_DIR}/test/docker_test/test-run-qtests.sh
+# the tree-already-tested check of develop pipelines (about 4 s)
+${MODULE_SRC_DIR}/test/docker_test/test-tree-already-tested.sh
 
 # the number of test files to run at a time
 QTEST_JOBS=${QTEST_JOBS:-$(${MODULE_SRC_DIR}/test/docker_test/cpu-jobs.sh)}
