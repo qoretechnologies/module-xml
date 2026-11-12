@@ -11,7 +11,8 @@
 # - leaves no process behind: neither the child of a timed-out file, nor the child that a passing file left running,
 #   nor a watchdog (its own "sh -c" or its sleep);
 # - when it is interrupted, by SIGTERM to the runner alone (as when the CI runner stops the script) or by SIGINT to
-#   its whole process group (Ctrl-C), ends with 143 or 130 and leaves no test, child, worker or watchdog running.
+#   its whole process group (Ctrl-C), ends with 143 or 130 and leaves no test, child, worker or watchdog running
+#   (and does not hang if the runner ignores the signal).
 # Takes about 7 s in the CI images. Exits nonzero on the first failed check.
 #
 # Copyright 2026 Qore Technologies, s.r.o.
@@ -207,14 +208,32 @@ check_none_left "after passing files"
 export QTEST_FILE_TIMEOUT=6007
 watchdog_sleep=6007
 printf '%s\n' "${dir}/block.qtest" "${dir}/pass.qtest" > "${dir}/list"
+# A non-interactive shell starts a background command with SIGINT ignored, and a signal ignored on entry cannot be
+# trapped or reset by a shell; the CI runner starts the job's script that way, so the runner (and everything it
+# starts) ignores SIGINT there, as Ctrl-C cannot happen. The SIGINT case therefore starts the runner through Python,
+# which restores SIGINT's default disposition first, and is skipped (saying so) without Python.
+# (python3 is started directly, not through eval, so that $! is the runner that it becomes)
+reset_sigint='import os, signal, sys; signal.signal(signal.SIGINT, signal.SIG_DFL); os.execvp(sys.argv[1], sys.argv[1:])'
 set -m
 for how in "TERM runner" "INT group"; do
     set -- ${how}
-    "${runner}" 1 "${dir}/list" > "${dir}/out.txt" 2>&1 &
+    if [ "$1" = INT ]; then
+        if ! command -v python3 > /dev/null 2>&1; then
+            echo "test-run-qtests.sh: no python3: the SIGINT case is skipped"
+            continue
+        fi
+        python3 -I -c "${reset_sigint}" "${runner}" 1 "${dir}/list" > "${dir}/out.txt" 2>&1 &
+    else
+        "${runner}" 1 "${dir}/list" > "${dir}/out.txt" 2>&1 &
+    fi
     pid=$!
     bg=${pid}
     read -r started < "${QTEST_SYNC_FIFO}"
     [ "${started}" = started ] || fail "SIG$1: the blocking file did not start"
+    # a runner that ignores the signal would wait for the blocking file for 100 min: it is killed after 30 s instead
+    # (in its own process group, the guard and its sleep end together when they are no longer needed)
+    ( sleep 30; kill -KILL -"${pid}" 2> /dev/null ) &
+    guard=$!
     if [ "$2" = group ]; then
         kill -"$1" -"${pid}"
     else
@@ -222,9 +241,11 @@ for how in "TERM runner" "INT group"; do
     fi
     wait "${pid}" && rc=0 || rc=$?
     bg=
+    kill -KILL -"${guard}" 2> /dev/null || :
+    wait "${guard}" 2> /dev/null || :
     expected=143
     [ "$1" = INT ] && expected=130
-    [ "${rc}" = "${expected}" ] || fail "SIG$1 to the ${2}: exit ${rc}, not ${expected}"
+    [ "${rc}" = "${expected}" ] || fail "SIG$1 to the ${2}: exit ${rc}, not ${expected} (137: it ignored the signal)"
     grep -q "interrupted (SIG$1)" "${dir}/out.txt" || fail "SIG$1 to the ${2}: the interrupt is not reported"
     check_none_left "after SIG$1 to the ${2}"
 done
