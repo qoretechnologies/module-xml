@@ -26,6 +26,8 @@ case "${QORE_TREE_TESTED_IN:-}" in
                 -d "{\"state\": \"success\", \"context\": \"${STATUS_CONTEXT:-${REPO_NAME}}\", \"description\": \"tree tested in pipeline ${QORE_TREE_TESTED_IN}\", \"target_url\": \"${tested_url}\"}" \
                 > /dev/null || true
         fi
+        # tells the job's after_script (.report in .gitlab/ci/module-xml.yml) that the status is posted
+        : > .tree-tested-skip
         exit 0
         ;;
 esac

@@ -1,20 +1,22 @@
 #!/bin/bash
 #
-# Runs the Qore tests against the AOT-compiled modules of this build: run-aot-qtests.sh BUILD_DIR [RUNNER...]
+# Runs the Qore tests against the AOT-compiled modules of this build: run-aot-qtests.sh BUILD_DIR JOBS [RUNNER...]
 #
 # The tests load the in-repo modules from their sources (%requires ../qlib/<Module>.qm), which never exercises the
 # native modules that the build compiles (QORE_BUILD_AOT_MODULES) and installs. For each test that loads one, this
 # writes a copy beside the original (so relative fixture paths still resolve) that loads the modules by name instead,
 # including in the sub-programs that tests parse, and runs it with BUILD_DIR/qlib-qmod first in the module path and
-# without the source directory. A preflight check requires every module to resolve to its compiled .qmod. RUNNER,
-# if given, prefixes each test command (for example "gosu qore:qore"). Exits nonzero if any test fails.
+# without the source directory. A preflight check requires every module to resolve to its compiled .qmod. The copies
+# run JOBS at a time (run-qtests.sh). RUNNER, if given, prefixes each test command (for example "gosu qore:qore").
+# Exits nonzero if any test fails.
 #
 # Copyright 2026 Qore Technologies, s.r.o.
 
 set -e
 
 build_dir=$(cd "$1" && pwd)
-shift
+jobs=$2
+shift 2
 src_dir=$(cd "$(dirname "$0")/../.." && pwd)
 qmod_dir="${build_dir}/qlib-qmod"
 cd "${src_dir}"
@@ -43,13 +45,13 @@ done
 echo "AOT modules: $(echo ${modules} | wc -w) load from ${qmod_dir}"
 
 copies=()
+list=$(mktemp)
 cleanup() {
-    rm -f "${copies[@]}"
+    rm -f "${copies[@]}" "${list}"
 }
 trap cleanup EXIT
 
 FAILED=
-count=0
 for test in test/*.qtest; do
     case "${test}" in
         *.aot.qtest) continue ;;
@@ -69,19 +71,17 @@ for test in test/*.qtest; do
         continue
     fi
     chmod +x "${copy}"
-    count=$((count + 1))
-    # run with debugging enabled to catch @debug block parse errors
-    "$@" qore -p enable-debug "${copy}" -v && rc=0 || rc=$?
-    if [ "${rc}" != "0" ]; then
-        FAILED="${FAILED} ${test}"
-    fi
+    echo "${copy}" >> "${list}"
 done
 
-echo "AOT test files run: ${count}"
+echo "AOT test files to run: $(grep -c . "${list}" || true)"
+rc=0
+"${src_dir}/test/docker_test/run-qtests.sh" "${jobs}" "${list}" "$@" || rc=1
 if [ -n "${FAILED}" ]; then
-    echo "FAILED AOT TEST FILES:"
+    echo "FAILED AOT TEST FILES (unrewritten reference to ../qlib/):"
     for test in ${FAILED}; do
         echo "    ${test}"
     done
-    exit 1
+    rc=1
 fi
+exit ${rc}

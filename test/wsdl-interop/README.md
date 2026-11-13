@@ -306,37 +306,81 @@ test/wsdl-interop/.venv/bin/pip install --only-binary=:all: --require-hashes -r 
 cd test/wsdl-interop && .venv/bin/python -W error -m unittest discover -p 'test_*.py'
 ```
 
-The suite takes longer than one CI job allows, so `ci_suite.py` splits it by test module into six shards that
-run as parallel jobs (`python-ubuntu` and `python-alpine`), with warnings as errors:
+Most tests start one `qore` or `java` process at a time and wait for it, so one test runner keeps 1.6-1.7 CPUs
+busy. `ci_suite.py` therefore runs several test modules at a time, each in a process and session of its own, with
+warnings as errors, and splits the suite by module into shards for separate CI jobs. CI runs two shards per
+distribution (`python-ubuntu`, `python-alpine`, `PYTHON_SHARDS` and `parallel` in `.gitlab/ci/module-xml.yml`), each
+running half as many modules at a time as its pod has CPUs (`test/docker_test/cpu-jobs.sh`, or `PYTHON_JOBS`): more
+would overcommit the CPUs and make each test slower than the fixed timeouts that some tests set for their
+subprocesses allow (see `test/docker_test/run-python-suite.sh`):
 
 ```sh
 cd test/wsdl-interop
-.venv/bin/python -W error ci_suite.py list --shards 6                            # the assignment
-.venv/bin/python -W error ci_suite.py run --shard 1/6 --output /tmp/ci-results    # one shard
-.venv/bin/python -W error ci_suite.py verify --shards 6 --output /tmp/ci-results  # the completeness check
+.venv/bin/python -W error ci_suite.py run --jobs 2 --output /tmp/ci-results     # the whole suite, 2 modules at a time
+.venv/bin/python -W error ci_suite.py verify --shards 1 --output /tmp/ci-results  # the completeness check
+.venv/bin/python -W error ci_suite.py list --shards 2                             # the CI shard assignment
+.venv/bin/python -W error ci_suite.py run --shard 1/2 --jobs 2 --output /tmp/ci-results  # one CI shard
+.venv/bin/python -W error ci_suite.py verify --shards 2 --output /tmp/ci-results
 ```
 
-Each shard records every test with its outcome and duration in `shard-I-of-N.json`. The verify jobs
-(`python-verify-ubuntu`, `python-verify-alpine`) discover the suite independently and fail unless every
-discovered test ran exactly once, in its assigned shard, and passed. A missing shard result, a missing,
-duplicate, unknown, skipped or failed test, or a module that cannot be imported therefore fails CI instead of
-changing the counts. The verify jobs report the GitHub statuses `module-xml-python-ubuntu` and
-`module-xml-python-alpine`; the shard results and `summary.json` are archived for 30 days.
+A run records every test with its outcome and duration in `shard-I-of-N.json`, and each module's output in
+`logs/<module>.log`; the output of a module is also printed whole when it finishes. The runner discovers the tests
+of each module itself. A module process that crashes, that runs longer than `--module-timeout` seconds (default
+3600, `PYTHON_MODULE_TIMEOUT` in CI) or that exits without a result fails the tests it did not report, naming the
+test that was running; it is killed with every process it started, and processes that a passing module leaves
+running are killed when it finishes. A run interrupted by SIGINT or SIGTERM stops its module processes and still
+writes its report. The verify jobs (`python-verify-ubuntu`, `python-verify-alpine`) discover
+the suite independently and fail unless every discovered test ran exactly once, in its assigned shard, and passed.
+A missing shard result, a missing, duplicate, unknown, skipped or failed test, a module that cannot be imported or a
+module process that failed therefore fails CI instead of changing the counts. The verify jobs report the GitHub
+statuses `module-xml-python-ubuntu` and `module-xml-python-alpine`; the shard results, the module logs and
+`summary.json` are archived for 30 days.
+
+The suite is safe to run in parallel: its servers and peers (Python, Qore HTTP servers, Jetty and Axis peers) listen
+on ports the system assigns, Java peers are compiled into temporary directories, every file a test writes is in a
+temporary directory, and no test writes to the source tree or shares a cache with another. The one port chosen
+before it is bound is the decoupled WS-Addressing endpoint of `addressing-peer/AddressingPeer.java`, whose address
+the request carries: it asks the system for a free port and binds it moments later, and another process would have
+to be given that same port in between. A new test must keep the suite parallel-safe.
 
 The assignment is deterministic: modules are placed longest first on the least loaded shard, using the
-measured durations in `ci-timings.json`. The timings only balance the shards. After adding slow tests, record
-new ones from a complete set of shard results with `python3 ci_suite.py timings --output <results>`, and
-change `PYTHON_SHARDS` and `parallel` in `.gitlab/ci/module-xml.yml` together.
+measured durations in `ci-timings.json`, and within a run they start longest first, so that the longest do not
+start last. The timings only balance the shards and order the modules. After adding slow tests, record new ones
+from a complete set of shard results with `python3 ci_suite.py timings --output <results>`, and change
+`PYTHON_SHARDS` and `parallel` in `.gitlab/ci/module-xml.yml` together.
 
-The Qore test jobs (`test-ubuntu`, `test-alpine`) run every `test/*.qtest` twice, first against the module
-sources and then against the AOT-compiled modules that the same build produces (`QORE_BUILD_AOT_MODULES`, on by
-default). The tests load the in-repo modules by path (`%requires ../qlib/WSDL.qm`), which never exercises the
-compiled modules, so `test/docker_test/run-aot-qtests.sh` writes a copy of each test that loads them by name, in
-the test and in the sub-programs it parses, and runs it with `build-debug/qlib-qmod` first in the module path and
-without the source directory. It first checks that every compiled module loads from the build. Locally:
+In a pipeline of a branch other than develop and master, the Python suite jobs and the valgrind job run only when
+the branch changes files they exercise, compared with develop (`rules:changes` in `.gitlab/ci/module-xml.yml`); for
+the Python suite these are the native module and its build, `WSDL.qm`, the `Soap*` and `XmlRpc*` handler and client
+modules, `docs/` (`test_doc_examples.py`), the `test/soap*.qtest` and `test/wsdl*.qtest` files the assertion ledger
+names, `test/xml-id-bindings.qtest`, `test/*.wsdl`, `test/*.xsd`, `test/cmake`, this directory, `test/docker_test`
+and the CI files; for valgrind, the native module and its build, the test files and test data at the top of `test/`,
+the fixtures in `test/wsdl-interop/fixtures`, the in-repo modules the valgrind tests load (`WSDL.qm`,
+`WebDavHandler`, `SaxDataProvider`, `XmlRpcClientIo`), `test/docker_test` and the CI files
+(`test/docker_test/test-change-rules.py`, run in every pipeline, checks that these cover everything the valgrind
+tests load and read). A skipped job posts no GitHub status. Develop, master, tags, scheduled, web, API and
+pipeline-triggered pipelines run everything, as does a branch pipeline with the CI variable `FULL_CI=1` (`git push
+-o ci.variable="FULL_CI=1"`). A develop merge reuses the result of the pull request's pipeline only when that
+pipeline ran every job (`tree-already-tested.sh`).
+
+The Qore test jobs run every `test/*.qtest` against the module sources (`test-ubuntu`, `test-alpine`) and, in
+parallel jobs, against the AOT-compiled modules that the same build produces (`test-ubuntu-aot`,
+`test-alpine-aot`; `QORE_BUILD_AOT_MODULES`, on by default). The tests load the in-repo modules by path
+(`%requires ../qlib/WSDL.qm`), which never exercises the compiled modules, so `test/docker_test/run-aot-qtests.sh`
+writes a copy of each test that loads them by name, in the test and in the sub-programs it parses, and runs it
+with `build-debug/qlib-qmod` first in the module path and without the source directory. It first checks that every
+compiled module loads from the build. Each job runs as many test files at a time as its pod has CPUs
+(`test/docker_test/run-qtests.sh`, sized by `cpu-jobs.sh` from the cgroup CPU quota, or by `QTEST_JOBS`), and
+prints each file's output whole when it finishes. Each file runs in its own session, and a file that runs longer
+than 600 s (`QTEST_FILE_TIMEOUT`) fails and is killed with every process it started; an interrupted runner kills
+every file it started. `test/docker_test/test-run-qtests.sh` checks the runner first in each job. The four jobs
+report the GitHub statuses `module-xml-ubuntu`, `module-xml-ubuntu-aot`, `module-xml-alpine` and
+`module-xml-alpine-aot`, and their combined result is reported as `module-xml`. Locally, with 4 files at a time:
 
 ```sh
-test/docker_test/run-aot-qtests.sh build-debug
+ls test/*.qtest | grep -v '\.aot\.qtest$' > /tmp/qtests.txt
+test/docker_test/run-qtests.sh 4 /tmp/qtests.txt
+test/docker_test/run-aot-qtests.sh build-debug 4
 ```
 
 The Ubuntu qtest job also installs the `litmus` WebDAV compliance suite and sets `QORE_XML_REQUIRE_LITMUS=1`, so
@@ -344,12 +388,15 @@ The Ubuntu qtest job also installs the `litmus` WebDAV compliance suite and sets
 `litmus` package, and the test skips explicitly without it.
 
 The `test-valgrind` job runs the native module's tests under valgrind (`test/docker_test/run-valgrind-qtests.sh`):
-the tests that load no in-repo Qore module and so exercise the C++ module and its bundled libxml2. Each must
-report no valgrind error and no definitely or indirectly lost memory. Valgrind is about 50 times slower than a
-normal run, so the WSDL/SOAP tests, which mostly exercise the Qore code of the `qlib` modules, are left to the
-other jobs. The runs set `QORE_PCRE2_NO_JIT=1`: PCRE2's JIT matcher reads a subject in blocks past its length,
-which valgrind reports as uninitialised reads, so its interpreter is used instead. The job reports the GitHub
-status `module-xml-valgrind`. Locally:
+the test files without a `qlib/` reference, which exercise the C++ module and its bundled libxml2
+(`run-valgrind-qtests.sh --list` prints them). Each must report no valgrind error and no definitely or indirectly
+lost memory. Valgrind is about 50 times slower than a normal run, so the WSDL/SOAP tests, which load the `qlib`
+modules by path and mostly exercise their Qore code, are left to the other jobs. Seven of the selected tests load
+in-repo modules by name through the module path, which the CI job sets to the checkout's `qlib` first (`WSDL`,
+`WebDavHandler`, `SaxDataProvider`, `XmlRpcClientIo`; `xml.qtest`, the main native API test, among them); they stay
+under valgrind. The runs set `QORE_PCRE2_NO_JIT=1`: PCRE2's JIT matcher reads a subject in blocks past its length,
+which valgrind reports as uninitialised reads, so its interpreter is used instead. The job reports the GitHub status
+`module-xml-valgrind`. Locally:
 
 ```sh
 test/docker_test/run-valgrind-qtests.sh 4

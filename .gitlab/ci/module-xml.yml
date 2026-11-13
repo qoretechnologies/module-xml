@@ -1,6 +1,16 @@
 # The module-xml test pipeline, run as a child pipeline of .gitlab-ci.yml, which runs one at a time.  Every job
 # sources test/docker_test/tree-tested-skip.sh first, which ends it with success when the parent pipeline found that
 # the commit's tree already passed CI (QORE_TREE_TESTED_IN).
+#
+# Full and partial pipelines: the trigger job in .gitlab-ci.yml sets MODULE_XML_FULL_CI to "0" only for a push to a
+# branch other than develop and master without FULL_CI=1; develop, master, tags, schedules, web and API pipelines
+# and pipelines triggered by other pipelines (the module CI that qore-test-base starts after each image cycle) are
+# full ("1", also when the variable is missing). In a partial pipeline the Qore test jobs always run, but the
+# valgrind job and the Python suite jobs run only when the branch changes files they exercise, compared with
+# develop (rules:changes:compare_to, which works in a child pipeline; checked with a probe pipeline). A job that
+# does not run posts no GitHub status: none of their statuses is required (develop requires only "module-xml",
+# which qtest-passed or qtest-failed posts in every pipeline), and a job posts "pending" only when it runs.
+# tree-already-tested.sh reuses only a pipeline in which every job ran and passed.
 
 stages:
   - test
@@ -22,29 +32,259 @@ variables:
   REPO_NAME: module-xml
   # the GitHub status context a job reports
   STATUS_CONTEXT: module-xml
-  # the number of parallel jobs running the Python WSDL/SOAP suite; must match "parallel" below
-  PYTHON_SHARDS: "6"
+  # the number of parallel jobs running the Python WSDL/SOAP suite per distribution; must match "parallel" below
+  PYTHON_SHARDS: "2"
+
+# The files whose changes make a partial pipeline run a suite (see above). Paths are compared with develop. The
+# job names of the full pipeline are listed in test/docker_test/tree-already-tested.sh (FULL_JOBS; every other job
+# must be in FULL_JOBS_EXEMPT, which test-tree-already-tested.sh checks).
+.changes:
+  # test-valgrind runs the test files that run-valgrind-qtests.sh selects (those without a "qlib/" reference; no
+  # glob can select them, so every test file and the test data at the top of test/ count) against the C++ sources and
+  # the bundled libxml2 build and its patches. Seven of them load in-repo modules by name through the module path
+  # (WSDL, WebDavHandler, SaxDataProvider and XmlRpcClientIo, which load no other in-repo module), and 14 read 18
+  # fixture files from test/wsdl-interop/fixtures. test/docker_test/test-change-rules.py (run in the Qore test jobs, which always run)
+  # checks that these globs cover every selected test file, every in-repo module it loads (also through other in-repo
+  # modules) and every file it names under test/.
+  valgrind: &valgrind-paths
+    - src/**/*
+    - cmake/**/*
+    - CMakeLists.txt
+    - qlib/WSDL.qm
+    - qlib/WebDavHandler/**/*
+    - qlib/SaxDataProvider/**/*
+    - qlib/XmlRpcClientIo/**/*
+    - test/*.qtest
+    - test/*.xml
+    - test/*.xsd
+    - test/*.wsdl
+    - test/*.dtd
+    - test/wsdl-interop/fixtures/**/*
+    - test/docker_test/**/*
+    - .gitlab-ci.yml
+    - .gitlab/ci/**/*
+  # The Python suite loads WSDL.qm, the Soap* modules and the XmlRpc handler and client (test_xmlrpc_text.py) from
+  # qlib, and through them the native module; no other qlib module (not SalesforceSoapClient, nor the WebDAV,
+  # Cargo, CDA or SAX data provider modules). test_doc_examples.py runs the examples in docs/; test_ledger.py checks
+  # that the assertion ledger names existing test cases of test/soap*.qtest and test/wsdl*.qtest;
+  # test_native_id_bindings.py runs test/xml-id-bindings.qtest; test_union_whitespace.py reads test/test.wsdl;
+  # test_ieee_canonical.py imports test/cmake. test_ci_suite.py checks that these globs cover every test file the
+  # ledger names and every file at the top of test/ that the suite's Python files name.
+  python: &python-paths
+    - src/**/*
+    - cmake/**/*
+    - CMakeLists.txt
+    - qlib/WSDL.qm
+    - qlib/Soap*
+    - qlib/Soap*/**/*
+    - qlib/XmlRpcHandler.qm
+    - qlib/XmlRpcClientIo/**/*
+    - docs/**/*
+    - test/soap*.qtest
+    - test/wsdl*.qtest
+    - test/xml-id-bindings.qtest
+    - test/*.wsdl
+    - test/*.xsd
+    - test/cmake/**/*
+    - test/wsdl-interop/**/*
+    - test/docker_test/**/*
+    - .gitlab-ci.yml
+    - .gitlab/ci/**/*
+
+.valgrind-rules: &valgrind-rules
+  - if: $MODULE_XML_FULL_CI != "0"
+  - changes:
+      paths: *valgrind-paths
+      compare_to: refs/heads/develop
+
+.python-rules: &python-rules
+  - if: $MODULE_XML_FULL_CI != "0"
+  - changes:
+      paths: *python-paths
+      compare_to: refs/heads/develop
 
 # runs $TEST_SCRIPT with $TEST_MODE and reports the result to GitHub under $STATUS_CONTEXT
+# The result is posted once, by after_script, from CI_JOB_STATUS, so that a job that fails, times out or is canceled
+# also replaces its pending status. A job that tree-tested-skip.sh ended has posted its status already and left
+# .tree-tested-skip, and after_script posts nothing for it. On a job timeout the runner kills the job's pod
+# (FF_USE_POD_ACTIVE_DEADLINE_SECONDS) without running after_script, so every job using this sets
+# RUNNER_SCRIPT_TIMEOUT below its job timeout: the runner then stops the script itself and runs after_script with
+# CI_JOB_STATUS "timedout" (checked with a probe job on this runner: timeout 3m, RUNNER_SCRIPT_TIMEOUT 1m). The pod
+# deadline counts from the pod's start, including the image pull and the clone, while RUNNER_SCRIPT_TIMEOUT counts
+# from the script's start, so the difference must cover the pod's startup, the clone and after_script: it is 6 min.
+# The pod startup (to "Running on") took at most 36 s over the last 300 jobs of this project, and the clone about
+# 10 s; a cold pull of the 10-15 GB test image on a new node that takes longer than about 5 min would still cost the
+# after_script of a job that times out (the job still fails, and qtest-failed reports "module-xml").
 .report: &report
   script:
+    # the default before_script ends with "set +e", so the status is passed on explicitly
+    - ${TEST_SCRIPT} ${TEST_MODE} || exit 1
+  after_script:
     - |
-        if ${TEST_SCRIPT} ${TEST_MODE}; then
-          curl "https://api.github.com/repos/qoretechnologies/${REPO_NAME}/statuses/${CI_COMMIT_SHA}" \
-            -X POST --oauth2-bearer ${GITHUB_ACCESS_TOKEN} -H "Content-Type: application/json" \
-            -d "{\"state\": \"success\", \"context\": \"${STATUS_CONTEXT}\", \"description\": \"Gitlab CI\", \"target_url\": \"${CI_JOB_URL}\"}"
+        if [ -e .tree-tested-skip ]; then
           exit 0
-        else
-          curl "https://api.github.com/repos/qoretechnologies/${REPO_NAME}/statuses/${CI_COMMIT_SHA}" \
+        fi
+        case "${CI_JOB_STATUS}" in
+          success) state=success ;;
+          failed|timedout) state=failure ;;
+          *) state=error ;;
+        esac
+        # GitHub's response is printed only when the post fails (a 401 or 422 would be silent otherwise); a failed
+        # post does not change the job's result, which after_script cannot change anyway
+        if ! response=$(curl -sS --fail-with-body --max-time 30 \
+            "https://api.github.com/repos/qoretechnologies/${REPO_NAME}/statuses/${CI_COMMIT_SHA}" \
             -X POST --oauth2-bearer ${GITHUB_ACCESS_TOKEN} -H "Content-Type: application/json" \
-            -d "{\"state\": \"failure\", \"context\": \"${STATUS_CONTEXT}\", \"description\": \"Gitlab CI\", \"target_url\": \"${CI_JOB_URL}\"}"
-          exit 1
+            -d "{\"state\": \"${state}\", \"context\": \"${STATUS_CONTEXT}\", \"description\": \"Gitlab CI: ${CI_JOB_STATUS}\", \"target_url\": \"${CI_JOB_URL}\"}" 2>&1); then
+          echo "posting the status ${state} of ${STATUS_CONTEXT} to GitHub failed: ${response}"
         fi
 
-# one shard of the Python suite; the verify job of the same distribution reports the combined result
+# The Qore tests run in four jobs, in parallel: against the module sources and against the AOT-compiled modules of
+# the build (run-aot-qtests.sh), on Ubuntu and Alpine. Each job builds the module itself and runs QTEST_JOBS test
+# files at a time, by default as many as the CPUs of its pod (cpu-jobs.sh reads the cgroup CPU quota; the runner
+# gives a build container a request and limit of 4 CPUs), and reports its own GitHub status; qtest-passed and
+# qtest-failed report their combined result as "module-xml", the status that develop's branch protection requires.
+#
+# Job timeouts: one job used to run both passes serially, and test-alpine job 226887 (pipeline 64294) hit the
+# default 1 h timeout on the node supah, which is 2-2.7 times slower than spinster and dugout under the load of
+# the rest of the pipeline. Serial pass times measured (build and setup take 2-4 min more):
+#   from source, 313 files: 778-1001 s on spinster/dugout, 1693 s and 2217 s on supah
+#   AOT, 264 files:          444-953 s on spinster/dugout, 863 s and 1300 s on supah (the latter extrapolated
+#                            from 1158 s for 235 files when the job was killed)
+# The slowest single file took 77 s (wsdl-identity-tuples.qtest, supah); run-qtests.sh kills a file after 600 s, so
+# a hang fails within 10 min of its start, and the job timeouts are only a backstop.
+# With 4 files at a time, in the first full pipeline of this layout (64492, under the rest of the pipeline's load),
+# the from-source files ran in 593-597 s and the AOT files in 259-398 s: about 1.3 times faster than the serial
+# pass on spinster/dugout, not 4, as a test process uses more than one CPU and the jobs share their nodes. Setup
+# before the tests (clone, build, AOT-compiled modules, checks) took 104-109 s in the from-source jobs and 133-196 s
+# in the AOT jobs. Timeout = worst serial pass on supah / 1.3 + longest setup x 2.7 (supah), with about 35% margin:
+#   from source: 2217 s / 1.3 + 109 s x 2.7 = 1705 s + 294 s = 1999 s -> 45 min (2700 s)
+#   AOT:         1300 s / 1.3 + 196 s x 2.7 = 1000 s + 529 s = 1529 s -> 35 min (2100 s)
+# RUNNER_SCRIPT_TIMEOUT is 6 min less (39 and 29 min; see .report), which still exceeds the estimates above; the jobs
+# that keep the default 1 h job timeout use 54 min.
+.qtest: &qtest
+  <<: *report
+  stage: test
+
+test-ubuntu:
+  <<: *qtest
+  image: $CI_REGISTRY/infrastructure/qore-test-base/qore-test-base:develop
+  timeout: 45m
+  variables:
+    RUNNER_SCRIPT_TIMEOUT: 39m
+    RUNNER_AFTER_SCRIPT_TIMEOUT: 2m
+    TEST_SCRIPT: test/docker_test/test-ubuntu.sh
+    TEST_MODE: qtest
+    STATUS_CONTEXT: module-xml-ubuntu
+
+test-ubuntu-aot:
+  <<: *qtest
+  image: $CI_REGISTRY/infrastructure/qore-test-base/qore-test-base:develop
+  timeout: 35m
+  variables:
+    RUNNER_SCRIPT_TIMEOUT: 29m
+    RUNNER_AFTER_SCRIPT_TIMEOUT: 2m
+    TEST_SCRIPT: test/docker_test/test-ubuntu.sh
+    TEST_MODE: qtest-aot
+    STATUS_CONTEXT: module-xml-ubuntu-aot
+
+# the native module's tests under valgrind (see test/docker_test/run-valgrind-qtests.sh)
+test-valgrind:
+  <<: *report
+  stage: test
+  rules: *valgrind-rules
+  image: $CI_REGISTRY/infrastructure/qore-test-base/qore-test-base:develop
+  variables:
+    RUNNER_SCRIPT_TIMEOUT: 54m
+    RUNNER_AFTER_SCRIPT_TIMEOUT: 2m
+    TEST_SCRIPT: test/docker_test/test-ubuntu.sh
+    TEST_MODE: valgrind
+    STATUS_CONTEXT: module-xml-valgrind
+
+test-alpine:
+  <<: *qtest
+  image: $CI_REGISTRY/infrastructure/qore-test-base/qore-test-base:develop-alpine
+  timeout: 45m
+  variables:
+    RUNNER_SCRIPT_TIMEOUT: 39m
+    RUNNER_AFTER_SCRIPT_TIMEOUT: 2m
+    TEST_SCRIPT: test/docker_test/test-alpine.sh
+    TEST_MODE: qtest
+    STATUS_CONTEXT: module-xml-alpine
+
+test-alpine-aot:
+  <<: *qtest
+  image: $CI_REGISTRY/infrastructure/qore-test-base/qore-test-base:develop-alpine
+  timeout: 35m
+  variables:
+    RUNNER_SCRIPT_TIMEOUT: 29m
+    RUNNER_AFTER_SCRIPT_TIMEOUT: 2m
+    TEST_SCRIPT: test/docker_test/test-alpine.sh
+    TEST_MODE: qtest-aot
+    STATUS_CONTEXT: module-xml-alpine-aot
+
+# the combined result of the four Qore test jobs, reported as "module-xml": qtest-passed runs when all of them
+# passed, qtest-failed when any of them failed (a job with "needs" runs on the result of the jobs it needs)
+.qtest-status: &qtest-status
+  stage: verify
+  image: $CI_REGISTRY/infrastructure/qore-test-base/qore-test-base:develop
+  needs:
+    - job: test-ubuntu
+      artifacts: false
+    - job: test-ubuntu-aot
+      artifacts: false
+    - job: test-alpine
+      artifacts: false
+    - job: test-alpine-aot
+      artifacts: false
+  variables:
+    GIT_DEPTH: "1"
+    STATUS_CONTEXT: module-xml
+
+qtest-passed:
+  <<: *qtest-status
+  when: on_success
+  script:
+    - |
+        curl "https://api.github.com/repos/qoretechnologies/${REPO_NAME}/statuses/${CI_COMMIT_SHA}" \
+          -X POST --oauth2-bearer ${GITHUB_ACCESS_TOKEN} -H "Content-Type: application/json" \
+          -d "{\"state\": \"success\", \"context\": \"${STATUS_CONTEXT}\", \"description\": \"Gitlab CI: the Qore test jobs passed\", \"target_url\": \"${CI_PIPELINE_URL}\"}"
+
+qtest-failed:
+  <<: *qtest-status
+  when: on_failure
+  script:
+    - |
+        curl "https://api.github.com/repos/qoretechnologies/${REPO_NAME}/statuses/${CI_COMMIT_SHA}" \
+          -X POST --oauth2-bearer ${GITHUB_ACCESS_TOKEN} -H "Content-Type: application/json" \
+          -d "{\"state\": \"failure\", \"context\": \"${STATUS_CONTEXT}\", \"description\": \"Gitlab CI: a Qore test job failed\", \"target_url\": \"${CI_PIPELINE_URL}\"}"
+
+# The Python suite runs in PYTHON_SHARDS jobs per distribution (parallel: 2): each builds the module and runs its
+# shard of the test modules (ci_suite.py), each module in its own process, half as many at a time as its pod has CPUs
+# (2 of 4: a module process keeps 1.6-1.7 CPUs busy; see run-python-suite.sh); the verify job of the distribution
+# then checks that every discovered test ran exactly once, in its shard, and passed, and reports the GitHub status.
+#
+# Job timeouts: in pipeline 64492, where six serial shards ran per distribution, a shard took 852-924 s (Ubuntu) and
+# 793-861 s (Alpine) on spinster/dugout and 1573-1973 s on supah, 2-2.7 times slower; the whole serial suite thus
+# takes about 5100 s on a fast node and up to about 13800 s on supah. In podman with 4 CPUs (about as fast as
+# spinster/dugout: the serial suite took 5361 s on Ubuntu and 4858 s on Alpine), a shard of two with two modules at a
+# time ran 2.3-2.6 times faster than the serial run of its modules (Alpine), and only 1.33-1.38 times faster (Ubuntu)
+# while the host was overloaded (load 35-45 on 32 CPUs, so that each container got about 3 of its 4 CPUs). Setup
+# before the tests (clone, virtual environment, build) took 99-106 s on spinster/dugout and 174-198 s on supah.
+# Timeout = worst serial half on supah / speedup + longest setup x 2.7 (supah):
+#   speedup 2.3:  13800 s / 2 / 2.3  + 106 s x 2.7 = 3000 s + 286 s = 3286 s (55 min)
+#   speedup 1.33: 13800 s / 2 / 1.33 + 106 s x 2.7 = 5188 s + 286 s = 5474 s (91 min) -> 95 min (5700 s)
+# RUNNER_SCRIPT_TIMEOUT is 6 min less (89 min; see .report). In pipeline 64582 the shards took 1214-1716 s on
+# spinster/dugout and 2534 s on supah (Alpine 2/2: 2291 s of tests, 1.9 times its 1221 s in podman, where the two
+# Alpine shards took 1257 s and 1221 s, so the difference is the node, not the balance). A hung
+# module is killed after PYTHON_MODULE_TIMEOUT (3600 s; the slowest module, test_calendar_values, took 471 s in the
+# serial run), so the job timeout is only a backstop. A job stopped at RUNNER_SCRIPT_TIMEOUT still archives the
+# module logs written so far, and the report when the runner's SIGTERM reaches ci_suite.py, which then names the
+# tests that were running.
 .python-shard: &python-shard
   stage: test
-  parallel: 6
+  parallel: 2
+  rules: *python-rules
+  timeout: 95m
   before_script:
     - . test/docker_test/tree-tested-skip.sh
   script:
@@ -55,52 +295,35 @@ variables:
     paths:
       - test/wsdl-interop/ci-results/
 
+# runs when its shards have finished, whatever their result ("when" belongs in the rules of a job with rules)
 .python-verify: &python-verify
   <<: *report
   stage: verify
-  when: always
+  rules:
+    - if: $MODULE_XML_FULL_CI != "0"
+      when: always
+    - changes:
+        paths: *python-paths
+        compare_to: refs/heads/develop
+      when: always
   artifacts:
     when: always
     expire_in: 30 days
     paths:
       - test/wsdl-interop/ci-results/
 
-test-ubuntu:
-  <<: *report
-  stage: test
-  image: $CI_REGISTRY/infrastructure/qore-test-base/qore-test-base:develop
-  variables:
-    TEST_SCRIPT: test/docker_test/test-ubuntu.sh
-    TEST_MODE: qtest
-
-# the native module's tests under valgrind (see test/docker_test/run-valgrind-qtests.sh)
-test-valgrind:
-  <<: *report
-  stage: test
-  image: $CI_REGISTRY/infrastructure/qore-test-base/qore-test-base:develop
-  variables:
-    TEST_SCRIPT: test/docker_test/test-ubuntu.sh
-    TEST_MODE: valgrind
-    STATUS_CONTEXT: module-xml-valgrind
-
-test-alpine:
-  <<: *report
-  stage: test
-  image: $CI_REGISTRY/infrastructure/qore-test-base/qore-test-base:develop-alpine
-  variables:
-    TEST_SCRIPT: test/docker_test/test-alpine.sh
-    TEST_MODE: qtest
-
 python-ubuntu:
   <<: *python-shard
   image: $CI_REGISTRY/infrastructure/qore-test-base/qore-test-base:develop
   variables:
+    RUNNER_SCRIPT_TIMEOUT: 89m
     TEST_SCRIPT: test/docker_test/test-ubuntu.sh
 
 python-alpine:
   <<: *python-shard
   image: $CI_REGISTRY/infrastructure/qore-test-base/qore-test-base:develop-alpine
   variables:
+    RUNNER_SCRIPT_TIMEOUT: 89m
     TEST_SCRIPT: test/docker_test/test-alpine.sh
 
 python-verify-ubuntu:
@@ -110,6 +333,8 @@ python-verify-ubuntu:
     - job: python-ubuntu
       artifacts: true
   variables:
+    RUNNER_SCRIPT_TIMEOUT: 54m
+    RUNNER_AFTER_SCRIPT_TIMEOUT: 2m
     TEST_SCRIPT: test/docker_test/test-ubuntu.sh
     TEST_MODE: python-verify
     STATUS_CONTEXT: module-xml-python-ubuntu
@@ -121,6 +346,8 @@ python-verify-alpine:
     - job: python-alpine
       artifacts: true
   variables:
+    RUNNER_SCRIPT_TIMEOUT: 54m
+    RUNNER_AFTER_SCRIPT_TIMEOUT: 2m
     TEST_SCRIPT: test/docker_test/test-alpine.sh
     TEST_MODE: python-verify
     STATUS_CONTEXT: module-xml-python-alpine
