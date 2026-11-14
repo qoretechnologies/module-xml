@@ -16,6 +16,11 @@
 # run in parallel; RUNNER, if given, prefixes each command (for example "gosu qore:qore"). Exits nonzero if any test
 # fails or reports a valgrind error.
 #
+# A test that exercises no C++ code can leave the selection with a line "# valgrind: skip - <why>" in its file (for
+# example one that loads every in-repo module in child qore processes: test/RestrictedProgramLoad.qtest).
+# test-change-rules.py checks the paths of the selected tests only. The AOT runner (run-aot-qtests.sh) runs only
+# tests with a "qlib/" reference, which such a test does not have.
+#
 # Copyright 2026 Qore Technologies, s.r.o.
 
 set -e
@@ -23,7 +28,7 @@ set -e
 src_dir=$(cd "$(dirname "$0")/../.." && pwd)
 cd "${src_dir}"
 
-tests=$(grep -L 'qlib/' test/*.qtest | grep -v '\.aot\.qtest$')
+tests=$(grep -L 'qlib/' test/*.qtest | grep -v '\.aot\.qtest$' | xargs grep -L -E '^# valgrind: skip( |$)')
 if [ "$1" = "--list" ]; then
     echo "${tests}"
     exit 0
