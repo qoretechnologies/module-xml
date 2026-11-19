@@ -35,6 +35,20 @@ class Server inherits HttpServer {
 
 } # class Server
 
+#! accepts the users alice and bob with any password and sets the request's user
+class TestUserAuthenticator inherits HttpServer::AbstractAuthenticator {
+    bool requiresAuthentication() {
+        return True;
+    }
+
+    authenticate(reference<hash<auto>> cx, string user, string pass = "") {
+        if (user != "alice" && user != "bob") {
+            throw "AUTHENTICATION-ERROR", sprintf("unknown user %y", user);
+        }
+        cx.user = user;
+    }
+}
+
 class Client inherits HTTPClient {
     constructor(string url)
             : HTTPClient({
@@ -51,6 +65,7 @@ class Main inherits QUnit::Test {
         addTestCase("property responses declare XML media types", \xmlResponseTypes());
         addTestCase("proxy constructors and mounted routes", \proxyRoutes());
         addTestCase("path traversal is refused", \pathTraversal());
+        addTestCase("only the lock's owner can remove or refresh it", \lockOwnership());
 
         set_return_value(main());
     }
@@ -80,6 +95,54 @@ class Main inherits QUnit::Test {
             rbody = s.readHTTPChunkedBody(10s).body;
         }
         return {"status": resp.status_code, "body": rbody};
+    }
+
+    #! returns the headers of a request of the given user, with Basic authentication
+    private static hash<auto> userHdr(string user, *hash<auto> hdr) {
+        return {"Authorization": "Basic " + make_base64_string(user + ":pw")} + hdr;
+    }
+
+    #! an UNLOCK or a lock refresh with the token of another user's lock is refused (issue #6797)
+    private lockOwnership() {
+        TmpDir root();
+        {
+            File f();
+            f.open2(root.path + "/doc.txt", O_CREAT | O_WRONLY | O_TRUNC);
+            f.write("doc");
+        }
+        WebDavHandler::FsWebDavHandler handler(root.path, new TestUserAuthenticator());
+        Server srv(<HttpServerOptionInfo>{"debug": True}, handler);
+        on_exit srv.stop();
+        int port = srv.getPort();
+
+        string lock_body = "<?xml version=\"1.0\" encoding=\"utf-8\"?><D:lockinfo xmlns:D=\"DAV:\">"
+            "<D:lockscope><D:exclusive/></D:lockscope><D:locktype><D:write/></D:locktype>"
+            "<D:owner>alice</D:owner></D:lockinfo>";
+        hash<auto> r = rawRequest(port, "LOCK", "/doc.txt", userHdr("alice", {"Content-Type": "application/xml",
+            "Timeout": "Second-60"}), lock_body);
+        assertEq(200, r.status, "alice locks the file");
+        *string token = (r.body.toString() =~ x/(urn:uuid:[-0-9a-fA-F]+)/)[0];
+        assertTrue(exists token, "the lock token is returned");
+
+        # bob presents alice's lock token
+        r = rawRequest(port, "UNLOCK", "/doc.txt", userHdr("bob", {"Lock-Token": "<" + token + ">"}));
+        assertEq(403, r.status, "bob cannot remove alice's lock");
+        r = rawRequest(port, "LOCK", "/doc.txt", userHdr("bob", {"If": "(<" + token + ">)",
+            "Timeout": "Infinite"}));
+        assertEq(423, r.status, "bob cannot refresh alice's lock");
+        # the lock is still alice's: bob cannot write
+        r = rawRequest(port, "PUT", "/doc.txt", userHdr("bob", {"If": "(<" + token + ">)"}), "bob");
+        assertEq(423, r.status, "the lock still holds against bob");
+
+        # alice can refresh and remove her lock
+        r = rawRequest(port, "LOCK", "/doc.txt", userHdr("alice", {"If": "(<" + token + ">)",
+            "Timeout": "Second-120"}));
+        assertEq(200, r.status, "alice refreshes her lock");
+        r = rawRequest(port, "UNLOCK", "/doc.txt", userHdr("alice", {"Lock-Token": "<" + token + ">"}));
+        assertEq(204, r.status, "alice removes her lock");
+        # bob can write now
+        r = rawRequest(port, "PUT", "/doc.txt", userHdr("bob"), "bob");
+        assertTrue(r.status == 200 || r.status == 201 || r.status == 204, sprintf("bob writes: %d", r.status));
     }
 
     private pathTraversal() {
