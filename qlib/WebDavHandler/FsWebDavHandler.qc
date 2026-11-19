@@ -266,6 +266,20 @@ public class FsWebDavHandler inherits AbstractWebDavHandler {
         return !exists lock_info.user || lock_info.user == cx.user;
     }
 
+    #! Returns True if the request's user may remove (\c UNLOCK) or refresh the lock
+    /** By default only the user that created the lock may (see ownsLock()), as for the use of the lock by a write
+        request; a subclass can override this method to allow more, for example an administrator to remove another
+        user's lock
+
+        @param cx the call context of the request; \c user is the authenticated user, if any
+        @param lock_info the lock
+
+        @since %WebDavHandler 1.3
+    */
+    private bool mayManageLock(hash<auto> cx, hash<WebDavLockInfo> lock_info) {
+        return ownsLock(cx, lock_info);
+    }
+
     #! Returns the locks that apply to a resource: its own, and those of its ancestors with depth infinity
     /** @param path a normalized resource path in the handler's directory
 
@@ -934,7 +948,7 @@ public class FsWebDavHandler inherits AbstractWebDavHandler {
 
         # Check for lock refresh (If header with lock token, no body)
         if (!body && hdr."if") {
-            return handleLockRefresh(path, hdr);
+            return handleLockRefresh(cx, path, hdr);
         }
 
         if (!body) {
@@ -1031,7 +1045,10 @@ public class FsWebDavHandler inherits AbstractWebDavHandler {
     }
 
     #! Handles lock refresh requests
-    private hash<HttpResponseInfo> handleLockRefresh(string path, hash<auto> hdr) {
+    /** only the user that may manage the lock can refresh it (see mayManageLock()); the request of another user is
+        refused with \c 423 Locked, as a write request with the lock token of another user's lock is
+    */
+    private hash<HttpResponseInfo> handleLockRefresh(hash<auto> cx, string path, hash<auto> hdr) {
         # Extract lock token from If header
         # Format: (<urn:uuid:...>) or (Not <urn:uuid:...>)
         *string if_header = hdr."if";
@@ -1051,6 +1068,10 @@ public class FsWebDavHandler inherits AbstractWebDavHandler {
         }
         if (!lock_info) {
             return response(412, "the If header names no lock of this resource");
+        }
+        # the lock token is not a capability: the lock of another user cannot be refreshed with it (issue #6797)
+        if (!mayManageLock(cx, lock_info)) {
+            return lockedResponse(lock_info);
         }
         string token = lock_info.token;
 
@@ -1203,6 +1224,12 @@ public class FsWebDavHandler inherits AbstractWebDavHandler {
         # the resource must be in the scope of the lock (RFC 4918 section 9.11)
         if (!inlist(token, map $1.token, getApplicableLocks(path))) {
             return response(409, "Lock token does not match resource");
+        }
+
+        # only the lock's owner may remove it: the lock token is not a capability (RFC 4918 section 9.11.1: 403
+        # Forbidden when the current principal does not have permission to remove the lock; issue #6797)
+        if (!mayManageLock(cx, lock_info)) {
+            return response(403, "the lock belongs to another user");
         }
 
         # Release the lock at its root
