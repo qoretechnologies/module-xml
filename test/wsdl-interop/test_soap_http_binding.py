@@ -117,21 +117,51 @@ class SoapHttpBindingTests(unittest.TestCase):
             self.assertTrue(responses.empty()); self.assertEqual(len(expected),requests.qsize()); total += len(expected)
         self.assertEqual(396,total)
 
+    def test_invalid_http_text_is_bad_request(self):
+        # SOAP 1.2 also returns 400 on older HttpServers that delegate decoding to the handler.
+        version = '12'
+        command = ['qore', '-b', '--enable-debug', str(PEER / 'handler.qr'), version, 'source', 'native', '0']
+        with endpoint(command, ENV) as (_, port):
+            for charset in ('UTF-16LE', 'UTF-8'):
+                with self.subTest(charset=charset):
+                    connection = http.client.HTTPConnection('127.0.0.1', port, timeout=10)
+                    try:
+                        connection.request('POST', '/service', b'\xff',
+                                           {'Content-Type': media(version) + ';charset=' + charset})
+                        response = connection.getresponse()
+                        raw = response.read()
+                        self.assertEqual(response.status, 400, raw)
+                        self.assertIn(charset.encode(), raw)
+                        if response.getheader('Content-Type').startswith(media(version)):
+                            self.schemas[version].assertValid(etree.fromstring(raw))
+                            self.assertIn(b'ENCODING-CONVERSION-ERROR', raw)
+                        else:
+                            self.assertIn(b'invalid encoding', raw)
+                    finally:
+                        connection.close()
+
     def test_invalid_encoded_bytes_keep_the_protocol_error(self):
+        # HttpServer delivers a multipart container as bytes. SoapHandler decodes its XML root.
         for version in URI:
-            for state in ('source','saved','data'):
-                for mode in ('native','retained'):
-                    with endpoint(['qore','-b','--enable-debug',str(PEER/'handler.qr'),version,state,mode,'1'],ENV) as (_,port):
-                        connection = http.client.HTTPConnection('127.0.0.1',port,timeout=10)
+            for state in ('source', 'saved', 'data'):
+                for mode in ('native', 'retained'):
+                    command = ['qore', '-b', '--enable-debug', str(PEER / 'handler.qr'), version, state, mode, '1']
+                    with self.subTest(version=version, state=state, mode=mode), endpoint(command, ENV) as (_, port):
+                        connection = http.client.HTTPConnection('127.0.0.1', port, timeout=10)
                         try:
-                            connection.request('POST','/service',b'\xff',{'Content-Type':media(version)+';charset=UTF-16LE'})
-                            response = connection.getresponse(); raw=response.read()
-                            self.assertEqual(400 if version=='12' else 500,response.status,raw)
-                            document=etree.fromstring(raw);self.schemas[version].assertValid(document)
-                            self.assertIn(b'ENCODING-CONVERSION-ERROR',raw)
-                            connection.request('POST','/service',envelope(version),{'Content-Type':media(version)})
-                            response=connection.getresponse();raw=response.read();self.assertEqual(200,response.status,raw)
-                        finally: connection.close()
+                            for charset in ('UTF-16LE', 'UTF-8'):
+                                ct, body = multipart(media(version) + ';charset=' + charset, b'\xff')
+                                connection.request('POST', '/service', body, {'Content-Type': ct})
+                                response = connection.getresponse()
+                                raw = response.read()
+                                self.assertEqual(response.status, 400 if version == '12' else 500, raw)
+                                self.schemas[version].assertValid(etree.fromstring(raw))
+                                self.assertIn(b'ENCODING-CONVERSION-ERROR', raw)
+                            connection.request('POST', '/service', envelope(version), {'Content-Type': media(version)})
+                            response = connection.getresponse()
+                            self.assertEqual(response.status, 200, response.read())
+                        finally:
+                            connection.close()
 
     def test_http_bindings_retain_their_allowed_methods(self):
         for state in ('source','saved','data'):
