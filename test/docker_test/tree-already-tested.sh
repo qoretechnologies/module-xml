@@ -8,7 +8,7 @@
 # same job runs in qore's pipelines (examples/test/docker_test/tree-already-tested.sh there).
 #
 # The candidates are the commit itself (a fast-forward merge, or a pipeline on another ref) and each parent with the
-# same tree (the merged pull request head).  Only a full pass counts: a successful pipeline other than this one whose
+# same tree, plus the verified head of a squash-merged pull request.  Only a full pass counts: a successful pipeline other than this one whose
 # child test pipeline (the trigger job "module-xml") ran every job in FULL_JOBS and passed them.  A partial branch
 # pipeline, which skips the valgrind or Python suite jobs when the branch changes nothing they exercise (see
 # .gitlab/ci/module-xml.yml), therefore does not spare its tree the full develop pipeline.  The first candidate with
@@ -96,6 +96,13 @@ full_pass() {
     done
     return 0
 }
+
+# A squash merge's tested tip is not a parent. Apply the same pipeline checks to
+# that tip only after GitHub confirms the merged PR and its identical Git tree.
+squash=$(python3 "$(dirname "$0")/squash_head.py" "$(git rev-parse HEAD)" "$tree") || squash=
+if [ -n "$squash" ]; then
+    candidates="$candidates $squash"
+fi
 
 for commit in $candidates; do
     if ! list=$(api "pipelines?sha=${commit}&status=success&per_page=20"); then
