@@ -357,10 +357,13 @@ SoapHandler returns plain UTF-8 HTTP 400 responses for malformed transport metad
 and 415 for unsupported transport, root media or charset. These failures precede
 header and body callbacks. Envelope-version negotiation precedes the final media/
 envelope identity check, preserving VersionMismatch and Upgrade behavior. Errors
-while interpreting a recognized SOAP envelope retain protocol faults. Error logging
-records the input byte count and original exception without decoding invalid body
-text. Valid character encodings with malformed payload bytes therefore retain their
-original protocol error and do not trigger a secondary logging failure.
+while interpreting a recognized SOAP envelope retain protocol faults. HttpServer can
+reject malformed request text with HTTP 400 before dispatch. For example, one byte
+cannot form a UTF-16LE code unit. HttpServer passes multipart containers as bytes,
+so SoapHandler decodes the XML root using its own charset. A malformed root raises
+`ENCODING-CONVERSION-ERROR` even when its charset is UTF-8. The handler records the
+input byte count and original exception and returns a SOAP 1.1 Client fault (HTTP
+500) or a SOAP 1.2 Sender fault (HTTP 400).
 
 Unsupported methods on registered resources return HTTP 405 with an Allow header
 computed from applicable SOAP and WSDL HTTP bindings. SOAP WSDL invocation uses POST;
