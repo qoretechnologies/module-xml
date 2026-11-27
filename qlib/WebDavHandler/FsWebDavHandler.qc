@@ -95,6 +95,11 @@ public class FsWebDavHandler inherits AbstractWebDavHandler {
 
     #! Common constructor initialization
     private init(string path) {
+        # the root is the creator's: refused before it is used if the creating code is restricted from the file system
+        if (SandboxManager::isCallerRestricted(DOM_FILESYSTEM)) {
+            throw "PERMISSION-DENIED", sprintf("WebDAV root %y cannot be used: the calling code is restricted from the "
+                "FILESYSTEM functional domain", path);
+        }
         basePath = normalize_dir(path) + "/";
         if (!is_dir(basePath)) {
             throw "WEBDAV-BASE-PATH-ERROR", sprintf("path %y is not a directory", path);

@@ -484,6 +484,9 @@ if (policy.required) {
 /** @page wsdlreleasenotes WSDL Release Notes
 
     @section wsdl_0_5_8 WSDL v0.5.8
+    - <b>Security fix</b>: @ref WSDL::WSDLLib::getFile() "WSDLLib::getFile()", which reads every local WSDL and
+      schema document, refuses code restricted from the file system with \c PERMISSION-DENIED before the file is
+      read (<a href="https://github.com/qoretechnologies/module-xml/issues/251">issue 251</a>)
     - <b>behavior change</b>: a value that a %WSDL data provider type refuses (an XSD lexical or facet violation, a
       union value that no member accepts, an invalid SOAP or HTTP MIME message value, and so on) raises
       \c TYPE-VALUE-ERROR instead of \c RUNTIME-TYPE-ERROR, as the DataProvider module's types do, so that a caller's
@@ -1965,8 +1968,19 @@ string method = WSDLLib::fromXmlName("Hello_x0020_world"); # "Hello world"
 
     #! retrieves a local file and returns the file's contents as a string
     /** called by WSDLLib::getFileFromURL() in case the scheme is "file"
+
+        @throw PERMISSION-DENIED the calling code is restricted from the \c FILESYSTEM functional domain (see
+        @ref Qore::SandboxManager::isCallerRestricted() "SandboxManager::isCallerRestricted()"); the file is the
+        location of a document that the caller gives or that a document of the caller references, so it is refused
+        before it is read
     */
     static data getFile(string fn, bool as_string = True) {
+        # library code runs with its own Program's options: the caller's restrictions decide
+        if (SandboxManager::isCallerRestricted(DOM_FILESYSTEM)) {
+            # the path is not given in the message, as it can hold the values of environment variables
+            throw "PERMISSION-DENIED", "a local file cannot be read: the calling code is restricted from the FILESYSTEM "
+                "functional domain";
+        }
         *binary rv = ReadOnlyFile::readBinaryFile(fn);
         if (!exists rv) {
             throw "WSDL-LIB-ERROR", sprintf("file %y is empty or could not be read as a normal file", fn);
@@ -44768,6 +44782,12 @@ public class XsdSchema inherits WSDL::XsdBase {
     }
 
     private {
+        #! set while a method adds a schema document that its caller gave: the local documents that it references are
+        #! that caller's input (module-xml#251)
+        transient *bool caller_schema_input;
+        #! set while the constructor or deserialization adds the schema documents
+        transient *bool internal_load;
+
         # the documents loaded for this schema graph, for the load limits (WsdlLoadLimitHelper)
         transient hash<string, bool> loaded_documents();
         # the depth of the schema import/include being loaded
@@ -44838,6 +44858,11 @@ public class XsdSchema inherits WSDL::XsdBase {
         foreach hash<XsdSourceInfo> source in (pending_schema_sources) {
             def_path = source.base;
             document_location = source.location;
+            # the documents of a deserialized schema are restored as they were added (also through a subclass's
+            # addSchemaString())
+            *bool prev_internal = internal_load;
+            internal_load = True;
+            on_exit internal_load = prev_internal;
             addSchemaString(source.xml);
         }
         pending_schema_sources = ();
@@ -44876,6 +44901,9 @@ public class XsdSchema inherits WSDL::XsdBase {
         if (opts.compat_empty_string_is_nothing || global_compat_empty_string_is_nothing) {
             nsc.opt_empty_string_is_nothing = True;
         }
+        # the documents of the constructor are the creator's (also through a subclass's addSchemaString())
+        internal_load = True;
+        on_exit internal_load = NOTHING;
         foreach string s in (xsd) {
             addSchemaString(s);
         }
@@ -44893,6 +44921,20 @@ public class XsdSchema inherits WSDL::XsdBase {
         @note A failed addition does not retain declarations or dependency marks from that document.
     */
     addSchemaString(string xsd) {
+        if (internal_load) {
+            addSchemaStringIntern(xsd);
+            return;
+        }
+        # the documents that this document references are the caller's input, also for the code that this object was
+        # lent to
+        *bool prev = caller_schema_input;
+        caller_schema_input = True;
+        on_exit caller_schema_input = prev;
+        addSchemaStringIntern(xsd);
+    }
+
+    #! adds an XSD document to the schema and parses its types, for the constructor and deserialization
+    private addSchemaStringIntern(string xsd) {
         validateSchemaRoot(xsd, "XSD-ERROR");
         validateSchemaGrammar(xsd);
         hash<auto> h = XsdSchemaSource::parse(xsd);
@@ -44967,11 +45009,15 @@ public class XsdSchema inherits WSDL::XsdBase {
     /** @param path the XSD file to read
         @throw XSD-ERROR invalid schema root
         @throw WSDL-ERROR invalid schema declarations or dependency graph
+        @throw PERMISSION-DENIED the calling code (or the code that this object was lent to) is restricted from the
+        \c FILESYSTEM functional domain
         @note Dependencies always resolve relative to this file. An existing default base is restored;
         the first successful file addition establishes the default if none was configured.
         Failed additions restore the original default base.
     */
     addSchemaFile(string path) {
+        # the path is the caller's input, also for the code that a schema object was lent to
+        XsdSchema::checkCallerPath(path);
         *string previous_location = document_location;
         document_location = WsdlFileLocation::fromPath(path);
         on_exit document_location = previous_location;
@@ -44986,6 +45032,20 @@ public class XsdSchema inherits WSDL::XsdBase {
         addSchemaString(WSDLLib::getFile(path));
     }
 
+    #! refuses a local path that the calling code gives if that code is restricted from the file system
+    /** The calling code is judged as by @ref Qore::SandboxManager::isLentToRestricted()
+        "SandboxManager::isLentToRestricted()": in a method of an object that the host lent to restricted code, the
+        code that the object was lent to counts, as the path is that code's input.
+
+        @throw PERMISSION-DENIED the calling code is restricted from the \c FILESYSTEM functional domain
+    */
+    private static checkCallerPath(string path) {
+        if (SandboxManager::isLentToRestricted(DOM_FILESYSTEM)) {
+            throw "PERMISSION-DENIED", sprintf("local path %y cannot be used: the calling code is restricted from the "
+                "FILESYSTEM functional domain", path);
+        }
+    }
+
     #! parses every matching XSD file in the given directory (non-recursive)
     /** @param dir the directory containing XSD files
         @param regex regex anchored against each file name (default matches filenames ending in \c .xsd)
@@ -44993,10 +45053,15 @@ public class XsdSchema inherits WSDL::XsdBase {
         Sets @ref def_path to \a dir if not already set. Individual files retain their own resolution bases.
         @throw XSD-ERROR an invalid schema root
         @throw WSDL-ERROR invalid schema declarations or dependency graph
+        @throw PERMISSION-DENIED the calling code (or the code that this object was lent to) is restricted from the
+        \c FILESYSTEM functional domain
         @note A failed call restores the original default base. Files successfully added before a later
         file fails remain available; each file addition is atomic.
     */
     addSchemaDir(string dir, string regex = "\\.xsd$") {
+        # the path is the caller's input, also for the code that a schema object was lent to: refused before the
+        # directory is listed
+        XsdSchema::checkCallerPath(dir);
         *string previous_base = def_path;
         on_error def_path = previous_base;
         if (!def_path) {
@@ -45677,6 +45742,12 @@ public class XsdSchema inherits WSDL::XsdBase {
             xsd = call_function(try_import, schema_location);
             new_def_path = WSDLLib::getLocationBase(loc);
         } else {
+            # a local document that a schema document given to a method references is that method's caller's input
+            if (caller_schema_input && WsdlFileLocation::isFile(loc)
+                    && SandboxManager::isLentToRestricted(DOM_FILESYSTEM)) {
+                throw "PERMISSION-DENIED", "a local schema document that the schema references cannot be read: the "
+                    "calling code is restricted from the FILESYSTEM functional domain";
+            }
             hash<string, string> aliases();
             xsd = WSDLLib::getFileFromURL(loc, "file", http_client, http_headers, True, NOTHING, \new_def_path,
                 \source_location, \aliases);

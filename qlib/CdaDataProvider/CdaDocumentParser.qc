@@ -122,7 +122,93 @@ public hashdecl CdaValidateDocumentResponse {
 }
 
 #! CDA XML parser, metadata extractor, and XSD validator
+/** An \c xsd_path option is the caller's input: it is refused with \c PERMISSION-DENIED before it is used if the
+    calling code (or the code that an object that calls these methods was lent to) is restricted from the
+    \c FILESYSTEM functional domain (see @ref Qore::SandboxManager::isLentToRestricted()
+    "SandboxManager::isLentToRestricted()").
+*/
 public class CdaDocumentParser {
+    #! Parses a CDA XML document and optionally validates it with an XSD
+    /** @throw PERMISSION-DENIED an \c xsd_path option is given and the calling code is restricted from the
+        \c FILESYSTEM functional domain
+    */
+    public static hash<CdaParseDocumentResponse> parse(string xml, *hash<auto> opts = NOTHING) {
+        CdaDocumentParser::checkXsdPath(opts);
+        return CdaDocumentParserImpl::parse(xml, opts);
+    }
+
+    #! Validates a CDA XML document and returns metadata when validation succeeds
+    /** @throw PERMISSION-DENIED an \c xsd_path option is given and the calling code is restricted from the
+        \c FILESYSTEM functional domain
+    */
+    public static hash<CdaValidateDocumentResponse> validate(string xml, hash<auto> opts) {
+        CdaDocumentParser::checkXsdPath(opts);
+        return CdaDocumentParserImpl::validate(xml, opts);
+    }
+
+    #! Validates the given XML with either file-based or inline XSD configuration
+    /** @throw PERMISSION-DENIED an \c xsd_path option is given and the calling code is restricted from the
+        \c FILESYSTEM functional domain
+    */
+    public static validateXml(string xml, *hash<auto> opts = NOTHING) {
+        CdaDocumentParser::checkXsdPath(opts);
+        CdaDocumentParserImpl::validateXml(xml, opts);
+    }
+
+    #! Refuses an \c xsd_path option if the calling code is restricted from the file system
+    /** Library code runs with its own %Program's options, so the caller's restrictions decide; the data providers of
+        this module call the implementation directly, as they check the path of a request and the path of their
+        creator themselves
+    */
+    private static checkXsdPath(*hash<auto> opts) {
+        if (opts.xsd_path && SandboxManager::isLentToRestricted(DOM_FILESYSTEM)) {
+            throw "PERMISSION-DENIED", "`xsd_path` cannot be used: the calling code is restricted from the FILESYSTEM "
+                "functional domain";
+        }
+        if (opts.xsd) {
+            cda_check_inline_xsd(opts.xsd, True);
+        }
+    }
+}
+
+#! Refuses an inline XSD that references local documents if the code that gives it is restricted from the file system
+/** An inline schema is not a path, but the documents that it includes, imports or redefines are read when it is used;
+    a reference that is not an \c http or \c https URL (a local path or a \c file URI) is the caller's path.  A
+    document with a DTD is refused too, as its declarations can supply such references.
+
+    @param xsd the inline schema
+    @param lent @ref True to judge the calling code as by @ref Qore::SandboxManager::isLentToRestricted()
+    "SandboxManager::isLentToRestricted()" (a schema in a request), @ref False as by
+    @ref Qore::SandboxManager::isCallerRestricted() "SandboxManager::isCallerRestricted()" (a schema given when a
+    provider is created)
+
+    @throw PERMISSION-DENIED the schema references a local document or has a DTD, and the calling code is restricted
+    from the \c FILESYSTEM functional domain
+*/
+sub cda_check_inline_xsd(string xsd, bool lent) {
+    bool restricted = lent
+        ? SandboxManager::isLentToRestricted(DOM_FILESYSTEM)
+        : SandboxManager::isCallerRestricted(DOM_FILESYSTEM);
+    if (!restricted) {
+        return;
+    }
+    bool local = xsd =~ /<!(DOCTYPE|ENTITY|ATTLIST)/i;
+    if (!local) {
+        foreach string loc in (xsd =~ x/\bschemaLocation\s*=\s*["']([^"']*)["']/g) {
+            if (loc !~ /^https?:\/\//i) {
+                local = True;
+                break;
+            }
+        }
+    }
+    if (local) {
+        throw "PERMISSION-DENIED", "the `xsd` schema references a local document, which cannot be read: the calling "
+            "code is restricted from the FILESYSTEM functional domain";
+    }
+}
+
+#! The implementation of CdaDocumentParser, without the check of the caller's \c xsd_path (not exported)
+class CdaDocumentParserImpl {
     #! Parses a CDA XML document and optionally validates it with an XSD
     public static hash<CdaParseDocumentResponse> parse(string xml, *hash<auto> opts = NOTHING) {
         bool validate = opts.validate ?? False;
