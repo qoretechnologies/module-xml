@@ -51,6 +51,11 @@ public class FileWebDavPropertyHandler inherits AbstractWebDavPropertyHandler {
         @param filename the name of the properties file (default: .webdav-props.json)
     */
     constructor(string base_path, string filename = ".webdav-props.json") {
+        # the path is the creator's: refused before it is used if the creating code is restricted from the file system
+        if (SandboxManager::isCallerRestricted(DOM_FILESYSTEM)) {
+            throw "PERMISSION-DENIED", sprintf("property directory %y cannot be used: the calling code is restricted "
+                "from the FILESYSTEM functional domain", base_path);
+        }
         props_file = normalize_dir(base_path) + "/" + filename;
         load();
     }

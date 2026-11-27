@@ -93,6 +93,15 @@ public class CdaDataProvider inherits AbstractDataProvider {
         if (xsd_path && xsd) {
             throw "CONSTRUCTOR-ERROR", "provide only one of `xsd_path` or `xsd`";
         }
+        # the path is the creator's: refused before it is used if the creating code is restricted from the file
+        # system; a provider that the host creates with its path and lends keeps it
+        if (xsd_path && SandboxManager::isCallerRestricted(DOM_FILESYSTEM)) {
+            throw "PERMISSION-DENIED", "the `xsd_path` option cannot be used: the calling code is restricted from the "
+                "FILESYSTEM functional domain";
+        }
+        if (xsd) {
+            cda_check_inline_xsd(xsd, False);
+        }
     }
 
     #! Returns the provider name
@@ -116,6 +125,15 @@ public class CdaDataProvider inherits AbstractDataProvider {
     # issue #5838: not getRequestOptions(), which AbstractDataProvider calls without arguments for the option
     # definitions and which a call of it could select instead
     hash<auto> resolveRequestOptions(auto req) {
+        # a path in the request is the caller's input, also for the code that the provider was lent to: refused before
+        # it is used
+        if (req.xsd_path && SandboxManager::isLentToRestricted(DOM_FILESYSTEM)) {
+            throw "PERMISSION-DENIED", "the `xsd_path` field of the request cannot be used: the calling code is "
+                "restricted from the FILESYSTEM functional domain";
+        }
+        if (req.xsd) {
+            cda_check_inline_xsd(req.xsd, True);
+        }
         hash<auto> rv = {
             "validate": exists req{"validate"} ? req.validate : validate_default,
             "xsd_path": req.xsd_path ?? xsd_path,

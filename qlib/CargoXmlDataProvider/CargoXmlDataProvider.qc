@@ -111,6 +111,12 @@ public class CargoXmlDataProvider inherits AbstractDataProvider {
     #! creates the object
     constructor(*hash<auto> options) {
         *hash<auto> copts = checkOptions("CONSTRUCTOR-ERROR", ConstructorOptions, options);
+        # the directory is the creator's: refused before it is used if the creating code is restricted from the file
+        # system; a provider that the host creates with its directory and lends keeps it
+        if (copts.schema_dir && SandboxManager::isCallerRestricted(DOM_FILESYSTEM)) {
+            throw "PERMISSION-DENIED", "the `schema_dir` option cannot be used: the calling code is restricted from "
+                "the FILESYSTEM functional domain";
+        }
         schema_dir = copts.schema_dir ?? BundledSchemaDir;
         if (!is_dir(schema_dir)) {
             throw "CONSTRUCTOR-ERROR", sprintf("schema_dir %y is not a directory", schema_dir);

@@ -64,8 +64,16 @@ public class LocalDocReader {
           - \c url (string): file:// URI for the file
           - \c title (string): the page title (from HTML &lt;title&gt; tag, or file path if none)
           - \c content (string): extracted plain text content
+        @throw PERMISSION-DENIED the calling code is restricted from the \c FILESYSTEM functional domain
     */
     static list<hash<auto>> read(string dir_path, *hash<auto> opts) {
+        # library code runs with its own Program's options: the path is the caller's input, refused before the
+        # directory is listed if the caller (or the code that a host's object calling this was lent to) is
+        # restricted from the file system
+        if (SandboxManager::isLentToRestricted(DOM_FILESYSTEM)) {
+            throw "PERMISSION-DENIED", sprintf("local directory %y cannot be read: the calling code is restricted from "
+                "the FILESYSTEM functional domain", dir_path);
+        }
         int max_pages = opts.max_pages ?? DefaultMaxPages;
         *code<bool(string)> skip_dir = opts.skip_dir;
         *code<nothing(int)> progress = opts.progress;

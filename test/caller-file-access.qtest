@@ -1,0 +1,421 @@
+#!/usr/bin/env qore
+# -*- mode: qore; indent-tabs-mode: nil -*-
+# valgrind: skip - it checks the caller restrictions in the Qore code of the user modules, which the C++ code does not decide
+
+# Copyright (C) 2026 Qore Technologies, s.r.o.
+
+%requires qore >= 3.0
+%modern
+%prepend-module-path "${SCRIPT_DIR}/../qlib"
+
+%requires QUnit
+%requires xml
+%requires FsUtil
+%requires DataProvider
+%requires WSDL
+%requires SoapClient
+%requires SoapDataProvider
+%requires CdaDataProvider
+%requires CargoXmlDataProvider
+%requires SaxDataProvider
+%requires WebContentUtil
+%requires WebDavHandler
+
+%exec-class CallerFileAccessTest
+
+#! Tests that local paths given by restricted callers are refused before they are used (module-xml#251)
+/** Library code runs with its own Program's options, so the modules of this repository refuse a local path that code
+    restricted from the file system gives: a path given when an object is created (the \c xsd_path option of the CDA
+    data provider, the \c schema_dir option of the Cargo-XML data provider, the \c path option of the SAX write data
+    provider, a local WSDL of a SOAP client or the SOAP data provider, the root of a WebDAV handler and the directory
+    of its property handler), a path given in a request or an argument (the \c xsd_path field of a CDA request,
+    XsdSchema::addSchemaFile() and XsdSchema::addSchemaDir(), LocalDocReader::read(),
+    CdaDocumentParser::validateXml()), also by the code that a host-created object was lent to, and the local schema
+    documents that an inline XSD of such code includes.  A Program with PO_NO_FILESYSTEM is refused with
+    PERMISSION-DENIED, a Program whose sandbox denies the file system by default with PERMISSION-DENIED or
+    FILESYSTEM-ACCESS-DENIED (its file-system policy); nothing is written.  The host's
+    objects use the host's paths for restricted code that they are lent to, and an unrestricted caller uses the paths.
+*/
+class CallerFileAccessTest inherits QUnit::Test {
+    private {
+        const Modes = {"ast": EM_AST, "ir": EM_IR, "jit": EM_JIT, "tiered": EM_TIERED};
+
+        const CdaSchema = get_script_dir() + "/cda-test-schema/cda-test.xsd";
+        const CdaTypes = get_script_dir() + "/cda-test-schema/cda-types.xsd";
+        const CargoSchemaDir = get_script_dir() + "/cargo-xml-test-schemas";
+        const Wsdl = get_script_dir() + "/simple.wsdl";
+
+        const CdaXml =
+            '<?xml version="1.0"?>'
+            '<ClinicalDocument xmlns="urn:hl7-org:v3">'
+            '  <templateId root="2.16.840.1.113883.10.20.22.1.2"/>'
+            '  <id root="1.2.3.4.5.6" extension="DOC-001" assigningAuthorityName="Qore Test"/>'
+            '  <code code="34133-9" codeSystem="2.16.840.1.113883.6.1" codeSystemName="LOINC" displayName="Summary of episode note"/>'
+            '  <title>Synthetic CDA Consultation Note</title>'
+            '  <effectiveTime value="20260526120000+0000"/>'
+            '  <confidentialityCode code="N" codeSystem="2.16.840.1.113883.5.25" displayName="normal"/>'
+            '  <languageCode code="en-US"/>'
+            '  <setId root="1.2.3.4.5.6" extension="SET-001"/>'
+            '  <versionNumber value="1"/>'
+            '  <recordTarget>'
+            '    <patientRole>'
+            '      <id root="1.2.3.4.5.7" extension="PAT-001"/>'
+            '      <patient>'
+            '        <name><given>Alex</given><family>Example</family></name>'
+            '        <administrativeGenderCode code="U"/>'
+            '        <birthTime value="19700101"/>'
+            '      </patient>'
+            '    </patientRole>'
+            '  </recordTarget>'
+            '  <author>'
+            '    <time value="20260526115900+0000"/>'
+            '    <assignedAuthor>'
+            '      <id root="1.2.3.4.5.8" extension="AUTH-001"/>'
+            '      <assignedPerson><name><given>Jordan</given><family>Author</family></name></assignedPerson>'
+            '      <representedOrganization>'
+            '        <id root="1.2.3.4.5.9" extension="ORG-001"/>'
+            '        <name>Example Clinic</name>'
+            '      </representedOrganization>'
+            '    </assignedAuthor>'
+            '  </author>'
+            '  <custodian>'
+            '    <assignedCustodian>'
+            '      <representedCustodianOrganization>'
+            '        <id root="1.2.3.4.5.10" extension="CUST-001"/>'
+            '        <name>Example Records Department</name>'
+            '      </representedCustodianOrganization>'
+            '    </assignedCustodian>'
+            '  </custodian>'
+            '  <component>'
+            '    <structuredBody>'
+            '      <component>'
+            '        <section>'
+            '          <templateId root="2.16.840.1.113883.10.20.22.2.1.1"/>'
+            '          <code code="10164-2" codeSystem="2.16.840.1.113883.6.1" displayName="History of Present Illness"/>'
+            '          <title>History</title>'
+            '          <text><paragraph>Synthetic history narrative.</paragraph></text>'
+            '          <entry>'
+            '            <observation>'
+            '              <templateId root="2.16.840.1.113883.10.20.22.4.2"/>'
+            '              <code code="8480-6" codeSystem="2.16.840.1.113883.6.1" displayName="Systolic blood pressure"/>'
+            '              <statusCode code="completed"/>'
+            '              <effectiveTime value="20260526115800+0000"/>'
+            '              <value value="120" unit="mm[Hg]"/>'
+            '            </observation>'
+            '          </entry>'
+            '        </section>'
+            '      </component>'
+            '      <component>'
+            '        <section>'
+            '          <code code="11450-4" codeSystem="2.16.840.1.113883.6.1" displayName="Problem List"/>'
+            '          <title>Problems</title>'
+            '          <text><list><item>Synthetic problem entry</item></list></text>'
+            '        </section>'
+            '      </component>'
+            '    </structuredBody>'
+            '  </component>'
+            '</ClinicalDocument>';
+
+        const Source = "%modern
+%requires DataProvider
+%requires WSDL
+%requires SoapClient
+%requires SoapDataProvider
+%requires CdaDataProvider
+%requires CargoXmlDataProvider
+%requires SaxDataProvider
+%requires WebContentUtil
+%requires WebDavHandler
+
+# returns an inline XSD (not a path) that includes the given schema document
+string sub include_xsd(string path) {
+    return sprintf(\"<?xml version=\\\"1.0\\\"?><xsd:schema xmlns:xsd=\\\"http://www.w3.org/2001/XMLSchema\\\" \"
+        \"xmlns:cda=\\\"urn:hl7-org:v3\\\" targetNamespace=\\\"urn:hl7-org:v3\\\" elementFormDefault=\\\"qualified\\\">\"
+        \"<xsd:include schemaLocation=\\\"%s\\\"/>\"
+        \"<xsd:element name=\\\"ClinicalDocument\\\" type=\\\"cda:ClinicalDocumentType\\\"/></xsd:schema>\", path);
+}
+
+# adds an inline schema to a schema object that the host created
+string sub add_schema_string(XsdSchema schema, string xsd) {
+    return run(sub () { schema.addSchemaString(xsd); });
+}
+
+# runs the given use and returns \"ok\" or the error
+string sub run(code c) {
+    try {
+        c();
+        return \"ok\";
+    } catch (hash<ExceptionInfo> ex) {
+        return ex.err;
+    }
+}
+
+# creates an object (and uses it) with the given path
+string sub create(string what, string path, *string xml) {
+    return run(sub () {
+        switch (what) {
+            case \"cda xsd_path\": {
+                CdaDataProvider dp({\"xsd_path\": path});
+                dp.getChildProviderEx(\"validate-document\").doRequest({\"xml\": xml});
+                break;
+            }
+            case \"cda inline xsd include\": {
+                # an inline XSD (not a path) that includes a local schema document
+                string xsd = include_xsd(path);
+                CdaDataProvider dp({\"xsd\": xsd});
+                dp.getChildProviderEx(\"validate-document\").doRequest({\"xml\": xml});
+                break;
+            }
+            case \"cda parser\":
+                CdaDocumentParser::validateXml(xml, {\"xsd_path\": path});
+                break;
+            case \"cargo schema_dir\":
+                new CargoXmlDataProvider({\"schema_dir\": path, \"schema_subdir\": \"\"});
+                break;
+            case \"sax write path\": {
+                SaxWriteDataProvider dp({\"path\": path});
+                dp.createRecord({\"a\": 1});
+                dp.commit();
+                break;
+            }
+            case \"sax read location\":
+                new SaxDataProvider({\"location\": path, \"element_name\": \"a\"});
+                break;
+            case \"soap client wsdl\":
+                new SoapClient({\"wsdl\": path});
+                break;
+            case \"soap data provider schema_location\":
+                new SoapDataProvider({\"schema_location\": path});
+                break;
+            case \"wsdl url\":
+                WSDLLib::getWebServiceFromUrl(path);
+                break;
+            case \"webdav root\":
+                new FsWebDavHandler(path, NOTHING);
+                break;
+            case \"webdav properties\":
+                new FileWebDavPropertyHandler(path);
+                break;
+            case \"xsd schema file\": {
+                XsdSchema schema();
+                schema.addSchemaFile(path);
+                break;
+            }
+            case \"xsd schema string include\": {
+                XsdSchema schema();
+                schema.addSchemaString(include_xsd(path));
+                break;
+            }
+            case \"cargo bundled schemas\":
+                new CargoXmlDataProvider();
+                break;
+            case \"xsd schema dir\": {
+                XsdSchema schema();
+                schema.addSchemaDir(path);
+                break;
+            }
+            case \"local doc reader\":
+                LocalDocReader::read(path);
+                break;
+            default:
+                throw \"TEST-ERROR\", what;
+        }
+    });
+}
+
+# makes a request with a data provider that the host created
+string sub request(AbstractDataProvider dp, string child, hash<auto> req) {
+    return run(sub () { dp.getChildProviderEx(child).doRequest(req); });
+}
+
+# commits records with a data provider that the host created
+string sub commit(SaxWriteDataProvider dp) {
+    return run(sub () { dp.createRecord({\"a\": 1}); dp.commit(); });
+}
+
+# adds a schema to a schema object that the host created
+string sub add_schema(XsdSchema schema, string path, bool dir) {
+    return run(sub () {
+        if (dir) {
+            schema.addSchemaDir(path);
+        } else {
+            schema.addSchemaFile(path);
+        }
+    });
+}
+";
+    }
+
+    private {
+        #! the directory of the test
+        string dir;
+        #! a file in it
+        string input;
+        #! the path of the output file
+        string out;
+        #! a system file
+        string system_file = "/etc/hostname";
+        #! a directory with one schema document
+        string xsd_dir;
+    }
+
+    constructor() : QUnit::Test("CallerFileAccess", "1.0", \ARGV) {
+        dir = make_tmp_dir("xml-caller-file-access-");
+        input = dir + "/input.xml";
+        out = dir + "/out.xml";
+        File f();
+        f.open2(input, O_CREAT | O_WRONLY | O_TRUNC);
+        f.write("<r><a>1</a></r>");
+        xsd_dir = dir + "/xsd";
+        mkdir(xsd_dir);
+        copy_file(CdaTypes, xsd_dir + "/cda-types.xsd");
+
+        foreach string mode in (keys Modes) {
+            string m = mode;
+            addTestCase("creation paths, " + m, sub () { testCreation(m); });
+            addTestCase("request paths, " + m, sub () { testRequests(m); });
+            addTestCase("lent objects, " + m, sub () { testLent(m); });
+        }
+        set_return_value(main());
+    }
+
+    destructor() {
+        if (dir) {
+            remove_tree(dir);
+        }
+    }
+
+    private testCreation(string mode) {
+        # use: the paths that a restricted caller is refused, the path that an unrestricted caller uses, and the error
+        # for a restricted caller (PO_NO_FILESYSTEM)
+        hash<string, list<auto>> uses = {
+            "cda xsd_path": ((CdaSchema, system_file), CdaSchema),
+            "cda inline xsd include": ((CdaTypes, "file://" + CdaTypes), CdaTypes),
+            "xsd schema string include": ((CdaTypes, "file://" + CdaTypes), CdaTypes),
+            "cda parser": ((CdaSchema, system_file), CdaSchema),
+            "cargo schema_dir": ((CargoSchemaDir, "/etc"), CargoSchemaDir),
+            "sax write path": ((out, "file://" + out), out),
+            "sax read location": ((input, system_file), input),
+            "soap client wsdl": (("file://" + Wsdl, Wsdl, system_file), "file://" + Wsdl),
+            "soap data provider schema_location": (("file://" + Wsdl, system_file), "file://" + Wsdl),
+            "wsdl url": ((Wsdl, "file://" + system_file), Wsdl),
+            "webdav root": ((dir, "/etc"), dir),
+            "webdav properties": ((dir, "/etc"), dir),
+            "xsd schema file": ((CdaTypes, system_file), CdaTypes),
+            "xsd schema dir": ((xsd_dir, "/etc"), xsd_dir),
+            "local doc reader": ((dir, "/etc"), dir),
+        };
+
+        # the sandbox refuses by its file-system policy (also without this module's checks); a PO_NO_FILESYSTEM
+        # Program is refused by the module
+        foreach hash<auto> i in (uses.pairIterator()) {
+            foreach string path in (i.value[0]) {
+                string desc = sprintf("%s %y %s", i.key, path, mode);
+                assertEq("PERMISSION-DENIED",
+                    getProgram("nofs", mode).callFunction("create", i.key, path, CdaXml), "nofs " + desc);
+                assertFalse(is_file(out), "nofs, nothing written " + desc);
+                assertRegex("^(PERMISSION|FILESYSTEM-ACCESS)-DENIED$",
+                    getProgram("sandbox", mode).callFunction("create", i.key, path, CdaXml), "sandbox " + desc);
+                assertFalse(is_file(out), "sandbox, nothing written " + desc);
+            }
+            # an unrestricted caller uses the path
+            string desc = sprintf("%s %y %s", i.key, i.value[1], mode);
+            assertEq("ok", getProgram("unrestricted", mode).callFunction("create", i.key, i.value[1], CdaXml),
+                "unrestricted " + desc);
+            if (is_file(out)) {
+                unlink(out);
+            }
+        }
+    }
+
+    private testRequests(string mode) {
+        # the module's own bundled schemas are not the caller's paths
+        assertEq("ok", getProgram("nofs", mode).callFunction("create", "cargo bundled schemas", "", CdaXml),
+            "nofs cargo bundled schemas " + mode);
+
+        # a local document that an inline schema given to a host-created object references is the caller's input
+        foreach string path in ((CdaTypes, "file://" + CdaTypes)) {
+            string xsd = sprintf("<?xml version=\"1.0\"?><xsd:schema xmlns:xsd=\"http://www.w3.org/2001/XMLSchema\" "
+                "xmlns:cda=\"urn:hl7-org:v3\" targetNamespace=\"urn:hl7-org:v3\" elementFormDefault=\"qualified\">"
+                "<xsd:include schemaLocation=\"%s\"/>"
+                "<xsd:element name=\"ClinicalDocument\" type=\"cda:ClinicalDocumentType\"/></xsd:schema>", path);
+            string desc = sprintf("inline xsd include %y %s", path, mode);
+            XsdSchema schema();
+            assertEq("PERMISSION-DENIED", getProgram("nofs", mode).callFunction("add_schema_string", schema, xsd),
+                "nofs lent schema " + desc);
+            CdaDataProvider cda();
+            assertEq("PERMISSION-DENIED", getProgram("nofs", mode).callFunction("request", cda, "validate-document",
+                {"xml": CdaXml, "xsd": xsd}), "nofs lent cda " + desc);
+            assertEq("ok", getProgram("unrestricted", mode).callFunction("add_schema_string", schema, xsd),
+                "unrestricted lent schema " + desc);
+        }
+
+        # the xsd_path of a CDA request, with a provider that the host created and lent
+        foreach string path in ((CdaSchema, system_file)) {
+            hash<auto> req = {"xml": CdaXml, "xsd_path": path};
+            foreach string child in ("validate-document", "parse-document") {
+                CdaDataProvider dp();
+                hash<auto> r = req + (child == "parse-document" ? {"validate": True} : {});
+                string desc = sprintf("%s %y %s", child, path, mode);
+                assertEq("PERMISSION-DENIED", getProgram("nofs", mode).callFunction("request", dp, child, r),
+                    "nofs lent " + desc);
+                assertRegex("^(PERMISSION|FILESYSTEM-ACCESS)-DENIED$",
+                    getProgram("sandbox", mode).callFunction("request", dp, child, r), "sandbox lent " + desc);
+            }
+        }
+        CdaDataProvider dp();
+        assertEq("ok", getProgram("unrestricted", mode).callFunction("request", dp, "validate-document",
+            {"xml": CdaXml, "xsd_path": CdaSchema}), "unrestricted request " + mode);
+
+        # the path given to a schema object that the host created and lent
+        foreach bool d in ((False, True)) {
+            string path = d ? xsd_dir : CdaTypes;
+            XsdSchema schema();
+            string desc = sprintf("add schema %y %s", path, mode);
+            assertEq("PERMISSION-DENIED", getProgram("nofs", mode).callFunction("add_schema", schema, path, d),
+                "nofs lent " + desc);
+            assertRegex("^(PERMISSION|FILESYSTEM-ACCESS)-DENIED$",
+                getProgram("sandbox", mode).callFunction("add_schema", schema, path, d), "sandbox lent " + desc);
+            assertEq("ok", getProgram("unrestricted", mode).callFunction("add_schema", schema, path, d),
+                "unrestricted " + desc);
+        }
+    }
+
+    #! the paths that the host gave an object that it created are the host's: the object uses them for restricted code
+    #! that it is lent to
+    private testLent(string mode) {
+        # the host's output path, for code restricted from the file system by PO_NO_FILESYSTEM
+        SaxWriteDataProvider sax({"path": out});
+        assertEq("ok", getProgram("nofs", mode).callFunction("commit", sax), "nofs lent sax write " + mode);
+        assertTrue(is_file(out), "nofs lent sax write, written " + mode);
+        unlink(out);
+        # the file-system policy of a sandbox still applies when the host's path is opened for its code
+        sax = new SaxWriteDataProvider({"path": out});
+        assertEq("FILESYSTEM-ACCESS-DENIED", getProgram("sandbox", mode).callFunction("commit", sax),
+            "sandbox lent sax write " + mode);
+        assertFalse(is_file(out), "sandbox lent sax write, nothing written " + mode);
+    }
+
+    #! returns a Program of the given kind
+    private Program getProgram(string kind, string mode) {
+        Program p;
+        switch (kind) {
+            case "nofs":
+                p = new Program(PO_NEW_STYLE | PO_NO_FILESYSTEM);
+                break;
+            case "sandbox": {
+                SandboxManager sm();
+                sm.setFilesystemDefaultPolicy(False);
+                p = new Program(PO_NEW_STYLE);
+                p.setSandboxManager(sm);
+                break;
+            }
+            default:
+                p = new Program(PO_NEW_STYLE);
+                break;
+        }
+        p.setExecMode(Modes{mode});
+        p.parse(Source, kind);
+        return p;
+    }
+}

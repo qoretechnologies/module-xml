@@ -109,6 +109,11 @@ public class SaxWriteDataProvider inherits DataProvider::AbstractDataProvider {
                 "provide one or the other, not both");
         }
         path = copts.path;
+        if (path) {
+            # the location is the creator's: refused when the provider is created, before any record is taken, if
+            # the creating code is restricted from a functional domain of the location's handler
+            SaxWriteDataProvider::checkCreatorLocation(path);
+        }
         stream = copts.stream;
         root_element_name = copts.root_element_name ?? "records";
         element_name = copts.element_name ?? "record";
@@ -118,6 +123,46 @@ public class SaxWriteDataProvider inherits DataProvider::AbstractDataProvider {
     #! Returns the object name
     string getName() {
         return path ?? "saxwrite";
+    }
+
+    #! Refuses a location given when the provider is created if the creating code is restricted from a functional domain of its handler
+    /** The handler of the location's scheme decides the domains, as when the location is written; the creating code is
+        judged as by @ref Qore::SandboxManager::isCallerRestricted() "SandboxManager::isCallerRestricted()", so a
+        provider that the host creates with its location and lends keeps it.
+
+        @throw LOCATION-ERROR the options of the location cannot be parsed
+        @throw PERMISSION-DENIED the creating code is restricted from a functional domain of the location's handler
+    */
+    private static checkCreatorLocation(string location) {
+        string scheme = (location =~ x/^(\w+):\/\//)[0] ?? "file";
+        AbstractFileLocationHandler handler;
+        try {
+            handler = FileLocationHandler::getHandler(scheme);
+        } catch (hash<ExceptionInfo> ex) {
+            if (ex.err == "SCHEME-ERROR") {
+                # an unknown scheme is refused when the location is written
+                return;
+            }
+            rethrow;
+        }
+        # the options at the end of the location, as FileLocationHandler takes them
+        *hash<auto> opts;
+        *string opt_str = (location =~ x/((?:{).*(?:}))$/)[0];
+        if (opt_str) {
+            auto v = parse_to_qore_value(opt_str);
+            if (v.typeCode() == NT_HASH) {
+                opts = v;
+            } else if (v.strp()) {
+                opts = {v: True};
+            } else {
+                throw "LOCATION-ERROR", "the options of the location cannot be parsed";
+            }
+        }
+        int dom = handler.getCallerDomains(scheme, opts);
+        if (dom && SandboxManager::isCallerRestricted(dom)) {
+            throw "PERMISSION-DENIED", sprintf("the `path` option cannot be used: the calling code is restricted from "
+                "a functional domain of the handler of %y locations", scheme);
+        }
     }
 
     #! Returns the description
