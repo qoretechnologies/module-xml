@@ -114,9 +114,9 @@ public class SoapRequestDataProvider inherits SoapDataProviderBase {
         if (op.input && req.typeCode() == NT_HASH && (req.hasKey("^body^") || req.hasKey("^headers^"))) {
             HashDataType envelope("SoapMessage");
             envelope.addQoreFields({
-                "^body^": {"display_name": "SOAP Body", "type": op.input.getDataProviderType(),
+                "^body^": {"display_name": "SOAP body", "type": op.input.getDataProviderType(),
                     "desc": "Message parts to send in the SOAP Body."},
-                "^headers^": {"display_name": "SOAP Headers", "type": new HashDataType(),
+                "^headers^": {"display_name": "SOAP headers", "type": new HashDataType(),
                     "desc": "SOAP header values keyed by message and part name; validated against the selected binding."},
             });
             return envelope;
@@ -238,7 +238,7 @@ public class SoapRequestDataProvider inherits SoapDataProviderBase {
     private *hash<string, hash<DataProviderOptionInfo>> getApiOptions() {
         return {
             "request_mime_format": <DataProviderOptionInfo>{
-                "display_name": "Request MIME Representation",
+                "display_name": "Request MIME representation",
                 "short_desc": "Select the request MIME representation",
                 "type": new QoreUnionDataType((new QoreStringDataType(),
                     new QoreDataType(new Type("hash<WSDL::WsdlMimeSelectionInfo>")))),
@@ -248,7 +248,7 @@ public class SoapRequestDataProvider inherits SoapDataProviderBase {
                     "Example: `{\"parts\":[{\"part\":0,\"format\":\"xml:invoice\"}]}` selects invoice XML.",
             },
             "response_mime_format": <DataProviderOptionInfo>{
-                "display_name": "Response MIME Representation",
+                "display_name": "Response MIME representation",
                 "short_desc": "Select the response MIME representation",
                 "type": new QoreUnionDataType((new QoreStringDataType(),
                     new QoreDataType(new Type("hash<WSDL::WsdlMimeSelectionInfo>")))),
@@ -259,26 +259,26 @@ public class SoapRequestDataProvider inherits SoapDataProviderBase {
                     "Example: `{\"parts\":[{\"part\":0,\"content_id\":\"invoice@example.org\"}]}` identifies an invoice entity.",
             },
             "soap_header": <DataProviderOptionInfo>{
-                "display_name": "SOAP Headers",
+                "display_name": "SOAP headers",
                 "short_desc": "SOAP headers to use in the message",
                 "type": new HashDataType(),
                 "desc": "A hash giving SOAP header information, if required by the message",
             },
             "http_header": <DataProviderOptionInfo>{
-                "display_name": "HTTP Headers",
+                "display_name": "HTTP headers",
                 "short_desc": "HTTP headers to send in the message",
                 "type": new HashDataType(),
                 "desc": "A hash giving HTTP header information to include in the message (does not override "
                     "automatically-generated SOAP message headers)",
             },
             "xml_opts": <DataProviderOptionInfo>{
-                "display_name": "XML Generation Options",
+                "display_name": "XML generation options",
                 "short_desc": "XML generation options",
                 "type": new QoreIntDataType(),
                 "desc": "An integer XML generation option code",
             },
             "soapaction": <DataProviderOptionInfo>{
-                "display_name": "SOAP Action",
+                "display_name": "SOAP action",
                 "short_desc": "Overrides the SOAPAction for the request",
                 "type": new QoreStringDataType(),
                 "desc": "An optional string that will override the `SOAPAction` for the request; an empty string "
@@ -293,7 +293,7 @@ public class SoapRequestDataProvider inherits SoapDataProviderBase {
                     "requests using WS-Addressing always carry the header.",
             },
             "binding": <DataProviderOptionInfo>{
-                "display_name": "SOAP Binding",
+                "display_name": "SOAP binding",
                 "short_desc": "The SOAP binding name",
                 "type": new QoreStringDataType(),
                 "desc": "The SOAP binding name, if not provided the first binding assigned to the operation will be "

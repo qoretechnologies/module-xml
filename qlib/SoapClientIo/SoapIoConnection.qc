@@ -66,14 +66,14 @@ public class SoapIoConnection inherits ConnectionProvider::HttpBasedConnection {
             },
             "options": HttpConnection::ConnectionScheme.options + {
                 "service": <ConnectionOptionInfo>{
-                    "display_name": "SOAP Service",
+                    "display_name": "SOAP service",
                     "short_desc": "The name of the SOAP service to use",
                     "type": "string",
                     "desc": "The name of the SOAP service to use; mandatory if more than one service is "
                         "defined in the WSDL",
                 },
                 "port": <ConnectionOptionInfo>{
-                    "display_name": "SOAP Port",
+                    "display_name": "SOAP port",
                     "short_desc": "The SOAP port to use",
                     "type": "string",
                     "desc": "In case multiple port entries are found in the WSDL, give the one to be used here",
@@ -85,7 +85,7 @@ public class SoapIoConnection inherits ConnectionProvider::HttpBasedConnection {
                     "desc": "Overrides the URL in the WSDL",
                 },
                 "mtom": <ConnectionOptionInfo>{
-                    "display_name": "MTOM Requests",
+                    "display_name": "MTOM requests",
                     "short_desc": "Send requests as MTOM/XOP packages",
                     "type": "bool",
                     "default_value": False,
@@ -94,7 +94,7 @@ public class SoapIoConnection inherits ConnectionProvider::HttpBasedConnection {
                         "shortens large document and image uploads. MTOM responses are always accepted.",
                 },
                 "mtom_threshold": <ConnectionOptionInfo>{
-                    "display_name": "MTOM Part Threshold",
+                    "display_name": "MTOM part threshold",
                     "short_desc": "The smallest binary value sent as an MTOM part",
                     "type": "int",
                     "default_value": WSDL::MTOM_THRESHOLD,

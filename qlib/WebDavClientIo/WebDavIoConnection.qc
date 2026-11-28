@@ -42,14 +42,14 @@ public class WebDavIoConnection inherits ConnectionProvider::HttpBasedConnection
             },
             "options": HttpConnection::ConnectionScheme.options + {
                 "root_path": <ConnectionOptionInfo>{
-                    "display_name": "Root Path",
+                    "display_name": "Root path",
                     "short_desc": "Root path for WebDAV operations",
                     "type": "string",
                     "desc": "Root path that will be prepended to all WebDAV operations",
                     "default_value": "/",
                 },
                 "http_protocol": <ConnectionOptionInfo>{
-                    "display_name": "HTTP Protocol",
+                    "display_name": "HTTP protocol",
                     "short_desc": "HTTP protocol selector for the async connection manager",
                     "type": "string",
                     "desc": "Selects the HTTP protocol used by the async connection manager: "
@@ -64,26 +64,26 @@ public class WebDavIoConnection inherits ConnectionProvider::HttpBasedConnection
                     ),
                 },
                 "ping_method": <ConnectionOptionInfo>{
-                    "display_name": "Ping Method",
+                    "display_name": "Ping method",
                     "short_desc": "HTTP method for advanced ping",
                     "type": "string",
                     "desc": "HTTP method for an advanced ping; must be set together with `ping_path`",
                 },
                 "ping_path": <ConnectionOptionInfo>{
-                    "display_name": "Ping Path",
+                    "display_name": "Ping path",
                     "short_desc": "URI path for advanced ping",
                     "type": "string",
                     "desc": "URI path for an advanced ping; must be set together with `ping_method`. "
                         "Leading `/` replaces the connection path; otherwise it is appended.",
                 },
                 "ping_headers": <ConnectionOptionInfo>{
-                    "display_name": "Ping Headers",
+                    "display_name": "Ping headers",
                     "short_desc": "Headers sent with the advanced ping",
                     "type": "hash",
                     "desc": "Headers sent with the advanced ping; ignored when `ping_method` and `ping_path` are not both set",
                 },
                 "ping_body": <ConnectionOptionInfo>{
-                    "display_name": "Ping Body",
+                    "display_name": "Ping body",
                     "short_desc": "Body sent with the advanced ping",
                     "type": "auto",
                     "desc": "Body sent with the advanced ping; ignored when `ping_method` is `GET` "

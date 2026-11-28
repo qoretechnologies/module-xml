@@ -85,7 +85,7 @@ public class CargoXmlDataProvider inherits AbstractDataProvider {
         #! constructor options
         const ConstructorOptions = {
             "schema_dir": <DataProviderOptionInfo>{
-                "display_name": "Schema Directory",
+                "display_name": "Schema directory",
                 "short_desc": "The directory containing the XSD message schemas",
                 "type": AbstractDataProviderType::get(StringType),
                 "desc": "Absolute path to the directory containing the XSD message schemas. "
@@ -94,7 +94,7 @@ public class CargoXmlDataProvider inherits AbstractDataProvider {
                     "the directory is walked recursively for `.xsd` files.",
             },
             "schema_subdir": <DataProviderOptionInfo>{
-                "display_name": "Schema Subdirectory",
+                "display_name": "Schema subdirectory",
                 "short_desc": "Subdirectory under schema_dir containing message-level XSDs",
                 "type": AbstractDataProviderType::get(StringType),
                 "desc": "Subdirectory under `schema_dir` to scan for top-level message XSDs. "

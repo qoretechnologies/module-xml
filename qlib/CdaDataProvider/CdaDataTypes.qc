@@ -41,7 +41,7 @@ public class CdaIdentifierDataType inherits HashDataType {
                 "type": StringOrNothingType,
             },
             "assigning_authority_name": {
-                "display_name": "Assigning Authority",
+                "display_name": "Assigning authority",
                 "short_desc": "Assigning authority name",
                 "desc": "The assigning authority name, when present.",
                 "type": StringOrNothingType,
@@ -68,19 +68,19 @@ public class CdaCodeDataType inherits HashDataType {
                 "type": StringOrNothingType,
             },
             "code_system": {
-                "display_name": "Code System",
+                "display_name": "Code system",
                 "short_desc": "Code system identifier",
                 "desc": "The code system identifier.",
                 "type": StringOrNothingType,
             },
             "code_system_name": {
-                "display_name": "Code System Name",
+                "display_name": "Code system name",
                 "short_desc": "Code system name",
                 "desc": "The human-readable code system name, when present.",
                 "type": StringOrNothingType,
             },
             "display_name": {
-                "display_name": "Display Name",
+                "display_name": "Display name",
                 "short_desc": "Code display name",
                 "desc": "The human-readable code display name, when present.",
                 "type": StringOrNothingType,
@@ -107,19 +107,19 @@ public class CdaPatientDataType inherits HashDataType {
                 "type": CdaIdentifierDataType,
             },
             "name": {
-                "display_name": "Patient Name",
+                "display_name": "Patient name",
                 "short_desc": "Patient display name",
                 "desc": "A compact patient name assembled from the CDA name elements.",
                 "type": StringOrNothingType,
             },
             "birth_time": {
-                "display_name": "Birth Time",
+                "display_name": "Birth time",
                 "short_desc": "Patient birth time",
                 "desc": "The CDA `birthTime/@value`, when present.",
                 "type": StringOrNothingType,
             },
             "administrative_gender_code": {
-                "display_name": "Administrative Gender",
+                "display_name": "Administrative gender",
                 "short_desc": "Administrative gender code",
                 "desc": "The CDA `administrativeGenderCode/@code`, when present.",
                 "type": StringOrNothingType,
@@ -146,7 +146,7 @@ public class CdaOrganizationDataType inherits HashDataType {
                 "type": CdaIdentifierDataType,
             },
             "name": {
-                "display_name": "Organization Name",
+                "display_name": "Organization name",
                 "short_desc": "Organization name",
                 "desc": "The CDA organization name, when present.",
                 "type": StringOrNothingType,
@@ -179,13 +179,13 @@ public class CdaAuthorDataType inherits HashDataType {
                 "type": CdaIdentifierDataType,
             },
             "name": {
-                "display_name": "Author Name",
+                "display_name": "Author name",
                 "short_desc": "Author display name",
                 "desc": "A compact author name assembled from CDA name elements.",
                 "type": StringOrNothingType,
             },
             "represented_organization": {
-                "display_name": "Represented Organization",
+                "display_name": "Represented organization",
                 "short_desc": "Represented organization",
                 "desc": "The organization represented by the author, when present.",
                 "type": CdaOrganizationDataType,
@@ -218,7 +218,7 @@ public class CdaDocumentMetadataDataType inherits HashDataType {
                 "type": new ListDataType(CdaIdentifierDataType),
             },
             "code": {
-                "display_name": "Document Code",
+                "display_name": "Document code",
                 "short_desc": "CDA document code",
                 "desc": "The CDA document code extracted from `ClinicalDocument/code`.",
                 "type": CdaCodeDataType,
@@ -230,7 +230,7 @@ public class CdaDocumentMetadataDataType inherits HashDataType {
                 "type": StringOrNothingType,
             },
             "effective_time": {
-                "display_name": "Effective Time",
+                "display_name": "Effective time",
                 "short_desc": "Document effective time",
                 "desc": "The CDA `effectiveTime/@value`, when present.",
                 "type": StringOrNothingType,
@@ -332,7 +332,7 @@ public class CdaEntryDataType inherits HashDataType {
     private {
         const Fields = {
             "section_index": {
-                "display_name": "Section Index",
+                "display_name": "Section index",
                 "short_desc": "Parent section index",
                 "desc": "The one-based index of the parent CDA section.",
                 "type": IntType,
@@ -362,7 +362,7 @@ public class CdaEntryDataType inherits HashDataType {
                 "type": StringOrNothingType,
             },
             "effective_time": {
-                "display_name": "Effective Time",
+                "display_name": "Effective time",
                 "short_desc": "Effective time",
                 "desc": "The CDA clinical statement effective time value or low/high interval.",
                 "type": StringOrNothingType,
@@ -407,7 +407,7 @@ public class CdaSectionDataType inherits HashDataType {
                 "type": new ListDataType(CdaIdentifierDataType),
             },
             "code": {
-                "display_name": "Section Code",
+                "display_name": "Section code",
                 "short_desc": "Section code",
                 "desc": "The CDA section code.",
                 "type": CdaCodeDataType,
@@ -459,7 +459,7 @@ public class CdaParseDocumentRequestDataType inherits HashDataType {
                 "type": SoftBoolOrNothingType,
             },
             "xsd_path": {
-                "display_name": "XSD Path",
+                "display_name": "XSD path",
                 "short_desc": "Path to a CDA XSD",
                 "desc": "Path to an XSD file. File-based validation resolves relative `xsd:include` and `xsd:import` references.",
                 "type": StringOrNothingType,
@@ -495,7 +495,7 @@ public class CdaValidateDocumentRequestDataType inherits HashDataType {
                 "example_value": "<?xml version=\"1.0\"?><ClinicalDocument xmlns=\"urn:hl7-org:v3\">...</ClinicalDocument>",
             },
             "xsd_path": {
-                "display_name": "XSD Path",
+                "display_name": "XSD path",
                 "short_desc": "Path to a CDA XSD",
                 "desc": "Path to an XSD file. File-based validation resolves relative `xsd:include` and `xsd:import` references.",
                 "type": StringOrNothingType,
