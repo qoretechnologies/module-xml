@@ -113,7 +113,7 @@ public class WebDavPutRequestDataType inherits HashDataType {
                 "desc": "The file content to upload",
             },
             "content_type": {
-                "display_name": "Content Type",
+                "display_name": "Content type",
                 "type": StringOrNothingType,
                 "desc": "The MIME content type of the file (e.g., `application/pdf`)",
                 "example_value": "application/pdf",
@@ -208,13 +208,13 @@ public class WebDavCopyRequestDataType inherits HashDataType {
     public {
         const Fields = {
             "source": {
-                "display_name": "Source Path",
+                "display_name": "Source path",
                 "type": StringType,
                 "desc": "The source path of the resource to copy",
                 "example_value": "/documents/original.pdf",
             },
             "destination": {
-                "display_name": "Destination Path",
+                "display_name": "Destination path",
                 "type": StringType,
                 "desc": "The destination path for the copy",
                 "example_value": "/backup/original.pdf",
@@ -241,13 +241,13 @@ public class WebDavMoveRequestDataType inherits HashDataType {
     public {
         const Fields = {
             "source": {
-                "display_name": "Source Path",
+                "display_name": "Source path",
                 "type": StringType,
                 "desc": "The source path of the resource to move",
                 "example_value": "/documents/file.pdf",
             },
             "destination": {
-                "display_name": "Destination Path",
+                "display_name": "Destination path",
                 "type": StringType,
                 "desc": "The destination path for the move",
                 "example_value": "/archive/file.pdf",

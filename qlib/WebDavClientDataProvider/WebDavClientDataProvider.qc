@@ -53,14 +53,14 @@ public class WebDavClientDataProvider inherits WebDavClientDataProviderBase {
         #! Constructor options
         const ConstructorOptions = {
             "webdavclient": <DataProviderOptionInfo>{
-                "display_name": "WebDAV Client",
+                "display_name": "WebDAV client",
                 "short_desc": "The synchronous WebDAV client object to use",
                 "type": AbstractDataProviderType::get(new Type("WebDavClient::WebDavClient")),
                 "desc": "An existing synchronous @ref WebDavClient::WebDavClient \"WebDavClient\" "
                     "object to use; mutually exclusive with `webdavclientio` and `url`",
             },
             "webdavclientio": <DataProviderOptionInfo>{
-                "display_name": "WebDAV Client (Async I/O)",
+                "display_name": "WebDAV client (async I/O)",
                 "short_desc": "The async-I/O WebDAV client object to use",
                 "type": AbstractDataProviderType::get(new Type("WebDavClientIo::WebDavClientIo")),
                 "desc": "An existing async-I/O @ref WebDavClientIo::WebDavClientIo "

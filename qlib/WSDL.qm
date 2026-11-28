@@ -484,6 +484,12 @@ if (policy.required) {
 /** @page wsdlreleasenotes WSDL Release Notes
 
     @section wsdl_0_5_8 WSDL v0.5.8
+    - @ref WSDL::SoapProcessingNode::processMessage() "SoapProcessingNode::processMessage()" takes an optional
+      \c processor_context argument that gives each header processor its request context, so that a server can
+      give a processor of a restricted %Program the request without its credentials, and
+      @ref WSDL::WsaReplyReceiver::ownerIsRestricted() "WsaReplyReceiver::ownerIsRestricted()" tells a transport
+      handler that the receiver's messages must be delivered without the credentials of the request
+      (<a href="https://github.com/qoretechnologies/qore/issues/7303">qore#7303</a>)
     - <b>Security fix</b>: @ref WSDL::WSDLLib::getFile() "WSDLLib::getFile()", which reads every local WSDL and
       schema document, refuses code restricted from the file system with \c PERMISSION-DENIED before the file is
       read (<a href="https://github.com/qoretechnologies/module-xml/issues/251">issue 251</a>)
@@ -5047,6 +5053,10 @@ SoapProcessingNode addressing_node(options);
         @param base_uri optional absolute document retrieval URI, used with inherited xml:base
         @param expected_soap12 optional required envelope version
         @param response True to allow the SOAP 1.1 VersionMismatch response required by SOAP 1.2 negotiation
+        @param processor_context optional code called as <tt>processor_context(processor, cx)</tt> before each
+        processor; the processor gets the context that it returns instead of \a cx, so that a server can give a
+        processor of a restricted %Program the request without its credentials, as the \c SoapHandler class of the
+        \c SoapHandler module does (since %WSDL 0.5.8)
         @return ordered header outcomes, a targeted-header envelope for ultimate-receiver application decoding,
         or a forwarding envelope for intermediaries
         @throw SOAP-MUST-UNDERSTAND one or more targeted mandatory headers have no processor; no processor ran;
@@ -5060,7 +5070,7 @@ SoapProcessingNode addressing_node(options);
         roles require an absolute XML base or base_uri. Forwarding preserves the effective document base explicitly.
     */
     hash<SoapNodeResult> processMessage(string xml, hash<auto> cx = {}, *string base_uri,
-            *bool expected_soap12, bool response = False) {
+            *bool expected_soap12, bool response = False, *code processor_context) {
         XsdSoapXmlHelper::validateDocument(xml, SOAP_DESERIALIZATION_ERROR);
         hash<string, string> inherited();
         if (exists base_uri) {
@@ -5110,7 +5120,7 @@ SoapProcessingNode addressing_node(options);
             auto value;
             if (processed && options.processors.hasKey(header.name)) {
                 SoapHeaderProcessor processor = options.processors{header.name};
-                value = processor(cx, header);
+                value = processor(processor_context ? processor_context(processor, cx) : cx, header);
             }
             bool forwarded = !options.ultimate_receiver && !processed
                 && (!header.targeted || (soap12 && header.relay));
@@ -18695,7 +18705,7 @@ public class XsdElementDataType inherits AbstractDataProviderType {
             foreach XsdElement member in (declarations.iterator()) {
                 HashDataType wrapper("Selected element " + member.getExpandedName());
                 XsdQNameValue identity(member.getNamespaceUri(), member.name);
-                wrapper.addField(new XsdQNameDataField({"name": "^element^", "display_name": "Selected Element",
+                wrapper.addField(new XsdQNameDataField({"name": "^element^", "display_name": "Selected element",
                     "type": new XsdQNameDataType(), "example_value": identity,
                     "allowed_values": (<AllowedValueInfo>{"value": identity,
                         "display_name": "Element " + member.getExpandedName()},),
@@ -18926,7 +18936,7 @@ public class XsdNativeTypeDataType inherits AbstractDataProviderType {
             auto wrapper_example = definition.declared.isAbstract() ? getMandatoryType().getExampleValue() : NOTHING;
             HashDataType wrapper("Selected XSD type");
             wrapper.addQoreFields({
-                "^type^":{"display_name":"Selected Type", "type":new QoreUnionDataType((
+                "^type^":{"display_name":"Selected type", "type":new QoreUnionDataType((
                     new QoreDataType(new Type("WSDL::XsdQNameValue")),
                     new QoreDataType(new Type("WSDL::XsdAbstractType")))),
                     "example_value":wrapper_example."^type^" ?? (definition.declared.hasRealName()
@@ -19362,9 +19372,9 @@ public class WsdlSoapMimeDataType inherits HashDataType {
         self.explicit_values = explicit_values;
         if (explicit_values) {
             addQoreFields({
-                "^body^":{"display_name":"SOAP Body","type":body,"desc":"Selected SOAP body parts."},
-                "^headers^":{"display_name":"SOAP Headers","type":headers,"desc":"Bound SOAP header message maps."},
-                "^attachments^":{"display_name":"MIME Attachments","type":attachments,"desc":"Selected MIME attachment parts."},
+                "^body^":{"display_name":"SOAP body","type":body,"desc":"Selected SOAP body parts."},
+                "^headers^":{"display_name":"SOAP headers","type":headers,"desc":"Bound SOAP header message maps."},
+                "^attachments^":{"display_name":"MIME attachments","type":attachments,"desc":"Selected MIME attachment parts."},
             });
         } else {
             foreach AbstractDataProviderType group in (body, attachments, headers) {
@@ -19524,7 +19534,7 @@ public class WsdlHttpMimeDataType inherits HashDataType {
             if (format.kind != WsdlMimeFormatKind::Multipart) { direct = True; }
         }
         AbstractDataProviderType tree_type = new QoreDataType(new Type("hash<WSDL::WsdlMimeEntityInfo>"));
-        addQoreFields({"^mime^":{"display_name":"MIME Entity Tree", "type":direct ? tree_type.getOrNothingType() : tree_type,
+        addQoreFields({"^mime^":{"display_name":"MIME entity tree", "type":direct ? tree_type.getOrNothingType() : tree_type,
             "desc":"Complete MIME message tree.\n\n"
                 "- `format`: representation identifier.\n- `parts`: child entities for multipart values.\n"
                 "- `value`: native data for a leaf.\n- `root`: root entity's WSDL declaration index.\n\n"
@@ -29971,6 +29981,8 @@ public class WsaReplyReceiver {
         # the message IDs whose reply has been delivered and not yet collected
         hash<string, bool> delivered();
         Mutex lock();
+        # True if code of a restricted Program created the receiver (qore#7303)
+        bool restricted_owner;
     }
 
     #! creates the receiver for the given endpoint reference
@@ -29984,6 +29996,23 @@ public class WsaReplyReceiver {
                 endpoint.address);
         }
         self.endpoint = endpoint;
+        # fails closed: restricted if it cannot be decided
+        try {
+            restricted_owner = SandboxManager::isRestricted();
+        } catch (hash<ExceptionInfo> ex) {
+            restricted_owner = True;
+        }
+    }
+
+    #! returns True if the code that created the receiver is of a restricted %Program
+    /** A transport handler, such as \c SoapReplyHandler in the \c SoapHandler module, then delivers messages to it
+        without the credential header fields of the request, as the code that waits for them is restricted; see
+        @ref Qore::SandboxManager::isRestricted() "SandboxManager::isRestricted()"
+
+        @since %WSDL 0.5.8
+    */
+    final bool ownerIsRestricted() {
+        return restricted_owner;
     }
 
     #! returns the endpoint reference of the receiver

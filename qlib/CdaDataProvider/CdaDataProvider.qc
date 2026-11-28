@@ -46,7 +46,7 @@ public class CdaDataProvider inherits AbstractDataProvider {
                 "default_value": False,
             },
             "xsd_path": <DataProviderOptionInfo>{
-                "display_name": "XSD Path",
+                "display_name": "XSD path",
                 "short_desc": "Default CDA XSD path",
                 "desc": "Default XSD path for validation. File-based validation resolves relative `xsd:include` and `xsd:import` references.",
                 "type": AbstractDataProviderType::get(StringOrNothingType),

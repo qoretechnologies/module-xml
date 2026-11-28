@@ -70,7 +70,7 @@ public class SoapDataProvider inherits AbstractDataProvider {
                 "required_groups": ("schema",),
             },
             "schema_location": <DataProviderOptionInfo>{
-                "display_name": "WSDL Location",
+                "display_name": "WSDL location",
                 "short_desc": "The WSDL source URL",
                 "type": (
                     AbstractDataProviderType::get(StringType, NOTHING, {
@@ -81,7 +81,7 @@ public class SoapDataProvider inherits AbstractDataProvider {
                 "required_groups": ("schema",),
             },
             "soapclient": <DataProviderOptionInfo>{
-                "display_name": "SOAP Client",
+                "display_name": "SOAP client",
                 "short_desc": "The SOAP client object to use",
                 "type": AbstractDataProviderType::get(new Type("SoapClient"), NOTHING, {
                     DTT_ClientOnly: True,
@@ -98,7 +98,7 @@ public class SoapDataProvider inherits AbstractDataProvider {
                     "passed as an option",
             },
             "soapclient_options": <DataProviderOptionInfo>{
-                "display_name": "SOAP Client Options",
+                "display_name": "SOAP client options",
                 "short_desc": "Options to use when creating the SOAP client",
                 "type": AbstractDataProviderType::get(AutoHashType, NOTHING, {
                     DTT_ClientOnly: True,

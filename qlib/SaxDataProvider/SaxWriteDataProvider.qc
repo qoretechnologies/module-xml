@@ -49,7 +49,7 @@ public class SaxWriteDataProvider inherits DataProvider::AbstractDataProvider {
         #! Constructor options
         const ConstructorOptions = {
             "path": <DataProviderOptionInfo>{
-                "display_name": "File Path",
+                "display_name": "File path",
                 "short_desc": "Path to output XML file",
                 "type": AbstractDataProviderType::get(StringType),
                 "desc": "The output file location; mutually exclusive with `stream`. "
@@ -58,13 +58,13 @@ public class SaxWriteDataProvider inherits DataProvider::AbstractDataProvider {
                 "example_value": "/data/output.xml",
             },
             "stream": <DataProviderOptionInfo>{
-                "display_name": "Output Stream",
+                "display_name": "Output stream",
                 "short_desc": "An output stream for XML data",
                 "type": AbstractDataProviderType::get(new Type("OutputStream")),
                 "desc": "An output stream for XML data; mutually exclusive with `path`",
             },
             "root_element_name": <DataProviderOptionInfo>{
-                "display_name": "Root Element Name",
+                "display_name": "Root element name",
                 "short_desc": "The name of the root XML element",
                 "type": AbstractDataProviderTypeMap."string",
                 "desc": "The name of the root XML element that wraps all records",
@@ -72,7 +72,7 @@ public class SaxWriteDataProvider inherits DataProvider::AbstractDataProvider {
                 "example_value": "records",
             },
             "element_name": <DataProviderOptionInfo>{
-                "display_name": "Record Element Name",
+                "display_name": "Record element name",
                 "short_desc": "The name of each record XML element",
                 "type": AbstractDataProviderTypeMap."string",
                 "desc": "The name of the XML element used for each record",
@@ -80,7 +80,7 @@ public class SaxWriteDataProvider inherits DataProvider::AbstractDataProvider {
                 "example_value": "record",
             },
             "encoding": <DataProviderOptionInfo>{
-                "display_name": "Character Encoding",
+                "display_name": "Character encoding",
                 "short_desc": "The character encoding for the output XML",
                 "type": AbstractDataProviderTypeMap."string",
                 "desc": "The character encoding for the output XML",

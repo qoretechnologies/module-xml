@@ -46,7 +46,7 @@ public class SaxDataProvider inherits DataProvider::AbstractDataProvider {
         #! Constructor options
         const ConstructorOptions = {
             "location": <DataProviderOptionInfo>{
-                "display_name": "XML Location",
+                "display_name": "XML location",
                 "short_desc": "The location of the XML data to parse",
                 "type": AbstractDataProviderType::get(StringType),
                 "desc": "The location of the XML data; mutually exclusive with `stream`. "
@@ -55,13 +55,13 @@ public class SaxDataProvider inherits DataProvider::AbstractDataProvider {
                 "example_value": "/data/records.xml",
             },
             "stream": <DataProviderOptionInfo>{
-                "display_name": "Input Stream",
+                "display_name": "Input stream",
                 "short_desc": "An input stream for XML data",
                 "type": AbstractDataProviderType::get(new Type("InputStream")),
                 "desc": "An input stream for XML data; mutually exclusive with `location`",
             },
             "element_name": <DataProviderOptionInfo>{
-                "display_name": "Element Name",
+                "display_name": "Element name",
                 "short_desc": "The name of the element to iterate",
                 "type": AbstractDataProviderTypeMap."string",
                 "desc": "The name of the XML element to iterate; each matching element is returned as a record",
@@ -69,13 +69,13 @@ public class SaxDataProvider inherits DataProvider::AbstractDataProvider {
                 "example_value": "record",
             },
             "encoding": <DataProviderOptionInfo>{
-                "display_name": "Character Encoding",
+                "display_name": "Character encoding",
                 "short_desc": "The character encoding of the data",
                 "type": AbstractDataProviderTypeMap."string",
                 "desc": "The character encoding of the data at `location` or in `stream`",
             },
             "xsd": <DataProviderOptionInfo>{
-                "display_name": "XML Schema Definition",
+                "display_name": "XML schema definition",
                 "short_desc": "An XSD string to use to validate the input XML",
                 "type": AbstractDataProviderTypeMap."string",
                 "desc": "An XSD string to validate the input XML",
